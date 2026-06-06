@@ -15,10 +15,10 @@ use application::handlers::AgentCommandHandler;
 use domain::services::memory_manager::MemoryManager;
 use infrastructure::llm::LlmClient;
 use infrastructure::cache::RedisCache;
+use infrastructure::http::novel_client::NovelServiceClient;
 use infrastructure::persistence::{
     pg_memory_repo::PgMemoryRepository,
     pg_chat_repo::PgChatRepository,
-    pg_character_info_repo::PgCharacterInfoRepository,
 };
 use interface::http::{router, AppState};
 
@@ -64,17 +64,22 @@ async fn main() -> Result<()> {
     // Repositories
     let memory_repo = Arc::new(PgMemoryRepository::new(pool.clone()));
     let chat_repo = Arc::new(PgChatRepository::new(pool.clone()));
-    let character_repo = Arc::new(PgCharacterInfoRepository::new(pool.clone()));
+
+    // Character info via HTTP to novel-service (replaces direct DB coupling)
+    let novel_service_url = std::env::var("NOVEL_SERVICE_URL")
+        .unwrap_or_else(|_| "http://novel-service:8002".into());
+    let character_repo = Arc::new(NovelServiceClient::new(novel_service_url));
 
     // Redis cache
     let cache = Arc::new(RedisCache::new(redis_pool));
 
     // Memory manager (4-layer memory pyramid)
+    // Domain ports: cache as dyn MessageCache, llm as dyn TextSummarizer
     let memory_manager = Arc::new(MemoryManager {
         memory_repo: memory_repo.clone(),
         chat_repo: chat_repo.clone(),
-        cache: cache.clone(),
-        llm: llm.clone(),
+        cache: cache.clone() as Arc<dyn domain::ports::MessageCache>,
+        llm: llm.clone() as Arc<dyn domain::ports::TextSummarizer>,
     });
 
     // Application handler

@@ -35,19 +35,6 @@ async fn main() -> Result<()> {
 
     tracing::info!("Connected to PostgreSQL");
 
-    // Ensure refresh_tokens table exists
-    sqlx::query(
-        r#"CREATE TABLE IF NOT EXISTS refresh_tokens (
-            id UUID PRIMARY KEY,
-            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            token VARCHAR(256) NOT NULL UNIQUE,
-            expires_at TIMESTAMPTZ NOT NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )"#
-    )
-    .execute(&pool)
-    .await?;
-
     let jwt_secret = std::env::var("JWT_SECRET").expect("JWT_SECRET must be set");
     let access_token_expiry: i64 = std::env::var("AUTH_ACCESS_TOKEN_EXPIRY")
         .unwrap_or_else(|_| "3600".into())

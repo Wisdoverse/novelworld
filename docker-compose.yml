@@ -137,11 +137,14 @@ services:
       MEMORY_MID_TERM_LIMIT: ${MEMORY_MID_TERM_LIMIT:-50}
       MEMORY_COMPRESS_THRESHOLD: ${MEMORY_COMPRESS_THRESHOLD:-15}
       PORT: 8003
+      NOVEL_SERVICE_URL: http://novel-service:8002
       RUST_LOG: info
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      novel-service:
         condition: service_healthy
     networks:
       - novel-net
@@ -164,9 +167,12 @@ services:
       LLM_API_KEY: ${LLM_API_KEY}
       LLM_MODEL: ${LLM_MODEL:-gpt-4o}
       PORT: 8004
+      NOVEL_SERVICE_URL: http://novel-service:8002
       RUST_LOG: info
     depends_on:
       postgres:
+        condition: service_healthy
+      novel-service:
         condition: service_healthy
     networks:
       - novel-net

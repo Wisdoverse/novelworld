@@ -12,6 +12,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use tower_http::cors::{CorsLayer, Any};
 
 use application::handlers::NovelCommandHandler;
+use domain::ports::{LlmPort, ImagePort};
 use infrastructure::llm::{LlmClient, image::ImageClient};
 use infrastructure::persistence::{
     novel_pg_repo::NovelPgRepository,
@@ -59,6 +60,9 @@ async fn main() -> Result<()> {
     let chapter_repo = Arc::new(ChapterPgRepository::new(pool.clone()));
     let character_repo = Arc::new(CharacterPgRepository::new(pool.clone()));
     let progress_repo = Arc::new(PgReadingProgressRepository::new(pool.clone()));
+
+    let llm: Arc<dyn LlmPort> = llm;
+    let image_client: Arc<dyn ImagePort> = image_client;
 
     let handler = Arc::new(NovelCommandHandler {
         novel_repo: novel_repo.clone(),

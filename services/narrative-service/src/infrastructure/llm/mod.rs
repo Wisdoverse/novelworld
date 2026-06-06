@@ -1,7 +1,10 @@
 use anyhow::{Result, anyhow};
+use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+
+use crate::domain::ports::LlmPort;
 
 #[derive(Debug, Serialize)]
 struct ChatRequest {
@@ -101,7 +104,11 @@ impl LlmClient {
         unreachable!()
     }
 
-    pub async fn chat(&self, system: &str, user: &str) -> Result<String> {
+}
+
+#[async_trait]
+impl LlmPort for LlmClient {
+    async fn chat(&self, system: &str, user: &str) -> Result<String> {
         let req = ChatRequest {
             model: self.model.clone(),
             messages: vec![
@@ -114,7 +121,7 @@ impl LlmClient {
         self.send_with_retry(&req).await
     }
 
-    pub async fn chat_json(&self, prompt: &str) -> Result<String> {
+    async fn chat_json(&self, prompt: &str) -> Result<String> {
         let req = ChatRequest {
             model: self.model.clone(),
             messages: vec![

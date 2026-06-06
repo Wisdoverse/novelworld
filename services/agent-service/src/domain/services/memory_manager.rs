@@ -4,8 +4,7 @@ use uuid::Uuid;
 
 use crate::domain::entities::memory::{Memory, MemoryLayer, ChatMessage};
 use crate::domain::repositories::{MemoryRepository, ChatRepository};
-use crate::infrastructure::cache::RedisCache;
-use crate::infrastructure::llm::LlmClient;
+use crate::domain::ports::{MessageCache, TextSummarizer};
 
 const SHORT_TERM_LIMIT: usize = 10;
 const MID_TERM_TRIGGER: usize = 20;
@@ -14,8 +13,8 @@ const MID_TERM_TRIGGER: usize = 20;
 pub struct MemoryManager {
     pub memory_repo: Arc<dyn MemoryRepository>,
     pub chat_repo: Arc<dyn ChatRepository>,
-    pub cache: Arc<RedisCache>,
-    pub llm: Arc<LlmClient>,
+    pub cache: Arc<dyn MessageCache>,
+    pub llm: Arc<dyn TextSummarizer>,
 }
 
 impl MemoryManager {
@@ -69,7 +68,7 @@ impl MemoryManager {
             current_chapter, current_chapter
         )));
 
-        // 5. 短期记忆（最近对话，从 Redis 获取）
+        // 5. 短期记忆（最近对话，从缓存获取）
         let recent = self.cache
             .get_recent_messages(character_id, user_id, SHORT_TERM_LIMIT)
             .await?;
@@ -94,7 +93,7 @@ impl MemoryManager {
         self.chat_repo.save(&user_msg).await?;
         self.chat_repo.save(&char_msg).await?;
 
-        // 保存到 Redis 短期缓存
+        // 保存到短期缓存
         self.cache.push_message(character_id, user_id, &user_msg).await?;
         self.cache.push_message(character_id, user_id, &char_msg).await?;
 
@@ -126,7 +125,7 @@ impl MemoryManager {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let summary = self.llm.chat(
+        let summary = self.llm.summarize(
             "你是一个对话摘要助手。请将以下对话压缩为2-3句话的摘要，保留关键信息和情感变化。",
             &conversation,
         ).await?;

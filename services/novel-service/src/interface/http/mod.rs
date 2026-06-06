@@ -32,6 +32,7 @@ pub fn router(state: AppState) -> Router {
         .route("/novels/:id/chapters", get(list_chapters))
         .route("/novels/:id/chapters/:num", get(get_chapter))
         .route("/novels/:id/characters", get(list_characters))
+        .route("/characters/:id", get(get_character_by_id))
         .route("/novels/:id/relationships", get(list_relationships))
         .route("/novels/:id/status", get(get_parse_status))
         .route("/progress/:novel_id", get(get_progress))
@@ -149,10 +150,22 @@ async fn get_novel(
 
 async fn delete_novel(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    match state.novel_repo.delete(id).await {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+    let user_id = match extract_user_id(&headers) {
+        Some(id) => id,
+        None => return (StatusCode::UNAUTHORIZED, Json(ApiError { error: "Missing user ID".into() })).into_response(),
+    };
+    match state.novel_repo.find_by_id(id).await {
+        Ok(Some(novel)) if novel.user_id == user_id => {
+            match state.novel_repo.delete(id).await {
+                Ok(_) => StatusCode::NO_CONTENT.into_response(),
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { error: e.to_string() })).into_response(),
+            }
+        }
+        Ok(Some(_)) => (StatusCode::FORBIDDEN, Json(ApiError { error: "Not your novel".into() })).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, Json(ApiError { error: "Novel not found".into() })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { error: e.to_string() })).into_response(),
     }
 }
@@ -184,6 +197,17 @@ async fn list_characters(
 ) -> impl IntoResponse {
     match state.character_repo.find_by_novel(novel_id).await {
         Ok(chars) => (StatusCode::OK, Json(chars)).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { error: e.to_string() })).into_response(),
+    }
+}
+
+async fn get_character_by_id(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    match state.character_repo.find_by_id(id).await {
+        Ok(Some(ch)) => (StatusCode::OK, Json(ch)).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, Json(ApiError { error: "Character not found".into() })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { error: e.to_string() })).into_response(),
     }
 }

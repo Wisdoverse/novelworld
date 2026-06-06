@@ -5,21 +5,19 @@ use uuid::Uuid;
 
 use crate::application::commands::{ImportNovelCommand, GenerateAvatarCommand};
 use crate::domain::entities::{novel::Novel, character::Character};
+use crate::domain::ports::{LlmPort, ImagePort};
 use crate::domain::repositories::{NovelRepository, ChapterRepository, CharacterRepository};
 use crate::domain::services::{
     novel_parser::NovelParserService,
     character_extractor::{build_extraction_prompt, ExtractionResult},
 };
-use crate::domain::value_objects::CharacterRole;
-use crate::infrastructure::llm::LlmClient;
-use crate::infrastructure::llm::image::ImageClient;
 
 pub struct NovelCommandHandler {
     pub novel_repo: Arc<dyn NovelRepository>,
     pub chapter_repo: Arc<dyn ChapterRepository>,
     pub character_repo: Arc<dyn CharacterRepository>,
-    pub llm: Arc<LlmClient>,
-    pub image_client: Arc<ImageClient>,
+    pub llm: Arc<dyn LlmPort>,
+    pub image_client: Arc<dyn ImagePort>,
 }
 
 impl NovelCommandHandler {
@@ -72,8 +70,8 @@ impl NovelCommandHandler {
         novel_repo: Arc<dyn NovelRepository>,
         chapter_repo: Arc<dyn ChapterRepository>,
         character_repo: Arc<dyn CharacterRepository>,
-        llm: Arc<LlmClient>,
-        image_client: Arc<ImageClient>,
+        llm: Arc<dyn LlmPort>,
+        image_client: Arc<dyn ImagePort>,
     ) -> Result<()> {
         // 更新状态为解析中
         let mut novel = novel_repo.find_by_id(novel_id).await?
@@ -100,25 +98,9 @@ impl NovelCommandHandler {
         let extraction: ExtractionResult = serde_json::from_str(&extraction_json)?;
 
         // 保存角色
-        let mut characters: Vec<Character> = extraction.characters.iter().map(|ec| {
-            let role = match ec.role.as_str() {
-                "protagonist" => CharacterRole::Protagonist,
-                "antagonist" => CharacterRole::Antagonist,
-                "minor" => CharacterRole::Minor,
-                _ => CharacterRole::Supporting,
-            };
-            let mut ch = Character::new(novel_id, ec.name.clone(), role);
-            ch.description = Some(ec.description.clone());
-            ch.personality = Some(ec.personality.clone());
-            ch.background = Some(ec.background.clone());
-            ch.speaking_style = Some(ec.speaking_style.clone());
-            ch.appearance = Some(ec.appearance.clone());
-            ch.aliases = ec.aliases.clone();
-            ch.first_appearance_chapter = ec.first_appearance_chapter;
-            // 构建 Agent 系统提示词
-            ch.build_system_prompt(title, &extraction.world_summary);
-            ch
-        }).collect();
+        let characters: Vec<Character> = extraction.characters.iter()
+            .map(|ec| Character::from_extraction(novel_id, ec, &extraction.world_summary, title))
+            .collect();
 
         character_repo.save_batch(&characters).await?;
 
@@ -171,7 +153,7 @@ impl NovelCommandHandler {
         character_id: Uuid,
         appearance: &str,
         character_repo: Arc<dyn CharacterRepository>,
-        image_client: Arc<ImageClient>,
+        image_client: Arc<dyn ImagePort>,
     ) -> Result<()> {
         let prompt = format!(
             "Portrait of a fictional character. {appearance}. \

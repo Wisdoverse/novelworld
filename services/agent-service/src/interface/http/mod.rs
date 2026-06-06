@@ -1,6 +1,6 @@
 use axum::{
-    extract::{Path, State, Json},
-    http::{StatusCode, HeaderMap, header},
+    extract::{Path, Query, State, Json},
+    http::StatusCode,
     response::{IntoResponse, Sse, sse::Event},
     routing::{get, post},
     Router,
@@ -11,6 +11,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::application::handlers::AgentCommandHandler;
+use crate::domain::entities::memory::MemoryLayer;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -64,7 +65,8 @@ async fn chat_stream(
             req.reader_identity,
             req.current_chapter,
         ).await {
-            Ok(mut s) => {
+            Ok(s) => {
+                let mut s = std::pin::pin!(s);
                 while let Some(chunk) = s.next().await {
                     match chunk {
                         Ok(text) if !text.is_empty() => {
@@ -118,24 +120,105 @@ async fn chat(
     }
 }
 
+/// Query params for chat history pagination.
+#[derive(Debug, Deserialize)]
+struct HistoryQuery {
+    user_id: Uuid,
+    #[serde(default = "default_limit")]
+    limit: i64,
+    #[serde(default)]
+    offset: i64,
+}
+
+fn default_limit() -> i64 {
+    50
+}
+
+/// GET /chat/:character_id/history?user_id=...&limit=50&offset=0
 async fn get_history(
     State(state): State<AppState>,
     Path(character_id): Path<Uuid>,
+    Query(params): Query<HistoryQuery>,
 ) -> impl IntoResponse {
-    // TODO: 从 query params 获取 user_id, novel_id
-    (StatusCode::OK, Json(serde_json::json!({ "messages": [] }))).into_response()
+    match state.handler.get_history(
+        character_id,
+        params.user_id,
+        params.limit,
+        params.offset,
+    ).await {
+        Ok(messages) => (StatusCode::OK, Json(serde_json::json!({
+            "messages": messages,
+            "count": messages.len(),
+        }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            "error": e.to_string()
+        }))).into_response(),
+    }
 }
 
+/// Query params for memory retrieval.
+#[derive(Debug, Deserialize)]
+struct MemoryQuery {
+    user_id: Uuid,
+    novel_id: Uuid,
+    /// One of: "short", "mid", "long", "permanent". Defaults to "permanent".
+    #[serde(default = "default_layer")]
+    layer: String,
+}
+
+fn default_layer() -> String {
+    "permanent".into()
+}
+
+fn parse_layer(s: &str) -> MemoryLayer {
+    match s {
+        "short" => MemoryLayer::Short,
+        "mid" => MemoryLayer::Mid,
+        "long" => MemoryLayer::Long,
+        "permanent" => MemoryLayer::Permanent,
+        _ => MemoryLayer::Permanent,
+    }
+}
+
+/// GET /memories/:character_id?user_id=...&novel_id=...&layer=permanent
 async fn get_memories(
     State(state): State<AppState>,
     Path(character_id): Path<Uuid>,
+    Query(params): Query<MemoryQuery>,
 ) -> impl IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!({ "memories": [] }))).into_response()
+    let layer = parse_layer(&params.layer);
+    match state.handler.get_memories(
+        character_id,
+        params.user_id,
+        params.novel_id,
+        layer,
+    ).await {
+        Ok(memories) => (StatusCode::OK, Json(serde_json::json!({
+            "memories": memories,
+            "count": memories.len(),
+        }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            "error": e.to_string()
+        }))).into_response(),
+    }
 }
 
+/// Query params for clearing short-term memory.
+#[derive(Debug, Deserialize)]
+struct ClearShortQuery {
+    user_id: Uuid,
+}
+
+/// DELETE /memories/:character_id/short?user_id=...
 async fn clear_short_memory(
     State(state): State<AppState>,
     Path(character_id): Path<Uuid>,
+    Query(params): Query<ClearShortQuery>,
 ) -> impl IntoResponse {
-    StatusCode::NO_CONTENT.into_response()
+    match state.handler.clear_short_memory(character_id, params.user_id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            "error": e.to_string()
+        }))).into_response(),
+    }
 }

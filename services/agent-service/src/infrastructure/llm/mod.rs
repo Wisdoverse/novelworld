@@ -1,8 +1,11 @@
 use anyhow::{Result, anyhow};
+use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::time::Duration;
+
+use crate::domain::ports::TextSummarizer;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Message {
@@ -161,5 +164,12 @@ impl LlmClient {
         });
 
         Ok(stream)
+    }
+}
+
+#[async_trait]
+impl TextSummarizer for LlmClient {
+    async fn summarize(&self, system: &str, text: &str) -> Result<String> {
+        self.chat(system, text).await
     }
 }

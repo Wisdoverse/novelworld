@@ -145,38 +145,3 @@ impl From<NovelRow> for Novel {
     }
 }
 
-impl NovelStatus {
-    pub fn to_str(&self) -> &str {
-        match self {
-            NovelStatus::Pending => "pending",
-            NovelStatus::Parsing => "parsing",
-            NovelStatus::Ready => "ready",
-            NovelStatus::Error => "error",
-        }
-    }
-    pub fn from_str(s: &str) -> Self {
-        match s {
-            "parsing" => Self::Parsing,
-            "ready" => Self::Ready,
-            "error" => Self::Error,
-            _ => Self::Pending,
-        }
-    }
-}
-
-impl DeviationMode {
-    pub fn to_str(&self) -> &str {
-        match self {
-            DeviationMode::Canon => "canon",
-            DeviationMode::Creative => "creative",
-            DeviationMode::Remix => "remix",
-        }
-    }
-    pub fn from_str(s: &str) -> Self {
-        match s {
-            "creative" => Self::Creative,
-            "remix" => Self::Remix,
-            _ => Self::Canon,
-        }
-    }
-}

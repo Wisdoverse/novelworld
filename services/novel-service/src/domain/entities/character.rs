@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::value_objects::{CharacterRole, AvatarStatus};
+use crate::domain::services::character_extractor::ExtractedCharacter;
 
 /// 角色实体
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +86,21 @@ impl Character {
             speaking_style = speaking_style,
         ));
         self.updated_at = Utc::now();
+    }
+
+    /// Factory method: build a Character from an extraction result
+    pub fn from_extraction(novel_id: Uuid, ec: &ExtractedCharacter, world_summary: &str, novel_title: &str) -> Self {
+        let role = CharacterRole::from_str(&ec.role);
+        let mut ch = Self::new(novel_id, ec.name.clone(), role);
+        ch.description = Some(ec.description.clone());
+        ch.personality = Some(ec.personality.clone());
+        ch.background = Some(ec.background.clone());
+        ch.speaking_style = Some(ec.speaking_style.clone());
+        ch.appearance = Some(ec.appearance.clone());
+        ch.aliases = ec.aliases.clone();
+        ch.first_appearance_chapter = ec.first_appearance_chapter;
+        ch.build_system_prompt(novel_title, world_summary);
+        ch
     }
 
     pub fn set_avatar(&mut self, url: String) {

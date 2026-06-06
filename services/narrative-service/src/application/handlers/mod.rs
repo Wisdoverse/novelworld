@@ -5,11 +5,11 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::domain::entities::narrative_node::{NarrativeNode, WorldState};
+use crate::domain::ports::LlmPort;
 use crate::domain::repositories::{
     NarrativeNodeRepository, UserChoiceRepository, WorldStateRepository, ChapterReadRepository,
 };
 use crate::domain::services::narrative_engine::build_consequence_prompt;
-use crate::infrastructure::llm::LlmClient;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChoiceResult {
@@ -22,7 +22,7 @@ pub struct NarrativeCommandHandler {
     pub choice_repo: Arc<dyn UserChoiceRepository>,
     pub world_state_repo: Arc<dyn WorldStateRepository>,
     pub chapter_repo: Arc<dyn ChapterReadRepository>,
-    pub llm: Arc<LlmClient>,
+    pub llm: Arc<dyn LlmPort>,
 }
 
 impl NarrativeCommandHandler {

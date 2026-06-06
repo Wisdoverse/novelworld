@@ -1,6 +1,9 @@
 use anyhow::Result;
+use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+
+use crate::domain::ports::ImagePort;
 
 #[derive(Debug, Serialize)]
 struct ImageRequest {
@@ -38,8 +41,11 @@ impl ImageClient {
             model,
         }
     }
+}
 
-    pub async fn generate(&self, prompt: &str) -> Result<String> {
+#[async_trait]
+impl ImagePort for ImageClient {
+    async fn generate(&self, prompt: &str) -> Result<String> {
         let req = ImageRequest {
             model: self.model.clone(),
             prompt: prompt.to_string(),

@@ -1,10 +1,13 @@
 pub mod image;
 
 use anyhow::{Result, anyhow};
+use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::time::Duration;
+
+use crate::domain::ports::LlmPort;
 
 #[derive(Debug, Serialize)]
 struct ChatRequest {
@@ -104,35 +107,6 @@ impl LlmClient {
         unreachable!()
     }
 
-    pub async fn chat(&self, system: &str, user: &str) -> Result<String> {
-        let req = ChatRequest {
-            model: self.model.clone(),
-            messages: vec![
-                Message { role: "system".into(), content: system.into() },
-                Message { role: "user".into(), content: user.into() },
-            ],
-            response_format: None,
-            temperature: 0.8,
-        };
-        self.send_request(&req).await
-    }
-
-    pub async fn chat_json(&self, prompt: &str) -> Result<String> {
-        let req = ChatRequest {
-            model: self.model.clone(),
-            messages: vec![
-                Message {
-                    role: "system".into(),
-                    content: "You are a helpful assistant that always responds with valid JSON.".into(),
-                },
-                Message { role: "user".into(), content: prompt.into() },
-            ],
-            response_format: Some(ResponseFormat { format_type: "json_object".into() }),
-            temperature: 0.3,
-        };
-        self.send_request(&req).await
-    }
-
     pub async fn chat_stream(
         &self,
         messages: Vec<(String, String)>,
@@ -176,5 +150,37 @@ impl LlmClient {
         });
 
         Ok(stream)
+    }
+}
+
+#[async_trait]
+impl LlmPort for LlmClient {
+    async fn chat(&self, system: &str, user: &str) -> Result<String> {
+        let req = ChatRequest {
+            model: self.model.clone(),
+            messages: vec![
+                Message { role: "system".into(), content: system.into() },
+                Message { role: "user".into(), content: user.into() },
+            ],
+            response_format: None,
+            temperature: 0.8,
+        };
+        self.send_request(&req).await
+    }
+
+    async fn chat_json(&self, prompt: &str) -> Result<String> {
+        let req = ChatRequest {
+            model: self.model.clone(),
+            messages: vec![
+                Message {
+                    role: "system".into(),
+                    content: "You are a helpful assistant that always responds with valid JSON.".into(),
+                },
+                Message { role: "user".into(), content: prompt.into() },
+            ],
+            response_format: Some(ResponseFormat { format_type: "json_object".into() }),
+            temperature: 0.3,
+        };
+        self.send_request(&req).await
     }
 }

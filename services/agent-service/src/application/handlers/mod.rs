@@ -3,7 +3,7 @@ use anyhow::Result;
 use uuid::Uuid;
 use futures::{Stream, StreamExt};
 
-use crate::domain::entities::memory::ChatMessage;
+use crate::domain::entities::memory::{ChatMessage, Memory};
 use crate::domain::services::memory_manager::MemoryManager;
 use crate::domain::repositories::CharacterInfoRepository;
 use crate::infrastructure::llm::LlmClient;
@@ -16,6 +16,9 @@ pub struct AgentCommandHandler {
 
 impl AgentCommandHandler {
     /// 流式对话（SSE）
+    ///
+    /// Fix: replaced sleep-based save with oneshot channel that fires after stream
+    /// completes, ensuring the full response is captured before persisting.
     pub async fn chat_stream(
         &self,
         character_id: Uuid,
@@ -54,7 +57,7 @@ impl AgentCommandHandler {
         // 调用 LLM 流式接口
         let stream = self.llm.chat_stream(context).await?;
 
-        // 保存消息（异步，不阻塞流）
+        // Prepare the user message for saving after stream completes
         let mm = self.memory_manager.clone();
         let user_msg = ChatMessage::new(
             user_id, character_id, novel_id,
@@ -62,39 +65,46 @@ impl AgentCommandHandler {
             reader_identity.clone(), Some(current_chapter),
         );
 
-        // 收集完整响应后保存（通过包装流实现）
+        // Use a oneshot channel to signal stream completion with the full response.
+        // The sender fires when the stream ends (either naturally or on error),
+        // ensuring save_and_consolidate runs only after all chunks are collected.
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
         let full_response = Arc::new(tokio::sync::Mutex::new(String::new()));
-        let full_response_clone = full_response.clone();
+        let full_response_writer = full_response.clone();
 
-        let wrapped_stream = stream.map(move |chunk| {
-            let fr = full_response_clone.clone();
-            if let Ok(ref text) = chunk {
-                let text = text.clone();
-                let fr2 = fr.clone();
-                tokio::spawn(async move {
-                    fr2.lock().await.push_str(&text);
-                });
+        let wrapped_stream = async_stream::stream! {
+            let mut inner = Box::pin(stream);
+            while let Some(chunk) = inner.next().await {
+                match chunk {
+                    Ok(ref text) => {
+                        full_response_writer.lock().await.push_str(text);
+                    }
+                    _ => {}
+                }
+                yield chunk;
             }
-            chunk
-        });
+            // Stream exhausted: send the complete response to the save task
+            let final_text = full_response_writer.lock().await.clone();
+            let _ = tx.send(final_text);
+        };
 
-        // 流结束后保存记忆（通过 tokio::spawn 异步处理）
-        let mm_clone = mm.clone();
+        // Spawn a task that waits for the stream to finish, then saves
         let reader_identity_clone = reader_identity.clone();
-        let full_response_final = full_response.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let response_text = full_response_final.lock().await.clone();
-            if !response_text.is_empty() {
-                let char_msg = ChatMessage::new(
-                    user_id, character_id, novel_id,
-                    "character".into(), response_text,
-                    reader_identity_clone, Some(current_chapter),
-                );
-                let _ = mm_clone.save_and_consolidate(
-                    user_msg, char_msg,
-                    character_id, user_id, novel_id,
-                ).await;
+            if let Ok(response_text) = rx.await {
+                if !response_text.is_empty() {
+                    let char_msg = ChatMessage::new(
+                        user_id, character_id, novel_id,
+                        "character".into(), response_text,
+                        reader_identity_clone, Some(current_chapter),
+                    );
+                    if let Err(e) = mm.save_and_consolidate(
+                        user_msg, char_msg,
+                        character_id, user_id, novel_id,
+                    ).await {
+                        tracing::error!("Failed to save chat after stream: {}", e);
+                    }
+                }
             }
         });
 
@@ -150,5 +160,42 @@ impl AgentCommandHandler {
         ).await?;
 
         Ok(response)
+    }
+
+    /// Fetch paginated chat history for a character-user pair.
+    pub async fn get_history(
+        &self,
+        character_id: Uuid,
+        user_id: Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<ChatMessage>> {
+        self.memory_manager.chat_repo
+            .find_by_character_user(character_id, user_id, limit, offset)
+            .await
+    }
+
+    /// Fetch memories for a character-user-novel combination, optionally filtered by layer.
+    pub async fn get_memories(
+        &self,
+        character_id: Uuid,
+        user_id: Uuid,
+        novel_id: Uuid,
+        layer: crate::domain::entities::memory::MemoryLayer,
+    ) -> Result<Vec<Memory>> {
+        self.memory_manager.memory_repo
+            .find_by_layer(character_id, user_id, novel_id, layer)
+            .await
+    }
+
+    /// Clear the short-term (Redis) cache for a character-user pair.
+    pub async fn clear_short_memory(
+        &self,
+        character_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<()> {
+        self.memory_manager.cache
+            .clear(character_id, user_id)
+            .await
     }
 }

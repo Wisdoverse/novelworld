@@ -16,8 +16,8 @@ use infrastructure::llm::LlmClient;
 use infrastructure::persistence::{
     pg_narrative_repo::{PgNarrativeNodeRepository, PgUserChoiceRepository},
     pg_world_state_repo::PgWorldStateRepository,
-    pg_chapter_read_repo::PgChapterReadRepository,
 };
+use infrastructure::http::novel_client::NovelServiceClient;
 use interface::http::{router, AppState};
 
 #[tokio::main]
@@ -42,8 +42,8 @@ async fn main() -> Result<()> {
 
     tracing::info!("Connected to PostgreSQL");
 
-    // LLM client
-    let llm = Arc::new(LlmClient::new(
+    // LLM client (behind domain port trait)
+    let llm: Arc<dyn domain::ports::LlmPort> = Arc::new(LlmClient::new(
         std::env::var("LLM_API_URL").unwrap_or_else(|_| "https://api.openai.com".into()),
         std::env::var("LLM_API_KEY").expect("LLM_API_KEY must be set"),
         std::env::var("LLM_MODEL").unwrap_or_else(|_| "gpt-4o".into()),
@@ -53,7 +53,9 @@ async fn main() -> Result<()> {
     let node_repo = Arc::new(PgNarrativeNodeRepository::new(pool.clone()));
     let choice_repo = Arc::new(PgUserChoiceRepository::new(pool.clone()));
     let world_state_repo = Arc::new(PgWorldStateRepository::new(pool.clone()));
-    let chapter_repo = Arc::new(PgChapterReadRepository::new(pool.clone()));
+    let novel_service_url = std::env::var("NOVEL_SERVICE_URL")
+        .unwrap_or_else(|_| "http://novel-service:8002".into());
+    let chapter_repo = Arc::new(NovelServiceClient::new(novel_service_url));
 
     // Application handler
     let handler = Arc::new(NarrativeCommandHandler {

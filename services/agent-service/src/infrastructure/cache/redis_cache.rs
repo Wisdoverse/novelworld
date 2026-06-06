@@ -1,9 +1,11 @@
 use anyhow::Result;
+use async_trait::async_trait;
 use deadpool_redis::Pool;
 use redis::AsyncCommands;
 use uuid::Uuid;
 
 use crate::domain::entities::memory::ChatMessage;
+use crate::domain::ports::MessageCache;
 
 const MAX_CACHED_MESSAGES: isize = 50;
 
@@ -22,9 +24,12 @@ impl RedisCache {
     fn cache_key(character_id: Uuid, user_id: Uuid) -> String {
         format!("chat:{}:{}", character_id, user_id)
     }
+}
 
+#[async_trait]
+impl MessageCache for RedisCache {
     /// Retrieve the most recent `limit` messages from Redis cache.
-    pub async fn get_recent_messages(
+    async fn get_recent_messages(
         &self,
         character_id: Uuid,
         user_id: Uuid,
@@ -47,7 +52,7 @@ impl RedisCache {
     }
 
     /// Push a new message to the front of the cache list, trimming to MAX_CACHED_MESSAGES.
-    pub async fn push_message(
+    async fn push_message(
         &self,
         character_id: Uuid,
         user_id: Uuid,
@@ -64,7 +69,7 @@ impl RedisCache {
     }
 
     /// Clear all cached messages for a character-user pair.
-    pub async fn clear(
+    async fn clear(
         &self,
         character_id: Uuid,
         user_id: Uuid,
