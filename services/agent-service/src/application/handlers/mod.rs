@@ -37,10 +37,10 @@ impl AgentCommandHandler {
         let system_prompt = character.system_prompt
             .unwrap_or_else(|| format!("你是角色 {}。", character.name));
 
-        // 构建完整上下文（4层记忆）
-        let mut context = self.memory_manager.build_context(
+        // 构建完整上下文（4层记忆 + 语义搜索）
+        let mut context = self.memory_manager.build_context_with_semantic(
             character_id, user_id, novel_id,
-            current_chapter, &system_prompt,
+            current_chapter, &system_prompt, &user_message,
         ).await?;
 
         // 注入读者身份
@@ -129,9 +129,9 @@ impl AgentCommandHandler {
         let system_prompt = character.system_prompt
             .unwrap_or_else(|| format!("你是角色 {}。", character.name));
 
-        let mut context = self.memory_manager.build_context(
+        let mut context = self.memory_manager.build_context_with_semantic(
             character_id, user_id, novel_id,
-            current_chapter, &system_prompt,
+            current_chapter, &system_prompt, &user_message,
         ).await?;
 
         if let Some(ref identity) = reader_identity {
