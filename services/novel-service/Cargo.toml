@@ -1,0 +1,34 @@
+[package]
+name = "novel-service"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio.workspace = true
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tonic.workspace = true
+prost.workspace = true
+sqlx.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+config.workspace = true
+dotenvy.workspace = true
+reqwest.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+bytes.workspace = true
+
+# PDF parsing
+pdf-extract = "0.7"
+# Text chunking
+tiktoken-rs = "0.6"
+# Chapter splitting regex
+regex = "1"

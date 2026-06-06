@@ -1,0 +1,37 @@
+# Rust
+target/
+Cargo.lock
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# Environment
+.env
+.env.local
+.env.prod
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes
+postgres_data/
+redis_data/
+uploads_data/
+
+# Logs
+*.log
+
+# Remember (session state)
+.remember/
+
+# Claude
+.claude/

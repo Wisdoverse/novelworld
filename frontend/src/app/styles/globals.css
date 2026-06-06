@@ -1,0 +1,306 @@
+@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700;900&family=Inter:wght@300;400;500;600&family=Noto+Serif+SC:wght@300;400;500;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─── 宇宙美学设计令牌 ─────────────────────────────────────────── */
+:root {
+  /* 色彩系统：午夜蓝 × 紫罗兰 × 青色 */
+  --color-void: #03040a;          /* 深空黑 */
+  --color-cosmos: #080d1f;        /* 宇宙深蓝 */
+  --color-nebula: #0f1535;        /* 星云蓝 */
+  --color-stardust: #1a2040;      /* 星尘蓝 */
+  --color-aurora: #6d28d9;        /* 极光紫 */
+  --color-aurora-light: #8b5cf6;  /* 浅极光紫 */
+  --color-nova: #06b6d4;          /* 新星青 */
+  --color-nova-glow: #22d3ee;     /* 发光青 */
+  --color-starlight: #e2e8f0;     /* 星光白 */
+  --color-moonbeam: #94a3b8;      /* 月光灰 */
+  --color-comet: #475569;         /* 彗星灰 */
+
+  /* 发光效果 */
+  --glow-nova: 0 0 20px rgba(6, 182, 212, 0.4), 0 0 40px rgba(6, 182, 212, 0.2);
+  --glow-aurora: 0 0 20px rgba(109, 40, 217, 0.4), 0 0 40px rgba(109, 40, 217, 0.2);
+  --glow-text: 0 0 10px rgba(34, 211, 238, 0.8), 0 0 20px rgba(34, 211, 238, 0.4);
+
+  /* 字体 */
+  --font-display: 'Cinzel', serif;          /* 标题：古典宇宙感 */
+  --font-body: 'Inter', sans-serif;         /* UI 文字 */
+  --font-reading: 'Noto Serif SC', serif;   /* 小说正文 */
+
+  /* 间距 */
+  --radius-sm: 6px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+  --radius-xl: 32px;
+
+  /* 动画 */
+  --ease-cosmic: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-warp: cubic-bezier(0.77, 0, 0.175, 1);
+}
+
+/* ─── 基础重置 ───────────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 16px;
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: var(--font-body);
+  background-color: var(--color-void);
+  color: var(--color-starlight);
+  min-height: 100vh;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ─── 星空背景 ───────────────────────────────────────────────────── */
+.cosmos-bg {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background:
+    radial-gradient(ellipse at 20% 20%, rgba(109, 40, 217, 0.15) 0%, transparent 50%),
+    radial-gradient(ellipse at 80% 80%, rgba(6, 182, 212, 0.1) 0%, transparent 50%),
+    radial-gradient(ellipse at 50% 50%, rgba(8, 13, 31, 0.9) 0%, transparent 100%),
+    var(--color-void);
+}
+
+/* 星点动画 */
+.stars {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+}
+
+.star {
+  position: absolute;
+  background: white;
+  border-radius: 50%;
+  animation: twinkle var(--duration, 3s) ease-in-out infinite;
+  animation-delay: var(--delay, 0s);
+}
+
+@keyframes twinkle {
+  0%, 100% { opacity: 0.2; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.2); }
+}
+
+/* ─── 发光文字 ───────────────────────────────────────────────────── */
+.text-glow {
+  text-shadow: var(--glow-text);
+  color: var(--color-nova-glow);
+}
+
+.text-glow-aurora {
+  text-shadow: 0 0 10px rgba(139, 92, 246, 0.8), 0 0 20px rgba(139, 92, 246, 0.4);
+  color: var(--color-aurora-light);
+}
+
+/* ─── 玻璃拟态卡片 ───────────────────────────────────────────────── */
+.glass-card {
+  background: rgba(15, 21, 53, 0.6);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(109, 40, 217, 0.2);
+  border-radius: var(--radius-lg);
+  box-shadow:
+    0 4px 24px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.glass-card-nova {
+  background: rgba(6, 182, 212, 0.05);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(6, 182, 212, 0.2);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--glow-nova);
+}
+
+/* ─── 宇宙按钮 ───────────────────────────────────────────────────── */
+.btn-cosmic {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 28px;
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--color-nova-glow);
+  background: transparent;
+  border: 1px solid rgba(6, 182, 212, 0.4);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all 160ms var(--ease-cosmic);
+  overflow: hidden;
+}
+
+.btn-cosmic::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, rgba(6, 182, 212, 0.1), rgba(109, 40, 217, 0.1));
+  opacity: 0;
+  transition: opacity 160ms var(--ease-cosmic);
+}
+
+.btn-cosmic:hover::before { opacity: 1; }
+.btn-cosmic:hover {
+  border-color: rgba(6, 182, 212, 0.8);
+  box-shadow: var(--glow-nova);
+  transform: translateY(-1px);
+}
+.btn-cosmic:active { transform: scale(0.97) translateY(0); }
+
+.btn-cosmic-filled {
+  background: linear-gradient(135deg, #0891b2, #6d28d9);
+  border-color: transparent;
+  color: white;
+  box-shadow: 0 4px 20px rgba(6, 182, 212, 0.3);
+}
+.btn-cosmic-filled:hover {
+  box-shadow: 0 6px 30px rgba(6, 182, 212, 0.5);
+  transform: translateY(-2px);
+}
+
+/* ─── 小说阅读器 ─────────────────────────────────────────────────── */
+.reader-content {
+  font-family: var(--font-reading);
+  font-size: 18px;
+  line-height: 1.9;
+  color: #d1d5db;
+  letter-spacing: 0.02em;
+}
+
+.reader-content p {
+  margin-bottom: 1.5em;
+  text-indent: 2em;
+}
+
+/* ─── 对话气泡 ───────────────────────────────────────────────────── */
+.chat-bubble-user {
+  background: linear-gradient(135deg, rgba(109, 40, 217, 0.3), rgba(6, 182, 212, 0.2));
+  border: 1px solid rgba(109, 40, 217, 0.3);
+  border-radius: 18px 18px 4px 18px;
+  padding: 12px 16px;
+}
+
+.chat-bubble-character {
+  background: rgba(15, 21, 53, 0.8);
+  border: 1px solid rgba(6, 182, 212, 0.2);
+  border-radius: 18px 18px 18px 4px;
+  padding: 12px 16px;
+}
+
+/* ─── 分支选择卡片 ───────────────────────────────────────────────── */
+.choice-card {
+  background: rgba(15, 21, 53, 0.7);
+  border: 1px solid rgba(109, 40, 217, 0.3);
+  border-radius: var(--radius-md);
+  padding: 16px 20px;
+  cursor: pointer;
+  transition: all 200ms var(--ease-cosmic);
+  position: relative;
+  overflow: hidden;
+}
+
+.choice-card::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: linear-gradient(to bottom, var(--color-nova), var(--color-aurora));
+  opacity: 0;
+  transition: opacity 200ms var(--ease-cosmic);
+}
+
+.choice-card:hover {
+  border-color: rgba(6, 182, 212, 0.5);
+  background: rgba(6, 182, 212, 0.08);
+  transform: translateX(4px);
+  box-shadow: var(--glow-nova);
+}
+
+.choice-card:hover::after { opacity: 1; }
+
+/* ─── 进度条 ─────────────────────────────────────────────────────── */
+.progress-cosmic {
+  height: 3px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.progress-cosmic-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--color-nova), var(--color-aurora-light));
+  border-radius: 2px;
+  box-shadow: 0 0 8px rgba(6, 182, 212, 0.6);
+  transition: width 400ms var(--ease-cosmic);
+}
+
+/* ─── 滚动条 ─────────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: var(--color-cosmos);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(109, 40, 217, 0.4);
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(6, 182, 212, 0.6);
+}
+
+/* ─── 动画 ───────────────────────────────────────────────────────── */
+@keyframes float {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-8px); }
+}
+
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 10px rgba(6, 182, 212, 0.3); }
+  50% { box-shadow: 0 0 25px rgba(6, 182, 212, 0.6), 0 0 50px rgba(6, 182, 212, 0.2); }
+}
+
+@keyframes orbit {
+  from { transform: rotate(0deg) translateX(60px) rotate(0deg); }
+  to { transform: rotate(360deg) translateX(60px) rotate(-360deg); }
+}
+
+@keyframes nebula-drift {
+  0% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(30px, -20px) scale(1.05); }
+  66% { transform: translate(-20px, 10px) scale(0.98); }
+  100% { transform: translate(0, 0) scale(1); }
+}
+
+.animate-float { animation: float 4s ease-in-out infinite; }
+.animate-pulse-glow { animation: pulse-glow 2s ease-in-out infinite; }
+.animate-nebula { animation: nebula-drift 20s ease-in-out infinite; }
+
+/* ─── 响应式 ─────────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

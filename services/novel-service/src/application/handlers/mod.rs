@@ -1,0 +1,189 @@
+use std::sync::Arc;
+use anyhow::Result;
+use tracing::{info, error};
+use uuid::Uuid;
+
+use crate::application::commands::{ImportNovelCommand, GenerateAvatarCommand};
+use crate::domain::entities::{novel::Novel, character::Character};
+use crate::domain::repositories::{NovelRepository, ChapterRepository, CharacterRepository};
+use crate::domain::services::{
+    novel_parser::NovelParserService,
+    character_extractor::{build_extraction_prompt, ExtractionResult},
+};
+use crate::domain::value_objects::CharacterRole;
+use crate::infrastructure::llm::LlmClient;
+use crate::infrastructure::llm::image::ImageClient;
+
+pub struct NovelCommandHandler {
+    pub novel_repo: Arc<dyn NovelRepository>,
+    pub chapter_repo: Arc<dyn ChapterRepository>,
+    pub character_repo: Arc<dyn CharacterRepository>,
+    pub llm: Arc<LlmClient>,
+    pub image_client: Arc<ImageClient>,
+}
+
+impl NovelCommandHandler {
+    /// 处理小说导入命令（异步解析流程）
+    pub async fn handle_import(&self, cmd: ImportNovelCommand) -> Result<Uuid> {
+        info!("Importing novel: {}", cmd.title);
+
+        // 1. 创建 Novel 聚合根
+        let mut novel = Novel::create(cmd.user_id, cmd.title.clone(), cmd.author.clone());
+        if let Some(mode) = cmd.deviation_mode {
+            novel.set_deviation_mode(mode);
+        }
+        self.novel_repo.save(&novel).await?;
+
+        let novel_id = novel.id;
+
+        // 2. 获取原始文本
+        let raw_text = match cmd.raw_content {
+            Some(text) => text,
+            None => {
+                // TODO: 从 S3 下载文件并解析 PDF/TXT
+                return Err(anyhow::anyhow!("File upload parsing not yet implemented"));
+            }
+        };
+
+        // 3. 异步执行解析（不阻塞响应）
+        let novel_repo = self.novel_repo.clone();
+        let chapter_repo = self.chapter_repo.clone();
+        let character_repo = self.character_repo.clone();
+        let llm = self.llm.clone();
+        let image_client = self.image_client.clone();
+        let title = cmd.title.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = Self::parse_novel_async(
+                novel_id, &title, &raw_text,
+                novel_repo, chapter_repo, character_repo, llm, image_client,
+            ).await {
+                error!("Novel parsing failed for {}: {}", novel_id, e);
+            }
+        });
+
+        Ok(novel_id)
+    }
+
+    async fn parse_novel_async(
+        novel_id: Uuid,
+        title: &str,
+        raw_text: &str,
+        novel_repo: Arc<dyn NovelRepository>,
+        chapter_repo: Arc<dyn ChapterRepository>,
+        character_repo: Arc<dyn CharacterRepository>,
+        llm: Arc<LlmClient>,
+        image_client: Arc<ImageClient>,
+    ) -> Result<()> {
+        // 更新状态为解析中
+        let mut novel = novel_repo.find_by_id(novel_id).await?
+            .ok_or_else(|| anyhow::anyhow!("Novel not found"))?;
+        novel.start_parsing();
+        novel_repo.update(&novel).await?;
+
+        // 拆分章节
+        info!("Parsing chapters for novel {}", novel_id);
+        let chapters = NovelParserService::parse_chapters(novel_id, raw_text)?;
+        let total_chapters = chapters.len() as i32;
+        chapter_repo.save_batch(&chapters).await?;
+
+        // 提取角色和世界观（使用前3章作为样本）
+        info!("Extracting characters for novel {}", novel_id);
+        let sample_text: String = chapters.iter()
+            .take(3)
+            .map(|c| c.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        let prompt = build_extraction_prompt(title, &sample_text);
+        let extraction_json = llm.chat_json(&prompt).await?;
+        let extraction: ExtractionResult = serde_json::from_str(&extraction_json)?;
+
+        // 保存角色
+        let mut characters: Vec<Character> = extraction.characters.iter().map(|ec| {
+            let role = match ec.role.as_str() {
+                "protagonist" => CharacterRole::Protagonist,
+                "antagonist" => CharacterRole::Antagonist,
+                "minor" => CharacterRole::Minor,
+                _ => CharacterRole::Supporting,
+            };
+            let mut ch = Character::new(novel_id, ec.name.clone(), role);
+            ch.description = Some(ec.description.clone());
+            ch.personality = Some(ec.personality.clone());
+            ch.background = Some(ec.background.clone());
+            ch.speaking_style = Some(ec.speaking_style.clone());
+            ch.appearance = Some(ec.appearance.clone());
+            ch.aliases = ec.aliases.clone();
+            ch.first_appearance_chapter = ec.first_appearance_chapter;
+            // 构建 Agent 系统提示词
+            ch.build_system_prompt(title, &extraction.world_summary);
+            ch
+        }).collect();
+
+        character_repo.save_batch(&characters).await?;
+
+        // Save character relationship graph
+        if !extraction.relationships.is_empty() {
+            let char_name_to_id: std::collections::HashMap<String, Uuid> = characters.iter()
+                .map(|c| (c.name.to_lowercase(), c.id))
+                .collect();
+
+            for rel in &extraction.relationships {
+                let from_id = char_name_to_id.get(&rel.from_character.to_lowercase());
+                let to_id = char_name_to_id.get(&rel.to_character.to_lowercase());
+                if let (Some(&from), Some(&to)) = (from_id, to_id) {
+                    character_repo.save_relationship(
+                        novel_id, from, to,
+                        &rel.relationship_type,
+                        Some(rel.description.as_str()),
+                        rel.strength,
+                    ).await.ok();
+                }
+            }
+            info!("Saved {} character relationships for novel {}", extraction.relationships.len(), novel_id);
+        }
+
+        // 标记小说为 ready
+        novel.mark_ready(total_chapters, extraction.world_summary.clone());
+        novel_repo.update(&novel).await?;
+
+        // 异步生成角色头像
+        for character in &characters {
+            if let Some(appearance) = &character.appearance {
+                let char_id = character.id;
+                let appearance = appearance.clone();
+                let char_repo = character_repo.clone();
+                let img_client = image_client.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = Self::generate_avatar(char_id, &appearance, char_repo, img_client).await {
+                        error!("Avatar generation failed for {}: {}", char_id, e);
+                    }
+                });
+            }
+        }
+
+        info!("Novel {} parsed successfully: {} chapters, {} characters",
+            novel_id, total_chapters, characters.len());
+        Ok(())
+    }
+
+    async fn generate_avatar(
+        character_id: Uuid,
+        appearance: &str,
+        character_repo: Arc<dyn CharacterRepository>,
+        image_client: Arc<ImageClient>,
+    ) -> Result<()> {
+        let prompt = format!(
+            "Portrait of a fictional character. {appearance}. \
+            Anime/illustration style, high quality, detailed face, \
+            dramatic lighting, cosmic background with stars.",
+            appearance = appearance
+        );
+        let url = image_client.generate(&prompt).await?;
+        let mut character = character_repo.find_by_id(character_id).await?
+            .ok_or_else(|| anyhow::anyhow!("Character not found"))?;
+        character.set_avatar(url);
+        character_repo.update(&character).await?;
+        Ok(())
+    }
+}
