@@ -23,7 +23,7 @@ tonic = "0.14"
 prost = "0.13"
 
 # Database
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -35,11 +35,11 @@ bcrypt = "0.19"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 # HTTP client (for LLM API)
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.13", features = ["json", "stream"] }
 
 # Redis
-redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
-deadpool-redis = "0.18"
+redis = { version = "1.2", features = ["tokio-comp", "connection-manager"] }
+deadpool-redis = "0.23"
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
