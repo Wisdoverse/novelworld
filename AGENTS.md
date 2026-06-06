@@ -128,6 +128,20 @@ docker compose up --build                     # full stack
 docker compose -f docker-compose.yml up -d    # production
 ```
 
+## Architecture Constraints
+
+- **Backend: DDD + Microservice architecture is mandatory.** Every change must respect:
+  - Domain layer has zero dependencies on infrastructure or interface layers.
+  - All external integrations (DB, Redis, LLM, HTTP) accessed through domain port traits.
+  - Services communicate via HTTP, never via shared database tables.
+  - Each service owns its data; cross-service reads use HTTP adapters in `infrastructure/http/`.
+- **Frontend: Feature-Sliced Design (FSD) is mandatory.** Import rules:
+  - `app` → `pages` → `widgets` → `features` → `entities` → `shared`.
+  - Never import upward. `features/` cannot import from `widgets/` or `pages/`.
+  - Each slice is self-contained: `ui/`, `model/`, `api/` co-located.
+
+Violating these constraints is a blocking issue — fix before merging.
+
 ## Code Style
 
 ### Rust
