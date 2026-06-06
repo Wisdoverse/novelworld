@@ -26,6 +26,7 @@ pub struct AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/novels", post(import_novel))
+        .route("/novels/upload", post(upload_novel))
         .route("/novels", get(list_novels))
         .route("/novels/:id", get(get_novel))
         .route("/novels/:id", delete(delete_novel))
@@ -111,6 +112,191 @@ async fn import_novel(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiError { error: e.to_string() }),
         ).into_response(),
+    }
+}
+
+/// Maximum upload size for plain text files (10 MB).
+const MAX_TXT_SIZE: usize = 10 * 1024 * 1024;
+/// Maximum upload size for PDF files (20 MB).
+const MAX_PDF_SIZE: usize = 20 * 1024 * 1024;
+
+/// Extract text content from an in-memory PDF using pdf-extract.
+fn extract_pdf_text(data: &[u8]) -> Result<String, (StatusCode, axum::Json<ApiError>)> {
+    pdf_extract::extract_text_from_mem(data).map_err(|e| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ApiError {
+                error: format!("Failed to extract text from PDF: {}", e),
+            }),
+        )
+    })
+}
+
+/// POST /novels/upload  -- multipart file upload (txt or pdf)
+async fn upload_novel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    let user_id = match extract_user_id(&headers) {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiError {
+                    error: "Missing or invalid X-User-Id header".into(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let mut title: Option<String> = None;
+    let mut author: Option<String> = None;
+    let mut content: Option<String> = None;
+    let mut deviation_mode_str: Option<String> = None;
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "title" => {
+                title = Some(field.text().await.unwrap_or_default());
+            }
+            "author" => {
+                author = Some(field.text().await.unwrap_or_default());
+            }
+            "deviation_mode" => {
+                deviation_mode_str = Some(field.text().await.unwrap_or_default());
+            }
+            "file" => {
+                let content_type = field
+                    .content_type()
+                    .unwrap_or("application/octet-stream")
+                    .to_string();
+                let data = match field.bytes().await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(ApiError {
+                                error: format!("Failed to read uploaded file: {}", e),
+                            }),
+                        )
+                            .into_response();
+                    }
+                };
+
+                let is_pdf = content_type.contains("pdf");
+
+                // Validate size limits
+                let max_size = if is_pdf { MAX_PDF_SIZE } else { MAX_TXT_SIZE };
+                if data.len() > max_size {
+                    return (
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        Json(ApiError {
+                            error: format!(
+                                "File too large: {} bytes (max {} bytes for {})",
+                                data.len(),
+                                max_size,
+                                if is_pdf { "PDF" } else { "text" }
+                            ),
+                        }),
+                    )
+                        .into_response();
+                }
+
+                // Validate MIME type
+                if !is_pdf
+                    && !content_type.contains("text/plain")
+                    && !content_type.contains("octet-stream")
+                {
+                    return (
+                        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                        Json(ApiError {
+                            error: format!(
+                                "Unsupported file type: {}. Only text/plain and application/pdf are accepted.",
+                                content_type
+                            ),
+                        }),
+                    )
+                        .into_response();
+                }
+
+                // Extract text
+                if is_pdf {
+                    match extract_pdf_text(&data) {
+                        Ok(text) => content = Some(text),
+                        Err(resp) => return resp.into_response(),
+                    }
+                } else {
+                    content = Some(String::from_utf8_lossy(&data).to_string());
+                }
+            }
+            _ => {
+                // Ignore unknown fields
+            }
+        }
+    }
+
+    // Validate required fields
+    let title = match title {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiError {
+                    error: "Missing required field: title".into(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let content = match content {
+        Some(c) if !c.is_empty() => c,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiError {
+                    error: "Missing or empty file upload".into(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let deviation_mode = deviation_mode_str.as_deref().map(|m| match m {
+        "creative" => crate::domain::value_objects::DeviationMode::Creative,
+        "remix" => crate::domain::value_objects::DeviationMode::Remix,
+        _ => crate::domain::value_objects::DeviationMode::Canon,
+    });
+
+    let cmd = ImportNovelCommand {
+        user_id,
+        title,
+        author,
+        raw_content: Some(content),
+        file_key: None,
+        deviation_mode,
+    };
+
+    match state.handler.handle_import(cmd).await {
+        Ok(novel_id) => (
+            StatusCode::ACCEPTED,
+            Json(ImportNovelResponse {
+                novel_id,
+                status: "parsing".into(),
+                message: "Novel file uploaded and import started. Poll /novels/:id/status for progress.".into(),
+            }),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
     }
 }
 

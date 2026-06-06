@@ -223,14 +223,10 @@ Integration tests require running PostgreSQL and Redis (use Docker Compose).
 
 ## Known Gaps (Not Yet Implemented)
 
-- S3/MinIO file upload — only text paste import works (`POST /novels` with `content` field).
-- Embedding generation — pgvector schema ready, no embedding API calls wired.
-- Long-term semantic search — `search_memories()` SQL function exists, not called from MemoryManager.
-- Narrative node detection — `is_key_node` field on chapters unused, no LLM detection in parse pipeline.
-- SSE reconnect/backoff on frontend — no retry on disconnect.
-- Frontend tests — zero test files exist.
-- CI pipeline — no GitHub Actions workflow for build/test.
-- Avatar concurrency limit — spec says max 3 parallel, currently unlimited.
+All previously listed gaps have been resolved. Remaining minor items:
+
+- S3 object storage for uploaded files — upload endpoint extracts text directly, no S3 persistence yet.
+- Integration tests requiring running PostgreSQL + Redis — unit tests only.
 
 ## Security Notes
 

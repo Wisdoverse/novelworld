@@ -35,3 +35,11 @@ pub trait MessageCache: Send + Sync {
 pub trait TextSummarizer: Send + Sync {
     async fn summarize(&self, system: &str, text: &str) -> Result<String>;
 }
+
+/// Port for generating vector embeddings from text.
+/// Used by the memory manager to create semantic embeddings for long-term memories
+/// and to embed user queries for similarity search.
+#[async_trait]
+pub trait EmbeddingGenerator: Send + Sync {
+    async fn generate_embedding(&self, text: &str) -> Result<Vec<f32>>;
+}

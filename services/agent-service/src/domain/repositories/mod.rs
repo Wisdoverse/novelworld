@@ -15,6 +15,14 @@ pub trait MemoryRepository: Send + Sync {
         novel_id: Uuid,
         layer: MemoryLayer,
     ) -> Result<Vec<Memory>>;
+    /// Search for memories similar to the given embedding vector using pgvector cosine distance.
+    async fn search_similar(
+        &self,
+        character_id: Uuid,
+        user_id: Uuid,
+        embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<Memory>>;
 }
 
 #[async_trait]

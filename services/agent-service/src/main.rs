@@ -15,6 +15,7 @@ use application::handlers::AgentCommandHandler;
 use domain::services::memory_manager::MemoryManager;
 use infrastructure::llm::LlmClient;
 use infrastructure::cache::RedisCache;
+use infrastructure::embedding::EmbeddingClient;
 use infrastructure::http::novel_client::NovelServiceClient;
 use infrastructure::persistence::{
     pg_memory_repo::PgMemoryRepository,
@@ -73,13 +74,22 @@ async fn main() -> Result<()> {
     // Redis cache
     let cache = Arc::new(RedisCache::new(redis_pool));
 
+    // Embedding client
+    let embedding: Arc<dyn domain::ports::EmbeddingGenerator> = Arc::new(EmbeddingClient::new(
+        std::env::var("EMBEDDING_API_URL").unwrap_or_else(|_| "https://api.openai.com".into()),
+        std::env::var("EMBEDDING_API_KEY").unwrap_or_else(|_|
+            std::env::var("LLM_API_KEY").expect("LLM_API_KEY or EMBEDDING_API_KEY must be set")
+        ),
+        std::env::var("EMBEDDING_MODEL").unwrap_or_else(|_| "text-embedding-3-small".into()),
+    ));
+
     // Memory manager (4-layer memory pyramid)
-    // Domain ports: cache as dyn MessageCache, llm as dyn TextSummarizer
     let memory_manager = Arc::new(MemoryManager {
         memory_repo: memory_repo.clone(),
         chat_repo: chat_repo.clone(),
         cache: cache.clone() as Arc<dyn domain::ports::MessageCache>,
         llm: llm.clone() as Arc<dyn domain::ports::TextSummarizer>,
+        embedding,
     });
 
     // Application handler

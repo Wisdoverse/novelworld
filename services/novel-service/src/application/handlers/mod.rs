@@ -2,6 +2,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tracing::{info, error};
 use uuid::Uuid;
+use tokio::sync::Semaphore;
 
 use crate::application::commands::{ImportNovelCommand, GenerateAvatarCommand};
 use crate::domain::entities::{novel::Novel, character::Character};
@@ -11,6 +12,7 @@ use crate::domain::services::{
     novel_parser::NovelParserService,
     character_extractor::{build_extraction_prompt, ExtractionResult},
 };
+use crate::domain::services::node_detector;
 
 pub struct NovelCommandHandler {
     pub novel_repo: Arc<dyn NovelRepository>,
@@ -125,18 +127,41 @@ impl NovelCommandHandler {
             info!("Saved {} character relationships for novel {}", extraction.relationships.len(), novel_id);
         }
 
+        // Detect narrative branch nodes
+        info!("Detecting narrative nodes for novel {}", novel_id);
+        let chapter_summaries: Vec<(i32, &str)> = chapters.iter()
+            .map(|c| (c.chapter_number, c.content.as_str()))
+            .collect();
+        let node_prompt = node_detector::build_node_detection_prompt(title, &chapter_summaries);
+        if let Ok(node_json) = llm.chat_json(&node_prompt).await {
+            if let Ok(detection) = serde_json::from_str::<node_detector::NodeDetectionResult>(&node_json) {
+                for node in &detection.nodes {
+                    if let Some(ch) = chapters.iter().find(|c| c.chapter_number == node.chapter_number) {
+                        // Mark chapter as key node
+                        let mut updated_ch = ch.clone();
+                        updated_ch.mark_as_key_node(node.description.clone());
+                        chapter_repo.update(&updated_ch).await.ok();
+                    }
+                }
+                info!("Detected {} narrative nodes for novel {}", detection.nodes.len(), novel_id);
+            }
+        }
+
         // 标记小说为 ready
         novel.mark_ready(total_chapters, extraction.world_summary.clone());
         novel_repo.update(&novel).await?;
 
-        // 异步生成角色头像
+        // Concurrent avatar generation (max 3 parallel)
+        let semaphore = Arc::new(Semaphore::new(3));
         for character in &characters {
             if let Some(appearance) = &character.appearance {
                 let char_id = character.id;
                 let appearance = appearance.clone();
                 let char_repo = character_repo.clone();
                 let img_client = image_client.clone();
+                let sem = semaphore.clone();
                 tokio::spawn(async move {
+                    let _permit = sem.acquire().await.unwrap();
                     if let Err(e) = Self::generate_avatar(char_id, &appearance, char_repo, img_client).await {
                         error!("Avatar generation failed for {}: {}", char_id, e);
                     }

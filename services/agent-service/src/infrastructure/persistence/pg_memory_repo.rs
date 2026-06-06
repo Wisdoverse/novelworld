@@ -68,15 +68,27 @@ impl PgMemoryRepository {
 #[async_trait]
 impl MemoryRepository for PgMemoryRepository {
     async fn save(&self, memory: &Memory) -> Result<()> {
+        // Format embedding as pgvector text literal when present
+        let embedding_str: Option<String> = memory.embedding.as_ref().map(|emb| {
+            format!(
+                "[{}]",
+                emb.iter()
+                    .map(|f| f.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        });
+
         sqlx::query(
             r#"
             INSERT INTO character_memories (
                 id, character_id, user_id, novel_id,
-                layer, content, importance, chapter_number, created_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                layer, content, importance, chapter_number, embedding, created_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::vector, $10)
             ON CONFLICT (id) DO UPDATE SET
                 content = EXCLUDED.content,
-                importance = EXCLUDED.importance
+                importance = EXCLUDED.importance,
+                embedding = EXCLUDED.embedding
             "#,
         )
         .bind(memory.id)
@@ -87,6 +99,7 @@ impl MemoryRepository for PgMemoryRepository {
         .bind(&memory.content)
         .bind(memory.importance)
         .bind(memory.chapter_number)
+        .bind(embedding_str)
         .bind(memory.created_at)
         .execute(&self.pool)
         .await?;
@@ -113,6 +126,45 @@ impl MemoryRepository for PgMemoryRepository {
         .bind(user_id)
         .bind(novel_id)
         .bind(layer_to_str(&layer))
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(Memory::from).collect())
+    }
+
+    async fn search_similar(
+        &self,
+        character_id: Uuid,
+        user_id: Uuid,
+        embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<Memory>> {
+        // Format the embedding vector as a pgvector-compatible string literal: [0.1,0.2,...]
+        let embedding_str = format!(
+            "[{}]",
+            embedding
+                .iter()
+                .map(|f| f.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+
+        let rows = sqlx::query_as::<_, MemoryRow>(
+            r#"
+            SELECT id, character_id, user_id, novel_id,
+                   layer::text AS layer, content, importance, chapter_number, created_at
+            FROM character_memories
+            WHERE character_id = $1
+              AND user_id = $2
+              AND embedding IS NOT NULL
+            ORDER BY embedding <=> $3::vector
+            LIMIT $4
+            "#,
+        )
+        .bind(character_id)
+        .bind(user_id)
+        .bind(&embedding_str)
+        .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?;
 
