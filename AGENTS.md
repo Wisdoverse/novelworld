@@ -195,6 +195,32 @@ relationship clamping.
 
 Integration tests require running PostgreSQL and Redis (use Docker Compose).
 
+## Gotchas
+
+- Use `sqlx::query()` with `.bind()`, NOT `sqlx::query!()` macro — no DATABASE_URL at compile time.
+- `deadpool-redis 0.23` requires `redis 1.2`. `redis::AsyncCommands` uses `isize` for range params.
+- `sqlx 0.9` renamed feature: `runtime-tokio-rustls` → `runtime-tokio` + `tls-rustls`.
+- Novel `domain_events` field must be `pub` for infrastructure reconstruction from DB rows.
+- Chapter splitter filters out chapters < 100 chars — test data must be long enough.
+- `axum 0.8` wildcard routes use `{*path}` syntax, not `*path`.
+- Gateway SSE proxy must NOT set Content-Length — use `Body::from_stream()` for passthrough.
+
+## DDD Rules
+
+- Domain layer (`domain/`) must never import from `infrastructure/` or `interface/`.
+- Application handlers hold `Arc<dyn Port>`, not `Arc<ConcreteType>`.
+- Port traits live in `domain/ports.rs`. Infra types implement them.
+- Services must NOT share database tables. Use HTTP adapters (`infrastructure/http/`) for cross-service queries.
+- `NOVEL_SERVICE_URL` env var for agent-service and narrative-service to call novel-service.
+- Value object serialization (`to_str`/`from_str`) belongs in `domain/value_objects/`, not in persistence layer.
+
+## Inter-Service Communication
+
+- Gateway injects `X-User-Id` and `X-User-Role` headers from JWT claims.
+- Downstream services extract user identity from these headers, never from JWT directly.
+- novel-service exposes `GET /characters/:id` for agent-service lookups.
+- All LLM calls use domain port traits with 3x exponential backoff retry.
+
 ## Security Notes
 
 - Never commit `.env`, credentials, or API keys.
