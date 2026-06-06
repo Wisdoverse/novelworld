@@ -1,7 +1,6 @@
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::domain::entities::narrative_node::{NarrativeNode, NarrativeChoice, WorldState};
+use crate::domain::entities::narrative_node::WorldState;
 
 /// LLM 返回的分支生成结果
 #[derive(Debug, Serialize, Deserialize)]

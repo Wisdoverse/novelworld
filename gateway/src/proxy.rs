@@ -50,7 +50,7 @@ impl ServiceProxy {
 
                 if is_sse {
                     let byte_stream = resp.bytes_stream()
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+                        .map_err(|e| std::io::Error::other(e));
                     let body = Body::from_stream(byte_stream);
 
                     let mut response = Response::builder()

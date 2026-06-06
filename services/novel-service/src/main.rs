@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports)]
 mod domain;
 mod application;
 mod infrastructure;

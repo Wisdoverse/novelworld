@@ -4,7 +4,7 @@ use tracing::{info, error};
 use uuid::Uuid;
 use tokio::sync::Semaphore;
 
-use crate::application::commands::{ImportNovelCommand, GenerateAvatarCommand};
+use crate::application::commands::ImportNovelCommand;
 use crate::domain::entities::{novel::Novel, character::Character};
 use crate::domain::ports::{LlmPort, ImagePort};
 use crate::domain::repositories::{NovelRepository, ChapterRepository, CharacterRepository};

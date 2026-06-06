@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports)]
 mod auth;
 mod proxy;
 
@@ -6,7 +7,7 @@ use axum::{
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{any, get, post, put, delete},
+    routing::{any, get, post},
     Router,
 };
 use std::sync::Arc;
@@ -109,7 +110,7 @@ async fn auth_middleware(
         "/api/auth/refresh",
         "/health",
     ];
-    if public_paths.iter().any(|p| path == *p) {
+    if public_paths.contains(&path) {
         return next.run(request).await;
     }
 

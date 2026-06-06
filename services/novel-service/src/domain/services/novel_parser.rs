@@ -49,7 +49,7 @@ impl NovelParserService {
             let title = m.as_str().trim().to_string();
             let content = text[start..end].trim().to_string();
             if !content.is_empty() {
-                let mut ch = Chapter::new(novel_id, (i + 1) as i32, Some(title), content);
+                let ch = Chapter::new(novel_id, (i + 1) as i32, Some(title), content);
                 // 章节内容过短（< 100字）可能是目录，跳过
                 if ch.word_count() > 100 {
                     chapters.push(ch);

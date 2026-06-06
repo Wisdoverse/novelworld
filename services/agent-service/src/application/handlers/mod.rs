@@ -75,11 +75,8 @@ impl AgentCommandHandler {
         let wrapped_stream = async_stream::stream! {
             let mut inner = Box::pin(stream);
             while let Some(chunk) = inner.next().await {
-                match chunk {
-                    Ok(ref text) => {
-                        full_response_writer.lock().await.push_str(text);
-                    }
-                    _ => {}
+                if let Ok(ref text) = chunk {
+                    full_response_writer.lock().await.push_str(text);
                 }
                 yield chunk;
             }
