@@ -105,6 +105,8 @@ cargo run -p user-service
 cargo run -p novel-service
 cargo run -p agent-service
 cargo run -p narrative-service
+cargo test -p novel-service                      # single service
+cargo test -p novel-service test_chapter_split   # single test
 ```
 
 Frontend:
@@ -130,13 +132,11 @@ docker compose -f docker-compose.yml up -d    # production
 
 ### Rust
 
-- Use `sqlx::query` with `.bind()` params, not `sqlx::query!` macro (no
-  compile-time DB required).
 - Use `sqlx::query_as::<_, RowStruct>(...)` for SELECT queries.
 - Repository traits in `domain/repositories/`, implementations in
   `infrastructure/persistence/`.
 - Enum-to-string conversion via `to_str()`/`from_str()` methods, not Display.
-- All LLM calls go through the `LlmClient` struct with built-in retry.
+- All LLM calls go through domain port traits (`LlmPort`/`TextSummarizer`) with built-in retry.
 - SSE responses use `axum::response::Sse` with `async_stream`.
 - Error handling: `anyhow::Result` for application code, `thiserror` for
   domain errors.
@@ -220,6 +220,17 @@ Integration tests require running PostgreSQL and Redis (use Docker Compose).
 - Downstream services extract user identity from these headers, never from JWT directly.
 - novel-service exposes `GET /characters/:id` for agent-service lookups.
 - All LLM calls use domain port traits with 3x exponential backoff retry.
+
+## Known Gaps (Not Yet Implemented)
+
+- S3/MinIO file upload — only text paste import works (`POST /novels` with `content` field).
+- Embedding generation — pgvector schema ready, no embedding API calls wired.
+- Long-term semantic search — `search_memories()` SQL function exists, not called from MemoryManager.
+- Narrative node detection — `is_key_node` field on chapters unused, no LLM detection in parse pipeline.
+- SSE reconnect/backoff on frontend — no retry on disconnect.
+- Frontend tests — zero test files exist.
+- CI pipeline — no GitHub Actions workflow for build/test.
+- Avatar concurrency limit — spec says max 3 parallel, currently unlimited.
 
 ## Security Notes
 
