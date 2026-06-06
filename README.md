@@ -10,6 +10,10 @@
 
 </div>
 
+> **For coding agents:** Start with [AGENTS.md](./AGENTS.md) (also symlinked as `CLAUDE.md`) for
+> runtime contract, repo map, naming rules, and code style. The full implementation guide is in
+> [IMPLEMENTATION.md](./IMPLEMENTATION.md). The normative spec is [SPEC.md](./SPEC.md).
+
 ---
 
 ## 🤔 What is this?
