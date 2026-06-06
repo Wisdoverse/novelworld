@@ -37,9 +37,8 @@ export function useNovelStatus(id: string, enabled = true) {
       `/novels/${id}/status`
     ).then(r => r.data),
     enabled: enabled && !!id,
-    refetchInterval: (data) => {
-      // 解析中每2秒轮询
-      if (data?.status === 'parsing') return 2000;
+    refetchInterval: (query) => {
+      if (query.state.data?.status === 'parsing') return 2000;
       return false;
     },
   });
