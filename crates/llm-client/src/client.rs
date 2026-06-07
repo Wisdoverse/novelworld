@@ -78,48 +78,95 @@ impl LlmClient {
         self
     }
 
+    // ─── DeepSeek ────────────────────────────────────────────────────
     pub fn with_deepseek(self, api_key: impl Into<String>) -> Self {
         self.with_openai_compatible("deepseek", api_key, "https://api.deepseek.com")
     }
 
+    // ─── Doubao (ByteDance Volcano Engine) ────────────────────────
     pub fn with_doubao(self, api_key: impl Into<String>) -> Self {
+        self.with_doubao_cn(api_key)
+    }
+    pub fn with_doubao_cn(self, api_key: impl Into<String>) -> Self {
         self.with_openai_compatible("doubao", api_key, "https://ark.cn-beijing.volces.com/api/v3")
     }
-
-    pub fn with_qwen(self, api_key: impl Into<String>) -> Self {
-        self.with_openai_compatible("qwen", api_key, "https://dashscope.aliyuncs.com/compatible-mode")
+    pub fn with_doubao_intl(self, api_key: impl Into<String>) -> Self {
+        self.with_openai_compatible("doubao", api_key, "https://ark.ap-southeast.volces.com/api/v3")
     }
 
+    // ─── Qwen (Alibaba Cloud) ─────────────────────────────────────
+    pub fn with_qwen(self, api_key: impl Into<String>) -> Self {
+        self.with_qwen_cn(api_key)
+    }
+    pub fn with_qwen_cn(self, api_key: impl Into<String>) -> Self {
+        self.with_openai_compatible("qwen", api_key, "https://dashscope.aliyuncs.com/compatible-mode")
+    }
+    pub fn with_qwen_intl(self, api_key: impl Into<String>) -> Self {
+        self.with_openai_compatible("qwen", api_key, "https://dashscope-intl.aliyuncs.com/compatible-mode")
+    }
+
+    // ─── MiniMax ──────────────────────────────────────────────────
     pub fn with_minimax(self, api_key: impl Into<String>) -> Self {
         self.with_openai_compatible("minimax", api_key, "https://api.minimax.chat")
     }
 
+    // ─── Xiaomi ───────────────────────────────────────────────────
     pub fn with_xiaomi(self, api_key: impl Into<String>) -> Self {
         self.with_openai_compatible("xiaomi", api_key, "https://api.xiaomi.com")
     }
 
+    // ─── GLM (ZhipuAI) ───────────────────────────────────────────
     pub fn with_glm(self, api_key: impl Into<String>) -> Self {
         self.with_glm_cn(api_key)
     }
-
     pub fn with_glm_cn(self, api_key: impl Into<String>) -> Self {
         self.with_openai_compatible("glm", api_key, "https://open.bigmodel.cn/api/paas")
     }
-
     pub fn with_glm_intl(self, api_key: impl Into<String>) -> Self {
         self.with_openai_compatible("glm", api_key, "https://open.bigmodel.com/api/paas")
     }
 
+    // ─── Moonshot (Kimi) ──────────────────────────────────────────
     pub fn with_moonshot(self, api_key: impl Into<String>) -> Self {
         self.with_openai_compatible("moonshot", api_key, "https://api.moonshot.cn")
     }
 
+    // ─── Baichuan ─────────────────────────────────────────────────
     pub fn with_baichuan(self, api_key: impl Into<String>) -> Self {
         self.with_openai_compatible("baichuan", api_key, "https://api.baichuan-ai.com")
     }
 
+    // ─── Stepfun (阶跃星辰) ──────────────────────────────────────
     pub fn with_stepfun(self, api_key: impl Into<String>) -> Self {
         self.with_openai_compatible("stepfun", api_key, "https://api.stepfun.com")
+    }
+
+    // ─── 讯飞星火 (iFlytek Spark) ────────────────────────────────
+    pub fn with_spark(self, api_key: impl Into<String>) -> Self {
+        self.with_openai_compatible("spark", api_key, "https://spark-api-open.xf-yun.com")
+    }
+
+    // ─── Mistral ──────────────────────────────────────────────────
+    pub fn with_mistral(self, api_key: impl Into<String>) -> Self {
+        self.with_openai_compatible("mistral", api_key, "https://api.mistral.ai")
+    }
+
+    // ─── Groq ─────────────────────────────────────────────────────
+    pub fn with_groq(self, api_key: impl Into<String>) -> Self {
+        self.with_openai_compatible("groq", api_key, "https://api.groq.com/openai")
+    }
+
+    // ─── Together AI ──────────────────────────────────────────────
+    pub fn with_together(self, api_key: impl Into<String>) -> Self {
+        self.with_openai_compatible("together", api_key, "https://api.together.xyz")
+    }
+
+    // ─── Local / Self-hosted ──────────────────────────────────────
+    pub fn with_ollama(self) -> Self {
+        self.with_openai_compatible("ollama", "", "http://localhost:11434")
+    }
+    pub fn with_vllm(self, base_url: impl Into<String>) -> Self {
+        self.with_openai_compatible("vllm", "", base_url)
     }
 
     pub fn with_yi(self, api_key: impl Into<String>) -> Self {
