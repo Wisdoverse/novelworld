@@ -80,9 +80,12 @@ Choose how to enter the world:
 ### Single Docker command (simplest)
 
 ```bash
-docker run -d -p 80:80 -e LLM_API_KEY=sk-your-key ghcr.io/schorsch888/novelworld
+docker run -d -p 80:80 ghcr.io/schorsch888/novelworld
 # Open http://localhost → setup wizard guides you through the rest
 ```
+
+No env vars needed. The web setup wizard handles everything:
+choose your LLM provider, enter API key, create account — all in the browser.
 
 Everything included: PostgreSQL, Redis, all 5 services, Nginx, frontend. One container.
 

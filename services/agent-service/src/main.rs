@@ -57,7 +57,7 @@ async fn main() -> Result<()> {
     tracing::info!("Redis pool created");
 
     // Shared LLM client (from llm-client workspace crate)
-    let api_key = std::env::var("LLM_API_KEY").expect("LLM_API_KEY must be set");
+    let api_key = std::env::var("LLM_API_KEY").unwrap_or_default();
     let api_url = std::env::var("LLM_API_URL").unwrap_or_else(|_| "https://api.openai.com".into());
     let model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "gpt-4o".into());
 

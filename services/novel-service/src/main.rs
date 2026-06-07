@@ -45,7 +45,7 @@ async fn main() -> Result<()> {
 
     let llm_base = Arc::new(llm_client::LlmClient::new()
         .with_openai_compatible("default",
-            std::env::var("LLM_API_KEY").expect("LLM_API_KEY must be set"),
+            std::env::var("LLM_API_KEY").unwrap_or_default(),
             std::env::var("LLM_API_URL").unwrap_or_else(|_| "https://api.openai.com".into()),
         ));
     let llm_model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "gpt-4o".into());
@@ -54,7 +54,7 @@ async fn main() -> Result<()> {
     let image_client = Arc::new(ImageClient::new(
         std::env::var("IMAGE_GEN_API_URL").unwrap_or_else(|_| "https://api.openai.com".into()),
         std::env::var("IMAGE_GEN_API_KEY").unwrap_or_else(|_|
-            std::env::var("LLM_API_KEY").expect("LLM_API_KEY must be set")
+            std::env::var("LLM_API_KEY").unwrap_or_default()
         ),
         std::env::var("IMAGE_GEN_MODEL").unwrap_or_else(|_| "dall-e-3".into()),
     ));
