@@ -4,13 +4,14 @@ import { BookOpen, Key, User, Check, Loader2, AlertCircle, ChevronRight } from '
 import { apiClient } from '@/shared/api/client';
 
 const PROVIDERS = [
-  { id: 'openai', name: 'OpenAI', hint: 'GPT-4o, GPT-4', placeholder: 'sk-...' },
-  { id: 'deepseek', name: 'DeepSeek', hint: 'DeepSeek-V3, R1', placeholder: 'sk-...' },
-  { id: 'qwen', name: '通义千问 Qwen', hint: 'Qwen3, Qwen-Max', placeholder: 'sk-...' },
-  { id: 'glm', name: 'GLM 智谱AI', hint: 'GLM-4, CodeGeeX', placeholder: '...' },
-  { id: 'anthropic', name: 'Anthropic', hint: 'Claude Opus/Sonnet', placeholder: 'sk-ant-...' },
-  { id: 'moonshot', name: 'Moonshot / Kimi', hint: 'Moonshot-v1', placeholder: 'sk-...' },
-  { id: 'doubao', name: '豆包 Doubao', hint: 'Doubao-1.5', placeholder: '...' },
+  { id: 'deepseek', name: 'DeepSeek', hint: 'DeepSeek-V3, R1 — 性价比最高', placeholder: 'sk-...', free: false },
+  { id: 'openai', name: 'OpenAI', hint: 'GPT-4o, GPT-4', placeholder: 'sk-...', free: false },
+  { id: 'qwen', name: '通义千问 Qwen', hint: 'Qwen3 — 有免费额度', placeholder: 'sk-...', free: false },
+  { id: 'glm', name: 'GLM 智谱AI', hint: 'GLM-4 — 有免费额度', placeholder: '...', free: false },
+  { id: 'moonshot', name: 'Moonshot / Kimi', hint: 'Moonshot-v1', placeholder: 'sk-...', free: false },
+  { id: 'doubao', name: '豆包 Doubao', hint: 'Doubao-1.5', placeholder: '...', free: false },
+  { id: 'anthropic', name: 'Anthropic', hint: 'Claude Opus/Sonnet', placeholder: 'sk-ant-...', free: false },
+  { id: 'ollama', name: 'Ollama (Local)', hint: 'Free — runs on your machine', placeholder: '', free: true },
 ];
 
 interface SetupState {
@@ -154,35 +155,43 @@ export function SetupPage({ onComplete }: { onComplete: () => void }) {
                   ))}
                 </div>
 
-                {state.provider && (
-                  <>
-                    <input
-                      type="password"
-                      value={state.apiKey}
-                      onChange={e => set({ apiKey: e.target.value, testResult: 'idle' })}
-                      placeholder={PROVIDERS.find(p => p.id === state.provider)?.placeholder || 'API Key'}
-                      className="w-full px-4 py-3 rounded-lg mb-3 outline-none"
-                      style={{
-                        background: 'rgba(3, 4, 10, 0.6)',
-                        border: '1px solid rgba(109, 40, 217, 0.2)',
-                        color: 'var(--color-starlight)',
-                      }}
-                    />
+                {state.provider && (() => {
+                  const selected = PROVIDERS.find(p => p.id === state.provider);
+                  const isFree = selected?.free;
+                  return (<>
+                    {isFree ? (
+                      <div className="p-3 rounded-lg mb-3 text-sm" style={{ background: 'rgba(34, 197, 94, 0.1)', border: '1px solid rgba(34, 197, 94, 0.3)', color: '#86efac' }}>
+                        No API key needed. Make sure Ollama is running locally ({`ollama serve`}).
+                      </div>
+                    ) : (
+                      <input
+                        type="password"
+                        value={state.apiKey}
+                        onChange={e => set({ apiKey: e.target.value, testResult: 'idle' })}
+                        placeholder={selected?.placeholder || 'API Key'}
+                        className="w-full px-4 py-3 rounded-lg mb-3 outline-none"
+                        style={{
+                          background: 'rgba(3, 4, 10, 0.6)',
+                          border: '1px solid rgba(109, 40, 217, 0.2)',
+                          color: 'var(--color-starlight)',
+                        }}
+                      />
+                    )}
 
                     <div className="flex gap-2">
                       <button
-                        onClick={testConnection}
-                        disabled={!state.apiKey || state.testing}
+                        onClick={isFree ? () => set({ testResult: 'success' }) : testConnection}
+                        disabled={!isFree && (!state.apiKey || state.testing)}
                         className="flex-1 py-2.5 rounded-lg font-medium transition-all flex items-center justify-center gap-2"
                         style={{
                           background: 'rgba(109, 40, 217, 0.3)',
                           border: '1px solid rgba(109, 40, 217, 0.4)',
                           color: 'var(--color-aurora-light)',
-                          opacity: !state.apiKey ? 0.5 : 1,
+                          opacity: !isFree && !state.apiKey ? 0.5 : 1,
                         }}
                       >
                         {state.testing ? <Loader2 size={16} className="animate-spin" /> : null}
-                        {state.testing ? 'Testing...' : 'Test Connection'}
+                        {state.testing ? 'Testing...' : isFree ? 'Continue' : 'Test Connection'}
                       </button>
 
                       {state.testResult === 'success' && (
@@ -209,8 +218,8 @@ export function SetupPage({ onComplete }: { onComplete: () => void }) {
                         <AlertCircle size={14} /> {state.testError}
                       </p>
                     )}
-                  </>
-                )}
+                  </>);
+                })()}
               </motion.div>
             )}
 

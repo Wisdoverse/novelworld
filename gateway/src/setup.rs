@@ -38,13 +38,14 @@ pub async fn get_setup_status() -> impl IntoResponse {
 
 pub async fn test_llm(Json(req): Json<TestLlmRequest>) -> impl IntoResponse {
     let (base_url, model) = match req.provider.as_str() {
-        "openai" => ("https://api.openai.com", "gpt-4o-mini"),
+        "openai" => ("https://api.openai.com", "gpt-4.1-nano"),
         "deepseek" => ("https://api.deepseek.com", "deepseek-chat"),
-        "qwen" => ("https://dashscope.aliyuncs.com/compatible-mode", "qwen-turbo"),
-        "glm" => ("https://open.bigmodel.cn/api/paas", "glm-4-flash"),
-        "anthropic" => ("https://api.anthropic.com", "claude-3-5-haiku-20241022"),
+        "qwen" => ("https://dashscope.aliyuncs.com/compatible-mode", "qwen-turbo-latest"),
+        "glm" => ("https://open.bigmodel.cn/api/paas", "glm-4-flash-250414"),
+        "anthropic" => ("https://api.anthropic.com", "claude-haiku-4-5-20251001"),
         "moonshot" => ("https://api.moonshot.cn", "moonshot-v1-8k"),
         "doubao" => ("https://ark.cn-beijing.volces.com/api/v3", "doubao-1.5-lite-32k"),
+        "ollama" => ("http://127.0.0.1:11434", "llama3.2"),
         unknown => {
             return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("Unknown provider: '{}'", unknown)}))).into_response();
         }
