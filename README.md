@@ -77,17 +77,24 @@ Choose how to enter the world:
 
 ## 🚀 Quick Start
 
-### Fastest path: Docker
+### One-Click Start (recommended)
+
+Only requires [Docker](https://docs.docker.com/get-docker/). No Rust, no Node.js, no manual config.
 
 ```bash
 git clone https://github.com/schorsch888/novelworld.git
 cd novelworld
-cp .env.example .env
-# Edit .env — set your LLM_API_KEY
-
-docker compose up --build
-# Open http://localhost:80
+./start.sh
 ```
+
+The interactive setup wizard will:
+1. Check Docker is installed
+2. Generate secure passwords automatically
+3. Ask which LLM provider to use (OpenAI / DeepSeek / Qwen / GLM / Anthropic / Moonshot / Doubao / custom)
+4. Start all services
+5. Open http://localhost in your browser
+
+That's it. Just have your API key ready.
 
 ### Development mode
 
