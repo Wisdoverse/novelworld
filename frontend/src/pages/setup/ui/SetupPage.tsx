@@ -12,12 +12,14 @@ const PROVIDERS = [
   { id: 'doubao', name: '豆包 Doubao', hint: 'Doubao-1.5', placeholder: '...', free: false },
   { id: 'anthropic', name: 'Anthropic', hint: 'Claude Opus/Sonnet', placeholder: 'sk-ant-...', free: false },
   { id: 'ollama', name: 'Ollama (Local)', hint: 'Free — runs on your machine', placeholder: '', free: true },
+  { id: 'custom', name: 'Custom / Relay', hint: 'one-api, new-api, or any OpenAI-compatible', placeholder: 'sk-...', free: false },
 ];
 
 interface SetupState {
   step: number;
   provider: string;
   apiKey: string;
+  customUrl: string;
   email: string;
   password: string;
   name: string;
@@ -32,6 +34,7 @@ export function SetupPage({ onComplete }: { onComplete: () => void }) {
     step: 1,
     provider: '',
     apiKey: '',
+    customUrl: '',
     email: '',
     password: '',
     name: '',
@@ -163,7 +166,21 @@ export function SetupPage({ onComplete }: { onComplete: () => void }) {
                       <div className="p-3 rounded-lg mb-3 text-sm" style={{ background: 'rgba(34, 197, 94, 0.1)', border: '1px solid rgba(34, 197, 94, 0.3)', color: '#86efac' }}>
                         No API key needed. Make sure Ollama is running locally ({`ollama serve`}).
                       </div>
-                    ) : (
+                    ) : (<>
+                      {state.provider === 'custom' && (
+                        <input
+                          type="text"
+                          value={state.customUrl}
+                          onChange={e => set({ customUrl: e.target.value, testResult: 'idle' })}
+                          placeholder="API URL (e.g. https://api.example.com)"
+                          className="w-full px-4 py-3 rounded-lg mb-2 outline-none"
+                          style={{
+                            background: 'rgba(3, 4, 10, 0.6)',
+                            border: '1px solid rgba(109, 40, 217, 0.2)',
+                            color: 'var(--color-starlight)',
+                          }}
+                        />
+                      )}
                       <input
                         type="password"
                         value={state.apiKey}
@@ -176,7 +193,7 @@ export function SetupPage({ onComplete }: { onComplete: () => void }) {
                           color: 'var(--color-starlight)',
                         }}
                       />
-                    )}
+                    </>)}
 
                     <div className="flex gap-2">
                       <button

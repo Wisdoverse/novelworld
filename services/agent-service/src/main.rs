@@ -81,17 +81,24 @@ async fn main() -> Result<()> {
     // Redis cache
     let cache = Arc::new(RedisCache::new(redis_pool));
 
-    // Embedding adapter (reuses shared LLM client for embedding API)
+    // Embedding adapter — auto-select model based on provider
     let embed_api_key = std::env::var("EMBEDDING_API_KEY").unwrap_or_else(|_| api_key.clone());
     let embed_api_url = std::env::var("EMBEDDING_API_URL").unwrap_or_else(|_| api_url.clone());
-    let embed_model = std::env::var("EMBEDDING_MODEL").unwrap_or_else(|_| "text-embedding-3-small".into());
+    let embed_model = std::env::var("EMBEDDING_MODEL").unwrap_or_else(|_| {
+        auto_detect_embedding_model(&embed_api_url)
+    });
 
-    let embed_base = Arc::new(
-        llm_client::LlmClient::new()
-            .with_openai_compatible("embed", &embed_api_key, &embed_api_url),
-    );
-    let embedding: Arc<dyn domain::ports::EmbeddingGenerator> =
-        Arc::new(EmbeddingAdapter::new(embed_base, format!("embed/{}", embed_model)));
+    let embedding: Arc<dyn domain::ports::EmbeddingGenerator> = if embed_api_key.is_empty() && !embed_api_url.contains("localhost") {
+        tracing::info!("No embedding API key — semantic search disabled, using other memory layers");
+        Arc::new(NoopEmbeddingGenerator)
+    } else {
+        let embed_base = Arc::new(
+            llm_client::LlmClient::new()
+                .with_openai_compatible("embed", &embed_api_key, &embed_api_url),
+        );
+        tracing::info!("Embedding model: {}", embed_model);
+        Arc::new(EmbeddingAdapter::new(embed_base, format!("embed/{}", embed_model)))
+    };
 
     // Memory manager (4-layer memory pyramid)
     let memory_manager = Arc::new(MemoryManager {
@@ -125,6 +132,34 @@ async fn main() -> Result<()> {
         .await?;
 
     Ok(())
+}
+
+fn auto_detect_embedding_model(api_url: &str) -> String {
+    let url = api_url.to_lowercase();
+    if url.contains("openai.com") {
+        "text-embedding-3-small".into()
+    } else if url.contains("dashscope") {
+        "text-embedding-v3".into()
+    } else if url.contains("bigmodel.cn") || url.contains("bigmodel.com") {
+        "embedding-3".into()
+    } else if url.contains("localhost") || url.contains("127.0.0.1") {
+        "nomic-embed-text".into()
+    } else if url.contains("deepseek") {
+        "text-embedding-3-small".into()
+    } else if url.contains("mistral") {
+        "mistral-embed".into()
+    } else {
+        "text-embedding-3-small".into()
+    }
+}
+
+struct NoopEmbeddingGenerator;
+
+#[async_trait::async_trait]
+impl domain::ports::EmbeddingGenerator for NoopEmbeddingGenerator {
+    async fn generate_embedding(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+        Err(anyhow::anyhow!("Embedding not configured — semantic search disabled"))
+    }
 }
 
 async fn shutdown_signal() {
