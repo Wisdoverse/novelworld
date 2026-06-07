@@ -111,6 +111,9 @@ impl LlmClient {
         if let Some(key) = env("GROQ_API_KEY") {
             client = client.with_groq(key);
         }
+        if let Some(key) = env("OPENROUTER_API_KEY") {
+            client = client.with_openrouter(key);
+        }
         if let Some(key) = env("SILICONFLOW_API_KEY") {
             client = client.with_siliconflow(key);
         }
@@ -253,6 +256,11 @@ impl LlmClient {
     // ─── 讯飞星火 (iFlytek Spark) ────────────────────────────────
     pub fn with_spark(self, api_key: impl Into<String>) -> Self {
         self.with_openai_compatible("spark", api_key, "https://spark-api-open.xf-yun.com")
+    }
+
+    // ─── OpenRouter ────────────────────────────────────────────
+    pub fn with_openrouter(self, api_key: impl Into<String>) -> Self {
+        self.with_openai_compatible("openrouter", api_key, "https://openrouter.ai/api")
     }
 
     // ─── SiliconFlow (硅基流动) ─────────────────────────────────
