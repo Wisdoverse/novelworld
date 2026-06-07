@@ -21,3 +21,4 @@ dotenvy.workspace = true
 reqwest.workspace = true
 async-trait.workspace = true
 futures.workspace = true
+llm-client.workspace = true

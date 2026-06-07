@@ -14,9 +14,9 @@ use tower_http::cors::{CorsLayer, Any};
 
 use application::handlers::AgentCommandHandler;
 use domain::services::memory_manager::MemoryManager;
-use infrastructure::llm::LlmClient;
+use infrastructure::llm::LlmAdapter;
 use infrastructure::cache::RedisCache;
-use infrastructure::embedding::EmbeddingClient;
+use infrastructure::embedding::EmbeddingAdapter;
 use infrastructure::http::novel_client::NovelServiceClient;
 use infrastructure::persistence::{
     pg_memory_repo::PgMemoryRepository,
@@ -56,12 +56,18 @@ async fn main() -> Result<()> {
 
     tracing::info!("Redis pool created");
 
-    // LLM client
-    let llm = Arc::new(LlmClient::new(
-        std::env::var("LLM_API_URL").unwrap_or_else(|_| "https://api.openai.com".into()),
-        std::env::var("LLM_API_KEY").expect("LLM_API_KEY must be set"),
-        std::env::var("LLM_MODEL").unwrap_or_else(|_| "gpt-4o".into()),
-    ));
+    // Shared LLM client (from llm-client workspace crate)
+    let api_key = std::env::var("LLM_API_KEY").expect("LLM_API_KEY must be set");
+    let api_url = std::env::var("LLM_API_URL").unwrap_or_else(|_| "https://api.openai.com".into());
+    let model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "gpt-4o".into());
+
+    let llm_base = Arc::new(
+        llm_client::LlmClient::new()
+            .with_openai_compatible("default", &api_key, &api_url),
+    );
+
+    // LLM adapter for chat (TextSummarizer + handler direct calls)
+    let llm = Arc::new(LlmAdapter::new(llm_base.clone(), format!("default/{}", model)));
 
     // Repositories
     let memory_repo = Arc::new(PgMemoryRepository::new(pool.clone()));
@@ -75,14 +81,17 @@ async fn main() -> Result<()> {
     // Redis cache
     let cache = Arc::new(RedisCache::new(redis_pool));
 
-    // Embedding client
-    let embedding: Arc<dyn domain::ports::EmbeddingGenerator> = Arc::new(EmbeddingClient::new(
-        std::env::var("EMBEDDING_API_URL").unwrap_or_else(|_| "https://api.openai.com".into()),
-        std::env::var("EMBEDDING_API_KEY").unwrap_or_else(|_|
-            std::env::var("LLM_API_KEY").expect("LLM_API_KEY or EMBEDDING_API_KEY must be set")
-        ),
-        std::env::var("EMBEDDING_MODEL").unwrap_or_else(|_| "text-embedding-3-small".into()),
-    ));
+    // Embedding adapter (reuses shared LLM client for embedding API)
+    let embed_api_key = std::env::var("EMBEDDING_API_KEY").unwrap_or_else(|_| api_key.clone());
+    let embed_api_url = std::env::var("EMBEDDING_API_URL").unwrap_or_else(|_| api_url.clone());
+    let embed_model = std::env::var("EMBEDDING_MODEL").unwrap_or_else(|_| "text-embedding-3-small".into());
+
+    let embed_base = Arc::new(
+        llm_client::LlmClient::new()
+            .with_openai_compatible("embed", &embed_api_key, &embed_api_url),
+    );
+    let embedding: Arc<dyn domain::ports::EmbeddingGenerator> =
+        Arc::new(EmbeddingAdapter::new(embed_base, format!("embed/{}", embed_model)));
 
     // Memory manager (4-layer memory pyramid)
     let memory_manager = Arc::new(MemoryManager {

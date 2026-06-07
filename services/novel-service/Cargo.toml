@@ -25,6 +25,7 @@ reqwest.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 bytes.workspace = true
+llm-client.workspace = true
 
 # PDF parsing
 pdf-extract = "0.10"

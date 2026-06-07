@@ -14,7 +14,7 @@ use tower_http::cors::{CorsLayer, Any};
 
 use application::handlers::NovelCommandHandler;
 use domain::ports::{LlmPort, ImagePort};
-use infrastructure::llm::{LlmClient, image::ImageClient};
+use infrastructure::llm::{LlmAdapter, image::ImageClient};
 use infrastructure::persistence::{
     novel_pg_repo::NovelPgRepository,
     chapter_pg_repo::ChapterPgRepository,
@@ -43,11 +43,13 @@ async fn main() -> Result<()> {
 
     tracing::info!("Connected to PostgreSQL");
 
-    let llm = Arc::new(LlmClient::new(
-        std::env::var("LLM_API_URL").unwrap_or_else(|_| "https://api.openai.com".into()),
-        std::env::var("LLM_API_KEY").expect("LLM_API_KEY must be set"),
-        std::env::var("LLM_MODEL").unwrap_or_else(|_| "gpt-4o".into()),
-    ));
+    let llm_base = Arc::new(llm_client::LlmClient::new()
+        .with_openai_compatible("default",
+            std::env::var("LLM_API_KEY").expect("LLM_API_KEY must be set"),
+            std::env::var("LLM_API_URL").unwrap_or_else(|_| "https://api.openai.com".into()),
+        ));
+    let llm_model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "gpt-4o".into());
+    let llm = Arc::new(LlmAdapter::new(llm_base, format!("default/{}", llm_model)));
 
     let image_client = Arc::new(ImageClient::new(
         std::env::var("IMAGE_GEN_API_URL").unwrap_or_else(|_| "https://api.openai.com".into()),

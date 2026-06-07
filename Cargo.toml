@@ -53,3 +53,4 @@ dotenvy = "0.15"
 futures = "0.3"
 async-trait = "0.1"
 bytes = "1"
+llm-client = { path = "crates/llm-client" }

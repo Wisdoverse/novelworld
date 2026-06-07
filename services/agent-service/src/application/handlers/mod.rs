@@ -6,12 +6,12 @@ use futures::{Stream, StreamExt};
 use crate::domain::entities::memory::{ChatMessage, Memory};
 use crate::domain::services::memory_manager::MemoryManager;
 use crate::domain::repositories::CharacterInfoRepository;
-use crate::infrastructure::llm::LlmClient;
+use crate::infrastructure::llm::LlmAdapter;
 
 pub struct AgentCommandHandler {
     pub memory_manager: Arc<MemoryManager>,
     pub character_repo: Arc<dyn CharacterInfoRepository>,
-    pub llm: Arc<LlmClient>,
+    pub llm: Arc<LlmAdapter>,
 }
 
 impl AgentCommandHandler {

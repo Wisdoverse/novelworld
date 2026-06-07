@@ -98,6 +98,26 @@ impl LlmClient {
         self.with_openai_compatible("xiaomi", api_key, "https://api.xiaomi.com")
     }
 
+    pub fn with_glm(self, api_key: impl Into<String>) -> Self {
+        self.with_openai_compatible("glm", api_key, "https://open.bigmodel.cn/api/paas")
+    }
+
+    pub fn with_moonshot(self, api_key: impl Into<String>) -> Self {
+        self.with_openai_compatible("moonshot", api_key, "https://api.moonshot.cn")
+    }
+
+    pub fn with_baichuan(self, api_key: impl Into<String>) -> Self {
+        self.with_openai_compatible("baichuan", api_key, "https://api.baichuan-ai.com")
+    }
+
+    pub fn with_stepfun(self, api_key: impl Into<String>) -> Self {
+        self.with_openai_compatible("stepfun", api_key, "https://api.stepfun.com")
+    }
+
+    pub fn with_yi(self, api_key: impl Into<String>) -> Self {
+        self.with_openai_compatible("yi", api_key, "https://api.lingyiwanwu.com")
+    }
+
     pub fn with_default(mut self, provider: impl Into<String>) -> Self {
         self.default_provider = Some(provider.into());
         self
