@@ -1,5 +1,18 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug)]
+pub struct LlmApiError {
+    pub status: u16,
+    pub message: String,
+}
+
+impl std::fmt::Display for LlmApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "LLM API error {}: {}", self.status, self.message)
+    }
+}
+impl std::error::Error for LlmApiError {}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,

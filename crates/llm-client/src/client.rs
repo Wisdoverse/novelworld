@@ -309,9 +309,13 @@ impl LlmClient {
             match provider.chat(&self.http, api_key, &req).await {
                 Ok(resp) => return Ok(resp),
                 Err(e) => {
-                    if attempt < RetryPolicy::max_retries() - 1 {
-                        let delay = RetryPolicy::delay(500, attempt, None);
-                        tracing::warn!("LLM chat error, retry {}/{}: {}", attempt + 1, RetryPolicy::max_retries(), e);
+                    let status = e.downcast_ref::<LlmApiError>()
+                        .map(|ae| ae.status)
+                        .unwrap_or(500);
+
+                    if attempt < RetryPolicy::max_retries() - 1 && RetryPolicy::should_retry(status, attempt) {
+                        let delay = RetryPolicy::delay(status, attempt, None);
+                        tracing::warn!("LLM error ({}), retry {}/{}: {}", status, attempt + 1, RetryPolicy::max_retries(), e);
                         tokio::time::sleep(delay).await;
                         continue;
                     }

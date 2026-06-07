@@ -1,5 +1,18 @@
 use serde::{Deserialize, Serialize};
 
+/// Truncate a string to at most `max_bytes` bytes without splitting a UTF-8
+/// codepoint.  Always returns a valid `&str`.
+fn safe_truncate(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ExtractedCharacter {
     pub name: String,
@@ -76,7 +89,7 @@ pub fn build_extraction_prompt(novel_title: &str, sample_text: &str) -> String {
 5. relationships 要覆盖主要角色之间的关系，strength 为 0-100 的关系密切度
 6. 只返回 JSON，不要有其他文字"#,
         title = novel_title,
-        text = &sample_text[..sample_text.len().min(8000)],
+        text = safe_truncate(sample_text, 8000),
     )
 }
 
@@ -118,6 +131,6 @@ pub fn build_chunk_extraction_prompt(novel_title: &str, chunk_text: &str, chunk_
 只返回 JSON。"#,
         title = novel_title,
         idx = chunk_index + 1,
-        text = &chunk_text[..chunk_text.len().min(6000)],
+        text = safe_truncate(chunk_text, 6000),
     )
 }

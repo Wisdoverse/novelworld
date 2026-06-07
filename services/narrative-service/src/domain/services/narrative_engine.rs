@@ -2,6 +2,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::entities::narrative_node::WorldState;
 
+/// Truncate a string to at most `max_bytes` bytes without splitting a UTF-8
+/// codepoint.  Always returns a valid `&str`.
+fn safe_truncate(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// LLM 返回的分支生成结果
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GeneratedBranch {
@@ -72,7 +85,7 @@ pub fn build_branch_prompt(
 3. 考虑读者与各角色的关系分数
 4. hint 要制造悬念，不直接说结果"#,
         title = novel_title,
-        chapter = &chapter_content[..chapter_content.len().min(2000)],
+        chapter = safe_truncate(chapter_content, 2000),
         identity = reader_identity,
         mode = deviation_mode,
         choices = choices_history,
@@ -109,7 +122,7 @@ pub fn build_consequence_prompt(
 4. 根据偏离度决定与原著的差异程度
 5. 结尾留有悬念，引导读者继续阅读"#,
         title = novel_title,
-        chapter = &chapter_content[..chapter_content.len().min(1500)],
+        chapter = safe_truncate(chapter_content, 1500),
         choice = choice_text,
         mode = deviation_mode,
         state = serde_json::to_string_pretty(&world_state.state).unwrap_or_default(),

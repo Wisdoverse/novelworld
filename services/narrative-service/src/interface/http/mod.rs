@@ -48,7 +48,15 @@ async fn get_branch_node(
     Path((novel_id, chapter)): Path<(Uuid, i32)>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let user_id = extract_user_id(&headers);
+    let user_id = match extract_user_id(&headers) {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiError { error: "Missing or invalid X-User-Id header".into() }),
+            ).into_response();
+        }
+    };
 
     match state.handler.get_branch_node(novel_id, chapter, user_id).await {
         Ok(Some(node)) => (StatusCode::OK, Json(serde_json::json!(node))).into_response(),
@@ -94,7 +102,15 @@ async fn get_world_state(
     Path(novel_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let user_id = extract_user_id(&headers);
+    let user_id = match extract_user_id(&headers) {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiError { error: "Missing or invalid X-User-Id header".into() }),
+            ).into_response();
+        }
+    };
 
     match state.handler.get_world_state(user_id, novel_id).await {
         Ok(ws) => (StatusCode::OK, Json(serde_json::json!(ws))).into_response(),
@@ -110,11 +126,10 @@ async fn health() -> impl IntoResponse {
     (StatusCode::OK, "OK")
 }
 
-/// Extract user_id from X-User-Id header, fallback to a nil UUID
-fn extract_user_id(headers: &HeaderMap) -> Uuid {
+/// Extract user_id from X-User-Id header; returns None if missing or invalid.
+fn extract_user_id(headers: &HeaderMap) -> Option<Uuid> {
     headers
         .get("X-User-Id")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| Uuid::parse_str(s).ok())
-        .unwrap_or_else(Uuid::nil)
 }

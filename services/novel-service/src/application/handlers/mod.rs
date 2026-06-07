@@ -48,6 +48,7 @@ impl NovelCommandHandler {
 
         // 3. 异步执行解析（不阻塞响应）
         let novel_repo = self.novel_repo.clone();
+        let novel_repo_err = self.novel_repo.clone();
         let chapter_repo = self.chapter_repo.clone();
         let character_repo = self.character_repo.clone();
         let llm = self.llm.clone();
@@ -60,6 +61,10 @@ impl NovelCommandHandler {
                 novel_repo, chapter_repo, character_repo, llm, image_client,
             ).await {
                 error!("Novel parsing failed for {}: {}", novel_id, e);
+                if let Ok(Some(mut novel)) = novel_repo_err.find_by_id(novel_id).await {
+                    novel.mark_error(e.to_string());
+                    let _ = novel_repo_err.update(&novel).await;
+                }
             }
         });
 
@@ -118,12 +123,14 @@ impl NovelCommandHandler {
                 let from_id = char_name_to_id.get(&rel.from_character.to_lowercase());
                 let to_id = char_name_to_id.get(&rel.to_character.to_lowercase());
                 if let (Some(&from), Some(&to)) = (from_id, to_id) {
-                    character_repo.save_relationship(
+                    if let Err(e) = character_repo.save_relationship(
                         novel_id, from, to,
                         &rel.relationship_type,
                         Some(rel.description.as_str()),
                         rel.strength,
-                    ).await.ok();
+                    ).await {
+                        tracing::error!("Failed to save relationship {}->{}: {}", rel.from_character, rel.to_character, e);
+                    }
                 }
             }
             info!("Saved {} character relationships for novel {}", extraction.relationships.len(), novel_id);
@@ -135,18 +142,26 @@ impl NovelCommandHandler {
             .map(|c| (c.chapter_number, c.content.as_str()))
             .collect();
         let node_prompt = node_detector::build_node_detection_prompt(title, &chapter_summaries);
-        if let Ok(node_json) = llm.chat_json(&node_prompt).await {
-            if let Ok(detection) = serde_json::from_str::<node_detector::NodeDetectionResult>(&node_json) {
-                for node in &detection.nodes {
-                    if let Some(ch) = chapters.iter().find(|c| c.chapter_number == node.chapter_number) {
-                        // Mark chapter as key node
-                        let mut updated_ch = ch.clone();
-                        updated_ch.mark_as_key_node(node.description.clone());
-                        chapter_repo.update(&updated_ch).await.ok();
+        match llm.chat_json(&node_prompt).await {
+            Ok(node_json) => {
+                match serde_json::from_str::<node_detector::NodeDetectionResult>(&node_json) {
+                    Ok(detection) => {
+                        for node in &detection.nodes {
+                            if let Some(ch) = chapters.iter().find(|c| c.chapter_number == node.chapter_number) {
+                                // Mark chapter as key node
+                                let mut updated_ch = ch.clone();
+                                updated_ch.mark_as_key_node(node.description.clone());
+                                if let Err(e) = chapter_repo.update(&updated_ch).await {
+                                    tracing::error!("Failed to mark chapter {} as key node: {}", node.chapter_number, e);
+                                }
+                            }
+                        }
+                        info!("Detected {} narrative nodes for novel {}", detection.nodes.len(), novel_id);
                     }
+                    Err(e) => tracing::warn!("Node detection JSON parse failed for {}: {}", novel_id, e),
                 }
-                info!("Detected {} narrative nodes for novel {}", detection.nodes.len(), novel_id);
             }
+            Err(e) => tracing::warn!("Node detection LLM call failed for {}: {}", novel_id, e),
         }
 
         // 标记小说为 ready

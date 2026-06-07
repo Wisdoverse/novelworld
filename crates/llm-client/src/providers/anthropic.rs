@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -102,20 +102,26 @@ impl LlmProvider for AnthropicProvider {
             stream: false,
         };
 
-        let resp: AnthropicResponse = client
+        let response = client
             .post(format!("{}/v1/messages", ANTHROPIC_API_URL))
             .header("x-api-key", api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json")
             .json(&body)
             .send()
-            .await?
-            .json()
             .await?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_default();
+            return Err(LlmApiError { status, message: body }.into());
+        }
+
+        let resp: AnthropicResponse = response.json().await?;
 
         let content = resp.content.first()
             .map(|c| c.text.clone())
-            .ok_or_else(|| anyhow!("Empty response"))?;
+            .ok_or_else(|| anyhow::anyhow!("Empty response"))?;
 
         Ok(ChatResponse {
             content,
@@ -153,8 +159,14 @@ impl LlmProvider for AnthropicProvider {
             .send()
             .await?;
 
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_default();
+            return Err(LlmApiError { status, message: body }.into());
+        }
+
         let stream = response.bytes_stream().map(|chunk| {
-            let chunk = chunk.map_err(|e| anyhow!(e))?;
+            let chunk = chunk.map_err(|e| anyhow::anyhow!(e))?;
             let text = String::from_utf8_lossy(&chunk).to_string();
             let content: String = text.lines()
                 .filter(|l| l.starts_with("data: "))
@@ -174,6 +186,6 @@ impl LlmProvider for AnthropicProvider {
         _api_key: &str,
         _request: &EmbeddingRequest,
     ) -> Result<EmbeddingResponse> {
-        Err(anyhow!("Anthropic does not support embeddings. Use OpenAI or Gemini."))
+        Err(anyhow::anyhow!("Anthropic does not support embeddings. Use OpenAI or Gemini."))
     }
 }

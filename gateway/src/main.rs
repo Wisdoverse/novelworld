@@ -67,10 +67,16 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // --- Global rate limiter: configurable via env, default 500 req/s ---
-    let rps: u32 = std::env::var("RATE_LIMIT_RPS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(500);
+    let rps: u32 = match std::env::var("RATE_LIMIT_RPS") {
+        Ok(v) => match v.parse() {
+            Ok(n) => n,
+            Err(_) => {
+                tracing::warn!("Invalid RATE_LIMIT_RPS value '{}', defaulting to 500", v);
+                500
+            }
+        },
+        Err(_) => 500,
+    };
     let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(
         NonZeroU32::new(rps).expect("RATE_LIMIT_RPS must be > 0"),
     )));
@@ -183,13 +189,15 @@ async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn check_service(client: &reqwest::Client, base_url: &str) -> bool {
-    client
-        .get(format!("{}/health", base_url))
+    match client.get(format!("{}/health", base_url))
         .timeout(Duration::from_secs(3))
         .send()
         .await
-        .map(|r| r.status().is_success())
-        .unwrap_or(false)
+    {
+        Ok(r) if r.status().is_success() => true,
+        Ok(r) => { tracing::warn!("Health check {} returned {}", base_url, r.status()); false }
+        Err(e) => { tracing::warn!("Health check {} failed: {}", base_url, e); false }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -204,16 +212,18 @@ async fn request_id_middleware(mut req: Request, next: Next) -> Response {
         .map(String::from)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    req.headers_mut().insert(
-        "x-request-id",
-        request_id.parse().expect("valid header value"),
-    );
+    let hv = match request_id.parse::<axum::http::HeaderValue>() {
+        Ok(v) => v,
+        Err(_) => {
+            let fallback = uuid::Uuid::new_v4().to_string();
+            fallback.parse().unwrap() // UUID is always valid
+        }
+    };
+
+    req.headers_mut().insert("x-request-id", hv.clone());
 
     let mut response = next.run(req).await;
-    response.headers_mut().insert(
-        "x-request-id",
-        request_id.parse().expect("valid header value"),
-    );
+    response.headers_mut().insert("x-request-id", hv);
     response
 }
 
@@ -272,12 +282,16 @@ async fn auth_middleware(
     match auth_header {
         Some(token) => match state.jwt.verify(token) {
             Ok(claims) => {
-                request
-                    .headers_mut()
-                    .insert("X-User-Id", claims.sub.parse().unwrap());
-                request
-                    .headers_mut()
-                    .insert("X-User-Role", claims.role.parse().unwrap());
+                let user_id = match claims.sub.parse() {
+                    Ok(v) => v,
+                    Err(_) => return (StatusCode::UNAUTHORIZED, "Invalid token claims").into_response(),
+                };
+                let role = match claims.role.parse() {
+                    Ok(v) => v,
+                    Err(_) => return (StatusCode::UNAUTHORIZED, "Invalid token claims").into_response(),
+                };
+                request.headers_mut().insert("X-User-Id", user_id);
+                request.headers_mut().insert("X-User-Role", role);
                 next.run(request).await
             }
             Err(_) => (StatusCode::UNAUTHORIZED, "Invalid token").into_response(),

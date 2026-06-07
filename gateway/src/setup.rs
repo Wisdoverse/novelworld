@@ -32,7 +32,7 @@ pub struct InitRequest {
 
 pub async fn get_setup_status() -> impl IntoResponse {
     (StatusCode::OK, Json(SetupStatus {
-        configured: SETUP_COMPLETE.load(Ordering::Relaxed),
+        configured: SETUP_COMPLETE.load(Ordering::SeqCst),
     }))
 }
 
@@ -45,7 +45,9 @@ pub async fn test_llm(Json(req): Json<TestLlmRequest>) -> impl IntoResponse {
         "anthropic" => ("https://api.anthropic.com", "claude-3-5-haiku-20241022"),
         "moonshot" => ("https://api.moonshot.cn", "moonshot-v1-8k"),
         "doubao" => ("https://ark.cn-beijing.volces.com/api/v3", "doubao-1.5-lite-32k"),
-        _ => ("https://api.openai.com", "gpt-4o-mini"),
+        unknown => {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("Unknown provider: '{}'", unknown)}))).into_response();
+        }
     };
 
     if req.provider == "anthropic" {
@@ -109,7 +111,7 @@ pub async fn init_setup(
     State(state): State<AppState>,
     Json(req): Json<InitRequest>,
 ) -> impl IntoResponse {
-    if SETUP_COMPLETE.load(Ordering::Relaxed) {
+    if SETUP_COMPLETE.load(Ordering::SeqCst) {
         return (StatusCode::CONFLICT, Json(serde_json::json!({"error": "Already configured"}))).into_response();
     }
 
@@ -128,8 +130,14 @@ pub async fn init_setup(
 
     match resp {
         Ok(r) if r.status().is_success() => {
-            SETUP_COMPLETE.store(true, Ordering::Relaxed);
-            let body: serde_json::Value = r.json().await.unwrap_or_default();
+            SETUP_COMPLETE.store(true, Ordering::SeqCst);
+            let body: serde_json::Value = match r.json().await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::error!("Failed to parse registration response: {}", e);
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": format!("Failed to parse response: {}", e)}))).into_response();
+                }
+            };
             (StatusCode::OK, Json(body)).into_response()
         }
         Ok(r) => {

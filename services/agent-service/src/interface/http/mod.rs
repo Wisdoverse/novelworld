@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, Query, State, Json},
-    http::StatusCode,
+    http::{StatusCode, HeaderMap},
     response::{IntoResponse, Sse, sse::Event},
     routing::{get, post},
     Router,
@@ -35,7 +35,6 @@ pub fn router(state: AppState) -> Router {
 
 #[derive(Debug, Deserialize)]
 pub struct ChatRequest {
-    pub user_id: Uuid,
     pub novel_id: Uuid,
     pub message: String,
     pub reader_identity: Option<String>,
@@ -52,14 +51,25 @@ pub struct ChatResponse {
 async fn chat_stream(
     State(state): State<AppState>,
     Path(character_id): Path<Uuid>,
+    headers: HeaderMap,
     Json(req): Json<ChatRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let user_id = match extract_user_id(&headers) {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Missing or invalid X-User-Id header"})),
+            ).into_response();
+        }
+    };
+
     let handler = state.handler.clone();
 
     let stream = async_stream::stream! {
         match handler.chat_stream(
             character_id,
-            req.user_id,
+            user_id,
             req.novel_id,
             req.message,
             req.reader_identity,
@@ -93,18 +103,29 @@ async fn chat_stream(
         }
     };
 
-    Sse::new(stream)
+    Sse::new(stream).into_response()
 }
 
 /// 普通对话接口（非流式）
 async fn chat(
     State(state): State<AppState>,
     Path(character_id): Path<Uuid>,
+    headers: HeaderMap,
     Json(req): Json<ChatRequest>,
 ) -> impl IntoResponse {
+    let user_id = match extract_user_id(&headers) {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Missing or invalid X-User-Id header"})),
+            ).into_response();
+        }
+    };
+
     match state.handler.chat(
         character_id,
-        req.user_id,
+        user_id,
         req.novel_id,
         req.message,
         req.reader_identity,
@@ -221,4 +242,12 @@ async fn clear_short_memory(
             "error": e.to_string()
         }))).into_response(),
     }
+}
+
+/// Extract user_id from X-User-Id header; returns None if missing or invalid.
+fn extract_user_id(headers: &HeaderMap) -> Option<Uuid> {
+    headers
+        .get("X-User-Id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| Uuid::parse_str(s).ok())
 }

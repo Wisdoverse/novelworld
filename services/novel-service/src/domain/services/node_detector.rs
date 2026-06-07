@@ -1,5 +1,18 @@
 use serde::{Deserialize, Serialize};
 
+/// Truncate a string to at most `max_bytes` bytes without splitting a UTF-8
+/// codepoint.  Always returns a valid `&str`.
+fn safe_truncate(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DetectedNode {
     pub chapter_number: i32,
@@ -20,7 +33,7 @@ pub struct NodeDetectionResult {
 
 pub fn build_node_detection_prompt(novel_title: &str, chapters: &[(i32, &str)]) -> String {
     let summaries: String = chapters.iter()
-        .map(|(num, content)| format!("Chapter {}: {}", num, &content[..content.len().min(500)]))
+        .map(|(num, content)| format!("Chapter {}: {}", num, safe_truncate(content, 500)))
         .collect::<Vec<_>>()
         .join("\n\n");
 

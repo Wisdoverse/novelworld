@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -96,18 +96,24 @@ impl LlmProvider for OpenAIProvider {
         };
 
         let (hk, hv) = self.auth_header(api_key);
-        let resp: OpenAIResponse = client
+        let response = client
             .post(format!("{}/v1/chat/completions", self.base_url))
             .header(&hk, &hv)
             .json(&body)
             .send()
-            .await?
-            .json()
             .await?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_default();
+            return Err(LlmApiError { status, message: body }.into());
+        }
+
+        let resp: OpenAIResponse = response.json().await?;
 
         let content = resp.choices.first()
             .and_then(|c| c.message.content.clone())
-            .ok_or_else(|| anyhow!("Empty response"))?;
+            .ok_or_else(|| anyhow::anyhow!("Empty response"))?;
 
         Ok(ChatResponse {
             content,
@@ -142,8 +148,14 @@ impl LlmProvider for OpenAIProvider {
             .send()
             .await?;
 
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_default();
+            return Err(LlmApiError { status, message: body }.into());
+        }
+
         let stream = response.bytes_stream().map(|chunk| {
-            let chunk = chunk.map_err(|e| anyhow!(e))?;
+            let chunk = chunk.map_err(|e| anyhow::anyhow!(e))?;
             let text = String::from_utf8_lossy(&chunk).to_string();
             let content: String = text.lines()
                 .filter(|l| l.starts_with("data: ") && !l.contains("[DONE]"))
@@ -168,18 +180,24 @@ impl LlmProvider for OpenAIProvider {
         });
 
         let (hk, hv) = self.auth_header(api_key);
-        let resp: OpenAIEmbeddingResponse = client
+        let response = client
             .post(format!("{}/v1/embeddings", self.base_url))
             .header(&hk, &hv)
             .json(&body)
             .send()
-            .await?
-            .json()
             .await?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_default();
+            return Err(LlmApiError { status, message: body }.into());
+        }
+
+        let resp: OpenAIEmbeddingResponse = response.json().await?;
 
         let embedding = resp.data.first()
             .map(|d| d.embedding.clone())
-            .ok_or_else(|| anyhow!("No embedding returned"))?;
+            .ok_or_else(|| anyhow::anyhow!("No embedding returned"))?;
 
         Ok(EmbeddingResponse { embedding, model: resp.model })
     }

@@ -53,14 +53,21 @@ impl ImagePort for ImageClient {
             size: "1024x1024".into(),
             response_format: "url".into(),
         };
-        let resp: ImageResponse = self.client
+        let response = self.client
             .post(format!("{}/v1/images/generations", self.api_url))
             .bearer_auth(&self.api_key)
             .json(&req)
             .send()
-            .await?
-            .json()
             .await?;
-        Ok(resp.data[0].url.clone())
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("Image API error {}: {}", status, body));
+        }
+        let resp: ImageResponse = response.json().await?;
+        resp.data
+            .first()
+            .map(|d| d.url.clone())
+            .ok_or_else(|| anyhow::anyhow!("Image API returned empty data"))
     }
 }

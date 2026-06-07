@@ -28,9 +28,13 @@ impl ServiceProxy {
         let headers = request.headers().clone();
         let is_sse = original_path.contains("/stream");
 
-        let body = axum::body::to_bytes(request.into_body(), 20 * 1024 * 1024)
-            .await
-            .unwrap_or_default();
+        let body = match axum::body::to_bytes(request.into_body(), 20 * 1024 * 1024).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!("Failed to read request body: {}", e);
+                return (StatusCode::BAD_REQUEST, format!("Failed to read request body: {}", e)).into_response();
+            }
+        };
 
         let target_url = format!("{}{}", target_base, original_path);
 
@@ -70,7 +74,13 @@ impl ServiceProxy {
                     response.body(body)
                         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
                 } else {
-                    let resp_body = resp.bytes().await.unwrap_or_default();
+                    let resp_body = match resp.bytes().await {
+                        Ok(b) => b,
+                        Err(e) => {
+                            tracing::error!("Failed to read response from {}: {}", target_url, e);
+                            return (StatusCode::BAD_GATEWAY, format!("Service response error: {}", e)).into_response();
+                        }
+                    };
                     let mut response = Response::builder().status(status.as_u16());
                     for (key, value) in &resp_headers {
                         response = response.header(key, value);
@@ -92,8 +102,10 @@ pub async fn forward_to_novel(
     State(state): State<AppState>,
     request: Request,
 ) -> Response {
-    let path = request.uri().path().to_string();
-    let stripped = path.strip_prefix("/api").unwrap_or(&path);
+    let path_and_query = request.uri().path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| request.uri().path().to_string());
+    let stripped = path_and_query.strip_prefix("/api").unwrap_or(&path_and_query);
     state.proxy.forward(&state.proxy.novel_service_url, stripped, request).await
 }
 
@@ -101,8 +113,10 @@ pub async fn forward_to_agent(
     State(state): State<AppState>,
     request: Request,
 ) -> Response {
-    let path = request.uri().path().to_string();
-    let stripped = path.strip_prefix("/api").unwrap_or(&path);
+    let path_and_query = request.uri().path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| request.uri().path().to_string());
+    let stripped = path_and_query.strip_prefix("/api").unwrap_or(&path_and_query);
     state.proxy.forward(&state.proxy.agent_service_url, stripped, request).await
 }
 
@@ -110,8 +124,10 @@ pub async fn forward_to_narrative(
     State(state): State<AppState>,
     request: Request,
 ) -> Response {
-    let path = request.uri().path().to_string();
-    let stripped = path.strip_prefix("/api").unwrap_or(&path);
+    let path_and_query = request.uri().path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| request.uri().path().to_string());
+    let stripped = path_and_query.strip_prefix("/api").unwrap_or(&path_and_query);
     state.proxy.forward(&state.proxy.narrative_service_url, stripped, request).await
 }
 
@@ -119,7 +135,9 @@ pub async fn forward_to_user(
     State(state): State<AppState>,
     request: Request,
 ) -> Response {
-    let path = request.uri().path().to_string();
-    let stripped = path.strip_prefix("/api").unwrap_or(&path);
+    let path_and_query = request.uri().path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| request.uri().path().to_string());
+    let stripped = path_and_query.strip_prefix("/api").unwrap_or(&path_and_query);
     state.proxy.forward(&state.proxy.user_service_url, stripped, request).await
 }
