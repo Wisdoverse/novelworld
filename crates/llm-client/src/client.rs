@@ -99,7 +99,15 @@ impl LlmClient {
     }
 
     pub fn with_glm(self, api_key: impl Into<String>) -> Self {
+        self.with_glm_cn(api_key)
+    }
+
+    pub fn with_glm_cn(self, api_key: impl Into<String>) -> Self {
         self.with_openai_compatible("glm", api_key, "https://open.bigmodel.cn/api/paas")
+    }
+
+    pub fn with_glm_intl(self, api_key: impl Into<String>) -> Self {
+        self.with_openai_compatible("glm", api_key, "https://open.bigmodel.com/api/paas")
     }
 
     pub fn with_moonshot(self, api_key: impl Into<String>) -> Self {
