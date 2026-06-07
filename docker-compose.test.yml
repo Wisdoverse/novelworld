@@ -1,0 +1,28 @@
+services:
+  test-postgres:
+    image: pgvector/pgvector:pg18
+    container_name: novelworld-test-pg
+    environment:
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: novelworld_test
+    ports:
+      - "25432:5432"
+    volumes:
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test -d novelworld_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+
+  test-redis:
+    image: redis:7-alpine
+    container_name: novelworld-test-redis
+    ports:
+      - "26379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 10

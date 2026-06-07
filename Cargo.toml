@@ -8,6 +8,7 @@ members = [
     "services/narrative-service",
     "services/user-service",
     "crates/llm-client",
+    "tests/integration",
 ]
 
 [workspace.dependencies]
