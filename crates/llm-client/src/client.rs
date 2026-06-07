@@ -78,6 +78,26 @@ impl LlmClient {
         self
     }
 
+    pub fn with_deepseek(self, api_key: impl Into<String>) -> Self {
+        self.with_openai_compatible("deepseek", api_key, "https://api.deepseek.com")
+    }
+
+    pub fn with_doubao(self, api_key: impl Into<String>) -> Self {
+        self.with_openai_compatible("doubao", api_key, "https://ark.cn-beijing.volces.com/api/v3")
+    }
+
+    pub fn with_qwen(self, api_key: impl Into<String>) -> Self {
+        self.with_openai_compatible("qwen", api_key, "https://dashscope.aliyuncs.com/compatible-mode")
+    }
+
+    pub fn with_minimax(self, api_key: impl Into<String>) -> Self {
+        self.with_openai_compatible("minimax", api_key, "https://api.minimax.chat")
+    }
+
+    pub fn with_xiaomi(self, api_key: impl Into<String>) -> Self {
+        self.with_openai_compatible("xiaomi", api_key, "https://api.xiaomi.com")
+    }
+
     pub fn with_default(mut self, provider: impl Into<String>) -> Self {
         self.default_provider = Some(provider.into());
         self
