@@ -32,8 +32,8 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
       - ./infra/postgres/seed.sql:/docker-entrypoint-initdb.d/02_seed.sql:ro
-    ports:
-      - "5432:5432"
+    # ports:
+    #   - "5432:5432"  # uncomment for local dev
     networks:
       - novel-net
     healthcheck:
@@ -49,8 +49,8 @@ services:
     command: redis-server --requirepass ${REDIS_PASSWORD:-redis_secret} --maxmemory 256mb --maxmemory-policy allkeys-lru
     volumes:
       - redis_data:/data
-    ports:
-      - "6379:6379"
+    # ports:
+    #   - "6379:6379"  # uncomment for local dev
     networks:
       - novel-net
     healthcheck:
@@ -199,8 +199,8 @@ services:
       GATEWAY_PORT: 8080
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost:80}
       RUST_LOG: info
-    ports:
-      - "8080:8080"
+    # ports:
+    #   - "8080:8080"  # uncomment for local dev
     depends_on:
       user-service:
         condition: service_healthy
