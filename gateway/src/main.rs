@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_imports)]
 mod auth;
 mod proxy;
+mod setup;
 
 use axum::{
     extract::{Request, State},
@@ -58,6 +59,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/auth/login", post(proxy::forward_to_user))
         .route("/api/auth/refresh", post(proxy::forward_to_user))
         .route("/health", get(health_check))
+        .route("/api/setup/status", get(setup::get_setup_status))
+        .route("/api/setup/test-llm", post(setup::test_llm))
+        .route("/api/setup/init", post(setup::init_setup))
         // Protected routes
         .route("/api/auth/me", get(proxy::forward_to_user))
         .route("/api/auth/logout", post(proxy::forward_to_user))
@@ -108,6 +112,9 @@ async fn auth_middleware(
         "/api/auth/register",
         "/api/auth/login",
         "/api/auth/refresh",
+        "/api/setup/status",
+        "/api/setup/test-llm",
+        "/api/setup/init",
         "/health",
     ];
     if public_paths.contains(&path) {
