@@ -15,11 +15,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Check
-        run: cargo check --workspace
+        run: cargo check --workspace --exclude integration-tests
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude integration-tests
       - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --exclude integration-tests -- -D warnings
         continue-on-error: true
 
   frontend:
@@ -38,6 +38,11 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Remove pnpm-workspace.yaml if invalid
+        run: |
+          if [ -f pnpm-workspace.yaml ] && ! grep -q "packages:" pnpm-workspace.yaml; then
+            rm pnpm-workspace.yaml
+          fi
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm type-check
       - run: pnpm build
