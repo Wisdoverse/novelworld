@@ -23,6 +23,112 @@ impl LlmClient {
         }
     }
 
+    /// Auto-detect providers from environment variables.
+    /// Just call `LlmClient::from_env()` — no manual configuration needed.
+    ///
+    /// Checks these env vars:
+    /// - `OPENAI_API_KEY` → OpenAI
+    /// - `ANTHROPIC_API_KEY` → Anthropic
+    /// - `GEMINI_API_KEY` → Gemini
+    /// - `DEEPSEEK_API_KEY` → DeepSeek
+    /// - `DOUBAO_API_KEY` → Doubao (CN by default, set `DOUBAO_REGION=intl` for international)
+    /// - `QWEN_API_KEY` / `DASHSCOPE_API_KEY` → Qwen (CN by default, set `QWEN_REGION=intl`)
+    /// - `GLM_API_KEY` / `ZHIPU_API_KEY` → GLM (CN by default, set `GLM_REGION=intl`)
+    /// - `MINIMAX_API_KEY` → MiniMax
+    /// - `MOONSHOT_API_KEY` → Moonshot
+    /// - `BAICHUAN_API_KEY` → Baichuan
+    /// - `STEPFUN_API_KEY` → Stepfun
+    /// - `YI_API_KEY` → Yi
+    /// - `SPARK_API_KEY` → Spark
+    /// - `XIAOMI_API_KEY` → Xiaomi
+    /// - `MISTRAL_API_KEY` → Mistral
+    /// - `GROQ_API_KEY` → Groq
+    /// - `TOGETHER_API_KEY` → Together
+    /// - `LLM_API_KEY` + `LLM_API_URL` → Generic OpenAI-compatible fallback
+    pub fn from_env() -> Self {
+        let mut client = Self::new();
+
+        let env = |key: &str| std::env::var(key).ok();
+        let region = |key: &str| env(key).map(|v| v.to_lowercase()).unwrap_or_default();
+
+        if let Some(key) = env("OPENAI_API_KEY") {
+            client = client.with_openai(key);
+        }
+        if let Some(key) = env("ANTHROPIC_API_KEY") {
+            client = client.with_anthropic(key);
+        }
+        if let Some(key) = env("GEMINI_API_KEY") {
+            client = client.with_gemini(key);
+        }
+        if let Some(key) = env("DEEPSEEK_API_KEY") {
+            client = client.with_deepseek(key);
+        }
+        if let Some(key) = env("DOUBAO_API_KEY") {
+            client = if region("DOUBAO_REGION") == "intl" {
+                client.with_doubao_intl(key)
+            } else {
+                client.with_doubao_cn(key)
+            };
+        }
+        if let Some(key) = env("QWEN_API_KEY").or_else(|| env("DASHSCOPE_API_KEY")) {
+            client = if region("QWEN_REGION") == "intl" {
+                client.with_qwen_intl(key)
+            } else {
+                client.with_qwen_cn(key)
+            };
+        }
+        if let Some(key) = env("GLM_API_KEY").or_else(|| env("ZHIPU_API_KEY")) {
+            client = if region("GLM_REGION") == "intl" {
+                client.with_glm_intl(key)
+            } else {
+                client.with_glm_cn(key)
+            };
+        }
+        if let Some(key) = env("MINIMAX_API_KEY") {
+            client = client.with_minimax(key);
+        }
+        if let Some(key) = env("MOONSHOT_API_KEY") {
+            client = client.with_moonshot(key);
+        }
+        if let Some(key) = env("BAICHUAN_API_KEY") {
+            client = client.with_baichuan(key);
+        }
+        if let Some(key) = env("STEPFUN_API_KEY") {
+            client = client.with_stepfun(key);
+        }
+        if let Some(key) = env("YI_API_KEY") {
+            client = client.with_yi(key);
+        }
+        if let Some(key) = env("SPARK_API_KEY") {
+            client = client.with_spark(key);
+        }
+        if let Some(key) = env("XIAOMI_API_KEY") {
+            client = client.with_xiaomi(key);
+        }
+        if let Some(key) = env("MISTRAL_API_KEY") {
+            client = client.with_mistral(key);
+        }
+        if let Some(key) = env("GROQ_API_KEY") {
+            client = client.with_groq(key);
+        }
+        if let Some(key) = env("TOGETHER_API_KEY") {
+            client = client.with_together(key);
+        }
+
+        // Generic fallback: LLM_API_KEY + LLM_API_URL
+        if let Some(key) = env("LLM_API_KEY") {
+            let url = env("LLM_API_URL").unwrap_or_else(|| "https://api.openai.com".into());
+            client = client.with_openai_compatible("default", key, url);
+        }
+
+        // Set default from LLM_PROVIDER env var, or first registered
+        if let Some(provider) = env("LLM_PROVIDER") {
+            client = client.with_default(provider);
+        }
+
+        client
+    }
+
     pub fn with_openai(mut self, api_key: impl Into<String>) -> Self {
         let key = api_key.into();
         self.providers.insert(

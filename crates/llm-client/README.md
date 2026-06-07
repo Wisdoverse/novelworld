@@ -2,15 +2,22 @@
 
 Unified Rust LLM client supporting 20 providers with a single API.
 
-## Quick Start
+## Quick Start (Zero Config)
+
+Just set environment variables — the client auto-detects providers:
+
+```bash
+export OPENAI_API_KEY=sk-...
+export DEEPSEEK_API_KEY=sk-...
+export GLM_API_KEY=...
+export GLM_REGION=cn          # or "intl"
+```
 
 ```rust
 use llm_client::{LlmClient, ChatRequest, EmbeddingRequest};
 
-let client = LlmClient::new()
-    .with_openai("sk-...")
-    .with_anthropic("sk-ant-...")
-    .with_deepseek("sk-...");
+// Auto-detect from env vars — no manual setup
+let client = LlmClient::from_env();
 
 // Simple chat
 let answer = client.simple_chat("openai/gpt-4o", "You are helpful.", "Hello!").await?;
@@ -30,6 +37,39 @@ let embed = client.embed(EmbeddingRequest {
     input: "Hello world".into(),
 }).await?;
 ```
+
+### Manual Configuration
+
+```rust
+let client = LlmClient::new()
+    .with_openai("sk-...")
+    .with_anthropic("sk-ant-...")
+    .with_deepseek("sk-...");
+```
+
+## Environment Variables
+
+| Env Var | Provider | Notes |
+|---------|----------|-------|
+| `OPENAI_API_KEY` | OpenAI | |
+| `ANTHROPIC_API_KEY` | Anthropic | |
+| `GEMINI_API_KEY` | Gemini | |
+| `DEEPSEEK_API_KEY` | DeepSeek | |
+| `DOUBAO_API_KEY` | Doubao | `DOUBAO_REGION=intl` for international |
+| `QWEN_API_KEY` | Qwen | `QWEN_REGION=intl` for international |
+| `GLM_API_KEY` | GLM/ZhipuAI | `GLM_REGION=intl` for international |
+| `MINIMAX_API_KEY` | MiniMax | |
+| `MOONSHOT_API_KEY` | Moonshot/Kimi | |
+| `BAICHUAN_API_KEY` | Baichuan | |
+| `STEPFUN_API_KEY` | Stepfun | |
+| `YI_API_KEY` | Yi/零一万物 | |
+| `SPARK_API_KEY` | iFlytek Spark | |
+| `XIAOMI_API_KEY` | Xiaomi | |
+| `MISTRAL_API_KEY` | Mistral | |
+| `GROQ_API_KEY` | Groq | |
+| `TOGETHER_API_KEY` | Together AI | |
+| `LLM_API_KEY` + `LLM_API_URL` | Generic fallback | Any OpenAI-compatible |
+| `LLM_PROVIDER` | — | Override default provider name |
 
 ## Providers & Models
 
