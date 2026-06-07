@@ -1,0 +1,16 @@
+[package]
+name = "llm-client"
+version = "0.1.0"
+edition = "2021"
+description = "Unified LLM client supporting OpenAI, Anthropic, Gemini, and OpenAI-compatible providers"
+
+[dependencies]
+reqwest = { version = "0.13", features = ["json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["time"] }
+futures = "0.3"
+async-trait = "0.1"
+anyhow = "1"
+tracing = "0.1"
+bytes = "1"
