@@ -20,6 +20,10 @@ interface SetupState {
   provider: string;
   apiKey: string;
   customUrl: string;
+  embeddingEnabled: boolean;
+  embeddingUrl: string;
+  embeddingKey: string;
+  embeddingModel: string;
   email: string;
   password: string;
   name: string;
@@ -35,6 +39,10 @@ export function SetupPage({ onComplete }: { onComplete: () => void }) {
     provider: '',
     apiKey: '',
     customUrl: '',
+    embeddingEnabled: false,
+    embeddingUrl: '',
+    embeddingKey: '',
+    embeddingModel: '',
     email: '',
     password: '',
     name: '',
@@ -341,6 +349,54 @@ export function SetupPage({ onComplete }: { onComplete: () => void }) {
                     <span style={{ color: 'var(--color-starlight)' }}>{state.email}</span>
                   </div>
                 </div>
+
+                {/* Advanced: Embedding Config */}
+                <details className="mb-4">
+                  <summary className="text-sm cursor-pointer mb-2" style={{ color: 'var(--color-comet)' }}>
+                    Advanced: Embedding Model (optional)
+                  </summary>
+                  <div className="p-3 rounded-lg space-y-2" style={{ background: 'rgba(3, 4, 10, 0.3)', border: '1px solid rgba(109, 40, 217, 0.15)' }}>
+                    <p className="text-xs mb-2" style={{ color: 'var(--color-comet)' }}>
+                      Embedding enables semantic memory search. Auto-detected by default. Configure manually for a different provider.
+                    </p>
+                    <label className="flex items-center gap-2 text-sm" style={{ color: 'var(--color-moonbeam)' }}>
+                      <input
+                        type="checkbox"
+                        checked={state.embeddingEnabled}
+                        onChange={e => set({ embeddingEnabled: e.target.checked })}
+                      />
+                      Use custom embedding provider
+                    </label>
+                    {state.embeddingEnabled && (
+                      <div className="space-y-2 mt-2">
+                        <input
+                          type="text"
+                          value={state.embeddingUrl}
+                          onChange={e => set({ embeddingUrl: e.target.value })}
+                          placeholder="API URL (e.g. https://dashscope.aliyuncs.com/compatible-mode)"
+                          className="w-full px-3 py-2 rounded text-sm outline-none"
+                          style={{ background: 'rgba(3, 4, 10, 0.6)', border: '1px solid rgba(109, 40, 217, 0.2)', color: 'var(--color-starlight)' }}
+                        />
+                        <input
+                          type="password"
+                          value={state.embeddingKey}
+                          onChange={e => set({ embeddingKey: e.target.value })}
+                          placeholder="API Key (leave empty to reuse LLM key)"
+                          className="w-full px-3 py-2 rounded text-sm outline-none"
+                          style={{ background: 'rgba(3, 4, 10, 0.6)', border: '1px solid rgba(109, 40, 217, 0.2)', color: 'var(--color-starlight)' }}
+                        />
+                        <input
+                          type="text"
+                          value={state.embeddingModel}
+                          onChange={e => set({ embeddingModel: e.target.value })}
+                          placeholder="Model (e.g. text-embedding-v3, BAAI/bge-m3)"
+                          className="w-full px-3 py-2 rounded text-sm outline-none"
+                          style={{ background: 'rgba(3, 4, 10, 0.6)', border: '1px solid rgba(109, 40, 217, 0.2)', color: 'var(--color-starlight)' }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                </details>
 
                 <div className="flex gap-2">
                   <button
