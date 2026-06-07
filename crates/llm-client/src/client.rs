@@ -111,6 +111,9 @@ impl LlmClient {
         if let Some(key) = env("GROQ_API_KEY") {
             client = client.with_groq(key);
         }
+        if let Some(key) = env("SILICONFLOW_API_KEY") {
+            client = client.with_siliconflow(key);
+        }
         if let Some(key) = env("TOGETHER_API_KEY") {
             client = client.with_together(key);
         }
@@ -250,6 +253,11 @@ impl LlmClient {
     // ─── 讯飞星火 (iFlytek Spark) ────────────────────────────────
     pub fn with_spark(self, api_key: impl Into<String>) -> Self {
         self.with_openai_compatible("spark", api_key, "https://spark-api-open.xf-yun.com")
+    }
+
+    // ─── SiliconFlow (硅基流动) ─────────────────────────────────
+    pub fn with_siliconflow(self, api_key: impl Into<String>) -> Self {
+        self.with_openai_compatible("siliconflow", api_key, "https://api.siliconflow.cn")
     }
 
     // ─── Mistral ──────────────────────────────────────────────────

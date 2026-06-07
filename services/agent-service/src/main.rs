@@ -142,12 +142,16 @@ fn auto_detect_embedding_model(api_url: &str) -> String {
         "text-embedding-v3".into()
     } else if url.contains("bigmodel.cn") || url.contains("bigmodel.com") {
         "embedding-3".into()
+    } else if url.contains("siliconflow") {
+        "BAAI/bge-m3".into()
     } else if url.contains("localhost") || url.contains("127.0.0.1") {
         "nomic-embed-text".into()
-    } else if url.contains("deepseek") {
-        "text-embedding-3-small".into()
     } else if url.contains("mistral") {
         "mistral-embed".into()
+    } else if url.contains("baichuan") {
+        "Baichuan-Text-Embedding".into()
+    } else if url.contains("volces.com") {
+        "doubao-embedding".into()
     } else {
         "text-embedding-3-small".into()
     }
