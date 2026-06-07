@@ -27,6 +27,7 @@ pub struct NarrativeCommandHandler {
 
 impl NarrativeCommandHandler {
     /// Get the branch node for a given chapter (if it exists)
+    #[tracing::instrument(skip(self))]
     pub async fn get_branch_node(
         &self,
         novel_id: Uuid,
@@ -40,6 +41,7 @@ impl NarrativeCommandHandler {
     }
 
     /// Submit a reader's choice for a narrative branch node
+    #[tracing::instrument(skip(self))]
     pub async fn submit_choice(
         &self,
         user_id: Uuid,
@@ -153,6 +155,7 @@ impl NarrativeCommandHandler {
     }
 
     /// Get the current world state for a user + novel
+    #[tracing::instrument(skip(self))]
     pub async fn get_world_state(
         &self,
         user_id: Uuid,

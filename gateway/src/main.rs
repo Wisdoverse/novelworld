@@ -1,18 +1,28 @@
 #![allow(dead_code, unused_imports)]
 mod auth;
+mod metrics;
 mod proxy;
 mod setup;
 
 use axum::{
-    extract::{Request, State},
+    extract::{ConnectInfo, Request, State},
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{any, get, post},
-    Router,
+    Json, Router,
 };
+use governor::{
+    clock::DefaultClock,
+    state::{InMemoryState, NotKeyed},
+    Quota, RateLimiter,
+};
+use metrics_exporter_prometheus::PrometheusHandle;
+use std::net::SocketAddr;
+use std::num::NonZeroU32;
 use std::sync::Arc;
-use tower_http::cors::{CorsLayer, Any};
+use std::time::Duration;
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -23,6 +33,8 @@ use proxy::ServiceProxy;
 pub struct AppState {
     pub jwt: Arc<JwtMiddleware>,
     pub proxy: Arc<ServiceProxy>,
+    pub metrics_handle: PrometheusHandle,
+    pub rate_limiter: Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
 }
 
 #[tokio::main]
@@ -35,6 +47,9 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     dotenvy::dotenv().ok();
+
+    // --- Prometheus metrics ---
+    let metrics_handle = metrics::init_metrics();
 
     let jwt_secret = std::env::var("JWT_SECRET").expect("JWT_SECRET must be set");
     let jwt = Arc::new(JwtMiddleware::new(&jwt_secret));
@@ -51,14 +66,30 @@ async fn main() -> anyhow::Result<()> {
         client: reqwest::Client::new(),
     });
 
-    let state = AppState { jwt: jwt.clone(), proxy };
+    // --- Global rate limiter: configurable via env, default 500 req/s ---
+    let rps: u32 = std::env::var("RATE_LIMIT_RPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(500);
+    let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(
+        NonZeroU32::new(rps).expect("RATE_LIMIT_RPS must be > 0"),
+    )));
+
+    let state = AppState {
+        jwt: jwt.clone(),
+        proxy,
+        metrics_handle,
+        rate_limiter,
+    };
 
     let app = Router::new()
+        // --- Observability endpoints (no auth, no rate-limit) ---
+        .route("/metrics", get(prometheus_metrics))
+        .route("/health", get(health_check))
         // Public routes (no auth)
         .route("/api/auth/register", post(proxy::forward_to_user))
         .route("/api/auth/login", post(proxy::forward_to_user))
         .route("/api/auth/refresh", post(proxy::forward_to_user))
-        .route("/health", get(health_check))
         .route("/api/setup/status", get(setup::get_setup_status))
         .route("/api/setup/test-llm", post(setup::test_llm))
         .route("/api/setup/init", post(setup::init_setup))
@@ -74,14 +105,22 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/progress/{*path}", any(proxy::forward_to_novel))
         .route("/api/users/{*path}", any(proxy::forward_to_user))
         .route("/api/characters/{*path}", any(proxy::forward_to_novel))
+        // --- Middleware layers (outermost applied first) ---
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
         ))
-        .layer(CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit_middleware,
+        ))
+        .layer(middleware::from_fn(request_id_middleware))
+        .layer(middleware::from_fn(metrics::metrics_middleware))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
         )
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -91,14 +130,116 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Gateway listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
 
+    // --- Graceful shutdown ---
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+
+    tracing::info!("Gateway shut down cleanly");
     Ok(())
 }
 
-async fn health_check() -> impl IntoResponse {
-    (StatusCode::OK, "OK")
+// ---------------------------------------------------------------------------
+// Prometheus /metrics endpoint
+// ---------------------------------------------------------------------------
+
+async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoResponse {
+    state.metrics_handle.render()
 }
+
+// ---------------------------------------------------------------------------
+// Health check with downstream service aggregation
+// ---------------------------------------------------------------------------
+
+async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
+    let client = &state.proxy.client;
+    let (user, novel, agent, narrative) = tokio::join!(
+        check_service(client, &state.proxy.user_service_url),
+        check_service(client, &state.proxy.novel_service_url),
+        check_service(client, &state.proxy.agent_service_url),
+        check_service(client, &state.proxy.narrative_service_url),
+    );
+
+    let all_healthy = user && novel && agent && narrative;
+    let status_code = if all_healthy {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (
+        status_code,
+        Json(serde_json::json!({
+            "status": if all_healthy { "healthy" } else { "degraded" },
+            "services": {
+                "user": user,
+                "novel": novel,
+                "agent": agent,
+                "narrative": narrative,
+            }
+        })),
+    )
+}
+
+async fn check_service(client: &reqwest::Client, base_url: &str) -> bool {
+    client
+        .get(format!("{}/health", base_url))
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+// ---------------------------------------------------------------------------
+// Request-ID middleware: propagate or generate X-Request-Id
+// ---------------------------------------------------------------------------
+
+async fn request_id_middleware(mut req: Request, next: Next) -> Response {
+    let request_id = req
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    req.headers_mut().insert(
+        "x-request-id",
+        request_id.parse().expect("valid header value"),
+    );
+
+    let mut response = next.run(req).await;
+    response.headers_mut().insert(
+        "x-request-id",
+        request_id.parse().expect("valid header value"),
+    );
+    response
+}
+
+// ---------------------------------------------------------------------------
+// Global rate-limit middleware (token-bucket via governor)
+// ---------------------------------------------------------------------------
+
+async fn rate_limit_middleware(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    match state.rate_limiter.check() {
+        Ok(_) => next.run(req).await,
+        Err(_) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("retry-after", "1")],
+            "Rate limit exceeded",
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Auth middleware (unchanged logic)
+// ---------------------------------------------------------------------------
 
 async fn auth_middleware(
     State(state): State<AppState>,
@@ -116,33 +257,56 @@ async fn auth_middleware(
         "/api/setup/test-llm",
         "/api/setup/init",
         "/health",
+        "/metrics",
     ];
     if public_paths.contains(&path) {
         return next.run(request).await;
     }
 
-    let auth_header = request.headers()
+    let auth_header = request
+        .headers()
         .get("Authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
 
     match auth_header {
-        Some(token) => {
-            match state.jwt.verify(token) {
-                Ok(claims) => {
-                    request.headers_mut().insert(
-                        "X-User-Id",
-                        claims.sub.parse().unwrap(),
-                    );
-                    request.headers_mut().insert(
-                        "X-User-Role",
-                        claims.role.parse().unwrap(),
-                    );
-                    next.run(request).await
-                }
-                Err(_) => (StatusCode::UNAUTHORIZED, "Invalid token").into_response(),
+        Some(token) => match state.jwt.verify(token) {
+            Ok(claims) => {
+                request
+                    .headers_mut()
+                    .insert("X-User-Id", claims.sub.parse().unwrap());
+                request
+                    .headers_mut()
+                    .insert("X-User-Role", claims.role.parse().unwrap());
+                next.run(request).await
             }
-        }
+            Err(_) => (StatusCode::UNAUTHORIZED, "Invalid token").into_response(),
+        },
         None => (StatusCode::UNAUTHORIZED, "Missing Authorization header").into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Graceful shutdown signal handler
+// ---------------------------------------------------------------------------
+
+async fn shutdown_signal() {
+    let ctrl_c = tokio::signal::ctrl_c();
+
+    #[cfg(unix)]
+    {
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to register SIGTERM handler");
+        tokio::select! {
+            _ = ctrl_c => { tracing::info!("Received SIGINT, starting graceful shutdown"); }
+            _ = sigterm.recv() => { tracing::info!("Received SIGTERM, starting graceful shutdown"); }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        ctrl_c.await.expect("failed to listen for ctrl-c");
+        tracing::info!("Received SIGINT, starting graceful shutdown");
     }
 }

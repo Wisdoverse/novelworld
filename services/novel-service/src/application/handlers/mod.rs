@@ -24,6 +24,7 @@ pub struct NovelCommandHandler {
 
 impl NovelCommandHandler {
     /// 处理小说导入命令（异步解析流程）
+    #[tracing::instrument(skip(self))]
     pub async fn handle_import(&self, cmd: ImportNovelCommand) -> Result<Uuid> {
         info!("Importing novel: {}", cmd.title);
 
@@ -65,6 +66,7 @@ impl NovelCommandHandler {
         Ok(novel_id)
     }
 
+    #[tracing::instrument(skip_all, fields(novel_id = %novel_id))]
     async fn parse_novel_async(
         novel_id: Uuid,
         title: &str,

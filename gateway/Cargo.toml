@@ -22,3 +22,10 @@ jsonwebtoken.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 futures.workspace = true
+
+# Observability
+metrics = "0.24"
+metrics-exporter-prometheus = "0.18"
+
+# Rate limiting
+governor = "0.8"

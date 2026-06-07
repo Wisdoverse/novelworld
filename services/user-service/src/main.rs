@@ -65,7 +65,23 @@ async fn main() -> Result<()> {
     tracing::info!("user-service listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
 
     Ok(())
+}
+
+async fn shutdown_signal() {
+    use tokio::signal;
+    let ctrl_c = signal::ctrl_c();
+    #[cfg(unix)]
+    let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate()).unwrap();
+    #[cfg(unix)]
+    tokio::select! {
+        _ = ctrl_c => { tracing::info!("Received SIGINT"); }
+        _ = sigterm.recv() => { tracing::info!("Received SIGTERM"); }
+    }
+    #[cfg(not(unix))]
+    ctrl_c.await.ok();
 }

@@ -13,6 +13,7 @@ pub struct AuthHandler {
 }
 
 impl AuthHandler {
+    #[tracing::instrument(skip(self, password))]
     pub async fn register(
         &self,
         email: &str,
@@ -41,6 +42,7 @@ impl AuthHandler {
         Ok((user, access_token, refresh_token_str))
     }
 
+    #[tracing::instrument(skip(self, password))]
     pub async fn login(&self, email: &str, password: &str) -> Result<(User, String, String)> {
         let mut user = self.user_repo.find_by_email(email).await?
             .ok_or_else(|| anyhow!("Invalid email or password"))?;

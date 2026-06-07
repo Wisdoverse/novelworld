@@ -19,6 +19,7 @@ impl AgentCommandHandler {
     ///
     /// Fix: replaced sleep-based save with oneshot channel that fires after stream
     /// completes, ensuring the full response is captured before persisting.
+    #[tracing::instrument(skip(self), fields(character_id = %character_id, user_id = %user_id))]
     pub async fn chat_stream(
         &self,
         character_id: Uuid,
@@ -109,6 +110,7 @@ impl AgentCommandHandler {
     }
 
     /// 普通对话（非流式）
+    #[tracing::instrument(skip(self), fields(character_id = %character_id, user_id = %user_id))]
     pub async fn chat(
         &self,
         character_id: Uuid,
