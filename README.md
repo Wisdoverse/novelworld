@@ -77,9 +77,16 @@ Choose how to enter the world:
 
 ## 🚀 Quick Start
 
-### One-Click Start (recommended)
+### Single Docker command (simplest)
 
-Only requires [Docker](https://docs.docker.com/get-docker/). No Rust, no Node.js, no manual config.
+```bash
+docker run -d -p 80:80 -e LLM_API_KEY=sk-your-key ghcr.io/schorsch888/novelworld
+# Open http://localhost → setup wizard guides you through the rest
+```
+
+Everything included: PostgreSQL, Redis, all 5 services, Nginx, frontend. One container.
+
+### Docker Compose (recommended for production)
 
 ```bash
 git clone https://github.com/schorsch888/novelworld.git
