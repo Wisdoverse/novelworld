@@ -29,7 +29,7 @@
     "lucide-react": "^0.441.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "react-dropzone": "^15.0.0",
+    "react-dropzone": "^19.0.1",
     "react-markdown": "^10.1.0",
     "react-router-dom": "^6.26.0",
     "remark-gfm": "^4.0.0",
