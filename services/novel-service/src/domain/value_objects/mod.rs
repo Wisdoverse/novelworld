@@ -1,3 +1,5 @@
+#![allow(clippy::should_implement_trait)] // Project convention uses explicit lossy from_str helpers.
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::Type)]
@@ -120,4 +122,21 @@ pub enum ReaderIdentityType {
     Self_,
     /// 扮演某个角色
     Character,
+}
+
+impl ReaderIdentityType {
+    pub fn to_str(&self) -> &'static str {
+        match self {
+            Self::Self_ => "self",
+            Self::Character => "character",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "self" => Some(Self::Self_),
+            "character" => Some(Self::Character),
+            _ => None,
+        }
+    }
 }

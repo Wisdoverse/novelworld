@@ -1,9 +1,13 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-use super::LlmProvider;
+use super::{
+    response_error,
+    sse::{decode_stream, SseFrame},
+    LlmProvider,
+};
 use crate::types::*;
 
 pub struct GeminiProvider;
@@ -88,16 +92,29 @@ impl GeminiProvider {
 
         for msg in messages {
             if msg.role == "system" {
-                let part = GeminiPart { text: msg.content.clone() };
+                let part = GeminiPart {
+                    text: msg.content.clone(),
+                };
                 match &mut system {
-                    None => system = Some(GeminiContent { role: None, parts: vec![part] }),
+                    None => {
+                        system = Some(GeminiContent {
+                            role: None,
+                            parts: vec![part],
+                        })
+                    }
                     Some(s) => s.parts.push(part),
                 }
             } else {
-                let role = if msg.role == "assistant" { "model" } else { "user" };
+                let role = if msg.role == "assistant" {
+                    "model"
+                } else {
+                    "user"
+                };
                 contents.push(GeminiContent {
                     role: Some(role.to_string()),
-                    parts: vec![GeminiPart { text: msg.content.clone() }],
+                    parts: vec![GeminiPart {
+                        text: msg.content.clone(),
+                    }],
                 });
             }
         }
@@ -106,12 +123,89 @@ impl GeminiProvider {
     }
 }
 
-#[async_trait]
-impl LlmProvider for GeminiProvider {
-    fn base_url(&self) -> &str {
-        GEMINI_API_URL
+pub(crate) fn parse_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>> {
+    if frame.event == "error" {
+        return Err(anyhow!("Gemini stream error: {}", frame.data));
+    }
+    if frame.event != "message" {
+        return Ok(Vec::new());
     }
 
+    let payload: Value = serde_json::from_str(&frame.data)
+        .map_err(|error| anyhow!("invalid Gemini stream payload: {error}"))?;
+    if let Some(error) = payload.get("error") {
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown error");
+        return Err(anyhow!("Gemini stream error: {message}"));
+    }
+
+    if let Some(block_reason) = payload
+        .get("promptFeedback")
+        .and_then(|feedback| feedback.get("blockReason"))
+    {
+        match block_reason {
+            Value::Null => {}
+            Value::String(reason) => {
+                return Err(anyhow!("Gemini prompt was blocked: {reason}"));
+            }
+            _ => return Err(anyhow!("Gemini blockReason is not a string or null")),
+        }
+    }
+
+    let candidates = payload
+        .get("candidates")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Gemini stream payload is missing candidates"))?;
+    let candidate = candidates
+        .first()
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("Gemini stream payload has no candidate"))?;
+    let mut events = Vec::new();
+
+    if let Some(content) = candidate.get("content") {
+        let content = content
+            .as_object()
+            .ok_or_else(|| anyhow!("Gemini candidate content is not an object"))?;
+        let parts = content
+            .get("parts")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("Gemini candidate content is missing parts"))?;
+        let mut text = String::new();
+        for part in parts {
+            let part = part
+                .as_object()
+                .ok_or_else(|| anyhow!("Gemini candidate part is not an object"))?;
+            if let Some(value) = part.get("text") {
+                text.push_str(
+                    value
+                        .as_str()
+                        .ok_or_else(|| anyhow!("Gemini candidate text is not a string"))?,
+                );
+            }
+        }
+        if !text.is_empty() {
+            events.push(ChatStreamEvent::Delta(text));
+        }
+    }
+
+    match candidate.get("finishReason") {
+        Some(Value::String(reason)) if reason == "STOP" || reason == "MAX_TOKENS" => {
+            events.push(ChatStreamEvent::Finished);
+        }
+        Some(Value::String(reason)) => {
+            return Err(anyhow!("Gemini stream failed with finish reason {reason}"));
+        }
+        Some(Value::Null) | None => {}
+        Some(_) => return Err(anyhow!("Gemini finishReason is not a string or null")),
+    }
+
+    Ok(events)
+}
+
+#[async_trait]
+impl LlmProvider for GeminiProvider {
     fn auth_header(&self, api_key: &str) -> (String, String) {
         ("x-goog-api-key".into(), api_key.to_string())
     }
@@ -143,21 +237,17 @@ impl LlmProvider for GeminiProvider {
             GEMINI_API_URL, request.model, api_key
         );
 
-        let response = client
-            .post(&url)
-            .json(&body)
-            .send()
-            .await?;
+        let response = client.post(&url).json(&body).send().await?;
 
         if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
-            return Err(LlmApiError { status, message: body }.into());
+            return Err(response_error(response).await);
         }
 
         let resp: GeminiResponse = response.json().await?;
 
-        let content = resp.candidates.first()
+        let content = resp
+            .candidates
+            .first()
             .and_then(|c| c.content.parts.first())
             .map(|p| p.text.clone())
             .ok_or_else(|| anyhow::anyhow!("Empty response"))?;
@@ -177,7 +267,7 @@ impl LlmProvider for GeminiProvider {
         client: &reqwest::Client,
         api_key: &str,
         request: &ChatRequest,
-    ) -> Result<Box<dyn futures::Stream<Item = Result<String>> + Send + Unpin>> {
+    ) -> Result<ChatStream> {
         let (system_instruction, contents) = Self::convert_messages(&request.messages);
 
         let body = GeminiRequest {
@@ -198,26 +288,10 @@ impl LlmProvider for GeminiProvider {
         let response = client.post(&url).json(&body).send().await?;
 
         if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
-            return Err(LlmApiError { status, message: body }.into());
+            return Err(response_error(response).await);
         }
 
-        let stream = response.bytes_stream().map(|chunk| {
-            let chunk = chunk.map_err(|e| anyhow::anyhow!(e))?;
-            let text = String::from_utf8_lossy(&chunk).to_string();
-            let content: String = text.lines()
-                .filter(|l| l.starts_with("data: "))
-                .filter_map(|l| serde_json::from_str::<serde_json::Value>(&l[6..]).ok())
-                .filter_map(|v| {
-                    v["candidates"][0]["content"]["parts"][0]["text"]
-                        .as_str().map(String::from)
-                })
-                .collect();
-            Ok(content)
-        });
-
-        Ok(Box::new(stream))
+        Ok(decode_stream(response.bytes_stream(), parse_stream_frame))
     }
 
     async fn embed(
@@ -237,16 +311,10 @@ impl LlmProvider for GeminiProvider {
             }
         });
 
-        let response = client
-            .post(&url)
-            .json(&body)
-            .send()
-            .await?;
+        let response = client.post(&url).json(&body).send().await?;
 
         if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
-            return Err(LlmApiError { status, message: body }.into());
+            return Err(response_error(response).await);
         }
 
         let resp: GeminiEmbedResponse = response.json().await?;

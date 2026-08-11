@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuthStore } from '@/features/auth/model/useAuthStore';
+import { getApiErrorMessage } from '@/shared/api/client';
 import { toast } from 'sonner';
 
 export function LoginPage() {
@@ -22,8 +23,8 @@ export function LoginPage() {
         toast.success('登录成功');
       }
       navigate('/shelf');
-    } catch (err: any) {
-      toast.error(err.response?.data?.error?.message || '操作失败');
+    } catch (error: unknown) {
+      toast.error(getApiErrorMessage(error, '操作失败'));
     }
   };
 

@@ -113,9 +113,11 @@ CREATE TABLE character_memories (
     id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     character_id  UUID NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
     user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    novel_id      UUID NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
     layer         memory_layer NOT NULL,
     content       TEXT NOT NULL,
     importance    SMALLINT NOT NULL DEFAULT 5 CHECK (importance BETWEEN 1 AND 10),
+    chapter_number INTEGER,
     -- pgvector 语义向量（1536维，OpenAI text-embedding-3-small）
     embedding     vector(1536),
     access_count  INTEGER NOT NULL DEFAULT 0,
@@ -125,6 +127,7 @@ CREATE TABLE character_memories (
 );
 
 CREATE INDEX idx_memories_character_user ON character_memories(character_id, user_id);
+CREATE INDEX idx_memories_character_user_novel ON character_memories(character_id, user_id, novel_id);
 CREATE INDEX idx_memories_layer ON character_memories(character_id, user_id, layer);
 CREATE INDEX idx_memories_importance ON character_memories(character_id, user_id, importance DESC);
 -- 向量相似度索引（HNSW，适合高维向量）
@@ -134,6 +137,65 @@ CREATE INDEX idx_memories_embedding ON character_memories
 
 -- ─── 对话历史表 ────────────────────────────────────────────────────────────
 
+CREATE TABLE chat_turns (
+    id                     UUID PRIMARY KEY,
+    user_id                UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    character_id           UUID NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    novel_id               UUID NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
+    request_fingerprint    BYTEA NOT NULL,
+    chapter_context        INTEGER NOT NULL,
+    reader_identity        VARCHAR(200),
+    reader_identity_type   identity_type NOT NULL,
+    reader_character_id    UUID REFERENCES characters(id) ON DELETE CASCADE,
+    deviation_mode         deviation_mode NOT NULL,
+    status                 VARCHAR(16) NOT NULL,
+    attempt                BIGINT NOT NULL DEFAULT 1,
+    lease_expires_at       TIMESTAMPTZ,
+    failure_code           VARCHAR(64),
+    created_at             TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.now(),
+    updated_at             TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.now(),
+    completed_at           TIMESTAMPTZ,
+    CONSTRAINT chat_turns_request_fingerprint_check
+        CHECK (pg_catalog.octet_length(request_fingerprint) = 32),
+    CONSTRAINT chat_turns_chapter_context_check CHECK (chapter_context >= 1),
+    CONSTRAINT chat_turns_status_check
+        CHECK (status IN ('in_progress', 'completed', 'failed')),
+    CONSTRAINT chat_turns_attempt_check CHECK (attempt >= 1),
+    CONSTRAINT chat_turns_identity_fields_check CHECK (
+        (reader_identity_type = 'self' AND reader_character_id IS NULL)
+        OR (
+            reader_identity_type = 'character'
+            AND reader_character_id IS NOT NULL
+            AND reader_identity IS NOT NULL
+        )
+    ),
+    CONSTRAINT chat_turns_state_check CHECK (
+        (
+            status = 'in_progress'
+            AND lease_expires_at IS NOT NULL
+            AND failure_code IS NULL
+            AND completed_at IS NULL
+        )
+        OR (
+            status = 'completed'
+            AND lease_expires_at IS NULL
+            AND failure_code IS NULL
+            AND completed_at IS NOT NULL
+        )
+        OR (
+            status = 'failed'
+            AND lease_expires_at IS NULL
+            AND failure_code IS NOT NULL
+            AND failure_code <> ''
+            AND completed_at IS NULL
+        )
+    )
+);
+
+CREATE UNIQUE INDEX idx_chat_turns_one_in_progress
+    ON chat_turns(user_id, character_id, novel_id)
+    WHERE status = 'in_progress';
+
 CREATE TABLE chat_messages (
     id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     character_id UUID NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
@@ -141,12 +203,17 @@ CREATE TABLE chat_messages (
     novel_id     UUID NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
     role         VARCHAR(20) NOT NULL CHECK (role IN ('user', 'character')),
     content      TEXT NOT NULL,
-    chapter_num  INTEGER,                    -- 对话发生时的章节
+    reader_identity VARCHAR(200),
+    chapter_context INTEGER,                 -- 对话发生时的章节
+    turn_id      UUID REFERENCES chat_turns(id) ON DELETE CASCADE,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX idx_chat_messages_character_user ON chat_messages(character_id, user_id, created_at DESC);
 CREATE INDEX idx_chat_messages_novel_user ON chat_messages(novel_id, user_id);
+CREATE UNIQUE INDEX idx_chat_messages_turn_role_unique
+    ON chat_messages(turn_id, role)
+    WHERE turn_id IS NOT NULL;
 
 -- ─── 叙事节点表 ────────────────────────────────────────────────────────────
 
@@ -156,7 +223,9 @@ CREATE TABLE narrative_nodes (
     chapter_number INTEGER NOT NULL,
     description    TEXT NOT NULL,
     choices        JSONB NOT NULL DEFAULT '[]',  -- NarrativeChoice[]
-    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT narrative_nodes_novel_chapter_key UNIQUE(novel_id, chapter_number),
+    CONSTRAINT narrative_nodes_identity_key UNIQUE(id, novel_id, chapter_number)
 );
 
 CREATE INDEX idx_narrative_nodes_novel ON narrative_nodes(novel_id, chapter_number);
@@ -167,12 +236,19 @@ CREATE TABLE user_choices (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     novel_id        UUID NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
-    node_id         UUID NOT NULL REFERENCES narrative_nodes(id) ON DELETE CASCADE,
+    node_id         UUID NOT NULL,
     chapter_number  INTEGER NOT NULL,
     choice_index    INTEGER NOT NULL,
     choice_text     TEXT NOT NULL,
     consequence     TEXT,                    -- AI 生成的后果描述
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT user_choices_user_node_key UNIQUE(user_id, node_id),
+    CONSTRAINT user_choices_node_scope_fkey
+        FOREIGN KEY(node_id, novel_id, chapter_number)
+        REFERENCES narrative_nodes(id, novel_id, chapter_number) ON DELETE CASCADE,
+    CONSTRAINT user_choices_chapter_check CHECK (chapter_number >= 1),
+    CONSTRAINT user_choices_index_check CHECK (choice_index >= 0),
+    CONSTRAINT user_choices_text_check CHECK (choice_text <> '')
 );
 
 CREATE INDEX idx_user_choices_user_novel ON user_choices(user_id, novel_id, chapter_number);
@@ -203,7 +279,12 @@ CREATE TABLE reading_progress (
     deviation_mode         deviation_mode NOT NULL DEFAULT 'canon',
     last_read_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(user_id, novel_id)
+    UNIQUE(user_id, novel_id),
+    CONSTRAINT reading_progress_current_chapter_check CHECK (current_chapter >= 1),
+    CONSTRAINT reading_progress_identity_fields_check CHECK (
+        (reader_identity_type = 'self' AND reader_character_id IS NULL)
+        OR (reader_identity_type = 'character' AND reader_character_id IS NOT NULL)
+    )
 );
 
 CREATE INDEX idx_reading_progress_user ON reading_progress(user_id, last_read_at DESC);

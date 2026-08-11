@@ -59,6 +59,7 @@ impl Memory {
         novel_id: Uuid,
         content: String,
         importance: i32,
+        chapter_number: i32,
     ) -> Self {
         Self {
             id: Uuid::new_v4(),
@@ -68,7 +69,7 @@ impl Memory {
             layer: MemoryLayer::Permanent,
             content,
             importance,
-            chapter_number: None,
+            chapter_number: Some(chapter_number),
             embedding: None,
             created_at: Utc::now(),
         }
@@ -79,6 +80,7 @@ impl Memory {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub id: Uuid,
+    pub turn_id: Option<Uuid>,
     pub user_id: Uuid,
     pub character_id: Uuid,
     pub novel_id: Uuid,
@@ -102,6 +104,7 @@ impl ChatMessage {
     ) -> Self {
         Self {
             id: Uuid::new_v4(),
+            turn_id: None,
             user_id,
             character_id,
             novel_id,
@@ -111,5 +114,10 @@ impl ChatMessage {
             chapter_context,
             created_at: Utc::now(),
         }
+    }
+
+    pub fn with_turn_id(mut self, turn_id: Uuid) -> Self {
+        self.turn_id = Some(turn_id);
+        self
     }
 }

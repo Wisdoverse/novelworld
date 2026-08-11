@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useCharacters } from '@/entities/novel/api';
+import { useReadingProgress } from '@/entities/reading-progress/api';
 import { CharacterCard } from '@/widgets/character-card/ui/CharacterCard';
 import { ChatPanel } from '@/widgets/chat-panel/ui/ChatPanel';
 import { useAuthStore } from '@/features/auth/model/useAuthStore';
@@ -11,8 +12,26 @@ export function CharactersPage() {
   const { novelId } = useParams<{ novelId: string }>();
   const navigate = useNavigate();
   const { user } = useAuthStore();
-  const { data: characters, isLoading } = useCharacters(novelId || '');
+  const {
+    data: readingProgress,
+    isLoading: isProgressLoading,
+    isError: isProgressError,
+    refetch: refetchProgress,
+  } = useReadingProgress(novelId || '');
+  const { data: characters, isLoading } = useCharacters(
+    novelId || '',
+    readingProgress?.current_chapter ?? 0,
+  );
   const [chatCharacter, setChatCharacter] = useState<Character | null>(null);
+  const chatCharacterIsAvailable = Boolean(
+    chatCharacter && characters?.some(character => character.id === chatCharacter.id),
+  );
+
+  useEffect(() => {
+    if (chatCharacter && characters && !chatCharacterIsAvailable) {
+      setChatCharacter(null);
+    }
+  }, [characters, chatCharacter, chatCharacterIsAvailable]);
 
   if (!novelId || !user) return null;
 
@@ -37,8 +56,15 @@ export function CharactersPage() {
           </h1>
         </div>
 
-        {isLoading ? (
+        {isLoading || isProgressLoading ? (
           <div className="text-center py-20" style={{ color: 'var(--color-moonbeam)' }}>加载中...</div>
+        ) : isProgressError ? (
+          <div className="text-center py-20" role="alert" style={{ color: 'var(--color-moonbeam)' }}>
+            <p className="mb-4">阅读上下文加载失败，暂时无法开始对话。</p>
+            <button className="px-4 py-2 rounded-lg" style={{ background: '#6d28d9', color: 'white' }} onClick={() => refetchProgress()}>
+              重试
+            </button>
+          </div>
         ) : !characters?.length ? (
           <div className="text-center py-20" style={{ color: 'var(--color-comet)' }}>暂无角色</div>
         ) : (
@@ -47,7 +73,9 @@ export function CharactersPage() {
               <CharacterCard
                 key={char.id}
                 character={char}
-                onTalk={(c) => setChatCharacter(c)}
+                onTalk={(c) => {
+                  if (readingProgress) setChatCharacter(c);
+                }}
               />
             ))}
           </div>
@@ -57,9 +85,10 @@ export function CharactersPage() {
       {chatCharacter && (
         <ChatPanel
           character={chatCharacter}
-          userId={user.id}
           novelId={novelId}
-          currentChapter={1}
+          currentChapter={readingProgress?.current_chapter || 1}
+          readerIdentity={readingProgress?.reader_identity}
+          canChat={Boolean(readingProgress) && chatCharacterIsAvailable}
           isOpen={!!chatCharacter}
           onClose={() => setChatCharacter(null)}
         />

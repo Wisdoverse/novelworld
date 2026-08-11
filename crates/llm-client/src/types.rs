@@ -1,9 +1,21 @@
+use anyhow::Result;
+use futures::Stream;
 use serde::{Deserialize, Serialize};
+use std::pin::Pin;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatStreamEvent {
+    Delta(String),
+    Finished,
+}
+
+pub type ChatStream = Pin<Box<dyn Stream<Item = Result<ChatStreamEvent>> + Send>>;
 
 #[derive(Debug)]
 pub struct LlmApiError {
     pub status: u16,
     pub message: String,
+    pub retry_after: Option<String>,
 }
 
 impl std::fmt::Display for LlmApiError {
@@ -21,13 +33,22 @@ pub struct ChatMessage {
 
 impl ChatMessage {
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: "system".into(), content: content.into() }
+        Self {
+            role: "system".into(),
+            content: content.into(),
+        }
     }
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: "user".into(), content: content.into() }
+        Self {
+            role: "user".into(),
+            content: content.into(),
+        }
     }
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: "assistant".into(), content: content.into() }
+        Self {
+            role: "assistant".into(),
+            content: content.into(),
+        }
     }
 }
 
@@ -54,7 +75,10 @@ impl ChatRequest {
     }
 
     pub fn message(mut self, role: &str, content: impl Into<String>) -> Self {
-        self.messages.push(ChatMessage { role: role.into(), content: content.into() });
+        self.messages.push(ChatMessage {
+            role: role.into(),
+            content: content.into(),
+        });
         self
     }
 
@@ -121,15 +145,31 @@ pub struct ProviderConfig {
 
 impl ProviderConfig {
     pub fn openai(api_key: impl Into<String>) -> Self {
-        Self { provider: Provider::OpenAI, api_key: api_key.into(), base_url: None }
+        Self {
+            provider: Provider::OpenAI,
+            api_key: api_key.into(),
+            base_url: None,
+        }
     }
     pub fn anthropic(api_key: impl Into<String>) -> Self {
-        Self { provider: Provider::Anthropic, api_key: api_key.into(), base_url: None }
+        Self {
+            provider: Provider::Anthropic,
+            api_key: api_key.into(),
+            base_url: None,
+        }
     }
     pub fn gemini(api_key: impl Into<String>) -> Self {
-        Self { provider: Provider::Gemini, api_key: api_key.into(), base_url: None }
+        Self {
+            provider: Provider::Gemini,
+            api_key: api_key.into(),
+            base_url: None,
+        }
     }
     pub fn openai_compatible(api_key: impl Into<String>, base_url: impl Into<String>) -> Self {
-        Self { provider: Provider::OpenAICompatible, api_key: api_key.into(), base_url: Some(base_url.into()) }
+        Self {
+            provider: Provider::OpenAICompatible,
+            api_key: api_key.into(),
+            base_url: Some(base_url.into()),
+        }
     }
 }

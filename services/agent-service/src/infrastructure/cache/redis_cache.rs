@@ -33,16 +33,23 @@ impl MessageCache for RedisCache {
         &self,
         character_id: Uuid,
         user_id: Uuid,
+        max_chapter: i32,
         limit: usize,
     ) -> Result<Vec<ChatMessage>> {
         let mut conn = self.pool.get().await?;
         let key = Self::cache_key(character_id, user_id);
 
-        let raw: Vec<String> = conn.lrange(&key, 0, (limit as isize) - 1).await?;
+        let raw: Vec<String> = conn.lrange(&key, 0, MAX_CACHED_MESSAGES - 1).await?;
 
         let messages: Vec<ChatMessage> = raw
             .into_iter()
             .filter_map(|s| serde_json::from_str(&s).ok())
+            .filter(|message: &ChatMessage| {
+                message
+                    .chapter_context
+                    .is_some_and(|chapter| chapter <= max_chapter)
+            })
+            .take(limit)
             .collect();
 
         // Redis stores most-recent first (LPUSH), but we want chronological order
@@ -51,29 +58,39 @@ impl MessageCache for RedisCache {
         Ok(messages)
     }
 
-    /// Push a new message to the front of the cache list, trimming to MAX_CACHED_MESSAGES.
-    async fn push_message(
+    /// Project one committed turn atomically, newest message first.
+    async fn push_turn(
         &self,
         character_id: Uuid,
         user_id: Uuid,
-        msg: &ChatMessage,
+        user_message: &ChatMessage,
+        character_message: &ChatMessage,
     ) -> Result<()> {
         let mut conn = self.pool.get().await?;
         let key = Self::cache_key(character_id, user_id);
-        let json = serde_json::to_string(msg)?;
+        let user_json = serde_json::to_string(user_message)?;
+        let character_json = serde_json::to_string(character_message)?;
 
-        conn.lpush::<_, _, ()>(&key, &json).await?;
-        conn.ltrim::<_, ()>(&key, 0, MAX_CACHED_MESSAGES - 1).await?;
+        redis::pipe()
+            .atomic()
+            .cmd("LPUSH")
+            .arg(&key)
+            .arg(user_json)
+            .arg(character_json)
+            .ignore()
+            .cmd("LTRIM")
+            .arg(&key)
+            .arg(0)
+            .arg(MAX_CACHED_MESSAGES - 1)
+            .ignore()
+            .query_async::<()>(&mut conn)
+            .await?;
 
         Ok(())
     }
 
     /// Clear all cached messages for a character-user pair.
-    async fn clear(
-        &self,
-        character_id: Uuid,
-        user_id: Uuid,
-    ) -> Result<()> {
+    async fn clear(&self, character_id: Uuid, user_id: Uuid) -> Result<()> {
         let mut conn = self.pool.get().await?;
         let key = Self::cache_key(character_id, user_id);
         conn.del::<_, ()>(&key).await?;

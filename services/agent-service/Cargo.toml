@@ -24,6 +24,7 @@ futures.workspace = true
 redis.workspace = true
 deadpool-redis.workspace = true
 bytes.workspace = true
+sha2 = "0.10"
 llm-client.workspace = true
 async-stream = "0.3"
 tokio-stream = "0.1"

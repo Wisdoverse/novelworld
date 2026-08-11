@@ -1,11 +1,11 @@
+use anyhow::Result;
 use async_trait::async_trait;
 use sqlx::PgPool;
 use uuid::Uuid;
-use anyhow::Result;
 
 use crate::domain::entities::novel::Novel;
 use crate::domain::repositories::NovelRepository;
-use crate::domain::value_objects::{NovelStatus, DeviationMode};
+use crate::domain::value_objects::{DeviationMode, NovelStatus};
 
 pub struct NovelPgRepository {
     pool: PgPool,
@@ -144,4 +144,3 @@ impl From<NovelRow> for Novel {
         }
     }
 }
-

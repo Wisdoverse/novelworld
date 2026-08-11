@@ -1,452 +1,136 @@
-import React, { useState, useEffect } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { BookOpen, Key, User, Check, Loader2, AlertCircle, ChevronRight } from 'lucide-react';
-import { apiClient } from '@/shared/api/client';
-
-const PROVIDERS = [
-  { id: 'deepseek', name: 'DeepSeek', hint: 'DeepSeek-V3, R1 — 性价比最高', placeholder: 'sk-...', free: false },
-  { id: 'openai', name: 'OpenAI', hint: 'GPT-4o, GPT-4', placeholder: 'sk-...', free: false },
-  { id: 'qwen', name: '通义千问 Qwen', hint: 'Qwen3 — 有免费额度', placeholder: 'sk-...', free: false },
-  { id: 'glm', name: 'GLM 智谱AI', hint: 'GLM-4 — 有免费额度', placeholder: '...', free: false },
-  { id: 'moonshot', name: 'Moonshot / Kimi', hint: 'Moonshot-v1', placeholder: 'sk-...', free: false },
-  { id: 'doubao', name: '豆包 Doubao', hint: 'Doubao-1.5', placeholder: '...', free: false },
-  { id: 'anthropic', name: 'Anthropic', hint: 'Claude Opus/Sonnet', placeholder: 'sk-ant-...', free: false },
-  { id: 'ollama', name: 'Ollama (Local)', hint: 'Free — runs on your machine', placeholder: '', free: true },
-  { id: 'custom', name: 'Custom / Relay', hint: 'one-api, new-api, or any OpenAI-compatible', placeholder: 'sk-...', free: false },
-];
-
-interface SetupState {
-  step: number;
-  provider: string;
-  apiKey: string;
-  customUrl: string;
-  embeddingEnabled: boolean;
-  embeddingUrl: string;
-  embeddingKey: string;
-  embeddingModel: string;
-  email: string;
-  password: string;
-  name: string;
-  testing: boolean;
-  testResult: 'idle' | 'success' | 'error';
-  testError: string;
-  submitting: boolean;
-}
+import { useState, type FormEvent } from 'react';
+import { AlertCircle, BookOpen, Loader2, User } from 'lucide-react';
+import { apiClient, getApiErrorMessage } from '@/shared/api/client';
 
 export function SetupPage({ onComplete }: { onComplete: () => void }) {
-  const [state, setState] = useState<SetupState>({
-    step: 1,
-    provider: '',
-    apiKey: '',
-    customUrl: '',
-    embeddingEnabled: false,
-    embeddingUrl: '',
-    embeddingKey: '',
-    embeddingModel: '',
-    email: '',
-    password: '',
-    name: '',
-    testing: false,
-    testResult: 'idle',
-    testError: '',
-    submitting: false,
-  });
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [name, setName] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
 
-  const set = (partial: Partial<SetupState>) => setState(s => ({ ...s, ...partial }));
-
-  const testConnection = async () => {
-    set({ testing: true, testResult: 'idle', testError: '' });
+  const finishSetup = async (event: FormEvent) => {
+    event.preventDefault();
+    setSubmitting(true);
+    setError('');
     try {
-      await apiClient.post('/setup/test-llm', {
-        provider: state.provider,
-        api_key: state.apiKey,
+      const response = await apiClient.post('/setup/init', {
+        email,
+        password,
+        name: name || undefined,
+        // ponytail: remove after the pre-H1 setup client is outside the rollout window.
+        provider: 'runtime-configured',
+        api_key: '',
       });
-      set({ testing: false, testResult: 'success' });
-    } catch (e: any) {
-      set({
-        testing: false,
-        testResult: 'error',
-        testError: e.response?.data?.error || 'Connection failed. Check your API key.',
-      });
-    }
-  };
-
-  const finishSetup = async () => {
-    set({ submitting: true });
-    try {
-      const res = await apiClient.post('/setup/init', {
-        provider: state.provider,
-        api_key: state.apiKey,
-        email: state.email,
-        password: state.password,
-        name: state.name,
-      });
-      if (res.data.access_token) {
-        localStorage.setItem('auth_token', res.data.access_token);
-        if (res.data.refresh_token) {
-          localStorage.setItem('refresh_token', res.data.refresh_token);
-        }
-      }
-      set({ step: 4 });
-      setTimeout(() => onComplete(), 2000);
-    } catch (e: any) {
-      set({ submitting: false });
-      alert(e.response?.data?.error || 'Setup failed');
+      localStorage.setItem('auth_token', response.data.access_token);
+      localStorage.setItem('refresh_token', response.data.refresh_token);
+      onComplete();
+    } catch (requestError: unknown) {
+      setError(getApiErrorMessage(requestError, 'Setup failed. Please try again.'));
+      setSubmitting(false);
     }
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4"
-         style={{ background: 'linear-gradient(135deg, var(--color-void) 0%, var(--color-cosmos) 100%)' }}>
-      <div className="w-full max-w-lg">
-        {/* Header */}
+    <main
+      className="min-h-screen flex items-center justify-center px-4"
+      style={{ background: 'linear-gradient(135deg, var(--color-void) 0%, var(--color-cosmos) 100%)' }}
+    >
+      <div className="w-full max-w-md">
         <div className="text-center mb-8">
-          <div className="flex items-center justify-center gap-3 mb-4">
-            <BookOpen size={36} style={{ color: 'var(--color-nova-glow)' }} />
-            <h1 style={{ fontFamily: 'var(--font-display)', fontSize: '2rem', color: 'var(--color-nova-glow)' }}>
-              NovelWorld
-            </h1>
+          <BookOpen size={36} className="mx-auto mb-3" style={{ color: 'var(--color-nova-glow)' }} />
+          <h1 className="text-3xl" style={{ fontFamily: 'var(--font-display)', color: 'var(--color-nova-glow)' }}>
+            NovelWorld
+          </h1>
+          <p className="mt-2" style={{ color: 'var(--color-moonbeam)' }}>
+            Create the first administrator account. AI credentials are read from the server environment.
+          </p>
+        </div>
+
+        <form
+          onSubmit={finishSetup}
+          className="rounded-xl p-8 space-y-4"
+          style={{
+            background: 'rgba(15, 21, 53, 0.8)',
+            border: '1px solid rgba(109, 40, 217, 0.3)',
+            backdropFilter: 'blur(20px)',
+          }}
+        >
+          <div className="flex items-center gap-2 mb-2">
+            <User size={20} style={{ color: 'var(--color-aurora-light)' }} />
+            <h2 className="text-lg font-semibold" style={{ color: 'var(--color-starlight)' }}>
+              Administrator account
+            </h2>
           </div>
-          <p style={{ color: 'var(--color-moonbeam)' }}>Welcome! Let's get you set up in 3 steps.</p>
-        </div>
 
-        {/* Progress */}
-        <div className="flex items-center justify-center gap-2 mb-8">
-          {[1, 2, 3].map(n => (
-            <React.Fragment key={n}>
-              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold transition-all ${
-                state.step >= n ? 'text-white' : ''
-              }`} style={{
-                background: state.step >= n
-                  ? 'linear-gradient(135deg, var(--color-aurora), var(--color-nova))'
-                  : 'rgba(15, 21, 53, 0.6)',
-                border: '1px solid rgba(109, 40, 217, 0.3)',
-                color: state.step >= n ? 'white' : 'var(--color-comet)',
-              }}>
-                {state.step > n ? <Check size={16} /> : n}
-              </div>
-              {n < 3 && <div className="w-12 h-0.5" style={{
-                background: state.step > n ? 'var(--color-aurora)' : 'rgba(109, 40, 217, 0.2)',
-              }} />}
-            </React.Fragment>
-          ))}
-        </div>
+          <label className="block text-sm" style={{ color: 'var(--color-moonbeam)' }}>
+            Display name (optional)
+            <input
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              maxLength={200}
+              autoComplete="name"
+              className="mt-1 w-full px-4 py-3 rounded-lg outline-none"
+              style={inputStyle}
+            />
+          </label>
 
-        {/* Card */}
-        <div className="rounded-xl p-8" style={{
-          background: 'rgba(15, 21, 53, 0.8)',
-          border: '1px solid rgba(109, 40, 217, 0.3)',
-          backdropFilter: 'blur(20px)',
-        }}>
-          <AnimatePresence mode="wait">
-            {/* Step 1: Choose Provider */}
-            {state.step === 1 && (
-              <motion.div key="step1" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }}>
-                <div className="flex items-center gap-2 mb-6">
-                  <Key size={20} style={{ color: 'var(--color-aurora-light)' }} />
-                  <h2 className="text-lg font-semibold" style={{ color: 'var(--color-starlight)' }}>
-                    Step 1: Connect AI Model
-                  </h2>
-                </div>
+          <label className="block text-sm" style={{ color: 'var(--color-moonbeam)' }}>
+            Email
+            <input
+              type="email"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              maxLength={320}
+              autoComplete="email"
+              required
+              className="mt-1 w-full px-4 py-3 rounded-lg outline-none"
+              style={inputStyle}
+            />
+          </label>
 
-                <div className="grid grid-cols-2 gap-2 mb-4">
-                  {PROVIDERS.map(p => (
-                    <button
-                      key={p.id}
-                      onClick={() => set({ provider: p.id })}
-                      className="p-3 rounded-lg text-left transition-all"
-                      style={{
-                        background: state.provider === p.id ? 'rgba(109, 40, 217, 0.3)' : 'rgba(3, 4, 10, 0.4)',
-                        border: `1px solid ${state.provider === p.id ? 'rgba(109, 40, 217, 0.6)' : 'rgba(109, 40, 217, 0.15)'}`,
-                      }}
-                    >
-                      <div className="text-sm font-medium" style={{ color: 'var(--color-starlight)' }}>{p.name}</div>
-                      <div className="text-xs" style={{ color: 'var(--color-comet)' }}>{p.hint}</div>
-                    </button>
-                  ))}
-                </div>
+          <label className="block text-sm" style={{ color: 'var(--color-moonbeam)' }}>
+            Password
+            <input
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              minLength={8}
+              autoComplete="new-password"
+              required
+              className="mt-1 w-full px-4 py-3 rounded-lg outline-none"
+              style={inputStyle}
+            />
+          </label>
 
-                {state.provider && (() => {
-                  const selected = PROVIDERS.find(p => p.id === state.provider);
-                  const isFree = selected?.free;
-                  return (<>
-                    {isFree ? (
-                      <div className="p-3 rounded-lg mb-3 text-sm" style={{ background: 'rgba(34, 197, 94, 0.1)', border: '1px solid rgba(34, 197, 94, 0.3)', color: '#86efac' }}>
-                        No API key needed. Make sure Ollama is running locally ({`ollama serve`}).
-                      </div>
-                    ) : (<>
-                      {state.provider === 'custom' && (
-                        <input
-                          type="text"
-                          value={state.customUrl}
-                          onChange={e => set({ customUrl: e.target.value, testResult: 'idle' })}
-                          placeholder="API URL (e.g. https://api.example.com)"
-                          className="w-full px-4 py-3 rounded-lg mb-2 outline-none"
-                          style={{
-                            background: 'rgba(3, 4, 10, 0.6)',
-                            border: '1px solid rgba(109, 40, 217, 0.2)',
-                            color: 'var(--color-starlight)',
-                          }}
-                        />
-                      )}
-                      <input
-                        type="password"
-                        value={state.apiKey}
-                        onChange={e => set({ apiKey: e.target.value, testResult: 'idle' })}
-                        placeholder={selected?.placeholder || 'API Key'}
-                        className="w-full px-4 py-3 rounded-lg mb-3 outline-none"
-                        style={{
-                          background: 'rgba(3, 4, 10, 0.6)',
-                          border: '1px solid rgba(109, 40, 217, 0.2)',
-                          color: 'var(--color-starlight)',
-                        }}
-                      />
-                    </>)}
+          {error && (
+            <div role="alert" className="flex gap-2 rounded-lg p-3 text-sm" style={{ background: 'rgba(239, 68, 68, 0.12)', color: '#fca5a5' }}>
+              <AlertCircle size={18} aria-hidden="true" />
+              <span>{error}</span>
+            </div>
+          )}
 
-                    <div className="flex gap-2">
-                      <button
-                        onClick={isFree ? () => set({ testResult: 'success' }) : testConnection}
-                        disabled={!isFree && (!state.apiKey || state.testing)}
-                        className="flex-1 py-2.5 rounded-lg font-medium transition-all flex items-center justify-center gap-2"
-                        style={{
-                          background: 'rgba(109, 40, 217, 0.3)',
-                          border: '1px solid rgba(109, 40, 217, 0.4)',
-                          color: 'var(--color-aurora-light)',
-                          opacity: !isFree && !state.apiKey ? 0.5 : 1,
-                        }}
-                      >
-                        {state.testing ? <Loader2 size={16} className="animate-spin" /> : null}
-                        {state.testing ? 'Testing...' : isFree ? 'Continue' : 'Test Connection'}
-                      </button>
-
-                      {state.testResult === 'success' && (
-                        <button
-                          onClick={() => set({ step: 2 })}
-                          className="px-6 py-2.5 rounded-lg font-semibold flex items-center gap-1"
-                          style={{
-                            background: 'linear-gradient(135deg, var(--color-aurora), var(--color-nova))',
-                            color: 'white',
-                          }}
-                        >
-                          Next <ChevronRight size={16} />
-                        </button>
-                      )}
-                    </div>
-
-                    {state.testResult === 'success' && (
-                      <p className="mt-3 text-sm flex items-center gap-1" style={{ color: '#22c55e' }}>
-                        <Check size={14} /> Connected successfully!
-                      </p>
-                    )}
-                    {state.testResult === 'error' && (
-                      <p className="mt-3 text-sm flex items-center gap-1" style={{ color: '#ef4444' }}>
-                        <AlertCircle size={14} /> {state.testError}
-                      </p>
-                    )}
-                  </>);
-                })()}
-              </motion.div>
-            )}
-
-            {/* Step 2: Create Admin Account */}
-            {state.step === 2 && (
-              <motion.div key="step2" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }}>
-                <div className="flex items-center gap-2 mb-6">
-                  <User size={20} style={{ color: 'var(--color-aurora-light)' }} />
-                  <h2 className="text-lg font-semibold" style={{ color: 'var(--color-starlight)' }}>
-                    Step 2: Create Your Account
-                  </h2>
-                </div>
-
-                <div className="space-y-3">
-                  <input
-                    type="text"
-                    value={state.name}
-                    onChange={e => set({ name: e.target.value })}
-                    placeholder="Your name (optional)"
-                    className="w-full px-4 py-3 rounded-lg outline-none"
-                    style={{
-                      background: 'rgba(3, 4, 10, 0.6)',
-                      border: '1px solid rgba(109, 40, 217, 0.2)',
-                      color: 'var(--color-starlight)',
-                    }}
-                  />
-                  <input
-                    type="email"
-                    value={state.email}
-                    onChange={e => set({ email: e.target.value })}
-                    placeholder="Email"
-                    required
-                    className="w-full px-4 py-3 rounded-lg outline-none"
-                    style={{
-                      background: 'rgba(3, 4, 10, 0.6)',
-                      border: '1px solid rgba(109, 40, 217, 0.2)',
-                      color: 'var(--color-starlight)',
-                    }}
-                  />
-                  <input
-                    type="password"
-                    value={state.password}
-                    onChange={e => set({ password: e.target.value })}
-                    placeholder="Password (min 8 characters)"
-                    minLength={8}
-                    className="w-full px-4 py-3 rounded-lg outline-none"
-                    style={{
-                      background: 'rgba(3, 4, 10, 0.6)',
-                      border: '1px solid rgba(109, 40, 217, 0.2)',
-                      color: 'var(--color-starlight)',
-                    }}
-                  />
-                </div>
-
-                <div className="flex gap-2 mt-4">
-                  <button
-                    onClick={() => set({ step: 1 })}
-                    className="px-4 py-2.5 rounded-lg"
-                    style={{
-                      background: 'rgba(3, 4, 10, 0.4)',
-                      border: '1px solid rgba(109, 40, 217, 0.2)',
-                      color: 'var(--color-moonbeam)',
-                    }}
-                  >
-                    Back
-                  </button>
-                  <button
-                    onClick={() => set({ step: 3 })}
-                    disabled={!state.email || state.password.length < 8}
-                    className="flex-1 py-2.5 rounded-lg font-semibold flex items-center justify-center gap-1"
-                    style={{
-                      background: 'linear-gradient(135deg, var(--color-aurora), var(--color-nova))',
-                      color: 'white',
-                      opacity: !state.email || state.password.length < 8 ? 0.5 : 1,
-                    }}
-                  >
-                    Next <ChevronRight size={16} />
-                  </button>
-                </div>
-              </motion.div>
-            )}
-
-            {/* Step 3: Confirm & Launch */}
-            {state.step === 3 && (
-              <motion.div key="step3" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }}>
-                <div className="flex items-center gap-2 mb-6">
-                  <Check size={20} style={{ color: 'var(--color-aurora-light)' }} />
-                  <h2 className="text-lg font-semibold" style={{ color: 'var(--color-starlight)' }}>
-                    Step 3: Ready to Launch
-                  </h2>
-                </div>
-
-                <div className="space-y-3 mb-6">
-                  <div className="flex justify-between p-3 rounded-lg" style={{ background: 'rgba(3, 4, 10, 0.4)' }}>
-                    <span style={{ color: 'var(--color-moonbeam)' }}>AI Provider</span>
-                    <span style={{ color: 'var(--color-starlight)' }}>
-                      {PROVIDERS.find(p => p.id === state.provider)?.name}
-                    </span>
-                  </div>
-                  <div className="flex justify-between p-3 rounded-lg" style={{ background: 'rgba(3, 4, 10, 0.4)' }}>
-                    <span style={{ color: 'var(--color-moonbeam)' }}>Account</span>
-                    <span style={{ color: 'var(--color-starlight)' }}>{state.email}</span>
-                  </div>
-                </div>
-
-                {/* Advanced: Embedding Config */}
-                <details className="mb-4">
-                  <summary className="text-sm cursor-pointer mb-2" style={{ color: 'var(--color-comet)' }}>
-                    Advanced: Embedding Model (optional)
-                  </summary>
-                  <div className="p-3 rounded-lg space-y-2" style={{ background: 'rgba(3, 4, 10, 0.3)', border: '1px solid rgba(109, 40, 217, 0.15)' }}>
-                    <p className="text-xs mb-2" style={{ color: 'var(--color-comet)' }}>
-                      Embedding enables semantic memory search. Auto-detected by default. Configure manually for a different provider.
-                    </p>
-                    <label className="flex items-center gap-2 text-sm" style={{ color: 'var(--color-moonbeam)' }}>
-                      <input
-                        type="checkbox"
-                        checked={state.embeddingEnabled}
-                        onChange={e => set({ embeddingEnabled: e.target.checked })}
-                      />
-                      Use custom embedding provider
-                    </label>
-                    {state.embeddingEnabled && (
-                      <div className="space-y-2 mt-2">
-                        <input
-                          type="text"
-                          value={state.embeddingUrl}
-                          onChange={e => set({ embeddingUrl: e.target.value })}
-                          placeholder="API URL (e.g. https://dashscope.aliyuncs.com/compatible-mode)"
-                          className="w-full px-3 py-2 rounded text-sm outline-none"
-                          style={{ background: 'rgba(3, 4, 10, 0.6)', border: '1px solid rgba(109, 40, 217, 0.2)', color: 'var(--color-starlight)' }}
-                        />
-                        <input
-                          type="password"
-                          value={state.embeddingKey}
-                          onChange={e => set({ embeddingKey: e.target.value })}
-                          placeholder="API Key (leave empty to reuse LLM key)"
-                          className="w-full px-3 py-2 rounded text-sm outline-none"
-                          style={{ background: 'rgba(3, 4, 10, 0.6)', border: '1px solid rgba(109, 40, 217, 0.2)', color: 'var(--color-starlight)' }}
-                        />
-                        <input
-                          type="text"
-                          value={state.embeddingModel}
-                          onChange={e => set({ embeddingModel: e.target.value })}
-                          placeholder="Model (e.g. text-embedding-v3, BAAI/bge-m3)"
-                          className="w-full px-3 py-2 rounded text-sm outline-none"
-                          style={{ background: 'rgba(3, 4, 10, 0.6)', border: '1px solid rgba(109, 40, 217, 0.2)', color: 'var(--color-starlight)' }}
-                        />
-                      </div>
-                    )}
-                  </div>
-                </details>
-
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => set({ step: 2 })}
-                    className="px-4 py-2.5 rounded-lg"
-                    style={{
-                      background: 'rgba(3, 4, 10, 0.4)',
-                      border: '1px solid rgba(109, 40, 217, 0.2)',
-                      color: 'var(--color-moonbeam)',
-                    }}
-                  >
-                    Back
-                  </button>
-                  <button
-                    onClick={finishSetup}
-                    disabled={state.submitting}
-                    className="flex-1 py-3 rounded-lg font-semibold flex items-center justify-center gap-2"
-                    style={{
-                      background: 'linear-gradient(135deg, var(--color-aurora), var(--color-nova))',
-                      color: 'white',
-                      opacity: state.submitting ? 0.7 : 1,
-                    }}
-                  >
-                    {state.submitting ? <Loader2 size={16} className="animate-spin" /> : <BookOpen size={16} />}
-                    {state.submitting ? 'Setting up...' : 'Launch NovelWorld'}
-                  </button>
-                </div>
-              </motion.div>
-            )}
-
-            {/* Step 4: Success */}
-            {state.step === 4 && (
-              <motion.div key="step4" initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }}
-                          className="text-center py-8">
-                <div className="w-16 h-16 rounded-full mx-auto mb-4 flex items-center justify-center"
-                     style={{ background: 'rgba(34, 197, 94, 0.2)' }}>
-                  <Check size={32} style={{ color: '#22c55e' }} />
-                </div>
-                <h2 className="text-xl font-semibold mb-2" style={{ color: 'var(--color-starlight)' }}>
-                  All Set!
-                </h2>
-                <p style={{ color: 'var(--color-moonbeam)' }}>
-                  Entering NovelWorld...
-                </p>
-                <Loader2 size={20} className="animate-spin mx-auto mt-4" style={{ color: 'var(--color-nova-glow)' }} />
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
+          <button
+            type="submit"
+            disabled={submitting}
+            className="w-full py-3 rounded-lg font-semibold flex items-center justify-center gap-2"
+            style={{
+              background: 'linear-gradient(135deg, var(--color-aurora), var(--color-nova))',
+              color: 'white',
+              opacity: submitting ? 0.7 : 1,
+            }}
+          >
+            {submitting && <Loader2 size={16} className="animate-spin" aria-hidden="true" />}
+            {submitting ? 'Creating account…' : 'Create administrator'}
+          </button>
+        </form>
       </div>
-    </div>
+    </main>
   );
 }
+
+const inputStyle = {
+  background: 'rgba(3, 4, 10, 0.6)',
+  border: '1px solid rgba(109, 40, 217, 0.2)',
+  color: 'var(--color-starlight)',
+};

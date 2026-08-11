@@ -2,8 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domain::value_objects::{NovelStatus, DeviationMode};
 use crate::domain::events::NovelEvent;
+use crate::domain::value_objects::{DeviationMode, NovelStatus};
 
 /// 小说聚合根
 /// DDD: 聚合根负责维护不变量，所有状态变更通过方法进行

@@ -1,29 +1,101 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ChevronLeft, ChevronRight, MessageCircle, Users,
-  BookOpen, Settings, Sparkles, Menu
+  BookOpen, Sparkles
 } from 'lucide-react';
 import { useChapter, useCharacters, useNovel } from '@/entities/novel/api';
+import {
+  useReadingProgress,
+  useUpdateReadingProgress,
+} from '@/entities/reading-progress/api';
 import { ChatPanel } from '@/widgets/chat-panel/ui/ChatPanel';
 import { BranchChoice } from '@/widgets/branch-choice/ui/BranchChoice';
-import type { Character, NarrativeNode } from '@/shared/types';
+import type { Character, NarrativeChoice, NarrativeNode } from '@/shared/types';
 
 export function ReaderPage() {
   const { novelId, chapterNum } = useParams<{ novelId: string; chapterNum: string }>();
   const navigate = useNavigate();
-  const currentChapter = parseInt(chapterNum || '1');
+  const {
+    data: readingProgress,
+    isLoading: isProgressLoading,
+    isError: isProgressError,
+    refetch: refetchProgress,
+  } = useReadingProgress(novelId || '');
+  const {
+    mutate: updateCurrentChapter,
+    isPending: isProgressSaving,
+    isError: isProgressSaveError,
+    reset: resetProgressUpdate,
+  } = useUpdateReadingProgress(novelId || '');
+  const parsedChapter = chapterNum === undefined ? undefined : Number(chapterNum);
+  const routeChapter = parsedChapter !== undefined
+    && Number.isInteger(parsedChapter)
+    && parsedChapter >= 1
+    ? parsedChapter
+    : undefined;
+  const currentChapter = routeChapter ?? readingProgress?.current_chapter ?? 0;
 
   const { data: novel } = useNovel(novelId!);
   const { data: chapter, isLoading } = useChapter(novelId!, currentChapter);
-  const { data: characters } = useCharacters(novelId!);
+  const { data: characters } = useCharacters(
+    novelId || '',
+    readingProgress?.current_chapter ?? 0,
+  );
 
   const [activeChatCharacter, setActiveChatCharacter] = useState<Character | null>(null);
   const [showCharacterList, setShowCharacterList] = useState(false);
   const [currentBranchNode, setCurrentBranchNode] = useState<NarrativeNode | null>(null);
-  const [readerIdentity] = useState<string | undefined>('自己');
-  const userId = 'demo-user'; // TODO: 从 auth store 获取
+  const lastProgressAttempt = useRef<string | undefined>(undefined);
+
+  useEffect(() => {
+    if (routeChapter === undefined && readingProgress) {
+      navigate(`/reader/${novelId}/${readingProgress.current_chapter}`, { replace: true });
+    }
+  }, [navigate, novelId, readingProgress, routeChapter]);
+
+  useEffect(() => {
+    if (routeChapter === undefined || !chapter || !readingProgress || !novelId) return;
+    if (isProgressSaving) return;
+    if (readingProgress.current_chapter === currentChapter) return;
+    const attemptKey = `${novelId}:${currentChapter}`;
+    if (lastProgressAttempt.current === attemptKey) return;
+    lastProgressAttempt.current = attemptKey;
+    updateCurrentChapter(currentChapter);
+  }, [
+    chapter,
+    currentChapter,
+    isProgressSaving,
+    novelId,
+    readingProgress,
+    routeChapter,
+    updateCurrentChapter,
+  ]);
+
+  const retryProgressUpdate = () => {
+    if (!novelId || routeChapter === undefined) return;
+    lastProgressAttempt.current = `${novelId}:${currentChapter}`;
+    resetProgressUpdate();
+    updateCurrentChapter(currentChapter);
+  };
+
+  const isChatReady = Boolean(
+    routeChapter !== undefined
+      && readingProgress
+      && readingProgress.current_chapter === currentChapter
+      && !isProgressSaving,
+  );
+  const activeCharacterIsAvailable = Boolean(
+    activeChatCharacter
+      && characters?.some(character => character.id === activeChatCharacter.id),
+  );
+
+  useEffect(() => {
+    if (activeChatCharacter && characters && !activeCharacterIsAvailable) {
+      setActiveChatCharacter(null);
+    }
+  }, [activeChatCharacter, activeCharacterIsAvailable, characters]);
 
   // 章节加载完成后检查是否有分支节点
   useEffect(() => {
@@ -43,16 +115,40 @@ export function ReaderPage() {
     }
   }, [chapter]);
 
-  const handleChoose = async (choice: any) => {
+  const handleChoose = async (choice: NarrativeChoice) => {
     // TODO: 调用 narrative-service 生成后续剧情
     console.log('Chosen:', choice);
     setCurrentBranchNode(null);
   };
 
   const goToChapter = (num: number) => {
-    if (num < 1 || (novel && num > novel.total_chapters)) return;
+    if (isProgressSaving || num < 1 || (novel && num > novel.total_chapters)) return;
     navigate(`/reader/${novelId}/${num}`);
   };
+
+  if (isProgressError) {
+    return (
+      <div className="min-h-screen flex flex-col gap-4 items-center justify-center" style={{ background: 'var(--color-void)', color: '#94a3b8' }}>
+        <p role="alert">阅读进度加载失败，无法安全恢复阅读上下文。</p>
+        <div className="flex gap-3">
+          <button className="px-4 py-2 rounded-lg" style={{ background: '#6d28d9', color: 'white' }} onClick={() => refetchProgress()}>
+            重试
+          </button>
+          <button className="px-4 py-2 rounded-lg" style={{ background: 'rgba(255,255,255,0.08)' }} onClick={() => navigate('/shelf')}>
+            返回书架
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (routeChapter === undefined || currentChapter < 1 || isProgressLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center" style={{ background: 'var(--color-void)' }}>
+        <div className="w-8 h-8 border-2 rounded-full animate-spin" style={{ borderColor: '#6d28d9', borderTopColor: 'transparent' }} />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--color-void)' }}>
@@ -112,6 +208,12 @@ export function ReaderPage() {
 
       {/* 主内容区 */}
       <div className="pt-16 pb-24 px-4 md:px-8 max-w-3xl mx-auto">
+        {isProgressSaveError && (
+          <div className="mt-4 p-3 rounded-lg flex items-center justify-between gap-3" role="alert" style={{ background: 'rgba(220, 38, 38, 0.12)', color: '#fca5a5' }}>
+            <span className="text-sm">阅读进度保存失败，聊天已暂停。</span>
+            <button className="text-sm underline" onClick={retryProgressUpdate}>重试</button>
+          </div>
+        )}
         {isLoading ? (
           <div className="flex items-center justify-center h-64">
             <div className="w-8 h-8 border-2 rounded-full animate-spin" style={{ borderColor: '#6d28d9', borderTopColor: 'transparent' }} />
@@ -187,13 +289,13 @@ export function ReaderPage() {
       >
         <button
           onClick={() => goToChapter(currentChapter - 1)}
-          disabled={currentChapter <= 1}
+          disabled={isProgressSaving || currentChapter <= 1}
           className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm transition-all"
           style={{
             background: 'rgba(255,255,255,0.05)',
             border: '1px solid rgba(255,255,255,0.1)',
-            color: currentChapter <= 1 ? '#334155' : '#94a3b8',
-            cursor: currentChapter <= 1 ? 'not-allowed' : 'pointer',
+            color: isProgressSaving || currentChapter <= 1 ? '#334155' : '#94a3b8',
+            cursor: isProgressSaving || currentChapter <= 1 ? 'not-allowed' : 'pointer',
           }}
         >
           <ChevronLeft size={14} />
@@ -212,13 +314,13 @@ export function ReaderPage() {
 
         <button
           onClick={() => goToChapter(currentChapter + 1)}
-          disabled={!novel || currentChapter >= novel.total_chapters}
+          disabled={isProgressSaving || !novel || currentChapter >= novel.total_chapters}
           className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm transition-all"
           style={{
             background: 'rgba(255,255,255,0.05)',
             border: '1px solid rgba(255,255,255,0.1)',
-            color: (!novel || currentChapter >= novel.total_chapters) ? '#334155' : '#94a3b8',
-            cursor: (!novel || currentChapter >= novel.total_chapters) ? 'not-allowed' : 'pointer',
+            color: (isProgressSaving || !novel || currentChapter >= novel.total_chapters) ? '#334155' : '#94a3b8',
+            cursor: (isProgressSaving || !novel || currentChapter >= novel.total_chapters) ? 'not-allowed' : 'pointer',
           }}
         >
           下一章
@@ -248,7 +350,9 @@ export function ReaderPage() {
             {characters?.map((char) => (
               <button
                 key={char.id}
+                disabled={!isChatReady}
                 onClick={() => {
+                  if (!isChatReady) return;
                   setActiveChatCharacter(char);
                   setShowCharacterList(false);
                 }}
@@ -286,10 +390,10 @@ export function ReaderPage() {
       {activeChatCharacter && (
         <ChatPanel
           character={activeChatCharacter}
-          userId={userId}
           novelId={novelId!}
           currentChapter={currentChapter}
-          readerIdentity={readerIdentity}
+          readerIdentity={readingProgress?.reader_identity}
+          canChat={isChatReady && activeCharacterIsAvailable}
           isOpen={!!activeChatCharacter}
           onClose={() => setActiveChatCharacter(null)}
         />

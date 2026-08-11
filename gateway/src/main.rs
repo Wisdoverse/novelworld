@@ -2,7 +2,6 @@
 mod auth;
 mod metrics;
 mod proxy;
-mod setup;
 
 use axum::{
     extract::{ConnectInfo, Request, State},
@@ -18,10 +17,12 @@ use governor::{
     Quota, RateLimiter,
 };
 use metrics_exporter_prometheus::PrometheusHandle;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -35,6 +36,47 @@ pub struct AppState {
     pub proxy: Arc<ServiceProxy>,
     pub metrics_handle: PrometheusHandle,
     pub rate_limiter: Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
+    readiness_cache: Arc<ReadinessCache>,
+}
+
+const READINESS_CACHE_TTL: Duration = Duration::from_secs(1);
+
+#[derive(Clone, Copy)]
+struct ReadinessSnapshot {
+    checked_at: Instant,
+    user: bool,
+    novel: bool,
+    agent: bool,
+    narrative: bool,
+}
+
+struct ReadinessCache {
+    snapshot: Mutex<Option<ReadinessSnapshot>>,
+}
+
+impl ReadinessCache {
+    fn new() -> Self {
+        Self {
+            snapshot: Mutex::new(None),
+        }
+    }
+
+    async fn get_or_refresh<F, Fut>(&self, refresh: F) -> ReadinessSnapshot
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = ReadinessSnapshot>,
+    {
+        let mut cached = self.snapshot.lock().await;
+        if let Some(snapshot) = *cached {
+            if snapshot.checked_at.elapsed() < READINESS_CACHE_TTL {
+                return snapshot;
+            }
+        }
+
+        let snapshot = refresh().await;
+        *cached = Some(snapshot);
+        snapshot
+    }
 }
 
 #[tokio::main]
@@ -86,19 +128,22 @@ async fn main() -> anyhow::Result<()> {
         proxy,
         metrics_handle,
         rate_limiter,
+        readiness_cache: Arc::new(ReadinessCache::new()),
     };
 
     let app = Router::new()
         // --- Observability endpoints (no auth, no rate-limit) ---
         .route("/metrics", get(prometheus_metrics))
-        .route("/health", get(health_check))
+        .route("/live", get(liveness_check))
+        .route("/health", get(readiness_check))
+        .route("/ready", get(readiness_check))
         // Public routes (no auth)
         .route("/api/auth/register", post(proxy::forward_to_user))
         .route("/api/auth/login", post(proxy::forward_to_user))
         .route("/api/auth/refresh", post(proxy::forward_to_user))
-        .route("/api/setup/status", get(setup::get_setup_status))
-        .route("/api/setup/test-llm", post(setup::test_llm))
-        .route("/api/setup/init", post(setup::init_setup))
+        .route("/api/setup/status", get(proxy::forward_to_user))
+        .route("/api/setup/test-llm", post(proxy::forward_to_user))
+        .route("/api/setup/init", post(proxy::forward_to_user))
         // Protected routes
         .route("/api/auth/me", get(proxy::forward_to_user))
         .route("/api/auth/logout", post(proxy::forward_to_user))
@@ -155,19 +200,35 @@ async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoResponse 
 }
 
 // ---------------------------------------------------------------------------
-// Health check with downstream service aggregation
+// Liveness and readiness
 // ---------------------------------------------------------------------------
 
-async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
-    let client = &state.proxy.client;
-    let (user, novel, agent, narrative) = tokio::join!(
-        check_service(client, &state.proxy.user_service_url),
-        check_service(client, &state.proxy.novel_service_url),
-        check_service(client, &state.proxy.agent_service_url),
-        check_service(client, &state.proxy.narrative_service_url),
-    );
+async fn liveness_check() -> impl IntoResponse {
+    (StatusCode::OK, Json(serde_json::json!({"status": "alive"})))
+}
 
-    let all_healthy = user && novel && agent && narrative;
+async fn readiness_check(State(state): State<AppState>) -> impl IntoResponse {
+    let snapshot = state
+        .readiness_cache
+        .get_or_refresh(|| async {
+            let client = &state.proxy.client;
+            let (user, novel, agent, narrative) = tokio::join!(
+                check_service(client, &state.proxy.user_service_url),
+                check_service(client, &state.proxy.novel_service_url),
+                check_service(client, &state.proxy.agent_service_url),
+                check_service(client, &state.proxy.narrative_service_url),
+            );
+            ReadinessSnapshot {
+                checked_at: Instant::now(),
+                user,
+                novel,
+                agent,
+                narrative,
+            }
+        })
+        .await;
+
+    let all_healthy = snapshot.user && snapshot.novel && snapshot.agent && snapshot.narrative;
     let status_code = if all_healthy {
         StatusCode::OK
     } else {
@@ -179,24 +240,31 @@ async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
         Json(serde_json::json!({
             "status": if all_healthy { "healthy" } else { "degraded" },
             "services": {
-                "user": user,
-                "novel": novel,
-                "agent": agent,
-                "narrative": narrative,
+                "user": snapshot.user,
+                "novel": snapshot.novel,
+                "agent": snapshot.agent,
+                "narrative": snapshot.narrative,
             }
         })),
     )
 }
 
 async fn check_service(client: &reqwest::Client, base_url: &str) -> bool {
-    match client.get(format!("{}/health", base_url))
+    match client
+        .get(format!("{}/ready", base_url))
         .timeout(Duration::from_secs(3))
         .send()
         .await
     {
         Ok(r) if r.status().is_success() => true,
-        Ok(r) => { tracing::warn!("Health check {} returned {}", base_url, r.status()); false }
-        Err(e) => { tracing::warn!("Health check {} failed: {}", base_url, e); false }
+        Ok(r) => {
+            tracing::warn!("Health check {} returned {}", base_url, r.status());
+            false
+        }
+        Err(e) => {
+            tracing::warn!("Health check {} failed: {}", base_url, e);
+            false
+        }
     }
 }
 
@@ -236,15 +304,28 @@ async fn rate_limit_middleware(
     req: Request,
     next: Next,
 ) -> Response {
+    if is_observability_path(req.uri().path()) {
+        return next.run(req).await;
+    }
+
     match state.rate_limiter.check() {
         Ok(_) => next.run(req).await,
-        Err(_) => (
-            StatusCode::TOO_MANY_REQUESTS,
-            [("retry-after", "1")],
-            "Rate limit exceeded",
-        )
-            .into_response(),
+        Err(_) => {
+            let mut response = proxy::api_error_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limited",
+                "Rate limit exceeded",
+            );
+            response
+                .headers_mut()
+                .insert("retry-after", axum::http::HeaderValue::from_static("1"));
+            response
+        }
     }
+}
+
+fn is_observability_path(path: &str) -> bool {
+    matches!(path, "/live" | "/health" | "/ready" | "/metrics")
 }
 
 // ---------------------------------------------------------------------------
@@ -266,7 +347,9 @@ async fn auth_middleware(
         "/api/setup/status",
         "/api/setup/test-llm",
         "/api/setup/init",
+        "/live",
         "/health",
+        "/ready",
         "/metrics",
     ];
     if public_paths.contains(&path) {
@@ -284,19 +367,37 @@ async fn auth_middleware(
             Ok(claims) => {
                 let user_id = match claims.sub.parse() {
                     Ok(v) => v,
-                    Err(_) => return (StatusCode::UNAUTHORIZED, "Invalid token claims").into_response(),
+                    Err(_) => {
+                        return proxy::api_error_response(
+                            StatusCode::UNAUTHORIZED,
+                            "unauthorized",
+                            "Invalid token claims",
+                        )
+                    }
                 };
                 let role = match claims.role.parse() {
                     Ok(v) => v,
-                    Err(_) => return (StatusCode::UNAUTHORIZED, "Invalid token claims").into_response(),
+                    Err(_) => {
+                        return proxy::api_error_response(
+                            StatusCode::UNAUTHORIZED,
+                            "unauthorized",
+                            "Invalid token claims",
+                        )
+                    }
                 };
                 request.headers_mut().insert("X-User-Id", user_id);
                 request.headers_mut().insert("X-User-Role", role);
                 next.run(request).await
             }
-            Err(_) => (StatusCode::UNAUTHORIZED, "Invalid token").into_response(),
+            Err(_) => {
+                proxy::api_error_response(StatusCode::UNAUTHORIZED, "unauthorized", "Invalid token")
+            }
         },
-        None => (StatusCode::UNAUTHORIZED, "Missing Authorization header").into_response(),
+        None => proxy::api_error_response(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "Missing Authorization header",
+        ),
     }
 }
 
@@ -309,9 +410,8 @@ async fn shutdown_signal() {
 
     #[cfg(unix)]
     {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("failed to register SIGTERM handler");
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to register SIGTERM handler");
         tokio::select! {
             _ = ctrl_c => { tracing::info!("Received SIGINT, starting graceful shutdown"); }
             _ = sigterm.recv() => { tracing::info!("Received SIGTERM, starting graceful shutdown"); }
@@ -322,5 +422,55 @@ async fn shutdown_signal() {
     {
         ctrl_c.await.expect("failed to listen for ctrl-c");
         tracing::info!("Received SIGINT, starting graceful shutdown");
+    }
+}
+
+#[cfg(test)]
+mod observability_tests {
+    use super::{is_observability_path, ReadinessCache, ReadinessSnapshot};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use std::time::Instant;
+
+    #[test]
+    fn probes_and_metrics_do_not_spend_rate_limit_capacity() {
+        for path in ["/live", "/health", "/ready", "/metrics"] {
+            assert!(is_observability_path(path));
+        }
+        assert!(!is_observability_path("/api/novels"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_probe_requests_share_one_dependency_refresh() {
+        let cache = Arc::new(ReadinessCache::new());
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+
+        for _ in 0..20 {
+            let cache = cache.clone();
+            let refreshes = refreshes.clone();
+            tasks.push(tokio::spawn(async move {
+                cache
+                    .get_or_refresh(|| async {
+                        refreshes.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        ReadinessSnapshot {
+                            checked_at: Instant::now(),
+                            user: true,
+                            novel: true,
+                            agent: true,
+                            narrative: true,
+                        }
+                    })
+                    .await
+            }));
+        }
+
+        for task in tasks {
+            assert!(task.await.unwrap().user);
+        }
+        assert_eq!(refreshes.load(Ordering::SeqCst), 1);
     }
 }
