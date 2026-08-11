@@ -1,10 +1,14 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
+use std::time::Duration;
 use uuid::Uuid;
 
+use crate::domain::ports::{ReadinessProbe, ReadingContext, ReadingContextPort};
 use crate::domain::repositories::{CharacterInfo, CharacterInfoRepository};
+
+const NOVEL_SERVICE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// HTTP adapter that fetches character info from novel-service,
 /// replacing the previous direct-DB query against novel-service's tables.
@@ -21,84 +25,46 @@ struct CharacterResponse {
     name: String,
     novel_id: Uuid,
     #[serde(default)]
-    system_prompt: Option<String>,
-    #[serde(default)]
-    personality: Option<String>,
-    #[serde(default)]
-    background: Option<String>,
-    #[serde(default)]
     speaking_style: Option<String>,
     #[serde(default)]
-    description: Option<String>,
+    first_appearance_chapter: Option<i32>,
 }
 
-/// Novel info needed to build a fallback system prompt.
 #[derive(Debug, Deserialize)]
-struct NovelResponse {
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    world_summary: Option<String>,
+struct ReadingProgressResponse {
+    user_id: Uuid,
+    novel_id: Uuid,
+    current_chapter: i32,
+    reader_identity: Option<String>,
+    reader_identity_type: String,
+    reader_character_id: Option<Uuid>,
+    deviation_mode: String,
 }
 
 impl NovelServiceClient {
     pub fn new(base_url: String) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(NOVEL_SERVICE_TIMEOUT)
+                .build()
+                .expect("valid novel-service HTTP client configuration"),
             base_url,
         }
-    }
-
-    /// Build a system prompt from character + novel fields when no pre-built prompt exists.
-    fn build_system_prompt(
-        ch: &CharacterResponse,
-        novel_title: &str,
-        world_summary: &str,
-    ) -> String {
-        let personality = ch.personality.as_deref().unwrap_or("Unknown");
-        let background = ch.background.as_deref().unwrap_or("Unknown");
-        let speaking_style = ch.speaking_style.as_deref().unwrap_or("Natural");
-        let description = ch.description.as_deref().unwrap_or("");
-
-        format!(
-            r#"You are the character "{name}" from "{novel_title}".
-
-## World Background
-{world_summary}
-
-## Your Character Info
-- **Name**: {name}
-- **Description**: {description}
-- **Personality**: {personality}
-- **Background**: {background}
-- **Speaking Style**: {speaking_style}
-
-## Behavioral Rules
-1. Always respond in character as "{name}", maintaining consistency
-2. Your speech patterns and word choices should match the character
-3. You only know events you have experienced in the story (anti-spoiler rule)
-4. Remember your conversation history with the reader for relationship continuity
-5. Keep responses natural and immersive; do not break the fourth wall
-6. If asked about information you should not know, deflect naturally in character"#,
-            novel_title = novel_title,
-            name = ch.name,
-            world_summary = world_summary,
-            description = description,
-            personality = personality,
-            background = background,
-            speaking_style = speaking_style,
-        )
     }
 }
 
 #[async_trait]
 impl CharacterInfoRepository for NovelServiceClient {
-    async fn find_by_id(&self, id: Uuid) -> Result<Option<CharacterInfo>> {
+    async fn find_by_id(&self, id: Uuid, user_id: Uuid) -> Result<Option<CharacterInfo>> {
         // Fetch character from novel-service API
         let url = format!("{}/characters/{}", self.base_url, id);
-        let resp = self.client.get(&url).send().await.map_err(|e| {
-            anyhow!("Failed to reach novel-service at {}: {}", url, e)
-        })?;
+        let resp = self
+            .client
+            .get(&url)
+            .header("X-User-Id", user_id.to_string())
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to reach novel-service at {}: {}", url, e))?;
 
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -114,36 +80,82 @@ impl CharacterInfoRepository for NovelServiceClient {
 
         let ch: CharacterResponse = resp.json().await?;
 
-        // If there is no pre-built system_prompt, fetch novel info and build one
-        let system_prompt = if let Some(ref prompt) = ch.system_prompt {
-            Some(prompt.clone())
-        } else {
-            // Fetch novel metadata to build the prompt
-            let novel_url = format!("{}/novels/{}", self.base_url, ch.novel_id);
-            let novel_resp = self.client.get(&novel_url).send().await;
-
-            let (novel_title, world_summary) = match novel_resp {
-                Ok(r) if r.status().is_success() => {
-                    let novel: NovelResponse = r.json().await.unwrap_or(NovelResponse {
-                        title: None,
-                        world_summary: None,
-                    });
-                    (
-                        novel.title.unwrap_or_else(|| "Unknown".into()),
-                        novel.world_summary.unwrap_or_default(),
-                    )
-                }
-                _ => ("Unknown".into(), String::new()),
-            };
-
-            Some(Self::build_system_prompt(&ch, &novel_title, &world_summary))
-        };
-
         Ok(Some(CharacterInfo {
             id: ch.id,
             name: ch.name,
             novel_id: ch.novel_id,
-            system_prompt,
+            speaking_style: ch.speaking_style,
+            first_appearance_chapter: ch.first_appearance_chapter,
         }))
+    }
+}
+
+#[async_trait]
+impl ReadingContextPort for NovelServiceClient {
+    async fn find(&self, novel_id: Uuid, user_id: Uuid) -> Result<Option<ReadingContext>> {
+        let url = format!("{}/progress/{}", self.base_url, novel_id);
+        let response = self
+            .client
+            .get(&url)
+            .header("X-User-Id", user_id.to_string())
+            .send()
+            .await
+            .map_err(|error| anyhow!("Failed to reach novel-service at {}: {}", url, error))?;
+
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "novel-service returned {} for reading progress {}",
+                response.status(),
+                novel_id
+            ));
+        }
+
+        let progress: ReadingProgressResponse = response.json().await?;
+        if progress.user_id != user_id
+            || progress.novel_id != novel_id
+            || progress.current_chapter < 1
+            || !matches!(progress.reader_identity_type.as_str(), "self" | "character")
+            || !matches!(
+                progress.deviation_mode.as_str(),
+                "canon" | "creative" | "remix"
+            )
+            || progress.reader_identity.as_deref().is_some_and(|identity| {
+                identity.chars().count() > 200 || identity.chars().any(char::is_control)
+            })
+            || !matches!(
+                (
+                    progress.reader_identity_type.as_str(),
+                    progress.reader_identity.as_ref(),
+                    progress.reader_character_id,
+                ),
+                ("self", _, None) | ("character", Some(_), Some(_))
+            )
+        {
+            return Err(anyhow!("novel-service returned invalid reading context"));
+        }
+
+        Ok(Some(ReadingContext {
+            user_id: progress.user_id,
+            novel_id: progress.novel_id,
+            current_chapter: progress.current_chapter,
+            reader_identity: progress.reader_identity,
+            reader_identity_type: progress.reader_identity_type,
+            reader_character_id: progress.reader_character_id,
+            deviation_mode: progress.deviation_mode,
+        }))
+    }
+}
+
+#[async_trait]
+impl ReadinessProbe for NovelServiceClient {
+    async fn is_ready(&self) -> bool {
+        self.client
+            .get(format!("{}/ready", self.base_url))
+            .send()
+            .await
+            .is_ok_and(|response| response.status().is_success())
     }
 }

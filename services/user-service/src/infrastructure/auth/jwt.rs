@@ -4,6 +4,8 @@ use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::domain::ports::AccessTokenIssuer;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Claims {
     pub sub: String,
@@ -48,5 +50,11 @@ impl JwtService {
             &Validation::new(Algorithm::HS256),
         )?;
         Ok(token_data.claims)
+    }
+}
+
+impl AccessTokenIssuer for JwtService {
+    fn generate_token(&self, user_id: Uuid, email: &str, role: &str) -> Result<String> {
+        JwtService::generate_token(self, user_id, email, role)
     }
 }

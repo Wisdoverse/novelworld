@@ -64,7 +64,10 @@ mod tests {
 
     #[test]
     fn test_normalize_path_numeric() {
-        assert_eq!(normalize_path("/api/novels/42/chapters"), "/api/novels/:num/chapters");
+        assert_eq!(
+            normalize_path("/api/novels/42/chapters"),
+            "/api/novels/:num/chapters"
+        );
     }
 
     #[test]

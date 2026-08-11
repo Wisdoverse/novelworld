@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import type { Novel, Character, ChatMessage, NarrativeNode, WorldState } from './index';
+import type { Novel, Character, ChatMessage, WorldState } from './index';
 
 describe('Type contracts', () => {
   it('Novel has required fields', () => {

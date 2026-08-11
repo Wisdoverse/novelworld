@@ -18,7 +18,7 @@ agent entrypoint.
   and uuid-ossp extensions.
 - Redis is used for short-term memory caching in the agent-service.
 - LLM calls go to an OpenAI-compatible API. All calls implement retry
-  (3 attempts, exponential backoff 1s/2s/4s, Retry-After header support).
+  (3 retries, exponential backoff 1s/2s/4s, Retry-After header support).
 - JWT authentication flows through the gateway. Downstream services receive
   `X-User-Id` and `X-User-Role` headers injected by the gateway middleware.
 
@@ -39,10 +39,12 @@ Data flow for a conversation turn:
 ```text
 Browser POST /api/chat/:characterId/stream
   → Gateway validates JWT, injects X-User-Id
+  → Agent Service reserves the Idempotency-Key and snapshots server-side progress
   → Agent Service retrieves 4-layer memory pyramid
   → Agent Service builds system prompt (character + memories + anti-spoiler)
   → Agent Service streams LLM response via SSE
-  → Post-stream: store messages, update short-term memory, trigger compression
+  → Atomically store both messages and complete the turn
+  → Emit done only after commit; then project Redis memory/compression
 ```
 
 ## Repository Map
@@ -57,7 +59,7 @@ Browser POST /api/chat/:characterId/stream
 - `services/narrative-service/` — Branch logic. Narrative nodes, choice
   submission, consequence generation, world state mutations.
 - `frontend/` — React/TypeScript/Tailwind app. Feature-Sliced Design.
-- `infra/postgres/` — Schema (`init.sql`), seed data, extensions.
+- `infra/postgres/` — Schema (`init.sql`), explicit development seed fixture, extensions.
 - `infra/nginx/` — Reverse proxy config with SSE support.
 - `docs/` — Architecture docs.
 
@@ -179,6 +181,7 @@ Schema lives in `infra/postgres/init.sql`. Key tables:
 | `character_memories` | 4-layer memory pyramid + pgvector embeddings |
 | `character_relationships` | Entity relationship graph between characters |
 | `chat_messages` | Conversation history |
+| `chat_turns` | Idempotency, lease, and commit state for conversation turns |
 | `narrative_nodes` | Branch points with JSONB choices |
 | `user_choices` | Reader's branch decisions |
 | `world_states` | JSONB world state per reader per novel |
@@ -200,14 +203,15 @@ See `.env.example` for the full list with defaults.
 
 ## Testing
 
-25 unit tests across all services. Run with `cargo test --workspace`.
+Unit and contract tests across all services run with `cargo test --workspace`.
 
 Tests cover: email validation, JWT roundtrip, bcrypt verification, chapter
 splitting (Chinese/English/fallback), novel status transitions, memory layer
 ordering, anti-spoiler chapter filtering, narrative choice bounds, world state
 relationship clamping.
 
-Integration tests require running PostgreSQL and Redis (use Docker Compose).
+Integration tests use PostgreSQL and Redis from `docker-compose.test.yml` and
+exercise production repositories plus replayable migrations.
 
 ## Gotchas
 
@@ -240,14 +244,13 @@ Integration tests require running PostgreSQL and Redis (use Docker Compose).
 All previously listed gaps have been resolved. Remaining minor items:
 
 - S3 object storage for uploaded files — upload endpoint extracts text directly, no S3 persistence yet.
-- Integration tests requiring running PostgreSQL + Redis — unit tests only.
 
 ## Security Notes
 
 - Never commit `.env`, credentials, or API keys.
 - All SQL uses parameterized queries (no string interpolation).
 - JWT tokens expire per `AUTH_ACCESS_TOKEN_EXPIRY` (default 1h).
-- Refresh tokens stored hashed, with expiry.
+- Refresh tokens are server-side, bounded, and expire; they are currently stored as opaque values.
 - User input is passed to LLM prompts — the system prompt includes behavioral
   constraints to mitigate prompt injection, but this is defense-in-depth, not
   a guarantee.

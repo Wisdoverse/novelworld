@@ -13,7 +13,7 @@
 
 ---
 
-## 快速部署（5 步）
+## 快速部署（仅首次安装，5 步）
 
 ### 第 1 步：安装 Docker
 
@@ -60,14 +60,78 @@ docker compose up -d --build
 # 检查所有服务状态
 docker compose ps
 
-# 检查 Gateway 健康
-curl http://localhost:8080/health
+# 通过公开 Nginx 入口检查聚合健康
+curl --fail http://localhost/health
+curl --fail http://localhost/ready
 
 # 查看日志
 docker compose logs -f gateway
 ```
 
 访问 `http://your-server-ip` 即可使用。
+首次访问会要求创建唯一的首位管理员。生产 schema 不再安装默认应用账号；LLM
+密钥只从服务器环境读取，浏览器不会保存密钥。
+
+---
+
+## 生产升级与回滚
+
+Tag workflow 会先运行完整 CI，只发布以 Git SHA 标记的应用镜像，并生成
+`novel-world-release-<git-sha>` artifact。`release.env` 只允许版本、代码 SHA、
+六个应用镜像和三个经源码审批的基础镜像 digest；不要部署单个镜像或使用
+`latest`。
+
+PostgreSQL、Redis、Nginx 的 digest 固定在 `docker-compose.yml`。普通应用发布
+要求候选与当前 release 的三个 digest 完全一致，只检查 PostgreSQL/Redis 健康，
+不会重建或降级它们。基础镜像变更必须作为独立基础设施变更，先完成数据库备份、
+格式兼容与恢复演练；本脚本会拒绝把它混入应用发布。
+
+自动回滚只适用于新格式 release。如果当前环境已经使用九镜像契约，首次采用前先
+验证一份与实际代码和镜像完全一致的基线：
+
+```bash
+./infra/docker/release.sh validate /path/to/current-release.env
+install -d -m 700 .release
+install -m 600 /path/to/current-release.env .release/current.env
+```
+
+旧版 all-in-one 环境无法建立上述基线。此时必须先保留并验证旧源码 bundle、精确
+镜像和数据库备份的人工恢复路径，再执行一次性采用；按提示输入
+`ADOPT-<release-git-sha>`。采用成功只建立 current，不伪造 previous，因此自动
+rollback 要到下一次成功 upgrade 后才可用：
+
+```bash
+./infra/docker/release.sh adopt /path/to/artifact/release.env
+```
+
+升级时把 artifact 解压到临时目录。脚本使用 `set -euo pipefail`，严格拒绝额外、
+重复或缺失字段，从不执行或 `source` manifest；Compose 同时读取生产 `.env` 和
+已验证的候选 manifest。候选只有在全部 readiness 成功后才原子提升为
+`.release/current.env`，旧 current 才成为 previous：
+
+```bash
+./infra/docker/release.sh upgrade /path/to/artifact/release.env
+```
+
+脚本先更新兼容前端并暂停。确认章节切换成功返回
+`PUT /api/progress/:novelId`，设置状态在旧后端上明确显示暂不可用，且聊天请求携带
+UUID v4 `Idempotency-Key` 后，输入脚本
+显示的代码 SHA；随后才会执行迁移和后端更新。旧标签页会收到
+`426 client_upgrade_required`，不会以请求体中的过期章节启动 LLM。新 Agent 只在
+同一事务写入一对消息并完成 turn；`done` 是数据库提交确认。
+
+升级中途失败时 current/previous 不会被覆盖。恢复最后成功的 current：
+
+```bash
+./infra/docker/release.sh restore
+```
+
+成功上线后若需回滚，数据库 migration 保持前向兼容且不执行 down migration；脚本
+部署 previous，通过 readiness 后再交换 current/previous：
+
+```bash
+./infra/docker/release.sh rollback <previous-release-git-sha>
+```
 
 ---
 
@@ -75,14 +139,14 @@ docker compose logs -f gateway
 
 | 服务 | 内部端口 | 对外暴露 | 说明 |
 |---|---|---|---|
-| nginx | 80, 443 | ✅ 80, 443 | 反向代理入口 |
-| gateway | 8080 | ✅ 8080（可选） | API 网关 |
+| nginx | 80 | ✅ 80 | 反向代理入口 |
+| gateway | 8080 | ❌ 默认关闭（可选 8080） | API 网关 |
 | user-service | 8001 | ❌ 内部 | 用户认证 |
 | novel-service | 8002 | ❌ 内部 | 小说解析 |
 | agent-service | 8003 | ❌ 内部 | 角色对话 |
 | narrative-service | 8004 | ❌ 内部 | 分支叙事 |
-| postgres | 5432 | ✅ 5432（建议关闭） | 数据库 |
-| redis | 6379 | ✅ 6379（建议关闭） | 缓存 |
+| postgres | 5432 | ❌ 默认关闭（可选 5432） | 数据库 |
+| redis | 6379 | ❌ 默认关闭（可选 6379） | 缓存 |
 
 **生产环境建议**：关闭 postgres 和 redis 的对外端口映射，仅通过内部网络访问。
 
@@ -94,6 +158,8 @@ docker compose logs -f gateway
 
 ### 用户认证
 ```
+GET    /api/setup/status     — 是否已有账号
+POST   /api/setup/init       — 原子创建首位管理员（仅空库）
 POST   /api/auth/register     — 注册
 POST   /api/auth/login        — 登录，返回 JWT
 POST   /api/auth/refresh      — 刷新 Token

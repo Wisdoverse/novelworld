@@ -1,0 +1,40 @@
+FROM rust:1.97-slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY gateway ./gateway
+COPY services ./services
+COPY tests ./tests
+
+RUN --mount=type=cache,id=novel-world-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=novel-world-cargo-target,target=/app/target,sharing=locked \
+    cargo build --locked --release \
+        --package gateway \
+        --package user-service \
+        --package novel-service \
+        --package agent-service \
+        --package narrative-service \
+    && mkdir /app/bin \
+    && for service in gateway user-service novel-service agent-service narrative-service; do \
+        cp "target/release/$service" /app/bin/; \
+    done
+
+ARG SERVICE
+RUN cp "/app/bin/$SERVICE" /app/service
+
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --shell /usr/sbin/nologin appuser
+
+WORKDIR /app
+COPY --from=builder /app/service /app/service
+USER appuser
+CMD ["/app/service"]

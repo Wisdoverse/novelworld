@@ -10,26 +10,122 @@ permissions:
   packages: write
 
 jobs:
-  build:
+  quality:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  rust-services:
+    needs: quality
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service:
+          - gateway
+          - user-service
+          - novel-service
+          - agent-service
+          - narrative-service
     steps:
       - uses: actions/checkout@v4
-
+      - id: image
+        run: echo "prefix=$(echo 'ghcr.io/${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v3
-
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
       - uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile
+          file: ./infra/docker/Dockerfile.rust-service
+          build-args: SERVICE=${{ matrix.service }}
           push: true
-          tags: |
-            ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ steps.image.outputs.prefix }}-${{ matrix.service }}:${{ github.sha }}
+          cache-from: type=gha,scope=rust-${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=rust-${{ matrix.service }}
+
+  frontend:
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: image
+        run: echo "prefix=$(echo 'ghcr.io/${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          tags: ${{ steps.image.outputs.prefix }}-frontend:${{ github.sha }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+
+  release-manifest:
+    needs: [rust-services, frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify immutable images and record digests
+        id: manifest
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+          RELEASE_GIT_SHA: ${{ github.sha }}
+          IMAGE_PREFIX: ghcr.io/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]
+          [[ "$RELEASE_GIT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          image_prefix=$(printf '%s' "$IMAGE_PREFIX" | tr '[:upper:]' '[:lower:]')
+          printf 'RELEASE_VERSION=%s\n' "$RELEASE_VERSION" > release.env
+          printf 'RELEASE_GIT_SHA=%s\n' "$RELEASE_GIT_SHA" >> release.env
+
+          record_image() {
+            local key="$1" image="$2" digest
+            digest=$(docker buildx imagetools inspect "$image" --format '{{.Manifest.Digest}}')
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            printf '%s=%s@%s\n' "$key" "${image%:*}" "$digest" >> release.env
+          }
+
+          record_pinned_image() {
+            local key="$1" image="$2" expected actual
+            [[ "$image" =~ ^[a-z0-9][a-z0-9._/:@-]*@sha256:[0-9a-f]{64}$ ]]
+            expected=${image##*@}
+            actual=$(docker buildx imagetools inspect "$image" --format '{{.Manifest.Digest}}')
+            [[ "$actual" = "$expected" ]]
+            printf '%s=%s\n' "$key" "$image" >> release.env
+          }
+
+          for service in gateway user-service novel-service agent-service narrative-service frontend; do
+            image="$image_prefix-$service:$RELEASE_GIT_SHA"
+            key=$(echo "${service//-/_}_IMAGE" | tr '[:lower:]' '[:upper:]')
+            record_image "$key" "$image"
+          done
+
+          compose_json=$(POSTGRES_PASSWORD=manifest-placeholder \
+            REDIS_PASSWORD=manifest-placeholder \
+            JWT_SECRET=manifest-placeholder-secret-at-least-32-characters \
+            LLM_API_KEY=manifest-placeholder docker compose config --format json)
+          postgres_image=$(jq -r '.services.postgres.image' <<<"$compose_json")
+          [[ $(jq -r '.services["postgres-migrate"].image' <<<"$compose_json") = "$postgres_image" ]]
+          record_pinned_image POSTGRES_IMAGE "$postgres_image"
+          record_pinned_image REDIS_IMAGE "$(jq -r '.services.redis.image' <<<"$compose_json")"
+          record_pinned_image NGINX_IMAGE "$(jq -r '.services.nginx.image' <<<"$compose_json")"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: novel-world-release-${{ github.sha }}
+          path: release.env

@@ -1,10 +1,10 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 
-use crate::providers::LlmProvider;
-use crate::providers::openai::OpenAIProvider;
 use crate::providers::anthropic::AnthropicProvider;
 use crate::providers::gemini::GeminiProvider;
+use crate::providers::openai::OpenAIProvider;
+use crate::providers::LlmProvider;
 use crate::retry::RetryPolicy;
 use crate::types::*;
 
@@ -12,6 +12,12 @@ pub struct LlmClient {
     http: reqwest::Client,
     providers: HashMap<String, (Box<dyn LlmProvider>, String)>,
     default_provider: Option<String>,
+}
+
+impl Default for LlmClient {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LlmClient {
@@ -137,10 +143,8 @@ impl LlmClient {
 
     pub fn with_openai(mut self, api_key: impl Into<String>) -> Self {
         let key = api_key.into();
-        self.providers.insert(
-            "openai".into(),
-            (Box::new(OpenAIProvider::new(None)), key),
-        );
+        self.providers
+            .insert("openai".into(), (Box::new(OpenAIProvider::new(None)), key));
         if self.default_provider.is_none() {
             self.default_provider = Some("openai".into());
         }
@@ -149,10 +153,8 @@ impl LlmClient {
 
     pub fn with_anthropic(mut self, api_key: impl Into<String>) -> Self {
         let key = api_key.into();
-        self.providers.insert(
-            "anthropic".into(),
-            (Box::new(AnthropicProvider), key),
-        );
+        self.providers
+            .insert("anthropic".into(), (Box::new(AnthropicProvider), key));
         if self.default_provider.is_none() {
             self.default_provider = Some("anthropic".into());
         }
@@ -161,10 +163,8 @@ impl LlmClient {
 
     pub fn with_gemini(mut self, api_key: impl Into<String>) -> Self {
         let key = api_key.into();
-        self.providers.insert(
-            "gemini".into(),
-            (Box::new(GeminiProvider), key),
-        );
+        self.providers
+            .insert("gemini".into(), (Box::new(GeminiProvider), key));
         if self.default_provider.is_none() {
             self.default_provider = Some("gemini".into());
         }
@@ -180,10 +180,8 @@ impl LlmClient {
         let n = name.into();
         let key = api_key.into();
         let url = base_url.into();
-        self.providers.insert(
-            n.clone(),
-            (Box::new(OpenAIProvider::new(Some(&url))), key),
-        );
+        self.providers
+            .insert(n.clone(), (Box::new(OpenAIProvider::new(Some(&url))), key));
         if self.default_provider.is_none() {
             self.default_provider = Some(n);
         }
@@ -200,10 +198,18 @@ impl LlmClient {
         self.with_doubao_cn(api_key)
     }
     pub fn with_doubao_cn(self, api_key: impl Into<String>) -> Self {
-        self.with_openai_compatible("doubao", api_key, "https://ark.cn-beijing.volces.com/api/v3")
+        self.with_openai_compatible(
+            "doubao",
+            api_key,
+            "https://ark.cn-beijing.volces.com/api/v3",
+        )
     }
     pub fn with_doubao_intl(self, api_key: impl Into<String>) -> Self {
-        self.with_openai_compatible("doubao", api_key, "https://ark.ap-southeast.volces.com/api/v3")
+        self.with_openai_compatible(
+            "doubao",
+            api_key,
+            "https://ark.ap-southeast.volces.com/api/v3",
+        )
     }
 
     // ─── Qwen (Alibaba Cloud) ─────────────────────────────────────
@@ -211,10 +217,18 @@ impl LlmClient {
         self.with_qwen_cn(api_key)
     }
     pub fn with_qwen_cn(self, api_key: impl Into<String>) -> Self {
-        self.with_openai_compatible("qwen", api_key, "https://dashscope.aliyuncs.com/compatible-mode")
+        self.with_openai_compatible(
+            "qwen",
+            api_key,
+            "https://dashscope.aliyuncs.com/compatible-mode",
+        )
     }
     pub fn with_qwen_intl(self, api_key: impl Into<String>) -> Self {
-        self.with_openai_compatible("qwen", api_key, "https://dashscope-intl.aliyuncs.com/compatible-mode")
+        self.with_openai_compatible(
+            "qwen",
+            api_key,
+            "https://dashscope-intl.aliyuncs.com/compatible-mode",
+        )
     }
 
     // ─── MiniMax ──────────────────────────────────────────────────
@@ -304,15 +318,25 @@ impl LlmClient {
         if let Some(idx) = model.find('/') {
             let provider_name = &model[..idx];
             let model_name = &model[idx + 1..];
-            let (provider, api_key) = self.providers.get(provider_name)
-                .ok_or_else(|| anyhow!("Unknown provider: {}. Available: {:?}", provider_name, self.providers.keys().collect::<Vec<_>>()))?;
+            let (provider, api_key) = self.providers.get(provider_name).ok_or_else(|| {
+                anyhow!(
+                    "Unknown provider: {}. Available: {:?}",
+                    provider_name,
+                    self.providers.keys().collect::<Vec<_>>()
+                )
+            })?;
             Ok((provider.as_ref(), api_key, model_name.to_string()))
         } else if let Some(default) = &self.default_provider {
-            let (provider, api_key) = self.providers.get(default)
+            let (provider, api_key) = self
+                .providers
+                .get(default)
                 .ok_or_else(|| anyhow!("Default provider '{}' not configured", default))?;
             Ok((provider.as_ref(), api_key, model.to_string()))
         } else {
-            Err(anyhow!("No provider specified in model '{}' and no default set", model))
+            Err(anyhow!(
+                "No provider specified in model '{}' and no default set",
+                model
+            ))
         }
     }
 
@@ -321,17 +345,26 @@ impl LlmClient {
         let mut req = request;
         req.model = model_name;
 
-        for attempt in 0..RetryPolicy::max_retries() {
+        for attempt in 0..=RetryPolicy::max_retries() {
             match provider.chat(&self.http, api_key, &req).await {
                 Ok(resp) => return Ok(resp),
                 Err(e) => {
-                    let status = e.downcast_ref::<LlmApiError>()
-                        .map(|ae| ae.status)
-                        .unwrap_or(500);
+                    let api_error = e.downcast_ref::<LlmApiError>();
+                    let status = api_error.map(|error| error.status).unwrap_or(500);
 
-                    if attempt < RetryPolicy::max_retries() - 1 && RetryPolicy::should_retry(status, attempt) {
-                        let delay = RetryPolicy::delay(status, attempt, None);
-                        tracing::warn!("LLM error ({}), retry {}/{}: {}", status, attempt + 1, RetryPolicy::max_retries(), e);
+                    if RetryPolicy::should_retry(status, attempt) {
+                        let delay = RetryPolicy::delay(
+                            status,
+                            attempt,
+                            api_error.and_then(|error| error.retry_after.as_deref()),
+                        );
+                        tracing::warn!(
+                            "LLM error ({}), retry {}/{}: {}",
+                            status,
+                            attempt + 1,
+                            RetryPolicy::max_retries(),
+                            e
+                        );
                         tokio::time::sleep(delay).await;
                         continue;
                     }
@@ -342,45 +375,69 @@ impl LlmClient {
         unreachable!()
     }
 
-    pub async fn chat_stream(
-        &self,
-        request: ChatRequest,
-    ) -> Result<Box<dyn futures::Stream<Item = Result<String>> + Send + Unpin>> {
+    pub async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream> {
         let (provider, api_key, model_name) = self.resolve_provider(&request.model)?;
         let mut req = request;
         req.model = model_name;
         req.stream = true;
-        provider.chat_stream(&self.http, api_key, &req).await
+
+        for attempt in 0..=RetryPolicy::max_retries() {
+            match provider.chat_stream(&self.http, api_key, &req).await {
+                Ok(stream) => return Ok(stream),
+                Err(error) => {
+                    let api_error = error.downcast_ref::<LlmApiError>();
+                    let status = api_error.map(|error| error.status).unwrap_or(500);
+
+                    if RetryPolicy::should_retry(status, attempt) {
+                        let delay = RetryPolicy::delay(
+                            status,
+                            attempt,
+                            api_error.and_then(|error| error.retry_after.as_deref()),
+                        );
+                        tracing::warn!(
+                            "LLM stream setup error ({}), retry {}/{}: {}",
+                            status,
+                            attempt + 1,
+                            RetryPolicy::max_retries(),
+                            error
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        unreachable!()
     }
 
     pub async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
         let (provider, api_key, model_name) = self.resolve_provider(&request.model)?;
-        let req = EmbeddingRequest { model: model_name, input: request.input };
+        let req = EmbeddingRequest {
+            model: model_name,
+            input: request.input,
+        };
         provider.embed(&self.http, api_key, &req).await
     }
 
-    pub async fn simple_chat(
-        &self,
-        model: &str,
-        system: &str,
-        user: &str,
-    ) -> Result<String> {
+    pub async fn simple_chat(&self, model: &str, system: &str, user: &str) -> Result<String> {
         let request = ChatRequest::new(model)
             .message("system", system)
             .message("user", user)
-            .temperature(0.8);
+            .temperature(0.8)
+            .max_tokens(1024);
         self.chat(request).await.map(|r| r.content)
     }
 
-    pub async fn json_chat(
-        &self,
-        model: &str,
-        prompt: &str,
-    ) -> Result<String> {
+    pub async fn json_chat(&self, model: &str, prompt: &str) -> Result<String> {
         let request = ChatRequest::new(model)
-            .message("system", "You are a helpful assistant that always responds with valid JSON.")
+            .message(
+                "system",
+                "You are a helpful assistant that always responds with valid JSON.",
+            )
             .message("user", prompt)
             .temperature(0.3)
+            .max_tokens(4096)
             .json();
         self.chat(request).await.map(|r| r.content)
     }

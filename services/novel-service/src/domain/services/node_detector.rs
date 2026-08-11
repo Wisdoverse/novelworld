@@ -32,7 +32,16 @@ pub struct NodeDetectionResult {
 }
 
 pub fn build_node_detection_prompt(novel_title: &str, chapters: &[(i32, &str)]) -> String {
-    let summaries: String = chapters.iter()
+    const MAX_CHAPTERS: usize = 40;
+    let selected: Vec<_> = if chapters.len() <= MAX_CHAPTERS {
+        chapters.iter().collect()
+    } else {
+        (0..MAX_CHAPTERS)
+            .map(|index| &chapters[index * (chapters.len() - 1) / (MAX_CHAPTERS - 1)])
+            .collect()
+    };
+    let summaries: String = selected
+        .into_iter()
         .map(|(num, content)| format!("Chapter {}: {}", num, safe_truncate(content, 500)))
         .collect::<Vec<_>>()
         .join("\n\n");
@@ -67,7 +76,7 @@ Requirements:
 2. 2-3 choices per node, each with a mysterious hint
 3. Choices should represent genuinely different paths (brave/cautious/creative)
 4. Only pick truly pivotal story moments, not minor decisions"#,
-        title = novel_title,
+        title = safe_truncate(novel_title, 500),
         summaries = summaries,
     )
 }

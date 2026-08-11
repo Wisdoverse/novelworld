@@ -1,8 +1,6 @@
-version: "3.9"
-
 # ─── NovelWorld 微服务编排 ────────────────────────────────────────────────────
 # 服务拓扑：
-#   nginx (80/443) → gateway (8080) → [novel-service, agent-service,
+#   nginx (80) → gateway (8080) → [novel-service, agent-service,
 #                                       narrative-service, user-service]
 #   所有服务共享 postgres18 + redis
 
@@ -13,25 +11,23 @@ networks:
 volumes:
   postgres_data:
   redis_data:
-  uploads_data:
 
 services:
 
   # ─── 基础设施 ──────────────────────────────────────────────────────────────
 
   postgres:
-    image: postgres:18-alpine
+    image: ${POSTGRES_IMAGE:-pgvector/pgvector@sha256:691673308c99d2161ba298736f3147f1f22d79de2fb7ec93ae9b4afcab870b62}
     container_name: novel-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-novel}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-novel_secret}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:-novel_world}
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
-      - ./infra/postgres/seed.sql:/docker-entrypoint-initdb.d/02_seed.sql:ro
     # ports:
     #   - "5432:5432"  # uncomment for local dev
     networks:
@@ -42,11 +38,35 @@ services:
       timeout: 5s
       retries: 5
 
+  postgres-migrate:
+    image: ${POSTGRES_IMAGE:-pgvector/pgvector@sha256:691673308c99d2161ba298736f3147f1f22d79de2fb7ec93ae9b4afcab870b62}
+    restart: "no"
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:-novel}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      PGDATABASE: ${POSTGRES_DB:-novel_world}
+    volumes:
+      - ./infra/postgres/migrations:/migrations:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        for migration in /migrations/*.sql; do
+          echo "Applying $$migration"
+          psql -v ON_ERROR_STOP=1 -f "$$migration"
+        done
+    networks:
+      - novel-net
+
   redis:
-    image: redis:7-alpine
+    image: ${REDIS_IMAGE:-redis@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2}
     container_name: novel-redis
     restart: unless-stopped
-    command: redis-server --requirepass ${REDIS_PASSWORD:-redis_secret} --maxmemory 256mb --maxmemory-policy allkeys-lru
+    command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required} --maxmemory 256mb --maxmemory-policy allkeys-lru
     volumes:
       - redis_data:/data
     # ports:
@@ -54,7 +74,7 @@ services:
     networks:
       - novel-net
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_secret}", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:?REDIS_PASSWORD is required}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -62,44 +82,47 @@ services:
   # ─── 微服务 ────────────────────────────────────────────────────────────────
 
   user-service:
+    image: ${USER_SERVICE_IMAGE:-novel-world-user-service:local}
     build:
-      context: ./services/user-service
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: infra/docker/Dockerfile.rust-service
+      args:
+        SERVICE: user-service
     container_name: novel-user-service
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER:-novel}:${POSTGRES_PASSWORD:-novel_secret}@postgres:5432/${POSTGRES_DB:-novel_world}
-      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_secret}@redis:6379
-      JWT_SECRET: ${JWT_SECRET:-change_me_in_production_32chars}
-      JWT_EXPIRY_HOURS: ${JWT_EXPIRY_HOURS:-24}
+      DATABASE_URL: postgres://${POSTGRES_USER:-novel}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-novel_world}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      AUTH_ACCESS_TOKEN_EXPIRY: ${AUTH_ACCESS_TOKEN_EXPIRY:-3600}
+      AUTH_REFRESH_TOKEN_EXPIRY: ${AUTH_REFRESH_TOKEN_EXPIRY:-604800}
       PORT: 8001
       RUST_LOG: info
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      postgres-migrate:
+        condition: service_completed_successfully
     networks:
       - novel-net
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8001/ready"]
       interval: 15s
       timeout: 5s
       retries: 3
 
   novel-service:
+    image: ${NOVEL_SERVICE_IMAGE:-novel-world-novel-service:local}
     build:
-      context: ./services/novel-service
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: infra/docker/Dockerfile.rust-service
+      args:
+        SERVICE: novel-service
     container_name: novel-novel-service
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER:-novel}:${POSTGRES_PASSWORD:-novel_secret}@postgres:5432/${POSTGRES_DB:-novel_world}
-      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_secret}@redis:6379
-      LLM_API_URL: ${LLM_API_URL:-https://api.openai.com/v1}
-      LLM_API_KEY: ${LLM_API_KEY}
+      DATABASE_URL: postgres://${POSTGRES_USER:-novel}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-novel_world}
+      LLM_API_URL: ${LLM_API_URL:-https://api.openai.com}
+      LLM_API_KEY: ${LLM_API_KEY:?LLM_API_KEY is required}
       LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
-      IMAGE_GEN_API_URL: ${IMAGE_GEN_API_URL:-https://api.openai.com/v1}
+      IMAGE_GEN_API_URL: ${IMAGE_GEN_API_URL:-https://api.openai.com}
       IMAGE_GEN_API_KEY: ${IMAGE_GEN_API_KEY:-}
       S3_ENDPOINT: ${S3_ENDPOINT:-}
       S3_BUCKET: ${S3_BUCKET:-novel-world}
@@ -107,30 +130,31 @@ services:
       S3_SECRET_KEY: ${S3_SECRET_KEY:-}
       PORT: 8002
       RUST_LOG: info
-    volumes:
-      - uploads_data:/app/uploads
     depends_on:
-      postgres:
-        condition: service_healthy
+      postgres-migrate:
+        condition: service_completed_successfully
     networks:
       - novel-net
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8002/ready"]
       interval: 15s
       timeout: 5s
       retries: 3
 
   agent-service:
+    image: ${AGENT_SERVICE_IMAGE:-novel-world-agent-service:local}
     build:
-      context: ./services/agent-service
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: infra/docker/Dockerfile.rust-service
+      args:
+        SERVICE: agent-service
     container_name: novel-agent-service
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER:-novel}:${POSTGRES_PASSWORD:-novel_secret}@postgres:5432/${POSTGRES_DB:-novel_world}
-      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_secret}@redis:6379
-      LLM_API_URL: ${LLM_API_URL:-https://api.openai.com/v1}
-      LLM_API_KEY: ${LLM_API_KEY}
+      DATABASE_URL: postgres://${POSTGRES_USER:-novel}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-novel_world}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
+      LLM_API_URL: ${LLM_API_URL:-https://api.openai.com}
+      LLM_API_KEY: ${LLM_API_KEY:?LLM_API_KEY is required}
       LLM_MODEL: ${LLM_MODEL:-gpt-4o}
       # 记忆层配置
       MEMORY_SHORT_TERM_LIMIT: ${MEMORY_SHORT_TERM_LIMIT:-20}
@@ -140,8 +164,8 @@ services:
       NOVEL_SERVICE_URL: http://novel-service:8002
       RUST_LOG: info
     depends_on:
-      postgres:
-        condition: service_healthy
+      postgres-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       novel-service:
@@ -149,35 +173,37 @@ services:
     networks:
       - novel-net
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8003/ready"]
       interval: 15s
       timeout: 5s
       retries: 3
 
   narrative-service:
+    image: ${NARRATIVE_SERVICE_IMAGE:-novel-world-narrative-service:local}
     build:
-      context: ./services/narrative-service
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: infra/docker/Dockerfile.rust-service
+      args:
+        SERVICE: narrative-service
     container_name: novel-narrative-service
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER:-novel}:${POSTGRES_PASSWORD:-novel_secret}@postgres:5432/${POSTGRES_DB:-novel_world}
-      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_secret}@redis:6379
-      LLM_API_URL: ${LLM_API_URL:-https://api.openai.com/v1}
-      LLM_API_KEY: ${LLM_API_KEY}
+      DATABASE_URL: postgres://${POSTGRES_USER:-novel}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-novel_world}
+      LLM_API_URL: ${LLM_API_URL:-https://api.openai.com}
+      LLM_API_KEY: ${LLM_API_KEY:?LLM_API_KEY is required}
       LLM_MODEL: ${LLM_MODEL:-gpt-4o}
       PORT: 8004
       NOVEL_SERVICE_URL: http://novel-service:8002
       RUST_LOG: info
     depends_on:
-      postgres:
-        condition: service_healthy
+      postgres-migrate:
+        condition: service_completed_successfully
       novel-service:
         condition: service_healthy
     networks:
       - novel-net
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8004/ready"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -185,9 +211,12 @@ services:
   # ─── API Gateway ───────────────────────────────────────────────────────────
 
   gateway:
+    image: ${GATEWAY_IMAGE:-novel-world-gateway:local}
     build:
-      context: ./gateway
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: infra/docker/Dockerfile.rust-service
+      args:
+        SERVICE: gateway
     container_name: novel-gateway
     restart: unless-stopped
     environment:
@@ -195,8 +224,9 @@ services:
       NOVEL_SERVICE_URL: http://novel-service:8002
       AGENT_SERVICE_URL: http://agent-service:8003
       NARRATIVE_SERVICE_URL: http://narrative-service:8004
-      JWT_SECRET: ${JWT_SECRET:-change_me_in_production_32chars}
-      GATEWAY_PORT: 8080
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      PORT: 8080
+      RATE_LIMIT_RPS: ${RATE_LIMIT_RPS:-500}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost:80}
       RUST_LOG: info
     # ports:
@@ -213,7 +243,7 @@ services:
     networks:
       - novel-net
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/ready"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -221,6 +251,7 @@ services:
   # ─── 前端 ──────────────────────────────────────────────────────────────────
 
   frontend:
+    image: ${FRONTEND_IMAGE:-novel-world-frontend:local}
     build:
       context: ./frontend
       dockerfile: Dockerfile
@@ -234,15 +265,13 @@ services:
   # ─── Nginx 反向代理 ────────────────────────────────────────────────────────
 
   nginx:
-    image: nginx:alpine
+    image: ${NGINX_IMAGE:-nginx@sha256:4a73073bd557c65b759505da037898b61f1be6cbcc3c2c3aeac22d2a470c1752}
     container_name: novel-nginx
     restart: unless-stopped
     ports:
       - "80:80"
-      - "443:443"
     volumes:
       - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./infra/nginx/certs:/etc/nginx/certs:ro
     depends_on:
       - gateway
       - frontend

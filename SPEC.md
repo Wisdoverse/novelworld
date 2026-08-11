@@ -283,9 +283,31 @@ Fields:
   - Set only for `short` layer entries. Null means no expiry.
 - `created_at` (timestamptz)
 
-#### 4.1.6 ChatMessage
+#### 4.1.6 ChatTurn
 
-One turn in a conversation between a reader and a character agent.
+The durable idempotency and fencing record for one logical conversation turn.
+
+Fields:
+
+- `id` (client-generated UUID v4 from `Idempotency-Key`)
+- `user_id`, `character_id`, `novel_id` (UUID ownership scope)
+- `request_fingerprint` (32-byte message fingerprint; plaintext is not stored while pending)
+- `chapter_context`, `reader_identity`, `reader_identity_type`,
+  `reader_character_id`, `deviation_mode` (immutable server-side prompt snapshot)
+- `status` (`in_progress` | `completed` | `failed`)
+- `attempt` (positive fencing token)
+- `lease_expires_at`, `failure_code`, `created_at`, `updated_at`, `completed_at`
+
+The state fields MUST agree with the status: only `in_progress` has a lease,
+only `failed` has a failure code, and only `completed` has `completed_at`.
+At most one `in_progress` turn may exist for a
+`(user_id, character_id, novel_id)` conversation, so a following turn builds
+its prompt only after the preceding pair is committed. An expired abandoned
+turn may be marked `superseded` when a new key claims that conversation.
+
+#### 4.1.7 ChatMessage
+
+One message in a conversation between a reader and a character agent.
 
 Fields:
 
@@ -293,13 +315,19 @@ Fields:
 - `character_id` (UUID, foreign key → Character)
 - `user_id` (UUID, foreign key → User)
 - `novel_id` (UUID, foreign key → Novel)
+- `turn_id` (UUID or null, foreign key → ChatTurn)
+  - Null only for messages written before the idempotent-turn migration or by a
+    rolled-back compatible service version.
 - `role` (enum: `user` | `character`)
 - `content` (text)
-- `chapter_num` (integer or null)
+- `reader_identity` (string or null)
+- `chapter_context` (integer or null)
   - The reader's current chapter at the time of the message.
 - `created_at` (timestamptz)
 
-#### 4.1.7 NarrativeNode
+Constraint: unique on `(turn_id, role)` where `turn_id IS NOT NULL`.
+
+#### 4.1.8 NarrativeNode
 
 A branch point within a chapter.
 
@@ -317,7 +345,7 @@ Fields:
     - `consequence_hint` (string or null) — brief hint about the consequence
 - `created_at` (timestamptz)
 
-#### 4.1.8 UserChoice
+#### 4.1.9 UserChoice
 
 A reader's selection at a NarrativeNode.
 
@@ -335,7 +363,7 @@ Fields:
   - LLM-generated consequence narrative.
 - `created_at` (timestamptz)
 
-#### 4.1.9 WorldState
+#### 4.1.10 WorldState
 
 Aggregated state of a reader's journey through a novel.
 
@@ -357,7 +385,7 @@ Fields:
 
 Constraint: unique on `(user_id, novel_id)`.
 
-#### 4.1.10 ReadingProgress
+#### 4.1.11 ReadingProgress
 
 A reader's current position in a novel.
 
@@ -625,7 +653,10 @@ recent entries.
 
 ### 6.5 Streaming Response
 
-The Agent Service MUST stream the LLM response to the caller via SSE.
+The Agent Service MUST stream the LLM response to the caller via SSE. Every new
+turn request MUST include `Idempotency-Key: <UUID v4>`. The key identifies one
+logical turn and MUST be reused for transport retries; reusing it with a
+different user, character, novel, or message returns `409 idempotency_conflict`.
 
 SSE event format:
 
@@ -634,24 +665,33 @@ event: delta
 data: {"content": "<token>"}
 
 event: done
-data: {"usage": {"input_tokens": N, "output_tokens": M}}
+data: {"turn_id":"<UUID>","committed":true,"replayed":false}
 ```
 
 On error:
 
 ```
 event: error
-data: {"code": "<error_code>", "message": "<human-readable message>"}
+data: {"code":"<error_code>","message":"<human-readable message>","turn_id":"<UUID>"}
 ```
 
-After the stream completes, the Agent Service MUST:
+`done` is a commit acknowledgement, not merely an upstream EOF marker. The
+Agent Service MUST NOT emit it until a single PostgreSQL transaction has:
 
-1. Store the complete response as a `ChatMessage` with `role = character`.
-2. Store the user's input as a `ChatMessage` with `role = user` (if not already stored).
-3. Create a new `short` layer `CharacterMemory` entry summarizing the turn.
-4. Trigger the Compression Pipeline if the short-term threshold is exceeded.
-5. Update `WorldState.state.relationships` if the LLM response implies a relationship change
-   (implementation-defined heuristic).
+1. Fenced the active `chat_turns.attempt`.
+2. Stored exactly one `user` and one `character` `ChatMessage` for the turn.
+3. Marked the turn `completed`.
+
+Client disconnect MUST stop delivery only; the in-process producer continues to
+the durable boundary. A provider error, malformed frame, or EOF without the
+provider's explicit terminal event MUST fail the attempt and MUST NOT be
+followed by `done`. A completed key is replayed without another LLM call. An
+active key returns `409 turn_in_progress` with `Retry-After`; a failed or
+expired attempt may be reclaimed with a higher fencing attempt.
+
+Redis and memory-compression updates are derived, best-effort projections after
+the PostgreSQL commit. Prompt history MUST be read from committed PostgreSQL
+messages so Redis lag or restart cannot erase the immediately preceding turn.
 
 ---
 
@@ -738,6 +778,7 @@ Input: `email`, `password`, `name` (optional).
 
 The User Service MUST:
 
+0. Reject registration with `setup_required` until the initial administrator exists.
 1. Validate that `email` is a valid RFC 5321 address.
 2. Validate that `password` is at least 8 characters.
 3. Check that no existing user has the same `email` (case-insensitive).
@@ -770,7 +811,12 @@ The JWT MUST be signed with HMAC-SHA256 using the `JWT_SECRET` environment varia
 
 ### 9.4 Authorization Rules
 
-- All endpoints except `POST /api/auth/register` and `POST /api/auth/login` REQUIRE a valid JWT.
+- All endpoints except setup status/init, the deprecated setup LLM probe,
+  `POST /api/auth/register`, `POST /api/auth/login`, and
+  `POST /api/auth/refresh` REQUIRE a valid JWT. Setup init succeeds only while
+  the `users` table is empty and atomically creates one administrator plus its
+  refresh token. Model credentials come only from the server environment and
+  are never accepted or persisted by setup.
 - A user MAY only access novels, characters, memories, and world states that belong to their own
   `user_id`.
 - Admin users MAY access all resources.
@@ -787,6 +833,8 @@ service.
 
 | Method | Path | Service | Auth | Description |
 |---|---|---|---|---|
+| GET | `/api/setup/status` | User | None | Whether any account exists (`contract: 2`) |
+| POST | `/api/setup/init` | User | None | Atomically create the first administrator |
 | POST | `/api/auth/register` | User | None | Register new user |
 | POST | `/api/auth/login` | User | None | Login, returns tokens |
 | POST | `/api/auth/refresh` | User | Refresh token | Issue new access token |
@@ -865,10 +913,19 @@ Standard error codes:
 | `forbidden` | 403 | Valid JWT but insufficient permission |
 | `not_found` | 404 | Resource does not exist |
 | `conflict` | 409 | Unique constraint violation |
+| `setup_required` | 409 | Initial administrator must be created first |
+| `turn_in_progress` | 409 | The same idempotent turn is still being produced |
+| `idempotency_conflict` | 409 | The key was reused for a different request |
 | `validation_error` | 422 | Request body failed validation |
+| `client_upgrade_required` | 426 | A stale chat client omitted the idempotency contract |
+| `rate_limited` | 429 | Request rate exceeded |
+| `payload_too_large` | 413 | Request or upload exceeded its byte limit |
+| `unsupported_media_type` | 415 | Upload type is not accepted |
 | `parse_error` | 422 | Novel parsing pipeline failed |
 | `llm_error` | 502 | Upstream LLM API returned an error |
 | `storage_error` | 502 | Object storage operation failed |
+| `bad_gateway` | 502 | Upstream response was invalid |
+| `service_unavailable` | 503 | A required dependency is unavailable |
 | `internal_error` | 500 | Unexpected server error |
 
 ---
@@ -947,6 +1004,8 @@ Implementations MUST create the following indexes:
 - `character_memories(character_id, user_id, layer)` — B-tree.
 - `character_memories(embedding)` — HNSW with `vector_cosine_ops`, `m=16`, `ef_construction=64`.
 - `chat_messages(character_id, user_id, created_at DESC)` — B-tree.
+- `chat_messages(turn_id, role)` where `turn_id IS NOT NULL` — unique B-tree.
+- `chat_turns(user_id, character_id, novel_id)` where `status = in_progress` — unique B-tree.
 - `world_states(user_id, novel_id)` — unique B-tree.
 - `reading_progress(user_id, novel_id)` — unique B-tree.
 
@@ -1022,11 +1081,27 @@ area MUST use `--font-reading` at a minimum size of 18px with a line height of 1
 
 The frontend SSE client MUST:
 
-1. Open a `POST` request to `/api/chat/:characterId/stream` with the user message in the body.
-2. Parse `event: delta` events and append `data.content` to the displayed message.
-3. On `event: done`, finalize the message and display token usage if desired.
-4. On `event: error`, display the error message and close the stream.
-5. Implement a reconnect strategy with exponential backoff (max 3 retries) on network errors.
+1. Generate one UUID v4 per logical turn, send it in `Idempotency-Key`, and keep
+   the same key for every automatic or manual retry.
+2. Open a `POST` request to `/api/chat/:characterId/stream` with the user message in the body.
+3. Incrementally decode UTF-8 and SSE frames across arbitrary network chunks.
+4. Parse `event: delta` JSON and append `data.content` to the displayed message.
+5. Finalize only on `event: done` whose JSON has the matching `turn_id` and
+   `committed: true`; a bare EOF is an error.
+6. On `event: error`, discard partial output, display the error, and retain the
+   key for an explicit retry.
+7. Retry network, 5xx, and `turn_in_progress` failures with exponential backoff
+   (max 3 retries), clearing partial output before each attempt.
+
+During the rolling upgrade the client MUST also accept the previous unnamed
+delta frames and empty `done` event. This compatibility parser does not weaken
+the new protocol: once a named v2 event is observed, a structured commit
+acknowledgement is required.
+
+The Agent Service MUST derive the user, current chapter, and reader identity from authenticated
+server-side state. Browser-supplied context is never authoritative. Requests containing the retired
+body `user_id` marker MUST fail before LLM invocation with HTTP 426 and error code
+`client_upgrade_required`; the client must refresh before retrying.
 
 ---
 
@@ -1044,14 +1119,16 @@ All services MUST emit structured JSON logs to stdout. Each log entry MUST inclu
 
 ### 14.2 Health Endpoints
 
-Each service MUST expose `GET /health` returning HTTP 200 with:
+Each downstream service MUST expose `GET /health` as a process-liveness probe
+and `GET /ready` as a dependency-readiness probe. Liveness returns HTTP 200
+while the process can serve requests; readiness returns HTTP 503 whenever a
+required dependency is unavailable.
 
-```json
-{ "status": "ok", "service": "<service-name>", "version": "<semver>" }
-```
-
-The Gateway's `/health` endpoint MUST aggregate health from all downstream services and return HTTP
-503 if any service is unhealthy.
+The Gateway MUST expose `GET /live` for its own liveness. Its `/health` and
+`/ready` endpoints MUST aggregate downstream readiness and return HTTP 503 if
+any required service is unavailable. Gateway probe and metrics endpoints MUST
+not require application authentication or consume business rate-limit capacity.
+Deployments MAY restrict `/metrics` to their internal monitoring network.
 
 ### 14.3 Metrics (OPTIONAL)
 

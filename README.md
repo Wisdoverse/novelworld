@@ -77,19 +77,7 @@ Choose how to enter the world:
 
 ## 🚀 Quick Start
 
-### Single Docker command (simplest)
-
-```bash
-docker run -d -p 80:80 ghcr.io/schorsch888/novelworld
-# Open http://localhost → setup wizard guides you through the rest
-```
-
-No env vars needed. The web setup wizard handles everything:
-choose your LLM provider, enter API key, create account — all in the browser.
-
-Everything included: PostgreSQL, Redis, all 5 services, Nginx, frontend. One container.
-
-### Docker Compose (recommended for production)
+### Docker Compose
 
 ```bash
 git clone https://github.com/schorsch888/novelworld.git
@@ -97,14 +85,15 @@ cd novelworld
 ./start.sh
 ```
 
-The interactive setup wizard will:
+The startup script will:
 1. Check Docker is installed
 2. Generate secure passwords automatically
 3. Ask which LLM provider to use (OpenAI / DeepSeek / Qwen / GLM / Anthropic / Moonshot / Doubao / custom)
 4. Start all services
-5. Open http://localhost in your browser
+5. Open http://localhost and create the first administrator account
 
-That's it. Just have your API key ready.
+No default application account is installed. The model API key stays in the
+server `.env`; the browser never stores it.
 
 ### Development mode
 
@@ -218,7 +207,7 @@ novelworld/
 ## 🧪 Testing
 
 ```bash
-cargo test --workspace    # 25 unit tests across all services
+cargo test --workspace    # unit and contract tests across all services
 ```
 
 ---

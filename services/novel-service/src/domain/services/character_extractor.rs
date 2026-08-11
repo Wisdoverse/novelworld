@@ -88,12 +88,16 @@ pub fn build_extraction_prompt(novel_title: &str, sample_text: &str) -> String {
 4. world_summary 要包含时代背景和核心世界观设定
 5. relationships 要覆盖主要角色之间的关系，strength 为 0-100 的关系密切度
 6. 只返回 JSON，不要有其他文字"#,
-        title = novel_title,
+        title = safe_truncate(novel_title, 500),
         text = safe_truncate(sample_text, 8000),
     )
 }
 
-pub fn build_chunk_extraction_prompt(novel_title: &str, chunk_text: &str, chunk_index: usize) -> String {
+pub fn build_chunk_extraction_prompt(
+    novel_title: &str,
+    chunk_text: &str,
+    chunk_index: usize,
+) -> String {
     format!(
         r#"你是一位专业的文学分析师。这是小说《{title}》的第{idx}段文本。请提取其中出现的角色和角色关系。
 
@@ -129,7 +133,7 @@ pub fn build_chunk_extraction_prompt(novel_title: &str, chunk_text: &str, chunk_
 }}
 
 只返回 JSON。"#,
-        title = novel_title,
+        title = safe_truncate(novel_title, 500),
         idx = chunk_index + 1,
         text = safe_truncate(chunk_text, 6000),
     )
