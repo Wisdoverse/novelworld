@@ -1,0 +1,9 @@
+.git
+.env
+.env.*
+!.env.example
+.release
+target
+frontend/node_modules
+frontend/dist
+infra/nginx/certs

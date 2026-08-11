@@ -1,3 +1,3 @@
-pub mod novel;
 pub mod chapter;
 pub mod character;
+pub mod novel;

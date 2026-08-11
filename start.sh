@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -e
+set -eo pipefail
 
 # ═══════════════════════════════════════════════════════════════════════════
 # NovelWorld — One-Click Start
@@ -69,46 +69,46 @@ if [ ! -f .env ]; then
     echo ""
     case $PROVIDER_CHOICE in
         1)
-            read -p "Enter your OpenAI API Key: " API_KEY
+            read -rsp "Enter your OpenAI API Key: " API_KEY; echo
             sed -i "s|LLM_API_KEY=sk-your-api-key|LLM_API_KEY=${API_KEY}|g" .env
             sed -i "s|IMAGE_GEN_API_KEY=sk-your-api-key|IMAGE_GEN_API_KEY=${API_KEY}|g" .env
             echo "OPENAI_API_KEY=${API_KEY}" >> .env
             ;;
         2)
-            read -p "Enter your DeepSeek API Key: " API_KEY
+            read -rsp "Enter your DeepSeek API Key: " API_KEY; echo
             sed -i "s|LLM_API_KEY=sk-your-api-key|LLM_API_KEY=${API_KEY}|g" .env
             sed -i "s|LLM_API_URL=https://api.openai.com|LLM_API_URL=https://api.deepseek.com|g" .env
             sed -i "s|LLM_MODEL=gpt-4o-mini|LLM_MODEL=deepseek-chat|g" .env
             echo "DEEPSEEK_API_KEY=${API_KEY}" >> .env
             ;;
         3)
-            read -p "Enter your Qwen/DashScope API Key: " API_KEY
+            read -rsp "Enter your Qwen/DashScope API Key: " API_KEY; echo
             sed -i "s|LLM_API_KEY=sk-your-api-key|LLM_API_KEY=${API_KEY}|g" .env
             sed -i "s|LLM_API_URL=https://api.openai.com|LLM_API_URL=https://dashscope.aliyuncs.com/compatible-mode|g" .env
             sed -i "s|LLM_MODEL=gpt-4o-mini|LLM_MODEL=qwen-max|g" .env
             echo "QWEN_API_KEY=${API_KEY}" >> .env
             ;;
         4)
-            read -p "Enter your GLM/ZhipuAI API Key: " API_KEY
+            read -rsp "Enter your GLM/ZhipuAI API Key: " API_KEY; echo
             sed -i "s|LLM_API_KEY=sk-your-api-key|LLM_API_KEY=${API_KEY}|g" .env
             sed -i "s|LLM_API_URL=https://api.openai.com|LLM_API_URL=https://open.bigmodel.cn/api/paas|g" .env
             sed -i "s|LLM_MODEL=gpt-4o-mini|LLM_MODEL=glm-4-flash|g" .env
             echo "GLM_API_KEY=${API_KEY}" >> .env
             ;;
         5)
-            read -p "Enter your Anthropic API Key: " API_KEY
+            read -rsp "Enter your Anthropic API Key: " API_KEY; echo
             sed -i "s|LLM_API_KEY=sk-your-api-key|LLM_API_KEY=${API_KEY}|g" .env
             echo "ANTHROPIC_API_KEY=${API_KEY}" >> .env
             ;;
         6)
-            read -p "Enter your Moonshot API Key: " API_KEY
+            read -rsp "Enter your Moonshot API Key: " API_KEY; echo
             sed -i "s|LLM_API_KEY=sk-your-api-key|LLM_API_KEY=${API_KEY}|g" .env
             sed -i "s|LLM_API_URL=https://api.openai.com|LLM_API_URL=https://api.moonshot.cn|g" .env
             sed -i "s|LLM_MODEL=gpt-4o-mini|LLM_MODEL=moonshot-v1-8k|g" .env
             echo "MOONSHOT_API_KEY=${API_KEY}" >> .env
             ;;
         7)
-            read -p "Enter your Doubao API Key: " API_KEY
+            read -rsp "Enter your Doubao API Key: " API_KEY; echo
             sed -i "s|LLM_API_KEY=sk-your-api-key|LLM_API_KEY=${API_KEY}|g" .env
             sed -i "s|LLM_API_URL=https://api.openai.com|LLM_API_URL=https://ark.cn-beijing.volces.com/api/v3|g" .env
             sed -i "s|LLM_MODEL=gpt-4o-mini|LLM_MODEL=doubao-1.5-pro-32k|g" .env
@@ -116,7 +116,7 @@ if [ ! -f .env ]; then
             ;;
         8)
             read -p "Enter API URL (e.g. https://api.example.com): " API_URL
-            read -p "Enter API Key: " API_KEY
+            read -rsp "Enter API Key: " API_KEY; echo
             read -p "Enter Model name: " MODEL_NAME
             sed -i "s|LLM_API_KEY=sk-your-api-key|LLM_API_KEY=${API_KEY}|g" .env
             sed -i "s|LLM_API_URL=https://api.openai.com|LLM_API_URL=${API_URL}|g" .env
@@ -143,7 +143,7 @@ echo -e "${GREEN}║                    ✅ NovelWorld is running!              
 echo -e "${GREEN}╠═══════════════════════════════════════════════════════════╣${NC}"
 echo -e "${GREEN}║                                                           ║${NC}"
 echo -e "${GREEN}║   🌐 Open:  ${CYAN}http://localhost${GREEN}                              ║${NC}"
-echo -e "${GREEN}║   📡 API:   ${CYAN}http://localhost:8080${GREEN}                         ║${NC}"
+echo -e "${GREEN}║   📡 API:   ${CYAN}http://localhost/api${GREEN}                          ║${NC}"
 echo -e "${GREEN}║                                                           ║${NC}"
 echo -e "${GREEN}║   Stop:     docker compose down                           ║${NC}"
 echo -e "${GREEN}║   Logs:     docker compose logs -f                        ║${NC}"

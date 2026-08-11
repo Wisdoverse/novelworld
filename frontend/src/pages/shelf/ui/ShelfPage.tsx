@@ -312,7 +312,7 @@ export function ShelfPage() {
                 <NovelCard
                   key={novel.id}
                   novel={novel}
-                  onOpen={() => navigate(`/reader/${novel.id}/1`)}
+                  onOpen={() => navigate(`/reader/${novel.id}`)}
                   onDelete={() => deleteNovel.mutate(novel.id)}
                 />
               ))}

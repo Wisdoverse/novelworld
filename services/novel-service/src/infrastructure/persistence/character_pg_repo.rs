@@ -1,13 +1,13 @@
+use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::prelude::FromRow;
 use sqlx::PgPool;
 use uuid::Uuid;
-use anyhow::Result;
 
 use crate::domain::entities::character::Character;
-use crate::domain::repositories::{CharacterRepository, CharacterRelationshipRecord};
-use crate::domain::value_objects::{CharacterRole, AvatarStatus};
+use crate::domain::repositories::{CharacterRelationshipRecord, CharacterRepository};
+use crate::domain::value_objects::{AvatarStatus, CharacterRole};
 
 #[derive(Debug, FromRow)]
 struct CharacterRow {
@@ -237,15 +237,18 @@ impl CharacterRepository for CharacterPgRepository {
         .bind(novel_id)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(|r| CharacterRelationshipRecord {
-            id: r.id,
-            novel_id: r.novel_id,
-            from_character_id: r.from_character_id,
-            to_character_id: r.to_character_id,
-            relationship_type: r.relationship_type,
-            description: r.description,
-            strength: r.strength as i32,
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|r| CharacterRelationshipRecord {
+                id: r.id,
+                novel_id: r.novel_id,
+                from_character_id: r.from_character_id,
+                to_character_id: r.to_character_id,
+                relationship_type: r.relationship_type,
+                description: r.description,
+                strength: r.strength as i32,
+            })
+            .collect())
     }
 }
 

@@ -1,9 +1,9 @@
+use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::prelude::FromRow;
 use sqlx::PgPool;
 use uuid::Uuid;
-use anyhow::Result;
 
 use crate::domain::entities::chapter::Chapter;
 use crate::domain::repositories::ChapterRepository;

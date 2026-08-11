@@ -1,12 +1,14 @@
+use anyhow::Result;
 use async_trait::async_trait;
 use uuid::Uuid;
-use anyhow::Result;
 
-use crate::domain::entities::user::{User, RefreshToken};
+use crate::domain::entities::user::{RefreshToken, User};
 
 #[async_trait]
 pub trait UserRepository: Send + Sync {
-    async fn save(&self, user: &User) -> Result<()>;
+    async fn save(&self, user: &User) -> Result<bool>;
+    async fn save_initial_user(&self, user: &User, token: &RefreshToken) -> Result<bool>;
+    async fn has_any(&self) -> Result<bool>;
     async fn find_by_id(&self, id: Uuid) -> Result<Option<User>>;
     async fn find_by_email(&self, email: &str) -> Result<Option<User>>;
     async fn update(&self, user: &User) -> Result<()>;

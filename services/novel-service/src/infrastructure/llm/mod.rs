@@ -1,8 +1,8 @@
 pub mod image;
 
-use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
+use std::sync::Arc;
 
 use crate::domain::ports::LlmPort;
 

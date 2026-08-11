@@ -1,21 +1,19 @@
 #![allow(dead_code, unused_imports)]
-mod domain;
-mod application;
-mod infrastructure;
-mod interface;
-#[cfg(test)]
-mod tests;
-
-use std::sync::Arc;
 use anyhow::Result;
 use sqlx::postgres::PgPoolOptions;
+use std::sync::Arc;
+use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use tower_http::cors::{CorsLayer, Any};
 
-use application::handlers::AuthHandler;
-use infrastructure::auth::jwt::JwtService;
-use infrastructure::persistence::pg_user_repo::PgUserRepository;
-use interface::http::{router, AppState};
+use user_service::{
+    application::handlers::AuthHandler,
+    domain,
+    infrastructure::{
+        auth::jwt::JwtService,
+        persistence::{pg_user_repo::PgUserRepository, PgReadinessProbe},
+    },
+    interface::http::{router, AppState},
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -47,18 +45,24 @@ async fn main() -> Result<()> {
         .unwrap_or(604800);
 
     let jwt = Arc::new(JwtService::new(&jwt_secret, access_token_expiry));
-    let user_repo = Arc::new(PgUserRepository::new(pool));
+    let user_repo = Arc::new(PgUserRepository::new(pool.clone()));
 
+    let token_issuer: Arc<dyn domain::ports::AccessTokenIssuer> = jwt;
     let handler = Arc::new(AuthHandler {
         user_repo,
-        jwt,
+        jwt: token_issuer,
         refresh_token_expiry,
     });
 
-    let state = AppState { handler };
+    let readiness = Arc::new(PgReadinessProbe::new(pool));
+    let state = AppState { handler, readiness };
 
-    let app = router(state)
-        .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any));
+    let app = router(state).layer(
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any),
+    );
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "8001".into());
     let addr = format!("0.0.0.0:{}", port);

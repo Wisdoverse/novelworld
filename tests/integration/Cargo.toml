@@ -3,16 +3,17 @@ name = "integration-tests"
 version = "0.1.0"
 edition = "2021"
 
-[[test]]
-name = "integration"
-path = "tests/mod.rs"
-
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json"] }
 redis = { version = "1.2", features = ["tokio-comp"] }
+deadpool-redis.workspace = true
 reqwest = { version = "0.13", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 anyhow = "1"
+agent-service = { path = "../../services/agent-service" }
+novel-service = { path = "../../services/novel-service" }
+narrative-service = { path = "../../services/narrative-service" }
+user-service = { path = "../../services/user-service" }

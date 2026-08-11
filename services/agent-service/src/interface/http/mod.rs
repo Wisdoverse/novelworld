@@ -1,50 +1,205 @@
 use axum::{
-    extract::{Path, Query, State, Json},
-    http::{StatusCode, HeaderMap},
-    response::{IntoResponse, Sse, sse::Event},
+    extract::{DefaultBodyLimit, Json, Path, Query, State},
+    http::{header::RETRY_AFTER, HeaderMap, HeaderValue, StatusCode},
+    response::{sse::Event, sse::KeepAlive, IntoResponse, Sse},
     routing::{get, post},
     Router,
 };
 use futures::StreamExt;
-use serde::{Deserialize, Serialize};
+use serde::{de::IgnoredAny, Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
-use uuid::Uuid;
+use uuid::{Uuid, Variant, Version};
 
-use crate::application::handlers::AgentCommandHandler;
+use crate::application::handlers::{AgentCommandHandler, AgentRequestError, AgentStreamEvent};
 use crate::domain::entities::memory::MemoryLayer;
+use crate::domain::ports::ReadinessProbe;
 
 #[derive(Clone)]
 pub struct AppState {
     pub handler: Arc<AgentCommandHandler>,
+    pub postgres_readiness: Arc<dyn ReadinessProbe>,
+    pub redis_readiness: Arc<dyn ReadinessProbe>,
+    pub novel_readiness: Arc<dyn ReadinessProbe>,
 }
 
 pub fn router(state: AppState) -> Router {
+    routes().with_state(state)
+}
+
+fn routes() -> Router<AppState> {
     Router::new()
         // 流式对话（SSE）
-        .route("/chat/:character_id/stream", post(chat_stream))
+        .route("/chat/{character_id}/stream", post(chat_stream))
         // 普通对话
-        .route("/chat/:character_id", post(chat))
+        .route("/chat/{character_id}", post(chat))
         // 获取对话历史
-        .route("/chat/:character_id/history", get(get_history))
+        .route("/chat/{character_id}/history", get(get_history))
         // 获取角色记忆
-        .route("/memories/:character_id", get(get_memories))
+        .route("/memories/{character_id}", get(get_memories))
         // 清除短期记忆
-        .route("/memories/:character_id/short", axum::routing::delete(clear_short_memory))
-        .with_state(state)
+        .route(
+            "/memories/{character_id}/short",
+            axum::routing::delete(clear_short_memory),
+        )
+        .route("/health", get(health))
+        .route("/ready", get(ready))
+        .layer(DefaultBodyLimit::max(MAX_CHAT_BODY_BYTES))
+}
+
+const MAX_CHAT_BODY_BYTES: usize = 20 * 1024;
+const MAX_CHAT_MESSAGE_BYTES: usize = 16 * 1024;
+const MAX_CHAT_MESSAGE_CHARS: usize = 4_000;
+const MAX_HISTORY_LIMIT: i64 = 100;
+const MAX_HISTORY_OFFSET: i64 = 10_000;
+
+fn provided<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    IgnoredAny::deserialize(deserializer)?;
+    Ok(true)
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChatRequest {
-    pub novel_id: Uuid,
     pub message: String,
+    /// Old clients supplied a body principal. It is never trusted and acts as
+    /// a stable upgrade marker so stale tabs cannot chat with stale context.
+    #[serde(default, rename = "user_id", deserialize_with = "provided")]
+    pub _legacy_user_id: bool,
+    #[serde(default)]
+    pub novel_id: Option<Uuid>,
+    #[serde(default)]
     pub reader_identity: Option<String>,
-    pub current_chapter: i32,
+    #[serde(default)]
+    pub current_chapter: Option<i32>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ChatResponse {
     pub message: String,
     pub character_id: Uuid,
+    pub turn_id: Uuid,
+    pub committed: bool,
+    pub replayed: bool,
+}
+
+fn validation_error(message: impl Into<String>) -> axum::response::Response {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(serde_json::json!({
+            "error": {"code": "validation_error", "message": message.into()}
+        })),
+    )
+        .into_response()
+}
+
+fn client_upgrade_required(user_id: Uuid) -> axum::response::Response {
+    tracing::warn!(%user_id, "legacy chat client rejected; refresh required");
+    (
+        StatusCode::UPGRADE_REQUIRED,
+        Json(serde_json::json!({
+            "error": {
+                "code": "client_upgrade_required",
+                "message": "Refresh the application before starting a new chat"
+            }
+        })),
+    )
+        .into_response()
+}
+
+fn application_error_response(
+    error: anyhow::Error,
+    fallback_status: StatusCode,
+) -> axum::response::Response {
+    let retry_after = match error.downcast_ref::<AgentRequestError>() {
+        Some(AgentRequestError::TurnInProgress {
+            retry_after_seconds,
+        }) => Some(*retry_after_seconds),
+        _ => None,
+    };
+    let (status, code, message) = match error.downcast_ref::<AgentRequestError>() {
+        Some(AgentRequestError::NotFound) => (
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "Character not found".to_string(),
+        ),
+        Some(AgentRequestError::Validation(message)) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "validation_error",
+            message.clone(),
+        ),
+        Some(AgentRequestError::TurnInProgress { .. }) => (
+            StatusCode::CONFLICT,
+            "turn_in_progress",
+            "Chat turn is already in progress".to_string(),
+        ),
+        Some(AgentRequestError::TurnConflict) => (
+            StatusCode::CONFLICT,
+            "idempotency_conflict",
+            "Idempotency key conflicts with an existing chat turn".to_string(),
+        ),
+        Some(AgentRequestError::Llm(_)) => (
+            StatusCode::BAD_GATEWAY,
+            "llm_error",
+            "The language model could not complete the request".to_string(),
+        ),
+        Some(AgentRequestError::Unavailable(_)) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "dependency_unavailable",
+            "Required service is unavailable".to_string(),
+        ),
+        None => (
+            fallback_status,
+            "internal_error",
+            "Request could not be completed".to_string(),
+        ),
+    };
+    if status.is_server_error() {
+        tracing::error!(error = ?error, "agent request failed");
+    }
+    let mut response = (
+        status,
+        Json(serde_json::json!({
+            "error": {"code": code, "message": message}
+        })),
+    )
+        .into_response();
+    if let Some(seconds) = retry_after {
+        if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
+            response.headers_mut().insert(RETRY_AFTER, value);
+        }
+    }
+    response
+}
+
+fn validate_message(message: String) -> Result<String, String> {
+    let message = message.trim().to_string();
+    if message.is_empty() {
+        return Err("message must not be empty".into());
+    }
+    if message.len() > MAX_CHAT_MESSAGE_BYTES || message.chars().count() > MAX_CHAT_MESSAGE_CHARS {
+        return Err(format!(
+            "message must not exceed {MAX_CHAT_MESSAGE_CHARS} characters or {MAX_CHAT_MESSAGE_BYTES} bytes"
+        ));
+    }
+    Ok(message)
+}
+
+fn extract_turn_id(headers: &HeaderMap) -> Result<Option<Uuid>, String> {
+    let Some(value) = headers.get("idempotency-key") else {
+        return Ok(None);
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| "idempotency key must be a UUID v4".to_string())?;
+    let turn_id =
+        Uuid::parse_str(value).map_err(|_| "idempotency key must be a UUID v4".to_string())?;
+    if turn_id.get_version() != Some(Version::Random) || turn_id.get_variant() != Variant::RFC4122 {
+        return Err("idempotency key must be a UUID v4".into());
+    }
+    Ok(Some(turn_id))
 }
 
 /// 流式 SSE 对话接口
@@ -60,50 +215,85 @@ async fn chat_stream(
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({"error": "Missing or invalid X-User-Id header"})),
-            ).into_response();
+            )
+                .into_response();
         }
+    };
+    if req._legacy_user_id {
+        return client_upgrade_required(user_id);
+    }
+    let turn_id = match extract_turn_id(&headers) {
+        Ok(Some(turn_id)) => turn_id,
+        Ok(None) => return client_upgrade_required(user_id),
+        Err(message) => return validation_error(message),
+    };
+    let message = match validate_message(req.message) {
+        Ok(message) => message,
+        Err(message) => return validation_error(message),
     };
 
     let handler = state.handler.clone();
-
-    let stream = async_stream::stream! {
-        match handler.chat_stream(
-            character_id,
-            user_id,
-            req.novel_id,
-            req.message,
-            req.reader_identity,
-            req.current_chapter,
-        ).await {
-            Ok(s) => {
-                let mut s = std::pin::pin!(s);
-                while let Some(chunk) = s.next().await {
-                    match chunk {
-                        Ok(text) if !text.is_empty() => {
-                            yield Ok::<Event, anyhow::Error>(
-                                Event::default().data(text)
-                            );
-                        }
-                        Err(e) => {
-                            yield Ok(Event::default()
-                                .event("error")
-                                .data(e.to_string()));
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
-                yield Ok(Event::default().event("done").data(""));
-            }
-            Err(e) => {
-                yield Ok(Event::default()
-                    .event("error")
-                    .data(e.to_string()));
-            }
+    let source = match handler
+        .chat_stream(turn_id, character_id, user_id, req.novel_id, message)
+        .await
+    {
+        Ok(source) => source,
+        Err(error) => {
+            return application_error_response(error, StatusCode::SERVICE_UNAVAILABLE);
         }
     };
 
-    Sse::new(stream).into_response()
+    let stream = async_stream::stream! {
+        let _handler = handler;
+        let mut source = std::pin::pin!(source);
+        let mut terminal = false;
+        while let Some(item) = source.next().await {
+            match item {
+                Ok(AgentStreamEvent::Delta(text)) if !text.is_empty() => {
+                    yield Ok::<Event, anyhow::Error>(
+                        Event::default()
+                            .event("delta")
+                            .data(serde_json::json!({"content": text}).to_string())
+                    );
+                }
+                Ok(AgentStreamEvent::Done { replayed }) => {
+                    terminal = true;
+                    yield Ok(Event::default()
+                        .event("done")
+                        .data(serde_json::json!({
+                            "turn_id": turn_id,
+                            "committed": true,
+                            "replayed": replayed
+                        }).to_string()));
+                    break;
+                }
+                Err(_) => {
+                    yield Ok(Event::default()
+                        .event("error")
+                        .data(serde_json::json!({
+                            "code": "turn_failed",
+                            "message": "Response could not be completed; retry is safe",
+                            "turn_id": turn_id
+                        }).to_string()));
+                    return;
+                }
+                _ => {}
+            }
+        }
+        if !terminal {
+            yield Ok(Event::default()
+                .event("error")
+                .data(serde_json::json!({
+                    "code": "stream_ended_early",
+                    "message": "Response ended before commit confirmation",
+                    "turn_id": turn_id
+                }).to_string()));
+        }
+    };
+
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 /// 普通对话接口（非流式）
@@ -119,32 +309,47 @@ async fn chat(
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({"error": "Missing or invalid X-User-Id header"})),
-            ).into_response();
+            )
+                .into_response();
         }
     };
+    if req._legacy_user_id {
+        return client_upgrade_required(user_id);
+    }
+    let turn_id = match extract_turn_id(&headers) {
+        Ok(Some(turn_id)) => turn_id,
+        Ok(None) => return client_upgrade_required(user_id),
+        Err(message) => return validation_error(message),
+    };
+    let message = match validate_message(req.message) {
+        Ok(message) => message,
+        Err(message) => return validation_error(message),
+    };
 
-    match state.handler.chat(
-        character_id,
-        user_id,
-        req.novel_id,
-        req.message,
-        req.reader_identity,
-        req.current_chapter,
-    ).await {
-        Ok(response) => (StatusCode::OK, Json(ChatResponse {
-            message: response,
-            character_id,
-        })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": e.to_string()
-        }))).into_response(),
+    match state
+        .handler
+        .chat(turn_id, character_id, user_id, req.novel_id, message)
+        .await
+    {
+        Ok(response) => (
+            StatusCode::OK,
+            Json(ChatResponse {
+                message: response.message,
+                character_id,
+                turn_id,
+                committed: true,
+                replayed: response.replayed,
+            }),
+        )
+            .into_response(),
+        Err(error) => application_error_response(error, StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
 /// Query params for chat history pagination.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HistoryQuery {
-    user_id: Uuid,
     #[serde(default = "default_limit")]
     limit: i64,
     #[serde(default)]
@@ -155,92 +360,162 @@ fn default_limit() -> i64 {
     50
 }
 
-/// GET /chat/:character_id/history?user_id=...&limit=50&offset=0
+/// GET /chat/:character_id/history?limit=50&offset=0
 async fn get_history(
     State(state): State<AppState>,
     Path(character_id): Path<Uuid>,
+    headers: HeaderMap,
     Query(params): Query<HistoryQuery>,
 ) -> impl IntoResponse {
-    match state.handler.get_history(
-        character_id,
-        params.user_id,
-        params.limit,
-        params.offset,
-    ).await {
-        Ok(messages) => (StatusCode::OK, Json(serde_json::json!({
-            "messages": messages,
-            "count": messages.len(),
-        }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": e.to_string()
-        }))).into_response(),
+    let user_id = match extract_user_id(&headers) {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({
+                    "error": "Missing or invalid X-User-Id header"
+                })),
+            )
+                .into_response()
+        }
+    };
+    if !(1..=MAX_HISTORY_LIMIT).contains(&params.limit)
+        || !(0..=MAX_HISTORY_OFFSET).contains(&params.offset)
+    {
+        return validation_error(format!(
+            "limit must be between 1 and {MAX_HISTORY_LIMIT}; offset must be between 0 and {MAX_HISTORY_OFFSET}"
+        ));
+    }
+    match state
+        .handler
+        .get_history(character_id, user_id, params.limit, params.offset)
+        .await
+    {
+        Ok(messages) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "messages": messages,
+                "count": messages.len(),
+            })),
+        )
+            .into_response(),
+        Err(error) => application_error_response(error, StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
 /// Query params for memory retrieval.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MemoryQuery {
-    user_id: Uuid,
     novel_id: Uuid,
     /// One of: "short", "mid", "long", "permanent". Defaults to "permanent".
     #[serde(default = "default_layer")]
     layer: String,
+    #[serde(default = "default_limit")]
+    limit: i64,
+    #[serde(default)]
+    offset: i64,
 }
 
 fn default_layer() -> String {
     "permanent".into()
 }
 
-fn parse_layer(s: &str) -> MemoryLayer {
+fn parse_layer(s: &str) -> Option<MemoryLayer> {
     match s {
-        "short" => MemoryLayer::Short,
-        "mid" => MemoryLayer::Mid,
-        "long" => MemoryLayer::Long,
-        "permanent" => MemoryLayer::Permanent,
-        _ => MemoryLayer::Permanent,
+        "short" => Some(MemoryLayer::Short),
+        "mid" => Some(MemoryLayer::Mid),
+        "long" => Some(MemoryLayer::Long),
+        "permanent" => Some(MemoryLayer::Permanent),
+        _ => None,
     }
 }
 
-/// GET /memories/:character_id?user_id=...&novel_id=...&layer=permanent
+/// GET /memories/:character_id?novel_id=...&layer=permanent
 async fn get_memories(
     State(state): State<AppState>,
     Path(character_id): Path<Uuid>,
+    headers: HeaderMap,
     Query(params): Query<MemoryQuery>,
 ) -> impl IntoResponse {
-    let layer = parse_layer(&params.layer);
-    match state.handler.get_memories(
-        character_id,
-        params.user_id,
-        params.novel_id,
-        layer,
-    ).await {
-        Ok(memories) => (StatusCode::OK, Json(serde_json::json!({
-            "memories": memories,
-            "count": memories.len(),
-        }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": e.to_string()
-        }))).into_response(),
+    let user_id = match extract_user_id(&headers) {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({
+                    "error": "Missing or invalid X-User-Id header"
+                })),
+            )
+                .into_response()
+        }
+    };
+    let layer = match parse_layer(&params.layer) {
+        Some(layer) => layer,
+        None => return validation_error("layer must be short, mid, long, or permanent"),
+    };
+    if !(1..=MAX_HISTORY_LIMIT).contains(&params.limit)
+        || !(0..=MAX_HISTORY_OFFSET).contains(&params.offset)
+    {
+        return validation_error(format!(
+            "limit must be between 1 and {MAX_HISTORY_LIMIT}; offset must be between 0 and {MAX_HISTORY_OFFSET}"
+        ));
+    }
+    match state
+        .handler
+        .get_memories(
+            character_id,
+            user_id,
+            params.novel_id,
+            layer,
+            params.limit,
+            params.offset,
+        )
+        .await
+    {
+        Ok(memories) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "memories": memories,
+                "count": memories.len(),
+            })),
+        )
+            .into_response(),
+        Err(error) => application_error_response(error, StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
 /// Query params for clearing short-term memory.
 #[derive(Debug, Deserialize)]
-struct ClearShortQuery {
-    user_id: Uuid,
-}
+#[serde(deny_unknown_fields)]
+struct ClearShortQuery {}
 
-/// DELETE /memories/:character_id/short?user_id=...
+/// DELETE /memories/:character_id/short
 async fn clear_short_memory(
     State(state): State<AppState>,
     Path(character_id): Path<Uuid>,
-    Query(params): Query<ClearShortQuery>,
+    headers: HeaderMap,
+    Query(_params): Query<ClearShortQuery>,
 ) -> impl IntoResponse {
-    match state.handler.clear_short_memory(character_id, params.user_id).await {
+    let user_id = match extract_user_id(&headers) {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({
+                    "error": "Missing or invalid X-User-Id header"
+                })),
+            )
+                .into_response()
+        }
+    };
+    match state
+        .handler
+        .clear_short_memory(character_id, user_id)
+        .await
+    {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": e.to_string()
-        }))).into_response(),
+        Err(error) => application_error_response(error, StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
@@ -250,4 +525,185 @@ fn extract_user_id(headers: &HeaderMap) -> Option<Uuid> {
         .get("X-User-Id")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| Uuid::parse_str(s).ok())
+}
+
+async fn health() -> impl IntoResponse {
+    (StatusCode::OK, "OK").into_response()
+}
+
+async fn ready(State(state): State<AppState>) -> impl IntoResponse {
+    let (postgres_ready, redis_ready, novel_ready) = dependency_readiness(
+        state.postgres_readiness.as_ref(),
+        state.redis_readiness.as_ref(),
+        state.novel_readiness.as_ref(),
+    )
+    .await;
+    let status = if postgres_ready && redis_ready && novel_ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (
+        status,
+        Json(serde_json::json!({
+            "status": if status == StatusCode::OK { "ready" } else { "not_ready" },
+            "dependencies": {
+                "postgres": postgres_ready,
+                "redis": redis_ready,
+                "novel_service": novel_ready,
+            }
+        })),
+    )
+        .into_response()
+}
+
+async fn dependency_readiness(
+    postgres: &dyn ReadinessProbe,
+    redis: &dyn ReadinessProbe,
+    novel: &dyn ReadinessProbe,
+) -> (bool, bool, bool) {
+    tokio::join!(postgres.is_ready(), redis.is_ready(), novel.is_ready())
+}
+
+#[cfg(test)]
+mod principal_contract_tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    struct FixedProbe(bool);
+
+    #[async_trait]
+    impl ReadinessProbe for FixedProbe {
+        async fn is_ready(&self) -> bool {
+            self.0
+        }
+    }
+
+    #[test]
+    fn body_principal_marks_a_client_that_must_upgrade() {
+        let forged = "demo-user";
+        let request = serde_json::from_value::<ChatRequest>(serde_json::json!({
+            "user_id": forged,
+            "novel_id": Uuid::new_v4(),
+            "message": "hello",
+            "current_chapter": 1
+        }))
+        .unwrap();
+        assert!(request._legacy_user_id);
+        let null_marker = serde_json::from_value::<ChatRequest>(serde_json::json!({
+            "user_id": null,
+            "message": "hello"
+        }))
+        .unwrap();
+        assert!(null_marker._legacy_user_id);
+        assert_eq!(
+            client_upgrade_required(Uuid::new_v4()).status(),
+            StatusCode::UPGRADE_REQUIRED
+        );
+        assert!(serde_json::from_value::<HistoryQuery>(serde_json::json!({
+            "user_id": Uuid::new_v4()
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<MemoryQuery>(serde_json::json!({
+            "user_id": Uuid::new_v4(),
+            "novel_id": Uuid::new_v4()
+        }))
+        .is_err());
+        assert!(
+            serde_json::from_value::<ClearShortQuery>(serde_json::json!({
+                "user_id": Uuid::new_v4()
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn chat_request_accepts_canonical_and_legacy_payloads() {
+        let canonical = serde_json::from_value::<ChatRequest>(serde_json::json!({
+            "message": "hello"
+        }))
+        .unwrap();
+        assert_eq!(canonical.message, "hello");
+        assert!(!canonical._legacy_user_id);
+        assert!(canonical.novel_id.is_none());
+
+        let legacy = serde_json::from_value::<ChatRequest>(serde_json::json!({
+            "message": "hello",
+            "novel_id": Uuid::new_v4(),
+            "reader_identity": "forged",
+            "current_chapter": 999
+        }))
+        .unwrap();
+        assert_eq!(legacy.reader_identity.as_deref(), Some("forged"));
+        assert_eq!(legacy.current_chapter, Some(999));
+    }
+
+    #[test]
+    fn message_validation_enforces_trimmed_character_and_byte_limits() {
+        assert!(validate_message(" \n\t ".into()).is_err());
+        assert_eq!(validate_message(" hello ".into()).unwrap(), "hello");
+        assert!(validate_message("a".repeat(MAX_CHAT_MESSAGE_CHARS)).is_ok());
+        assert!(validate_message("a".repeat(MAX_CHAT_MESSAGE_CHARS + 1)).is_err());
+        assert!(validate_message("读".repeat(MAX_CHAT_MESSAGE_CHARS)).is_ok());
+        assert!(validate_message("🦀".repeat(MAX_CHAT_MESSAGE_CHARS)).is_ok());
+        assert!(validate_message("🦀".repeat(MAX_CHAT_MESSAGE_CHARS + 1)).is_err());
+    }
+
+    #[test]
+    fn idempotency_key_requires_uuid_v4_and_distinguishes_old_clients() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(extract_turn_id(&headers).unwrap(), None);
+        headers.insert("idempotency-key", HeaderValue::from_static("not-a-uuid"));
+        assert!(extract_turn_id(&headers).is_err());
+        headers.insert(
+            "idempotency-key",
+            HeaderValue::from_str(&Uuid::nil().to_string()).unwrap(),
+        );
+        assert!(extract_turn_id(&headers).is_err());
+        headers.insert(
+            "idempotency-key",
+            HeaderValue::from_static("00000000-0000-4000-0000-000000000001"),
+        );
+        assert!(extract_turn_id(&headers).is_err());
+        let turn_id = Uuid::new_v4();
+        headers.insert(
+            "idempotency-key",
+            HeaderValue::from_str(&turn_id.to_string()).unwrap(),
+        );
+        assert_eq!(extract_turn_id(&headers).unwrap(), Some(turn_id));
+    }
+
+    #[test]
+    fn in_progress_response_exposes_the_remaining_lease() {
+        let response = application_error_response(
+            AgentRequestError::TurnInProgress {
+                retry_after_seconds: 117,
+            }
+            .into(),
+            StatusCode::SERVICE_UNAVAILABLE,
+        );
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "117");
+    }
+
+    #[test]
+    fn memory_layer_is_strict() {
+        assert_eq!(parse_layer("short"), Some(MemoryLayer::Short));
+        assert_eq!(parse_layer("permanent"), Some(MemoryLayer::Permanent));
+        assert_eq!(parse_layer("unknown"), None);
+    }
+
+    #[test]
+    fn routes_construct_with_axum_08_syntax() {
+        let _ = routes();
+    }
+
+    #[tokio::test]
+    async fn dependency_readiness_fails_closed_per_dependency() {
+        assert_eq!(
+            dependency_readiness(&FixedProbe(true), &FixedProbe(false), &FixedProbe(true)).await,
+            (true, false, true)
+        );
+    }
 }

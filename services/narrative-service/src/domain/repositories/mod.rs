@@ -1,28 +1,27 @@
+use crate::domain::entities::narrative_node::{NarrativeNode, WorldState};
+use anyhow::Result;
 use async_trait::async_trait;
 use uuid::Uuid;
-use anyhow::Result;
-use crate::domain::entities::narrative_node::{NarrativeNode, WorldState};
 
 #[async_trait]
 pub trait NarrativeNodeRepository: Send + Sync {
     async fn save(&self, node: &NarrativeNode) -> Result<()>;
-    async fn find_by_chapter(&self, novel_id: Uuid, chapter_number: i32) -> Result<Option<NarrativeNode>>;
+    async fn find_by_chapter(
+        &self,
+        novel_id: Uuid,
+        chapter_number: i32,
+    ) -> Result<Option<NarrativeNode>>;
     async fn find_by_id(&self, id: Uuid) -> Result<Option<NarrativeNode>>;
 }
 
 #[async_trait]
 pub trait UserChoiceRepository: Send + Sync {
-    async fn save_choice(
+    async fn commit_choice(&self, choice: &ChoiceCommit) -> Result<ChoiceCommitResult>;
+    async fn find_user_choice(
         &self,
         user_id: Uuid,
-        novel_id: Uuid,
         node_id: Uuid,
-        chapter_number: i32,
-        choice_index: i32,
-        choice_text: &str,
-        consequence: Option<&str>,
-    ) -> Result<()>;
-    async fn find_user_choice(&self, user_id: Uuid, node_id: Uuid) -> Result<Option<UserChoiceRecord>>;
+    ) -> Result<Option<UserChoiceRecord>>;
     async fn find_by_novel(&self, user_id: Uuid, novel_id: Uuid) -> Result<Vec<UserChoiceRecord>>;
 }
 
@@ -35,8 +34,13 @@ pub trait WorldStateRepository: Send + Sync {
 /// Lightweight read-only access to chapters and novels from shared DB
 #[async_trait]
 pub trait ChapterReadRepository: Send + Sync {
-    async fn get_chapter_content(&self, novel_id: Uuid, chapter_number: i32) -> Result<Option<String>>;
-    async fn get_novel_info(&self, novel_id: Uuid) -> Result<Option<NovelInfo>>;
+    async fn get_chapter_content(
+        &self,
+        novel_id: Uuid,
+        chapter_number: i32,
+        user_id: Uuid,
+    ) -> Result<Option<String>>;
+    async fn get_novel_info(&self, novel_id: Uuid, user_id: Uuid) -> Result<Option<NovelInfo>>;
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -50,6 +54,23 @@ pub struct UserChoiceRecord {
     pub choice_text: String,
     pub consequence: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChoiceCommit {
+    pub user_id: Uuid,
+    pub novel_id: Uuid,
+    pub node_id: Uuid,
+    pub chapter_number: i32,
+    pub choice_index: i32,
+    pub choice_text: String,
+    pub consequence: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChoiceCommitResult {
+    pub choice: UserChoiceRecord,
+    pub world_state: WorldState,
 }
 
 #[derive(Debug, Clone)]

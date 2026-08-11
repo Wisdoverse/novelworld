@@ -10,11 +10,9 @@ impl RetryPolicy {
         attempt < MAX_RETRIES && (status == 429 || status >= 500)
     }
 
-    pub fn delay(status: u16, attempt: u32, retry_after: Option<&str>) -> Duration {
-        if status == 429 {
-            if let Some(secs) = retry_after.and_then(|v| v.parse::<u64>().ok()) {
-                return Duration::from_secs(secs);
-            }
+    pub fn delay(_status: u16, attempt: u32, retry_after: Option<&str>) -> Duration {
+        if let Some(secs) = retry_after.and_then(|value| value.parse::<u64>().ok()) {
+            return Duration::from_secs(secs);
         }
         Duration::from_secs(RETRY_DELAYS[attempt as usize])
     }

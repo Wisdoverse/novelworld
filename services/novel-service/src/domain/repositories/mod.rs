@@ -1,8 +1,8 @@
+use anyhow::Result;
 use async_trait::async_trait;
 use uuid::Uuid;
-use anyhow::Result;
 
-use crate::domain::entities::{novel::Novel, chapter::Chapter, character::Character};
+use crate::domain::entities::{chapter::Chapter, character::Character, novel::Novel};
 
 #[async_trait]
 pub trait NovelRepository: Send + Sync {
@@ -27,7 +27,15 @@ pub trait CharacterRepository: Send + Sync {
     async fn find_by_novel(&self, novel_id: Uuid) -> Result<Vec<Character>>;
     async fn find_by_id(&self, id: Uuid) -> Result<Option<Character>>;
     async fn update(&self, character: &Character) -> Result<()>;
-    async fn save_relationship(&self, novel_id: Uuid, from_id: Uuid, to_id: Uuid, rel_type: &str, description: Option<&str>, strength: i32) -> Result<()>;
+    async fn save_relationship(
+        &self,
+        novel_id: Uuid,
+        from_id: Uuid,
+        to_id: Uuid,
+        rel_type: &str,
+        description: Option<&str>,
+        strength: i32,
+    ) -> Result<()>;
     async fn find_relationships(&self, novel_id: Uuid) -> Result<Vec<CharacterRelationshipRecord>>;
 }
 
@@ -61,7 +69,19 @@ pub struct ReadingProgressRecord {
 
 #[async_trait]
 pub trait ReadingProgressRepository: Send + Sync {
-    async fn get_or_create(&self, user_id: Uuid, novel_id: Uuid) -> Result<ReadingProgressRecord>;
+    async fn get_or_create(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        deviation_mode: &str,
+    ) -> Result<ReadingProgressRecord>;
     async fn update_chapter(&self, user_id: Uuid, novel_id: Uuid, chapter: i32) -> Result<()>;
-    async fn set_identity(&self, user_id: Uuid, novel_id: Uuid, identity_type: &str, identity_name: Option<&str>, character_id: Option<Uuid>) -> Result<()>;
+    async fn set_identity(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        identity_type: &str,
+        identity_name: Option<&str>,
+        character_id: Option<Uuid>,
+    ) -> Result<()>;
 }

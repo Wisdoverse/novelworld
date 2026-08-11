@@ -15,6 +15,13 @@ fn safe_truncate(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
+const MAX_TITLE_BYTES: usize = 2_000;
+const MAX_CHAPTER_BYTES: usize = 4_000;
+const MAX_CHOICE_BYTES: usize = 2_000;
+const MAX_STATE_SECTION_BYTES: usize = 8_000;
+const MAX_IDENTITY_BYTES: usize = 800;
+const MAX_MODE_BYTES: usize = 32;
+
 /// LLM 返回的分支生成结果
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GeneratedBranch {
@@ -36,10 +43,10 @@ pub fn build_branch_prompt(
     deviation_mode: &str,
     reader_identity: &str,
 ) -> String {
-    let choices_history = serde_json::to_string_pretty(&world_state.state["choices"])
-        .unwrap_or_default();
-    let relationships = serde_json::to_string_pretty(&world_state.state["relationships"])
-        .unwrap_or_default();
+    let choices_history =
+        serde_json::to_string_pretty(&world_state.state["choices"]).unwrap_or_default();
+    let relationships =
+        serde_json::to_string_pretty(&world_state.state["relationships"]).unwrap_or_default();
 
     format!(
         r#"你是《{title}》的叙事引擎。请根据当前章节内容，在关键时刻为读者生成分支选择。
@@ -84,12 +91,12 @@ pub fn build_branch_prompt(
 2. 根据故事偏离度决定选项的创意程度
 3. 考虑读者与各角色的关系分数
 4. hint 要制造悬念，不直接说结果"#,
-        title = novel_title,
-        chapter = safe_truncate(chapter_content, 2000),
-        identity = reader_identity,
-        mode = deviation_mode,
-        choices = choices_history,
-        relationships = relationships,
+        title = safe_truncate(novel_title, MAX_TITLE_BYTES),
+        chapter = safe_truncate(chapter_content, MAX_CHAPTER_BYTES),
+        identity = safe_truncate(reader_identity, MAX_IDENTITY_BYTES),
+        mode = safe_truncate(deviation_mode, MAX_MODE_BYTES),
+        choices = safe_truncate(&choices_history, MAX_STATE_SECTION_BYTES),
+        relationships = safe_truncate(&relationships, MAX_STATE_SECTION_BYTES),
     )
 }
 
@@ -101,6 +108,7 @@ pub fn build_consequence_prompt(
     world_state: &WorldState,
     deviation_mode: &str,
 ) -> String {
+    let state = serde_json::to_string_pretty(&world_state.state).unwrap_or_default();
     format!(
         r#"你是《{title}》的叙事引擎。读者在关键时刻做出了选择，请生成选择后的故事发展。
 
@@ -121,10 +129,10 @@ pub fn build_consequence_prompt(
 3. 保持角色性格一致
 4. 根据偏离度决定与原著的差异程度
 5. 结尾留有悬念，引导读者继续阅读"#,
-        title = novel_title,
-        chapter = safe_truncate(chapter_content, 1500),
-        choice = choice_text,
-        mode = deviation_mode,
-        state = serde_json::to_string_pretty(&world_state.state).unwrap_or_default(),
+        title = safe_truncate(novel_title, MAX_TITLE_BYTES),
+        chapter = safe_truncate(chapter_content, MAX_CHAPTER_BYTES),
+        choice = safe_truncate(choice_text, MAX_CHOICE_BYTES),
+        mode = safe_truncate(deviation_mode, MAX_MODE_BYTES),
+        state = safe_truncate(&state, MAX_STATE_SECTION_BYTES),
     )
 }

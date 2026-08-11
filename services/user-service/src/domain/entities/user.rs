@@ -31,6 +31,7 @@ impl UserRole {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "admin" => Self::Admin,
@@ -41,6 +42,19 @@ impl UserRole {
 
 impl User {
     pub fn new(email: String, password_hash: String, name: Option<String>) -> Self {
+        Self::with_role(email, password_hash, name, UserRole::User)
+    }
+
+    pub fn new_admin(email: String, password_hash: String, name: Option<String>) -> Self {
+        Self::with_role(email, password_hash, name, UserRole::Admin)
+    }
+
+    fn with_role(
+        email: String,
+        password_hash: String,
+        name: Option<String>,
+        role: UserRole,
+    ) -> Self {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
@@ -48,7 +62,7 @@ impl User {
             password_hash,
             name,
             avatar_url: None,
-            role: UserRole::User,
+            role,
             email_verified: false,
             created_at: now,
             updated_at: now,

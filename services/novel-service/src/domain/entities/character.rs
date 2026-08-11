@@ -2,8 +2,18 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domain::value_objects::{CharacterRole, AvatarStatus};
 use crate::domain::services::character_extractor::ExtractedCharacter;
+use crate::domain::value_objects::{AvatarStatus, CharacterRole};
+
+const MAX_CHARACTER_NAME_CHARS: usize = 200;
+
+fn normalize_character_name(name: &str) -> Option<String> {
+    let name = name.trim();
+    (!name.is_empty()
+        && name.chars().count() <= MAX_CHARACTER_NAME_CHARS
+        && !name.chars().any(char::is_control))
+    .then(|| name.to_owned())
+}
 
 /// 角色实体
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,9 +99,14 @@ impl Character {
     }
 
     /// Factory method: build a Character from an extraction result
-    pub fn from_extraction(novel_id: Uuid, ec: &ExtractedCharacter, world_summary: &str, novel_title: &str) -> Self {
+    pub fn from_extraction(
+        novel_id: Uuid,
+        ec: &ExtractedCharacter,
+        world_summary: &str,
+        novel_title: &str,
+    ) -> Option<Self> {
         let role = CharacterRole::from_str(&ec.role);
-        let mut ch = Self::new(novel_id, ec.name.clone(), role);
+        let mut ch = Self::new(novel_id, normalize_character_name(&ec.name)?, role);
         ch.description = Some(ec.description.clone());
         ch.personality = Some(ec.personality.clone());
         ch.background = Some(ec.background.clone());
@@ -100,12 +115,28 @@ impl Character {
         ch.aliases = ec.aliases.clone();
         ch.first_appearance_chapter = ec.first_appearance_chapter;
         ch.build_system_prompt(novel_title, world_summary);
-        ch
+        Some(ch)
     }
 
     pub fn set_avatar(&mut self, url: String) {
         self.avatar_url = Some(url);
         self.avatar_status = AvatarStatus::Ready;
         self.updated_at = Utc::now();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_character_name;
+
+    #[test]
+    fn extracted_character_names_are_canonical() {
+        assert_eq!(
+            normalize_character_name("  Alice  ").as_deref(),
+            Some("Alice")
+        );
+        assert!(normalize_character_name(" \t ").is_none());
+        assert!(normalize_character_name("bad\nname").is_none());
+        assert!(normalize_character_name(&"a".repeat(201)).is_none());
     }
 }

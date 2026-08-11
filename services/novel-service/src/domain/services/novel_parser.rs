@@ -33,11 +33,7 @@ impl NovelParserService {
         Ok(Self::split_by_length(novel_id, raw_text, 3000))
     }
 
-    fn split_by_matches(
-        novel_id: Uuid,
-        text: &str,
-        matches: &[regex::Match],
-    ) -> Vec<Chapter> {
+    fn split_by_matches(novel_id: Uuid, text: &str, matches: &[regex::Match]) -> Vec<Chapter> {
         let mut chapters = Vec::new();
         for (i, m) in matches.iter().enumerate() {
             let start = m.start();

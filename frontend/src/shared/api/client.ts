@@ -1,4 +1,4 @@
-import axios, { AxiosInstance, AxiosRequestConfig } from 'axios';
+import axios, { AxiosInstance } from 'axios';
 
 const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080/api';
 
@@ -7,6 +7,16 @@ export const apiClient: AxiosInstance = axios.create({
   timeout: 30000,
   headers: { 'Content-Type': 'application/json' },
 });
+
+interface ApiErrorBody {
+  error?: string | { code?: string; message?: string };
+}
+
+export function getApiErrorMessage(error: unknown, fallback: string): string {
+  if (!axios.isAxiosError<ApiErrorBody>(error)) return fallback;
+  const detail = error.response?.data?.error;
+  return typeof detail === 'string' ? detail : detail?.message || fallback;
+}
 
 // 请求拦截器：注入 JWT
 apiClient.interceptors.request.use((config) => {
@@ -29,80 +39,327 @@ apiClient.interceptors.response.use(
   }
 );
 
-/** SSE 流式对话 */
-export function createChatStream(
-  characterId: string,
-  payload: {
-    user_id: string;
-    novel_id: string;
-    message: string;
-    reader_identity?: string;
-    current_chapter: number;
-  },
-  onChunk: (text: string) => void,
-  onDone: () => void,
-  onError: (err: string) => void,
-): () => void {
+export interface ChatStreamPayload {
+  novel_id: string;
+  message: string;
+  reader_identity?: string;
+  current_chapter: number;
+}
+
+export interface ChatStreamDone {
+  turnId: string;
+  replayed: boolean;
+  legacy: boolean;
+}
+
+export interface ChatStreamError {
+  code: string;
+  message: string;
+}
+
+export interface ChatStreamOptions {
+  characterId: string;
+  turnId: string;
+  payload: ChatStreamPayload;
+  onChunk: (text: string) => void;
+  onDone: (result: ChatStreamDone) => void;
+  onError: (error: ChatStreamError) => void;
+  onRetry?: () => void;
+}
+
+class ChatProtocolError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+  }
+}
+
+interface ChatSseCallbacks {
+  onChunk: (text: string) => void;
+  onDone: (result: ChatStreamDone) => void;
+  onError: (error: ChatStreamError) => void;
+}
+
+class ChatSseParser {
+  private buffer = '';
+  private eventName = '';
+  private dataLines: string[] = [];
+  private sawV2 = false;
+  private terminal = false;
+
+  constructor(
+    private readonly turnId: string,
+    private readonly callbacks: ChatSseCallbacks,
+  ) {}
+
+  get isTerminal() {
+    return this.terminal;
+  }
+
+  feed(text: string) {
+    if (this.terminal || !text) return;
+    this.buffer += text;
+    let consumed = 0;
+
+    for (let index = 0; index < this.buffer.length;) {
+      const character = this.buffer[index];
+      if (character !== '\n' && character !== '\r') {
+        index++;
+        continue;
+      }
+      if (character === '\r' && index + 1 === this.buffer.length) break;
+
+      this.processLine(this.buffer.slice(consumed, index));
+      index += character === '\r' && this.buffer[index + 1] === '\n' ? 2 : 1;
+      consumed = index;
+      if (this.terminal) break;
+    }
+
+    this.buffer = this.buffer.slice(consumed);
+  }
+
+  finish() {
+    if (!this.terminal) {
+      throw new ChatProtocolError(
+        'stream_incomplete',
+        'The response ended before the turn was committed',
+      );
+    }
+  }
+
+  private processLine(line: string) {
+    if (line === '') {
+      this.dispatch();
+      return;
+    }
+    if (line.startsWith(':')) return;
+
+    const colon = line.indexOf(':');
+    const field = colon === -1 ? line : line.slice(0, colon);
+    let value = colon === -1 ? '' : line.slice(colon + 1);
+    if (value.startsWith(' ')) value = value.slice(1);
+
+    if (field === 'event') this.eventName = value;
+    if (field === 'data') this.dataLines.push(value);
+  }
+
+  private dispatch() {
+    const eventName = this.eventName || 'message';
+    const data = this.dataLines.join('\n');
+    this.eventName = '';
+    this.dataLines = [];
+
+    if (eventName === 'message') {
+      if (data) this.callbacks.onChunk(data);
+      return;
+    }
+
+    if (eventName === 'delta') {
+      this.sawV2 = true;
+      const event = this.parseObject(data, 'malformed_delta');
+      if (typeof event.content !== 'string') {
+        throw new ChatProtocolError('malformed_delta', 'Delta content must be a string');
+      }
+      this.callbacks.onChunk(event.content);
+      return;
+    }
+
+    if (eventName === 'done') {
+      if (!data && !this.sawV2) {
+        this.terminal = true;
+        this.callbacks.onDone({ turnId: this.turnId, replayed: false, legacy: true });
+        return;
+      }
+
+      const event = this.parseObject(data, 'malformed_done');
+      if (
+        event.turn_id !== this.turnId
+        || event.committed !== true
+        || (event.replayed !== undefined && typeof event.replayed !== 'boolean')
+      ) {
+        throw new ChatProtocolError('malformed_done', 'Commit acknowledgement is invalid');
+      }
+      this.terminal = true;
+      this.callbacks.onDone({
+        turnId: this.turnId,
+        replayed: event.replayed === true,
+        legacy: false,
+      });
+      return;
+    }
+
+    if (eventName === 'error') {
+      this.terminal = true;
+      if (!data) {
+        this.callbacks.onError({ code: 'stream_error', message: 'Response generation failed' });
+        return;
+      }
+      try {
+        const event = JSON.parse(data) as Record<string, unknown>;
+        if (event.turn_id !== undefined && event.turn_id !== this.turnId) {
+          throw new Error('turn mismatch');
+        }
+        this.callbacks.onError({
+          code: typeof event.code === 'string' ? event.code : 'stream_error',
+          message: typeof event.message === 'string' ? event.message : 'Response generation failed',
+        });
+      } catch {
+        this.callbacks.onError({ code: 'stream_error', message: data });
+      }
+    }
+  }
+
+  private parseObject(data: string, code: string): Record<string, unknown> {
+    try {
+      const value = JSON.parse(data) as unknown;
+      if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error();
+      return value as Record<string, unknown>;
+    } catch {
+      throw new ChatProtocolError(code, 'The response stream was malformed');
+    }
+  }
+}
+
+const MAX_CHAT_RETRIES = 3;
+const RETRY_BASE_MS = 1_000;
+
+function responseErrorBody(value: unknown, status: number): ChatStreamError {
+  if (typeof value === 'object' && value !== null) {
+    const detail = (value as { error?: unknown }).error;
+    if (typeof detail === 'object' && detail !== null) {
+      const code = (detail as { code?: unknown }).code;
+      const message = (detail as { message?: unknown }).message;
+      return {
+        code: typeof code === 'string' ? code : `http_${status}`,
+        message: typeof message === 'string' ? message : `HTTP ${status}`,
+      };
+    }
+  }
+  return { code: `http_${status}`, message: `HTTP ${status}` };
+}
+
+/** POST-based SSE chat with one idempotency key for every retry. */
+export function createChatStream(options: ChatStreamOptions): () => void {
   const token = localStorage.getItem('auth_token');
-  const controller = new AbortController();
-  let retryCount = 0;
-  const maxRetries = 3;
-  const baseDelay = 1000;
+  let cancelled = false;
+  let settled = false;
+  let retries = 0;
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let controller: AbortController | undefined;
 
-  const attempt = () => {
-    fetch(`${BASE_URL}/chat/${characterId}/stream`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    }).then(async (res) => {
-      if (!res.ok) {
-        if (res.status >= 500 && retryCount < maxRetries) {
-          retryCount++;
-          setTimeout(attempt, baseDelay * Math.pow(2, retryCount - 1));
-          return;
-        }
-        onError(`HTTP ${res.status}`);
-        return;
-      }
-      retryCount = 0; // reset on success
-      const reader = res.body?.getReader();
-      if (!reader) { onError('No response body'); return; }
-
-      const decoder = new TextDecoder();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) { onDone(); break; }
-        const text = decoder.decode(value);
-        const lines = text.split('\n');
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const data = line.slice(6);
-            if (data.trim()) onChunk(data);
-          } else if (line.startsWith('event: done')) {
-            onDone();
-            return;
-          } else if (line.startsWith('event: error')) {
-            onError('Stream error');
-            return;
-          }
-        }
-      }
-    }).catch((err) => {
-      if (err.name === 'AbortError') return;
-      if (retryCount < maxRetries) {
-        retryCount++;
-        setTimeout(attempt, baseDelay * Math.pow(2, retryCount - 1));
-        return;
-      }
-      onError(err.message);
-    });
+  const fail = (error: ChatStreamError) => {
+    if (cancelled || settled) return;
+    settled = true;
+    options.onError(error);
   };
 
-  attempt();
-  // 返回取消函数
-  return () => controller.abort();
+  const scheduleRetry = (error: ChatStreamError, retryAfter: string | null = null) => {
+    if (cancelled || settled) return;
+    if (retries >= MAX_CHAT_RETRIES) {
+      fail(error);
+      return;
+    }
+    const exponential = RETRY_BASE_MS * 2 ** retries;
+    const retryAfterMs = retryAfter && Number.isFinite(Number(retryAfter))
+      ? Number(retryAfter) * 1_000
+      : 0;
+    retries++;
+    options.onRetry?.();
+    retryTimer = setTimeout(attempt, Math.max(exponential, retryAfterMs));
+  };
+
+  const consume = async (response: Response) => {
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw new ChatProtocolError('missing_response_body', 'The response body is missing');
+    }
+    const decoder = new TextDecoder('utf-8', { fatal: true });
+    const parser = new ChatSseParser(options.turnId, {
+      onChunk: options.onChunk,
+      onDone: result => {
+        if (cancelled || settled) return;
+        settled = true;
+        options.onDone(result);
+      },
+      onError: fail,
+    });
+
+    while (!parser.isTerminal) {
+      const { done, value } = await reader.read();
+      if (done) {
+        try {
+          parser.feed(decoder.decode());
+        } catch (error) {
+          if (error instanceof ChatProtocolError) throw error;
+          throw new ChatProtocolError('malformed_utf8', 'The response was not valid UTF-8');
+        }
+        parser.finish();
+        break;
+      }
+      try {
+        parser.feed(decoder.decode(value, { stream: true }));
+      } catch (error) {
+        if (error instanceof ChatProtocolError) throw error;
+        throw new ChatProtocolError('malformed_utf8', 'The response was not valid UTF-8');
+      }
+    }
+
+    if (parser.isTerminal) await reader.cancel().catch(() => undefined);
+  };
+
+  async function attempt() {
+    if (cancelled || settled) return;
+    controller = new AbortController();
+    let response: Response;
+    try {
+      response = await fetch(`${BASE_URL}/chat/${options.characterId}/stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': options.turnId,
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(options.payload),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (cancelled || (error instanceof DOMException && error.name === 'AbortError')) return;
+      scheduleRetry({
+        code: 'network_error',
+        message: error instanceof Error ? error.message : 'Network request failed',
+      });
+      return;
+    }
+
+    if (!response.ok) {
+      const body = await response.json().catch(() => undefined);
+      const error = responseErrorBody(body, response.status);
+      if (response.status >= 500 || (response.status === 409 && error.code === 'turn_in_progress')) {
+        scheduleRetry(error, response.headers.get('Retry-After'));
+      } else {
+        fail(error);
+      }
+      return;
+    }
+
+    try {
+      await consume(response);
+    } catch (error) {
+      if (cancelled || (error instanceof DOMException && error.name === 'AbortError')) return;
+      if (error instanceof ChatProtocolError) {
+        fail({ code: error.code, message: error.message });
+      } else {
+        scheduleRetry({
+          code: 'network_error',
+          message: error instanceof Error ? error.message : 'The response stream failed',
+        });
+      }
+    }
+  }
+
+  void attempt();
+  return () => {
+    cancelled = true;
+    if (retryTimer !== undefined) clearTimeout(retryTimer);
+    controller?.abort();
+  };
 }

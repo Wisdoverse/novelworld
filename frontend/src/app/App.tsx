@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
@@ -11,6 +11,7 @@ import { ReaderPage } from '@/pages/reader/ui/ReaderPage';
 import { CharactersPage } from '@/pages/characters/ui/CharactersPage';
 import { SetupPage } from '@/pages/setup/ui/SetupPage';
 import { useAuthStore } from '@/features/auth/model/useAuthStore';
+import { useChatStore } from '@/features/character-chat/model/useChatStore';
 import { apiClient } from '@/shared/api/client';
 
 const queryClient = new QueryClient({
@@ -22,19 +23,49 @@ const queryClient = new QueryClient({
   },
 });
 
-function AppRoutes() {
-  const { user, fetchMe } = useAuthStore();
-  const [setupStatus, setSetupStatus] = useState<'loading' | 'needed' | 'done'>('loading');
+export function resetPrivateClientStateForPrincipalChange(
+  client: QueryClient,
+  previousPrincipal: string | null,
+  currentPrincipal: string | null,
+) {
+  if (previousPrincipal !== currentPrincipal) {
+    client.clear();
+    useChatStore.getState().reset();
+  }
+  return currentPrincipal;
+}
 
-  useEffect(() => {
+export function AppRoutes() {
+  const { user, fetchMe } = useAuthStore();
+  const previousPrincipal = useRef<string | null>(null);
+  const [setupStatus, setSetupStatus] = useState<'loading' | 'needed' | 'done' | 'error'>('loading');
+
+  useLayoutEffect(() => {
+    previousPrincipal.current = resetPrivateClientStateForPrincipalChange(
+      queryClient,
+      previousPrincipal.current,
+      user?.id ?? null,
+    );
+  }, [user?.id]);
+
+  const loadSetupStatus = useCallback(() => {
+    setSetupStatus('loading');
     apiClient.get('/setup/status')
       .then(res => {
-        setSetupStatus(res.data?.configured ? 'done' : 'needed');
+        if (res.data?.contract !== 2) {
+          setSetupStatus('error');
+          return;
+        }
+        setSetupStatus(res.data.configured ? 'done' : 'needed');
       })
       .catch(() => {
-        setSetupStatus('done');
+        setSetupStatus('error');
       });
   }, []);
+
+  useEffect(() => {
+    loadSetupStatus();
+  }, [loadSetupStatus]);
 
   useEffect(() => {
     if (setupStatus === 'done') {
@@ -58,8 +89,29 @@ function AppRoutes() {
   if (setupStatus === 'needed') {
     return <SetupPage onComplete={() => {
       setSetupStatus('done');
-      fetchMe();
     }} />;
+  }
+
+  if (setupStatus === 'error') {
+    return (
+      <div className="min-h-screen flex items-center justify-center px-4"
+           style={{ background: 'linear-gradient(135deg, var(--color-void) 0%, var(--color-cosmos) 100%)' }}>
+        <div role="alert" className="max-w-md text-center rounded-xl p-8"
+             style={{ background: 'rgba(15, 21, 53, 0.8)', color: 'var(--color-moonbeam)' }}>
+          <h1 className="text-lg font-semibold mb-2" style={{ color: 'var(--color-starlight)' }}>
+            Setup status unavailable
+          </h1>
+          <p className="mb-4">NovelWorld could not verify its server configuration.</p>
+          <button
+            onClick={loadSetupStatus}
+            className="px-5 py-2.5 rounded-lg font-semibold"
+            style={{ background: 'var(--color-nova)', color: 'white' }}
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -68,7 +120,7 @@ function AppRoutes() {
       <Route path="/login" element={<LoginPage />} />
       <Route path="/shelf" element={user ? <ShelfPage /> : <Navigate to="/login" replace />} />
       <Route path="/reader/:novelId/:chapterNum" element={user ? <ReaderPage /> : <Navigate to="/login" replace />} />
-      <Route path="/reader/:novelId" element={<Navigate to="1" replace />} />
+      <Route path="/reader/:novelId" element={user ? <ReaderPage /> : <Navigate to="/login" replace />} />
       <Route path="/characters/:novelId" element={user ? <CharactersPage /> : <Navigate to="/login" replace />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

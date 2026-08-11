@@ -1,5 +1,5 @@
-use async_trait::async_trait;
 use anyhow::Result;
+use async_trait::async_trait;
 
 #[async_trait]
 pub trait LlmPort: Send + Sync {
@@ -10,4 +10,9 @@ pub trait LlmPort: Send + Sync {
 #[async_trait]
 pub trait ImagePort: Send + Sync {
     async fn generate(&self, prompt: &str) -> Result<String>;
+}
+
+#[async_trait]
+pub trait ReadinessProbe: Send + Sync {
+    async fn is_ready(&self) -> bool;
 }

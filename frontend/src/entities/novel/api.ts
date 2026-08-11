@@ -9,7 +9,7 @@ export const novelKeys = {
   detail: (id: string) => [...novelKeys.all, 'detail', id] as const,
   chapters: (id: string) => [...novelKeys.all, id, 'chapters'] as const,
   chapter: (id: string, num: number) => [...novelKeys.all, id, 'chapters', num] as const,
-  characters: (id: string) => [...novelKeys.all, id, 'characters'] as const,
+  characters: (id: string, chapter: number) => [...novelKeys.all, id, 'characters', chapter] as const,
   status: (id: string) => [...novelKeys.all, id, 'status'] as const,
 };
 
@@ -60,11 +60,18 @@ export function useChapter(novelId: string, chapterNum: number) {
   });
 }
 
-export function useCharacters(novelId: string) {
+export function isCharacterAvailable(character: Character, currentChapter: number) {
+  const appearance = character.first_appearance_chapter;
+  return appearance !== undefined && appearance >= 1 && appearance <= currentChapter;
+}
+
+export function useCharacters(novelId: string, currentChapter: number) {
   return useQuery({
-    queryKey: novelKeys.characters(novelId),
-    queryFn: () => apiClient.get<Character[]>(`/novels/${novelId}/characters`).then(r => r.data),
-    enabled: !!novelId,
+    queryKey: novelKeys.characters(novelId, currentChapter),
+    queryFn: () => apiClient
+      .get<Character[]>(`/novels/${novelId}/characters`)
+      .then(r => r.data.filter(character => isCharacterAvailable(character, currentChapter))),
+    enabled: !!novelId && currentChapter >= 1,
   });
 }
 

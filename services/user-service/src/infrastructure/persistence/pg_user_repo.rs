@@ -1,9 +1,9 @@
+use anyhow::Result;
 use async_trait::async_trait;
 use sqlx::PgPool;
 use uuid::Uuid;
-use anyhow::Result;
 
-use crate::domain::entities::user::{User, UserRole, RefreshToken};
+use crate::domain::entities::user::{RefreshToken, User, UserRole};
 use crate::domain::repositories::UserRepository;
 
 pub struct PgUserRepository {
@@ -18,10 +18,11 @@ impl PgUserRepository {
 
 #[async_trait]
 impl UserRepository for PgUserRepository {
-    async fn save(&self, user: &User) -> Result<()> {
-        sqlx::query(
+    async fn save(&self, user: &User) -> Result<bool> {
+        let result = sqlx::query(
             r#"INSERT INTO users (id, email, password_hash, name, avatar_url, role, email_verified, created_at, updated_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#
+               VALUES ($1, $2, $3, $4, $5, $6::public.user_role, $7, $8, $9)
+               ON CONFLICT DO NOTHING"#
         )
         .bind(user.id)
         .bind(&user.email)
@@ -34,7 +35,56 @@ impl UserRepository for PgUserRepository {
         .bind(user.updated_at)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn save_initial_user(&self, user: &User, token: &RefreshToken) -> Result<bool> {
+        let mut transaction = self.pool.begin().await?;
+        // ponytail: one global lock for the one-time bootstrap; revisit only if setup throughput matters.
+        sqlx::query("LOCK TABLE users IN EXCLUSIVE MODE")
+            .execute(&mut *transaction)
+            .await?;
+        let configured: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users)")
+            .fetch_one(&mut *transaction)
+            .await?;
+        if configured {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+
+        sqlx::query(
+            r#"INSERT INTO users (id, email, password_hash, name, avatar_url, role, email_verified, created_at, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6::public.user_role, $7, $8, $9)"#,
+        )
+        .bind(user.id)
+        .bind(&user.email)
+        .bind(&user.password_hash)
+        .bind(&user.name)
+        .bind(&user.avatar_url)
+        .bind(user.role.as_str())
+        .bind(user.email_verified)
+        .bind(user.created_at)
+        .bind(user.updated_at)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO refresh_tokens (id, user_id, token, expires_at, created_at) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(token.id)
+        .bind(token.user_id)
+        .bind(&token.token)
+        .bind(token.expires_at)
+        .bind(token.created_at)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(true)
+    }
+
+    async fn has_any(&self) -> Result<bool> {
+        Ok(sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users)")
+            .fetch_one(&self.pool)
+            .await?)
     }
 
     async fn find_by_id(&self, id: Uuid) -> Result<Option<User>> {
@@ -59,7 +109,7 @@ impl UserRepository for PgUserRepository {
 
     async fn update(&self, user: &User) -> Result<()> {
         sqlx::query(
-            r#"UPDATE users SET name=$2, avatar_url=$3, role=$4, email_verified=$5, updated_at=$6, last_sign_in=$7 WHERE id=$1"#
+            r#"UPDATE users SET name=$2, avatar_url=$3, role=$4::public.user_role, email_verified=$5, updated_at=$6, last_sign_in=$7 WHERE id=$1"#
         )
         .bind(user.id)
         .bind(&user.name)
@@ -76,7 +126,7 @@ impl UserRepository for PgUserRepository {
     async fn save_refresh_token(&self, token: &RefreshToken) -> Result<()> {
         sqlx::query(
             r#"INSERT INTO refresh_tokens (id, user_id, token, expires_at, created_at)
-               VALUES ($1, $2, $3, $4, $5)"#
+               VALUES ($1, $2, $3, $4, $5)"#,
         )
         .bind(token.id)
         .bind(token.user_id)

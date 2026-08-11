@@ -1,9 +1,13 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-use super::LlmProvider;
+use super::{
+    response_error,
+    sse::{decode_stream, SseFrame},
+    LlmProvider,
+};
 use crate::types::*;
 
 pub struct OpenAIProvider {
@@ -66,12 +70,67 @@ struct OpenAIEmbeddingData {
     embedding: Vec<f32>,
 }
 
-#[async_trait]
-impl LlmProvider for OpenAIProvider {
-    fn base_url(&self) -> &str {
-        &self.base_url
+pub(crate) fn parse_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>> {
+    if frame.event == "error" {
+        return Err(anyhow!("OpenAI stream error: {}", frame.data));
+    }
+    if frame.event != "message" {
+        return Ok(Vec::new());
+    }
+    if frame.data == "[DONE]" {
+        return Ok(vec![ChatStreamEvent::Finished]);
     }
 
+    let payload: Value = serde_json::from_str(&frame.data)
+        .map_err(|error| anyhow!("invalid OpenAI stream payload: {error}"))?;
+    if let Some(error) = payload.get("error") {
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown error");
+        return Err(anyhow!("OpenAI stream error: {message}"));
+    }
+
+    let choices = payload
+        .get("choices")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("OpenAI stream payload is missing choices"))?;
+    let mut events = Vec::new();
+
+    for choice in choices {
+        let choice = choice
+            .as_object()
+            .ok_or_else(|| anyhow!("OpenAI stream choice is not an object"))?;
+
+        if let Some(reason) = choice.get("finish_reason") {
+            match reason {
+                Value::Null => {}
+                Value::String(reason) if reason == "content_filter" => {
+                    return Err(anyhow!("OpenAI stream was blocked by content filtering"));
+                }
+                Value::String(_) => {}
+                _ => return Err(anyhow!("OpenAI finish_reason is not a string or null")),
+            }
+        }
+
+        let delta = choice
+            .get("delta")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("OpenAI stream choice is missing delta"))?;
+        match delta.get("content") {
+            Some(Value::String(content)) if !content.is_empty() => {
+                events.push(ChatStreamEvent::Delta(content.clone()));
+            }
+            Some(Value::String(_) | Value::Null) | None => {}
+            Some(_) => return Err(anyhow!("OpenAI delta content is not a string or null")),
+        }
+    }
+
+    Ok(events)
+}
+
+#[async_trait]
+impl LlmProvider for OpenAIProvider {
     fn auth_header(&self, api_key: &str) -> (String, String) {
         ("Authorization".into(), format!("Bearer {}", api_key))
     }
@@ -104,14 +163,14 @@ impl LlmProvider for OpenAIProvider {
             .await?;
 
         if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
-            return Err(LlmApiError { status, message: body }.into());
+            return Err(response_error(response).await);
         }
 
         let resp: OpenAIResponse = response.json().await?;
 
-        let content = resp.choices.first()
+        let content = resp
+            .choices
+            .first()
             .and_then(|c| c.message.content.clone())
             .ok_or_else(|| anyhow::anyhow!("Empty response"))?;
 
@@ -130,7 +189,7 @@ impl LlmProvider for OpenAIProvider {
         client: &reqwest::Client,
         api_key: &str,
         request: &ChatRequest,
-    ) -> Result<Box<dyn futures::Stream<Item = Result<String>> + Send + Unpin>> {
+    ) -> Result<ChatStream> {
         let body = OpenAIRequest {
             model: request.model.clone(),
             messages: request.messages.clone(),
@@ -149,23 +208,10 @@ impl LlmProvider for OpenAIProvider {
             .await?;
 
         if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
-            return Err(LlmApiError { status, message: body }.into());
+            return Err(response_error(response).await);
         }
 
-        let stream = response.bytes_stream().map(|chunk| {
-            let chunk = chunk.map_err(|e| anyhow::anyhow!(e))?;
-            let text = String::from_utf8_lossy(&chunk).to_string();
-            let content: String = text.lines()
-                .filter(|l| l.starts_with("data: ") && !l.contains("[DONE]"))
-                .filter_map(|l| serde_json::from_str::<serde_json::Value>(&l[6..]).ok())
-                .filter_map(|v| v["choices"][0]["delta"]["content"].as_str().map(String::from))
-                .collect();
-            Ok(content)
-        });
-
-        Ok(Box::new(stream))
+        Ok(decode_stream(response.bytes_stream(), parse_stream_frame))
     }
 
     async fn embed(
@@ -188,17 +234,20 @@ impl LlmProvider for OpenAIProvider {
             .await?;
 
         if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
-            return Err(LlmApiError { status, message: body }.into());
+            return Err(response_error(response).await);
         }
 
         let resp: OpenAIEmbeddingResponse = response.json().await?;
 
-        let embedding = resp.data.first()
+        let embedding = resp
+            .data
+            .first()
             .map(|d| d.embedding.clone())
             .ok_or_else(|| anyhow::anyhow!("No embedding returned"))?;
 
-        Ok(EmbeddingResponse { embedding, model: resp.model })
+        Ok(EmbeddingResponse {
+            embedding,
+            model: resp.model,
+        })
     }
 }

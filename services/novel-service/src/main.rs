@@ -1,27 +1,23 @@
 #![allow(dead_code, unused_imports)]
-mod domain;
-mod application;
-mod infrastructure;
-mod interface;
-#[cfg(test)]
-mod tests;
-
-use std::sync::Arc;
 use anyhow::Result;
 use sqlx::postgres::PgPoolOptions;
+use std::sync::Arc;
+use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use tower_http::cors::{CorsLayer, Any};
 
-use application::handlers::NovelCommandHandler;
-use domain::ports::{LlmPort, ImagePort};
-use infrastructure::llm::{LlmAdapter, image::ImageClient};
-use infrastructure::persistence::{
-    novel_pg_repo::NovelPgRepository,
-    chapter_pg_repo::ChapterPgRepository,
-    character_pg_repo::CharacterPgRepository,
-    pg_progress_repo::PgReadingProgressRepository,
+use novel_service::{
+    application::handlers::{NovelCommandHandler, ReadingProgressHandler},
+    domain::ports::{ImagePort, LlmPort},
+    infrastructure::{
+        llm::{image::ImageClient, LlmAdapter},
+        persistence::{
+            chapter_pg_repo::ChapterPgRepository, character_pg_repo::CharacterPgRepository,
+            novel_pg_repo::NovelPgRepository, pg_progress_repo::PgReadingProgressRepository,
+            PgReadinessProbe,
+        },
+    },
+    interface::http::{router, AppState},
 };
-use interface::http::{router, AppState};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -34,8 +30,7 @@ async fn main() -> Result<()> {
 
     dotenvy::dotenv().ok();
 
-    let database_url = std::env::var("DATABASE_URL")
-        .expect("DATABASE_URL must be set");
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let pool = PgPoolOptions::new()
         .max_connections(20)
         .connect(&database_url)
@@ -43,19 +38,18 @@ async fn main() -> Result<()> {
 
     tracing::info!("Connected to PostgreSQL");
 
-    let llm_base = Arc::new(llm_client::LlmClient::new()
-        .with_openai_compatible("default",
-            std::env::var("LLM_API_KEY").unwrap_or_default(),
-            std::env::var("LLM_API_URL").unwrap_or_else(|_| "https://api.openai.com".into()),
-        ));
+    let llm_base = Arc::new(llm_client::LlmClient::new().with_openai_compatible(
+        "default",
+        std::env::var("LLM_API_KEY").unwrap_or_default(),
+        std::env::var("LLM_API_URL").unwrap_or_else(|_| "https://api.openai.com".into()),
+    ));
     let llm_model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "gpt-4o".into());
     let llm = Arc::new(LlmAdapter::new(llm_base, format!("default/{}", llm_model)));
 
     let image_client = Arc::new(ImageClient::new(
         std::env::var("IMAGE_GEN_API_URL").unwrap_or_else(|_| "https://api.openai.com".into()),
-        std::env::var("IMAGE_GEN_API_KEY").unwrap_or_else(|_|
-            std::env::var("LLM_API_KEY").unwrap_or_default()
-        ),
+        std::env::var("IMAGE_GEN_API_KEY")
+            .unwrap_or_else(|_| std::env::var("LLM_API_KEY").unwrap_or_default()),
         std::env::var("IMAGE_GEN_MODEL").unwrap_or_else(|_| "dall-e-3".into()),
     ));
 
@@ -74,17 +68,28 @@ async fn main() -> Result<()> {
         llm,
         image_client,
     });
+    let progress_handler = Arc::new(ReadingProgressHandler {
+        novel_repo: novel_repo.clone(),
+        chapter_repo: chapter_repo.clone(),
+        character_repo: character_repo.clone(),
+        progress_repo,
+    });
 
     let state = AppState {
         handler,
         novel_repo,
         chapter_repo,
         character_repo,
-        progress_repo,
+        progress_handler,
+        readiness: Arc::new(PgReadinessProbe::new(pool)),
     };
 
-    let app = router(state)
-        .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any));
+    let app = router(state).layer(
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any),
+    );
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "8002".into());
     let addr = format!("0.0.0.0:{}", port);

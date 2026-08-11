@@ -1,6 +1,5 @@
 # Rust
 target/
-Cargo.lock
 
 # Node
 node_modules/
@@ -32,6 +31,7 @@ uploads_data/
 
 # Remember (session state)
 .remember/
+.release/
 
 # Claude
 .claude/

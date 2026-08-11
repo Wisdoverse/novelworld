@@ -8,7 +8,7 @@ description = "Unified LLM client supporting OpenAI, Anthropic, Gemini, and Open
 reqwest = { version = "0.13", features = ["json", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["time", "rt-multi-thread"] }
 futures = "0.3"
 async-trait = "0.1"
 anyhow = "1"

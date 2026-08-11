@@ -1,17 +1,40 @@
-use async_trait::async_trait;
-use anyhow::{Result, anyhow};
-use reqwest::Client;
-use uuid::Uuid;
 use crate::domain::repositories::{ChapterReadRepository, NovelInfo};
+use anyhow::{anyhow, Result};
+use async_trait::async_trait;
+use reqwest::Client;
+use std::time::Duration;
+use uuid::Uuid;
 
+use crate::domain::ports::ReadinessProbe;
 pub struct NovelServiceClient {
     client: Client,
     base_url: String,
 }
 
+const NOVEL_SERVICE_TIMEOUT: Duration = Duration::from_secs(2);
+
 impl NovelServiceClient {
     pub fn new(base_url: String) -> Self {
-        Self { client: Client::new(), base_url }
+        Self {
+            client: Client::builder()
+                .timeout(NOVEL_SERVICE_TIMEOUT)
+                .build()
+                .expect("valid novel-service HTTP client configuration"),
+            base_url,
+        }
+    }
+}
+
+#[async_trait]
+impl ReadinessProbe for NovelServiceClient {
+    async fn is_ready(&self) -> bool {
+        matches!(
+            self.client
+                .get(format!("{}/ready", self.base_url))
+                .send()
+                .await,
+            Ok(response) if response.status().is_success()
+        )
     }
 }
 
@@ -30,10 +53,25 @@ struct NovelResponse {
 
 #[async_trait]
 impl ChapterReadRepository for NovelServiceClient {
-    async fn get_chapter_content(&self, novel_id: Uuid, chapter_number: i32) -> Result<Option<String>> {
-        let url = format!("{}/novels/{}/chapters/{}", self.base_url, novel_id, chapter_number);
-        let resp = self.client.get(&url).send().await?;
-        if resp.status().as_u16() == 404 { return Ok(None); }
+    async fn get_chapter_content(
+        &self,
+        novel_id: Uuid,
+        chapter_number: i32,
+        user_id: Uuid,
+    ) -> Result<Option<String>> {
+        let url = format!(
+            "{}/novels/{}/chapters/{}",
+            self.base_url, novel_id, chapter_number
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .header("X-User-Id", user_id.to_string())
+            .send()
+            .await?;
+        if resp.status().as_u16() == 404 {
+            return Ok(None);
+        }
         if !resp.status().is_success() {
             return Err(anyhow!("Novel service returned {}", resp.status()));
         }
@@ -41,10 +79,17 @@ impl ChapterReadRepository for NovelServiceClient {
         Ok(Some(ch.content))
     }
 
-    async fn get_novel_info(&self, novel_id: Uuid) -> Result<Option<NovelInfo>> {
+    async fn get_novel_info(&self, novel_id: Uuid, user_id: Uuid) -> Result<Option<NovelInfo>> {
         let url = format!("{}/novels/{}", self.base_url, novel_id);
-        let resp = self.client.get(&url).send().await?;
-        if resp.status().as_u16() == 404 { return Ok(None); }
+        let resp = self
+            .client
+            .get(&url)
+            .header("X-User-Id", user_id.to_string())
+            .send()
+            .await?;
+        if resp.status().as_u16() == 404 {
+            return Ok(None);
+        }
         if !resp.status().is_success() {
             return Err(anyhow!("Novel service returned {}", resp.status()));
         }

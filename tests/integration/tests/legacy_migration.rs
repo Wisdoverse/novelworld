@@ -1,0 +1,892 @@
+use agent_service::domain::ports::ReadinessProbe;
+use agent_service::infrastructure::persistence::PgReadinessProbe;
+use narrative_service::{
+    domain::ports::ReadinessProbe as NarrativeReadinessPort,
+    infrastructure::persistence::PgReadinessProbe as NarrativePgReadinessProbe,
+};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use std::str::FromStr;
+
+const LEGACY_SCHEMA: &str = include_str!("../fixtures/legacy_runtime_contract.sql");
+const FRESH_SCHEMA: &str = include_str!("../../../infra/postgres/init.sql");
+const RUNTIME_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0001_runtime_contract.sql");
+const PROGRESS_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0002_reading_progress_contract.sql");
+const CHAT_TURN_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0003_chat_turn_contract.sql");
+const NARRATIVE_CHOICE_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0004_narrative_choice_contract.sql");
+const SEED_REMOVAL_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0005_remove_default_seed.sql");
+
+fn db_url() -> String {
+    std::env::var("TEST_DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://test:test@localhost:25432/novelworld_test".into())
+}
+
+#[tokio::test]
+async fn fresh_schema_matches_replayable_chat_turn_contract() {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    sqlx::query("DROP DATABASE IF EXISTS novelworld_fresh_contract WITH (FORCE)")
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("CREATE DATABASE novelworld_fresh_contract")
+        .execute(&admin)
+        .await
+        .unwrap();
+
+    let options = PgConnectOptions::from_str(&db_url())
+        .unwrap()
+        .database("novelworld_fresh_contract");
+    let fresh = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+
+    sqlx::raw_sql(FRESH_SCHEMA).execute(&fresh).await.unwrap();
+    for _ in 0..2 {
+        sqlx::raw_sql(CHAT_TURN_MIGRATION)
+            .execute(&fresh)
+            .await
+            .unwrap();
+        sqlx::raw_sql(NARRATIVE_CHOICE_MIGRATION)
+            .execute(&fresh)
+            .await
+            .unwrap();
+        sqlx::raw_sql(SEED_REMOVAL_MIGRATION)
+            .execute(&fresh)
+            .await
+            .unwrap();
+    }
+
+    let contract_exists: bool = sqlx::query_scalar(
+        "SELECT to_regclass('public.chat_turns') IS NOT NULL \
+             AND EXISTS ( \
+                 SELECT 1 FROM information_schema.columns \
+                 WHERE table_schema = 'public' \
+                   AND table_name = 'chat_messages' \
+                   AND column_name = 'turn_id' \
+                   AND is_nullable = 'YES' \
+             )",
+    )
+    .fetch_one(&fresh)
+    .await
+    .unwrap();
+    assert!(contract_exists);
+
+    let readiness = PgReadinessProbe::new(fresh.clone());
+    assert!(readiness.is_ready().await);
+
+    let narrative_readiness = NarrativePgReadinessProbe::new(fresh.clone());
+    assert!(narrative_readiness.is_ready().await);
+    sqlx::raw_sql(
+        "ALTER TABLE public.user_choices DROP CONSTRAINT user_choices_user_node_key; \
+         ALTER TABLE public.user_choices ADD CONSTRAINT user_choices_user_node_key \
+             UNIQUE(node_id, user_id)",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    assert!(!narrative_readiness.is_ready().await);
+    sqlx::raw_sql(
+        "ALTER TABLE public.user_choices DROP CONSTRAINT user_choices_user_node_key; \
+         ALTER TABLE public.user_choices ADD CONSTRAINT user_choices_user_node_key \
+             UNIQUE(user_id, node_id)",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    assert!(narrative_readiness.is_ready().await);
+
+    sqlx::raw_sql(
+        "DROP INDEX public.idx_chat_turns_one_in_progress; \
+         CREATE UNIQUE INDEX idx_chat_turns_one_in_progress \
+             ON public.chat_turns(character_id, user_id, novel_id) \
+             WHERE status = 'in_progress'",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    assert!(!readiness.is_ready().await);
+    sqlx::query("DROP INDEX public.idx_chat_turns_one_in_progress")
+        .execute(&fresh)
+        .await
+        .unwrap();
+    sqlx::raw_sql(CHAT_TURN_MIGRATION)
+        .execute(&fresh)
+        .await
+        .unwrap();
+    assert!(readiness.is_ready().await);
+
+    sqlx::raw_sql(
+        "DROP INDEX public.idx_chat_messages_turn_role_unique; \
+         CREATE UNIQUE INDEX idx_chat_messages_turn_role_unique \
+             ON public.chat_messages(role, turn_id) \
+             WHERE turn_id IS NOT NULL",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    assert!(!readiness.is_ready().await);
+    sqlx::query("DROP INDEX public.idx_chat_messages_turn_role_unique")
+        .execute(&fresh)
+        .await
+        .unwrap();
+    sqlx::raw_sql(CHAT_TURN_MIGRATION)
+        .execute(&fresh)
+        .await
+        .unwrap();
+    assert!(readiness.is_ready().await);
+
+    let seed_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+    let seed_hash = "$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TiGniMnCGkzBMqVbNxoQyJXkBxKi";
+    sqlx::query(
+        "INSERT INTO users (id, email, password_hash, role) VALUES ($1, 'admin@novelworld.dev', $2, 'admin')",
+    )
+    .bind(seed_id)
+    .bind(seed_hash)
+    .execute(&fresh)
+    .await
+    .unwrap();
+    sqlx::raw_sql(SEED_REMOVAL_MIGRATION)
+        .execute(&fresh)
+        .await
+        .unwrap();
+    assert!(
+        !sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)")
+            .bind(seed_id)
+            .fetch_one(&fresh)
+            .await
+            .unwrap()
+    );
+
+    let owned_novel = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO users (id, email, password_hash, role) VALUES ($1, 'admin@novelworld.dev', $2, 'admin')",
+    )
+    .bind(seed_id)
+    .bind(seed_hash)
+    .execute(&fresh)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO novels (id, user_id, title) VALUES ($1, $2, 'Seed data')")
+        .bind(owned_novel)
+        .bind(seed_id)
+        .execute(&fresh)
+        .await
+        .unwrap();
+    let error = sqlx::raw_sql(SEED_REMOVAL_MIGRATION)
+        .execute(&fresh)
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("known default admin credential owns product data"));
+    sqlx::query("DELETE FROM novels WHERE id = $1")
+        .bind(owned_novel)
+        .execute(&fresh)
+        .await
+        .unwrap();
+    sqlx::raw_sql(SEED_REMOVAL_MIGRATION)
+        .execute(&fresh)
+        .await
+        .unwrap();
+
+    fresh.close().await;
+    sqlx::query("DROP DATABASE novelworld_fresh_contract WITH (FORCE)")
+        .execute(&admin)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    sqlx::query("DROP DATABASE IF EXISTS novelworld_legacy_contract WITH (FORCE)")
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("CREATE DATABASE novelworld_legacy_contract")
+        .execute(&admin)
+        .await
+        .unwrap();
+
+    let options = PgConnectOptions::from_str(&db_url())
+        .unwrap()
+        .database("novelworld_legacy_contract");
+    let legacy = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+
+    sqlx::raw_sql(LEGACY_SCHEMA).execute(&legacy).await.unwrap();
+    for _ in 0..2 {
+        sqlx::raw_sql(RUNTIME_MIGRATION)
+            .execute(&legacy)
+            .await
+            .unwrap();
+        sqlx::raw_sql(PROGRESS_MIGRATION)
+            .execute(&legacy)
+            .await
+            .unwrap();
+    }
+
+    sqlx::raw_sql(
+        "CREATE FUNCTION decoy.now() RETURNS TIMESTAMPTZ \
+         LANGUAGE SQL IMMUTABLE \
+         AS $$ SELECT '2001-01-01 00:00:00+00'::TIMESTAMPTZ $$",
+    )
+    .execute(&legacy)
+    .await
+    .unwrap();
+    sqlx::raw_sql(
+        "CREATE DOMAIN decoy.regclass AS oid; \
+         CREATE DOMAIN decoy.regnamespace AS oid; \
+         CREATE DOMAIN decoy.uuid AS pg_catalog.uuid; \
+         CREATE DOMAIN decoy.text AS pg_catalog.text; \
+         CREATE TABLE decoy.pg_constraint (ignored INTEGER); \
+         CREATE TABLE decoy.pg_index (ignored INTEGER); \
+         CREATE TABLE decoy.pg_class (ignored INTEGER); \
+         CREATE TABLE decoy.pg_am (ignored INTEGER)",
+    )
+    .execute(&legacy)
+    .await
+    .unwrap();
+
+    let mut psql_url = reqwest::Url::parse(&db_url()).unwrap();
+    psql_url.set_path("/novelworld_legacy_contract");
+    for migration in [
+        "0003_chat_turn_contract.sql",
+        "0004_narrative_choice_contract.sql",
+        "0005_remove_default_seed.sql",
+    ] {
+        let migration_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../infra/postgres/migrations")
+            .join(migration);
+        let psql = tokio::process::Command::new("psql")
+            .arg("--set=ON_ERROR_STOP=1")
+            .arg("--file")
+            .arg(migration_path)
+            .arg("--dbname")
+            .arg(psql_url.as_str())
+            .env("PGOPTIONS", "-c search_path=decoy,pg_catalog")
+            .output()
+            .await
+            .expect("psql must be installed for the production migration contract test");
+        assert!(
+            psql.status.success(),
+            "psql migration {migration} failed: {}",
+            String::from_utf8_lossy(&psql.stderr)
+        );
+    }
+
+    let mut non_default_path = legacy.acquire().await.unwrap();
+    sqlx::query("SET search_path TO decoy, pg_catalog")
+        .execute(&mut *non_default_path)
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        sqlx::raw_sql(PROGRESS_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
+        sqlx::raw_sql(CHAT_TURN_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
+        sqlx::raw_sql(NARRATIVE_CHOICE_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
+        sqlx::raw_sql(SEED_REMOVAL_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
+    }
+    sqlx::query("RESET search_path")
+        .execute(&mut *non_default_path)
+        .await
+        .unwrap();
+    drop(non_default_path);
+
+    let novel_id: uuid::Uuid = sqlx::query_scalar(
+        "SELECT novel_id FROM public.character_memories WHERE content = 'legacy memory'",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    assert_eq!(novel_id.to_string(), "00000000-0000-0000-0000-000000000002");
+
+    let chapter_context: Option<i32> = sqlx::query_scalar(
+        "SELECT chapter_context FROM public.chat_messages WHERE content = 'legacy chat'",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    assert_eq!(chapter_context, Some(7));
+
+    let legacy_turn_id: Option<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT turn_id FROM public.chat_messages WHERE content = 'legacy chat'",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    assert!(legacy_turn_id.is_none());
+
+    let turn_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM public.chat_turns")
+        .fetch_one(&legacy)
+        .await
+        .unwrap();
+    assert_eq!(turn_count, 0);
+
+    let legacy_column_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM information_schema.columns \
+         WHERE table_schema = 'public' AND table_name = 'chat_messages' \
+         AND column_name = 'chapter_num'",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    assert_eq!(legacy_column_count, 0);
+
+    let target_constraint_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pg_constraint \
+         WHERE (conname = 'character_memories_novel_id_fkey' \
+                AND conrelid = 'public.character_memories'::regclass) \
+            OR (conname = 'narrative_nodes_novel_chapter_key' \
+                AND conrelid = 'public.narrative_nodes'::regclass) \
+            OR (conname = 'reading_progress_current_chapter_check' \
+                AND conrelid = 'public.reading_progress'::regclass) \
+            OR (conname = 'reading_progress_identity_fields_check' \
+                AND conrelid = 'public.reading_progress'::regclass)",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    assert_eq!(target_constraint_count, 4);
+
+    let progress: (i32, String, Option<String>, Option<uuid::Uuid>) = sqlx::query_as(
+        "SELECT current_chapter, reader_identity_type::text, reader_identity, reader_character_id \
+         FROM public.reading_progress \
+         WHERE id = '00000000-0000-0000-0000-000000000008'",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    assert_eq!(
+        progress,
+        (
+            7,
+            "character".into(),
+            Some("Legacy Future Character".into()),
+            Some(uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap()),
+        )
+    );
+
+    let repaired_hole: (i32, String, Option<String>, Option<uuid::Uuid>) = sqlx::query_as(
+        "SELECT current_chapter, reader_identity_type::text, reader_identity, reader_character_id \
+         FROM public.reading_progress \
+         WHERE id = '00000000-0000-0000-0000-000000000011'",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    assert_eq!(
+        repaired_hole,
+        (1, "self".into(), Some("Reader".into()), None)
+    );
+
+    let character_name: String = sqlx::query_scalar("SELECT name FROM public.characters LIMIT 1")
+        .fetch_one(&legacy)
+        .await
+        .unwrap();
+    assert_eq!(character_name, "Legacy Future Character");
+
+    let memory_nullable: String = sqlx::query_scalar(
+        "SELECT is_nullable FROM information_schema.columns \
+         WHERE table_schema = 'public' AND table_name = 'character_memories' \
+         AND column_name = 'novel_id'",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    assert_eq!(memory_nullable, "NO");
+
+    let row_counts: (i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+            (SELECT COUNT(*) FROM public.character_memories), \
+            (SELECT COUNT(*) FROM public.chat_messages), \
+            (SELECT COUNT(*) FROM public.narrative_nodes)",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    assert_eq!(row_counts, (1, 1, 1));
+
+    let chat_turn_contract_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pg_constraint \
+         WHERE (conname = 'chat_turns_state_check' \
+                AND conrelid = 'public.chat_turns'::regclass) \
+            OR (conname = 'chat_turns_identity_fields_check' \
+                AND conrelid = 'public.chat_turns'::regclass) \
+            OR (conname = 'chat_turns_request_fingerprint_check' \
+                AND conrelid = 'public.chat_turns'::regclass) \
+            OR (conname = 'chat_messages_turn_id_fkey' \
+                AND conrelid = 'public.chat_messages'::regclass)",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    assert_eq!(chat_turn_contract_count, 4);
+
+    let turn_index_is_valid: bool = sqlx::query_scalar(
+        "SELECT EXISTS ( \
+             SELECT 1 FROM pg_index AS index_definition \
+             JOIN pg_class AS index_relation \
+               ON index_relation.oid = index_definition.indexrelid \
+             WHERE index_relation.relnamespace = 'public'::regnamespace \
+               AND index_relation.relname = 'idx_chat_messages_turn_role_unique' \
+               AND index_definition.indrelid = 'public.chat_messages'::regclass \
+               AND index_definition.indisunique \
+               AND pg_get_indexdef(index_definition.indexrelid, 1, true) = 'turn_id' \
+               AND pg_get_indexdef(index_definition.indexrelid, 2, true) = 'role' \
+               AND pg_get_expr(index_definition.indpred, index_definition.indrelid) = \
+                   '(turn_id IS NOT NULL)' \
+         )",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    assert!(turn_index_is_valid);
+
+    let one_in_progress_index_is_valid: bool = sqlx::query_scalar(
+        "SELECT EXISTS ( \
+             SELECT 1 FROM pg_index AS index_definition \
+             JOIN pg_class AS index_relation \
+               ON index_relation.oid = index_definition.indexrelid \
+             WHERE index_relation.relnamespace = 'public'::regnamespace \
+               AND index_relation.relname = 'idx_chat_turns_one_in_progress' \
+               AND index_definition.indrelid = 'public.chat_turns'::regclass \
+               AND index_definition.indisunique \
+               AND pg_get_indexdef(index_definition.indexrelid, 1, true) = 'user_id' \
+               AND pg_get_indexdef(index_definition.indexrelid, 2, true) = 'character_id' \
+               AND pg_get_indexdef(index_definition.indexrelid, 3, true) = 'novel_id' \
+               AND pg_get_expr(index_definition.indpred, index_definition.indrelid) = \
+                   '((status)::text = ''in_progress''::text)' \
+         )",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    assert!(one_in_progress_index_is_valid);
+
+    sqlx::query("ALTER TABLE public.chat_turns ALTER COLUMN attempt DROP NOT NULL")
+        .execute(&legacy)
+        .await
+        .unwrap();
+    let turn_column_error = sqlx::raw_sql(CHAT_TURN_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap_err();
+    assert!(turn_column_error
+        .to_string()
+        .contains("chat turns columns have an unexpected definition"));
+    sqlx::query("ALTER TABLE public.chat_turns ALTER COLUMN attempt SET NOT NULL")
+        .execute(&legacy)
+        .await
+        .unwrap();
+    sqlx::raw_sql(CHAT_TURN_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "ALTER TABLE public.chat_messages \
+         ALTER COLUMN turn_id SET DEFAULT \
+             '00000000-0000-0000-0000-000000000099'::uuid",
+    )
+    .execute(&legacy)
+    .await
+    .unwrap();
+    let message_turn_column_error = sqlx::raw_sql(CHAT_TURN_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap_err();
+    assert!(message_turn_column_error
+        .to_string()
+        .contains("chat messages turn column has an unexpected definition"));
+    sqlx::query("ALTER TABLE public.chat_messages ALTER COLUMN turn_id DROP DEFAULT")
+        .execute(&legacy)
+        .await
+        .unwrap();
+    sqlx::raw_sql(CHAT_TURN_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap();
+
+    sqlx::raw_sql(
+        "ALTER TABLE public.chat_messages \
+         DROP CONSTRAINT chat_messages_turn_id_fkey; \
+         ALTER TABLE public.chat_turns \
+         DROP CONSTRAINT chat_turns_pkey, \
+         ADD CONSTRAINT chat_turns_pkey PRIMARY KEY (user_id)",
+    )
+    .execute(&legacy)
+    .await
+    .unwrap();
+    let turn_primary_key_error = sqlx::raw_sql(CHAT_TURN_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap_err();
+    assert!(turn_primary_key_error
+        .to_string()
+        .contains("chat turns primary key has an unexpected definition"));
+    sqlx::query("ALTER TABLE public.chat_turns DROP CONSTRAINT chat_turns_pkey")
+        .execute(&legacy)
+        .await
+        .unwrap();
+    sqlx::raw_sql(CHAT_TURN_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "ALTER TABLE public.chat_turns \
+         DROP CONSTRAINT chat_turns_state_check, \
+         ADD CONSTRAINT chat_turns_state_check CHECK (TRUE)",
+    )
+    .execute(&legacy)
+    .await
+    .unwrap();
+    let state_constraint_error = sqlx::raw_sql(CHAT_TURN_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap_err();
+    assert!(state_constraint_error
+        .to_string()
+        .contains("chat turns state constraint has an unexpected definition"));
+    sqlx::query("ALTER TABLE public.chat_turns DROP CONSTRAINT chat_turns_state_check")
+        .execute(&legacy)
+        .await
+        .unwrap();
+    sqlx::raw_sql(CHAT_TURN_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "ALTER TABLE public.chat_turns \
+         DROP CONSTRAINT chat_turns_request_fingerprint_check, \
+         ADD CONSTRAINT chat_turns_request_fingerprint_check \
+             CHECK (octet_length(request_fingerprint) > 0)",
+    )
+    .execute(&legacy)
+    .await
+    .unwrap();
+    let fingerprint_constraint_error = sqlx::raw_sql(CHAT_TURN_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap_err();
+    assert!(fingerprint_constraint_error
+        .to_string()
+        .contains("request fingerprint constraint has an unexpected definition"));
+    sqlx::query(
+        "ALTER TABLE public.chat_turns \
+         DROP CONSTRAINT chat_turns_request_fingerprint_check",
+    )
+    .execute(&legacy)
+    .await
+    .unwrap();
+    sqlx::raw_sql(CHAT_TURN_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "ALTER TABLE public.chat_messages \
+         DROP CONSTRAINT chat_messages_turn_id_fkey, \
+         ADD CONSTRAINT chat_messages_turn_id_fkey \
+             FOREIGN KEY (turn_id) REFERENCES public.chat_turns(id)",
+    )
+    .execute(&legacy)
+    .await
+    .unwrap();
+    let turn_foreign_key_error = sqlx::raw_sql(CHAT_TURN_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap_err();
+    assert!(turn_foreign_key_error
+        .to_string()
+        .contains("chat messages turn foreign key has an unexpected definition"));
+    sqlx::query(
+        "ALTER TABLE public.chat_messages \
+         DROP CONSTRAINT chat_messages_turn_id_fkey",
+    )
+    .execute(&legacy)
+    .await
+    .unwrap();
+    sqlx::raw_sql(CHAT_TURN_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap();
+
+    sqlx::query("DROP INDEX public.idx_chat_messages_turn_role_unique")
+        .execute(&legacy)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE UNIQUE INDEX idx_chat_messages_turn_role_unique \
+         ON public.chat_messages(role, turn_id) WHERE turn_id IS NOT NULL",
+    )
+    .execute(&legacy)
+    .await
+    .unwrap();
+    let turn_index_error = sqlx::raw_sql(CHAT_TURN_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap_err();
+    assert!(turn_index_error
+        .to_string()
+        .contains("chat messages turn/role index has an unexpected definition"));
+    sqlx::query("DROP INDEX public.idx_chat_messages_turn_role_unique")
+        .execute(&legacy)
+        .await
+        .unwrap();
+    sqlx::raw_sql(CHAT_TURN_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap();
+
+    sqlx::query("DROP INDEX public.idx_chat_turns_one_in_progress")
+        .execute(&legacy)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE UNIQUE INDEX idx_chat_turns_one_in_progress \
+         ON public.chat_turns(character_id, user_id, novel_id) \
+         WHERE status = 'in_progress'",
+    )
+    .execute(&legacy)
+    .await
+    .unwrap();
+    let one_in_progress_index_error = sqlx::raw_sql(CHAT_TURN_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap_err();
+    assert!(one_in_progress_index_error
+        .to_string()
+        .contains("chat turns one-in-progress index has an unexpected definition"));
+    sqlx::query("DROP INDEX public.idx_chat_turns_one_in_progress")
+        .execute(&legacy)
+        .await
+        .unwrap();
+    sqlx::raw_sql(CHAT_TURN_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap();
+
+    sqlx::query("DROP INDEX public.idx_chat_turns_one_in_progress")
+        .execute(&legacy)
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "INSERT INTO public.chat_turns ( \
+             id, user_id, character_id, novel_id, request_fingerprint, \
+             chapter_context, reader_identity_type, deviation_mode, status, \
+             lease_expires_at \
+         ) VALUES \
+             ( \
+                 '00000000-0000-0000-0000-000000000020', \
+                 '00000000-0000-0000-0000-000000000001', \
+                 '00000000-0000-0000-0000-000000000003', \
+                 '00000000-0000-0000-0000-000000000002', \
+                 decode(repeat('01', 32), 'hex'), 7, 'self', 'canon', \
+                 'in_progress', NOW() + INTERVAL '5 minutes' \
+             ), \
+             ( \
+                 '00000000-0000-0000-0000-000000000021', \
+                 '00000000-0000-0000-0000-000000000001', \
+                 '00000000-0000-0000-0000-000000000003', \
+                 '00000000-0000-0000-0000-000000000002', \
+                 decode(repeat('02', 32), 'hex'), 7, 'self', 'canon', \
+                 'in_progress', NOW() + INTERVAL '5 minutes' \
+             )",
+    )
+    .execute(&legacy)
+    .await
+    .unwrap();
+    let duplicate_active_turn_error = sqlx::raw_sql(CHAT_TURN_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap_err();
+    assert!(duplicate_active_turn_error
+        .to_string()
+        .contains("cannot enforce one in-progress chat turn"));
+    sqlx::query(
+        "DELETE FROM public.chat_turns \
+         WHERE id IN ( \
+             '00000000-0000-0000-0000-000000000020', \
+             '00000000-0000-0000-0000-000000000021' \
+         )",
+    )
+    .execute(&legacy)
+    .await
+    .unwrap();
+    sqlx::raw_sql(CHAT_TURN_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "ALTER TABLE public.reading_progress \
+         DROP CONSTRAINT reading_progress_current_chapter_check, \
+         ADD CONSTRAINT reading_progress_current_chapter_check CHECK (current_chapter >= 0)",
+    )
+    .execute(&legacy)
+    .await
+    .unwrap();
+    let chapter_constraint_error = sqlx::raw_sql(PROGRESS_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap_err();
+    assert!(chapter_constraint_error
+        .to_string()
+        .contains("chapter constraint has an unexpected definition"));
+    sqlx::query(
+        "ALTER TABLE public.reading_progress \
+         DROP CONSTRAINT reading_progress_current_chapter_check",
+    )
+    .execute(&legacy)
+    .await
+    .unwrap();
+    sqlx::raw_sql(PROGRESS_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap();
+
+    sqlx::raw_sql(
+        "INSERT INTO public.users (id, email, password_hash) VALUES \
+             ('00000000-0000-0000-0000-000000000016', \
+              'legacy-repair@test.invalid', 'legacy-test-hash'); \
+         INSERT INTO public.novels (id, user_id, total_chapters) VALUES \
+             ('00000000-0000-0000-0000-000000000017', \
+              '00000000-0000-0000-0000-000000000016', 3); \
+         INSERT INTO public.characters (id, novel_id, name, first_appearance_chapter) VALUES \
+             ('00000000-0000-0000-0000-000000000018', \
+              '00000000-0000-0000-0000-000000000017', E'\\tPending repair\\t', 1); \
+         INSERT INTO public.reading_progress \
+             (id, user_id, novel_id, current_chapter, reader_identity_type) VALUES \
+             ('00000000-0000-0000-0000-000000000019', \
+              '00000000-0000-0000-0000-000000000016', \
+              '00000000-0000-0000-0000-000000000017', 1, 'self')",
+    )
+    .execute(&legacy)
+    .await
+    .unwrap();
+    let no_chapter_error = sqlx::raw_sql(PROGRESS_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap_err();
+    assert!(no_chapter_error
+        .to_string()
+        .contains("novel has no readable chapter"));
+    let unchanged_name: String = sqlx::query_scalar(
+        "SELECT name FROM public.characters \
+         WHERE id = '00000000-0000-0000-0000-000000000018'",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    assert_eq!(unchanged_name, "\tPending repair\t");
+
+    sqlx::query(
+        "INSERT INTO public.chapters (id, novel_id, chapter_number) VALUES \
+         ('00000000-0000-0000-0000-000000000020', \
+          '00000000-0000-0000-0000-000000000017', 1)",
+    )
+    .execute(&legacy)
+    .await
+    .unwrap();
+    for _ in 0..2 {
+        sqlx::raw_sql(PROGRESS_MIGRATION)
+            .execute(&legacy)
+            .await
+            .unwrap();
+    }
+    let repaired_name: String = sqlx::query_scalar(
+        "SELECT name FROM public.characters \
+         WHERE id = '00000000-0000-0000-0000-000000000018'",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    assert_eq!(repaired_name, "Pending repair");
+
+    sqlx::query(
+        "ALTER TABLE public.reading_progress \
+         DROP CONSTRAINT reading_progress_identity_fields_check, \
+         ADD CONSTRAINT reading_progress_identity_fields_check CHECK (TRUE)",
+    )
+    .execute(&legacy)
+    .await
+    .unwrap();
+    let identity_constraint_error = sqlx::raw_sql(PROGRESS_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap_err();
+    assert!(identity_constraint_error
+        .to_string()
+        .contains("identity constraint has an unexpected definition"));
+    sqlx::query(
+        "ALTER TABLE public.reading_progress \
+         DROP CONSTRAINT reading_progress_identity_fields_check",
+    )
+    .execute(&legacy)
+    .await
+    .unwrap();
+    sqlx::raw_sql(PROGRESS_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "ALTER TABLE public.narrative_nodes \
+         DROP CONSTRAINT narrative_nodes_novel_chapter_key",
+    )
+    .execute(&legacy)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO public.narrative_nodes (id, novel_id, chapter_number) \
+         VALUES ('00000000-0000-0000-0000-000000000007', \
+                 '00000000-0000-0000-0000-000000000002', 7)",
+    )
+    .execute(&legacy)
+    .await
+    .unwrap();
+    let duplicate_error = sqlx::raw_sql(RUNTIME_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap_err();
+    assert!(duplicate_error
+        .to_string()
+        .contains("duplicate novel/chapter rows exist"));
+
+    legacy.close().await;
+    sqlx::query("DROP DATABASE novelworld_legacy_contract WITH (FORCE)")
+        .execute(&admin)
+        .await
+        .unwrap();
+}

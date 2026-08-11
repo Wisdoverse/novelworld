@@ -16,6 +16,26 @@ services:
       timeout: 3s
       retries: 10
 
+  test-migrate:
+    image: pgvector/pgvector:pg18
+    environment:
+      PGHOST: test-postgres
+      PGUSER: test
+      PGPASSWORD: test
+      PGDATABASE: novelworld_test
+    volumes:
+      - ./infra/postgres/migrations:/migrations:ro
+    depends_on:
+      test-postgres:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        for migration in /migrations/*.sql; do
+          psql -v ON_ERROR_STOP=1 -f "$$migration"
+        done
+
   test-redis:
     image: redis:7-alpine
     container_name: novelworld-test-redis

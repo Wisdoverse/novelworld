@@ -3,24 +3,26 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Send, X, Minimize2, Maximize2, Brain } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { useChatStore } from '@/features/character-chat/model/useChatStore';
-import type { Character } from '@/shared/types';
+import type { Character, ChatMessage } from '@/shared/types';
+
+const EMPTY_MESSAGES: ChatMessage[] = [];
 
 interface ChatPanelProps {
   character: Character;
-  userId: string;
   novelId: string;
   currentChapter: number;
   readerIdentity?: string;
+  canChat: boolean;
   isOpen: boolean;
   onClose: () => void;
 }
 
 export function ChatPanel({
   character,
-  userId,
   novelId,
   currentChapter,
   readerIdentity,
+  canChat,
   isOpen,
   onClose,
 }: ChatPanelProps) {
@@ -29,20 +31,22 @@ export function ChatPanel({
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  const { messages, streamingText, isStreaming, sendMessage } = useChatStore();
-  const charMessages = messages[character.id] || [];
-  const currentStreamText = streamingText[character.id] || '';
-  const isCurrentlyStreaming = isStreaming[character.id] || false;
+  const charMessages = useChatStore(state => state.messages[character.id]) ?? EMPTY_MESSAGES;
+  const currentStreamText = useChatStore(state => state.streamingText[character.id]) || '';
+  const isCurrentlyStreaming = useChatStore(state => state.isStreaming[character.id]) || false;
+  const failedTurn = useChatStore(state => state.failedTurn[character.id]);
+  const sendMessage = useChatStore(state => state.sendMessage);
+  const retryMessage = useChatStore(state => state.retryMessage);
+  const cancelMessage = useChatStore(state => state.cancelMessage);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [charMessages, currentStreamText]);
 
   const handleSend = () => {
-    if (!input.trim() || isCurrentlyStreaming) return;
+    if (!canChat || !input.trim() || isCurrentlyStreaming) return;
     sendMessage({
       characterId: character.id,
-      userId,
       novelId,
       message: input.trim(),
       readerIdentity,
@@ -207,6 +211,23 @@ export function ChatPanel({
                       以「{readerIdentity}」身份对话
                     </div>
                   )}
+                  {failedTurn && !isCurrentlyStreaming && (
+                    <div
+                      className="mb-2 flex items-center justify-between gap-2 rounded px-2 py-1.5 text-xs"
+                      style={{ background: 'rgba(220, 38, 38, 0.12)', color: '#fca5a5' }}
+                      role="alert"
+                    >
+                      <span>{failedTurn.error.message}</span>
+                      <button
+                        type="button"
+                        className="shrink-0 underline disabled:opacity-50"
+                        disabled={!canChat}
+                        onClick={() => retryMessage(character.id)}
+                      >
+                        重试
+                      </button>
+                    </div>
+                  )}
                   <div className="flex gap-2 items-end">
                     <textarea
                       ref={inputRef}
@@ -215,6 +236,7 @@ export function ChatPanel({
                       onKeyDown={handleKeyDown}
                       placeholder={`对 ${character.name} 说...`}
                       rows={2}
+                      maxLength={4000}
                       className="flex-1 resize-none rounded-xl px-3 py-2 text-sm outline-none"
                       style={{
                         background: 'rgba(15, 21, 53, 0.8)',
@@ -222,18 +244,29 @@ export function ChatPanel({
                         color: '#e2e8f0',
                         fontFamily: 'var(--font-body)',
                       }}
-                      disabled={isCurrentlyStreaming}
+                      disabled={!canChat || isCurrentlyStreaming}
                     />
+                    {isCurrentlyStreaming && (
+                      <button
+                        type="button"
+                        onClick={() => cancelMessage(character.id)}
+                        className="flex-shrink-0 rounded-xl px-3 py-2.5 text-xs transition-all"
+                        style={{ background: 'rgba(220, 38, 38, 0.18)', color: '#fca5a5' }}
+                      >
+                        停止
+                      </button>
+                    )}
                     <button
+                      type="button"
                       onClick={handleSend}
-                      disabled={!input.trim() || isCurrentlyStreaming}
+                      disabled={!canChat || !input.trim() || isCurrentlyStreaming}
                       className="flex-shrink-0 p-2.5 rounded-xl transition-all"
                       style={{
-                        background: input.trim() && !isCurrentlyStreaming
+                        background: canChat && input.trim() && !isCurrentlyStreaming
                           ? 'linear-gradient(135deg, #0891b2, #6d28d9)'
                           : 'rgba(71, 85, 105, 0.3)',
-                        color: input.trim() && !isCurrentlyStreaming ? 'white' : '#475569',
-                        cursor: input.trim() && !isCurrentlyStreaming ? 'pointer' : 'not-allowed',
+                        color: canChat && input.trim() && !isCurrentlyStreaming ? 'white' : '#475569',
+                        cursor: canChat && input.trim() && !isCurrentlyStreaming ? 'pointer' : 'not-allowed',
                       }}
                     >
                       <Send size={16} />

@@ -53,7 +53,8 @@ impl ImagePort for ImageClient {
             size: "1024x1024".into(),
             response_format: "url".into(),
         };
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}/v1/images/generations", self.api_url))
             .bearer_auth(&self.api_key)
             .json(&req)

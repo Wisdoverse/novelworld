@@ -1,25 +1,24 @@
 #![allow(dead_code, unused_imports)]
-mod domain;
-mod application;
-mod infrastructure;
-mod interface;
-#[cfg(test)]
-mod tests;
-
-use std::sync::Arc;
 use anyhow::Result;
 use sqlx::postgres::PgPoolOptions;
+use std::sync::Arc;
+use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use tower_http::cors::{CorsLayer, Any};
 
-use application::handlers::NarrativeCommandHandler;
-use infrastructure::llm::LlmAdapter;
-use infrastructure::persistence::{
-    pg_narrative_repo::{PgNarrativeNodeRepository, PgUserChoiceRepository},
-    pg_world_state_repo::PgWorldStateRepository,
+use narrative_service::{
+    application::handlers::NarrativeCommandHandler,
+    domain,
+    infrastructure::{
+        http::novel_client::NovelServiceClient,
+        llm::LlmAdapter,
+        persistence::{
+            pg_narrative_repo::{PgNarrativeNodeRepository, PgUserChoiceRepository},
+            pg_world_state_repo::PgWorldStateRepository,
+            PgReadinessProbe,
+        },
+    },
+    interface::http::{router, AppState},
 };
-use infrastructure::http::novel_client::NovelServiceClient;
-use interface::http::{router, AppState};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -34,8 +33,7 @@ async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
 
     // Database connection pool
-    let database_url = std::env::var("DATABASE_URL")
-        .expect("DATABASE_URL must be set");
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let pool = PgPoolOptions::new()
         .max_connections(20)
         .connect(&database_url)
@@ -49,8 +47,7 @@ async fn main() -> Result<()> {
     let model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "gpt-4o".into());
 
     let llm_base = Arc::new(
-        llm_client::LlmClient::new()
-            .with_openai_compatible("default", &api_key, &api_url),
+        llm_client::LlmClient::new().with_openai_compatible("default", &api_key, &api_url),
     );
     let llm: Arc<dyn domain::ports::LlmPort> =
         Arc::new(LlmAdapter::new(llm_base, format!("default/{}", model)));
@@ -59,9 +56,10 @@ async fn main() -> Result<()> {
     let node_repo = Arc::new(PgNarrativeNodeRepository::new(pool.clone()));
     let choice_repo = Arc::new(PgUserChoiceRepository::new(pool.clone()));
     let world_state_repo = Arc::new(PgWorldStateRepository::new(pool.clone()));
-    let novel_service_url = std::env::var("NOVEL_SERVICE_URL")
-        .unwrap_or_else(|_| "http://novel-service:8002".into());
+    let novel_service_url =
+        std::env::var("NOVEL_SERVICE_URL").unwrap_or_else(|_| "http://novel-service:8002".into());
     let chapter_repo = Arc::new(NovelServiceClient::new(novel_service_url));
+    let novel_readiness: Arc<dyn domain::ports::ReadinessProbe> = chapter_repo.clone();
 
     // Application handler
     let handler = Arc::new(NarrativeCommandHandler {
@@ -72,11 +70,19 @@ async fn main() -> Result<()> {
         llm,
     });
 
-    let state = AppState { handler };
+    let state = AppState {
+        handler,
+        postgres_readiness: Arc::new(PgReadinessProbe::new(pool)),
+        novel_readiness,
+    };
 
     // Router with CORS
-    let app = router(state)
-        .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any));
+    let app = router(state).layer(
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any),
+    );
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "8004".into());
     let addr = format!("0.0.0.0:{}", port);
