@@ -2,6 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { BookOpen, Users, GitBranch, Brain, Sparkles, ArrowRight, Star } from 'lucide-react';
+import { useAuthStore } from '@/features/auth/model/useAuthStore';
 
 // 星点组件
 function StarField() {
@@ -64,7 +65,7 @@ const features = [
   {
     icon: BookOpen,
     title: '任意小说导入',
-    desc: '上传 TXT/PDF 或粘贴文本，AI 自动解析章节、提取角色、构建世界观',
+    desc: '上传 TXT/EPUB/PDF 或粘贴文本，AI 自动解析章节、提取角色、构建世界观',
     color: '#22d3ee',
   },
   {
@@ -101,6 +102,7 @@ const features = [
 
 export function HomePage() {
   const navigate = useNavigate();
+  const user = useAuthStore(state => state.user);
 
   return (
     <div className="relative min-h-screen overflow-hidden" style={{ background: 'var(--color-void)' }}>
@@ -207,7 +209,7 @@ export function HomePage() {
 
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
             <button
-              onClick={() => navigate('/register')}
+              onClick={() => navigate(user ? '/shelf' : '/register')}
               className="flex items-center gap-2 px-8 py-4 rounded-xl text-base font-semibold transition-all"
               style={{
                 background: 'linear-gradient(135deg, #0891b2, #6d28d9)',

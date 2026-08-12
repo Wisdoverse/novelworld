@@ -2,7 +2,7 @@ use axum::{
     extract::{DefaultBodyLimit, Json, State},
     http::{header::CACHE_CONTROL, HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, post, put},
     Router,
 };
 use serde::{Deserialize, Serialize};
@@ -28,6 +28,8 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/logout", post(logout))
         .route("/setup/status", get(setup_status))
         .route("/setup/init", post(setup_init))
+        .route("/settings/llm", get(get_llm_settings))
+        .route("/settings/llm", put(update_llm_settings))
         .route("/internal/runtime/llm", get(runtime_llm_config))
         .route("/health", get(health))
         .route("/ready", get(ready))
@@ -117,7 +119,25 @@ struct RuntimeLlmConfigResponse {
     contract: u8,
     api_url: String,
     model: String,
+    thinking_enabled: bool,
     api_key: String,
+}
+
+#[derive(Debug, Serialize)]
+struct LlmSettingsResponse {
+    provider: String,
+    model: String,
+    thinking_enabled: bool,
+    api_key_configured: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateLlmSettingsRequest {
+    provider: String,
+    model: String,
+    api_key: Option<String>,
+    thinking_enabled: bool,
 }
 
 fn user_dto(u: &crate::domain::entities::user::User) -> UserDto {
@@ -333,13 +353,66 @@ async fn runtime_llm_config(
             StatusCode::OK,
             [(CACHE_CONTROL, "no-store")],
             Json(RuntimeLlmConfigResponse {
-                contract: 1,
+                contract: 2,
                 api_url: config.api_url,
                 model: config.model,
+                thinking_enabled: config.thinking_enabled,
                 api_key: config.api_key,
             }),
         )
             .into_response(),
+        Err(error) => auth_error_response(error),
+    }
+}
+
+async fn get_llm_settings(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let user_id = match extract_user_id(&headers) {
+        Some(user_id) => user_id,
+        None => return auth_error_response(AuthError::InvalidCredentials),
+    };
+    match state.handler.llm_settings(user_id).await {
+        Ok(config) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, "no-store")],
+            Json(LlmSettingsResponse {
+                provider: config.provider,
+                model: config.model,
+                thinking_enabled: config.thinking_enabled,
+                api_key_configured: !config.api_key.is_empty(),
+            }),
+        )
+            .into_response(),
+        Err(error) => auth_error_response(error),
+    }
+}
+
+async fn update_llm_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<UpdateLlmSettingsRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user_id(&headers) {
+        Some(user_id) => user_id,
+        None => return auth_error_response(AuthError::InvalidCredentials),
+    };
+    match state
+        .handler
+        .update_llm_settings(
+            user_id,
+            &request.provider,
+            &request.model,
+            request.api_key.as_deref(),
+            request.thinking_enabled,
+        )
+        .await
+    {
+        Ok(config) => Json(LlmSettingsResponse {
+            provider: config.provider,
+            model: config.model,
+            thinking_enabled: config.thinking_enabled,
+            api_key_configured: true,
+        })
+        .into_response(),
         Err(error) => auth_error_response(error),
     }
 }

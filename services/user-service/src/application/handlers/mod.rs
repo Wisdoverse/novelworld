@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::domain::entities::{
     runtime_config::RuntimeLlmConfig,
-    user::{RefreshToken, User},
+    user::{RefreshToken, User, UserRole},
 };
 use crate::domain::ports::{AccessTokenIssuer, LlmConnectionTester};
 use crate::domain::repositories::UserRepository;
@@ -183,6 +183,61 @@ impl AuthHandler {
             .await
             .map_err(AuthError::Internal)?
             .ok_or(AuthError::SetupRequired)
+    }
+
+    pub async fn llm_settings(&self, user_id: Uuid) -> AuthResult<RuntimeLlmConfig> {
+        self.require_admin(user_id).await?;
+        self.runtime_llm_config().await
+    }
+
+    pub async fn update_llm_settings(
+        &self,
+        user_id: Uuid,
+        provider: &str,
+        model: &str,
+        api_key: Option<&str>,
+        thinking_enabled: bool,
+    ) -> AuthResult<RuntimeLlmConfig> {
+        self.require_admin(user_id).await?;
+        if self.environment_llm_config.is_some() {
+            return Err(AuthError::Validation(
+                "LLM settings are managed by environment variables".into(),
+            ));
+        }
+        let current = self.runtime_llm_config().await?;
+        let key = api_key
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .unwrap_or(&current.api_key);
+        let config = RuntimeLlmConfig::for_settings(provider, model, key, thinking_enabled)
+            .map_err(AuthError::Validation)?;
+        self.llm_tester
+            .test(&config)
+            .await
+            .map_err(|error| {
+                tracing::warn!(error = ?error, provider = %config.provider, model = %config.model, "settings LLM connection test failed");
+                AuthError::LlmUnavailable
+            })?;
+        self.user_repo
+            .save_runtime_llm_config(&config)
+            .await
+            .map_err(AuthError::Internal)?;
+        Ok(config)
+    }
+
+    async fn require_admin(&self, user_id: Uuid) -> AuthResult<User> {
+        let user = self
+            .user_repo
+            .find_by_id(user_id)
+            .await
+            .map_err(AuthError::Internal)?
+            .ok_or(AuthError::NotFound)?;
+        if user.role != UserRole::Admin {
+            return Err(AuthError::Validation(
+                "Administrator access is required".into(),
+            ));
+        }
+        Ok(user)
     }
 
     #[tracing::instrument(skip(self, password))]

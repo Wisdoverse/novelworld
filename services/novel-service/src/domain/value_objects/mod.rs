@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "varchar", rename_all = "snake_case")]
 pub enum NovelStatus {
     Pending,
@@ -13,6 +14,7 @@ pub enum NovelStatus {
 
 /// 故事偏离度（借鉴 KathaaVerse）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "varchar", rename_all = "snake_case")]
 pub enum DeviationMode {
     /// 忠实原著
@@ -24,6 +26,7 @@ pub enum DeviationMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "varchar", rename_all = "snake_case")]
 pub enum CharacterRole {
     Protagonist,
@@ -33,6 +36,7 @@ pub enum CharacterRole {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "varchar", rename_all = "snake_case")]
 pub enum AvatarStatus {
     Pending,

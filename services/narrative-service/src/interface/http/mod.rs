@@ -25,6 +25,10 @@ pub fn router(state: AppState) -> Router {
 
 fn routes() -> Router<AppState> {
     Router::new()
+        .route(
+            "/narrative/{novel_id}/chapters/{chapter}",
+            get(get_effective_chapter),
+        )
         .route("/narrative/{novel_id}/{chapter}", get(get_branch_node))
         .route("/narrative/choose", post(submit_choice))
         .route("/narrative/{novel_id}/world-state", get(get_world_state))
@@ -110,6 +114,33 @@ fn narrative_error_response(error: NarrativeError) -> axum::response::Response {
 }
 
 // ─── Handlers ───────────────────────────────────────────────────────────────
+
+/// GET /narrative/:novel_id/chapters/:chapter
+async fn get_effective_chapter(
+    State(state): State<AppState>,
+    Path((novel_id, chapter)): Path<(Uuid, i32)>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let user_id = match extract_user_id(&headers) {
+        Some(id) => id,
+        None => {
+            return error_response(
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "Missing or invalid user identity",
+            );
+        }
+    };
+
+    match state
+        .handler
+        .get_effective_chapter(user_id, novel_id, chapter)
+        .await
+    {
+        Ok(result) => (StatusCode::OK, Json(serde_json::json!(result))).into_response(),
+        Err(error) => narrative_error_response(error),
+    }
+}
 
 /// GET /narrative/:novel_id/:chapter
 async fn get_branch_node(

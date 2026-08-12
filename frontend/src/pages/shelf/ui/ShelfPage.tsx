@@ -1,14 +1,25 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Plus, BookOpen, Clock, Trash2, Loader2, CheckCircle, AlertCircle, Upload } from 'lucide-react';
-import { useNovels, useImportNovel, useDeleteNovel } from '@/entities/novel/api';
+import { Plus, BookOpen, Clock, Trash2, Loader2, CheckCircle, AlertCircle, Upload, RotateCcw, Settings } from 'lucide-react';
+import {
+  useNovels,
+  useImportNovel,
+  useUploadNovel,
+  useDeleteNovel,
+  useRetryNovel,
+  validateNovelFile,
+} from '@/entities/novel/api';
 import type { Novel } from '@/shared/types';
+import { getApiErrorMessage } from '@/shared/api/client';
+import { toast } from 'sonner';
 
-function NovelCard({ novel, onOpen, onDelete }: {
+function NovelCard({ novel, onOpen, onDelete, onRetry, retrying }: {
   novel: Novel;
   onOpen: () => void;
   onDelete: () => void;
+  onRetry: () => void;
+  retrying: boolean;
 }) {
   const statusConfig = {
     pending: { icon: Loader2, color: '#94a3b8', label: '等待解析', spin: true },
@@ -16,7 +27,12 @@ function NovelCard({ novel, onOpen, onDelete }: {
     ready: { icon: CheckCircle, color: '#22c55e', label: '已就绪', spin: false },
     error: { icon: AlertCircle, color: '#ef4444', label: '解析失败', spin: false },
   };
-  const status = statusConfig[novel.status];
+  const status = statusConfig[novel.status] ?? {
+    icon: AlertCircle,
+    color: '#f59e0b',
+    label: '状态未知',
+    spin: false,
+  };
 
   return (
     <motion.div
@@ -54,7 +70,9 @@ function NovelCard({ novel, onOpen, onDelete }: {
         {/* 删除按钮 */}
         <button
           onClick={(e) => { e.stopPropagation(); onDelete(); }}
-          className="absolute top-3 left-3 p-1.5 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity"
+          className={`absolute top-3 left-3 p-1.5 rounded-lg transition-opacity ${
+            novel.status === 'error' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+          }`}
           style={{ background: 'rgba(239,68,68,0.2)', color: '#ef4444' }}
         >
           <Trash2 size={12} />
@@ -88,6 +106,37 @@ function NovelCard({ novel, onOpen, onDelete }: {
             {novel.genre}
           </div>
         )}
+        {novel.status === 'error' && novel.parse_error && (
+          <>
+            <p
+              className="mt-3 text-xs leading-relaxed"
+              role="alert"
+              style={{ color: '#f87171' }}
+            >
+              解析失败：{novel.parse_error.includes('EOF while parsing') || novel.parse_error.includes('empty response')
+                ? 'AI 服务返回了空内容，可以直接重试'
+                : novel.parse_error}
+            </p>
+            <button
+              type="button"
+              disabled={retrying}
+              onClick={(event) => {
+                event.stopPropagation();
+                onRetry();
+              }}
+              className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold"
+              style={{
+                background: 'rgba(6,182,212,0.12)',
+                border: '1px solid rgba(6,182,212,0.3)',
+                color: '#67e8f9',
+                opacity: retrying ? 0.6 : 1,
+              }}
+            >
+              {retrying ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />}
+              {retrying ? '正在重试...' : '重试解析'}
+            </button>
+          </>
+        )}
       </div>
     </motion.div>
   );
@@ -97,14 +146,50 @@ function ImportModal({ onClose }: { onClose: () => void }) {
   const [title, setTitle] = useState('');
   const [author, setAuthor] = useState('');
   const [content, setContent] = useState('');
+  const [file, setFile] = useState<File | null>(null);
   const [deviationMode, setDeviationMode] = useState('canon');
   const importNovel = useImportNovel();
+  const uploadNovel = useUploadNovel();
+  const isPending = importNovel.isPending || uploadNovel.isPending;
+
+  const selectFile = (selected: File | undefined) => {
+    if (!selected) return;
+    const error = validateNovelFile(selected);
+    if (error) {
+      toast.error(error);
+      return;
+    }
+    setFile(selected);
+    setContent('');
+    if (!title.trim()) {
+      setTitle(selected.name.replace(/\.(txt|epub|pdf)$/i, ''));
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim() || !content.trim()) return;
-    await importNovel.mutateAsync({ title, author: author || undefined, content, deviation_mode: deviationMode });
-    onClose();
+    if (!title.trim() || (!file && !content.trim())) return;
+    try {
+      if (file) {
+        await uploadNovel.mutateAsync({
+          title,
+          author: author || undefined,
+          deviationMode,
+          file,
+        });
+      } else {
+        await importNovel.mutateAsync({
+          title,
+          author: author || undefined,
+          content,
+          deviation_mode: deviationMode,
+        });
+      }
+      toast.success('小说导入已开始');
+      onClose();
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, '小说导入失败'));
+    }
   };
 
   return (
@@ -190,14 +275,49 @@ function ImportModal({ onClose }: { onClose: () => void }) {
 
             <div>
               <label className="block text-xs font-semibold mb-1.5 uppercase tracking-wider" style={{ color: '#6d28d9' }}>
-                小说内容 *
+                小说文件
+              </label>
+              <label
+                className="flex items-center justify-center gap-2 w-full px-4 py-5 rounded-lg text-sm cursor-pointer transition-all"
+                style={{
+                  background: file ? 'rgba(6,182,212,0.12)' : 'rgba(15,21,53,0.8)',
+                  border: `1px dashed ${file ? 'rgba(6,182,212,0.6)' : 'rgba(109,40,217,0.35)'}`,
+                  color: file ? '#22d3ee' : '#94a3b8',
+                }}
+              >
+                <Upload size={16} />
+                {file ? file.name : '选择 TXT、EPUB 或 PDF 文件'}
+                <input
+                  type="file"
+                  accept=".txt,.epub,.pdf,text/plain,application/epub+zip,application/pdf"
+                  className="sr-only"
+                  onChange={(event) => selectFile(event.target.files?.[0])}
+                />
+              </label>
+              <p className="text-xs mt-1" style={{ color: '#334155' }}>
+                TXT 最大 10 MiB；EPUB/PDF 最大 20 MiB
+              </p>
+            </div>
+
+            <div className="flex items-center gap-3" aria-hidden="true">
+              <div className="h-px flex-1" style={{ background: 'rgba(109,40,217,0.2)' }} />
+              <span className="text-xs" style={{ color: '#475569' }}>或粘贴正文</span>
+              <div className="h-px flex-1" style={{ background: 'rgba(109,40,217,0.2)' }} />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold mb-1.5 uppercase tracking-wider" style={{ color: '#6d28d9' }}>
+                小说内容 {!file && '*'}
               </label>
               <textarea
                 value={content}
-                onChange={(e) => setContent(e.target.value)}
+                onChange={(e) => {
+                  setContent(e.target.value);
+                  if (e.target.value) setFile(null);
+                }}
                 placeholder="粘贴小说全文内容（支持中英文，建议至少粘贴前3章用于角色提取）"
                 rows={10}
-                required
+                required={!file}
                 className="w-full px-3 py-2 rounded-lg text-sm outline-none resize-none"
                 style={{
                   background: 'rgba(15,21,53,0.8)',
@@ -223,16 +343,16 @@ function ImportModal({ onClose }: { onClose: () => void }) {
               </button>
               <button
                 type="submit"
-                disabled={importNovel.isPending || !title.trim() || !content.trim()}
+                disabled={isPending || !title.trim() || (!file && !content.trim())}
                 className="flex items-center gap-2 px-6 py-2.5 rounded-lg text-sm font-semibold transition-all"
                 style={{
                   background: 'linear-gradient(135deg, #0891b2, #6d28d9)',
                   color: 'white',
-                  opacity: importNovel.isPending ? 0.7 : 1,
-                  cursor: importNovel.isPending ? 'not-allowed' : 'pointer',
+                  opacity: isPending ? 0.7 : 1,
+                  cursor: isPending ? 'not-allowed' : 'pointer',
                 }}
               >
-                {importNovel.isPending ? (
+                {isPending ? (
                   <><Loader2 size={14} className="animate-spin" /> 导入中...</>
                 ) : (
                   <><Upload size={14} /> 开始导入</>
@@ -250,6 +370,10 @@ export function ShelfPage() {
   const navigate = useNavigate();
   const { data: novels, isLoading } = useNovels();
   const deleteNovel = useDeleteNovel();
+  const retryNovel = useRetryNovel();
+  const processingCount = novels?.filter(
+    novel => novel.status === 'pending' || novel.status === 'parsing',
+  ).length ?? 0;
   const [showImport, setShowImport] = useState(false);
 
   return (
@@ -273,21 +397,40 @@ export function ShelfPage() {
           </span>
         </div>
 
-        <button
-          onClick={() => setShowImport(true)}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all"
-          style={{
-            background: 'linear-gradient(135deg, rgba(8,145,178,0.3), rgba(109,40,217,0.3))',
-            border: '1px solid rgba(6,182,212,0.3)',
-            color: '#22d3ee',
-          }}
-        >
-          <Plus size={14} />
-          导入小说
-        </button>
+        <div className="flex items-center gap-2">
+          <button type="button" aria-label="模型设置" onClick={() => navigate('/settings')} className="flex h-9 w-9 items-center justify-center rounded-lg transition-all" style={{ background: 'rgba(109,40,217,0.15)', border: '1px solid rgba(109,40,217,0.3)', color: '#a78bfa' }}>
+            <Settings size={16} />
+          </button>
+          <button
+            onClick={() => setShowImport(true)}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all"
+            style={{
+              background: 'linear-gradient(135deg, rgba(8,145,178,0.3), rgba(109,40,217,0.3))',
+              border: '1px solid rgba(6,182,212,0.3)',
+              color: '#22d3ee',
+            }}
+          >
+            <Plus size={14} />
+            导入小说
+          </button>
+        </div>
       </header>
 
       <div className="p-6 max-w-6xl mx-auto">
+        {processingCount > 0 && (
+          <div
+            role="status"
+            className="mb-5 flex items-center gap-3 rounded-xl px-4 py-3 text-sm"
+            style={{
+              background: 'rgba(6,182,212,0.1)',
+              border: '1px solid rgba(6,182,212,0.25)',
+              color: '#67e8f9',
+            }}
+          >
+            <Loader2 size={16} className="animate-spin" />
+            正在解析 {processingCount} 本小说，状态会自动更新
+          </div>
+        )}
         {isLoading ? (
           <div className="flex items-center justify-center h-64">
             <div className="w-8 h-8 border-2 rounded-full animate-spin" style={{ borderColor: '#6d28d9', borderTopColor: 'transparent' }} />
@@ -314,6 +457,11 @@ export function ShelfPage() {
                   novel={novel}
                   onOpen={() => navigate(`/reader/${novel.id}`)}
                   onDelete={() => deleteNovel.mutate(novel.id)}
+                  onRetry={() => retryNovel.mutate(novel.id, {
+                    onSuccess: () => toast.success('已重新开始解析'),
+                    onError: (error) => toast.error(getApiErrorMessage(error, '重试失败')),
+                  })}
+                  retrying={retryNovel.isPending && retryNovel.variables === novel.id}
                 />
               ))}
             </AnimatePresence>

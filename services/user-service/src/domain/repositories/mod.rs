@@ -16,6 +16,7 @@ pub trait UserRepository: Send + Sync {
     ) -> Result<bool>;
     async fn has_any(&self) -> Result<bool>;
     async fn find_runtime_llm_config(&self) -> Result<Option<RuntimeLlmConfig>>;
+    async fn save_runtime_llm_config(&self, config: &RuntimeLlmConfig) -> Result<()>;
     async fn find_by_id(&self, id: Uuid) -> Result<Option<User>>;
     async fn find_by_email(&self, email: &str) -> Result<Option<User>>;
     async fn update(&self, user: &User) -> Result<()>;

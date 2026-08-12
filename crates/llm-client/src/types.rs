@@ -60,6 +60,7 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
     pub stream: bool,
     pub json_mode: bool,
+    pub thinking: Option<bool>,
 }
 
 impl ChatRequest {
@@ -71,6 +72,7 @@ impl ChatRequest {
             max_tokens: None,
             stream: false,
             json_mode: false,
+            thinking: None,
         }
     }
 
@@ -99,6 +101,11 @@ impl ChatRequest {
 
     pub fn json(mut self) -> Self {
         self.json_mode = true;
+        self
+    }
+
+    pub fn thinking(mut self, enabled: bool) -> Self {
+        self.thinking = Some(enabled);
         self
     }
 }

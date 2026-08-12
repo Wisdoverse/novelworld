@@ -64,6 +64,20 @@ pub struct ChunkExtractionResult {
 #[error("invalid character extraction: {0}")]
 pub struct ExtractionValidationError(String);
 
+/// OpenAI-compatible providers sometimes wrap an otherwise valid JSON object
+/// in a Markdown fence when native JSON mode is unavailable. Keep transport
+/// quirks out of the application handler while still requiring one JSON object.
+pub fn json_object_payload(response: &str) -> &str {
+    let trimmed = response.trim();
+    let Some(start) = trimmed.find('{') else {
+        return trimmed;
+    };
+    let Some(relative_end) = trimmed[start..].rfind('}') else {
+        return trimmed;
+    };
+    &trimmed[start..=start + relative_end]
+}
+
 pub fn build_representative_sample(chapters: &[Chapter]) -> String {
     if chapters.is_empty() {
         return String::new();
@@ -208,14 +222,7 @@ pub fn build_chunk_extraction_prompt(
     chunk_index: usize,
 ) -> String {
     format!(
-        r#"你是一位专业的文学分析师。这是小说《{title}》的第{idx}段文本。请提取其中出现的角色和角色关系。
-
-文本：
----
-{text}
----
-
-以 JSON 格式返回：
+        r#"你是一位专业的文学分析师。请从小说文本中提取角色和角色关系，并以 JSON 格式返回：
 {{
   "characters": [
     {{
@@ -246,7 +253,14 @@ pub fn build_chunk_extraction_prompt(
 2. aliases 只收原文明确使用的姓名或称谓，不要收“他/她/那人”等代词
 3. role 只能是 protagonist、antagonist、supporting、minor
 4. 最多返回本段最重要的 12 个角色，各描述字段保持在 1 句话内
-5. 只返回 JSON，不要有其他文字。"#,
+5. 只返回 JSON，不要有其他文字。
+
+小说：{title}
+扫描段落：{idx}
+文本：
+---
+{text}
+---"#,
         title = safe_truncate(novel_title, 500),
         idx = chunk_index + 1,
         text = safe_truncate(chunk_text, SCAN_CHUNK_BYTES),
@@ -656,5 +670,14 @@ mod tests {
         };
 
         assert!(validate_chunk_extraction(&result).is_err());
+    }
+
+    #[test]
+    fn json_payload_accepts_provider_markdown_fences() {
+        assert_eq!(
+            json_object_payload("```json\n{\"characters\": []}\n```"),
+            "{\"characters\": []}"
+        );
+        assert_eq!(json_object_payload("not json"), "not json");
     }
 }

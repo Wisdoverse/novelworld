@@ -1,22 +1,41 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { GitBranch, Sparkles, ChevronRight } from 'lucide-react';
+import { CheckCircle2, GitBranch, Sparkles, ChevronRight } from 'lucide-react';
 import type { NarrativeNode, NarrativeChoice } from '@/shared/types';
 
 interface BranchChoiceProps {
   node: NarrativeNode;
-  onChoose: (choice: NarrativeChoice) => void;
+  onChoose: (choice: NarrativeChoice) => Promise<void>;
   isLoading?: boolean;
+  selectedChoiceIndex?: number;
+  consequence?: string;
+  error?: string;
 }
 
-export function BranchChoice({ node, onChoose, isLoading }: BranchChoiceProps) {
-  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+export function BranchChoice({
+  node,
+  onChoose,
+  isLoading = false,
+  selectedChoiceIndex,
+  consequence,
+  error,
+}: BranchChoiceProps) {
+  const [pendingIndex, setPendingIndex] = useState<number | null>(null);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const selectedIndex = selectedChoiceIndex ?? pendingIndex;
 
-  const handleChoose = (choice: NarrativeChoice) => {
-    if (selectedIndex !== null || isLoading) return;
-    setSelectedIndex(choice.index);
-    onChoose(choice);
+  useEffect(() => {
+    if (!isLoading && error) setPendingIndex(null);
+  }, [error, isLoading]);
+
+  const handleChoose = async (choice: NarrativeChoice) => {
+    if (selectedChoiceIndex !== undefined || pendingIndex !== null || isLoading) return;
+    setPendingIndex(choice.index);
+    try {
+      await onChoose(choice);
+    } catch {
+      setPendingIndex(null);
+    }
   };
 
   return (
@@ -55,7 +74,7 @@ export function BranchChoice({ node, onChoose, isLoading }: BranchChoiceProps) {
             onClick={() => handleChoose(choice)}
             onMouseEnter={() => setHoveredIndex(i)}
             onMouseLeave={() => setHoveredIndex(null)}
-            disabled={selectedIndex !== null || isLoading}
+            disabled={selectedChoiceIndex !== undefined || pendingIndex !== null || isLoading}
             className="choice-card w-full text-left"
             style={{
               opacity: selectedIndex !== null && selectedIndex !== choice.index ? 0.4 : 1,
@@ -119,11 +138,38 @@ export function BranchChoice({ node, onChoose, isLoading }: BranchChoiceProps) {
           >
             <div className="flex items-center justify-center gap-2 text-sm" style={{ color: '#22d3ee' }}>
               <div className="w-4 h-4 border-2 rounded-full animate-spin" style={{ borderColor: '#22d3ee', borderTopColor: 'transparent' }} />
-              命运正在重写...
+              正在根据你的行动重新生成后续内容...
             </div>
           </motion.div>
         )}
       </AnimatePresence>
+
+      {error && !isLoading && (
+        <div
+          role="alert"
+          className="mt-4 p-4 rounded-xl text-sm"
+          style={{ background: 'rgba(220, 38, 38, 0.1)', border: '1px solid rgba(248, 113, 113, 0.25)', color: '#fca5a5' }}
+        >
+          {error} 请重新选择。
+        </div>
+      )}
+
+      {consequence && selectedChoiceIndex !== undefined && (
+        <motion.div
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="mt-6 p-5 rounded-xl"
+          style={{ background: 'rgba(16, 185, 129, 0.08)', border: '1px solid rgba(52, 211, 153, 0.25)' }}
+        >
+          <div className="flex items-center gap-2 mb-3 text-sm font-semibold" style={{ color: '#6ee7b7' }}>
+            <CheckCircle2 size={16} />
+            你的行动改变了后续故事
+          </div>
+          <p className="text-sm leading-7 whitespace-pre-wrap" style={{ color: '#cbd5e1' }}>
+            {consequence}
+          </p>
+        </motion.div>
+      )}
     </motion.div>
   );
 }

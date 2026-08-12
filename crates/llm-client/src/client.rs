@@ -433,7 +433,7 @@ impl LlmClient {
         let request = ChatRequest::new(model)
             .message(
                 "system",
-                "You are a helpful assistant that always responds with valid JSON.",
+                "You are a helpful assistant that always responds with a non-empty valid JSON object. Output JSON only.",
             )
             .message("user", prompt)
             .temperature(0.3)

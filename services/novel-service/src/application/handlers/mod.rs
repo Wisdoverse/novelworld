@@ -1,11 +1,12 @@
 use anyhow::Result;
+use futures::{stream, StreamExt};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::application::commands::ImportNovelCommand;
-use crate::domain::entities::{character::Character, novel::Novel};
+use crate::domain::entities::{chapter::Chapter, character::Character, novel::Novel};
 use crate::domain::ports::{ImagePort, LlmPort};
 use crate::domain::repositories::{
     ChapterRepository, CharacterRepository, LoreExcerpt, NovelRepository, ReadingProgressRecord,
@@ -15,12 +16,13 @@ use crate::domain::services::node_detector;
 use crate::domain::services::{
     character_extractor::{
         build_chunk_extraction_prompt, build_extraction_prompt, build_representative_sample,
-        build_scan_plan, find_first_appearance, merge_extractions, needs_chunk_scan,
-        validate_chunk_extraction, validate_extraction, ChunkExtractionResult, ExtractionResult,
+        build_scan_plan, find_first_appearance, json_object_payload, merge_extractions,
+        needs_chunk_scan, validate_chunk_extraction, validate_extraction, ChunkExtractionResult,
+        ExtractionResult,
     },
     novel_parser::NovelParserService,
 };
-use crate::domain::value_objects::ReaderIdentityType;
+use crate::domain::value_objects::{NovelStatus, ReaderIdentityType};
 
 pub struct NovelCommandHandler {
     pub novel_repo: Arc<dyn NovelRepository>,
@@ -34,7 +36,10 @@ const MAX_AVATARS_PER_NOVEL: usize = 30;
 
 impl NovelCommandHandler {
     /// 处理小说导入命令（异步解析流程）
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(
+        skip(self, cmd),
+        fields(user_id = %cmd.user_id, title = %cmd.title)
+    )]
     pub async fn handle_import(&self, cmd: ImportNovelCommand) -> Result<Uuid> {
         info!("Importing novel: {}", cmd.title);
 
@@ -89,6 +94,69 @@ impl NovelCommandHandler {
         Ok(novel_id)
     }
 
+    /// Retry enrichment for an owned failed import using the chapters that were
+    /// already persisted. The original upload does not need to be sent again.
+    pub async fn retry_import(&self, user_id: Uuid, novel_id: Uuid) -> Result<()> {
+        let mut novel = self
+            .novel_repo
+            .find_by_id(novel_id)
+            .await?
+            .filter(|novel| novel.user_id == user_id)
+            .ok_or_else(|| anyhow::anyhow!("Novel not found"))?;
+        if !matches!(novel.status, NovelStatus::Error) {
+            return Err(anyhow::anyhow!("Only failed imports can be retried"));
+        }
+
+        let chapters = self.chapter_repo.find_by_novel(novel_id).await?;
+        if chapters.is_empty() {
+            return Err(anyhow::anyhow!(
+                "No parsed chapters are available for retry"
+            ));
+        }
+        if !self
+            .character_repo
+            .find_by_novel(novel_id)
+            .await?
+            .is_empty()
+        {
+            return Err(anyhow::anyhow!(
+                "This import has partial character data and cannot be retried safely"
+            ));
+        }
+
+        novel.start_parsing();
+        self.novel_repo.update(&novel).await?;
+
+        let title = novel.title.clone();
+        let novel_repo = self.novel_repo.clone();
+        let novel_repo_err = self.novel_repo.clone();
+        let chapter_repo = self.chapter_repo.clone();
+        let character_repo = self.character_repo.clone();
+        let llm = self.llm.clone();
+        let image_client = self.image_client.clone();
+        tokio::spawn(async move {
+            if let Err(error) = Self::enrich_novel_async(
+                novel,
+                &title,
+                chapters,
+                novel_repo,
+                chapter_repo,
+                character_repo,
+                llm,
+                image_client,
+            )
+            .await
+            {
+                error!("Novel retry failed for {}: {}", novel_id, error);
+                if let Ok(Some(mut novel)) = novel_repo_err.find_by_id(novel_id).await {
+                    novel.mark_error(error.to_string());
+                    let _ = novel_repo_err.update(&novel).await;
+                }
+            }
+        });
+        Ok(())
+    }
+
     #[tracing::instrument(skip_all, fields(novel_id = %novel_id))]
     // ponytail: keep the one-shot task explicit until ingestion becomes a durable job.
     #[allow(clippy::too_many_arguments)]
@@ -113,25 +181,72 @@ impl NovelCommandHandler {
         // 拆分章节
         info!("Parsing chapters for novel {}", novel_id);
         let chapters = NovelParserService::parse_chapters(novel_id, raw_text)?;
-        let total_chapters = chapters.len() as i32;
         chapter_repo.save_batch(&chapters).await?;
+
+        Self::enrich_novel_async(
+            novel,
+            title,
+            chapters,
+            novel_repo,
+            chapter_repo,
+            character_repo,
+            llm,
+            image_client,
+        )
+        .await
+    }
+
+    #[tracing::instrument(skip_all, fields(novel_id = %novel.id))]
+    #[allow(clippy::too_many_arguments)]
+    async fn enrich_novel_async(
+        mut novel: Novel,
+        title: &str,
+        chapters: Vec<Chapter>,
+        novel_repo: Arc<dyn NovelRepository>,
+        chapter_repo: Arc<dyn ChapterRepository>,
+        character_repo: Arc<dyn CharacterRepository>,
+        llm: Arc<dyn LlmPort>,
+        image_client: Arc<dyn ImagePort>,
+    ) -> Result<()> {
+        let novel_id = novel.id;
+        let total_chapters = chapters.len() as i32;
 
         // 提取角色和世界观（代表性样本 + 分块全文扫描）
         info!("Extracting characters for novel {}", novel_id);
         let sample_text = build_representative_sample(&chapters);
         let prompt = build_extraction_prompt(title, &sample_text);
         let extraction_json = llm.chat_json(&prompt).await?;
-        let base_extraction: ExtractionResult = serde_json::from_str(&extraction_json)?;
+        let base_extraction: ExtractionResult =
+            serde_json::from_str(json_object_payload(&extraction_json))?;
         validate_extraction(&base_extraction)?;
 
         let mut chunk_extractions = Vec::new();
         if needs_chunk_scan(&chapters) {
-            for (index, chunk) in build_scan_plan(&chapters).iter().enumerate() {
-                let prompt = build_chunk_extraction_prompt(title, chunk, index);
-                let json = llm.chat_json(&prompt).await?;
-                let result: ChunkExtractionResult = serde_json::from_str(&json)?;
-                validate_chunk_extraction(&result)?;
-                chunk_extractions.push(result);
+            let scans = build_scan_plan(&chapters);
+            let results = stream::iter(scans.into_iter().enumerate())
+                .map(|(index, chunk)| {
+                    let llm = llm.clone();
+                    async move {
+                        let prompt = build_chunk_extraction_prompt(title, &chunk, index);
+                        let json = llm.chat_json(&prompt).await?;
+                        let result: ChunkExtractionResult =
+                            serde_json::from_str(json_object_payload(&json))?;
+                        validate_chunk_extraction(&result)?;
+                        Ok::<_, anyhow::Error>((index, result))
+                    }
+                })
+                .buffer_unordered(3)
+                .collect::<Vec<_>>()
+                .await;
+            for result in results {
+                match result {
+                    Ok((_, extraction)) => chunk_extractions.push(extraction),
+                    Err(error) => tracing::warn!(
+                        novel_id = %novel_id,
+                        %error,
+                        "optional full-text character scan failed; keeping successful scans"
+                    ),
+                }
             }
         }
         let extraction = merge_extractions(base_extraction, chunk_extractions);
@@ -213,30 +328,40 @@ impl NovelCommandHandler {
         let node_prompt = node_detector::build_node_detection_prompt(title, &chapter_summaries);
         match llm.chat_json(&node_prompt).await {
             Ok(node_json) => {
-                match serde_json::from_str::<node_detector::NodeDetectionResult>(&node_json) {
+                match serde_json::from_str::<node_detector::NodeDetectionResult>(
+                    json_object_payload(&node_json),
+                ) {
                     Ok(detection) => {
-                        for node in &detection.nodes {
-                            if let Some(ch) = chapters
-                                .iter()
-                                .find(|c| c.chapter_number == node.chapter_number)
-                            {
-                                // Mark chapter as key node
-                                let mut updated_ch = ch.clone();
-                                updated_ch.mark_as_key_node(node.description.clone());
-                                if let Err(e) = chapter_repo.update(&updated_ch).await {
-                                    tracing::error!(
-                                        "Failed to mark chapter {} as key node: {}",
-                                        node.chapter_number,
-                                        e
-                                    );
+                        let validation = node_detector::validate_detection(
+                            &detection,
+                            chapters.iter().map(|chapter| chapter.chapter_number),
+                        );
+                        if let Err(error) = validation {
+                            tracing::warn!(%error, %novel_id, "node detection output rejected");
+                        } else {
+                            for node in &detection.nodes {
+                                if let Some(ch) = chapters
+                                    .iter()
+                                    .find(|c| c.chapter_number == node.chapter_number)
+                                {
+                                    // Mark chapter as key node
+                                    let mut updated_ch = ch.clone();
+                                    updated_ch.mark_as_key_node(node.description.clone());
+                                    if let Err(e) = chapter_repo.update(&updated_ch).await {
+                                        tracing::error!(
+                                            "Failed to mark chapter {} as key node: {}",
+                                            node.chapter_number,
+                                            e
+                                        );
+                                    }
                                 }
                             }
+                            info!(
+                                "Detected {} narrative nodes for novel {}",
+                                detection.nodes.len(),
+                                novel_id
+                            );
                         }
-                        info!(
-                            "Detected {} narrative nodes for novel {}",
-                            detection.nodes.len(),
-                            novel_id
-                        );
                     }
                     Err(e) => {
                         tracing::warn!("Node detection JSON parse failed for {}: {}", novel_id, e)
