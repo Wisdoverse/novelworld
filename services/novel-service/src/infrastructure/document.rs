@@ -132,7 +132,7 @@ fn decode_text(data: &[u8]) -> Result<String, DocumentExtractionError> {
 }
 
 fn decode_utf16(data: &[u8], little_endian: bool) -> Result<String, DocumentExtractionError> {
-    if data.len() % 2 != 0 {
+    if !data.len().is_multiple_of(2) {
         return Err(DocumentExtractionError::InvalidTextEncoding);
     }
     let units = data.chunks_exact(2).map(|chunk| {
