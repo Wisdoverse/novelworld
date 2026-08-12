@@ -19,6 +19,10 @@ const NARRATIVE_CHOICE_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0004_narrative_choice_contract.sql");
 const SEED_REMOVAL_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0005_remove_default_seed.sql");
+const RUNTIME_LLM_CONFIG_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0006_runtime_llm_config.sql");
+const CHAPTER_LORE_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0007_chapter_lore_search.sql");
 
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
@@ -61,6 +65,14 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
             .await
             .unwrap();
         sqlx::raw_sql(SEED_REMOVAL_MIGRATION)
+            .execute(&fresh)
+            .await
+            .unwrap();
+        sqlx::raw_sql(RUNTIME_LLM_CONFIG_MIGRATION)
+            .execute(&fresh)
+            .await
+            .unwrap();
+        sqlx::raw_sql(CHAPTER_LORE_MIGRATION)
             .execute(&fresh)
             .await
             .unwrap();
@@ -271,6 +283,8 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
         "0003_chat_turn_contract.sql",
         "0004_narrative_choice_contract.sql",
         "0005_remove_default_seed.sql",
+        "0006_runtime_llm_config.sql",
+        "0007_chapter_lore_search.sql",
     ] {
         let migration_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../infra/postgres/migrations")
@@ -314,6 +328,14 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
             .execute(&mut *non_default_path)
             .await
             .unwrap();
+        sqlx::raw_sql(RUNTIME_LLM_CONFIG_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
+        sqlx::raw_sql(CHAPTER_LORE_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
     }
     sqlx::query("RESET search_path")
         .execute(&mut *non_default_path)
@@ -336,6 +358,25 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
     .await
     .unwrap();
     assert_eq!(chapter_context, Some(7));
+
+    let legacy_chapter_content: String = sqlx::query_scalar(
+        "SELECT content FROM public.chapters \
+         WHERE id = '00000000-0000-0000-0000-000000000012'",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    assert!(legacy_chapter_content.is_empty());
+
+    let chapter_content_nullable: String = sqlx::query_scalar(
+        "SELECT is_nullable FROM information_schema.columns \
+         WHERE table_schema = 'public' AND table_name = 'chapters' \
+         AND column_name = 'content'",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    assert_eq!(chapter_content_nullable, "NO");
 
     let legacy_turn_id: Option<uuid::Uuid> = sqlx::query_scalar(
         "SELECT turn_id FROM public.chat_messages WHERE content = 'legacy chat'",
@@ -812,9 +853,9 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
     assert_eq!(unchanged_name, "\tPending repair\t");
 
     sqlx::query(
-        "INSERT INTO public.chapters (id, novel_id, chapter_number) VALUES \
+        "INSERT INTO public.chapters (id, novel_id, chapter_number, content) VALUES \
          ('00000000-0000-0000-0000-000000000020', \
-          '00000000-0000-0000-0000-000000000017', 1)",
+          '00000000-0000-0000-0000-000000000017', 1, '')",
     )
     .execute(&legacy)
     .await

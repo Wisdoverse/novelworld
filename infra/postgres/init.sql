@@ -82,6 +82,15 @@ CREATE TABLE chapters (
 CREATE INDEX idx_chapters_novel_id ON chapters(novel_id);
 CREATE INDEX idx_chapters_key_node ON chapters(novel_id, is_key_node) WHERE is_key_node = TRUE;
 
+-- 章节检索投影：小块比整章更适合相关性排序，也为以后可选的向量检索保留清晰边界。
+CREATE TABLE chapter_chunks (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    chapter_id      UUID NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+    chunk_index     INTEGER NOT NULL CHECK (chunk_index >= 0),
+    content         TEXT NOT NULL CHECK (content <> ''),
+    UNIQUE(chapter_id, chunk_index)
+);
+
 -- ─── 角色表 ────────────────────────────────────────────────────────────────
 
 CREATE TABLE characters (
@@ -318,6 +327,19 @@ CREATE TABLE refresh_tokens (
 
 CREATE INDEX idx_refresh_tokens_user ON refresh_tokens(user_id);
 CREATE INDEX idx_refresh_tokens_token ON refresh_tokens(token);
+
+-- ─── 运行时模型设置（user-service 所有）──────────────────────────────────
+
+CREATE TABLE runtime_llm_config (
+    singleton          BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+    provider           VARCHAR(32) NOT NULL,
+    api_url            TEXT NOT NULL,
+    model              VARCHAR(200) NOT NULL,
+    api_key_nonce      BYTEA NOT NULL,
+    api_key_ciphertext BYTEA NOT NULL,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 -- ─── 触发器：自动更新 updated_at ──────────────────────────────────────────
 

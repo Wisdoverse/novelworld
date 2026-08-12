@@ -39,6 +39,7 @@ export function AppRoutes() {
   const { user, fetchMe } = useAuthStore();
   const previousPrincipal = useRef<string | null>(null);
   const [setupStatus, setSetupStatus] = useState<'loading' | 'needed' | 'done' | 'error'>('loading');
+  const [llmConfigured, setLlmConfigured] = useState(false);
 
   useLayoutEffect(() => {
     previousPrincipal.current = resetPrivateClientStateForPrincipalChange(
@@ -52,10 +53,11 @@ export function AppRoutes() {
     setSetupStatus('loading');
     apiClient.get('/setup/status')
       .then(res => {
-        if (res.data?.contract !== 2) {
+        if (res.data?.contract !== 3) {
           setSetupStatus('error');
           return;
         }
+        setLlmConfigured(res.data.llm_configured === true);
         setSetupStatus(res.data.configured ? 'done' : 'needed');
       })
       .catch(() => {
@@ -87,9 +89,12 @@ export function AppRoutes() {
   }
 
   if (setupStatus === 'needed') {
-    return <SetupPage onComplete={() => {
-      setSetupStatus('done');
-    }} />;
+    return (
+      <SetupPage
+        llmConfigured={llmConfigured}
+        onComplete={() => setSetupStatus('done')}
+      />
+    );
   }
 
   if (setupStatus === 'error') {

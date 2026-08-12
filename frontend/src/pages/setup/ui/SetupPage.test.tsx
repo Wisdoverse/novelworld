@@ -21,43 +21,52 @@ describe('SetupPage', () => {
       data: { access_token: 'access', refresh_token: 'refresh' },
     });
     const onComplete = vi.fn();
-    render(<SetupPage onComplete={onComplete} />);
+    render(<SetupPage onComplete={onComplete} llmConfigured={false} />);
 
-    fireEvent.change(screen.getByLabelText('Display name (optional)'), {
+    fireEvent.change(screen.getByLabelText('API Key'), {
+      target: { value: 'deepseek-secret' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /下一步/ }));
+    fireEvent.change(screen.getByLabelText('昵称（可选）'), {
       target: { value: 'Admin' },
     });
-    fireEvent.change(screen.getByLabelText('Email'), {
+    fireEvent.change(screen.getByLabelText('邮箱'), {
       target: { value: 'admin@test.invalid' },
     });
-    fireEvent.change(screen.getByLabelText('Password'), {
+    fireEvent.change(screen.getByLabelText('密码（至少 8 位）'), {
       target: { value: 'password123' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Create administrator' }));
+    fireEvent.click(screen.getByRole('button', { name: '完成设置' }));
 
     await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
     expect(mocks.post).toHaveBeenCalledWith('/setup/init', {
       email: 'admin@test.invalid',
       password: 'password123',
       name: 'Admin',
-      provider: 'runtime-configured',
-      api_key: '',
+      provider: 'deepseek',
+      api_key: 'deepseek-secret',
     });
     expect(localStorage.getItem('auth_token')).toBe('access');
     expect(localStorage.getItem('refresh_token')).toBe('refresh');
-    expect(screen.queryByLabelText(/API key/i)).toBeNull();
+    expect(localStorage.getItem('api_key')).toBeNull();
   });
 
   it('renders a stable inline error', async () => {
     mocks.post.mockRejectedValue(new Error('offline'));
-    render(<SetupPage onComplete={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText('Email'), {
+    render(<SetupPage onComplete={vi.fn()} llmConfigured={true} />);
+    fireEvent.change(screen.getByLabelText('邮箱'), {
       target: { value: 'admin@test.invalid' },
     });
-    fireEvent.change(screen.getByLabelText('Password'), {
+    fireEvent.change(screen.getByLabelText('密码（至少 8 位）'), {
       target: { value: 'password123' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Create administrator' }));
+    fireEvent.click(screen.getByRole('button', { name: '完成设置' }));
 
     expect((await screen.findByRole('alert')).textContent).toContain('Setup unavailable');
+    expect(mocks.post).toHaveBeenCalledWith('/setup/init', {
+      email: 'admin@test.invalid',
+      password: 'password123',
+      name: undefined,
+    });
   });
 });

@@ -1,19 +1,78 @@
+use aes_gcm::{
+    aead::{Aead, AeadCore, KeyInit, OsRng, Payload},
+    Aes256Gcm,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::domain::entities::runtime_config::RuntimeLlmConfig;
 use crate::domain::entities::user::{RefreshToken, User, UserRole};
 use crate::domain::repositories::UserRepository;
 
+const CONFIG_AAD: &[u8] = b"novelworld-runtime-llm-v1";
+
 pub struct PgUserRepository {
     pool: PgPool,
+    cipher: Aes256Gcm,
 }
 
 impl PgUserRepository {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: PgPool, encryption_key: &str) -> Result<Self> {
+        let key = decode_hex_key(encryption_key)?;
+        let cipher = Aes256Gcm::new_from_slice(&key)
+            .map_err(|_| anyhow::anyhow!("RUNTIME_CONFIG_KEY must contain 32 bytes"))?;
+        Ok(Self { pool, cipher })
     }
+
+    fn encrypt_api_key(&self, api_key: &str) -> Result<(Vec<u8>, Vec<u8>)> {
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let ciphertext = self
+            .cipher
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: api_key.as_bytes(),
+                    aad: CONFIG_AAD,
+                },
+            )
+            .map_err(|_| anyhow::anyhow!("failed to encrypt runtime configuration"))?;
+        Ok((nonce.to_vec(), ciphertext))
+    }
+
+    fn decrypt_api_key(&self, nonce: &[u8], ciphertext: &[u8]) -> Result<String> {
+        if nonce.len() != 12 {
+            return Err(anyhow::anyhow!("runtime configuration nonce is invalid"));
+        }
+        let plaintext = self
+            .cipher
+            .decrypt(
+                nonce.into(),
+                Payload {
+                    msg: ciphertext,
+                    aad: CONFIG_AAD,
+                },
+            )
+            .map_err(|_| anyhow::anyhow!("failed to decrypt runtime configuration"))?;
+        String::from_utf8(plaintext)
+            .map_err(|_| anyhow::anyhow!("runtime configuration contains invalid UTF-8"))
+    }
+}
+
+fn decode_hex_key(value: &str) -> Result<[u8; 32]> {
+    let value = value.trim();
+    if value.len() != 64 {
+        return Err(anyhow::anyhow!(
+            "RUNTIME_CONFIG_KEY must be 64 hexadecimal characters"
+        ));
+    }
+    let mut key = [0_u8; 32];
+    for (index, byte) in key.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .map_err(|_| anyhow::anyhow!("RUNTIME_CONFIG_KEY must be hexadecimal"))?;
+    }
+    Ok(key)
 }
 
 #[async_trait]
@@ -38,7 +97,15 @@ impl UserRepository for PgUserRepository {
         Ok(result.rows_affected() == 1)
     }
 
-    async fn save_initial_user(&self, user: &User, token: &RefreshToken) -> Result<bool> {
+    async fn save_initial_setup(
+        &self,
+        user: &User,
+        token: &RefreshToken,
+        llm: Option<&RuntimeLlmConfig>,
+    ) -> Result<bool> {
+        let encrypted_key = llm
+            .map(|config| self.encrypt_api_key(&config.api_key))
+            .transpose()?;
         let mut transaction = self.pool.begin().await?;
         // ponytail: one global lock for the one-time bootstrap; revisit only if setup throughput matters.
         sqlx::query("LOCK TABLE users IN EXCLUSIVE MODE")
@@ -77,6 +144,27 @@ impl UserRepository for PgUserRepository {
         .bind(token.created_at)
         .execute(&mut *transaction)
         .await?;
+        if let (Some(config), Some((nonce, ciphertext))) = (llm, encrypted_key) {
+            sqlx::query(
+                r#"INSERT INTO runtime_llm_config
+                   (singleton, provider, api_url, model, api_key_nonce, api_key_ciphertext)
+                   VALUES (TRUE, $1, $2, $3, $4, $5)
+                   ON CONFLICT (singleton) DO UPDATE SET
+                     provider = EXCLUDED.provider,
+                     api_url = EXCLUDED.api_url,
+                     model = EXCLUDED.model,
+                     api_key_nonce = EXCLUDED.api_key_nonce,
+                     api_key_ciphertext = EXCLUDED.api_key_ciphertext,
+                     updated_at = NOW()"#,
+            )
+            .bind(&config.provider)
+            .bind(&config.api_url)
+            .bind(&config.model)
+            .bind(nonce)
+            .bind(ciphertext)
+            .execute(&mut *transaction)
+            .await?;
+        }
         transaction.commit().await?;
         Ok(true)
     }
@@ -85,6 +173,24 @@ impl UserRepository for PgUserRepository {
         Ok(sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users)")
             .fetch_one(&self.pool)
             .await?)
+    }
+
+    async fn find_runtime_llm_config(&self) -> Result<Option<RuntimeLlmConfig>> {
+        let row = sqlx::query_as::<_, RuntimeLlmConfigRow>(
+            r#"SELECT provider, api_url, model, api_key_nonce, api_key_ciphertext
+               FROM runtime_llm_config WHERE singleton = TRUE"#,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(RuntimeLlmConfig {
+                provider: row.provider,
+                api_url: row.api_url,
+                model: row.model,
+                api_key: self.decrypt_api_key(&row.api_key_nonce, &row.api_key_ciphertext)?,
+            })
+        })
+        .transpose()
     }
 
     async fn find_by_id(&self, id: Uuid) -> Result<Option<User>> {
@@ -209,4 +315,25 @@ struct RefreshTokenRow {
     token: String,
     expires_at: chrono::DateTime<chrono::Utc>,
     created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(sqlx::FromRow)]
+struct RuntimeLlmConfigRow {
+    provider: String,
+    api_url: String,
+    model: String,
+    api_key_nonce: Vec<u8>,
+    api_key_ciphertext: Vec<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_hex_key;
+
+    #[test]
+    fn runtime_key_must_be_exactly_32_hex_bytes() {
+        assert!(decode_hex_key(&"ab".repeat(32)).is_ok());
+        assert!(decode_hex_key("not-a-key").is_err());
+        assert!(decode_hex_key(&"ab".repeat(31)).is_err());
+    }
 }

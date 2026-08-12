@@ -34,101 +34,41 @@ fi
 
 echo -e "${GREEN}✓ Docker detected${NC}"
 
-# ─── Setup .env ──────────────────────────────────────────────────────────
+# ─── Setup server-only secrets ───────────────────────────────────────────
+random_hex() {
+    openssl rand -hex "$1" 2>/dev/null || od -An -N"$1" -tx1 /dev/urandom | tr -d ' \n'
+}
+
+ensure_secret() {
+    key="$1"
+    placeholder="$2"
+    bytes="$3"
+    current=$(sed -n "s/^${key}=//p" .env | tail -n 1)
+    if [ -z "$current" ] || [ "$current" = "$placeholder" ]; then
+        value=$(random_hex "$bytes")
+        if grep -q "^${key}=" .env; then
+            sed -i "s|^${key}=.*$|${key}=${value}|" .env
+        else
+            printf '\n%s=%s\n' "$key" "$value" >> .env
+        fi
+    fi
+}
+
 if [ ! -f .env ]; then
-    echo ""
-    echo -e "${YELLOW}First time setup — let's configure your environment.${NC}"
-    echo ""
     cp .env.example .env
-
-    # Generate random JWT secret
-    JWT_SECRET=$(openssl rand -hex 32 2>/dev/null || head -c 64 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 64)
-    sed -i "s|change_me_to_a_random_32_char_string|${JWT_SECRET}|g" .env
-
-    # Generate random passwords
-    PG_PASS=$(openssl rand -hex 16 2>/dev/null || echo "novel_pg_$(date +%s)")
-    REDIS_PASS=$(openssl rand -hex 16 2>/dev/null || echo "novel_redis_$(date +%s)")
-    sed -i "s|your_strong_password_here|${PG_PASS}|g" .env
-    sed -i "s|your_redis_password_here|${REDIS_PASS}|g" .env
-
-    # Ask for LLM API key
-    echo -e "${CYAN}Which LLM provider do you want to use?${NC}"
-    echo ""
-    echo "  1) OpenAI          (needs OPENAI_API_KEY)"
-    echo "  2) DeepSeek         (needs DEEPSEEK_API_KEY)"
-    echo "  3) 通义千问 Qwen    (needs QWEN_API_KEY)"
-    echo "  4) GLM 智谱AI       (needs GLM_API_KEY)"
-    echo "  5) Anthropic Claude (needs ANTHROPIC_API_KEY)"
-    echo "  6) Moonshot / Kimi  (needs MOONSHOT_API_KEY)"
-    echo "  7) 豆包 Doubao      (needs DOUBAO_API_KEY)"
-    echo "  8) Other / Custom   (OpenAI-compatible URL)"
-    echo ""
-    read -p "Choose [1-8, default 1]: " PROVIDER_CHOICE
-    PROVIDER_CHOICE=${PROVIDER_CHOICE:-1}
-
-    echo ""
-    case $PROVIDER_CHOICE in
-        1)
-            read -rsp "Enter your OpenAI API Key: " API_KEY; echo
-            sed -i "s|LLM_API_KEY=sk-your-api-key|LLM_API_KEY=${API_KEY}|g" .env
-            sed -i "s|IMAGE_GEN_API_KEY=sk-your-api-key|IMAGE_GEN_API_KEY=${API_KEY}|g" .env
-            echo "OPENAI_API_KEY=${API_KEY}" >> .env
-            ;;
-        2)
-            read -rsp "Enter your DeepSeek API Key: " API_KEY; echo
-            sed -i "s|LLM_API_KEY=sk-your-api-key|LLM_API_KEY=${API_KEY}|g" .env
-            sed -i "s|LLM_API_URL=https://api.openai.com|LLM_API_URL=https://api.deepseek.com|g" .env
-            sed -i "s|LLM_MODEL=gpt-4o-mini|LLM_MODEL=deepseek-chat|g" .env
-            echo "DEEPSEEK_API_KEY=${API_KEY}" >> .env
-            ;;
-        3)
-            read -rsp "Enter your Qwen/DashScope API Key: " API_KEY; echo
-            sed -i "s|LLM_API_KEY=sk-your-api-key|LLM_API_KEY=${API_KEY}|g" .env
-            sed -i "s|LLM_API_URL=https://api.openai.com|LLM_API_URL=https://dashscope.aliyuncs.com/compatible-mode|g" .env
-            sed -i "s|LLM_MODEL=gpt-4o-mini|LLM_MODEL=qwen-max|g" .env
-            echo "QWEN_API_KEY=${API_KEY}" >> .env
-            ;;
-        4)
-            read -rsp "Enter your GLM/ZhipuAI API Key: " API_KEY; echo
-            sed -i "s|LLM_API_KEY=sk-your-api-key|LLM_API_KEY=${API_KEY}|g" .env
-            sed -i "s|LLM_API_URL=https://api.openai.com|LLM_API_URL=https://open.bigmodel.cn/api/paas|g" .env
-            sed -i "s|LLM_MODEL=gpt-4o-mini|LLM_MODEL=glm-4-flash|g" .env
-            echo "GLM_API_KEY=${API_KEY}" >> .env
-            ;;
-        5)
-            read -rsp "Enter your Anthropic API Key: " API_KEY; echo
-            sed -i "s|LLM_API_KEY=sk-your-api-key|LLM_API_KEY=${API_KEY}|g" .env
-            echo "ANTHROPIC_API_KEY=${API_KEY}" >> .env
-            ;;
-        6)
-            read -rsp "Enter your Moonshot API Key: " API_KEY; echo
-            sed -i "s|LLM_API_KEY=sk-your-api-key|LLM_API_KEY=${API_KEY}|g" .env
-            sed -i "s|LLM_API_URL=https://api.openai.com|LLM_API_URL=https://api.moonshot.cn|g" .env
-            sed -i "s|LLM_MODEL=gpt-4o-mini|LLM_MODEL=moonshot-v1-8k|g" .env
-            echo "MOONSHOT_API_KEY=${API_KEY}" >> .env
-            ;;
-        7)
-            read -rsp "Enter your Doubao API Key: " API_KEY; echo
-            sed -i "s|LLM_API_KEY=sk-your-api-key|LLM_API_KEY=${API_KEY}|g" .env
-            sed -i "s|LLM_API_URL=https://api.openai.com|LLM_API_URL=https://ark.cn-beijing.volces.com/api/v3|g" .env
-            sed -i "s|LLM_MODEL=gpt-4o-mini|LLM_MODEL=doubao-1.5-pro-32k|g" .env
-            echo "DOUBAO_API_KEY=${API_KEY}" >> .env
-            ;;
-        8)
-            read -p "Enter API URL (e.g. https://api.example.com): " API_URL
-            read -rsp "Enter API Key: " API_KEY; echo
-            read -p "Enter Model name: " MODEL_NAME
-            sed -i "s|LLM_API_KEY=sk-your-api-key|LLM_API_KEY=${API_KEY}|g" .env
-            sed -i "s|LLM_API_URL=https://api.openai.com|LLM_API_URL=${API_URL}|g" .env
-            sed -i "s|LLM_MODEL=gpt-4o-mini|LLM_MODEL=${MODEL_NAME}|g" .env
-            ;;
-    esac
-
-    echo ""
-    echo -e "${GREEN}✓ Configuration saved to .env${NC}"
-else
-    echo -e "${GREEN}✓ .env already exists${NC}"
 fi
+
+ensure_secret "JWT_SECRET" "change_me_to_a_random_32_char_string" 32
+ensure_secret "POSTGRES_PASSWORD" "your_strong_password_here" 16
+ensure_secret "REDIS_PASSWORD" "your_redis_password_here" 16
+ensure_secret "RUNTIME_CONFIG_KEY" "change_me_to_a_random_64_char_hex_string" 32
+ensure_secret "INTERNAL_SERVICE_TOKEN" "change_me_to_a_random_internal_service_token" 32
+
+# Migrate untouched templates to the web setup path without changing real keys.
+sed -i 's|^LLM_API_KEY=sk-your-api-key$|LLM_API_KEY=|' .env
+sed -i 's|^IMAGE_GEN_API_KEY=sk-your-api-key$|IMAGE_GEN_API_KEY=|' .env
+chmod 600 .env
+echo -e "${GREEN}✓ Server secrets ready; AI and administrator setup will continue in the browser${NC}"
 
 # ─── Start ───────────────────────────────────────────────────────────────
 echo ""

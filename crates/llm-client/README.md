@@ -23,7 +23,7 @@ let client = LlmClient::from_env();
 let answer = client.simple_chat("openai/gpt-4o", "You are helpful.", "Hello!").await?;
 
 // JSON mode
-let json = client.json_chat("deepseek/deepseek-chat", "Return {name, age}").await?;
+let json = client.json_chat("deepseek/deepseek-v4-flash", "Return {name, age}").await?;
 
 // Streaming
 let stream = client.chat_stream(
@@ -125,9 +125,8 @@ client.with_deepseek(key)
 
 | Model | ID |
 |-------|-----|
-| DeepSeek-V3 | `deepseek/deepseek-chat` |
-| DeepSeek-R1 | `deepseek/deepseek-reasoner` |
-| DeepSeek-Coder | `deepseek/deepseek-coder` |
+| DeepSeek V4 Flash | `deepseek/deepseek-v4-flash` |
+| DeepSeek V4 Pro | `deepseek/deepseek-v4-pro` |
 
 ### 豆包 Doubao (ByteDance)
 

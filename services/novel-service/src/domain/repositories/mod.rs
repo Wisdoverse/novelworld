@@ -18,7 +18,22 @@ pub trait ChapterRepository: Send + Sync {
     async fn save_batch(&self, chapters: &[Chapter]) -> Result<()>;
     async fn find_by_novel(&self, novel_id: Uuid) -> Result<Vec<Chapter>>;
     async fn find_by_number(&self, novel_id: Uuid, number: i32) -> Result<Option<Chapter>>;
+    async fn search_lore(
+        &self,
+        novel_id: Uuid,
+        max_chapter: i32,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<LoreExcerpt>>;
     async fn update(&self, chapter: &Chapter) -> Result<()>;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LoreExcerpt {
+    pub chapter_number: i32,
+    pub title: Option<String>,
+    pub content: String,
+    pub score: f32,
 }
 
 #[async_trait]

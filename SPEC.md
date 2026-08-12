@@ -814,9 +814,10 @@ The JWT MUST be signed with HMAC-SHA256 using the `JWT_SECRET` environment varia
 - All endpoints except setup status/init, the deprecated setup LLM probe,
   `POST /api/auth/register`, `POST /api/auth/login`, and
   `POST /api/auth/refresh` REQUIRE a valid JWT. Setup init succeeds only while
-  the `users` table is empty and atomically creates one administrator plus its
-  refresh token. Model credentials come only from the server environment and
-  are never accepted or persisted by setup.
+  the `users` table is empty and atomically creates one administrator, its
+  refresh token, and (when not supplied by the environment) an encrypted model
+  configuration. Anonymous setup only accepts provider presets with fixed
+  HTTPS endpoints; it never accepts an arbitrary URL.
 - A user MAY only access novels, characters, memories, and world states that belong to their own
   `user_id`.
 - Admin users MAY access all resources.
@@ -833,8 +834,8 @@ service.
 
 | Method | Path | Service | Auth | Description |
 |---|---|---|---|---|
-| GET | `/api/setup/status` | User | None | Whether any account exists (`contract: 2`) |
-| POST | `/api/setup/init` | User | None | Atomically create the first administrator |
+| GET | `/api/setup/status` | User | None | Administrator and model readiness (`contract: 3`) |
+| POST | `/api/setup/init` | User | None | Validate AI settings and atomically create the initial configuration |
 | POST | `/api/auth/register` | User | None | Register new user |
 | POST | `/api/auth/login` | User | None | Login, returns tokens |
 | POST | `/api/auth/refresh` | User | Refresh token | Issue new access token |
@@ -945,8 +946,10 @@ Required variables:
 | `REDIS_URL` | User, Agent | Redis connection string |
 | `JWT_SECRET` | User, Gateway | HMAC-SHA256 signing key, min 32 chars |
 | `LLM_API_URL` | Novel, Agent, Narrative | LLM API base URL |
-| `LLM_API_KEY` | Novel, Agent, Narrative | LLM API authentication key |
-| `LLM_MODEL` | Novel, Agent, Narrative | Model identifier |
+| `LLM_API_KEY` | User, Novel, Agent, Narrative | Optional environment override for LLM authentication |
+| `LLM_MODEL` | User, Novel, Agent, Narrative | Model identifier for the environment override |
+| `RUNTIME_CONFIG_KEY` | User | 32-byte hex key for encrypting web-provided credentials |
+| `INTERNAL_SERVICE_TOKEN` | User, Novel, Agent, Narrative | Authenticates internal runtime configuration reads |
 | `IMAGE_GEN_API_URL` | Novel | Image generation API base URL |
 | `IMAGE_GEN_API_KEY` | Novel | Image generation API key |
 | `EMBEDDING_API_URL` | Agent | Embedding API base URL |

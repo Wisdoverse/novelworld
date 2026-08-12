@@ -88,12 +88,14 @@ cd novelworld
 The startup script will:
 1. Check Docker is installed
 2. Generate secure passwords automatically
-3. Ask which LLM provider to use (OpenAI / DeepSeek / Qwen / GLM / Anthropic / Moonshot / Doubao / custom)
-4. Start all services
-5. Open http://localhost and create the first administrator account
+3. Start all services without asking command-line configuration questions
+4. Open http://localhost
+5. Guide you through choosing DeepSeek or OpenAI and creating the first administrator
 
-No default application account is installed. The model API key stays in the
-server `.env`; the browser never stores it.
+No default application account is installed. A key entered in the setup page is
+sent only to your server, encrypted before PostgreSQL persistence, and never
+written to browser storage. Advanced operators can still use `LLM_API_*` in
+`.env`; environment configuration takes precedence over the web setup.
 
 ### Development mode
 
@@ -109,7 +111,7 @@ server `.env`; the browser never stores it.
 ```bash
 # 1. Configure
 cp .env.example .env
-# Edit .env — set LLM_API_KEY and JWT_SECRET at minimum
+# Set the generated server secrets. LLM_API_KEY is optional when using web setup.
 
 # 2. Start databases
 docker compose up -d postgres redis

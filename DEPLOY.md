@@ -13,7 +13,7 @@
 
 ---
 
-## 快速部署（仅首次安装，5 步）
+## 快速部署
 
 ### 第 1 步：安装 Docker
 
@@ -30,31 +30,19 @@ git clone https://github.com/your-org/novel-world.git
 cd novel-world
 ```
 
-### 第 3 步：配置环境变量
+### 第 3 步：一条命令启动
 
 ```bash
-cp .env.example .env
-nano .env   # 填入以下必填项：
-            # POSTGRES_PASSWORD — 数据库密码
-            # REDIS_PASSWORD    — Redis 密码
-            # JWT_SECRET        — 至少 32 位随机字符串
-            # LLM_API_KEY       — OpenAI API Key
+./start.sh
 ```
 
-生成安全的 JWT_SECRET：
-```bash
-openssl rand -base64 32
-```
-
-### 第 4 步：启动所有服务
-
-```bash
-docker compose up -d --build
-```
+脚本会生成数据库、Redis、JWT、配置加密和服务间鉴权密钥，构建并启动
+全部容器，然后打开 `http://localhost`。请在网页中选择 DeepSeek 或
+OpenAI、填写 API Key，并创建第一个管理员。API Key 不会保存在浏览器中。
 
 首次构建约需 5-15 分钟（Rust 编译较慢）。
 
-### 第 5 步：验证部署
+### 第 4 步：验证部署
 
 ```bash
 # 检查所有服务状态
@@ -158,8 +146,8 @@ UUID v4 `Idempotency-Key` 后，输入脚本
 
 ### 用户认证
 ```
-GET    /api/setup/status     — 是否已有账号
-POST   /api/setup/init       — 原子创建首位管理员（仅空库）
+GET    /api/setup/status     — 管理员与模型设置是否完成
+POST   /api/setup/init       — 验证模型并原子创建首次设置（仅空库）
 POST   /api/auth/register     — 注册
 POST   /api/auth/login        — 登录，返回 JWT
 POST   /api/auth/refresh      — 刷新 Token
@@ -243,7 +231,9 @@ docker pull rust:1.82-slim-bookworm
 
 **Q: 如何更换 LLM 提供商？**
 
-A: 修改 `.env` 中的 `LLM_API_URL` 为任意 OpenAI 兼容接口（如 Anthropic、DeepSeek、本地 Ollama）。
+A: 新安装可在网页向导选择 DeepSeek 或 OpenAI。高级部署可在启动前设置
+`.env` 中的 `LLM_API_URL`、`LLM_API_KEY` 和 `LLM_MODEL`，然后重建三个
+LLM 服务；环境配置优先于网页设置。
 
 **Q: pgvector 扩展安装失败？**
 

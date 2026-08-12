@@ -53,17 +53,10 @@ async fn main() -> Result<()> {
     // Shared LLM client (from llm-client workspace crate)
     let api_key = std::env::var("LLM_API_KEY").unwrap_or_default();
     let api_url = std::env::var("LLM_API_URL").unwrap_or_else(|_| "https://api.openai.com".into());
-    let model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "gpt-4o".into());
-
-    let llm_base = Arc::new(
-        llm_client::LlmClient::new().with_openai_compatible("default", &api_key, &api_url),
-    );
+    let llm_base = Arc::new(llm_client::RuntimeLlmClient::from_env()?);
 
     // LLM adapter for chat (TextSummarizer + handler direct calls)
-    let llm = Arc::new(LlmAdapter::new(
-        llm_base.clone(),
-        format!("default/{}", model),
-    ));
+    let llm = Arc::new(LlmAdapter::new(llm_base));
 
     // Repositories
     let memory_repo = Arc::new(PgMemoryRepository::new(pool.clone()));
@@ -76,6 +69,7 @@ async fn main() -> Result<()> {
     let character_repo: Arc<dyn domain::repositories::CharacterInfoRepository> =
         novel_client.clone();
     let reading_context: Arc<dyn domain::ports::ReadingContextPort> = novel_client.clone();
+    let lore_context: Arc<dyn domain::ports::LoreContextPort> = novel_client.clone();
     let novel_readiness: Arc<dyn domain::ports::ReadinessProbe> = novel_client;
 
     // Redis cache
@@ -85,7 +79,9 @@ async fn main() -> Result<()> {
     let embed_api_key = std::env::var("EMBEDDING_API_KEY").unwrap_or_else(|_| api_key.clone());
     let embed_api_url = std::env::var("EMBEDDING_API_URL").unwrap_or_else(|_| api_url.clone());
     let embed_model = std::env::var("EMBEDDING_MODEL")
-        .unwrap_or_else(|_| auto_detect_embedding_model(&embed_api_url));
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| auto_detect_embedding_model(&embed_api_url));
 
     let embedding: Arc<dyn domain::ports::EmbeddingGenerator> =
         if embed_api_key.is_empty() && !embed_api_url.contains("localhost") {
@@ -121,6 +117,7 @@ async fn main() -> Result<()> {
         memory_manager,
         character_repo,
         reading_context,
+        lore_context,
         llm: chat_llm,
     });
 
