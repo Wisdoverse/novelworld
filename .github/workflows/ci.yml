@@ -8,6 +8,15 @@ on:
   workflow_call:
 
 jobs:
+  windows-launcher:
+    name: Windows Launcher
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Self-check
+        shell: powershell
+        run: .\start.ps1 -Check
+
   rust:
     name: Rust Build & Test
     runs-on: ubuntu-latest
@@ -99,6 +108,8 @@ jobs:
       POSTGRES_PASSWORD: runtime-postgres-only
       REDIS_PASSWORD: runtime-redis-only
       JWT_SECRET: runtime-smoke-secret-at-least-32-characters
+      RUNTIME_CONFIG_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      INTERNAL_SERVICE_TOKEN: runtime-smoke-internal-token-at-least-32-characters
       RATE_LIMIT_RPS: 1
     steps:
       - uses: actions/checkout@v4

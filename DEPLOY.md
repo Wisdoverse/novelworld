@@ -7,7 +7,7 @@
 | CPU | 2 核 | 4 核+ |
 | 内存 | 4 GB | 8 GB+ |
 | 磁盘 | 20 GB SSD | 50 GB SSD |
-| 操作系统 | Ubuntu 22.04 / Debian 12 | Ubuntu 24.04 |
+| 操作系统 | Windows 10/11、Ubuntu 22.04、Debian 12 | Windows 11、Ubuntu 24.04 |
 | Docker | 24.0+ | 最新稳定版 |
 | Docker Compose | 2.20+ | 最新稳定版 |
 
@@ -16,6 +16,9 @@
 ## 快速部署
 
 ### 第 1 步：安装 Docker
+
+Windows 请安装并启动 [Docker Desktop](https://docs.docker.com/desktop/setup/install/windows-install/)。
+Linux 可运行：
 
 ```bash
 curl -fsSL https://get.docker.com | sh
@@ -26,14 +29,21 @@ newgrp docker
 ### 第 2 步：克隆代码
 
 ```bash
-git clone https://github.com/your-org/novel-world.git
-cd novel-world
+git clone https://github.com/schorsch888/novelworld.git
+cd novelworld
 ```
 
 ### 第 3 步：一条命令启动
 
 ```bash
+# Linux
 ./start.sh
+```
+
+Windows 在命令提示符运行，或在资源管理器中双击：
+
+```bat
+start.cmd
 ```
 
 脚本会生成数据库、Redis、JWT、配置加密和服务间鉴权密钥，构建并启动
@@ -57,8 +67,8 @@ docker compose logs -f gateway
 ```
 
 访问 `http://your-server-ip` 即可使用。
-首次访问会要求创建唯一的首位管理员。生产 schema 不再安装默认应用账号；LLM
-密钥只从服务器环境读取，浏览器不会保存密钥。
+首次访问会要求配置模型并创建唯一的首位管理员。生产 schema 不再安装默认应用
+账号；LLM 密钥由服务端加密保存或从环境变量读取，浏览器不会保存密钥。
 
 ---
 

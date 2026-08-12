@@ -82,10 +82,14 @@ Choose how to enter the world:
 ```bash
 git clone https://github.com/schorsch888/novelworld.git
 cd novelworld
+# Linux
 ./start.sh
 ```
 
-The startup script will:
+On Windows, start Docker Desktop and run `start.cmd` from Command Prompt, or
+double-click it in Explorer.
+
+The startup scripts will:
 1. Check Docker is installed
 2. Generate secure passwords automatically
 3. Start all services without asking command-line configuration questions
