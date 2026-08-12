@@ -50,9 +50,9 @@ describe('setup status', () => {
     request.mockRestore();
   });
 
-  it('does not trust the retired in-memory setup contract during rollout', async () => {
+  it('does not trust the retired setup contract during rollout', async () => {
     const request = vi.spyOn(apiClient, 'get').mockResolvedValueOnce({
-      data: { configured: false },
+      data: { contract: 2, configured: false },
     });
     render(React.createElement(MemoryRouter, null, React.createElement(AppRoutes)));
 

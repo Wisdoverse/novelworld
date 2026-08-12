@@ -142,7 +142,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/auth/login", post(proxy::forward_to_user))
         .route("/api/auth/refresh", post(proxy::forward_to_user))
         .route("/api/setup/status", get(proxy::forward_to_user))
-        .route("/api/setup/test-llm", post(proxy::forward_to_user))
         .route("/api/setup/init", post(proxy::forward_to_user))
         // Protected routes
         .route("/api/auth/me", get(proxy::forward_to_user))
@@ -345,7 +344,6 @@ async fn auth_middleware(
         "/api/auth/login",
         "/api/auth/refresh",
         "/api/setup/status",
-        "/api/setup/test-llm",
         "/api/setup/init",
         "/live",
         "/health",

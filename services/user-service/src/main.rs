@@ -7,9 +7,10 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use user_service::{
     application::handlers::AuthHandler,
-    domain,
+    domain::{self, entities::runtime_config::RuntimeLlmConfig},
     infrastructure::{
         auth::jwt::JwtService,
+        llm::LlmClientTester,
         persistence::{pg_user_repo::PgUserRepository, PgReadinessProbe},
     },
     interface::http::{router, AppState},
@@ -44,18 +45,37 @@ async fn main() -> Result<()> {
         .parse()
         .unwrap_or(604800);
 
+    let runtime_config_key = std::env::var("RUNTIME_CONFIG_KEY")
+        .expect("RUNTIME_CONFIG_KEY must be set to 64 hexadecimal characters");
+    let internal_service_token =
+        std::env::var("INTERNAL_SERVICE_TOKEN").expect("INTERNAL_SERVICE_TOKEN must be set");
+    if internal_service_token.len() < 32 {
+        anyhow::bail!("INTERNAL_SERVICE_TOKEN must be at least 32 characters");
+    }
+    let environment_llm_config = RuntimeLlmConfig::from_environment(
+        std::env::var("LLM_API_URL").unwrap_or_else(|_| "https://api.openai.com".into()),
+        std::env::var("LLM_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into()),
+        std::env::var("LLM_API_KEY").unwrap_or_default(),
+    );
+
     let jwt = Arc::new(JwtService::new(&jwt_secret, access_token_expiry));
-    let user_repo = Arc::new(PgUserRepository::new(pool.clone()));
+    let user_repo = Arc::new(PgUserRepository::new(pool.clone(), &runtime_config_key)?);
 
     let token_issuer: Arc<dyn domain::ports::AccessTokenIssuer> = jwt;
     let handler = Arc::new(AuthHandler {
         user_repo,
         jwt: token_issuer,
+        llm_tester: Arc::new(LlmClientTester),
+        environment_llm_config,
         refresh_token_expiry,
     });
 
     let readiness = Arc::new(PgReadinessProbe::new(pool));
-    let state = AppState { handler, readiness };
+    let state = AppState {
+        handler,
+        readiness,
+        internal_service_token: internal_service_token.into(),
+    };
 
     let app = router(state).layer(
         CorsLayer::new()

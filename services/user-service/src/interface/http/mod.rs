@@ -1,11 +1,11 @@
 use axum::{
     extract::{DefaultBodyLimit, Json, State},
-    http::{HeaderMap, StatusCode},
+    http::{header::CACHE_CONTROL, HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Router,
 };
-use serde::{de::IgnoredAny, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -16,6 +16,7 @@ use crate::domain::ports::ReadinessProbe;
 pub struct AppState {
     pub handler: Arc<AuthHandler>,
     pub readiness: Arc<dyn ReadinessProbe>,
+    pub internal_service_token: Arc<str>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -27,7 +28,7 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/logout", post(logout))
         .route("/setup/status", get(setup_status))
         .route("/setup/init", post(setup_init))
-        .route("/setup/test-llm", post(deprecated_setup_llm_test))
+        .route("/internal/runtime/llm", get(runtime_llm_config))
         .route("/health", get(health))
         .route("/ready", get(ready))
         .layer(DefaultBodyLimit::max(16 * 1024))
@@ -96,6 +97,8 @@ struct ErrorDetail {
 #[derive(Debug, Serialize)]
 struct SetupStatus {
     configured: bool,
+    admin_configured: bool,
+    llm_configured: bool,
     contract: u8,
 }
 
@@ -105,12 +108,16 @@ struct SetupRequest {
     email: String,
     password: String,
     name: Option<String>,
-    // Rolling compatibility only: old setup clients sent these fields even
-    // though the gateway never persisted them.
-    #[serde(default, rename = "provider")]
-    _legacy_provider: Option<IgnoredAny>,
-    #[serde(default, rename = "api_key")]
-    _legacy_api_key: Option<IgnoredAny>,
+    provider: Option<String>,
+    api_key: Option<String>,
+}
+
+#[derive(Serialize)]
+struct RuntimeLlmConfigResponse {
+    contract: u8,
+    api_url: String,
+    model: String,
+    api_key: String,
 }
 
 fn user_dto(u: &crate::domain::entities::user::User) -> UserDto {
@@ -156,6 +163,11 @@ fn auth_error_response(error: AuthError) -> axum::response::Response {
             StatusCode::CONFLICT,
             "setup_required",
             "Create the initial administrator before registering users".into(),
+        ),
+        AuthError::LlmUnavailable => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "llm_unavailable",
+            "The AI provider rejected the key or is unavailable".into(),
         ),
         AuthError::InvalidCredentials => (
             StatusCode::UNAUTHORIZED,
@@ -256,12 +268,14 @@ async fn logout(
 }
 
 async fn setup_status(State(state): State<AppState>) -> impl IntoResponse {
-    match state.handler.is_configured().await {
-        Ok(configured) => (
+    match state.handler.setup_status().await {
+        Ok(status) => (
             StatusCode::OK,
             Json(SetupStatus {
-                configured,
-                contract: 2,
+                configured: status.configured(),
+                admin_configured: status.admin_configured,
+                llm_configured: status.llm_configured,
+                contract: 3,
             }),
         )
             .into_response(),
@@ -275,7 +289,13 @@ async fn setup_init(
 ) -> impl IntoResponse {
     match state
         .handler
-        .setup(&req.email, &req.password, req.name)
+        .setup(
+            &req.email,
+            &req.password,
+            req.name,
+            req.provider.as_deref(),
+            req.api_key.as_deref(),
+        )
         .await
     {
         Ok((user, access_token, refresh_token)) => (
@@ -291,12 +311,48 @@ async fn setup_init(
     }
 }
 
-async fn deprecated_setup_llm_test() -> impl IntoResponse {
-    error_response(
-        StatusCode::UPGRADE_REQUIRED,
-        "client_upgrade_required",
-        "Refresh the setup page; model credentials are configured by the operator",
-    )
+async fn runtime_llm_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let authorized = headers
+        .get("X-Internal-Service-Token")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| secrets_equal(value, state.internal_service_token.as_ref()));
+    if !authorized {
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "Invalid internal service identity",
+        )
+        .into_response();
+    }
+
+    match state.handler.runtime_llm_config().await {
+        Ok(config) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, "no-store")],
+            Json(RuntimeLlmConfigResponse {
+                contract: 1,
+                api_url: config.api_url,
+                model: config.model,
+                api_key: config.api_key,
+            }),
+        )
+            .into_response(),
+        Err(error) => auth_error_response(error),
+    }
+}
+
+fn secrets_equal(left: &str, right: &str) -> bool {
+    left.len() == right.len()
+        && left
+            .bytes()
+            .zip(right.bytes())
+            .fold(0_u8, |difference, (left, right)| {
+                difference | (left ^ right)
+            })
+            == 0
 }
 
 async fn health() -> impl IntoResponse {

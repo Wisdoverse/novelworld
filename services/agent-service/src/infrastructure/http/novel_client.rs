@@ -1,11 +1,13 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use uuid::Uuid;
 
-use crate::domain::ports::{ReadinessProbe, ReadingContext, ReadingContextPort};
+use crate::domain::ports::{
+    LoreContextPort, LoreExcerpt, ReadinessProbe, ReadingContext, ReadingContextPort,
+};
 use crate::domain::repositories::{CharacterInfo, CharacterInfoRepository};
 
 const NOVEL_SERVICE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -39,6 +41,18 @@ struct ReadingProgressResponse {
     reader_identity_type: String,
     reader_character_id: Option<Uuid>,
     deviation_mode: String,
+}
+
+#[derive(Debug, Serialize)]
+struct LoreSearchRequest<'a> {
+    query: &'a str,
+    max_chapter: i32,
+    limit: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct LoreSearchResponse {
+    excerpts: Vec<LoreExcerpt>,
 }
 
 impl NovelServiceClient {
@@ -146,6 +160,50 @@ impl ReadingContextPort for NovelServiceClient {
             reader_character_id: progress.reader_character_id,
             deviation_mode: progress.deviation_mode,
         }))
+    }
+}
+
+#[async_trait]
+impl LoreContextPort for NovelServiceClient {
+    async fn search(
+        &self,
+        novel_id: Uuid,
+        user_id: Uuid,
+        max_chapter: i32,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<LoreExcerpt>> {
+        let url = format!("{}/novels/{}/lore/search", self.base_url, novel_id);
+        let response = self
+            .client
+            .post(&url)
+            .header("X-User-Id", user_id.to_string())
+            .json(&LoreSearchRequest {
+                query,
+                max_chapter,
+                limit,
+            })
+            .send()
+            .await
+            .map_err(|error| anyhow!("Failed to reach novel-service at {}: {}", url, error))?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "novel-service returned {} for lore search {}",
+                response.status(),
+                novel_id
+            ));
+        }
+
+        let body: LoreSearchResponse = response.json().await?;
+        if body.excerpts.iter().any(|excerpt| {
+            excerpt.chapter_number < 1
+                || excerpt.chapter_number > max_chapter
+                || excerpt.content.trim().is_empty()
+        }) {
+            return Err(anyhow!("novel-service returned invalid lore context"));
+        }
+        Ok(body.excerpts)
     }
 }
 
