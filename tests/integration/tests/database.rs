@@ -1,3 +1,7 @@
+use novel_service::{
+    domain::{entities::chapter::Chapter, repositories::ChapterRepository},
+    infrastructure::persistence::chapter_pg_repo::ChapterPgRepository,
+};
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
@@ -55,6 +59,7 @@ async fn test_tables_exist() {
         "users",
         "novels",
         "chapters",
+        "chapter_chunks",
         "characters",
         "character_memories",
         "character_relationships",
@@ -64,6 +69,7 @@ async fn test_tables_exist() {
         "world_states",
         "reading_progress",
         "refresh_tokens",
+        "runtime_llm_config",
     ];
 
     for table in &expected_tables {
@@ -77,6 +83,100 @@ async fn test_tables_exist() {
 
         assert!(exists.0, "Table '{}' does not exist", table);
     }
+}
+
+#[tokio::test]
+async fn chapter_lore_search_never_crosses_the_chapter_boundary() {
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let user_id = Uuid::new_v4();
+    let novel_id = Uuid::new_v4();
+
+    sqlx::query("INSERT INTO users (id, email, password_hash, role) VALUES ($1, $2, $3, 'user')")
+        .bind(user_id)
+        .bind(format!("lore_test_{}@example.com", user_id))
+        .bind("$2b$12$fakehashfakehashfakehashfakehashfakehashfakehashfak")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO novels (id, user_id, title, total_chapters, status) \
+         VALUES ($1, $2, 'Lore Test', 2, 'ready')",
+    )
+    .bind(novel_id)
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let repository = ChapterPgRepository::new(pool.clone());
+    let first_chapter = Chapter::new(
+        novel_id,
+        1,
+        Some("The Letter".into()),
+        "The owl delivered a school letter to the young wizard.".repeat(10),
+    );
+    let mut second_chapter = Chapter::new(
+        novel_id,
+        2,
+        Some("The Chamber".into()),
+        format!(
+            "密室中的蛇怪正在苏醒。{}",
+            "The basilisk sleeps inside the secret chamber beneath the school.".repeat(10)
+        ),
+    );
+    repository
+        .save_batch(&[first_chapter, second_chapter.clone()])
+        .await
+        .unwrap();
+
+    assert!(repository
+        .search_lore(novel_id, 1, "basilisk secret chamber", 3)
+        .await
+        .unwrap()
+        .is_empty());
+    let visible = repository
+        .search_lore(novel_id, 2, "basilisk secret chamber", 3)
+        .await
+        .unwrap();
+    assert_eq!(
+        visible.first().map(|excerpt| excerpt.chapter_number),
+        Some(2)
+    );
+    let chinese = repository
+        .search_lore(novel_id, 2, "蛇怪在哪里", 3)
+        .await
+        .unwrap();
+    assert_eq!(
+        chinese.first().map(|excerpt| excerpt.chapter_number),
+        Some(2)
+    );
+
+    second_chapter.content = "A phoenix feather glows beside the empty doorway.".repeat(10);
+    repository.update(&second_chapter).await.unwrap();
+    assert!(repository
+        .search_lore(novel_id, 2, "蛇怪", 3)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        repository
+            .search_lore(novel_id, 2, "phoenix feather", 3)
+            .await
+            .unwrap()
+            .first()
+            .map(|excerpt| excerpt.chapter_number),
+        Some(2)
+    );
+
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

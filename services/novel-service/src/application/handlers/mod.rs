@@ -5,15 +5,19 @@ use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::application::commands::ImportNovelCommand;
-use crate::domain::entities::{chapter::Chapter, character::Character, novel::Novel};
+use crate::domain::entities::{character::Character, novel::Novel};
 use crate::domain::ports::{ImagePort, LlmPort};
 use crate::domain::repositories::{
-    ChapterRepository, CharacterRepository, NovelRepository, ReadingProgressRecord,
+    ChapterRepository, CharacterRepository, LoreExcerpt, NovelRepository, ReadingProgressRecord,
     ReadingProgressRepository,
 };
 use crate::domain::services::node_detector;
 use crate::domain::services::{
-    character_extractor::{build_extraction_prompt, ExtractionResult},
+    character_extractor::{
+        build_chunk_extraction_prompt, build_extraction_prompt, build_representative_sample,
+        build_scan_plan, find_first_appearance, merge_extractions, needs_chunk_scan,
+        validate_chunk_extraction, validate_extraction, ChunkExtractionResult, ExtractionResult,
+    },
     novel_parser::NovelParserService,
 };
 use crate::domain::value_objects::ReaderIdentityType;
@@ -26,14 +30,7 @@ pub struct NovelCommandHandler {
     pub image_client: Arc<dyn ImagePort>,
 }
 
-fn resolve_first_appearance(declared: Option<i32>, chapters: &[Chapter]) -> Option<i32> {
-    declared.filter(|number| {
-        *number >= 1
-            && chapters
-                .iter()
-                .any(|chapter| chapter.chapter_number == *number)
-    })
-}
+const MAX_AVATARS_PER_NOVEL: usize = 30;
 
 impl NovelCommandHandler {
     /// 处理小说导入命令（异步解析流程）
@@ -119,28 +116,35 @@ impl NovelCommandHandler {
         let total_chapters = chapters.len() as i32;
         chapter_repo.save_batch(&chapters).await?;
 
-        // 提取角色和世界观（使用前3章作为样本）
+        // 提取角色和世界观（代表性样本 + 分块全文扫描）
         info!("Extracting characters for novel {}", novel_id);
-        let sample_text: String = chapters
-            .iter()
-            .take(3)
-            .map(|c| c.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-
+        let sample_text = build_representative_sample(&chapters);
         let prompt = build_extraction_prompt(title, &sample_text);
         let extraction_json = llm.chat_json(&prompt).await?;
-        let extraction: ExtractionResult = serde_json::from_str(&extraction_json)?;
+        let base_extraction: ExtractionResult = serde_json::from_str(&extraction_json)?;
+        validate_extraction(&base_extraction)?;
+
+        let mut chunk_extractions = Vec::new();
+        if needs_chunk_scan(&chapters) {
+            for (index, chunk) in build_scan_plan(&chapters).iter().enumerate() {
+                let prompt = build_chunk_extraction_prompt(title, chunk, index);
+                let json = llm.chat_json(&prompt).await?;
+                let result: ChunkExtractionResult = serde_json::from_str(&json)?;
+                validate_chunk_extraction(&result)?;
+                chunk_extractions.push(result);
+            }
+        }
+        let extraction = merge_extractions(base_extraction, chunk_extractions);
+        validate_extraction(&extraction)?;
 
         // 保存角色
         let characters: Vec<Character> = extraction
             .characters
             .iter()
             .filter_map(|ec| {
-                let first_appearance =
-                    resolve_first_appearance(ec.first_appearance_chapter, &chapters);
+                let first_appearance = find_first_appearance(ec, &chapters);
                 let Some(first_appearance) = first_appearance else {
-                    tracing::warn!(character = %ec.name, "omitting character with unverifiable first appearance");
+                    tracing::warn!(character = %ec.name, "omitting character without a source-proven first appearance");
                     return None;
                 };
                 let Some(mut character) =
@@ -243,12 +247,23 @@ impl NovelCommandHandler {
         }
 
         // 标记小说为 ready
-        novel.mark_ready(total_chapters, extraction.world_summary.clone());
+        novel.mark_ready(
+            total_chapters,
+            extraction.world_summary.clone(),
+            extraction.genre.clone(),
+        );
         novel_repo.update(&novel).await?;
 
-        // Concurrent avatar generation (max 3 parallel)
+        // ponytail: discover every character; cap cosmetic avatar cost until demand proves otherwise.
         let semaphore = Arc::new(Semaphore::new(3));
-        for character in &characters {
+        if characters.len() > MAX_AVATARS_PER_NOVEL {
+            info!(
+                novel_id = %novel_id,
+                skipped = characters.len() - MAX_AVATARS_PER_NOVEL,
+                "avatar generation capped; all characters remain available"
+            );
+        }
+        for character in characters.iter().take(MAX_AVATARS_PER_NOVEL) {
             if let Some(appearance) = &character.appearance {
                 let char_id = character.id;
                 let appearance = appearance.clone();
@@ -300,6 +315,8 @@ impl NovelCommandHandler {
 }
 
 const MAX_READER_IDENTITY_CHARS: usize = 200;
+const MAX_LORE_QUERY_CHARS: usize = 1_000;
+const MAX_LORE_RESULTS: usize = 5;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReadingProgressError {
@@ -365,6 +382,33 @@ fn validate_character_appearance(
         ));
     }
     Ok(())
+}
+
+fn normalize_lore_query(query: &str) -> std::result::Result<String, ReadingProgressError> {
+    let query = query.split_whitespace().collect::<Vec<_>>().join(" ");
+    if query.is_empty() {
+        return Err(ReadingProgressError::Validation(
+            "lore query must not be empty".into(),
+        ));
+    }
+    if query.chars().count() > MAX_LORE_QUERY_CHARS {
+        return Err(ReadingProgressError::Validation(format!(
+            "lore query must not exceed {MAX_LORE_QUERY_CHARS} characters"
+        )));
+    }
+    Ok(query)
+}
+
+fn lore_chapter_limit(
+    requested: i32,
+    current: i32,
+) -> std::result::Result<i32, ReadingProgressError> {
+    if requested < 1 {
+        return Err(ReadingProgressError::Validation(
+            "max_chapter must be at least 1".into(),
+        ));
+    }
+    Ok(requested.min(current))
 }
 
 pub struct ReadingProgressHandler {
@@ -510,6 +554,30 @@ impl ReadingProgressHandler {
 
         self.progress_repo
             .update_chapter(user_id, novel_id, chapter)
+            .await
+            .map_err(ReadingProgressError::Internal)
+    }
+
+    pub async fn search_lore(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        requested_max_chapter: i32,
+        query: &str,
+        limit: usize,
+    ) -> std::result::Result<Vec<LoreExcerpt>, ReadingProgressError> {
+        let query = normalize_lore_query(query)?;
+        let novel = self.owned_novel(user_id, novel_id).await?;
+        let progress = self.progress_for_novel(user_id, &novel).await?;
+        let max_chapter = lore_chapter_limit(requested_max_chapter, progress.current_chapter)?;
+
+        self.chapter_repo
+            .search_lore(
+                novel_id,
+                max_chapter,
+                &query,
+                limit.clamp(1, MAX_LORE_RESULTS),
+            )
             .await
             .map_err(ReadingProgressError::Internal)
     }
@@ -669,15 +737,12 @@ mod reading_progress_validation_tests {
     }
 
     #[test]
-    fn character_appearance_requires_a_valid_declared_chapter() {
-        let novel_id = Uuid::new_v4();
-        let chapters = vec![
-            Chapter::new(novel_id, 1, None, "Alice enters the room.".into()),
-            Chapter::new(novel_id, 2, None, "The journey continues.".into()),
-        ];
-        assert_eq!(resolve_first_appearance(None, &chapters), None);
-        assert_eq!(resolve_first_appearance(Some(2), &chapters), Some(2));
-        assert_eq!(resolve_first_appearance(Some(0), &chapters), None);
-        assert_eq!(resolve_first_appearance(Some(3), &chapters), None);
+    fn lore_queries_are_normalized_and_bounded() {
+        assert_eq!(normalize_lore_query("  密室\n蛇怪  ").unwrap(), "密室 蛇怪");
+        assert!(normalize_lore_query(" \n ").is_err());
+        assert!(normalize_lore_query(&"界".repeat(MAX_LORE_QUERY_CHARS + 1)).is_err());
+        assert_eq!(lore_chapter_limit(7, 3).unwrap(), 3);
+        assert_eq!(lore_chapter_limit(2, 3).unwrap(), 2);
+        assert!(lore_chapter_limit(0, 3).is_err());
     }
 }

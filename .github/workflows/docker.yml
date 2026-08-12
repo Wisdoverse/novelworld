@@ -119,6 +119,8 @@ jobs:
           compose_json=$(POSTGRES_PASSWORD=manifest-placeholder \
             REDIS_PASSWORD=manifest-placeholder \
             JWT_SECRET=manifest-placeholder-secret-at-least-32-characters \
+            RUNTIME_CONFIG_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+            INTERNAL_SERVICE_TOKEN=manifest-placeholder-internal-token-at-least-32-characters \
             LLM_API_KEY=manifest-placeholder docker compose config --format json)
           postgres_image=$(jq -r '.services.postgres.image' <<<"$compose_json")
           [[ $(jq -r '.services["postgres-migrate"].image' <<<"$compose_json") = "$postgres_image" ]]

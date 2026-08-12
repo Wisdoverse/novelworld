@@ -93,6 +93,11 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-novel}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-novel_world}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      RUNTIME_CONFIG_KEY: ${RUNTIME_CONFIG_KEY:?RUNTIME_CONFIG_KEY is required}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN is required}
+      LLM_API_URL: ${LLM_API_URL:-https://api.openai.com}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
       AUTH_ACCESS_TOKEN_EXPIRY: ${AUTH_ACCESS_TOKEN_EXPIRY:-3600}
       AUTH_REFRESH_TOKEN_EXPIRY: ${AUTH_REFRESH_TOKEN_EXPIRY:-604800}
       PORT: 8001
@@ -120,8 +125,10 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-novel}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-novel_world}
       LLM_API_URL: ${LLM_API_URL:-https://api.openai.com}
-      LLM_API_KEY: ${LLM_API_KEY:?LLM_API_KEY is required}
+      LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      USER_SERVICE_URL: http://user-service:8001
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN is required}
       IMAGE_GEN_API_URL: ${IMAGE_GEN_API_URL:-https://api.openai.com}
       IMAGE_GEN_API_KEY: ${IMAGE_GEN_API_KEY:-}
       S3_ENDPOINT: ${S3_ENDPOINT:-}
@@ -154,8 +161,13 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-novel}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-novel_world}
       REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
       LLM_API_URL: ${LLM_API_URL:-https://api.openai.com}
-      LLM_API_KEY: ${LLM_API_KEY:?LLM_API_KEY is required}
+      LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-gpt-4o}
+      USER_SERVICE_URL: http://user-service:8001
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN is required}
+      EMBEDDING_API_URL: ${EMBEDDING_API_URL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
       # 记忆层配置
       MEMORY_SHORT_TERM_LIMIT: ${MEMORY_SHORT_TERM_LIMIT:-20}
       MEMORY_MID_TERM_LIMIT: ${MEMORY_MID_TERM_LIMIT:-50}
@@ -190,8 +202,10 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-novel}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-novel_world}
       LLM_API_URL: ${LLM_API_URL:-https://api.openai.com}
-      LLM_API_KEY: ${LLM_API_KEY:?LLM_API_KEY is required}
+      LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-gpt-4o}
+      USER_SERVICE_URL: http://user-service:8001
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN is required}
       PORT: 8004
       NOVEL_SERVICE_URL: http://novel-service:8002
       RUST_LOG: info

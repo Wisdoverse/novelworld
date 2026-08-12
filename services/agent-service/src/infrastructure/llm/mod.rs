@@ -6,20 +6,19 @@ use std::sync::Arc;
 use crate::domain::ports::{ChatCompletion, ChatCompletionEvent, ChatStream, TextSummarizer};
 
 pub struct LlmAdapter {
-    client: Arc<llm_client::LlmClient>,
-    model: String,
+    client: Arc<llm_client::RuntimeLlmClient>,
 }
 
 impl LlmAdapter {
-    pub fn new(client: Arc<llm_client::LlmClient>, model: String) -> Self {
-        Self { client, model }
+    pub fn new(client: Arc<llm_client::RuntimeLlmClient>) -> Self {
+        Self { client }
     }
 }
 
 #[async_trait]
 impl ChatCompletion for LlmAdapter {
     async fn chat_stream(&self, messages: Vec<(String, String)>) -> Result<ChatStream> {
-        let mut req = llm_client::ChatRequest::new(&self.model);
+        let mut req = llm_client::ChatRequest::new("");
         for (role, content) in messages {
             req = req.message(&role, content);
         }
@@ -37,7 +36,7 @@ impl ChatCompletion for LlmAdapter {
             .into_iter()
             .map(|(role, content)| llm_client::ChatMessage { role, content })
             .collect();
-        let req = llm_client::ChatRequest::new(&self.model)
+        let req = llm_client::ChatRequest::new("")
             .messages(msgs)
             .temperature(0.85)
             .max_tokens(1024);
@@ -48,7 +47,7 @@ impl ChatCompletion for LlmAdapter {
 #[async_trait]
 impl TextSummarizer for LlmAdapter {
     async fn summarize(&self, system: &str, text: &str) -> Result<String> {
-        let request = llm_client::ChatRequest::new(&self.model)
+        let request = llm_client::ChatRequest::new("")
             .message("system", system)
             .message("user", text)
             .temperature(0.3)

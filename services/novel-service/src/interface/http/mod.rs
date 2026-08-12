@@ -41,6 +41,7 @@ fn routes() -> Router<AppState> {
         .route("/novels/{id}", delete(delete_novel))
         .route("/novels/{id}/chapters", get(list_chapters))
         .route("/novels/{id}/chapters/{num}", get(get_chapter))
+        .route("/novels/{id}/lore/search", post(search_lore))
         .route("/novels/{id}/characters", get(list_characters))
         .route("/characters/{id}", get(get_character_by_id))
         .route("/novels/{id}/relationships", get(list_relationships))
@@ -74,6 +75,19 @@ pub struct ImportNovelResponse {
 #[derive(Debug, Serialize)]
 pub struct ApiError {
     pub error: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LoreSearchRequest {
+    query: String,
+    max_chapter: i32,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct LoreSearchResponse {
+    excerpts: Vec<crate::domain::repositories::LoreExcerpt>,
 }
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
@@ -780,6 +794,41 @@ async fn set_identity(
         .await
     {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => progress_error_response(error),
+    }
+}
+
+async fn search_lore(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(novel_id): Path<Uuid>,
+    Json(req): Json<LoreSearchRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user_id(&headers) {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiError {
+                    error: "Missing user ID".into(),
+                }),
+            )
+                .into_response()
+        }
+    };
+
+    match state
+        .progress_handler
+        .search_lore(
+            user_id,
+            novel_id,
+            req.max_chapter,
+            &req.query,
+            req.limit.unwrap_or(3),
+        )
+        .await
+    {
+        Ok(excerpts) => (StatusCode::OK, Json(LoreSearchResponse { excerpts })).into_response(),
         Err(error) => progress_error_response(error),
     }
 }

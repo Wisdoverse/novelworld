@@ -73,10 +73,11 @@ fn test_novel_status_transitions() {
     novel.start_parsing();
     assert!(matches!(novel.status, NovelStatus::Parsing));
 
-    novel.mark_ready(10, "A fantasy world.".into());
+    novel.mark_ready(10, "A fantasy world.".into(), "fantasy".into());
     assert!(matches!(novel.status, NovelStatus::Ready));
     assert_eq!(novel.total_chapters, 10);
     assert!(novel.world_summary.is_some());
+    assert_eq!(novel.genre.as_deref(), Some("fantasy"));
 }
 
 #[test]
@@ -125,7 +126,7 @@ fn test_domain_events() {
     let events = novel.take_events();
     assert_eq!(events.len(), 1);
 
-    novel.mark_ready(5, "summary".into());
+    novel.mark_ready(5, "summary".into(), "fantasy".into());
     let events = novel.take_events();
     assert_eq!(events.len(), 1);
 

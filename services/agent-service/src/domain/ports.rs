@@ -1,5 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 use uuid::Uuid;
 
@@ -76,4 +77,24 @@ pub struct ReadingContext {
 #[async_trait]
 pub trait ReadingContextPort: Send + Sync {
     async fn find(&self, novel_id: Uuid, user_id: Uuid) -> Result<Option<ReadingContext>>;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LoreExcerpt {
+    pub chapter_number: i32,
+    pub title: Option<String>,
+    pub content: String,
+    pub score: f32,
+}
+
+#[async_trait]
+pub trait LoreContextPort: Send + Sync {
+    async fn search(
+        &self,
+        novel_id: Uuid,
+        user_id: Uuid,
+        max_chapter: i32,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<LoreExcerpt>>;
 }

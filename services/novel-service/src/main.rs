@@ -38,13 +38,9 @@ async fn main() -> Result<()> {
 
     tracing::info!("Connected to PostgreSQL");
 
-    let llm_base = Arc::new(llm_client::LlmClient::new().with_openai_compatible(
-        "default",
-        std::env::var("LLM_API_KEY").unwrap_or_default(),
-        std::env::var("LLM_API_URL").unwrap_or_else(|_| "https://api.openai.com".into()),
-    ));
-    let llm_model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "gpt-4o".into());
-    let llm = Arc::new(LlmAdapter::new(llm_base, format!("default/{}", llm_model)));
+    let llm = Arc::new(LlmAdapter::new(Arc::new(
+        llm_client::RuntimeLlmClient::from_env()?,
+    )));
 
     let image_client = Arc::new(ImageClient::new(
         std::env::var("IMAGE_GEN_API_URL").unwrap_or_else(|_| "https://api.openai.com".into()),

@@ -1,8 +1,11 @@
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::domain::entities::user::{RefreshToken, User};
-use crate::domain::ports::AccessTokenIssuer;
+use crate::domain::entities::{
+    runtime_config::RuntimeLlmConfig,
+    user::{RefreshToken, User},
+};
+use crate::domain::ports::{AccessTokenIssuer, LlmConnectionTester};
 use crate::domain::repositories::UserRepository;
 
 const MAX_PASSWORD_BYTES: usize = 72;
@@ -19,6 +22,8 @@ pub enum AuthError {
     AlreadyConfigured,
     #[error("Initial setup is required")]
     SetupRequired,
+    #[error("The AI provider could not be reached with these settings")]
+    LlmUnavailable,
     #[error("Invalid email or password")]
     InvalidCredentials,
     #[error("Invalid or expired refresh token")]
@@ -34,7 +39,20 @@ pub type AuthResult<T> = std::result::Result<T, AuthError>;
 pub struct AuthHandler {
     pub user_repo: Arc<dyn UserRepository>,
     pub jwt: Arc<dyn AccessTokenIssuer>,
+    pub llm_tester: Arc<dyn LlmConnectionTester>,
+    pub environment_llm_config: Option<RuntimeLlmConfig>,
     pub refresh_token_expiry: i64,
+}
+
+pub struct SetupStatus {
+    pub admin_configured: bool,
+    pub llm_configured: bool,
+}
+
+impl SetupStatus {
+    pub fn configured(&self) -> bool {
+        self.admin_configured && self.llm_configured
+    }
 }
 
 impl AuthHandler {
@@ -85,14 +103,40 @@ impl AuthHandler {
         Ok((user, access_token, refresh_token.token))
     }
 
-    #[tracing::instrument(skip(self, password))]
+    #[tracing::instrument(skip(self, password, api_key))]
     pub async fn setup(
         &self,
         email: &str,
         password: &str,
         name: Option<String>,
+        provider: Option<&str>,
+        api_key: Option<&str>,
     ) -> AuthResult<(User, String, String)> {
         let (email, name) = validate_registration(email, password, name)?;
+        if self
+            .user_repo
+            .has_any()
+            .await
+            .map_err(AuthError::Internal)?
+        {
+            return Err(AuthError::AlreadyConfigured);
+        }
+
+        let runtime_config = if self.environment_llm_config.is_some() {
+            None
+        } else {
+            let config = RuntimeLlmConfig::for_provider(
+                provider.unwrap_or_default(),
+                api_key.unwrap_or_default(),
+            )
+            .map_err(AuthError::Validation)?;
+            if let Err(error) = self.llm_tester.test(&config).await {
+                tracing::warn!(error = ?error, provider = %config.provider, "setup LLM connection test failed");
+                return Err(AuthError::LlmUnavailable);
+            }
+            Some(config)
+        };
+
         let password_hash = bcrypt::hash(password, 12)
             .map_err(anyhow::Error::from)
             .map_err(AuthError::Internal)?;
@@ -101,7 +145,7 @@ impl AuthHandler {
 
         if !self
             .user_repo
-            .save_initial_user(&user, &refresh_token)
+            .save_initial_setup(&user, &refresh_token, runtime_config.as_ref())
             .await
             .map_err(AuthError::Internal)?
         {
@@ -111,8 +155,34 @@ impl AuthHandler {
         Ok((user, access_token, refresh_token.token))
     }
 
-    pub async fn is_configured(&self) -> AuthResult<bool> {
-        self.user_repo.has_any().await.map_err(AuthError::Internal)
+    pub async fn setup_status(&self) -> AuthResult<SetupStatus> {
+        let admin_configured = self
+            .user_repo
+            .has_any()
+            .await
+            .map_err(AuthError::Internal)?;
+        let llm_configured = self.environment_llm_config.is_some()
+            || self
+                .user_repo
+                .find_runtime_llm_config()
+                .await
+                .map_err(AuthError::Internal)?
+                .is_some();
+        Ok(SetupStatus {
+            admin_configured,
+            llm_configured,
+        })
+    }
+
+    pub async fn runtime_llm_config(&self) -> AuthResult<RuntimeLlmConfig> {
+        if let Some(config) = &self.environment_llm_config {
+            return Ok(config.clone());
+        }
+        self.user_repo
+            .find_runtime_llm_config()
+            .await
+            .map_err(AuthError::Internal)?
+            .ok_or(AuthError::SetupRequired)
     }
 
     #[tracing::instrument(skip(self, password))]

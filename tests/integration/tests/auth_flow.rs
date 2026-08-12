@@ -4,14 +4,20 @@ use std::sync::Arc;
 use user_service::{
     application::handlers::{AuthError, AuthHandler},
     domain::{
-        entities::user::{RefreshToken, User, UserRole},
+        entities::{
+            runtime_config::RuntimeLlmConfig,
+            user::{RefreshToken, User, UserRole},
+        },
         repositories::UserRepository,
     },
-    infrastructure::{auth::jwt::JwtService, persistence::pg_user_repo::PgUserRepository},
+    infrastructure::{
+        auth::jwt::JwtService, llm::LlmClientTester, persistence::pg_user_repo::PgUserRepository,
+    },
 };
 use uuid::Uuid;
 
 const FRESH_SCHEMA: &str = include_str!("../../../infra/postgres/init.sql");
+const CONFIG_KEY: &str = "abababababababababababababababababababababababababababababababab";
 
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
@@ -45,8 +51,10 @@ async fn initial_admin_is_durable_and_single_winner() {
     sqlx::raw_sql(FRESH_SCHEMA).execute(&pool).await.unwrap();
 
     let empty_handler = AuthHandler {
-        user_repo: Arc::new(PgUserRepository::new(pool.clone())),
+        user_repo: Arc::new(PgUserRepository::new(pool.clone(), CONFIG_KEY).unwrap()),
         jwt: Arc::new(JwtService::new("setup-contract-secret-is-long-enough", 60)),
+        llm_tester: Arc::new(LlmClientTester),
+        environment_llm_config: None,
         refresh_token_expiry: 60,
     };
     assert!(matches!(
@@ -68,16 +76,32 @@ async fn initial_admin_is_durable_and_single_winner() {
     );
     let left_token = RefreshToken::new(left_user.id, "a".repeat(64), 60);
     let right_token = RefreshToken::new(right_user.id, "b".repeat(64), 60);
-    let left_repo = PgUserRepository::new(pool.clone());
-    let right_repo = PgUserRepository::new(pool.clone());
+    let left_config = RuntimeLlmConfig::for_provider("deepseek", "left-secret").unwrap();
+    let right_config = RuntimeLlmConfig::for_provider("openai", "right-secret").unwrap();
+    let left_repo = PgUserRepository::new(pool.clone(), CONFIG_KEY).unwrap();
+    let right_repo = PgUserRepository::new(pool.clone(), CONFIG_KEY).unwrap();
     let (left, right) = tokio::join!(
-        left_repo.save_initial_user(&left_user, &left_token),
-        right_repo.save_initial_user(&right_user, &right_token)
+        left_repo.save_initial_setup(&left_user, &left_token, Some(&left_config)),
+        right_repo.save_initial_setup(&right_user, &right_token, Some(&right_config))
     );
-    assert_ne!(left.unwrap(), right.unwrap());
+    let left_won = left.unwrap();
+    assert_ne!(left_won, right.unwrap());
 
-    let restarted_repo = PgUserRepository::new(pool.clone());
+    let restarted_repo = PgUserRepository::new(pool.clone(), CONFIG_KEY).unwrap();
     assert!(restarted_repo.has_any().await.unwrap());
+    let saved_config = restarted_repo
+        .find_runtime_llm_config()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        saved_config.api_key,
+        if left_won {
+            "left-secret"
+        } else {
+            "right-secret"
+        }
+    );
     let winner: (Uuid, String) = sqlx::query_as("SELECT id, role::text FROM users")
         .fetch_one(&pool)
         .await

@@ -4,6 +4,19 @@ This roadmap orders work by risk and evidence, not by feature count or calendar
 promises. A horizon starts only when the previous horizon's exit criteria are
 measured and met.
 
+## Delivery status
+
+Last reviewed: 2026-08-11. "Complete" means merged to `main` with required CI
+green; it does not claim that an operator has deployed the release.
+
+| Horizon | Status | Evidence / next gate |
+|---|---|---|
+| 0 — Trust boundary | Complete | [PR #72](https://github.com/schorsch888/novelworld/pull/72) merged as `6b62c44`; ownership, principal, and boundary checks are in required CI. |
+| 1 — Reliability | Complete | PR #72 completed atomic chat/narrative persistence, durable setup, migrations, readiness, and release checks; CI passed 5/5. |
+| 2 — Core reader loop | Next | Eligible to start. The exit gate remains a restart-safe upload-to-resume end-to-end test. |
+| 3 — Quality, safety, cost | Queued | Starts only after Horizon 2 exits and evaluation/privacy budgets are defined. |
+| 4 — Measured scale | Queued | Starts only for a named SLO or measured bottleneck. |
+
 ## Product and system invariants
 
 These remain true through every horizon:
@@ -24,8 +37,9 @@ These remain true through every horizon:
 
 ## Horizon 0: restore the trust boundary
 
-Current evidence shows resource endpoints that trust caller-supplied `user_id`
-and novel reads that do not verify ownership. Fix these before adding features.
+Baseline evidence showed resource endpoints that trusted caller-supplied
+`user_id` and novel reads that did not verify ownership. PR #72 closed these
+gaps before feature work proceeds.
 
 - Derive the acting user from `X-User-Id` on every downstream endpoint.
 - Enforce novel ownership before returning novels, chapters, characters,
@@ -62,9 +76,10 @@ documented API matches runtime behavior.
 ## Horizon 2: complete the core reader loop
 
 - Replace the reader's mock branch node with the narrative-service contract.
-- Persist and use authenticated reading progress and reader identity.
-- Complete history, memory controls, narrative consequence rendering, and
-  accessible loading/error/retry states in the existing FSD slices.
+- Connect the existing authenticated progress, reader-identity, history, and
+  memory contracts into a restart-safe resume flow.
+- Complete memory controls, narrative consequence rendering, and accessible
+  loading/error/retry states in the existing FSD slices.
 - Move ingestion to durable background work with explicit status transitions,
   retry policy, cancellation, and idempotency.
 - Store uploaded source files only when retention/reprocessing requirements are

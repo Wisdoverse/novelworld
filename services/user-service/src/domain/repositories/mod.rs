@@ -2,13 +2,20 @@ use anyhow::Result;
 use async_trait::async_trait;
 use uuid::Uuid;
 
+use crate::domain::entities::runtime_config::RuntimeLlmConfig;
 use crate::domain::entities::user::{RefreshToken, User};
 
 #[async_trait]
 pub trait UserRepository: Send + Sync {
     async fn save(&self, user: &User) -> Result<bool>;
-    async fn save_initial_user(&self, user: &User, token: &RefreshToken) -> Result<bool>;
+    async fn save_initial_setup(
+        &self,
+        user: &User,
+        token: &RefreshToken,
+        llm: Option<&RuntimeLlmConfig>,
+    ) -> Result<bool>;
     async fn has_any(&self) -> Result<bool>;
+    async fn find_runtime_llm_config(&self) -> Result<Option<RuntimeLlmConfig>>;
     async fn find_by_id(&self, id: Uuid) -> Result<Option<User>>;
     async fn find_by_email(&self, email: &str) -> Result<Option<User>>;
     async fn update(&self, user: &User) -> Result<()>;

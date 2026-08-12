@@ -42,15 +42,9 @@ async fn main() -> Result<()> {
     tracing::info!("Connected to PostgreSQL");
 
     // LLM client (shared workspace crate, behind domain port trait)
-    let api_key = std::env::var("LLM_API_KEY").unwrap_or_default();
-    let api_url = std::env::var("LLM_API_URL").unwrap_or_else(|_| "https://api.openai.com".into());
-    let model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "gpt-4o".into());
-
-    let llm_base = Arc::new(
-        llm_client::LlmClient::new().with_openai_compatible("default", &api_key, &api_url),
-    );
-    let llm: Arc<dyn domain::ports::LlmPort> =
-        Arc::new(LlmAdapter::new(llm_base, format!("default/{}", model)));
+    let llm: Arc<dyn domain::ports::LlmPort> = Arc::new(LlmAdapter::new(Arc::new(
+        llm_client::RuntimeLlmClient::from_env()?,
+    )));
 
     // Repositories
     let node_repo = Arc::new(PgNarrativeNodeRepository::new(pool.clone()));

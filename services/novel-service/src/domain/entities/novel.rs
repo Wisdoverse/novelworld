@@ -65,10 +65,11 @@ impl Novel {
     }
 
     /// 解析完成
-    pub fn mark_ready(&mut self, total_chapters: i32, world_summary: String) {
+    pub fn mark_ready(&mut self, total_chapters: i32, world_summary: String, genre: String) {
         self.status = NovelStatus::Ready;
         self.total_chapters = total_chapters;
         self.world_summary = Some(world_summary);
+        self.genre = Some(genre);
         self.updated_at = Utc::now();
         self.domain_events.push(NovelEvent::ParseCompleted {
             novel_id: self.id,
