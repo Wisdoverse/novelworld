@@ -11,6 +11,9 @@ const mocks = vi.hoisted(() => ({
   progressError: true,
   progressChapter: 1,
   characters: [] as Array<Record<string, unknown>>,
+  effectiveContent: 'Chapter two',
+  effectiveGenerated: false,
+  effectiveError: false,
 }));
 
 vi.mock('react-router-dom', () => ({
@@ -47,6 +50,16 @@ vi.mock('@/entities/reading-progress/api', () => ({
 }));
 
 vi.mock('@/entities/narrative/api', () => ({
+  useEffectiveChapter: () => ({
+    data: mocks.effectiveError ? undefined : {
+      chapter_number: 2,
+      content: mocks.effectiveContent,
+      generated: mocks.effectiveGenerated,
+    },
+    isLoading: false,
+    isError: mocks.effectiveError,
+    refetch: vi.fn(),
+  }),
   useNarrativeNode: () => ({
     data: undefined,
     isLoading: false,
@@ -74,6 +87,9 @@ describe('ReaderPage progress gate', () => {
     mocks.progressError = true;
     mocks.progressChapter = 1;
     mocks.characters = [];
+    mocks.effectiveContent = 'Chapter two';
+    mocks.effectiveGenerated = false;
+    mocks.effectiveError = false;
   });
 
   it('offers an explicit retry after persistence fails', async () => {
@@ -129,6 +145,18 @@ describe('splitChapterAtAnchor', () => {
       after: '原著后续。',
       anchored: true,
     });
+  });
+
+  it('renders the complete player timeline chapter after causality diverges', () => {
+    mocks.progressChapter = 2;
+    mocks.progressError = false;
+    mocks.effectiveContent = '你推开旧城门，原著从未发生的战争由此开始。';
+    mocks.effectiveGenerated = true;
+
+    render(<ReaderPage />);
+
+    expect(screen.getByText('你推开旧城门，原著从未发生的战争由此开始。')).toBeTruthy();
+    expect(screen.getByText('玩家时间线 · 本章已因你的选择完全改写')).toBeTruthy();
   });
 
   it('fails open to the full chapter when a legacy anchor is unavailable', () => {

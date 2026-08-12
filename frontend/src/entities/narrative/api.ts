@@ -3,14 +3,35 @@ import { apiClient } from '@/shared/api/client';
 import type { NarrativeNode, WorldState } from '@/shared/types';
 
 export interface ChoiceResult {
+  chapter_number: number;
   consequence: string;
+  chapter_content: string;
   world_state: WorldState;
+}
+
+export interface EffectiveChapter {
+  chapter_number: number;
+  content: string;
+  generated: boolean;
 }
 
 export const narrativeKeys = {
   node: (novelId: string, chapter: number) => ['narrative', novelId, 'node', chapter] as const,
+  chapter: (novelId: string, chapter: number) => ['narrative', novelId, 'chapter', chapter] as const,
   worldState: (novelId: string) => ['narrative', novelId, 'world-state'] as const,
 };
+
+export function useEffectiveChapter(novelId: string, chapter: number, enabled: boolean) {
+  return useQuery({
+    queryKey: narrativeKeys.chapter(novelId, chapter),
+    queryFn: () => apiClient
+      .get<EffectiveChapter>(`/narrative/${novelId}/chapters/${chapter}`, { timeout: 5 * 60_000 })
+      .then(response => response.data),
+    enabled: enabled && !!novelId && chapter >= 1,
+    staleTime: Infinity,
+    retry: false,
+  });
+}
 
 export function useNarrativeNode(novelId: string, chapter: number, enabled: boolean) {
   return useQuery({
@@ -46,6 +67,11 @@ export function useSubmitNarrativeChoice(novelId: string) {
       .then(response => response.data),
     onSuccess: (result) => {
       queryClient.setQueryData(narrativeKeys.worldState(novelId), result.world_state);
+      queryClient.setQueryData(narrativeKeys.chapter(novelId, result.chapter_number), {
+        chapter_number: result.chapter_number,
+        content: result.chapter_content,
+        generated: true,
+      } satisfies EffectiveChapter);
     },
   });
 }

@@ -19,6 +19,7 @@ const MAX_TITLE_BYTES: usize = 2_000;
 const MAX_CHAPTER_BYTES: usize = 4_000;
 const MAX_CHOICE_BYTES: usize = 2_000;
 const MAX_STATE_SECTION_BYTES: usize = 8_000;
+const MAX_WORLD_SUMMARY_BYTES: usize = 4_000;
 const MAX_IDENTITY_BYTES: usize = 800;
 const MAX_MODE_BYTES: usize = 32;
 
@@ -203,6 +204,54 @@ pub fn build_consequence_prompt(
     )
 }
 
+/// Build a complete chapter in the player's forked timeline. The canonical
+/// chapter is reference material, never output that can be shown verbatim once
+/// causality has diverged.
+pub fn build_player_chapter_prompt(
+    novel_title: &str,
+    chapter_number: i32,
+    previous_player_chapter: &str,
+    canonical_chapter: &str,
+    world_summary: Option<&str>,
+    world_state: &WorldState,
+    deviation_mode: &str,
+) -> String {
+    let state = serde_json::to_string_pretty(&world_state.state).unwrap_or_default();
+    format!(
+        r#"你是《{title}》的玩家时间线主笔。用户已经作为原著中不存在的新角色改变了因果；现在要写玩家时间线的第 {chapter_number} 章完整正文。
+
+## 上一章玩家时间线正文
+{previous}
+
+## 原著本章素材（只作为世界设定、人物动机和可选事件参考，禁止直接续接或照抄）
+{canonical}
+
+## 原著世界摘要
+{world_summary}
+
+## 玩家时间线累计状态
+{state}
+
+## 偏离模式
+{mode}（canon=尽量保留仍然合理的原著事件，creative=允许明显新发展，remix=自由重构）
+
+请输出第 {chapter_number} 章的完整正文，要求：
+1. 从上一章玩家时间线直接续写，所有因果必须服从玩家已经造成的变化
+2. 原著本章只能作为素材；不合理的原著情节必须删除或改写，不能让时间线突然复原
+3. 用户始终是独立玩家角色，以第二人称“你”参与世界；不能让用户控制原著角色
+4. 原著角色保持自主性、性格、知识边界与目标，并对新局势作出可信反应
+5. 正文使用自然的简体中文，约1200-2500字，包含场景、行动、对话与新的因果推进
+6. 只输出正文，不要标题、摘要、Markdown 围栏或创作说明"#,
+        title = safe_truncate(novel_title, MAX_TITLE_BYTES),
+        chapter_number = chapter_number,
+        previous = safe_truncate(previous_player_chapter, MAX_CHAPTER_BYTES),
+        canonical = safe_truncate(canonical_chapter, MAX_CHAPTER_BYTES),
+        world_summary = safe_truncate(world_summary.unwrap_or("暂无"), MAX_WORLD_SUMMARY_BYTES),
+        state = safe_truncate(&state, MAX_STATE_SECTION_BYTES),
+        mode = safe_truncate(deviation_mode, MAX_MODE_BYTES),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,5 +271,23 @@ mod tests {
           {"text":"Wait","hint":"Patience"}
         ]}"#;
         assert!(parse_generated_branch(english).is_err());
+    }
+
+    #[test]
+    fn player_chapter_prompt_treats_canon_as_reference_only() {
+        let state = WorldState::new(uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        let prompt = build_player_chapter_prompt(
+            "测试小说",
+            6,
+            "你推开了旧城门。",
+            "原著中众人从未进入旧城。",
+            Some("一座被遗忘的城市。"),
+            &state,
+            "creative",
+        );
+
+        assert!(prompt.contains("完整正文"));
+        assert!(prompt.contains("禁止直接续接或照抄"));
+        assert!(prompt.contains("所有因果必须服从玩家已经造成的变化"));
     }
 }

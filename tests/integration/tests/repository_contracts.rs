@@ -736,7 +736,7 @@ async fn production_repositories_match_fresh_schema() {
     node_repo.save(&node).await.unwrap();
     assert_eq!(
         node_repo
-            .find_by_chapter(novel_id, 1)
+            .find_by_chapter(novel_id, 1, None)
             .await
             .unwrap()
             .unwrap()
@@ -753,6 +753,7 @@ async fn production_repositories_match_fresh_schema() {
         choice_index: 0,
         choice_text: "Stay".into(),
         consequence: "The character stays.".into(),
+        rewritten_chapter_content: "Canonical opening. The character stays.".into(),
     };
     let (left, right) = tokio::join!(
         choice_repo.commit_choice(&draft),
@@ -761,6 +762,27 @@ async fn production_repositories_match_fresh_schema() {
     let left = left.unwrap();
     let right = right.unwrap();
     assert_eq!(left.choice.id, right.choice.id);
+    assert_eq!(
+        left.player_chapter_content,
+        "Canonical opening. The character stays."
+    );
+    assert_eq!(left.player_chapter_content, right.player_chapter_content);
+    let persisted_player_chapter: (String, String) = sqlx::query_as(
+        "SELECT content, origin FROM player_chapters \
+         WHERE user_id = $1 AND novel_id = $2 AND chapter_number = 1",
+    )
+    .bind(user_id)
+    .bind(novel_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        persisted_player_chapter,
+        (
+            "Canonical opening. The character stays.".into(),
+            "choice".into()
+        )
+    );
     assert_eq!(
         left.world_state.state["choices"].as_array().unwrap().len(),
         1
@@ -806,6 +828,7 @@ async fn production_repositories_match_fresh_schema() {
             choice_index: 0,
             choice_text: format!("Choice {chapter_number}"),
             consequence: format!("Result {chapter_number}"),
+            rewritten_chapter_content: format!("Rewritten chapter {chapter_number}"),
         });
     }
     let (second, third) = tokio::join!(

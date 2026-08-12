@@ -11,6 +11,7 @@ import {
   useUpdateReadingProgress,
 } from '@/entities/reading-progress/api';
 import {
+  useEffectiveChapter,
   useNarrativeNode,
   useSubmitNarrativeChoice,
   useWorldState,
@@ -58,6 +59,12 @@ export function ReaderPage() {
 
   const { data: novel } = useNovel(novelId!);
   const { data: chapter, isLoading } = useChapter(novelId!, currentChapter);
+  const {
+    data: effectiveChapter,
+    isLoading: isEffectiveChapterLoading,
+    isError: isEffectiveChapterError,
+    refetch: refetchEffectiveChapter,
+  } = useEffectiveChapter(novelId || '', currentChapter, Boolean(chapter));
   const { data: characters } = useCharacters(
     novelId || '',
     readingProgress?.current_chapter ?? 0,
@@ -75,8 +82,12 @@ export function ReaderPage() {
     isLoading: isBranchLoading,
     isError: isBranchError,
     refetch: refetchBranch,
-  } = useNarrativeNode(novelId || '', currentChapter, hasBranch);
-  const { data: worldState } = useWorldState(novelId || '', hasBranch);
+  } = useNarrativeNode(
+    novelId || '',
+    currentChapter,
+    hasBranch && Boolean(effectiveChapter) && !isEffectiveChapterError,
+  );
+  const { data: worldState } = useWorldState(novelId || '', Boolean(chapter));
   const submitChoice = useSubmitNarrativeChoice(novelId || '');
 
   useEffect(() => {
@@ -138,8 +149,9 @@ export function ReaderPage() {
     : undefined;
   const selectedChoiceIndex = submittedChoiceIndex ?? savedChoice?.choice_index;
   const consequence = choiceResult?.consequence ?? savedChoice?.consequence;
+  const displayContent = effectiveChapter?.content ?? '';
   const inlineChapter = chapter && currentBranchNode
-    ? splitChapterAtAnchor(chapter.content, currentBranchNode.anchor_quote)
+    ? splitChapterAtAnchor(displayContent, currentBranchNode.anchor_quote)
     : undefined;
   const branchChoiceRequired = Boolean(
     currentBranchNode && selectedChoiceIndex === undefined,
@@ -259,11 +271,20 @@ export function ReaderPage() {
             <button className="text-sm underline" onClick={retryProgressUpdate}>重试</button>
           </div>
         )}
-        {isLoading ? (
+        {isLoading || isEffectiveChapterLoading ? (
           <div className="flex items-center justify-center h-64">
             <div className="w-8 h-8 border-2 rounded-full animate-spin" style={{ borderColor: '#6d28d9', borderTopColor: 'transparent' }} />
           </div>
-        ) : chapter ? (
+        ) : isEffectiveChapterError ? (
+          <div
+            role="alert"
+            className="mt-16 p-5 rounded-xl flex items-center justify-between gap-4"
+            style={{ background: 'rgba(220, 38, 38, 0.1)', border: '1px solid rgba(248, 113, 113, 0.25)', color: '#fca5a5' }}
+          >
+            <span className="text-sm">玩家时间线生成失败。为避免回退到已经失效的原著因果，本章暂不显示。</span>
+            <button className="text-sm underline" onClick={() => refetchEffectiveChapter()}>重新生成</button>
+          </div>
+        ) : chapter && effectiveChapter ? (
           <motion.div
             key={currentChapter}
             initial={{ opacity: 0, y: 20 }}
@@ -275,6 +296,11 @@ export function ReaderPage() {
               <div className="text-xs font-semibold uppercase tracking-widest mb-2" style={{ color: '#6d28d9' }}>
                 第 {currentChapter} 章
               </div>
+              {effectiveChapter.generated && (
+                <div className="mb-3 text-xs font-semibold tracking-wider" style={{ color: '#22d3ee' }}>
+                  玩家时间线 · 本章已因你的选择完全改写
+                </div>
+              )}
               {chapter.title && (
                 <h1
                   className="text-2xl md:text-3xl font-bold"
@@ -295,7 +321,7 @@ export function ReaderPage() {
             )}
             {(!hasBranch || !isBranchLoading) && (
               <div className="reader-content">
-                {(inlineChapter?.before ?? chapter.content).split('\n\n').map((paragraph, i) => (
+                {(inlineChapter?.before ?? displayContent).split('\n\n').map((paragraph, i) => (
                   <p key={i}>{paragraph}</p>
                 ))}
               </div>

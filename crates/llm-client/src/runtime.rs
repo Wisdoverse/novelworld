@@ -167,6 +167,23 @@ impl RuntimeLlmClient {
         .map(|response| response.content)
     }
 
+    /// Generate prose where the output itself is the product. Reasoning mode
+    /// is deliberately disabled so providers such as DeepSeek cannot consume
+    /// the response budget with hidden reasoning and return an incomplete
+    /// chapter instead of usable text.
+    pub async fn longform_chat(&self, system: &str, user: &str) -> Result<String> {
+        self.chat(
+            ChatRequest::new("")
+                .message("system", system)
+                .message("user", user)
+                .temperature(0.8)
+                .max_tokens(8_192)
+                .thinking(false),
+        )
+        .await
+        .map(|response| response.content)
+    }
+
     pub async fn json_chat(&self, prompt: &str) -> Result<String> {
         self.chat(
             ChatRequest::new("")

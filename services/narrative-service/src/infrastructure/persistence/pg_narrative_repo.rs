@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 use crate::domain::entities::narrative_node::{NarrativeChoice, NarrativeNode, WorldState};
 use crate::domain::repositories::{
-    ChoiceCommit, ChoiceCommitResult, NarrativeNodeRepository, UserChoiceRecord,
-    UserChoiceRepository,
+    ChoiceCommit, ChoiceCommitResult, NarrativeNodeRepository, PlayerChapter, PlayerChapterOrigin,
+    PlayerChapterRepository, UserChoiceRecord, UserChoiceRepository,
 };
 
 // ─── NarrativeNode persistence ──────────────────────────────────────────────
@@ -16,6 +16,7 @@ use crate::domain::repositories::{
 #[derive(Debug, FromRow)]
 struct NarrativeNodeRow {
     id: Uuid,
+    user_id: Option<Uuid>,
     novel_id: Uuid,
     chapter_number: i32,
     description: String,
@@ -29,6 +30,7 @@ impl From<NarrativeNodeRow> for NarrativeNode {
         let choices: Vec<NarrativeChoice> = serde_json::from_value(r.choices).unwrap_or_default();
         NarrativeNode {
             id: r.id,
+            user_id: r.user_id,
             novel_id: r.novel_id,
             chapter_number: r.chapter_number,
             description: r.description,
@@ -53,26 +55,38 @@ impl PgNarrativeNodeRepository {
 impl NarrativeNodeRepository for PgNarrativeNodeRepository {
     async fn save(&self, node: &NarrativeNode) -> Result<()> {
         let choices_json = serde_json::to_value(&node.choices)?;
-        sqlx::query(
+        let query = if node.user_id.is_some() {
             r#"
             INSERT INTO narrative_nodes (
-                id, novel_id, chapter_number, description, anchor_quote, choices, created_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ON CONFLICT (novel_id, chapter_number) DO UPDATE SET
+                id, user_id, novel_id, chapter_number, description, anchor_quote, choices, created_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (user_id, novel_id, chapter_number) WHERE user_id IS NOT NULL DO UPDATE SET
                 description = EXCLUDED.description,
                 anchor_quote = EXCLUDED.anchor_quote,
                 choices = EXCLUDED.choices
-            "#,
-        )
-        .bind(node.id)
-        .bind(node.novel_id)
-        .bind(node.chapter_number)
-        .bind(&node.description)
-        .bind(&node.anchor_quote)
-        .bind(choices_json)
-        .bind(node.created_at)
-        .execute(&self.pool)
-        .await?;
+            "#
+        } else {
+            r#"
+            INSERT INTO narrative_nodes (
+                id, user_id, novel_id, chapter_number, description, anchor_quote, choices, created_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (novel_id, chapter_number) WHERE user_id IS NULL DO UPDATE SET
+                description = EXCLUDED.description,
+                anchor_quote = EXCLUDED.anchor_quote,
+                choices = EXCLUDED.choices
+            "#
+        };
+        sqlx::query(query)
+            .bind(node.id)
+            .bind(node.user_id)
+            .bind(node.novel_id)
+            .bind(node.chapter_number)
+            .bind(&node.description)
+            .bind(&node.anchor_quote)
+            .bind(choices_json)
+            .bind(node.created_at)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -80,12 +94,19 @@ impl NarrativeNodeRepository for PgNarrativeNodeRepository {
         &self,
         novel_id: Uuid,
         chapter_number: i32,
+        user_id: Option<Uuid>,
     ) -> Result<Option<NarrativeNode>> {
         let row = sqlx::query_as::<_, NarrativeNodeRow>(
-            "SELECT * FROM narrative_nodes WHERE novel_id = $1 AND chapter_number = $2",
+            r#"
+            SELECT * FROM narrative_nodes
+            WHERE novel_id = $1
+              AND chapter_number = $2
+              AND user_id IS NOT DISTINCT FROM $3
+            "#,
         )
         .bind(novel_id)
         .bind(chapter_number)
+        .bind(user_id)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -249,10 +270,40 @@ impl UserChoiceRepository for PgUserChoiceRepository {
             .await?;
         }
 
+        sqlx::query(
+            r#"
+            INSERT INTO player_chapters (
+                id, user_id, novel_id, chapter_number, content, origin, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, 'choice', $6, $6)
+            ON CONFLICT (user_id, novel_id, chapter_number) DO NOTHING
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(draft.user_id)
+        .bind(draft.novel_id)
+        .bind(draft.chapter_number)
+        .bind(&draft.rewritten_chapter_content)
+        .bind(Utc::now())
+        .execute(&mut *transaction)
+        .await?;
+
+        let player_chapter_content: String = sqlx::query_scalar(
+            r#"
+            SELECT content FROM player_chapters
+            WHERE user_id = $1 AND novel_id = $2 AND chapter_number = $3
+            "#,
+        )
+        .bind(draft.user_id)
+        .bind(draft.novel_id)
+        .bind(draft.chapter_number)
+        .fetch_one(&mut *transaction)
+        .await?;
+
         transaction.commit().await?;
         Ok(ChoiceCommitResult {
             choice,
             world_state,
+            player_chapter_content,
         })
     }
 
@@ -282,6 +333,116 @@ impl UserChoiceRepository for PgUserChoiceRepository {
         .await?;
 
         Ok(rows.into_iter().map(UserChoiceRecord::from).collect())
+    }
+}
+
+// ─── Player chapter persistence ─────────────────────────────────────────────
+
+#[derive(Debug, FromRow)]
+struct PlayerChapterRow {
+    user_id: Uuid,
+    novel_id: Uuid,
+    chapter_number: i32,
+    content: String,
+    origin: String,
+    created_at: DateTime<Utc>,
+}
+
+impl TryFrom<PlayerChapterRow> for PlayerChapter {
+    type Error = anyhow::Error;
+
+    fn try_from(row: PlayerChapterRow) -> Result<Self> {
+        let origin = PlayerChapterOrigin::from_str(&row.origin)
+            .ok_or_else(|| anyhow::anyhow!("invalid player chapter origin"))?;
+        Ok(Self {
+            user_id: row.user_id,
+            novel_id: row.novel_id,
+            chapter_number: row.chapter_number,
+            content: row.content,
+            origin,
+            created_at: row.created_at,
+        })
+    }
+}
+
+pub struct PgPlayerChapterRepository {
+    pool: PgPool,
+}
+
+impl PgPlayerChapterRepository {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl PlayerChapterRepository for PgPlayerChapterRepository {
+    async fn find(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        chapter_number: i32,
+    ) -> Result<Option<PlayerChapter>> {
+        let row = sqlx::query_as::<_, PlayerChapterRow>(
+            r#"
+            SELECT user_id, novel_id, chapter_number, content, origin, created_at
+            FROM player_chapters
+            WHERE user_id = $1 AND novel_id = $2 AND chapter_number = $3
+            "#,
+        )
+        .bind(user_id)
+        .bind(novel_id)
+        .bind(chapter_number)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(PlayerChapter::try_from).transpose()
+    }
+
+    async fn save_if_absent(&self, chapter: &PlayerChapter) -> Result<PlayerChapter> {
+        sqlx::query(
+            r#"
+            INSERT INTO player_chapters (
+                id, user_id, novel_id, chapter_number, content, origin, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+            ON CONFLICT (user_id, novel_id, chapter_number) DO NOTHING
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(chapter.user_id)
+        .bind(chapter.novel_id)
+        .bind(chapter.chapter_number)
+        .bind(&chapter.content)
+        .bind(chapter.origin.to_str())
+        .bind(chapter.created_at)
+        .execute(&self.pool)
+        .await?;
+
+        self.find(chapter.user_id, chapter.novel_id, chapter.chapter_number)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("player chapter was not persisted"))
+    }
+
+    async fn find_latest_before(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        chapter_number: i32,
+    ) -> Result<Option<PlayerChapter>> {
+        let row = sqlx::query_as::<_, PlayerChapterRow>(
+            r#"
+            SELECT user_id, novel_id, chapter_number, content, origin, created_at
+            FROM player_chapters
+            WHERE user_id = $1 AND novel_id = $2 AND chapter_number < $3
+            ORDER BY chapter_number DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(user_id)
+        .bind(novel_id)
+        .bind(chapter_number)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(PlayerChapter::try_from).transpose()
     }
 }
 

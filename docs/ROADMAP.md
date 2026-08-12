@@ -121,6 +121,14 @@ adding unrestricted exploration.
 - Replace prose-only consequences with a validated structured transition
   (`events`, `relationship_changes`, `location_changes`, `thread_changes`, and
   rendered narrative). Apply the transition and the user choice atomically.
+- Treat the first player choice as a causal boundary: preserve source chapters
+  unchanged, replace the rest of the divergence chapter, and regenerate every
+  subsequent chapter as a user-scoped `PlayerChapter`. Canonical chapter prose
+  becomes reference material only; it is never displayed as the active timeline
+  when its preconditions have been invalidated.
+- Persist generated chapters as deterministic read projections of committed
+  world state. Fail closed on generation errors, generate chapters in order,
+  and isolate post-divergence narrative nodes by player.
 - Version prompts and structured-output schemas; reject transitions that refer
   to unknown entities, violate hard world rules, resurrect characters without
   an explicit allowed mechanism, or cross the reader's spoiler boundary.
