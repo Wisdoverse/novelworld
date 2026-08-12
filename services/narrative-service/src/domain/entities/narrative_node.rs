@@ -10,6 +10,8 @@ pub struct NarrativeNode {
     pub chapter_number: i32,
     /// 节点描述（触发分支的情境）
     pub description: String,
+    /// Exact source excerpt after which the choice is rendered inline.
+    pub anchor_quote: Option<String>,
     /// 可选择的分支选项
     pub choices: Vec<NarrativeChoice>,
     pub created_at: DateTime<Utc>,
@@ -38,9 +40,15 @@ impl NarrativeNode {
             novel_id,
             chapter_number,
             description,
+            anchor_quote: None,
             choices,
             created_at: Utc::now(),
         }
+    }
+
+    pub fn with_anchor_quote(mut self, anchor_quote: String) -> Self {
+        self.anchor_quote = Some(anchor_quote);
+        self
     }
 }
 

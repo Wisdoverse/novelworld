@@ -31,16 +31,23 @@ pub trait WorldStateRepository: Send + Sync {
     async fn update(&self, state: &WorldState) -> Result<()>;
 }
 
-/// Lightweight read-only access to chapters and novels from shared DB
+/// Read-only access to novel-service data through its HTTP API.
 #[async_trait]
 pub trait ChapterReadRepository: Send + Sync {
-    async fn get_chapter_content(
+    async fn get_chapter(
         &self,
         novel_id: Uuid,
         chapter_number: i32,
         user_id: Uuid,
-    ) -> Result<Option<String>>;
+    ) -> Result<Option<ChapterInfo>>;
     async fn get_novel_info(&self, novel_id: Uuid, user_id: Uuid) -> Result<Option<NovelInfo>>;
+}
+
+#[derive(Debug, Clone)]
+pub struct ChapterInfo {
+    pub content: String,
+    pub is_key_node: bool,
+    pub key_node_description: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

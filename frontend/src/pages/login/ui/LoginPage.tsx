@@ -4,10 +4,10 @@ import { useAuthStore } from '@/features/auth/model/useAuthStore';
 import { getApiErrorMessage } from '@/shared/api/client';
 import { toast } from 'sonner';
 
-export function LoginPage() {
+export function LoginPage({ initialRegister = false }: { initialRegister?: boolean }) {
   const navigate = useNavigate();
   const { login, register, loading } = useAuthStore();
-  const [isRegister, setIsRegister] = useState(false);
+  const [isRegister, setIsRegister] = useState(initialRegister);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');

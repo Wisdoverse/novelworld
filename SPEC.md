@@ -739,18 +739,56 @@ The Narrative Service MUST ensure that:
 - All mutations to `WorldState.state` are atomic (use database transactions or optimistic locking).
 - The `relationships` map in `WorldState.state` uses `character_id` (UUID string) as keys.
 
+### 7.5 Canonical Mainline and Open-World Evolution
+
+A completed source novel MAY be transformed into a living world, but generated
+prose MUST NOT become the authoritative state. The Narrative Service MUST keep
+two distinct layers:
+
+1. `CanonStoryModel`: an immutable, versioned, source-backed graph of story
+   arcs, ordered events, locations, factions, world rules, character states,
+   unresolved threads, and the canonical ending. Extracted entities and events
+   MUST retain chapter provenance.
+2. `PlayerTimeline`: an append-only overlay beginning at a canonical checkpoint
+   and containing only the player's committed actions and validated world
+   transitions.
+
+The user MUST enter as a durable `PlayerEntity`: a new person who does not exist
+in source canon and has a chosen identity, background, capabilities, location,
+inventory, relationships, faction standing, and discovered knowledge. The
+primary interaction MUST describe actions taken by this player. It MUST NOT ask
+the player to choose actions on behalf of canonical characters.
+
+An open-world session is reconstructed from a canonical checkpoint plus its
+player entity and player timeline. Canonical events continue when their
+preconditions remain true, and canonical characters act according to their own
+goals and knowledge. Player actions MAY observe, assist, obstruct, delay, or
+redirect those events. A world turn MUST produce a structured transition containing
+event, relationship, location, and thread changes alongside the narrative
+rendering. The transition MUST be schema-valid, entity-valid, spoiler-bounded,
+idempotent, and atomically committed before its prose is shown as complete.
+
+Players MAY enter at any checkpoint already unlocked by server-side reading
+progress. Future canon remains spoiler-bounded. Character agents, exploration,
+scheduled canon events, and future narrative turns MUST read the same committed
+player timeline.
+
 ---
 
-## 8. Reader Identity System
+## 8. Player Identity System
 
 ### 8.1 Identity Types
 
-Readers MAY choose one of two identity modes:
+Users MAY choose one of two identity modes. The primary mode is `self`, whose
+existing wire name is retained for compatibility:
 
-- `self`: The reader enters the world as themselves. The agent system prompt uses the reader's
-  `reader_identity` name and addresses them in second person.
+- `self`: The user creates an original `PlayerEntity` and enters the world as a
+  new person. The display name does not have to be the user's real identity.
+  Agents address the player in second person and canonical characters perceive
+  the player as another person in their world.
 - `character`: The reader adopts a character's identity. The agent system prompt acknowledges the
-  reader as that character and adjusts the dynamic accordingly.
+  reader as that character and adjusts the dynamic accordingly. This is an
+  optional alternate mode, not the primary open-world experience.
 
 ### 8.2 Identity Constraints
 
@@ -759,6 +797,9 @@ Readers MAY choose one of two identity modes:
 - A reader MUST NOT adopt the identity of the character they are currently conversing with.
 - Identity changes take effect immediately for new conversation turns; they do not retroactively
   alter existing `ChatMessage` records.
+- In `self` mode, narrative choices MUST be actions performed by the
+  `PlayerEntity`; they MUST NOT transfer control of a canonical character to the
+  player.
 
 ### 8.3 Deviation Modes
 

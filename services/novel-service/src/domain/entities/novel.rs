@@ -61,6 +61,7 @@ impl Novel {
     /// 开始解析
     pub fn start_parsing(&mut self) {
         self.status = NovelStatus::Parsing;
+        self.parse_error = None;
         self.updated_at = Utc::now();
     }
 

@@ -231,10 +231,13 @@ CREATE TABLE narrative_nodes (
     novel_id       UUID NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
     chapter_number INTEGER NOT NULL,
     description    TEXT NOT NULL,
+    anchor_quote   TEXT,
     choices        JSONB NOT NULL DEFAULT '[]',  -- NarrativeChoice[]
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT narrative_nodes_novel_chapter_key UNIQUE(novel_id, chapter_number),
-    CONSTRAINT narrative_nodes_identity_key UNIQUE(id, novel_id, chapter_number)
+    CONSTRAINT narrative_nodes_identity_key UNIQUE(id, novel_id, chapter_number),
+    CONSTRAINT narrative_nodes_anchor_quote_length_check
+        CHECK (anchor_quote IS NULL OR char_length(anchor_quote) BETWEEN 1 AND 1000)
 );
 
 CREATE INDEX idx_narrative_nodes_novel ON narrative_nodes(novel_id, chapter_number);
@@ -335,6 +338,7 @@ CREATE TABLE runtime_llm_config (
     provider           VARCHAR(32) NOT NULL,
     api_url            TEXT NOT NULL,
     model              VARCHAR(200) NOT NULL,
+    thinking_enabled   BOOLEAN NOT NULL DEFAULT FALSE,
     api_key_nonce      BYTEA NOT NULL,
     api_key_ciphertext BYTEA NOT NULL,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),

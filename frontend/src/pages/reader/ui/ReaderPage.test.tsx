@@ -1,7 +1,7 @@
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ReaderPage } from './ReaderPage';
+import { ReaderPage, splitChapterAtAnchor } from './ReaderPage';
 
 const mocks = vi.hoisted(() => ({
   navigate: vi.fn(),
@@ -43,6 +43,20 @@ vi.mock('@/entities/reading-progress/api', () => ({
     isPending: mocks.progressSaving,
     isError: mocks.progressError,
     reset: mocks.reset,
+  }),
+}));
+
+vi.mock('@/entities/narrative/api', () => ({
+  useNarrativeNode: () => ({
+    data: undefined,
+    isLoading: false,
+    isError: false,
+    refetch: vi.fn(),
+  }),
+  useWorldState: () => ({ data: undefined }),
+  useSubmitNarrativeChoice: () => ({
+    mutateAsync: vi.fn(),
+    isPending: false,
   }),
 }));
 
@@ -103,5 +117,25 @@ describe('ReaderPage progress gate', () => {
     mocks.characters = [];
     view.rerender(<ReaderPage />);
     await waitFor(() => expect(screen.queryByTestId('chat-panel')).toBeNull());
+  });
+});
+
+describe('splitChapterAtAnchor', () => {
+  it('pauses the canonical chapter immediately after the exact source anchor', () => {
+    const result = splitChapterAtAnchor('原文开始。关键事件发生。原著后续。', '关键事件发生。');
+
+    expect(result).toEqual({
+      before: '原文开始。关键事件发生。',
+      after: '原著后续。',
+      anchored: true,
+    });
+  });
+
+  it('fails open to the full chapter when a legacy anchor is unavailable', () => {
+    expect(splitChapterAtAnchor('完整原文', '不存在的锚点')).toEqual({
+      before: '完整原文',
+      after: '',
+      anchored: false,
+    });
   });
 });

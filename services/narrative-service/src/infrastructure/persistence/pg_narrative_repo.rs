@@ -19,6 +19,7 @@ struct NarrativeNodeRow {
     novel_id: Uuid,
     chapter_number: i32,
     description: String,
+    anchor_quote: Option<String>,
     choices: serde_json::Value,
     created_at: DateTime<Utc>,
 }
@@ -31,6 +32,7 @@ impl From<NarrativeNodeRow> for NarrativeNode {
             novel_id: r.novel_id,
             chapter_number: r.chapter_number,
             description: r.description,
+            anchor_quote: r.anchor_quote,
             choices,
             created_at: r.created_at,
         }
@@ -54,10 +56,11 @@ impl NarrativeNodeRepository for PgNarrativeNodeRepository {
         sqlx::query(
             r#"
             INSERT INTO narrative_nodes (
-                id, novel_id, chapter_number, description, choices, created_at
-            ) VALUES ($1, $2, $3, $4, $5, $6)
+                id, novel_id, chapter_number, description, anchor_quote, choices, created_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT (novel_id, chapter_number) DO UPDATE SET
                 description = EXCLUDED.description,
+                anchor_quote = EXCLUDED.anchor_quote,
                 choices = EXCLUDED.choices
             "#,
         )
@@ -65,6 +68,7 @@ impl NarrativeNodeRepository for PgNarrativeNodeRepository {
         .bind(node.novel_id)
         .bind(node.chapter_number)
         .bind(&node.description)
+        .bind(&node.anchor_quote)
         .bind(choices_json)
         .bind(node.created_at)
         .execute(&self.pool)

@@ -3,13 +3,15 @@ use std::sync::Arc;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::domain::entities::narrative_node::{NarrativeNode, WorldState};
+use crate::domain::entities::narrative_node::{NarrativeChoice, NarrativeNode, WorldState};
 use crate::domain::ports::LlmPort;
 use crate::domain::repositories::{
     ChapterReadRepository, ChoiceCommit, NarrativeNodeRepository, NovelInfo, UserChoiceRecord,
     UserChoiceRepository, WorldStateRepository,
 };
-use crate::domain::services::narrative_engine::build_consequence_prompt;
+use crate::domain::services::narrative_engine::{
+    build_branch_prompt, build_consequence_prompt, is_chinese_narrative, parse_generated_branch,
+};
 
 const MAX_NARRATIVE_PROMPT_BYTES: usize = 32 * 1024;
 const MAX_NARRATIVE_PROMPT_CHARS: usize = 16_000;
@@ -67,7 +69,87 @@ impl NarrativeCommandHandler {
                 "chapter must be at least 1".into(),
             ));
         }
-        self.owned_novel(novel_id, user_id).await?;
+        let novel_info = self.owned_novel(novel_id, user_id).await?;
+        if let Some(node) = self
+            .node_repo
+            .find_by_chapter(novel_id, chapter_number)
+            .await
+            .map_err(NarrativeError::Internal)?
+        {
+            return Ok(Some(node));
+        }
+
+        let chapter = self
+            .chapter_repo
+            .get_chapter(novel_id, chapter_number, user_id)
+            .await
+            .map_err(NarrativeError::Unavailable)?
+            .ok_or(NarrativeError::NotFound)?;
+        if !chapter.is_key_node {
+            return Ok(None);
+        }
+        let key_node_description = chapter
+            .key_node_description
+            .as_deref()
+            .filter(|description| !description.trim().is_empty())
+            .ok_or_else(|| {
+                NarrativeError::Internal(anyhow::anyhow!(
+                    "key chapter is missing its node description"
+                ))
+            })?;
+        let empty_world_state = WorldState::new(user_id, novel_id);
+        let prompt = build_branch_prompt(
+            &novel_info.title,
+            &chapter.content,
+            key_node_description,
+            &empty_world_state,
+            &novel_info.deviation_mode,
+            "读者",
+        );
+        if prompt.len() > MAX_NARRATIVE_PROMPT_BYTES
+            || prompt.chars().count() > MAX_NARRATIVE_PROMPT_CHARS
+        {
+            return Err(NarrativeError::Internal(anyhow::anyhow!(
+                "branch prompt exceeded its budget"
+            )));
+        }
+        let generated = self
+            .llm
+            .chat_json(&prompt)
+            .await
+            .map_err(NarrativeError::Llm)
+            .and_then(|json| {
+                parse_generated_branch(&json)
+                    .map_err(|error| NarrativeError::Llm(anyhow::anyhow!(error)))
+            })?;
+        if !chapter.content.contains(&generated.anchor_quote) {
+            return Err(NarrativeError::Llm(anyhow::anyhow!(
+                "generated branch anchor was not present in chapter source"
+            )));
+        }
+        let node = NarrativeNode::new(
+            novel_id,
+            chapter_number,
+            generated.description,
+            generated
+                .choices
+                .into_iter()
+                .enumerate()
+                .map(|(index, choice)| NarrativeChoice {
+                    index: index as i32,
+                    text: choice.text,
+                    hint: choice.hint,
+                    generated_consequence: None,
+                })
+                .collect(),
+        )
+        .with_anchor_quote(generated.anchor_quote);
+        self.node_repo
+            .save(&node)
+            .await
+            .map_err(NarrativeError::Internal)?;
+        // Reload after the upsert so concurrent first readers receive the same
+        // persisted node id.
         self.node_repo
             .find_by_chapter(novel_id, chapter_number)
             .await
@@ -134,9 +216,9 @@ impl NarrativeCommandHandler {
                 "persisted choice index is invalid"
             )));
         }
-        let chapter_content = self
+        let chapter = self
             .chapter_repo
-            .get_chapter_content(novel_id, node.chapter_number, user_id)
+            .get_chapter(novel_id, node.chapter_number, user_id)
             .await
             .map_err(NarrativeError::Unavailable)?
             .ok_or(NarrativeError::NotFound)?;
@@ -148,7 +230,7 @@ impl NarrativeCommandHandler {
         let prompt = build_consequence_prompt(
             &novel_info.title,
             &choice_text,
-            &chapter_content,
+            &chapter.content,
             &world_state,
             &novel_info.deviation_mode,
         );
@@ -169,7 +251,7 @@ impl NarrativeCommandHandler {
         let consequence = self
             .llm
             .chat(
-                "You are a narrative engine that generates story consequences based on reader choices.",
+                "你是互动小说叙事引擎。所有面向读者的内容必须使用自然的简体中文。",
                 &prompt,
             )
             .await
@@ -178,6 +260,7 @@ impl NarrativeCommandHandler {
         if consequence.is_empty()
             || consequence.len() > MAX_CONSEQUENCE_BYTES
             || consequence.chars().count() > MAX_CONSEQUENCE_CHARS
+            || !is_chinese_narrative(&consequence)
         {
             return Err(NarrativeError::Llm(anyhow::anyhow!(
                 "language model consequence was empty or exceeded the limit"

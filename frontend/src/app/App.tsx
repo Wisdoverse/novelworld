@@ -10,6 +10,7 @@ import { ShelfPage } from '@/pages/shelf/ui/ShelfPage';
 import { ReaderPage } from '@/pages/reader/ui/ReaderPage';
 import { CharactersPage } from '@/pages/characters/ui/CharactersPage';
 import { SetupPage } from '@/pages/setup/ui/SetupPage';
+import { SettingsPage } from '@/pages/settings/ui/SettingsPage';
 import { useAuthStore } from '@/features/auth/model/useAuthStore';
 import { useChatStore } from '@/features/character-chat/model/useChatStore';
 import { apiClient } from '@/shared/api/client';
@@ -40,6 +41,7 @@ export function AppRoutes() {
   const previousPrincipal = useRef<string | null>(null);
   const [setupStatus, setSetupStatus] = useState<'loading' | 'needed' | 'done' | 'error'>('loading');
   const [llmConfigured, setLlmConfigured] = useState(false);
+  const [authReady, setAuthReady] = useState(false);
 
   useLayoutEffect(() => {
     previousPrincipal.current = resetPrivateClientStateForPrincipalChange(
@@ -71,11 +73,19 @@ export function AppRoutes() {
 
   useEffect(() => {
     if (setupStatus === 'done') {
-      fetchMe();
+      let active = true;
+      setAuthReady(false);
+      fetchMe().finally(() => {
+        if (active) setAuthReady(true);
+      });
+      return () => {
+        active = false;
+      };
     }
+    setAuthReady(false);
   }, [setupStatus, fetchMe]);
 
-  if (setupStatus === 'loading') {
+  if (setupStatus === 'loading' || (setupStatus === 'done' && !authReady)) {
     return (
       <div className="min-h-screen flex items-center justify-center"
            style={{ background: 'linear-gradient(135deg, var(--color-void) 0%, var(--color-cosmos) 100%)' }}>
@@ -123,10 +133,12 @@ export function AppRoutes() {
     <Routes>
       <Route path="/" element={<HomePage />} />
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/register" element={<LoginPage initialRegister />} />
       <Route path="/shelf" element={user ? <ShelfPage /> : <Navigate to="/login" replace />} />
       <Route path="/reader/:novelId/:chapterNum" element={user ? <ReaderPage /> : <Navigate to="/login" replace />} />
       <Route path="/reader/:novelId" element={user ? <ReaderPage /> : <Navigate to="/login" replace />} />
       <Route path="/characters/:novelId" element={user ? <CharactersPage /> : <Navigate to="/login" replace />} />
+      <Route path="/settings" element={user ? <SettingsPage /> : <Navigate to="/login" replace />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

@@ -1,5 +1,5 @@
 use axum::{
-    extract::{DefaultBodyLimit, Json, Multipart, Path, State},
+    extract::{multipart::MultipartRejection, DefaultBodyLimit, Json, Multipart, Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -14,7 +14,7 @@ use crate::application::handlers::{
     NovelCommandHandler, ReadingProgressError, ReadingProgressHandler,
 };
 use crate::domain::entities::novel::Novel;
-use crate::domain::ports::ReadinessProbe;
+use crate::domain::ports::{DocumentExtractionError, DocumentTextExtractor, ReadinessProbe};
 use crate::domain::repositories::{ChapterRepository, CharacterRepository, NovelRepository};
 use axum::routing::put;
 
@@ -25,6 +25,7 @@ pub struct AppState {
     pub chapter_repo: Arc<dyn ChapterRepository>,
     pub character_repo: Arc<dyn CharacterRepository>,
     pub progress_handler: Arc<ReadingProgressHandler>,
+    pub document_extractor: Arc<dyn DocumentTextExtractor>,
     pub readiness: Arc<dyn ReadinessProbe>,
 }
 
@@ -39,6 +40,7 @@ fn routes() -> Router<AppState> {
         .route("/novels", get(list_novels))
         .route("/novels/{id}", get(get_novel))
         .route("/novels/{id}", delete(delete_novel))
+        .route("/novels/{id}/retry", post(retry_novel))
         .route("/novels/{id}/chapters", get(list_chapters))
         .route("/novels/{id}/chapters/{num}", get(get_chapter))
         .route("/novels/{id}/lore/search", post(search_lore))
@@ -163,12 +165,9 @@ async fn import_novel(
     }
 }
 
-/// Maximum upload size for plain text files (10 MB).
-const MAX_TXT_SIZE: usize = 10 * 1024 * 1024;
-/// Maximum upload size for PDF files (20 MB).
-const MAX_PDF_SIZE: usize = 20 * 1024 * 1024;
 const MAX_PASTE_SIZE: usize = 5 * 1024 * 1024;
-const MAX_REQUEST_SIZE: usize = MAX_PDF_SIZE + 1024 * 1024;
+const MAX_FILE_SIZE: usize = 20 * 1024 * 1024;
+const MAX_REQUEST_SIZE: usize = MAX_FILE_SIZE + 1024 * 1024;
 const MAX_TITLE_CHARS: usize = 500;
 const MAX_AUTHOR_CHARS: usize = 200;
 type ValidatedMetadata = (
@@ -227,23 +226,24 @@ fn validate_metadata(
     Ok((title, author, Some(mode)))
 }
 
-/// Extract text content from an in-memory PDF using pdf-extract.
-fn extract_pdf_text(data: &[u8]) -> Result<String, (StatusCode, axum::Json<ApiError>)> {
-    pdf_extract::extract_text_from_mem(data).map_err(|e| {
-        (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(ApiError {
-                error: format!("Failed to extract text from PDF: {}", e),
-            }),
-        )
-    })
+fn document_error_response(error: DocumentExtractionError) -> Response {
+    let status = match &error {
+        DocumentExtractionError::UnsupportedType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        DocumentExtractionError::UploadTooLarge { .. }
+        | DocumentExtractionError::ExtractedTextTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+        DocumentExtractionError::InvalidTextEncoding
+        | DocumentExtractionError::InvalidEpub(_)
+        | DocumentExtractionError::InvalidPdf(_)
+        | DocumentExtractionError::EmptyDocument => StatusCode::UNPROCESSABLE_ENTITY,
+    };
+    api_error(status, error.to_string())
 }
 
-/// POST /novels/upload  -- multipart file upload (txt or pdf)
+/// POST /novels/upload -- multipart file upload (TXT, EPUB, or PDF).
 async fn upload_novel(
     State(state): State<AppState>,
     headers: HeaderMap,
-    mut multipart: Multipart,
+    multipart: Result<Multipart, MultipartRejection>,
 ) -> impl IntoResponse {
     let user_id = match extract_user_id(&headers) {
         Some(id) => id,
@@ -255,6 +255,14 @@ async fn upload_novel(
                 }),
             )
                 .into_response();
+        }
+    };
+
+    let mut multipart = match multipart {
+        Ok(multipart) => multipart,
+        Err(error) => {
+            tracing::warn!(error = ?error, "multipart upload rejected");
+            return api_error(StatusCode::BAD_REQUEST, "Invalid multipart upload");
         }
     };
 
@@ -295,10 +303,8 @@ async fn upload_novel(
                 };
             }
             "file" => {
-                let content_type = field
-                    .content_type()
-                    .unwrap_or("application/octet-stream")
-                    .to_string();
+                let file_name = field.file_name().map(str::to_owned);
+                let content_type = field.content_type().map(str::to_owned);
                 let data = match field.bytes().await {
                     Ok(d) => d,
                     Err(e) => {
@@ -312,57 +318,14 @@ async fn upload_novel(
                     }
                 };
 
-                let is_pdf = content_type.contains("pdf");
-
-                // Validate size limits
-                let max_size = if is_pdf { MAX_PDF_SIZE } else { MAX_TXT_SIZE };
-                if data.len() > max_size {
-                    return (
-                        StatusCode::PAYLOAD_TOO_LARGE,
-                        Json(ApiError {
-                            error: format!(
-                                "File too large: {} bytes (max {} bytes for {})",
-                                data.len(),
-                                max_size,
-                                if is_pdf { "PDF" } else { "text" }
-                            ),
-                        }),
-                    )
-                        .into_response();
-                }
-
-                // Validate MIME type
-                if !is_pdf
-                    && !content_type.contains("text/plain")
-                    && !content_type.contains("octet-stream")
-                {
-                    return (
-                        StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                        Json(ApiError {
-                            error: format!(
-                                "Unsupported file type: {}. Only text/plain and application/pdf are accepted.",
-                                content_type
-                            ),
-                        }),
-                    )
-                        .into_response();
-                }
-
-                // Extract text
-                if is_pdf {
-                    match extract_pdf_text(&data) {
-                        Ok(text) if text.len() <= MAX_PDF_SIZE => content = Some(text),
-                        Ok(_) => {
-                            return api_error(
-                                StatusCode::PAYLOAD_TOO_LARGE,
-                                "Extracted PDF text exceeds 20 MiB",
-                            )
-                        }
-                        Err(resp) => return resp.into_response(),
-                    }
-                } else {
-                    content = Some(String::from_utf8_lossy(&data).to_string());
-                }
+                content = match state.document_extractor.extract_text(
+                    file_name.as_deref(),
+                    content_type.as_deref(),
+                    &data,
+                ) {
+                    Ok(text) => Some(text),
+                    Err(error) => return document_error_response(error),
+                };
             }
             _ => {
                 // Ignore unknown fields
@@ -494,6 +457,32 @@ async fn delete_novel(
     }
 }
 
+async fn retry_novel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let user_id = match extract_user_id(&headers) {
+        Some(user_id) => user_id,
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+    if let Err(response) = owned_novel(&state, &headers, id).await {
+        return response;
+    }
+    match state.handler.retry_import(user_id, id).await {
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(ImportNovelResponse {
+                novel_id: id,
+                status: "parsing".into(),
+                message: "Novel import retry started.".into(),
+            }),
+        )
+            .into_response(),
+        Err(error) => api_error(StatusCode::CONFLICT, error.to_string()),
+    }
+}
+
 async fn list_chapters(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -609,7 +598,7 @@ async fn get_parse_status(
             StatusCode::OK,
             Json(serde_json::json!({
                 "novel_id": novel.id,
-                "status": format!("{:?}", novel.status),
+                "status": novel.status.to_str(),
                 "total_chapters": novel.total_chapters,
                 "error": novel.parse_error,
             })),

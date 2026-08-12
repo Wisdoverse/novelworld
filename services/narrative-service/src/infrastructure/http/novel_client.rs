@@ -1,4 +1,4 @@
-use crate::domain::repositories::{ChapterReadRepository, NovelInfo};
+use crate::domain::repositories::{ChapterInfo, ChapterReadRepository, NovelInfo};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use reqwest::Client;
@@ -41,6 +41,8 @@ impl ReadinessProbe for NovelServiceClient {
 #[derive(serde::Deserialize)]
 struct ChapterResponse {
     content: String,
+    is_key_node: bool,
+    key_node_description: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -53,12 +55,12 @@ struct NovelResponse {
 
 #[async_trait]
 impl ChapterReadRepository for NovelServiceClient {
-    async fn get_chapter_content(
+    async fn get_chapter(
         &self,
         novel_id: Uuid,
         chapter_number: i32,
         user_id: Uuid,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<ChapterInfo>> {
         let url = format!(
             "{}/novels/{}/chapters/{}",
             self.base_url, novel_id, chapter_number
@@ -76,7 +78,11 @@ impl ChapterReadRepository for NovelServiceClient {
             return Err(anyhow!("Novel service returned {}", resp.status()));
         }
         let ch: ChapterResponse = resp.json().await?;
-        Ok(Some(ch.content))
+        Ok(Some(ChapterInfo {
+            content: ch.content,
+            is_key_node: ch.is_key_node,
+            key_node_description: ch.key_node_description,
+        }))
     }
 
     async fn get_novel_info(&self, novel_id: Uuid, user_id: Uuid) -> Result<Option<NovelInfo>> {
