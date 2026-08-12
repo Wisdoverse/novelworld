@@ -17,7 +17,8 @@ impl LlmConnectionTester for LlmClientTester {
             .chat(
                 llm_client::ChatRequest::new(format!("setup/{}", config.model))
                     .message("user", "Reply OK")
-                    .max_tokens(8),
+                    .max_tokens(8)
+                    .thinking(false),
             )
             .await?;
         Ok(())

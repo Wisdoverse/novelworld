@@ -10,9 +10,29 @@ import {
   useReadingProgress,
   useUpdateReadingProgress,
 } from '@/entities/reading-progress/api';
+import {
+  useEffectiveChapter,
+  useNarrativeNode,
+  useSubmitNarrativeChoice,
+  useWorldState,
+  type ChoiceResult,
+} from '@/entities/narrative/api';
 import { ChatPanel } from '@/widgets/chat-panel/ui/ChatPanel';
 import { BranchChoice } from '@/widgets/branch-choice/ui/BranchChoice';
-import type { Character, NarrativeChoice, NarrativeNode } from '@/shared/types';
+import { getApiErrorMessage } from '@/shared/api/client';
+import type { Character, NarrativeChoice } from '@/shared/types';
+
+export function splitChapterAtAnchor(content: string, anchorQuote?: string) {
+  if (!anchorQuote) return { before: content, after: '', anchored: false };
+  const anchorStart = content.indexOf(anchorQuote);
+  if (anchorStart < 0) return { before: content, after: '', anchored: false };
+  const anchorEnd = anchorStart + anchorQuote.length;
+  return {
+    before: content.slice(0, anchorEnd),
+    after: content.slice(anchorEnd),
+    anchored: true,
+  };
+}
 
 export function ReaderPage() {
   const { novelId, chapterNum } = useParams<{ novelId: string; chapterNum: string }>();
@@ -39,6 +59,12 @@ export function ReaderPage() {
 
   const { data: novel } = useNovel(novelId!);
   const { data: chapter, isLoading } = useChapter(novelId!, currentChapter);
+  const {
+    data: effectiveChapter,
+    isLoading: isEffectiveChapterLoading,
+    isError: isEffectiveChapterError,
+    refetch: refetchEffectiveChapter,
+  } = useEffectiveChapter(novelId || '', currentChapter, Boolean(chapter));
   const { data: characters } = useCharacters(
     novelId || '',
     readingProgress?.current_chapter ?? 0,
@@ -46,8 +72,23 @@ export function ReaderPage() {
 
   const [activeChatCharacter, setActiveChatCharacter] = useState<Character | null>(null);
   const [showCharacterList, setShowCharacterList] = useState(false);
-  const [currentBranchNode, setCurrentBranchNode] = useState<NarrativeNode | null>(null);
+  const [choiceResult, setChoiceResult] = useState<ChoiceResult | null>(null);
+  const [submittedChoiceIndex, setSubmittedChoiceIndex] = useState<number | undefined>();
+  const [choiceError, setChoiceError] = useState<string | undefined>();
   const lastProgressAttempt = useRef<string | undefined>(undefined);
+  const hasBranch = Boolean(chapter?.is_key_node && chapter.key_node_description);
+  const {
+    data: currentBranchNode,
+    isLoading: isBranchLoading,
+    isError: isBranchError,
+    refetch: refetchBranch,
+  } = useNarrativeNode(
+    novelId || '',
+    currentChapter,
+    hasBranch && Boolean(effectiveChapter) && !isEffectiveChapterError,
+  );
+  const { data: worldState } = useWorldState(novelId || '', Boolean(chapter));
+  const submitChoice = useSubmitNarrativeChoice(novelId || '');
 
   useEffect(() => {
     if (routeChapter === undefined && readingProgress) {
@@ -97,32 +138,48 @@ export function ReaderPage() {
     }
   }, [activeChatCharacter, activeCharacterIsAvailable, characters]);
 
-  // 章节加载完成后检查是否有分支节点
   useEffect(() => {
-    if (chapter?.is_key_node && chapter.key_node_description) {
-      // 模拟分支节点（实际从 narrative-service 获取）
-      setCurrentBranchNode({
-        id: crypto.randomUUID(),
-        novel_id: novelId!,
-        chapter_number: currentChapter,
-        description: chapter.key_node_description,
-        choices: [
-          { index: 0, text: '勇敢地站出来，直面挑战', hint: '也许会改变一切...' },
-          { index: 1, text: '谨慎地观察，等待时机', hint: '智者善于等待' },
-          { index: 2, text: '寻求盟友的帮助', hint: '团结就是力量' },
-        ],
-      });
-    }
-  }, [chapter]);
+    setChoiceResult(null);
+    setSubmittedChoiceIndex(undefined);
+    setChoiceError(undefined);
+  }, [currentChapter, novelId]);
+
+  const savedChoice = currentBranchNode
+    ? worldState?.state.choices.find(choice => choice.node_id === currentBranchNode.id)
+    : undefined;
+  const selectedChoiceIndex = submittedChoiceIndex ?? savedChoice?.choice_index;
+  const consequence = choiceResult?.consequence ?? savedChoice?.consequence;
+  const displayContent = effectiveChapter?.content ?? '';
+  const inlineChapter = chapter && currentBranchNode
+    ? splitChapterAtAnchor(displayContent, currentBranchNode.anchor_quote)
+    : undefined;
+  const branchChoiceRequired = Boolean(
+    currentBranchNode && selectedChoiceIndex === undefined,
+  );
 
   const handleChoose = async (choice: NarrativeChoice) => {
-    // TODO: 调用 narrative-service 生成后续剧情
-    console.log('Chosen:', choice);
-    setCurrentBranchNode(null);
+    if (!currentBranchNode) return;
+    setChoiceError(undefined);
+    try {
+      const result = await submitChoice.mutateAsync({
+        nodeId: currentBranchNode.id,
+        choiceIndex: choice.index,
+      });
+      setSubmittedChoiceIndex(choice.index);
+      setChoiceResult(result);
+    } catch (error) {
+      setChoiceError(getApiErrorMessage(error, '命运改写失败'));
+      throw error;
+    }
   };
 
   const goToChapter = (num: number) => {
-    if (isProgressSaving || num < 1 || (novel && num > novel.total_chapters)) return;
+    if (
+      isProgressSaving
+      || num < 1
+      || (novel && num > novel.total_chapters)
+      || (num > currentChapter && branchChoiceRequired)
+    ) return;
     navigate(`/reader/${novelId}/${num}`);
   };
 
@@ -214,11 +271,20 @@ export function ReaderPage() {
             <button className="text-sm underline" onClick={retryProgressUpdate}>重试</button>
           </div>
         )}
-        {isLoading ? (
+        {isLoading || isEffectiveChapterLoading ? (
           <div className="flex items-center justify-center h-64">
             <div className="w-8 h-8 border-2 rounded-full animate-spin" style={{ borderColor: '#6d28d9', borderTopColor: 'transparent' }} />
           </div>
-        ) : chapter ? (
+        ) : isEffectiveChapterError ? (
+          <div
+            role="alert"
+            className="mt-16 p-5 rounded-xl flex items-center justify-between gap-4"
+            style={{ background: 'rgba(220, 38, 38, 0.1)', border: '1px solid rgba(248, 113, 113, 0.25)', color: '#fca5a5' }}
+          >
+            <span className="text-sm">玩家时间线生成失败。为避免回退到已经失效的原著因果，本章暂不显示。</span>
+            <button className="text-sm underline" onClick={() => refetchEffectiveChapter()}>重新生成</button>
+          </div>
+        ) : chapter && effectiveChapter ? (
           <motion.div
             key={currentChapter}
             initial={{ opacity: 0, y: 20 }}
@@ -230,6 +296,11 @@ export function ReaderPage() {
               <div className="text-xs font-semibold uppercase tracking-widest mb-2" style={{ color: '#6d28d9' }}>
                 第 {currentChapter} 章
               </div>
+              {effectiveChapter.generated && (
+                <div className="mb-3 text-xs font-semibold tracking-wider" style={{ color: '#22d3ee' }}>
+                  玩家时间线 · 本章已因你的选择完全改写
+                </div>
+              )}
               {chapter.title && (
                 <h1
                   className="text-2xl md:text-3xl font-bold"
@@ -241,23 +312,43 @@ export function ReaderPage() {
               <div className="mt-4 mx-auto w-16 h-px" style={{ background: 'linear-gradient(90deg, transparent, #6d28d9, transparent)' }} />
             </div>
 
-            {/* 正文 */}
-            <div className="reader-content">
-              {chapter.content.split('\n\n').map((paragraph, i) => (
-                <p key={i}>{paragraph}</p>
-              ))}
-            </div>
-
-            {/* 分支选择节点 */}
+            {/* 正文中的分支节点：原文在锚点处暂停，选择后由生成内容接续。 */}
+            {hasBranch && isBranchLoading && (
+              <div className="my-16 flex items-center justify-center gap-2 p-5 text-sm" style={{ color: '#22d3ee' }}>
+                <div className="w-4 h-4 border-2 rounded-full animate-spin" style={{ borderColor: '#22d3ee', borderTopColor: 'transparent' }} />
+                正在定位章节中的命运交叉点...
+              </div>
+            )}
+            {(!hasBranch || !isBranchLoading) && (
+              <div className="reader-content">
+                {(inlineChapter?.before ?? displayContent).split('\n\n').map((paragraph, i) => (
+                  <p key={i}>{paragraph}</p>
+                ))}
+              </div>
+            )}
+            {hasBranch && isBranchError && (
+              <div
+                role="alert"
+                className="my-8 p-4 rounded-xl flex items-center justify-between gap-4"
+                style={{ background: 'rgba(220, 38, 38, 0.1)', border: '1px solid rgba(248, 113, 113, 0.25)', color: '#fca5a5' }}
+              >
+                <span className="text-sm">命运交叉点加载失败。</span>
+                <button className="text-sm underline" onClick={() => refetchBranch()}>重试</button>
+              </div>
+            )}
             {currentBranchNode && (
               <BranchChoice
                 node={currentBranchNode}
                 onChoose={handleChoose}
+                isLoading={submitChoice.isPending}
+                selectedChoiceIndex={selectedChoiceIndex}
+                consequence={consequence}
+                error={choiceError}
               />
             )}
 
             {/* 章节摘要 */}
-            {chapter.summary && (
+            {chapter.summary && !hasBranch && (
               <div
                 className="mt-12 p-4 rounded-xl"
                 style={{
@@ -314,16 +405,16 @@ export function ReaderPage() {
 
         <button
           onClick={() => goToChapter(currentChapter + 1)}
-          disabled={isProgressSaving || !novel || currentChapter >= novel.total_chapters}
+          disabled={isProgressSaving || branchChoiceRequired || !novel || currentChapter >= novel.total_chapters}
           className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm transition-all"
           style={{
             background: 'rgba(255,255,255,0.05)',
             border: '1px solid rgba(255,255,255,0.1)',
-            color: (isProgressSaving || !novel || currentChapter >= novel.total_chapters) ? '#334155' : '#94a3b8',
-            cursor: (isProgressSaving || !novel || currentChapter >= novel.total_chapters) ? 'not-allowed' : 'pointer',
+            color: (isProgressSaving || branchChoiceRequired || !novel || currentChapter >= novel.total_chapters) ? '#334155' : '#94a3b8',
+            cursor: (isProgressSaving || branchChoiceRequired || !novel || currentChapter >= novel.total_chapters) ? 'not-allowed' : 'pointer',
           }}
         >
-          下一章
+          {branchChoiceRequired ? '请先选择' : '下一章'}
           <ChevronRight size={14} />
         </button>
       </div>

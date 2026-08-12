@@ -228,16 +228,23 @@ CREATE UNIQUE INDEX idx_chat_messages_turn_role_unique
 
 CREATE TABLE narrative_nodes (
     id             UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id        UUID REFERENCES users(id) ON DELETE CASCADE,
     novel_id       UUID NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
     chapter_number INTEGER NOT NULL,
     description    TEXT NOT NULL,
+    anchor_quote   TEXT,
     choices        JSONB NOT NULL DEFAULT '[]',  -- NarrativeChoice[]
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT narrative_nodes_novel_chapter_key UNIQUE(novel_id, chapter_number),
-    CONSTRAINT narrative_nodes_identity_key UNIQUE(id, novel_id, chapter_number)
+    CONSTRAINT narrative_nodes_identity_key UNIQUE(id, novel_id, chapter_number),
+    CONSTRAINT narrative_nodes_anchor_quote_length_check
+        CHECK (anchor_quote IS NULL OR char_length(anchor_quote) BETWEEN 1 AND 1000)
 );
 
 CREATE INDEX idx_narrative_nodes_novel ON narrative_nodes(novel_id, chapter_number);
+CREATE UNIQUE INDEX idx_narrative_nodes_canonical_chapter
+    ON narrative_nodes(novel_id, chapter_number) WHERE user_id IS NULL;
+CREATE UNIQUE INDEX idx_narrative_nodes_player_chapter
+    ON narrative_nodes(user_id, novel_id, chapter_number) WHERE user_id IS NOT NULL;
 
 -- ─── 用户选择记录表 ────────────────────────────────────────────────────────
 
@@ -274,6 +281,25 @@ CREATE TABLE world_states (
 );
 
 CREATE INDEX idx_world_states_user_novel ON world_states(user_id, novel_id);
+
+-- ─── 玩家时间线章节表 ──────────────────────────────────────────────────────
+
+-- 原著 chapters 永远保持不可变。玩家第一次作出选择后，当前章锚点之后以及
+-- 所有后续章节都写入这张按用户隔离的投影表。
+CREATE TABLE player_chapters (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    novel_id        UUID NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
+    chapter_number  INTEGER NOT NULL CHECK (chapter_number >= 1),
+    content         TEXT NOT NULL CHECK (content <> ''),
+    origin          VARCHAR(20) NOT NULL CHECK (origin IN ('choice', 'continuation')),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(user_id, novel_id, chapter_number)
+);
+
+CREATE INDEX idx_player_chapters_timeline
+    ON player_chapters(user_id, novel_id, chapter_number DESC);
 
 -- ─── 阅读进度表 ────────────────────────────────────────────────────────────
 
@@ -335,6 +361,7 @@ CREATE TABLE runtime_llm_config (
     provider           VARCHAR(32) NOT NULL,
     api_url            TEXT NOT NULL,
     model              VARCHAR(200) NOT NULL,
+    thinking_enabled   BOOLEAN NOT NULL DEFAULT FALSE,
     api_key_nonce      BYTEA NOT NULL,
     api_key_ciphertext BYTEA NOT NULL,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),

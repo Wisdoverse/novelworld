@@ -24,11 +24,13 @@ struct RuntimeConfig {
     api_url: String,
     model: String,
     api_key: String,
+    thinking_enabled: bool,
 }
 
 struct ResolvedClient {
     client: LlmClient,
     model: String,
+    thinking_enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -37,6 +39,7 @@ struct RemoteConfig {
     api_url: String,
     model: String,
     api_key: String,
+    thinking_enabled: bool,
 }
 
 impl RuntimeLlmClient {
@@ -47,6 +50,9 @@ impl RuntimeLlmClient {
                 std::env::var("LLM_API_URL").unwrap_or_else(|_| "https://api.openai.com".into()),
                 std::env::var("LLM_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into()),
                 api_key,
+                std::env::var("LLM_THINKING_ENABLED")
+                    .ok()
+                    .is_some_and(|value| value.eq_ignore_ascii_case("true")),
             ));
         }
 
@@ -62,12 +68,18 @@ impl RuntimeLlmClient {
         Ok(Self::remote(user_service_url, token))
     }
 
-    pub fn static_config(api_url: String, model: String, api_key: String) -> Self {
+    pub fn static_config(
+        api_url: String,
+        model: String,
+        api_key: String,
+        thinking_enabled: bool,
+    ) -> Self {
         Self {
             source: ConfigSource::Static(RuntimeConfig {
                 api_url,
                 model,
                 api_key,
+                thinking_enabled,
             }),
             resolved: OnceCell::new(),
         }
@@ -85,6 +97,29 @@ impl RuntimeLlmClient {
     }
 
     async fn resolved(&self) -> Result<Arc<ResolvedClient>> {
+        if let ConfigSource::Remote {
+            client,
+            user_service_url,
+            token,
+        } = &self.source
+        {
+            let response = client
+                .get(format!("{user_service_url}/internal/runtime/llm"))
+                .header("X-Internal-Service-Token", token)
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await?;
+            if !response.status().is_success() {
+                return Err(anyhow!(
+                    "runtime LLM configuration is unavailable ({})",
+                    response.status()
+                ));
+            }
+            return Ok(Arc::new(build_resolved(validate_remote_config(
+                response.json().await?,
+            )?)));
+        }
+
         self.resolved
             .get_or_try_init(|| async {
                 let config = match &self.source {
@@ -92,34 +127,11 @@ impl RuntimeLlmClient {
                         api_url: config.api_url.clone(),
                         model: config.model.clone(),
                         api_key: config.api_key.clone(),
+                        thinking_enabled: config.thinking_enabled,
                     },
-                    ConfigSource::Remote {
-                        client,
-                        user_service_url,
-                        token,
-                    } => {
-                        let response = client
-                            .get(format!("{user_service_url}/internal/runtime/llm"))
-                            .header("X-Internal-Service-Token", token)
-                            .timeout(Duration::from_secs(5))
-                            .send()
-                            .await?;
-                        if !response.status().is_success() {
-                            return Err(anyhow!(
-                                "runtime LLM configuration is unavailable ({})",
-                                response.status()
-                            ));
-                        }
-                        validate_remote_config(response.json().await?)?
-                    }
+                    ConfigSource::Remote { .. } => unreachable!(),
                 };
-                let model = format!("runtime/{}", config.model);
-                let client = LlmClient::new().with_openai_compatible(
-                    "runtime",
-                    config.api_key,
-                    config.api_url,
-                );
-                Ok(Arc::new(ResolvedClient { client, model }))
+                Ok(Arc::new(build_resolved(config)))
             })
             .await
             .cloned()
@@ -128,12 +140,18 @@ impl RuntimeLlmClient {
     pub async fn chat(&self, mut request: ChatRequest) -> Result<ChatResponse> {
         let resolved = self.resolved().await?;
         request.model.clone_from(&resolved.model);
+        if request.thinking.is_none() {
+            request.thinking = Some(resolved.thinking_enabled);
+        }
         resolved.client.chat(request).await
     }
 
     pub async fn chat_stream(&self, mut request: ChatRequest) -> Result<ChatStream> {
         let resolved = self.resolved().await?;
         request.model.clone_from(&resolved.model);
+        if request.thinking.is_none() {
+            request.thinking = Some(resolved.thinking_enabled);
+        }
         resolved.client.chat_stream(request).await
     }
 
@@ -149,16 +167,34 @@ impl RuntimeLlmClient {
         .map(|response| response.content)
     }
 
+    /// Generate prose where the output itself is the product. Reasoning mode
+    /// is deliberately disabled so providers such as DeepSeek cannot consume
+    /// the response budget with hidden reasoning and return an incomplete
+    /// chapter instead of usable text.
+    pub async fn longform_chat(&self, system: &str, user: &str) -> Result<String> {
+        self.chat(
+            ChatRequest::new("")
+                .message("system", system)
+                .message("user", user)
+                .temperature(0.8)
+                .max_tokens(8_192)
+                .thinking(false),
+        )
+        .await
+        .map(|response| response.content)
+    }
+
     pub async fn json_chat(&self, prompt: &str) -> Result<String> {
         self.chat(
             ChatRequest::new("")
                 .message(
                     "system",
-                    "You are a helpful assistant that always responds with valid JSON.",
+                    "You are a helpful assistant that always responds with a non-empty valid JSON object. Output JSON only.",
                 )
                 .message("user", prompt)
                 .temperature(0.3)
                 .max_tokens(4096)
+                .thinking(false)
                 .json(),
         )
         .await
@@ -166,8 +202,18 @@ impl RuntimeLlmClient {
     }
 }
 
+fn build_resolved(config: RuntimeConfig) -> ResolvedClient {
+    let model = format!("runtime/{}", config.model);
+    let client = LlmClient::new().with_openai_compatible("runtime", config.api_key, config.api_url);
+    ResolvedClient {
+        client,
+        model,
+        thinking_enabled: config.thinking_enabled,
+    }
+}
+
 fn validate_remote_config(config: RemoteConfig) -> Result<RuntimeConfig> {
-    if config.contract != 1
+    if config.contract != 2
         || !config.api_url.starts_with("https://")
         || config.model.trim().is_empty()
         || config.model.len() > 200
@@ -180,6 +226,7 @@ fn validate_remote_config(config: RemoteConfig) -> Result<RuntimeConfig> {
         api_url: config.api_url,
         model: config.model,
         api_key: config.api_key,
+        thinking_enabled: config.thinking_enabled,
     })
 }
 
@@ -190,10 +237,11 @@ mod tests {
     #[test]
     fn remote_configuration_fails_closed() {
         assert!(validate_remote_config(RemoteConfig {
-            contract: 1,
+            contract: 2,
             api_url: "http://127.0.0.1:11434".into(),
             model: "model".into(),
             api_key: "secret".into(),
+            thinking_enabled: false,
         })
         .is_err());
     }

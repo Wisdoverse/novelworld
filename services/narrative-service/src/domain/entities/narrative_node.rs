@@ -6,10 +6,14 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NarrativeNode {
     pub id: Uuid,
+    /// None for the immutable canonical timeline, Some for a player's fork.
+    pub user_id: Option<Uuid>,
     pub novel_id: Uuid,
     pub chapter_number: i32,
     /// 节点描述（触发分支的情境）
     pub description: String,
+    /// Exact source excerpt after which the choice is rendered inline.
+    pub anchor_quote: Option<String>,
     /// 可选择的分支选项
     pub choices: Vec<NarrativeChoice>,
     pub created_at: DateTime<Utc>,
@@ -35,12 +39,24 @@ impl NarrativeNode {
     ) -> Self {
         Self {
             id: Uuid::new_v4(),
+            user_id: None,
             novel_id,
             chapter_number,
             description,
+            anchor_quote: None,
             choices,
             created_at: Utc::now(),
         }
+    }
+
+    pub fn with_anchor_quote(mut self, anchor_quote: String) -> Self {
+        self.anchor_quote = Some(anchor_quote);
+        self
+    }
+
+    pub fn for_user(mut self, user_id: Uuid) -> Self {
+        self.user_id = Some(user_id);
+        self
     }
 }
 

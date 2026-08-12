@@ -20,6 +20,10 @@ impl LlmPort for LlmAdapter {
         self.client.simple_chat(system, user).await
     }
 
+    async fn chat_longform(&self, system: &str, user: &str) -> Result<String> {
+        self.client.longform_chat(system, user).await
+    }
+
     async fn chat_json(&self, prompt: &str) -> Result<String> {
         self.client.json_chat(prompt).await
     }

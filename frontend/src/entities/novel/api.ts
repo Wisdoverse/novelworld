@@ -15,10 +15,17 @@ export const novelKeys = {
 
 // ─── Hooks ────────────────────────────────────────────────────────────────────
 
+export function shouldPollNovelList(novels: Novel[] | undefined) {
+  return novels?.some(
+    novel => novel.status === 'pending' || novel.status === 'parsing',
+  ) ?? false;
+}
+
 export function useNovels() {
   return useQuery({
     queryKey: novelKeys.list(),
     queryFn: () => apiClient.get<Novel[]>('/novels').then(r => r.data),
+    refetchInterval: (query) => shouldPollNovelList(query.state.data) ? 2000 : false,
   });
 }
 
@@ -90,12 +97,59 @@ export function useImportNovel() {
   });
 }
 
+export interface NovelUploadInput {
+  title: string;
+  author?: string;
+  deviationMode: string;
+  file: File;
+}
+
+export function buildNovelUploadFormData(input: NovelUploadInput) {
+  const form = new FormData();
+  form.append('title', input.title);
+  if (input.author) form.append('author', input.author);
+  form.append('deviation_mode', input.deviationMode);
+  form.append('file', input.file);
+  return form;
+}
+
+export function validateNovelFile(file: File): string | null {
+  const extension = file.name.split('.').pop()?.toLowerCase();
+  if (!extension || !['txt', 'epub', 'pdf'].includes(extension)) {
+    return '请选择 TXT、EPUB 或 PDF 文件';
+  }
+  const limit = extension === 'txt' ? 10 * 1024 * 1024 : 20 * 1024 * 1024;
+  if (file.size > limit) {
+    return `${extension.toUpperCase()} 文件不能超过 ${limit / 1024 / 1024} MiB`;
+  }
+  return null;
+}
+
+export function useUploadNovel() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: NovelUploadInput) => apiClient.post<{
+      novel_id: string;
+      status: string;
+    }>('/novels/upload', buildNovelUploadFormData(input), {
+      timeout: 60_000,
+    }).then(r => r.data),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: novelKeys.list() }),
+  });
+}
+
 export function useDeleteNovel() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => apiClient.delete(`/novels/${id}`),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: novelKeys.list() });
-    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: novelKeys.list() }),
+  });
+}
+
+export function useRetryNovel() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => apiClient.post(`/novels/${id}/retry`),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: novelKeys.list() }),
   });
 }

@@ -147,12 +147,13 @@ impl UserRepository for PgUserRepository {
         if let (Some(config), Some((nonce, ciphertext))) = (llm, encrypted_key) {
             sqlx::query(
                 r#"INSERT INTO runtime_llm_config
-                   (singleton, provider, api_url, model, api_key_nonce, api_key_ciphertext)
-                   VALUES (TRUE, $1, $2, $3, $4, $5)
+                   (singleton, provider, api_url, model, thinking_enabled, api_key_nonce, api_key_ciphertext)
+                   VALUES (TRUE, $1, $2, $3, $4, $5, $6)
                    ON CONFLICT (singleton) DO UPDATE SET
                      provider = EXCLUDED.provider,
                      api_url = EXCLUDED.api_url,
                      model = EXCLUDED.model,
+                     thinking_enabled = EXCLUDED.thinking_enabled,
                      api_key_nonce = EXCLUDED.api_key_nonce,
                      api_key_ciphertext = EXCLUDED.api_key_ciphertext,
                      updated_at = NOW()"#,
@@ -160,6 +161,7 @@ impl UserRepository for PgUserRepository {
             .bind(&config.provider)
             .bind(&config.api_url)
             .bind(&config.model)
+            .bind(config.thinking_enabled)
             .bind(nonce)
             .bind(ciphertext)
             .execute(&mut *transaction)
@@ -177,7 +179,7 @@ impl UserRepository for PgUserRepository {
 
     async fn find_runtime_llm_config(&self) -> Result<Option<RuntimeLlmConfig>> {
         let row = sqlx::query_as::<_, RuntimeLlmConfigRow>(
-            r#"SELECT provider, api_url, model, api_key_nonce, api_key_ciphertext
+            r#"SELECT provider, api_url, model, thinking_enabled, api_key_nonce, api_key_ciphertext
                FROM runtime_llm_config WHERE singleton = TRUE"#,
         )
         .fetch_optional(&self.pool)
@@ -187,10 +189,37 @@ impl UserRepository for PgUserRepository {
                 provider: row.provider,
                 api_url: row.api_url,
                 model: row.model,
+                thinking_enabled: row.thinking_enabled,
                 api_key: self.decrypt_api_key(&row.api_key_nonce, &row.api_key_ciphertext)?,
             })
         })
         .transpose()
+    }
+
+    async fn save_runtime_llm_config(&self, config: &RuntimeLlmConfig) -> Result<()> {
+        let (nonce, ciphertext) = self.encrypt_api_key(&config.api_key)?;
+        sqlx::query(
+            r#"INSERT INTO runtime_llm_config
+               (singleton, provider, api_url, model, thinking_enabled, api_key_nonce, api_key_ciphertext)
+               VALUES (TRUE, $1, $2, $3, $4, $5, $6)
+               ON CONFLICT (singleton) DO UPDATE SET
+                 provider = EXCLUDED.provider,
+                 api_url = EXCLUDED.api_url,
+                 model = EXCLUDED.model,
+                 thinking_enabled = EXCLUDED.thinking_enabled,
+                 api_key_nonce = EXCLUDED.api_key_nonce,
+                 api_key_ciphertext = EXCLUDED.api_key_ciphertext,
+                 updated_at = NOW()"#,
+        )
+        .bind(&config.provider)
+        .bind(&config.api_url)
+        .bind(&config.model)
+        .bind(config.thinking_enabled)
+        .bind(nonce)
+        .bind(ciphertext)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     async fn find_by_id(&self, id: Uuid) -> Result<Option<User>> {
@@ -322,6 +351,7 @@ struct RuntimeLlmConfigRow {
     provider: String,
     api_url: String,
     model: String,
+    thinking_enabled: bool,
     api_key_nonce: Vec<u8>,
     api_key_ciphertext: Vec<u8>,
 }

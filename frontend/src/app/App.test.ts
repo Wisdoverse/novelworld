@@ -1,8 +1,9 @@
-import { QueryClient } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
+import { useAuthStore } from '@/features/auth/model/useAuthStore';
 import { useChatStore } from '@/features/character-chat/model/useChatStore';
 import { apiClient } from '@/shared/api/client';
 import { AppRoutes, resetPrivateClientStateForPrincipalChange } from './App';
@@ -57,6 +58,66 @@ describe('setup status', () => {
     render(React.createElement(MemoryRouter, null, React.createElement(AppRoutes)));
 
     expect((await screen.findByRole('alert')).textContent).toContain('Setup status unavailable');
+    request.mockRestore();
+  });
+
+  it('routes the journey registration destination to registration mode', async () => {
+    const canvasContext = vi
+      .spyOn(HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue(null);
+    const request = vi.spyOn(apiClient, 'get').mockResolvedValue({
+      data: { contract: 3, configured: true, llm_configured: true },
+    });
+    render(
+      React.createElement(
+        MemoryRouter,
+        { initialEntries: ['/'] },
+        React.createElement(AppRoutes),
+      ),
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /开始你的旅程/ }));
+    expect(await screen.findByRole('heading', { name: '创建账号' })).toBeTruthy();
+    canvasContext.mockRestore();
+    request.mockRestore();
+  });
+
+  it('restores an authenticated session before guarding a refreshed shelf route', async () => {
+    localStorage.setItem('auth_token', 'stored-token');
+    useAuthStore.setState({ user: null });
+    const request = vi.spyOn(apiClient, 'get').mockImplementation(async (url) => {
+      if (url === '/setup/status') {
+        return { data: { contract: 3, configured: true, llm_configured: true } };
+      }
+      if (url === '/auth/me') {
+        return {
+          data: {
+            id: 'user-id',
+            email: 'reader@example.com',
+            role: 'user',
+          },
+        };
+      }
+      if (url === '/novels') return { data: [] };
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    render(
+      React.createElement(
+        QueryClientProvider,
+        { client: new QueryClient() },
+        React.createElement(
+          MemoryRouter,
+          { initialEntries: ['/shelf'] },
+          React.createElement(AppRoutes),
+        ),
+      ),
+    );
+
+    expect(await screen.findByText('我的书架')).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: '登录' })).toBeNull();
+    localStorage.removeItem('auth_token');
+    useAuthStore.setState({ user: null });
     request.mockRestore();
   });
 });

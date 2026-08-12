@@ -90,6 +90,7 @@ export interface NarrativeNode {
   novel_id: string;
   chapter_number: number;
   description: string;
+  anchor_quote?: string;
   choices: NarrativeChoice[];
 }
 
@@ -100,7 +101,9 @@ export interface WorldState {
   novel_id: string;
   state: {
     choices: Array<{
+      node_id?: string;
       chapter: number;
+      choice_index?: number;
       choice: string;
       consequence: string;
       timestamp: string;

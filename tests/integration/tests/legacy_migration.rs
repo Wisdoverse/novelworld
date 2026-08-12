@@ -23,6 +23,12 @@ const RUNTIME_LLM_CONFIG_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0006_runtime_llm_config.sql");
 const CHAPTER_LORE_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0007_chapter_lore_search.sql");
+const LLM_THINKING_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0008_llm_thinking_mode.sql");
+const NARRATIVE_ANCHOR_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0009_narrative_inline_anchor.sql");
+const PLAYER_TIMELINE_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0010_player_timeline_chapters.sql");
 
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
@@ -73,6 +79,18 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
             .await
             .unwrap();
         sqlx::raw_sql(CHAPTER_LORE_MIGRATION)
+            .execute(&fresh)
+            .await
+            .unwrap();
+        sqlx::raw_sql(LLM_THINKING_MIGRATION)
+            .execute(&fresh)
+            .await
+            .unwrap();
+        sqlx::raw_sql(NARRATIVE_ANCHOR_MIGRATION)
+            .execute(&fresh)
+            .await
+            .unwrap();
+        sqlx::raw_sql(PLAYER_TIMELINE_MIGRATION)
             .execute(&fresh)
             .await
             .unwrap();
@@ -285,6 +303,9 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
         "0005_remove_default_seed.sql",
         "0006_runtime_llm_config.sql",
         "0007_chapter_lore_search.sql",
+        "0008_llm_thinking_mode.sql",
+        "0009_narrative_inline_anchor.sql",
+        "0010_player_timeline_chapters.sql",
     ] {
         let migration_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../infra/postgres/migrations")
@@ -333,6 +354,18 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
             .await
             .unwrap();
         sqlx::raw_sql(CHAPTER_LORE_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
+        sqlx::raw_sql(LLM_THINKING_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
+        sqlx::raw_sql(NARRATIVE_ANCHOR_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
+        sqlx::raw_sql(PLAYER_TIMELINE_MIGRATION)
             .execute(&mut *non_default_path)
             .await
             .unwrap();
@@ -406,8 +439,6 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
         "SELECT COUNT(*) FROM pg_constraint \
          WHERE (conname = 'character_memories_novel_id_fkey' \
                 AND conrelid = 'public.character_memories'::regclass) \
-            OR (conname = 'narrative_nodes_novel_chapter_key' \
-                AND conrelid = 'public.narrative_nodes'::regclass) \
             OR (conname = 'reading_progress_current_chapter_check' \
                 AND conrelid = 'public.reading_progress'::regclass) \
             OR (conname = 'reading_progress_identity_fields_check' \
@@ -416,7 +447,17 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
     .fetch_one(&legacy)
     .await
     .unwrap();
-    assert_eq!(target_constraint_count, 4);
+    assert_eq!(target_constraint_count, 3);
+
+    let player_timeline_contract: bool = sqlx::query_scalar(
+        "SELECT to_regclass('public.player_chapters') IS NOT NULL \
+         AND to_regclass('public.idx_narrative_nodes_canonical_chapter') IS NOT NULL \
+         AND to_regclass('public.idx_narrative_nodes_player_chapter') IS NOT NULL",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    assert!(player_timeline_contract);
 
     let progress: (i32, String, Option<String>, Option<uuid::Uuid>) = sqlx::query_as(
         "SELECT current_chapter, reader_identity_type::text, reader_identity, reader_character_id \
@@ -902,13 +943,10 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
         .await
         .unwrap();
 
-    sqlx::query(
-        "ALTER TABLE public.narrative_nodes \
-         DROP CONSTRAINT narrative_nodes_novel_chapter_key",
-    )
-    .execute(&legacy)
-    .await
-    .unwrap();
+    sqlx::query("DROP INDEX public.idx_narrative_nodes_canonical_chapter")
+        .execute(&legacy)
+        .await
+        .unwrap();
     sqlx::query(
         "INSERT INTO public.narrative_nodes (id, novel_id, chapter_number) \
          VALUES ('00000000-0000-0000-0000-000000000007', \

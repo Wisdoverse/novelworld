@@ -12,7 +12,9 @@ use narrative_service::{
         http::novel_client::NovelServiceClient,
         llm::LlmAdapter,
         persistence::{
-            pg_narrative_repo::{PgNarrativeNodeRepository, PgUserChoiceRepository},
+            pg_narrative_repo::{
+                PgNarrativeNodeRepository, PgPlayerChapterRepository, PgUserChoiceRepository,
+            },
             pg_world_state_repo::PgWorldStateRepository,
             PgReadinessProbe,
         },
@@ -50,6 +52,7 @@ async fn main() -> Result<()> {
     let node_repo = Arc::new(PgNarrativeNodeRepository::new(pool.clone()));
     let choice_repo = Arc::new(PgUserChoiceRepository::new(pool.clone()));
     let world_state_repo = Arc::new(PgWorldStateRepository::new(pool.clone()));
+    let player_chapter_repo = Arc::new(PgPlayerChapterRepository::new(pool.clone()));
     let novel_service_url =
         std::env::var("NOVEL_SERVICE_URL").unwrap_or_else(|_| "http://novel-service:8002".into());
     let chapter_repo = Arc::new(NovelServiceClient::new(novel_service_url));
@@ -60,6 +63,7 @@ async fn main() -> Result<()> {
         node_repo,
         choice_repo,
         world_state_repo,
+        player_chapter_repo,
         chapter_repo,
         llm,
     });

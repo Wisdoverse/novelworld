@@ -7,8 +7,9 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use novel_service::{
     application::handlers::{NovelCommandHandler, ReadingProgressHandler},
-    domain::ports::{ImagePort, LlmPort},
+    domain::ports::{DocumentTextExtractor, ImagePort, LlmPort},
     infrastructure::{
+        document::EbookTextExtractor,
         llm::{image::ImageClient, LlmAdapter},
         persistence::{
             chapter_pg_repo::ChapterPgRepository, character_pg_repo::CharacterPgRepository,
@@ -56,6 +57,7 @@ async fn main() -> Result<()> {
 
     let llm: Arc<dyn LlmPort> = llm;
     let image_client: Arc<dyn ImagePort> = image_client;
+    let document_extractor: Arc<dyn DocumentTextExtractor> = Arc::new(EbookTextExtractor);
 
     let handler = Arc::new(NovelCommandHandler {
         novel_repo: novel_repo.clone(),
@@ -77,6 +79,7 @@ async fn main() -> Result<()> {
         chapter_repo,
         character_repo,
         progress_handler,
+        document_extractor,
         readiness: Arc::new(PgReadinessProbe::new(pool)),
     };
 

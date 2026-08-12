@@ -215,6 +215,9 @@ Fields:
 Fields:
 
 - `id` (UUID v4)
+- `user_id` (UUID, nullable foreign key → User)
+  - `null` identifies a canonical pre-divergence node.
+  - Non-null nodes belong exclusively to one player's generated timeline.
 - `novel_id` (UUID, foreign key → Novel)
 - `chapter_number` (integer)
   - 1-indexed. Unique within a novel.
@@ -345,7 +348,25 @@ Fields:
     - `consequence_hint` (string or null) — brief hint about the consequence
 - `created_at` (timestamptz)
 
-#### 4.1.9 UserChoice
+#### 4.1.9 PlayerChapter
+
+A persisted prose projection of one chapter in a player's forked timeline.
+The source `Chapter` remains immutable; this projection is rebuilt from
+committed player state and is never shared between users.
+
+Fields:
+
+- `id` (UUID v4)
+- `user_id` (UUID, foreign key → User)
+- `novel_id` (UUID, foreign key → Novel)
+- `chapter_number` (integer)
+- `content` (text) — the complete effective chapter shown to this player
+- `origin` (`choice` | `continuation`)
+- `created_at`, `updated_at` (timestamptz)
+
+Constraint: unique on `(user_id, novel_id, chapter_number)`.
+
+#### 4.1.10 UserChoice
 
 A reader's selection at a NarrativeNode.
 
@@ -363,7 +384,7 @@ Fields:
   - LLM-generated consequence narrative.
 - `created_at` (timestamptz)
 
-#### 4.1.10 WorldState
+#### 4.1.11 WorldState
 
 Aggregated state of a reader's journey through a novel.
 
@@ -712,10 +733,12 @@ When a reader submits a choice:
 
 1. Validate that `choice_index` is within the bounds of `NarrativeNode.choices`.
 2. Store a `UserChoice` record.
-3. Invoke the LLM to generate a consequence narrative (see §7.3).
-4. Update `WorldState.state.choices` by appending the new choice.
+3. Invoke the LLM to generate replacement prose from the exact inline anchor
+   through the end of the current chapter (see §7.3).
+4. Atomically persist the `UserChoice`, updated `WorldState`, and the complete
+   current `PlayerChapter`. The source `Chapter` MUST remain unchanged.
 5. Optionally update `WorldState.state.world_events` if the consequence implies a world-level event.
-6. Return the consequence text to the reader.
+6. Return both the consequence and the persisted effective chapter to the reader.
 
 ### 7.3 Consequence Generation
 
@@ -729,9 +752,32 @@ The LLM MUST be prompted to generate a consequence narrative that:
 - Is between 100 and 400 words.
 - Ends with a clear transition to the next chapter.
 
-The consequence MUST be stored in `UserChoice.consequence`.
+The consequence MUST be stored in `UserChoice.consequence`, and the resulting
+complete chapter MUST be stored as a `PlayerChapter` with `origin = choice`.
 
-### 7.4 World State Consistency
+### 7.4 Full Chapter Regeneration After Divergence
+
+The first committed choice establishes a causal boundary. From the next chapter
+onward, the original chapter text MUST NOT be displayed as the player's current
+story. For each requested chapter, the Narrative Service MUST:
+
+1. Return an already persisted `PlayerChapter` when one exists.
+2. Require the immediately preceding player chapter, preventing gaps in the
+   generated timeline.
+3. Generate the entire chapter from the previous player chapter, committed
+   `WorldState`, novel world summary, and the original chapter as reference-only
+   source material.
+4. Remove or rewrite canonical events whose preconditions no longer hold; it
+   MUST NOT silently reset causality to the source novel.
+5. Persist the winning result idempotently under
+   `(user_id, novel_id, chapter_number)` before displaying it.
+6. Fail closed when generation is unavailable rather than fall back to original
+   prose that contradicts the player's timeline.
+
+Narrative nodes created after divergence MUST also be player-scoped. Two users
+in different timelines MUST NOT receive or mutate the same generated node.
+
+### 7.5 World State Consistency
 
 The Narrative Service MUST ensure that:
 
@@ -739,18 +785,61 @@ The Narrative Service MUST ensure that:
 - All mutations to `WorldState.state` are atomic (use database transactions or optimistic locking).
 - The `relationships` map in `WorldState.state` uses `character_id` (UUID string) as keys.
 
+### 7.6 Canonical Mainline and Open-World Evolution
+
+A completed source novel MAY be transformed into a living world, but generated
+prose MUST NOT become the authoritative state. The Narrative Service MUST keep
+two distinct layers:
+
+1. `CanonStoryModel`: an immutable, versioned, source-backed graph of story
+   arcs, ordered events, locations, factions, world rules, character states,
+   unresolved threads, and the canonical ending. Extracted entities and events
+   MUST retain chapter provenance.
+2. `PlayerTimeline`: an append-only overlay beginning at a canonical checkpoint
+   and containing only the player's committed actions and validated world
+   transitions.
+
+Generated `PlayerChapter` prose is a durable read projection of committed
+timeline state, not the authoritative transition log. It may be regenerated by
+future migration tooling, while the source `Chapter` and canonical graph remain
+immutable.
+
+The user MUST enter as a durable `PlayerEntity`: a new person who does not exist
+in source canon and has a chosen identity, background, capabilities, location,
+inventory, relationships, faction standing, and discovered knowledge. The
+primary interaction MUST describe actions taken by this player. It MUST NOT ask
+the player to choose actions on behalf of canonical characters.
+
+An open-world session is reconstructed from a canonical checkpoint plus its
+player entity and player timeline. Canonical events continue when their
+preconditions remain true, and canonical characters act according to their own
+goals and knowledge. Player actions MAY observe, assist, obstruct, delay, or
+redirect those events. A world turn MUST produce a structured transition containing
+event, relationship, location, and thread changes alongside the narrative
+rendering. The transition MUST be schema-valid, entity-valid, spoiler-bounded,
+idempotent, and atomically committed before its prose is shown as complete.
+
+Players MAY enter at any checkpoint already unlocked by server-side reading
+progress. Future canon remains spoiler-bounded. Character agents, exploration,
+scheduled canon events, and future narrative turns MUST read the same committed
+player timeline.
+
 ---
 
-## 8. Reader Identity System
+## 8. Player Identity System
 
 ### 8.1 Identity Types
 
-Readers MAY choose one of two identity modes:
+Users MAY choose one of two identity modes. The primary mode is `self`, whose
+existing wire name is retained for compatibility:
 
-- `self`: The reader enters the world as themselves. The agent system prompt uses the reader's
-  `reader_identity` name and addresses them in second person.
+- `self`: The user creates an original `PlayerEntity` and enters the world as a
+  new person. The display name does not have to be the user's real identity.
+  Agents address the player in second person and canonical characters perceive
+  the player as another person in their world.
 - `character`: The reader adopts a character's identity. The agent system prompt acknowledges the
-  reader as that character and adjusts the dynamic accordingly.
+  reader as that character and adjusts the dynamic accordingly. This is an
+  optional alternate mode, not the primary open-world experience.
 
 ### 8.2 Identity Constraints
 
@@ -759,6 +848,9 @@ Readers MAY choose one of two identity modes:
 - A reader MUST NOT adopt the identity of the character they are currently conversing with.
 - Identity changes take effect immediately for new conversation turns; they do not retroactively
   alter existing `ChatMessage` records.
+- In `self` mode, narrative choices MUST be actions performed by the
+  `PlayerEntity`; they MUST NOT transfer control of a canonical character to the
+  player.
 
 ### 8.3 Deviation Modes
 
@@ -882,6 +974,7 @@ service.
 | Method | Path | Service | Auth | Description |
 |---|---|---|---|---|
 | GET | `/api/narrative/:novelId/:chapter` | Narrative | JWT | Get branch node for chapter |
+| GET | `/api/narrative/:novelId/chapters/:chapter` | Narrative | JWT | Get or generate the player's effective full chapter |
 | POST | `/api/narrative/choose` | Narrative | JWT | Submit choice |
 | GET | `/api/narrative/:novelId/world-state` | Narrative | JWT | Reader's world state |
 

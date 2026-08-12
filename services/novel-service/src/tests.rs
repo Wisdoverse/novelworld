@@ -1,6 +1,6 @@
 use crate::domain::entities::novel::Novel;
 use crate::domain::services::novel_parser::NovelParserService;
-use crate::domain::value_objects::{CharacterRole, DeviationMode, NovelStatus};
+use crate::domain::value_objects::{AvatarStatus, CharacterRole, DeviationMode, NovelStatus};
 use uuid::Uuid;
 
 #[test]
@@ -100,6 +100,26 @@ fn test_deviation_mode() {
 }
 
 #[test]
+fn api_enums_serialize_as_lowercase_contract_values() {
+    assert_eq!(
+        serde_json::to_string(&NovelStatus::Error).unwrap(),
+        "\"error\""
+    );
+    assert_eq!(
+        serde_json::to_string(&DeviationMode::Canon).unwrap(),
+        "\"canon\""
+    );
+    assert_eq!(
+        serde_json::to_string(&CharacterRole::Supporting).unwrap(),
+        "\"supporting\""
+    );
+    assert_eq!(
+        serde_json::to_string(&AvatarStatus::Ready).unwrap(),
+        "\"ready\""
+    );
+}
+
+#[test]
 fn test_character_role_str_roundtrip() {
     for (role, expected) in [
         (CharacterRole::Protagonist, "protagonist"),
@@ -143,6 +163,8 @@ fn node_detection_prompt_has_a_total_budget_and_keeps_endpoints() {
     let prompt = build_node_detection_prompt(&"T".repeat(2_000), &chapters);
 
     assert!(prompt.len() < 25_000);
-    assert!(prompt.contains("Chapter 1:"));
-    assert!(prompt.contains("Chapter 100:"));
+    assert!(prompt.contains("第 1 章："));
+    assert!(prompt.contains("第 100 章："));
+    assert!(prompt.contains("必须全部使用自然的简体中文"));
+    assert!(prompt.contains("不能替原著角色作决定"));
 }
