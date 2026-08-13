@@ -34,12 +34,12 @@ The assets that require protection are:
   and the internal service token.
 - Private source novels, chapters, characters, chat messages, character
   memories, reading progress and identity, choices, world state, generated
-  player chapters, and account exports.
+  player chapters, open-world sessions and turn journals, and account exports.
 - Canon provenance and spoiler boundaries. Generated or reader-specific content
   must not silently replace source-backed canon or expose chapters beyond the
   reader's server-side progress.
-- PostgreSQL and Redis integrity, durable idempotency records, and atomic chat
-  and narrative commits.
+- PostgreSQL and Redis integrity, durable idempotency records, and atomic chat,
+  narrative, and world-turn commits.
 - Provider spend and the availability of the edge, parsers, database pools,
   Redis, and model-dependent operations.
 - Release provenance: the reviewed Git revision, immutable production image
@@ -114,7 +114,7 @@ limit but cannot enforce.
 
 4. **Authenticated user to owned resources.** Readers are mutually untrusted.
    Novel, chapter, character, progress, chat, memory, narrative, world-state,
-   generated-chapter, export, and deletion operations must bind both the acting
+   generated-chapter, open-world, export, and deletion operations must bind both the acting
    user and the target resource. UUID unpredictability is not authorization.
    Agent and narrative services use novel-service HTTP adapters to prove novel
    ownership instead of reading another service's logical data directly.
@@ -139,6 +139,9 @@ limit but cannot enforce.
    accidental instruction confusion but are not an authorization mechanism.
    Structured responses must pass JSON and domain validation before durable
    state changes; free-form chat remains untrusted display data.
+   Open-world prompts label the novel, action, session, and state as untrusted
+   data. The model proposes bounded typed changes over IDs in a persisted entry
+   snapshot; it cannot select the acting player or commit.
 
 7. **Services to PostgreSQL and Redis.** All services currently share one
    PostgreSQL deployment, but ownership is logical and enforced by service APIs
@@ -303,7 +306,8 @@ document parsing, bcrypt, imports,
 chats, and provider calls use small native admission limits. Imports also reject
 plans above a fixed model-call budget, effective chapters advance one generated
 chapter per request, and request/parser/model layers enforce byte, deadline,
-retry, and token ceilings. Readiness checks are cached and Gateway observation
+retry, and token ceilings. World turns allow one active claim per user/novel,
+renew a bounded lease, and share provider admission. Readiness checks are cached and Gateway observation
 probes do not consume the shared global bucket.
 
 Relevant stories include one actor consuming global admission capacity, many

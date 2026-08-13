@@ -1,6 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import axios from 'axios';
 import { apiClient } from '@/shared/api/client';
-import type { NarrativeNode, PlayerEntry, WorldState } from '@/shared/types';
+import type {
+  NarrativeNode,
+  OpenWorldView,
+  PlayerEntry,
+  WorldAction,
+  WorldState,
+  WorldTurnResult,
+} from '@/shared/types';
 
 export interface NarrativeTransition {
   schema_version: 1;
@@ -40,10 +48,14 @@ export const narrativeKeys = {
   node: (novelId: string, chapter: number) => ['narrative', novelId, 'node', chapter] as const,
   chapter: (novelId: string, chapter: number) => ['narrative', novelId, 'chapter', chapter] as const,
   worldState: (novelId: string) => ['narrative', novelId, 'world-state'] as const,
-  playerEntry: (novelId: string) => ['narrative', novelId, 'player-entry'] as const,
+  playerEntry: (novelId: string, checkpoint?: number) => [
+    'narrative', novelId, 'player-entry', checkpoint ?? 'current',
+  ] as const,
+  openWorld: (novelId: string) => ['narrative', novelId, 'open-world'] as const,
 };
 
 export interface CreatePlayerEntityInput {
+  checkpoint_chapter: number;
   name: string;
   background: string;
   capabilities: string[];
@@ -51,11 +63,13 @@ export interface CreatePlayerEntityInput {
   inventory: string[];
 }
 
-export function usePlayerEntry(novelId: string, enabled: boolean) {
+export function usePlayerEntry(novelId: string, enabled: boolean, checkpoint?: number) {
   return useQuery({
-    queryKey: narrativeKeys.playerEntry(novelId),
+    queryKey: narrativeKeys.playerEntry(novelId, checkpoint),
     queryFn: () => apiClient
-      .get<PlayerEntry>(`/narrative/${novelId}/player-entry`)
+      .get<PlayerEntry>(`/narrative/${novelId}/player-entry`, {
+        params: checkpoint ? { checkpoint_chapter: checkpoint } : undefined,
+      })
       .then(response => response.data),
     enabled: enabled && !!novelId,
     retry: false,
@@ -69,7 +83,10 @@ export function useCreatePlayerEntity(novelId: string) {
       .put<PlayerEntry>(`/narrative/${novelId}/player-entry`, input)
       .then(response => response.data),
     onSuccess: (entry) => {
-      queryClient.setQueryData(narrativeKeys.playerEntry(novelId), entry);
+      queryClient.setQueryData(
+        narrativeKeys.playerEntry(novelId, entry.checkpoint_chapter),
+        entry,
+      );
       void queryClient.invalidateQueries({ queryKey: narrativeKeys.worldState(novelId) });
     },
   });
@@ -106,6 +123,54 @@ export function useWorldState(novelId: string, enabled: boolean) {
       .get<WorldState>(`/narrative/${novelId}/world-state`)
       .then(response => response.data),
     enabled: enabled && !!novelId,
+  });
+}
+
+export function useOpenWorld(novelId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: narrativeKeys.openWorld(novelId),
+    queryFn: async () => {
+      try {
+        return (await apiClient.get<OpenWorldView>(`/narrative/${novelId}/world`)).data;
+      } catch (error) {
+        if (axios.isAxiosError(error) && error.response?.status === 404) return null;
+        throw error;
+      }
+    },
+    enabled: enabled && !!novelId,
+    retry: false,
+  });
+}
+
+export function useStartOpenWorld(novelId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => apiClient
+      .post<OpenWorldView>(`/narrative/${novelId}/world`)
+      .then(response => response.data),
+    onSuccess: view => {
+      queryClient.setQueryData(narrativeKeys.openWorld(novelId), view);
+      queryClient.setQueryData(narrativeKeys.worldState(novelId), view.world_state);
+    },
+  });
+}
+
+export function useSubmitWorldTurn(novelId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ action, idempotencyKey }: {
+      action: WorldAction;
+      idempotencyKey: string;
+    }) => apiClient
+      .post<WorldTurnResult>(`/narrative/${novelId}/world/turns`, action, {
+        headers: { 'Idempotency-Key': idempotencyKey },
+        timeout: 120_000,
+      })
+      .then(response => response.data),
+    onSuccess: result => {
+      queryClient.setQueryData(narrativeKeys.worldState(novelId), result.world_state);
+      void queryClient.invalidateQueries({ queryKey: narrativeKeys.openWorld(novelId) });
+    },
   });
 }
 

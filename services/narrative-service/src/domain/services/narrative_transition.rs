@@ -402,14 +402,14 @@ WORLD_STATE:
     )
 }
 
-fn bounded_items(name: &str, count: usize) -> Result<(), TransitionError> {
+pub(crate) fn bounded_items(name: &str, count: usize) -> Result<(), TransitionError> {
     if count > MAX_ITEMS {
         return invalid(format!("{name} exceeds {MAX_ITEMS} items"));
     }
     Ok(())
 }
 
-fn unique<T: Eq + std::hash::Hash>(
+pub(crate) fn unique<T: Eq + std::hash::Hash>(
     name: &str,
     values: impl Iterator<Item = T>,
 ) -> Result<(), TransitionError> {
@@ -420,7 +420,7 @@ fn unique<T: Eq + std::hash::Hash>(
     Ok(())
 }
 
-fn token(name: &str, value: &str) -> Result<(), TransitionError> {
+pub(crate) fn token(name: &str, value: &str) -> Result<(), TransitionError> {
     bounded_text(name, value, 200)?;
     if value.trim() != value || value.chars().any(char::is_control) {
         return invalid(format!("{name} must be a trimmed single-line token"));
@@ -428,7 +428,7 @@ fn token(name: &str, value: &str) -> Result<(), TransitionError> {
     Ok(())
 }
 
-fn bounded_text(name: &str, value: &str, max: usize) -> Result<(), TransitionError> {
+pub(crate) fn bounded_text(name: &str, value: &str, max: usize) -> Result<(), TransitionError> {
     if value.trim().is_empty()
         || value.chars().count() > max
         || value

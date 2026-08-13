@@ -1,3 +1,4 @@
+use crate::domain::entities::world_session::WorldEntryContext;
 use crate::domain::repositories::{
     ChapterInfo, ChapterReadRepository, NovelInfo, PlayerEntryContext,
 };
@@ -149,6 +150,7 @@ impl ChapterReadRepository for NovelServiceClient {
         &self,
         novel_id: Uuid,
         user_id: Uuid,
+        checkpoint_chapter: Option<i32>,
         proposed_name: Option<&str>,
     ) -> Result<Option<PlayerEntryContext>> {
         let url = format!(
@@ -159,7 +161,10 @@ impl ChapterReadRepository for NovelServiceClient {
             .client
             .post(&url)
             .header("X-User-Id", user_id.to_string())
-            .json(&serde_json::json!({"proposed_name": proposed_name}))
+            .json(&serde_json::json!({
+                "checkpoint_chapter": checkpoint_chapter,
+                "proposed_name": proposed_name,
+            }))
             .send()
             .await?;
         if resp.status().as_u16() == 404 {
@@ -209,5 +214,40 @@ impl ChapterReadRepository for NovelServiceClient {
                 "Novel service returned invalid reader identity type {value}"
             )),
         }
+    }
+
+    async fn get_world_entry_context(
+        &self,
+        novel_id: Uuid,
+        checkpoint_chapter: i32,
+        user_id: Uuid,
+    ) -> Result<Option<WorldEntryContext>> {
+        let url = format!(
+            "{}/internal/novels/{}/world-entry/{}",
+            self.base_url, novel_id, checkpoint_chapter
+        );
+        let response = self
+            .client
+            .get(&url)
+            .header("X-User-Id", user_id.to_string())
+            .send()
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "Novel service returned {} for world entry",
+                response.status()
+            ));
+        }
+        let context = response.json::<WorldEntryContext>().await?;
+        context
+            .validate()
+            .map_err(|error| anyhow!("Novel service returned invalid world entry: {error}"))?;
+        if context.checkpoint_chapter != checkpoint_chapter {
+            return Err(anyhow!("Novel service returned the wrong world checkpoint"));
+        }
+        Ok(Some(context))
     }
 }

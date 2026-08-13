@@ -1,6 +1,7 @@
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { NarrativeNode, OpenWorldView } from '@/shared/types';
 import { ReaderPage, splitChapterAtAnchor } from './ReaderPage';
 
 const mocks = vi.hoisted(() => ({
@@ -14,8 +15,12 @@ const mocks = vi.hoisted(() => ({
   hasBranch: false,
   player: { id: 'player', name: '云舟' } as Record<string, unknown> | null,
   playerEntryEnabled: false,
+  playerEntryCheckpoint: undefined as number | undefined,
   branchEnabled: false,
+  branchNode: undefined as NarrativeNode | undefined,
   createPlayer: vi.fn(),
+  startWorld: vi.fn(),
+  openWorld: null as OpenWorldView | null,
   characters: [] as Array<Record<string, unknown>>,
   effectiveContent: 'Chapter two',
   effectiveGenerated: false,
@@ -75,18 +80,19 @@ vi.mock('@/entities/narrative/api', () => ({
   useNarrativeNode: (_novelId: string, _chapter: number, enabled: boolean) => {
     mocks.branchEnabled = enabled;
     return {
-      data: undefined,
+      data: mocks.branchNode,
       isLoading: false,
       isError: false,
       refetch: vi.fn(),
     };
   },
-  usePlayerEntry: (_novelId: string, enabled: boolean) => {
+  usePlayerEntry: (_novelId: string, enabled: boolean, checkpoint?: number) => {
     mocks.playerEntryEnabled = enabled;
+    mocks.playerEntryCheckpoint = checkpoint;
     return {
       data: {
         player: mocks.player,
-        checkpoint_chapter: 2,
+        checkpoint_chapter: checkpoint ?? 2,
         locations: [{ id: 'tower', name: '北塔' }],
       },
       isLoading: false,
@@ -100,6 +106,17 @@ vi.mock('@/entities/narrative/api', () => ({
     isError: false,
   }),
   useWorldState: () => ({ data: undefined }),
+  useOpenWorld: () => ({
+    data: mocks.openWorld,
+    isLoading: false,
+    isError: false,
+    refetch: vi.fn(),
+  }),
+  useStartOpenWorld: () => ({
+    mutate: mocks.startWorld,
+    isPending: false,
+    isError: false,
+  }),
   useSubmitNarrativeChoice: () => ({
     mutateAsync: vi.fn(),
     isPending: false,
@@ -111,7 +128,10 @@ vi.mock('@/widgets/chat-panel/ui/ChatPanel', () => ({
     <div data-testid="chat-panel">{character.name}</div>
   ),
 }));
-vi.mock('@/widgets/branch-choice/ui/BranchChoice', () => ({ BranchChoice: () => null }));
+vi.mock('@/widgets/branch-choice/ui/BranchChoice', () => ({
+  BranchChoice: () => <div data-testid="branch-choice" />,
+}));
+vi.mock('@/widgets/world-dashboard/ui/WorldDashboard', () => ({ WorldDashboard: () => null }));
 
 describe('ReaderPage progress gate', () => {
   beforeEach(() => {
@@ -123,7 +143,10 @@ describe('ReaderPage progress gate', () => {
     mocks.hasBranch = false;
     mocks.player = { id: 'player', name: '云舟' };
     mocks.playerEntryEnabled = false;
+    mocks.playerEntryCheckpoint = undefined;
     mocks.branchEnabled = false;
+    mocks.branchNode = undefined;
+    mocks.openWorld = null;
     mocks.characters = [];
     mocks.effectiveContent = 'Chapter two';
     mocks.effectiveGenerated = false;
@@ -173,6 +196,35 @@ describe('ReaderPage progress gate', () => {
     await waitFor(() => expect(screen.queryByTestId('chat-panel')).toBeNull());
   });
 
+  it('closes and disables chat when the committed timeline kills a character', async () => {
+    mocks.progressChapter = 2;
+    mocks.progressError = false;
+    mocks.characters = [{
+      id: 'future',
+      novel_id: 'novel',
+      name: 'Future',
+      aliases: [],
+      role: 'supporting',
+      avatar_status: 'pending',
+      first_appearance_chapter: 2,
+    }];
+    const view = render(<ReaderPage />);
+
+    fireEvent.click(screen.getByRole('button', { name: '角色' }));
+    fireEvent.click(screen.getByRole('button', { name: /Future/ }));
+    expect(screen.getByTestId('chat-panel')).toBeTruthy();
+
+    mocks.openWorld = {
+      session: { dead_character_ids: ['future'] },
+    } as unknown as OpenWorldView;
+    view.rerender(<ReaderPage />);
+    await waitFor(() => expect(screen.queryByTestId('chat-panel')).toBeNull());
+
+    fireEvent.click(screen.getByRole('button', { name: '角色' }));
+    expect(screen.getByRole('button', { name: /Future/ }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByText('当前时间线已死亡')).toBeTruthy();
+  });
+
   it('requires a durable player before enabling self-mode branches', async () => {
     mocks.progressChapter = 2;
     mocks.progressError = false;
@@ -192,12 +244,26 @@ describe('ReaderPage progress gate', () => {
     fireEvent.click(screen.getByRole('button', { name: '进入故事' }));
 
     await waitFor(() => expect(mocks.createPlayer).toHaveBeenCalledWith({
+      checkpoint_chapter: 2,
       name: '云舟',
       background: '来自边城的地图学徒。',
       capabilities: ['识图', '追踪'],
       location_id: 'tower',
       inventory: ['旧地图'],
     }));
+  });
+
+  it('lets a completed reader choose an earlier unlocked entry checkpoint', async () => {
+    mocks.progressChapter = 3;
+    mocks.progressError = false;
+    mocks.player = null;
+
+    render(<ReaderPage />);
+    expect(mocks.playerEntryCheckpoint).toBe(3);
+    expect(screen.getByRole('option', { name: '第 1 章' })).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText('入场章节'), { target: { value: '1' } });
+    await waitFor(() => expect(mocks.playerEntryCheckpoint).toBe(1));
   });
 
   it('keeps character-identity branches compatible without PlayerEntity', () => {
@@ -212,6 +278,27 @@ describe('ReaderPage progress gate', () => {
     expect(mocks.playerEntryEnabled).toBe(false);
     expect(mocks.branchEnabled).toBe(true);
     expect(screen.queryByRole('heading', { name: '创建你的原创角色' })).toBeNull();
+  });
+
+  it('does not require an uncommitted legacy choice after open-world entry', () => {
+    mocks.progressChapter = 2;
+    mocks.progressError = false;
+    mocks.hasBranch = true;
+    mocks.branchNode = {
+      id: 'node',
+      novel_id: 'novel',
+      chapter_number: 2,
+      description: '旧分支',
+      choices: [{ index: 0, text: '旧选择', hint: '旧路径' }],
+    };
+    mocks.openWorld = {
+      session: { dead_character_ids: [] },
+    } as unknown as OpenWorldView;
+
+    render(<ReaderPage />);
+
+    expect(screen.queryByTestId('branch-choice')).toBeNull();
+    expect(screen.getByRole('button', { name: '下一章' }).hasAttribute('disabled')).toBe(false);
   });
 });
 
