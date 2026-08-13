@@ -1,0 +1,77 @@
+name: Roadmap work item
+description: Define one independently deliverable roadmap outcome
+title: "[Roadmap] "
+labels:
+  - roadmap
+body:
+  - type: markdown
+    attributes:
+      value: |
+        `docs/ROADMAP.md` owns product direction and horizon exit criteria. This issue owns one verifiable delivery slice; Project fields own status, horizon, and priority.
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: State the user- or system-observable problem and the result required. Do not prescribe a design unless it is an invariant.
+      placeholder: What becomes true when this is complete, and why does it matter now?
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and non-goals
+      description: Bound this to one merge-sized outcome and name what is deliberately excluded.
+      placeholder: |
+        In scope:
+        - ...
+
+        Non-goals:
+        - ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: invariants
+    attributes:
+      label: Invariants and risks
+      description: List contracts that must remain true and the material failure modes.
+      placeholder: Authentication, ownership, DDD/FSD boundaries, idempotency, privacy, data integrity, compatibility, or operational risk.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance evidence
+      description: Use observable pass/fail criteria. Name the tests, metrics, or runtime evidence that will prove completion.
+      placeholder: |
+        - [ ] Behavior or contract is demonstrably true
+        - [ ] Smallest regression test passes
+        - [ ] Required CI passes on the final commit
+    validations:
+      required: true
+
+  - type: textarea
+    id: delivery
+    attributes:
+      label: Delivery and rollback
+      description: State rollout, observability, migration, and rollback needs; write N/A with a reason when none apply.
+      placeholder: How can this ship safely, be observed, and be reversed or repaired?
+    validations:
+      required: true
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Link blocking issues, decisions, or external dependencies. Leave empty when there are none.
+
+  - type: checkboxes
+    id: readiness
+    attributes:
+      label: Ready for planning
+      options:
+        - label: I searched for duplicates and this issue represents one independently mergeable outcome.
+          required: true
