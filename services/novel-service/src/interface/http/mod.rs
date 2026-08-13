@@ -18,7 +18,9 @@ use crate::domain::ports::{DocumentExtractionError, DocumentTextExtractor, Readi
 use crate::domain::repositories::{
     CanonStoryModelRepository, ChapterRepository, CharacterRepository, NovelRepository,
 };
-use crate::domain::services::canon_story_context::build_canon_context;
+use crate::domain::services::canon_story_context::{
+    build_canon_context, original_player_name_available,
+};
 use axum::routing::put;
 
 #[derive(Clone)]
@@ -53,6 +55,10 @@ fn routes() -> Router<AppState> {
         .route(
             "/internal/novels/{id}/canon-context/{chapter}",
             get(get_canon_context),
+        )
+        .route(
+            "/internal/novels/{id}/player-entry",
+            post(get_player_entry_context),
         )
         .route("/novels/{id}/relationships", get(list_relationships))
         .route("/novels/{id}/status", get(get_parse_status))
@@ -143,6 +149,81 @@ async fn get_canon_context(
                 .into_response()
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerEntryContextRequest {
+    proposed_name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PlayerEntryContextResponse {
+    checkpoint_chapter: i32,
+    name_available: bool,
+    locations: Vec<crate::domain::services::canon_story_context::CanonEntityRef>,
+}
+
+async fn get_player_entry_context(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(novel_id): Path<Uuid>,
+    Json(req): Json<PlayerEntryContextRequest>,
+) -> Response {
+    let user_id = match extract_user_id(&headers) {
+        Some(id) => id,
+        None => return api_error(StatusCode::UNAUTHORIZED, "Missing user ID"),
+    };
+    if req.proposed_name.as_ref().is_some_and(|name| {
+        name.trim() != name
+            || name.is_empty()
+            || name.chars().count() > 100
+            || name.chars().any(char::is_control)
+    }) {
+        return api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Player name must contain 1-100 trimmed printable characters",
+        );
+    }
+    let progress = match state.progress_handler.get(user_id, novel_id).await {
+        Ok(progress) => progress,
+        Err(error) => return progress_error_response(error),
+    };
+    let model = match state.canon_repo.find_latest(novel_id).await {
+        Ok(Some(model)) => model,
+        Ok(None) => return api_error(StatusCode::NOT_FOUND, "Canon context not found"),
+        Err(error) => {
+            tracing::error!(%error, %novel_id, "failed to load player entry canon");
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error");
+        }
+    };
+    let characters = match state.character_repo.find_by_novel(novel_id).await {
+        Ok(characters) => characters,
+        Err(error) => {
+            tracing::error!(%error, %novel_id, "failed to load player entry characters");
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error");
+        }
+    };
+    let context = match build_canon_context(&model, &characters, progress.current_chapter) {
+        Ok(context) => context,
+        Err(error) => {
+            tracing::error!(%error, %novel_id, "invalid player entry context");
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error");
+        }
+    };
+    let name_available = req
+        .proposed_name
+        .as_deref()
+        .is_none_or(|name| original_player_name_available(name, &characters));
+    (
+        StatusCode::OK,
+        Json(PlayerEntryContextResponse {
+            checkpoint_chapter: context.checkpoint_chapter,
+            name_available,
+            locations: context.locations,
+        }),
+    )
+        .into_response()
 }
 
 // ─── Request/Response DTOs ────────────────────────────────────────────────────

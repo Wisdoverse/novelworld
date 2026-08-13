@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::application::handlers::{NarrativeCommandHandler, NarrativeError};
+use crate::application::handlers::{
+    CreatePlayerEntityCommand, NarrativeCommandHandler, NarrativeError,
+};
 use crate::domain::ports::ReadinessProbe;
 
 #[derive(Clone)]
@@ -29,6 +31,12 @@ fn routes() -> Router<AppState> {
             "/narrative/{novel_id}/chapters/{chapter}",
             get(get_effective_chapter),
         )
+        .route(
+            "/narrative/{novel_id}/player-entry",
+            get(get_player_entry)
+                .put(put_player_entry)
+                .layer(DefaultBodyLimit::max(64 * 1024)),
+        )
         .route("/narrative/{novel_id}/{chapter}", get(get_branch_node))
         .route("/narrative/choose", post(submit_choice))
         .route("/narrative/{novel_id}/world-state", get(get_world_state))
@@ -45,6 +53,16 @@ pub struct SubmitChoiceRequest {
     pub novel_id: Uuid,
     pub node_id: Uuid,
     pub choice_index: i32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreatePlayerEntityRequest {
+    pub name: String,
+    pub background: String,
+    pub capabilities: Vec<String>,
+    pub location_id: String,
+    pub inventory: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -85,6 +103,9 @@ fn narrative_error_response(error: NarrativeError) -> axum::response::Response {
                 &message,
             )
         }
+        NarrativeError::Conflict(message) => {
+            return error_response(StatusCode::CONFLICT, "conflict", &message)
+        }
         NarrativeError::Unavailable(error) => {
             tracing::warn!(error = ?error, "novel dependency unavailable");
             (
@@ -114,6 +135,62 @@ fn narrative_error_response(error: NarrativeError) -> axum::response::Response {
 }
 
 // ─── Handlers ───────────────────────────────────────────────────────────────
+
+async fn get_player_entry(
+    State(state): State<AppState>,
+    Path(novel_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some(user_id) = extract_user_id(&headers) else {
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "Missing or invalid user identity",
+        );
+    };
+    match state.handler.get_player_entry(user_id, novel_id).await {
+        Ok(entry) => (StatusCode::OK, Json(serde_json::json!(entry))).into_response(),
+        Err(error) => narrative_error_response(error),
+    }
+}
+
+async fn put_player_entry(
+    State(state): State<AppState>,
+    Path(novel_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(req): Json<CreatePlayerEntityRequest>,
+) -> impl IntoResponse {
+    let Some(user_id) = extract_user_id(&headers) else {
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "Missing or invalid user identity",
+        );
+    };
+    let command = CreatePlayerEntityCommand {
+        name: req.name,
+        background: req.background,
+        capabilities: req.capabilities,
+        location_id: req.location_id,
+        inventory: req.inventory,
+    };
+    match state
+        .handler
+        .create_player_entity(user_id, novel_id, command)
+        .await
+    {
+        Ok(player) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "checkpoint_chapter": player.canonical_checkpoint_chapter,
+                "locations": [],
+                "player": player,
+            })),
+        )
+            .into_response(),
+        Err(error) => narrative_error_response(error),
+    }
+}
 
 /// GET /narrative/:novel_id/chapters/:chapter
 async fn get_effective_chapter(
@@ -286,6 +363,17 @@ mod principal_contract_tests {
                 "novel_id": Uuid::new_v4(),
                 "node_id": Uuid::new_v4(),
                 "choice_index": 0
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<CreatePlayerEntityRequest>(serde_json::json!({
+                "user_id": Uuid::new_v4(),
+                "name": "云舟",
+                "background": "来自边城的地图学徒。",
+                "capabilities": ["辨认古地图"],
+                "location_id": "north-tower",
+                "inventory": []
             }))
             .is_err()
         );

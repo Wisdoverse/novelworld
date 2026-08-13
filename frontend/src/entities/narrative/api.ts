@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from '@/shared/api/client';
-import type { NarrativeNode, WorldState } from '@/shared/types';
+import type { NarrativeNode, PlayerEntry, WorldState } from '@/shared/types';
 
 export interface NarrativeTransition {
   schema_version: 1;
@@ -40,7 +40,40 @@ export const narrativeKeys = {
   node: (novelId: string, chapter: number) => ['narrative', novelId, 'node', chapter] as const,
   chapter: (novelId: string, chapter: number) => ['narrative', novelId, 'chapter', chapter] as const,
   worldState: (novelId: string) => ['narrative', novelId, 'world-state'] as const,
+  playerEntry: (novelId: string) => ['narrative', novelId, 'player-entry'] as const,
 };
+
+export interface CreatePlayerEntityInput {
+  name: string;
+  background: string;
+  capabilities: string[];
+  location_id: string;
+  inventory: string[];
+}
+
+export function usePlayerEntry(novelId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: narrativeKeys.playerEntry(novelId),
+    queryFn: () => apiClient
+      .get<PlayerEntry>(`/narrative/${novelId}/player-entry`)
+      .then(response => response.data),
+    enabled: enabled && !!novelId,
+    retry: false,
+  });
+}
+
+export function useCreatePlayerEntity(novelId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: CreatePlayerEntityInput) => apiClient
+      .put<PlayerEntry>(`/narrative/${novelId}/player-entry`, input)
+      .then(response => response.data),
+    onSuccess: (entry) => {
+      queryClient.setQueryData(narrativeKeys.playerEntry(novelId), entry);
+      void queryClient.invalidateQueries({ queryKey: narrativeKeys.worldState(novelId) });
+    },
+  });
+}
 
 export function useEffectiveChapter(novelId: string, chapter: number, enabled: boolean) {
   return useQuery({

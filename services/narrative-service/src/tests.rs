@@ -76,10 +76,11 @@ fn test_world_state_relationships() {
 
     assert_eq!(ws.get_relationship_score("Alice"), 50);
 
-    ws.update_relationship("Alice", 20, "Saved her life");
+    ws.update_relationship("Alice", 20, "Saved her life")
+        .unwrap();
     assert_eq!(ws.get_relationship_score("Alice"), 70);
 
-    ws.update_relationship("Alice", -30, "Betrayal");
+    ws.update_relationship("Alice", -30, "Betrayal").unwrap();
     assert_eq!(ws.get_relationship_score("Alice"), 40);
 }
 
@@ -87,13 +88,14 @@ fn test_world_state_relationships() {
 fn test_world_state_relationship_clamping() {
     let mut ws = WorldState::new(Uuid::new_v4(), Uuid::new_v4());
 
-    ws.update_relationship("Bob", 100, "Best friends");
+    ws.update_relationship("Bob", 100, "Best friends").unwrap();
     assert_eq!(ws.get_relationship_score("Bob"), 100);
 
-    ws.update_relationship("Bob", 50, "Even more");
+    ws.update_relationship("Bob", 50, "Even more").unwrap();
     assert_eq!(ws.get_relationship_score("Bob"), 100); // clamped
 
-    ws.update_relationship("Enemy", -200, "Mortal enemies");
+    ws.update_relationship("Enemy", -200, "Mortal enemies")
+        .unwrap();
     assert_eq!(ws.get_relationship_score("Enemy"), 0); // clamped
 }
 
@@ -129,6 +131,18 @@ fn legacy_choice_is_enriched_in_place() {
     assert_eq!(choices.len(), 1);
     assert_eq!(choices[0]["node_id"], node_id.to_string());
     assert_eq!(choices[0]["consequence"], "Dawn arrives");
+}
+
+#[test]
+fn malformed_player_entity_fails_without_mutating_world_state() {
+    let mut state = WorldState::new(Uuid::new_v4(), Uuid::new_v4());
+    state.state["player_entity"] = serde_json::Value::Null;
+    let before = state.state.clone();
+
+    assert!(state
+        .record_choice(Uuid::new_v4(), 1, 0, "前进", "继续")
+        .is_err());
+    assert_eq!(state.state, before);
 }
 
 #[test]

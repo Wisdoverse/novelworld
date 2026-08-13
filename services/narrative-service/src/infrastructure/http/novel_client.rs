@@ -1,4 +1,6 @@
-use crate::domain::repositories::{ChapterInfo, ChapterReadRepository, NovelInfo};
+use crate::domain::repositories::{
+    ChapterInfo, ChapterReadRepository, NovelInfo, PlayerEntryContext,
+};
 use crate::domain::services::narrative_transition::CanonContext;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -52,6 +54,11 @@ struct NovelResponse {
     title: String,
     deviation_mode: String,
     world_summary: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct ReadingProgressResponse {
+    reader_identity_type: String,
 }
 
 #[async_trait]
@@ -136,5 +143,71 @@ impl ChapterReadRepository for NovelServiceClient {
             .validate()
             .map_err(|error| anyhow!("Novel service returned invalid canon context: {error}"))?;
         Ok(Some(context))
+    }
+
+    async fn get_player_entry_context(
+        &self,
+        novel_id: Uuid,
+        user_id: Uuid,
+        proposed_name: Option<&str>,
+    ) -> Result<Option<PlayerEntryContext>> {
+        let url = format!(
+            "{}/internal/novels/{}/player-entry",
+            self.base_url, novel_id
+        );
+        let resp = self
+            .client
+            .post(&url)
+            .header("X-User-Id", user_id.to_string())
+            .json(&serde_json::json!({"proposed_name": proposed_name}))
+            .send()
+            .await?;
+        if resp.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(anyhow!("Novel service returned {}", resp.status()));
+        }
+        let context = resp.json::<PlayerEntryContext>().await?;
+        if context.checkpoint_chapter < 1
+            || context.locations.len() > 256
+            || context.locations.iter().any(|location| {
+                location.id.trim() != location.id
+                    || location.id.is_empty()
+                    || location.id.chars().count() > 200
+                    || location.id.chars().any(char::is_control)
+                    || location.name.trim().is_empty()
+                    || location.name.chars().count() > 1_000
+            })
+        {
+            return Err(anyhow!(
+                "Novel service returned invalid player entry context"
+            ));
+        }
+        Ok(Some(context))
+    }
+
+    async fn uses_original_player_identity(&self, novel_id: Uuid, user_id: Uuid) -> Result<bool> {
+        let resp = self
+            .client
+            .get(format!("{}/progress/{}", self.base_url, novel_id))
+            .header("X-User-Id", user_id.to_string())
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(anyhow!("Novel service returned {}", resp.status()));
+        }
+        match resp
+            .json::<ReadingProgressResponse>()
+            .await?
+            .reader_identity_type
+            .as_str()
+        {
+            "self" => Ok(true),
+            "character" => Ok(false),
+            value => Err(anyhow!(
+                "Novel service returned invalid reader identity type {value}"
+            )),
+        }
     }
 }
