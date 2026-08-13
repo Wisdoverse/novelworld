@@ -28,7 +28,7 @@ bytes.workspace = true
 llm-client.workspace = true
 
 # PDF parsing
-pdf-extract = "0.10"
+pdf-extract = "0.12"
 # EPUB parsing and HTML-to-text conversion
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 quick-xml = { version = "0.41", features = ["serialize"] }

@@ -1,5 +1,5 @@
 use aes_gcm::{
-    aead::{Aead, AeadCore, KeyInit, OsRng, Payload},
+    aead::{Aead, Generate, KeyInit, Nonce, Payload},
     Aes256Gcm,
 };
 use anyhow::Result;
@@ -27,7 +27,8 @@ impl PgUserRepository {
     }
 
     fn encrypt_api_key(&self, api_key: &str) -> Result<(Vec<u8>, Vec<u8>)> {
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let nonce = Nonce::<Aes256Gcm>::try_generate()
+            .map_err(|_| anyhow::anyhow!("failed to generate runtime configuration nonce"))?;
         let ciphertext = self
             .cipher
             .encrypt(
@@ -42,9 +43,9 @@ impl PgUserRepository {
     }
 
     fn decrypt_api_key(&self, nonce: &[u8], ciphertext: &[u8]) -> Result<String> {
-        if nonce.len() != 12 {
-            return Err(anyhow::anyhow!("runtime configuration nonce is invalid"));
-        }
+        let nonce: &[u8; 12] = nonce
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("runtime configuration nonce is invalid"))?;
         let plaintext = self
             .cipher
             .decrypt(
