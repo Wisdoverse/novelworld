@@ -1,3 +1,4 @@
+pub mod canon_story_context;
 pub mod canon_story_extractor;
 pub mod character_extractor;
 pub mod node_detector;

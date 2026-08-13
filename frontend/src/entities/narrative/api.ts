@@ -2,9 +2,30 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from '@/shared/api/client';
 import type { NarrativeNode, WorldState } from '@/shared/types';
 
+export interface NarrativeTransition {
+  schema_version: 1;
+  prompt_version: string;
+  canon_model_version: number;
+  canonical_checkpoint_chapter: number;
+  rendered_narrative: string;
+  events: Array<{
+    summary: string;
+    actor_character_ids: string[];
+    location_id: string | null;
+  }>;
+  relationship_changes: Array<{ character_id: string; delta: number; reason: string }>;
+  location_changes: Array<{ location_id: string; state: string; reason: string }>;
+  thread_changes: Array<{
+    thread_id: string;
+    status: 'open' | 'resolved';
+    description: string;
+  }>;
+}
+
 export interface ChoiceResult {
   chapter_number: number;
   consequence: string;
+  transition: NarrativeTransition;
   chapter_content: string;
   world_state: WorldState;
 }

@@ -12,14 +12,17 @@ use crate::domain::repositories::{
     UserChoiceRepository, WorldStateRepository,
 };
 use crate::domain::services::narrative_engine::{
-    build_branch_prompt, build_consequence_prompt, build_player_chapter_prompt,
-    is_chinese_narrative, parse_generated_branch,
+    build_branch_prompt, build_player_chapter_prompt, is_chinese_narrative, parse_generated_branch,
+};
+use crate::domain::services::narrative_transition::{
+    build_transition_prompt, parse_transition, NarrativeTransition,
 };
 
 const MAX_NARRATIVE_PROMPT_BYTES: usize = 32 * 1024;
 const MAX_NARRATIVE_PROMPT_CHARS: usize = 16_000;
 const MAX_CONSEQUENCE_BYTES: usize = 32 * 1024;
 const MAX_CONSEQUENCE_CHARS: usize = 8_000;
+const MAX_TRANSITION_BYTES: usize = 128 * 1024;
 const MAX_PLAYER_CHAPTER_BYTES: usize = 64 * 1024;
 const MAX_PLAYER_CHAPTER_CHARS: usize = 20_000;
 
@@ -43,6 +46,7 @@ pub type NarrativeResult<T> = std::result::Result<T, NarrativeError>;
 pub struct ChoiceResult {
     pub chapter_number: i32,
     pub consequence: String,
+    pub transition: NarrativeTransition,
     pub chapter_content: String,
     pub world_state: WorldState,
 }
@@ -250,42 +254,36 @@ impl NarrativeCommandHandler {
             .await
             .map_err(NarrativeError::Internal)?;
         if let Some(existing) = existing.as_ref() {
-            if let Some(consequence) = existing
-                .consequence
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
+            warn!(
+                user_id = %user_id,
+                node_id = %node_id,
+                choice_index = existing.choice_index,
+                "replaying an existing narrative choice"
+            );
+            let full_content = match self
+                .player_chapter_repo
+                .find(user_id, novel_id, node.chapter_number)
+                .await
+                .map_err(NarrativeError::Internal)?
             {
-                warn!(
-                    user_id = %user_id,
-                    node_id = %node_id,
-                    choice_index = existing.choice_index,
-                    "repairing or replaying an existing narrative choice"
-                );
-                let full_content = match self
-                    .player_chapter_repo
-                    .find(user_id, novel_id, node.chapter_number)
-                    .await
-                    .map_err(NarrativeError::Internal)?
-                {
-                    Some(chapter) => chapter.content,
-                    None => {
-                        let chapter = self
-                            .chapter_repo
-                            .get_chapter(novel_id, node.chapter_number, user_id)
-                            .await
-                            .map_err(NarrativeError::Unavailable)?
-                            .ok_or(NarrativeError::NotFound)?;
-                        rewrite_after_anchor(
-                            &chapter.content,
-                            node.anchor_quote.as_deref(),
-                            consequence,
-                        )?
-                    }
-                };
-                return self
-                    .commit_result(choice_draft(existing, consequence.to_owned(), full_content))
-                    .await;
-            }
+                Some(chapter) => chapter.content,
+                None => {
+                    let chapter = self
+                        .chapter_repo
+                        .get_chapter(novel_id, node.chapter_number, user_id)
+                        .await
+                        .map_err(NarrativeError::Unavailable)?
+                        .ok_or(NarrativeError::NotFound)?;
+                    rewrite_after_anchor(
+                        &chapter.content,
+                        node.anchor_quote.as_deref(),
+                        &existing.consequence,
+                    )?
+                }
+            };
+            return self
+                .commit_result(choice_draft(existing, full_content))
+                .await;
         }
 
         let (choice_index, choice_text) = match existing.as_ref() {
@@ -318,12 +316,28 @@ impl NarrativeCommandHandler {
             .get_or_create(user_id, novel_id)
             .await
             .map_err(NarrativeError::Internal)?;
-        let prompt = build_consequence_prompt(
+        let canon_context = self
+            .chapter_repo
+            .get_canon_context(novel_id, node.chapter_number, user_id)
+            .await
+            .map_err(NarrativeError::Unavailable)?
+            .ok_or_else(|| {
+                NarrativeError::Internal(anyhow::anyhow!(
+                    "ready novel has no canonical story context"
+                ))
+            })?;
+        if canon_context.checkpoint_chapter != node.chapter_number {
+            return Err(NarrativeError::Validation(
+                "chapter is ahead of the reader's progress".into(),
+            ));
+        }
+        let prompt = build_transition_prompt(
             &novel_info.title,
             &choice_text,
             chapter_prefix,
             &world_state,
             &novel_info.deviation_mode,
+            &canon_context,
         );
         if prompt.len() > MAX_NARRATIVE_PROMPT_BYTES
             || prompt.chars().count() > MAX_NARRATIVE_PROMPT_CHARS
@@ -339,15 +353,19 @@ impl NarrativeCommandHandler {
             choice_index,
             "generating narrative consequence"
         );
-        let consequence = self
+        let raw_transition = self
             .llm
-            .chat(
-                "你是互动小说叙事引擎。所有面向读者的内容必须使用自然的简体中文。",
-                &prompt,
-            )
+            .chat_json(&prompt)
             .await
             .map_err(NarrativeError::Llm)?;
-        let consequence = consequence.trim().to_owned();
+        if raw_transition.len() > MAX_TRANSITION_BYTES {
+            return Err(NarrativeError::Llm(anyhow::anyhow!(
+                "language model transition exceeded the limit"
+            )));
+        }
+        let transition = parse_transition(&raw_transition, &canon_context)
+            .map_err(|error| NarrativeError::Llm(anyhow::anyhow!(error)))?;
+        let consequence = transition.rendered_narrative.clone();
         if consequence.is_empty()
             || consequence.len() > MAX_CONSEQUENCE_BYTES
             || consequence.chars().count() > MAX_CONSEQUENCE_CHARS
@@ -370,7 +388,7 @@ impl NarrativeCommandHandler {
             chapter_number: node.chapter_number,
             choice_index,
             choice_text,
-            consequence,
+            transition,
             rewritten_chapter_content,
         })
         .await
@@ -397,7 +415,8 @@ impl NarrativeCommandHandler {
             .map_err(NarrativeError::Internal)?;
         Ok(ChoiceResult {
             chapter_number: committed.choice.chapter_number,
-            consequence: committed.choice.consequence.unwrap_or_default(),
+            consequence: committed.choice.consequence.clone(),
+            transition: committed.choice.transition,
             chapter_content: committed.player_chapter_content,
             world_state: committed.world_state,
         })
@@ -436,11 +455,7 @@ impl NarrativeCommandHandler {
             .map_err(NarrativeError::Internal)?
             .into_iter()
             .filter(|choice| {
-                choice.chapter_number <= chapter_number
-                    && choice
-                        .consequence
-                        .as_deref()
-                        .is_some_and(|value| !value.trim().is_empty())
+                choice.chapter_number <= chapter_number && !choice.consequence.trim().is_empty()
             })
             .collect::<Vec<_>>();
         if committed_choices.is_empty() {
@@ -542,15 +557,11 @@ impl NarrativeCommandHandler {
                         .is_none_or(|owner_id| owner_id == choice.user_id)
             })
             .ok_or(NarrativeError::NotFound)?;
-        let consequence = choice
-            .consequence
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| {
-                NarrativeError::Internal(anyhow::anyhow!("committed choice has no consequence"))
-            })?;
-        let content =
-            rewrite_after_anchor(&source.content, node.anchor_quote.as_deref(), consequence)?;
+        let content = rewrite_after_anchor(
+            &source.content,
+            node.anchor_quote.as_deref(),
+            &choice.consequence,
+        )?;
         self.player_chapter_repo
             .save_if_absent(&PlayerChapter {
                 user_id: choice.user_id,
@@ -622,11 +633,7 @@ impl NarrativeCommandHandler {
     }
 }
 
-fn choice_draft(
-    existing: &UserChoiceRecord,
-    consequence: String,
-    rewritten_chapter_content: String,
-) -> ChoiceCommit {
+fn choice_draft(existing: &UserChoiceRecord, rewritten_chapter_content: String) -> ChoiceCommit {
     ChoiceCommit {
         user_id: existing.user_id,
         novel_id: existing.novel_id,
@@ -634,7 +641,7 @@ fn choice_draft(
         chapter_number: existing.chapter_number,
         choice_index: existing.choice_index,
         choice_text: existing.choice_text.clone(),
-        consequence,
+        transition: existing.transition.clone(),
         rewritten_chapter_content,
     }
 }

@@ -1,4 +1,5 @@
 use crate::domain::repositories::{ChapterInfo, ChapterReadRepository, NovelInfo};
+use crate::domain::services::narrative_transition::CanonContext;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use reqwest::Client;
@@ -106,5 +107,34 @@ impl ChapterReadRepository for NovelServiceClient {
             deviation_mode: n.deviation_mode,
             world_summary: n.world_summary,
         }))
+    }
+
+    async fn get_canon_context(
+        &self,
+        novel_id: Uuid,
+        checkpoint_chapter: i32,
+        user_id: Uuid,
+    ) -> Result<Option<CanonContext>> {
+        let url = format!(
+            "{}/internal/novels/{}/canon-context/{}",
+            self.base_url, novel_id, checkpoint_chapter
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .header("X-User-Id", user_id.to_string())
+            .send()
+            .await?;
+        if resp.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(anyhow!("Novel service returned {}", resp.status()));
+        }
+        let context = resp.json::<CanonContext>().await?;
+        context
+            .validate()
+            .map_err(|error| anyhow!("Novel service returned invalid canon context: {error}"))?;
+        Ok(Some(context))
     }
 }
