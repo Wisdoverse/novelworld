@@ -1,3 +1,4 @@
+pub mod canon_story_model_pg_repo;
 pub mod chapter_pg_repo;
 pub mod character_pg_repo;
 pub mod novel_pg_repo;
