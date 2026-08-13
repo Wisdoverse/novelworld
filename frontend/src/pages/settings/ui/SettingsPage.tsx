@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
-import { ArrowLeft, Brain, Key, Loader2, Save, Settings, Trash2 } from 'lucide-react';
+import { ArrowLeft, Brain, Download, Key, Loader2, Save, Settings, Trash2 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { apiClient, getApiErrorMessage } from '@/shared/api/client';
@@ -29,6 +29,7 @@ export function SettingsPage() {
   const [settings, setSettings] = useState<LlmSettings | null>(null);
   const [apiKey, setApiKey] = useState('');
   const [saving, setSaving] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const isAdmin = user?.role === 'admin';
   const models = useMemo(() => settings ? MODELS[settings.provider] : [], [settings]);
@@ -81,6 +82,39 @@ export function SettingsPage() {
       toast.error(getApiErrorMessage(error, '账号删除失败，请稍后重试'));
     } finally {
       setDeleting(false);
+    }
+  };
+
+  const exportAccount = async () => {
+    setExporting(true);
+    try {
+      // ponytail: A browser Blob prevents saving partial exports; adopt the File
+      // System Access API only if measured account sizes make this impractical.
+      const response = await apiClient.get<Blob>('/account/export', {
+        responseType: 'blob',
+        timeout: 16 * 60 * 1000,
+      });
+      const tail = await response.data.slice(Math.max(0, response.data.size - 4096)).text();
+      const lines = tail.trimEnd().split('\n');
+      const lastLine = lines[lines.length - 1];
+      const completion = lastLine ? JSON.parse(lastLine) : null;
+      if (completion?.type !== 'complete' || completion?.schema !== 'account-export-v1') {
+        throw new Error('incomplete account export');
+      }
+
+      const url = URL.createObjectURL(response.data);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `novelworld-account-${user?.id}-${new Date().toISOString().slice(0, 10)}.ndjson`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      toast.success('账号数据导出完成');
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, '账号导出未完整完成，请重试'));
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -161,7 +195,11 @@ export function SettingsPage() {
           <p className="mb-5 text-sm leading-relaxed" style={{ color: '#94a3b8' }}>
             删除后，NovelWorld 保存的小说正文、对话、记忆、世界模型与个人时间线将永久移除。模型服务商可能保留的数据受其政策约束。
           </p>
-          <button type="button" disabled={deleting} onClick={eraseAccount} className="flex w-full items-center justify-center gap-2 rounded-lg py-3 font-semibold" style={{ background: 'rgba(127,29,29,0.5)', border: '1px solid rgba(248,113,113,0.5)', color: '#fecaca', opacity: deleting ? 0.65 : 1 }}>
+          <button type="button" disabled={exporting || deleting} onClick={exportAccount} className="mb-3 flex w-full items-center justify-center gap-2 rounded-lg py-3 font-semibold" style={{ background: 'rgba(8,145,178,0.18)', border: '1px solid rgba(34,211,238,0.4)', color: '#a5f3fc', opacity: exporting || deleting ? 0.65 : 1 }}>
+            {exporting ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
+            {exporting ? '正在导出…' : '导出账号数据'}
+          </button>
+          <button type="button" disabled={deleting || exporting} onClick={eraseAccount} className="flex w-full items-center justify-center gap-2 rounded-lg py-3 font-semibold" style={{ background: 'rgba(127,29,29,0.5)', border: '1px solid rgba(248,113,113,0.5)', color: '#fecaca', opacity: deleting || exporting ? 0.65 : 1 }}>
             {deleting ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
             {deleting ? '正在删除…' : '删除账号'}
           </button>

@@ -241,6 +241,7 @@ services:
       AGENT_SERVICE_URL: http://agent-service:8003
       NARRATIVE_SERVICE_URL: http://narrative-service:8004
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN is required}
       PORT: 8080
       RATE_LIMIT_RPS: ${RATE_LIMIT_RPS:-500}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost:80}

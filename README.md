@@ -208,6 +208,7 @@ novelworld/
 | [DEPLOY.md](./DEPLOY.md) | Deployment guide |
 | [ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Architecture decisions |
 | [DATA_RETENTION.md](./docs/DATA_RETENTION.md) | Data retention, erasure, and provider boundaries |
+| [ACCOUNT_EXPORT.md](./docs/ACCOUNT_EXPORT.md) | Versioned account export wire contract and completeness rules |
 
 ---
 

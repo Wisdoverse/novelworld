@@ -1,3 +1,4 @@
+pub mod account_export;
 pub mod pg_narrative_repo;
 pub mod pg_world_state_repo;
 

@@ -12,6 +12,7 @@ use narrative_service::{
         http::novel_client::NovelServiceClient,
         llm::LlmAdapter,
         persistence::{
+            account_export::PgAccountExport,
             pg_narrative_repo::{
                 PgNarrativeNodeRepository, PgPlayerChapterRepository, PgUserChoiceRepository,
             },
@@ -34,6 +35,11 @@ async fn main() -> Result<()> {
 
     dotenvy::dotenv().ok();
     let metrics = llm_client::install_metrics("narrative-service")?;
+    let internal_service_token =
+        std::env::var("INTERNAL_SERVICE_TOKEN").expect("INTERNAL_SERVICE_TOKEN must be set");
+    if internal_service_token.len() < 32 {
+        anyhow::bail!("INTERNAL_SERVICE_TOKEN must be at least 32 characters");
+    }
 
     // Database connection pool
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
@@ -54,6 +60,8 @@ async fn main() -> Result<()> {
     let choice_repo = Arc::new(PgUserChoiceRepository::new(pool.clone()));
     let world_state_repo = Arc::new(PgWorldStateRepository::new(pool.clone()));
     let player_chapter_repo = Arc::new(PgPlayerChapterRepository::new(pool.clone()));
+    let account_export: Arc<dyn domain::ports::AccountExportPort> =
+        Arc::new(PgAccountExport::new(pool.clone()));
     let novel_service_url =
         std::env::var("NOVEL_SERVICE_URL").unwrap_or_else(|_| "http://novel-service:8002".into());
     let chapter_repo = Arc::new(NovelServiceClient::new(novel_service_url));
@@ -73,6 +81,8 @@ async fn main() -> Result<()> {
         handler,
         postgres_readiness: Arc::new(PgReadinessProbe::new(pool)),
         novel_readiness,
+        account_export,
+        internal_service_token: internal_service_token.into(),
         metrics,
     };
 

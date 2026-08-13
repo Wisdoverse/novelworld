@@ -7,7 +7,9 @@ email=admin@test.invalid
 password='RuntimeSmokeOnly123!'
 source_file=$(mktemp)
 metrics_file=$(mktemp)
-trap 'rm -f "$source_file" "$metrics_file"' EXIT
+account_export_file=$(mktemp)
+account_export_headers=$(mktemp)
+trap 'rm -f "$source_file" "$metrics_file" "$account_export_file" "$account_export_headers"' EXIT
 curl_cmd=(curl --connect-timeout 5 --max-time 120 --fail --silent --show-error)
 
 json_get() {
@@ -145,7 +147,7 @@ node_id=$(json_get "value['id']" <<<"$node")
 
 pause
 failed_choice_file=$(mktemp)
-trap 'rm -f "$source_file" "$failed_choice_file" "$metrics_file"' EXIT
+trap 'rm -f "$source_file" "$failed_choice_file" "$metrics_file" "$account_export_file" "$account_export_headers"' EXIT
 failed_choice_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   --output "$failed_choice_file" --write-out '%{http_code}' "${auth[@]}" \
   -H 'Content-Type: application/json' \
@@ -243,6 +245,113 @@ replayed_choice=$("${curl_cmd[@]}" "${auth[@]}" \
   --data "{\"novel_id\":\"$novel_id\",\"node_id\":\"$node_id\",\"choice_index\":0}" \
   "$api/narrative/choose")
 python3 -c "import json,sys; value=json.load(sys.stdin); state=value['world_state']['state']; assert len(state['choices'])==1; assert len(state['world_events'])==1; assert 'relationships' not in state; assert next(iter(state['player_entity']['relationships'].values()))['score']==55" <<<"$replayed_choice"
+
+privacy_turn_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
+docker exec novel-postgres psql \
+  -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -v ON_ERROR_STOP=1 \
+  -c "UPDATE novels SET original_file_key = 'SENTINEL_E2E_OBJECT_KEY' WHERE id = '$novel_id'; INSERT INTO character_relationships (novel_id, from_character_id, to_character_id, relationship_type, description) VALUES ('$novel_id', '$character_id', '$character_id', 'self', 'Portable E2E relationship'); INSERT INTO character_memories (character_id, user_id, novel_id, layer, content, importance, chapter_number) VALUES ('$character_id', '$user_id', '$novel_id', 'long', 'Portable E2E memory', 8, 1); INSERT INTO chat_turns (id, user_id, character_id, novel_id, request_fingerprint, chapter_context, reader_identity_type, deviation_mode, status, failure_code) VALUES ('$privacy_turn_id', '$user_id', '$character_id', '$novel_id', decode(repeat('5a', 32), 'hex'), 1, 'self', 'canon', 'failed', 'SENTINEL_E2E_CHAT_FAILURE');" >/dev/null
+
+for target in \
+  'novel-user-service:8001' \
+  'novel-novel-service:8002' \
+  'novel-agent-service:8003' \
+  'novel-narrative-service:8004'; do
+  container=${target%%:*}
+  port=${target##*:}
+  test "$(docker exec "$container" curl --silent --output /dev/null --write-out '%{http_code}' \
+    -H 'X-Internal-Service-Token: wrong-token' \
+    "http://127.0.0.1:$port/internal/privacy/users/$user_id/export")" = 401
+done
+pause
+"${curl_cmd[@]}" "${auth[@]}" --dump-header "$account_export_headers" \
+  --output "$account_export_file" "$api/account/export"
+grep -Eiq '^content-type: application/x-ndjson' "$account_export_headers"
+grep -Eiq '^cache-control: no-store' "$account_export_headers"
+grep -Eiq '^content-disposition: attachment;' "$account_export_headers"
+! grep -Eiq '^content-length:' "$account_export_headers"
+python3 - "$account_export_file" "$user_id" "$refresh_token" "$token" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+path, user_id, refresh_token, access_token = sys.argv[1:]
+raw = pathlib.Path(path).read_text()
+records = [json.loads(line) for line in raw.splitlines() if line]
+assert records[0]["type"] == "manifest"
+assert records[0]["schema"] == "account-export-v1"
+assert records[0]["user_id"] == user_id
+assert records[0]["snapshot"] == "service-local"
+assert records[-1] == {
+    "schema": "account-export-v1",
+    "services": ["user", "novel", "agent", "narrative"],
+    "type": "complete",
+}
+
+expected_services = ["user", "novel", "agent", "narrative"]
+completed = []
+active = None
+kinds = set()
+all_keys = set()
+
+def visit(value):
+    if isinstance(value, dict):
+        all_keys.update(value)
+        for child in value.values():
+            visit(child)
+    elif isinstance(value, list):
+        for child in value:
+            visit(child)
+
+for record in records[1:-1]:
+    visit(record)
+    event = record["type"]
+    if event == "service_start":
+        assert active is None
+        active = record["service"]
+        assert active == expected_services[len(completed)]
+    elif event == "record":
+        assert record["service"] == active
+        kinds.add(record["kind"])
+    elif event == "service_complete":
+        assert record["service"] == active
+        completed.append(active)
+        active = None
+    else:
+        raise AssertionError(event)
+
+assert active is None
+assert completed == expected_services
+assert {
+    "profile", "novel", "chapter", "character", "character_relationship",
+    "canon_story_model", "reading_progress", "chat_message", "character_memory",
+    "narrative_node", "user_choice", "world_state", "player_chapter",
+} <= kinds
+assert "Portable E2E relationship" in raw
+assert "Portable E2E memory" in raw
+for secret in [
+    "SENTINEL_E2E_OBJECT_KEY",
+    "SENTINEL_E2E_CHAT_FAILURE",
+    "RuntimeSmokeOnly123!",
+    refresh_token,
+    access_token,
+    os.environ["JWT_SECRET"],
+    os.environ["INTERNAL_SERVICE_TOKEN"],
+    os.environ["LLM_API_KEY"],
+]:
+    assert secret not in raw
+assert {
+    "password_hash", "original_file_key", "request_fingerprint", "failure_code",
+    "embedding", "access_count", "last_accessed", "expires_at",
+}.isdisjoint(all_keys)
+PY
+pause
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  "${auth[@]}" "$api/internal/privacy/users/$user_id/export")" = 404
+pause
+test "$(curl --path-as-is --silent --output /dev/null --write-out '%{http_code}' \
+  "${auth[@]}" -H "X-Internal-Service-Token: $INTERNAL_SERVICE_TOKEN" \
+  "$api/users/%2e%2e/internal/privacy/users/$user_id/export")" = 404
 
 delete_novel_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
 delete_character_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
