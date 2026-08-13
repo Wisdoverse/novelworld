@@ -14,7 +14,7 @@ green; it does not claim that an operator has deployed the release.
 | 0 — Trust boundary | Complete | [PR #72](https://github.com/schorsch888/novelworld/pull/72) merged as `6b62c44`; ownership, principal, and boundary checks are in required CI. |
 | 1 — Reliability | Complete | PR #72 completed atomic chat/narrative persistence, durable setup, migrations, readiness, and release checks; CI passed 5/5. |
 | 2 — Core reader loop | Complete | PR #76 gates upload -> parse -> read -> chat -> choose -> resume across a full process restart; all required CI checks passed. |
-| 3 — Canonical world model | In progress | PRs [#79](https://github.com/schorsch888/novelworld/pull/79), [#84](https://github.com/schorsch888/novelworld/pull/84), [#86](https://github.com/schorsch888/novelworld/pull/86), and [#88](https://github.com/schorsch888/novelworld/pull/88) establish source-complete canon, validated transitions, exact replay, and the offline quality gate. `PlayerEntity`, player-scoped generated chapters, and release privacy/security/latency/cost budgets remain. |
+| 3 — Canonical world model | In progress | PRs [#79](https://github.com/schorsch888/novelworld/pull/79), [#84](https://github.com/schorsch888/novelworld/pull/84), [#86](https://github.com/schorsch888/novelworld/pull/86), and [#88](https://github.com/schorsch888/novelworld/pull/88) establish source-complete canon, validated transitions, exact replay, player-scoped generated chapters, and the offline quality gate. `PlayerEntity` and release privacy/security/latency/cost budgets remain. |
 | 4 — Living open world | Queued | Starts after the canonical model and structured transition quality gates pass. |
 | 5 — Measured scale | Queued | Starts only for a named SLO or measured bottleneck. |
 
