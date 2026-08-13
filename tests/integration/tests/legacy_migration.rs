@@ -29,6 +29,8 @@ const NARRATIVE_ANCHOR_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0009_narrative_inline_anchor.sql");
 const PLAYER_TIMELINE_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0010_player_timeline_chapters.sql");
+const CANON_STORY_MODEL_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0011_canon_story_models.sql");
 
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
@@ -91,6 +93,10 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
             .await
             .unwrap();
         sqlx::raw_sql(PLAYER_TIMELINE_MIGRATION)
+            .execute(&fresh)
+            .await
+            .unwrap();
+        sqlx::raw_sql(CANON_STORY_MODEL_MIGRATION)
             .execute(&fresh)
             .await
             .unwrap();
@@ -306,6 +312,7 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
         "0008_llm_thinking_mode.sql",
         "0009_narrative_inline_anchor.sql",
         "0010_player_timeline_chapters.sql",
+        "0011_canon_story_models.sql",
     ] {
         let migration_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../infra/postgres/migrations")
@@ -366,6 +373,10 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
             .await
             .unwrap();
         sqlx::raw_sql(PLAYER_TIMELINE_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
+        sqlx::raw_sql(CANON_STORY_MODEL_MIGRATION)
             .execute(&mut *non_default_path)
             .await
             .unwrap();
