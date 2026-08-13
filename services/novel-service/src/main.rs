@@ -12,6 +12,7 @@ use novel_service::{
         document::EbookTextExtractor,
         llm::{image::ImageClient, LlmAdapter},
         persistence::{
+            canon_story_model_pg_repo::PgCanonStoryModelRepository,
             chapter_pg_repo::ChapterPgRepository, character_pg_repo::CharacterPgRepository,
             novel_pg_repo::NovelPgRepository, pg_progress_repo::PgReadingProgressRepository,
             PgReadinessProbe,
@@ -53,6 +54,7 @@ async fn main() -> Result<()> {
     let novel_repo = Arc::new(NovelPgRepository::new(pool.clone()));
     let chapter_repo = Arc::new(ChapterPgRepository::new(pool.clone()));
     let character_repo = Arc::new(CharacterPgRepository::new(pool.clone()));
+    let canon_repo = Arc::new(PgCanonStoryModelRepository::new(pool.clone()));
     let progress_repo = Arc::new(PgReadingProgressRepository::new(pool.clone()));
 
     let llm: Arc<dyn LlmPort> = llm;
@@ -63,6 +65,7 @@ async fn main() -> Result<()> {
         novel_repo: novel_repo.clone(),
         chapter_repo: chapter_repo.clone(),
         character_repo: character_repo.clone(),
+        canon_repo,
         llm,
         image_client,
     });

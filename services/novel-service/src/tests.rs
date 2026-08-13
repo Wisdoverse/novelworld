@@ -73,6 +73,10 @@ fn test_novel_status_transitions() {
     novel.start_parsing();
     assert!(matches!(novel.status, NovelStatus::Parsing));
 
+    novel.record_enrichment(10, "A fantasy world.".into(), "fantasy".into());
+    assert!(matches!(novel.status, NovelStatus::Parsing));
+    assert_eq!(novel.total_chapters, 10);
+
     novel.mark_ready(10, "A fantasy world.".into(), "fantasy".into());
     assert!(matches!(novel.status, NovelStatus::Ready));
     assert_eq!(novel.total_chapters, 10);
