@@ -1,0 +1,34 @@
+{
+  "version": "single-node-v1",
+  "topology": {
+    "gateway_instances": 1,
+    "user_service_instances": 1,
+    "novel_service_instances": 1,
+    "agent_service_instances": 1,
+    "narrative_service_instances": 1,
+    "postgres_instances": 1,
+    "redis_instances": 1
+  },
+  "workload": {
+    "users": 9,
+    "source_bytes_min": 16384,
+    "import_concurrency": 2,
+    "stream_concurrency": 8,
+    "world_turn_concurrency": 8,
+    "provider_delay_ms": 1000,
+    "world_turn_history": 100,
+    "read_requests": 128,
+    "read_concurrency": 16,
+    "chat_turns": 60
+  },
+  "objectives": {
+    "import_admission_seconds_max": 1.0,
+    "import_ready_seconds_max": 120.0,
+    "overload_rejection_seconds_max": 1.0,
+    "stream_first_event_p95_seconds_max": 2.5,
+    "world_turn_p95_seconds_max": 3.0,
+    "world_read_p95_seconds_max": 0.75,
+    "redis_messages": 50,
+    "redis_bytes_max": 262144
+  }
+}

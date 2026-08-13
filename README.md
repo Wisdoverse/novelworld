@@ -215,6 +215,8 @@ novelworld/
 | [AGENTS.md](./AGENTS.md) | Instructions for AI coding assistants |
 | [DEPLOY.md](./DEPLOY.md) | Deployment guide |
 | [ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Architecture decisions |
+| [ROADMAP.md](./docs/ROADMAP.md) | Evidence-gated engineering horizons |
+| [SLOS.md](./docs/SLOS.md) | Versioned single-node capacity and scaling decision contract |
 | [DATA_RETENTION.md](./docs/DATA_RETENTION.md) | Data retention, erasure, and provider boundaries |
 | [ACCOUNT_EXPORT.md](./docs/ACCOUNT_EXPORT.md) | Versioned account export wire contract and completeness rules |
 
