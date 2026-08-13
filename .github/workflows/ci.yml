@@ -76,6 +76,8 @@ jobs:
             --metrics tools/llm-budget/recorded-release.prom \
             --commit "$GITHUB_SHA" > /tmp/llm-budget-b.json
           cmp /tmp/llm-budget-a.json /tmp/llm-budget-b.json
+      - name: Horizon 5 capacity policy contract
+        run: python3 tools/capacity/run.py --self-test
       - name: Test
         run: cargo test --workspace --exclude integration-tests
       - name: Clippy
@@ -262,6 +264,33 @@ jobs:
           test "$(docker exec novel-gateway curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8080/ready)" = 200
       - name: Verify restart-safe core reader loop
         run: tests/e2e/core_reader_loop.sh
+      - name: Reset production topology for the capacity profile
+        env:
+          RATE_LIMIT_RPS: 500
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.e2e.yml down -v
+          docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d
+          for attempt in $(seq 1 30); do
+            if [ "$(docker inspect --format '{{.State.Health.Status}}' novel-gateway 2>/dev/null)" = healthy ]; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
+      - name: Verify the single-node-v1 capacity SLO
+        run: |
+          python3 tools/capacity/run.py \
+            --policy tools/capacity/policy-v1.json \
+            --report capacity-report.json \
+            --git-sha "$GITHUB_SHA"
+      - name: Upload capacity report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: single-node-v1-${{ github.sha }}
+          path: capacity-report.json
+          if-no-files-found: warn
+          retention-days: 14
       - name: Show logs on failure
         if: failure()
         run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml logs --no-color
