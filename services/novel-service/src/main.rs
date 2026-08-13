@@ -7,7 +7,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use novel_service::{
     application::handlers::{NovelCommandHandler, ReadingProgressHandler},
-    domain::ports::{DocumentTextExtractor, ImagePort, LlmPort},
+    domain::ports::{DocumentTextExtractor, ImagePort, LlmPort, PrivacyCleanupPort},
     infrastructure::{
         document::EbookTextExtractor,
         llm::{image::ImageClient, LlmAdapter},
@@ -17,6 +17,7 @@ use novel_service::{
             novel_pg_repo::NovelPgRepository, pg_progress_repo::PgReadingProgressRepository,
             PgReadinessProbe,
         },
+        privacy::AgentPrivacyClient,
     },
     interface::http::{router, AppState},
 };
@@ -32,6 +33,11 @@ async fn main() -> Result<()> {
 
     dotenvy::dotenv().ok();
     let metrics = llm_client::install_metrics("novel-service")?;
+    let internal_service_token =
+        std::env::var("INTERNAL_SERVICE_TOKEN").expect("INTERNAL_SERVICE_TOKEN must be set");
+    if internal_service_token.len() < 32 {
+        anyhow::bail!("INTERNAL_SERVICE_TOKEN must be at least 32 characters");
+    }
 
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let pool = PgPoolOptions::new()
@@ -61,6 +67,10 @@ async fn main() -> Result<()> {
     let llm: Arc<dyn LlmPort> = llm;
     let image_client: Arc<dyn ImagePort> = image_client;
     let document_extractor: Arc<dyn DocumentTextExtractor> = Arc::new(EbookTextExtractor);
+    let privacy_cleanup: Arc<dyn PrivacyCleanupPort> = Arc::new(AgentPrivacyClient::new(
+        std::env::var("AGENT_SERVICE_URL").unwrap_or_else(|_| "http://agent-service:8003".into()),
+        internal_service_token,
+    )?);
 
     let handler = Arc::new(NovelCommandHandler {
         novel_repo: novel_repo.clone(),
@@ -69,6 +79,7 @@ async fn main() -> Result<()> {
         canon_repo: canon_repo.clone(),
         llm,
         image_client,
+        privacy_cleanup,
     });
     let progress_handler = Arc::new(ReadingProgressHandler {
         novel_repo: novel_repo.clone(),

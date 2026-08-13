@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::application::commands::ImportNovelCommand;
 use crate::application::handlers::{
-    NovelCommandHandler, ReadingProgressError, ReadingProgressHandler,
+    NovelCommandHandler, NovelDeletionError, ReadingProgressError, ReadingProgressHandler,
 };
 use crate::domain::entities::novel::Novel;
 use crate::domain::ports::{DocumentExtractionError, DocumentTextExtractor, ReadinessProbe};
@@ -624,19 +624,42 @@ async fn delete_novel(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    if let Err(response) = owned_novel(&state, &headers, id).await {
-        return response;
-    }
-    match state.novel_repo.delete(id).await {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
+    let user_id = match extract_user_id(&headers) {
+        Some(user_id) => user_id,
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+    match state.handler.delete_owned_novel(user_id, id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(NovelDeletionError::NotFound) => (
+            StatusCode::NOT_FOUND,
             Json(ApiError {
-                error: e.to_string(),
+                error: "Novel not found".into(),
             }),
         )
             .into_response(),
+        Err(NovelDeletionError::PrivacyCleanup(error)) => privacy_cleanup_error(error),
+        Err(NovelDeletionError::Repository(error)) => {
+            tracing::error!(error = ?error, %user_id, novel_id = %id, "novel deletion failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "Novel deletion failed".into(),
+                }),
+            )
+                .into_response()
+        }
     }
+}
+
+fn privacy_cleanup_error(error: anyhow::Error) -> Response {
+    tracing::warn!(error = ?error, "novel privacy cleanup failed");
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(ApiError {
+            error: "Novel deletion is temporarily unavailable; retry the request".into(),
+        }),
+    )
+        .into_response()
 }
 
 async fn retry_novel(

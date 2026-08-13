@@ -35,6 +35,8 @@ We will acknowledge receipt within 48 hours and provide a timeline for resolutio
 - All SQL queries use parameterized bindings (no string interpolation)
 - File upload validates MIME type and enforces size limits (10MB txt, 20MB pdf)
 - API gateway enforces rate limiting (configurable, default 500 req/s)
+- Retention and application-layer erasure boundaries are documented in
+  [docs/DATA_RETENTION.md](./docs/DATA_RETENTION.md)
 
 ### Infrastructure
 - All inter-service communication over internal Docker network
@@ -50,5 +52,7 @@ We will acknowledge receipt within 48 hours and provide a timeline for resolutio
 ### Known Limitations
 - Refresh tokens stored in plaintext (not hashed) — acceptable for self-hosted
 - No CSRF protection (API-only, no cookie auth)
-- No request body size limit on non-upload endpoints
 - LLM prompt injection cannot be fully mitigated at the application layer
+- Provider logs, provider-hosted generated images, and operator backups are
+  outside the application-layer erasure transaction
+- Account data export is not yet implemented

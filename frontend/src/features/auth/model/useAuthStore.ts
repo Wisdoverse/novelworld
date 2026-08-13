@@ -8,6 +8,7 @@ interface AuthState {
   register: (email: string, password: string, name?: string) => Promise<void>;
   login: (email: string, password: string) => Promise<void>;
   logout: () => void;
+  deleteAccount: () => Promise<void>;
   fetchMe: () => Promise<void>;
 }
 
@@ -54,6 +55,13 @@ export const useAuthStore = create<AuthState>((set) => ({
     if (refreshToken) {
       apiClient.post('/auth/logout', { refresh_token: refreshToken }).catch(() => {});
     }
+    localStorage.removeItem('auth_token');
+    localStorage.removeItem('refresh_token');
+    set({ user: null });
+  },
+
+  deleteAccount: async () => {
+    await apiClient.delete('/auth/me');
     localStorage.removeItem('auth_token');
     localStorage.removeItem('refresh_token');
     set({ user: null });

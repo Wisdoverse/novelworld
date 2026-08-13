@@ -32,6 +32,11 @@ async fn main() -> Result<()> {
 
     dotenvy::dotenv().ok();
     let metrics = llm_client::install_metrics("agent-service")?;
+    let internal_service_token =
+        std::env::var("INTERNAL_SERVICE_TOKEN").expect("INTERNAL_SERVICE_TOKEN must be set");
+    if internal_service_token.len() < 32 {
+        anyhow::bail!("INTERNAL_SERVICE_TOKEN must be at least 32 characters");
+    }
 
     // PostgreSQL connection pool
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
@@ -127,6 +132,7 @@ async fn main() -> Result<()> {
         postgres_readiness: Arc::new(PgReadinessProbe::new(pool)),
         redis_readiness: Arc::new(RedisReadinessProbe::new(redis_pool)),
         novel_readiness,
+        internal_service_token: internal_service_token.into(),
         metrics,
     };
 

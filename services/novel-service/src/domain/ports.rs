@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use thiserror::Error;
+use uuid::Uuid;
 
 #[async_trait]
 pub trait LlmPort: Send + Sync {
@@ -22,6 +23,12 @@ pub trait ImagePort: Send + Sync {
 #[async_trait]
 pub trait ReadinessProbe: Send + Sync {
     async fn is_ready(&self) -> bool;
+}
+
+#[async_trait]
+pub trait PrivacyCleanupPort: Send + Sync {
+    async fn clear_novel(&self, user_id: Uuid, novel_id: Uuid) -> Result<()>;
+    async fn allow_novel(&self, user_id: Uuid, novel_id: Uuid) -> Result<()>;
 }
 
 #[derive(Debug, Error)]

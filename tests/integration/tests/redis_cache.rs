@@ -158,3 +158,202 @@ async fn production_cache_filters_unknown_and_future_chapters() {
     assert_eq!(visible[1].content, "visible");
     cache.clear(character_id, user_id).await.unwrap();
 }
+
+#[tokio::test]
+async fn privacy_cleanup_is_scoped_to_the_requested_user_and_novel() {
+    let config = deadpool_redis::Config::from_url(redis_url());
+    let pool = config
+        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+        .unwrap();
+    let cache = RedisCache::new(pool);
+    let user_id = Uuid::new_v4();
+    let other_user_id = Uuid::new_v4();
+    let novel_id = Uuid::new_v4();
+    let other_novel_id = Uuid::new_v4();
+    let character_id = Uuid::new_v4();
+    let other_character_id = Uuid::new_v4();
+    let other_user_character_id = Uuid::new_v4();
+
+    for (owner, character, novel, content) in [
+        (user_id, character_id, novel_id, "delete this novel"),
+        (
+            user_id,
+            other_character_id,
+            other_novel_id,
+            "keep until user cleanup",
+        ),
+        (
+            other_user_id,
+            other_user_character_id,
+            novel_id,
+            "keep other user",
+        ),
+    ] {
+        let user_message = ChatMessage::new(
+            owner,
+            character,
+            novel,
+            "user".into(),
+            content.into(),
+            None,
+            Some(1),
+        );
+        let character_message = ChatMessage::new(
+            owner,
+            character,
+            novel,
+            "character".into(),
+            "reply".into(),
+            None,
+            Some(1),
+        );
+        assert!(cache
+            .push_turn(character, owner, &user_message, &character_message)
+            .await
+            .unwrap());
+    }
+
+    cache.clear_novel(user_id, novel_id).await.unwrap();
+    assert!(cache
+        .get_recent_messages(character_id, user_id, 1, 10)
+        .await
+        .unwrap()
+        .is_empty());
+    let late_user_message = ChatMessage::new(
+        user_id,
+        character_id,
+        novel_id,
+        "user".into(),
+        "late projection".into(),
+        None,
+        Some(1),
+    );
+    let late_character_message = ChatMessage::new(
+        user_id,
+        character_id,
+        novel_id,
+        "character".into(),
+        "late reply".into(),
+        None,
+        Some(1),
+    );
+    assert!(!cache
+        .push_turn(
+            character_id,
+            user_id,
+            &late_user_message,
+            &late_character_message,
+        )
+        .await
+        .unwrap());
+    assert!(cache
+        .get_recent_messages(character_id, user_id, 1, 10)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        cache
+            .get_recent_messages(other_character_id, user_id, 1, 10)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        cache
+            .get_recent_messages(other_user_character_id, other_user_id, 1, 10)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    cache.allow_novel(user_id, novel_id).await.unwrap();
+    assert!(cache
+        .push_turn(
+            character_id,
+            user_id,
+            &late_user_message,
+            &late_character_message,
+        )
+        .await
+        .unwrap());
+    assert_eq!(
+        cache
+            .get_recent_messages(character_id, user_id, 1, 10)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+
+    cache.clear_user(user_id).await.unwrap();
+    assert!(cache
+        .get_recent_messages(other_character_id, user_id, 1, 10)
+        .await
+        .unwrap()
+        .is_empty());
+    let late_user_message = ChatMessage::new(
+        user_id,
+        other_character_id,
+        other_novel_id,
+        "user".into(),
+        "late account projection".into(),
+        None,
+        Some(1),
+    );
+    let late_character_message = ChatMessage::new(
+        user_id,
+        other_character_id,
+        other_novel_id,
+        "character".into(),
+        "late reply".into(),
+        None,
+        Some(1),
+    );
+    assert!(!cache
+        .push_turn(
+            other_character_id,
+            user_id,
+            &late_user_message,
+            &late_character_message,
+        )
+        .await
+        .unwrap());
+    assert!(cache
+        .get_recent_messages(other_character_id, user_id, 1, 10)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        cache
+            .get_recent_messages(other_user_character_id, other_user_id, 1, 10)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    cache.allow_user(user_id).await.unwrap();
+    assert!(cache
+        .push_turn(
+            other_character_id,
+            user_id,
+            &late_user_message,
+            &late_character_message,
+        )
+        .await
+        .unwrap());
+    assert_eq!(
+        cache
+            .get_recent_messages(other_character_id, user_id, 1, 10)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+
+    cache.clear_user(user_id).await.unwrap();
+    cache.clear_user(other_user_id).await.unwrap();
+    cache.allow_user(user_id).await.unwrap();
+    cache.allow_user(other_user_id).await.unwrap();
+    cache.allow_novel(user_id, novel_id).await.unwrap();
+}
