@@ -1,4 +1,7 @@
-use crate::domain::entities::narrative_node::{NarrativeNode, WorldState};
+use crate::domain::entities::{
+    narrative_node::{NarrativeNode, WorldState},
+    player_entity::PlayerEntity,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use uuid::Uuid;
@@ -31,6 +34,7 @@ pub trait UserChoiceRepository: Send + Sync {
 #[async_trait]
 pub trait WorldStateRepository: Send + Sync {
     async fn get_or_create(&self, user_id: Uuid, novel_id: Uuid) -> Result<WorldState>;
+    async fn create_player_entity(&self, player: &PlayerEntity) -> Result<PlayerEntity>;
     async fn update(&self, state: &WorldState) -> Result<()>;
 }
 
@@ -50,6 +54,13 @@ pub trait ChapterReadRepository: Send + Sync {
         checkpoint_chapter: i32,
         user_id: Uuid,
     ) -> Result<Option<CanonContext>>;
+    async fn get_player_entry_context(
+        &self,
+        novel_id: Uuid,
+        user_id: Uuid,
+        proposed_name: Option<&str>,
+    ) -> Result<Option<PlayerEntryContext>>;
+    async fn uses_original_player_identity(&self, novel_id: Uuid, user_id: Uuid) -> Result<bool>;
 }
 
 #[async_trait]
@@ -74,6 +85,14 @@ pub struct ChapterInfo {
     pub content: String,
     pub is_key_node: bool,
     pub key_node_description: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlayerEntryContext {
+    pub checkpoint_chapter: i32,
+    pub name_available: bool,
+    pub locations: Vec<crate::domain::services::narrative_transition::CanonEntityRef>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

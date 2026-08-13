@@ -12,13 +12,16 @@ import {
 } from '@/entities/reading-progress/api';
 import {
   useEffectiveChapter,
+  useCreatePlayerEntity,
   useNarrativeNode,
+  usePlayerEntry,
   useSubmitNarrativeChoice,
   useWorldState,
   type ChoiceResult,
 } from '@/entities/narrative/api';
 import { ChatPanel } from '@/widgets/chat-panel/ui/ChatPanel';
 import { BranchChoice } from '@/widgets/branch-choice/ui/BranchChoice';
+import { PlayerEntryForm } from '@/features/player-entry/ui/PlayerEntryForm';
 import { getApiErrorMessage } from '@/shared/api/client';
 import type { Character, NarrativeChoice } from '@/shared/types';
 
@@ -69,6 +72,17 @@ export function ReaderPage() {
     novelId || '',
     readingProgress?.current_chapter ?? 0,
   );
+  const isSelfMode = readingProgress?.reader_identity_type === 'self';
+  const {
+    data: playerEntry,
+    isLoading: isPlayerEntryLoading,
+    isError: isPlayerEntryError,
+    refetch: refetchPlayerEntry,
+  } = usePlayerEntry(novelId || '', Boolean(readingProgress && isSelfMode));
+  const createPlayerEntity = useCreatePlayerEntity(novelId || '');
+  const playerEntryReady = Boolean(readingProgress)
+    && (!isSelfMode || Boolean(playerEntry?.player));
+  const playerEntityRequired = Boolean(isSelfMode && !playerEntry?.player);
 
   const [activeChatCharacter, setActiveChatCharacter] = useState<Character | null>(null);
   const [showCharacterList, setShowCharacterList] = useState(false);
@@ -85,7 +99,7 @@ export function ReaderPage() {
   } = useNarrativeNode(
     novelId || '',
     currentChapter,
-    hasBranch && Boolean(effectiveChapter) && !isEffectiveChapterError,
+    hasBranch && Boolean(effectiveChapter) && !isEffectiveChapterError && playerEntryReady,
   );
   const { data: worldState } = useWorldState(novelId || '', Boolean(chapter));
   const submitChoice = useSubmitNarrativeChoice(novelId || '');
@@ -178,7 +192,7 @@ export function ReaderPage() {
       isProgressSaving
       || num < 1
       || (novel && num > novel.total_chapters)
-      || (num > currentChapter && branchChoiceRequired)
+      || (num > currentChapter && (branchChoiceRequired || playerEntityRequired))
     ) return;
     navigate(`/reader/${novelId}/${num}`);
   };
@@ -271,6 +285,26 @@ export function ReaderPage() {
             <button className="text-sm underline" onClick={retryProgressUpdate}>重试</button>
           </div>
         )}
+        {isSelfMode && isPlayerEntryLoading ? (
+          <p className="mt-8 text-sm" style={{ color: '#94a3b8' }}>正在恢复你的原创角色…</p>
+        ) : null}
+        {isSelfMode && isPlayerEntryError ? (
+          <div className="mt-8 p-4 rounded-xl flex items-center justify-between gap-4" role="alert" style={{ background: 'rgba(220, 38, 38, 0.1)', color: '#fca5a5' }}>
+            <span className="text-sm">原创角色加载失败，命运分支已暂停。</span>
+            <button className="text-sm underline" onClick={() => refetchPlayerEntry()}>重试</button>
+          </div>
+        ) : null}
+        {isSelfMode && playerEntry && !playerEntry.player ? (
+          <PlayerEntryForm
+            checkpointChapter={playerEntry.checkpoint_chapter}
+            locations={playerEntry.locations}
+            isPending={createPlayerEntity.isPending}
+            error={createPlayerEntity.isError
+              ? getApiErrorMessage(createPlayerEntity.error, '原创角色创建失败')
+              : undefined}
+            onSubmit={createPlayerEntity.mutateAsync}
+          />
+        ) : null}
         {isLoading || isEffectiveChapterLoading ? (
           <div className="flex items-center justify-center h-64">
             <div className="w-8 h-8 border-2 rounded-full animate-spin" style={{ borderColor: '#6d28d9', borderTopColor: 'transparent' }} />
@@ -405,16 +439,16 @@ export function ReaderPage() {
 
         <button
           onClick={() => goToChapter(currentChapter + 1)}
-          disabled={isProgressSaving || branchChoiceRequired || !novel || currentChapter >= novel.total_chapters}
+          disabled={isProgressSaving || playerEntityRequired || branchChoiceRequired || !novel || currentChapter >= novel.total_chapters}
           className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm transition-all"
           style={{
             background: 'rgba(255,255,255,0.05)',
             border: '1px solid rgba(255,255,255,0.1)',
-            color: (isProgressSaving || branchChoiceRequired || !novel || currentChapter >= novel.total_chapters) ? '#334155' : '#94a3b8',
-            cursor: (isProgressSaving || branchChoiceRequired || !novel || currentChapter >= novel.total_chapters) ? 'not-allowed' : 'pointer',
+            color: (isProgressSaving || playerEntityRequired || branchChoiceRequired || !novel || currentChapter >= novel.total_chapters) ? '#334155' : '#94a3b8',
+            cursor: (isProgressSaving || playerEntityRequired || branchChoiceRequired || !novel || currentChapter >= novel.total_chapters) ? 'not-allowed' : 'pointer',
           }}
         >
-          {branchChoiceRequired ? '请先选择' : '下一章'}
+          {playerEntityRequired ? '请先创建角色' : branchChoiceRequired ? '请先选择' : '下一章'}
           <ChevronRight size={14} />
         </button>
       </div>

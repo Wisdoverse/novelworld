@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::domain::entities::player_entity::PlayerEntity;
 use crate::domain::services::narrative_transition::NarrativeTransition;
 
 /// 叙事节点（关键分支点）
@@ -82,6 +83,8 @@ pub enum WorldStateError {
     InvalidArray(&'static str),
     #[error("invalid narrative transition: {0}")]
     InvalidTransition(String),
+    #[error("invalid player entity: {0}")]
+    InvalidPlayerEntity(String),
 }
 
 impl WorldState {
@@ -108,6 +111,7 @@ impl WorldState {
         choice_text: &str,
         consequence: &str,
     ) -> Result<bool, WorldStateError> {
+        self.player_entity()?;
         let choices = self
             .state
             .get_mut("choices")
@@ -158,6 +162,7 @@ impl WorldState {
         choice_text: &str,
         transition: &NarrativeTransition,
     ) -> Result<bool, WorldStateError> {
+        self.player_entity()?;
         transition
             .validate_shape()
             .map_err(|error| WorldStateError::InvalidTransition(error.to_string()))?;
@@ -207,7 +212,7 @@ impl WorldState {
             }
         }
         {
-            let relationships = object_section(&mut next, "relationships")?;
+            let relationships = relationship_section(&mut next)?;
             for change in &transition.relationship_changes {
                 let key = change.character_id.to_string();
                 let current = relationships
@@ -265,28 +270,99 @@ impl WorldState {
         Ok(true)
     }
 
+    pub fn player_entity(&self) -> Result<Option<PlayerEntity>, WorldStateError> {
+        let root = self
+            .state
+            .as_object()
+            .ok_or(WorldStateError::InvalidObject("root"))?;
+        let Some(value) = root.get("player_entity") else {
+            return Ok(None);
+        };
+        if value.is_null() {
+            return Err(WorldStateError::InvalidPlayerEntity(
+                "player entity must be an object".into(),
+            ));
+        }
+        let entity = serde_json::from_value::<PlayerEntity>(value.clone())
+            .map_err(|error| WorldStateError::InvalidPlayerEntity(error.to_string()))?;
+        entity
+            .validate()
+            .map_err(|error| WorldStateError::InvalidPlayerEntity(error.to_string()))?;
+        if entity.user_id != self.user_id || entity.novel_id != self.novel_id {
+            return Err(WorldStateError::InvalidPlayerEntity(
+                "player scope does not match world state".into(),
+            ));
+        }
+        Ok(Some(entity))
+    }
+
     /// 更新角色关系
-    pub fn update_relationship(&mut self, character_name: &str, delta: i32, reason: &str) {
-        let current = self.state["relationships"]
+    pub fn update_relationship(
+        &mut self,
+        character_name: &str,
+        delta: i32,
+        reason: &str,
+    ) -> Result<(), WorldStateError> {
+        self.player_entity()?;
+        let relationships = relationship_section(&mut self.state)?;
+        let current = relationships
             .get(character_name)
             .and_then(|v| v["score"].as_i64())
             .unwrap_or(50) as i32;
 
         let new_score = (current + delta).clamp(0, 100);
-        self.state["relationships"][character_name] = serde_json::json!({
-            "score": new_score,
-            "last_change": reason,
-        });
+        relationships.insert(
+            character_name.into(),
+            serde_json::json!({
+                "score": new_score,
+                "last_change": reason,
+            }),
+        );
         self.updated_at = Utc::now();
+        Ok(())
     }
 
     /// 获取与某角色的关系分数（0-100）
     pub fn get_relationship_score(&self, character_name: &str) -> i32 {
-        self.state["relationships"]
-            .get(character_name)
+        self.state
+            .get("player_entity")
+            .and_then(|player| player.get("relationships"))
+            .or_else(|| self.state.get("relationships"))
+            .and_then(|relationships| relationships.get(character_name))
             .and_then(|v| v["score"].as_i64())
             .unwrap_or(50) as i32
     }
+}
+
+fn relationship_section(
+    state: &mut serde_json::Value,
+) -> Result<&mut serde_json::Map<String, serde_json::Value>, WorldStateError> {
+    let root = state
+        .as_object_mut()
+        .ok_or(WorldStateError::InvalidObject("root"))?;
+    if root
+        .get("player_entity")
+        .is_some_and(|player| !player.is_null())
+    {
+        let player = root
+            .get_mut("player_entity")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or(WorldStateError::InvalidObject("player_entity"))?;
+        player
+            .entry("relationships")
+            .or_insert_with(|| serde_json::json!({}));
+        return player
+            .get_mut("relationships")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or(WorldStateError::InvalidObject(
+                "player_entity.relationships",
+            ));
+    }
+    root.entry("relationships")
+        .or_insert_with(|| serde_json::json!({}));
+    root.get_mut("relationships")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or(WorldStateError::InvalidObject("relationships"))
 }
 
 fn array_section<'a>(

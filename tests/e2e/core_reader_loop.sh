@@ -80,6 +80,43 @@ pause
   "$api/progress/$novel_id/identity"
 
 pause
+blocked_branch_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
+  --output /dev/null --write-out '%{http_code}' "${auth[@]}" \
+  "$api/narrative/$novel_id/1")
+[ "$blocked_branch_status" = 409 ]
+
+pause
+player_entry=$("${curl_cmd[@]}" "${auth[@]}" "$api/narrative/$novel_id/player-entry")
+location_id=$(json_get "value['locations'][0]['id']" <<<"$player_entry")
+python3 -c "import json,sys; value=json.load(sys.stdin); assert value['player'] is None; assert value['checkpoint_chapter']==1; assert len(value['locations'])==1" <<<"$player_entry"
+
+pause
+player=$("${curl_cmd[@]}" "${auth[@]}" \
+  -X PUT -H 'Content-Type: application/json' \
+  --data "{\"name\":\"云舟\",\"background\":\"来自边城的地图学徒。\",\"capabilities\":[\"辨认古地图\"],\"location_id\":\"$location_id\",\"inventory\":[\"旧地图\"]}" \
+  "$api/narrative/$novel_id/player-entry")
+player_id=$(json_get "value['player']['id']" <<<"$player")
+python3 -c "import json,sys; value=json.load(sys.stdin); player=value['player']; assert value['checkpoint_chapter']==1; assert player['name']=='云舟'; assert player['location_id']=='$location_id'; assert player['relationships']=={}" <<<"$player"
+
+pause
+same_player=$("${curl_cmd[@]}" "${auth[@]}" \
+  -X PUT -H 'Content-Type: application/json' \
+  --data "{\"name\":\"云舟\",\"background\":\"来自边城的地图学徒。\",\"capabilities\":[\"辨认古地图\"],\"location_id\":\"$location_id\",\"inventory\":[\"旧地图\"]}" \
+  "$api/narrative/$novel_id/player-entry")
+[ "$(json_get "value['player']['id']" <<<"$same_player")" = "$player_id" ]
+pause
+conflict_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
+  --output /dev/null --write-out '%{http_code}' "${auth[@]}" \
+  -X PUT -H 'Content-Type: application/json' \
+  --data "{\"name\":\"另一名玩家\",\"background\":\"来自另一条时间线。\",\"capabilities\":[\"观察\"],\"location_id\":\"$location_id\",\"inventory\":[]}" \
+  "$api/narrative/$novel_id/player-entry")
+[ "$conflict_status" = 409 ]
+player_snapshot=$(docker exec novel-postgres psql \
+  -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
+  -c "SELECT md5((state -> 'player_entity')::text) FROM world_states WHERE user_id = (SELECT id FROM users WHERE email = '$email') AND novel_id = '$novel_id'")
+[[ "$player_snapshot" =~ ^[0-9a-f]{32}$ ]]
+
+pause
 characters=$("${curl_cmd[@]}" "${auth[@]}" "$api/novels/$novel_id/characters")
 character_id=$(json_get "value[0]['id']" <<<"$characters")
 python3 -c "import json,sys; value=json.load(sys.stdin); assert value[0]['name']=='林岚'" <<<"$characters"
@@ -121,7 +158,10 @@ choice=$("${curl_cmd[@]}" "${auth[@]}" \
   -H 'Content-Type: application/json' \
   --data "{\"novel_id\":\"$novel_id\",\"node_id\":\"$node_id\",\"choice_index\":0}" \
   "$api/narrative/choose")
-python3 -c "import json,sys; value=json.load(sys.stdin); transition=value['transition']; state=value['world_state']['state']; assert value['chapter_number']==1; assert transition['schema_version']==1; assert transition['canon_model_version']==1; assert transition['canonical_checkpoint_chapter']==1; assert value['consequence']==transition['rendered_narrative']; assert len(state['choices'])==1; assert len(state['world_events'])==1; assert len(state['relationships'])==1; assert len(state['locations'])==1; assert len(state['threads'])==1" <<<"$choice"
+python3 -c "import json,sys; value=json.load(sys.stdin); transition=value['transition']; state=value['world_state']['state']; assert value['chapter_number']==1; assert transition['schema_version']==1; assert transition['canon_model_version']==1; assert transition['canonical_checkpoint_chapter']==1; assert value['consequence']==transition['rendered_narrative']; assert len(state['choices'])==1; assert len(state['world_events'])==1; assert 'relationships' not in state; assert len(state['player_entity']['relationships'])==1; assert len(state['locations'])==1; assert len(state['threads'])==1" <<<"$choice"
+player_snapshot=$(docker exec novel-postgres psql \
+  -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
+  -c "SELECT md5((state -> 'player_entity')::text) FROM world_states WHERE user_id = (SELECT id FROM users WHERE email = '$email') AND novel_id = '$novel_id'")
 
 transition_snapshot=$(docker exec novel-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
@@ -152,6 +192,14 @@ resumed_transition_snapshot=$(docker exec novel-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT md5(transition::text) || ':' || md5((SELECT state::text FROM world_states WHERE user_id = user_choices.user_id AND novel_id = user_choices.novel_id)) FROM user_choices WHERE node_id = '$node_id'")
 [ "$resumed_transition_snapshot" = "$transition_snapshot" ]
+resumed_player_snapshot=$(docker exec novel-postgres psql \
+  -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
+  -c "SELECT md5((state -> 'player_entity')::text) FROM world_states WHERE user_id = (SELECT id FROM users WHERE email = '$email') AND novel_id = '$novel_id'")
+[ "$resumed_player_snapshot" = "$player_snapshot" ]
+
+pause
+resumed_player=$("${curl_cmd[@]}" "${auth[@]}" "$api/narrative/$novel_id/player-entry")
+[ "$(json_get "value['player']['id']" <<<"$resumed_player")" = "$player_id" ]
 
 pause
 resumed_progress=$("${curl_cmd[@]}" "${auth[@]}" "$api/progress/$novel_id")
@@ -173,6 +221,6 @@ replayed_choice=$("${curl_cmd[@]}" "${auth[@]}" \
   -H 'Content-Type: application/json' \
   --data "{\"novel_id\":\"$novel_id\",\"node_id\":\"$node_id\",\"choice_index\":0}" \
   "$api/narrative/choose")
-python3 -c "import json,sys; value=json.load(sys.stdin); state=value['world_state']['state']; assert len(state['choices'])==1; assert len(state['world_events'])==1; assert next(iter(state['relationships'].values()))['score']==55" <<<"$replayed_choice"
+python3 -c "import json,sys; value=json.load(sys.stdin); state=value['world_state']['state']; assert len(state['choices'])==1; assert len(state['world_events'])==1; assert 'relationships' not in state; assert next(iter(state['player_entity']['relationships'].values()))['score']==55" <<<"$replayed_choice"
 
 printf 'core reader loop resumed after restart: novel=%s turn=%s\n' "$novel_id" "$turn_id"
