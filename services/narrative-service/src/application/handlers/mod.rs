@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::domain::entities::narrative_node::{NarrativeChoice, NarrativeNode, WorldState};
 use crate::domain::entities::player_entity::PlayerEntity;
-use crate::domain::ports::LlmPort;
+use crate::domain::ports::{LlmPort, NarrativeLlmTask};
 use crate::domain::repositories::{
     ChapterInfo, ChapterReadRepository, ChoiceCommit, NarrativeNodeRepository, NovelInfo,
     PlayerChapter, PlayerChapterOrigin, PlayerChapterRepository, UserChoiceRecord,
@@ -328,7 +328,7 @@ impl NarrativeCommandHandler {
         }
         let generated = self
             .llm
-            .chat_json(&prompt)
+            .chat_json(NarrativeLlmTask::BranchGeneration, &prompt)
             .await
             .map_err(NarrativeError::Llm)
             .and_then(|json| {
@@ -517,7 +517,7 @@ impl NarrativeCommandHandler {
         );
         let raw_transition = self
             .llm
-            .chat_json(&prompt)
+            .chat_json(NarrativeLlmTask::NarrativeTransition, &prompt)
             .await
             .map_err(NarrativeError::Llm)?;
         if raw_transition.len() > MAX_TRANSITION_BYTES {

@@ -13,6 +13,28 @@ use std::{
     time::{Duration, Instant},
 };
 
+fn http_response(status: &str, content_type: &str, body: &str, extra: &str) -> Vec<u8> {
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n{extra}\r\n{body}",
+        body.len()
+    )
+    .into_bytes()
+}
+
+fn metric_value(rendered: &str, name: &str, labels: &[(&str, &str)]) -> f64 {
+    rendered
+        .lines()
+        .filter(|line| line.starts_with(name) && !line.starts_with('#'))
+        .find(|line| {
+            labels
+                .iter()
+                .all(|(key, value)| line.contains(&format!(r#"{key}="{value}""#)))
+        })
+        .and_then(|line| line.rsplit_once(' '))
+        .and_then(|(_, value)| value.parse().ok())
+        .unwrap_or(0.0)
+}
+
 async fn decode(
     chunks: Vec<Vec<u8>>,
     parse: fn(sse::SseFrame) -> Result<Vec<ChatStreamEvent>>,
@@ -79,6 +101,22 @@ fn test_retry_after_header() {
 }
 
 #[test]
+fn operation_output_limits_include_hidden_reasoning_and_fail_before_io() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let error = runtime
+        .block_on(LlmClient::new().chat(
+            ChatRequest::new(crate::LlmOperation::SetupConnection, "missing/model").max_tokens(9),
+        ))
+        .unwrap_err();
+    assert!(error.to_string().contains("allows at most 8"));
+
+    let request = ChatRequest::new(crate::LlmOperation::CharacterChat, "missing/model")
+        .max_tokens(1_024)
+        .thinking(true);
+    assert_eq!(request.effective_max_output_tokens(), Some(5_120));
+}
+
+#[test]
 fn stream_setup_honors_retry_after_and_uses_all_three_retries() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -118,7 +156,10 @@ fn stream_setup_honors_retry_after_and_uses_all_three_retries() {
         let client =
             LlmClient::new().with_openai_compatible("test", "key", format!("http://{address}"));
         let stream = client
-            .chat_stream(ChatRequest::new("test/model"))
+            .chat_stream(
+                ChatRequest::new(crate::LlmOperation::CharacterChat, "test/model")
+                    .max_tokens(1_024),
+            )
             .await
             .unwrap();
         stream.collect::<Vec<_>>().await
@@ -127,6 +168,311 @@ fn stream_setup_honors_retry_after_and_uses_all_three_retries() {
     server.join().unwrap();
     assert!(started.elapsed() < Duration::from_secs(3));
     assert!(matches!(events.as_slice(), [Ok(ChatStreamEvent::Finished)]));
+}
+
+#[test]
+fn provider_metrics_count_logical_requests_attempts_usage_and_stream_terminals() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let success = r#"{"choices":[{"message":{"content":"ok"}}],"model":"model","usage":{"prompt_tokens":10,"completion_tokens":3,"prompt_cache_hit_tokens":4}}"#;
+    let stream_success = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}],\"usage\":null}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":2,\"prompt_cache_hit_tokens\":5}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let stream_drop = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}],\"usage\":null}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let missing_terminal =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}],\"usage\":null}\n\n";
+    let stream_provider_error =
+        "data: {\"error\":{\"message\":\"provider rejected the stream\"}}\n\n";
+    let responses = vec![
+        http_response(
+            "429 Too Many Requests",
+            "application/json",
+            "{}",
+            "Retry-After: 0\r\n",
+        ),
+        http_response("200 OK", "application/json", success, ""),
+        http_response("400 Bad Request", "application/json", "{}", ""),
+        http_response(
+            "200 OK",
+            "application/json",
+            r#"{"choices":[{"message":{"content":"ok"}}],"model":"model","usage":null}"#,
+            "",
+        ),
+        http_response(
+            "200 OK",
+            "application/json",
+            r#"{"choices":[{"message":{"content":""}}],"model":"model","usage":{"prompt_tokens":7,"completion_tokens":1,"prompt_cache_hit_tokens":2}}"#,
+            "",
+        ),
+        http_response(
+            "200 OK",
+            "application/json",
+            r#"{"choices":[{"message":{"content":"{}"}}],"model":"model","usage":{"prompt_tokens":5,"completion_tokens":2,"prompt_cache_hit_tokens":1}}"#,
+            "",
+        ),
+        http_response("200 OK", "text/event-stream", stream_success, ""),
+        http_response("200 OK", "text/event-stream", stream_drop, ""),
+        http_response("200 OK", "text/event-stream", missing_terminal, ""),
+        http_response("200 OK", "text/event-stream", stream_provider_error, ""),
+    ];
+    let server = thread::spawn(move || {
+        for response in responses {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0; 8192];
+            assert!(socket.read(&mut request).unwrap() > 0);
+            socket.write_all(&response).unwrap();
+        }
+    });
+
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let client = LlmClient::new().with_openai_compatible(
+                "deepseek",
+                "key",
+                format!("http://{address}"),
+            );
+            client
+                .chat(
+                    ChatRequest::new(crate::LlmOperation::CharacterExtraction, "deepseek/model")
+                        .max_tokens(4_096),
+                )
+                .await
+                .unwrap();
+            assert!(client
+                .chat(
+                    ChatRequest::new(crate::LlmOperation::NarrativeTransition, "deepseek/model")
+                        .max_tokens(4_096),
+                )
+                .await
+                .is_err());
+            client
+                .chat(
+                    ChatRequest::new(crate::LlmOperation::BranchGeneration, "deepseek/model")
+                        .max_tokens(4_096),
+                )
+                .await
+                .unwrap();
+            client
+                .chat(
+                    ChatRequest::new(crate::LlmOperation::CanonExtraction, "deepseek/model")
+                        .max_tokens(4_096)
+                        .json(),
+                )
+                .await
+                .unwrap();
+
+            let events = client
+                .chat_stream(
+                    ChatRequest::new(crate::LlmOperation::CharacterChat, "deepseek/model")
+                        .max_tokens(1_024),
+                )
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            assert!(matches!(
+                events.as_slice(),
+                [Ok(ChatStreamEvent::Delta(text)), Ok(ChatStreamEvent::Finished)] if text == "hello"
+            ));
+
+            let mut dropped = client
+                .chat_stream(
+                    ChatRequest::new(crate::LlmOperation::CharacterChat, "deepseek/model")
+                        .max_tokens(1_024),
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                dropped.next().await,
+                Some(Ok(ChatStreamEvent::Delta(text))) if text == "partial"
+            ));
+            drop(dropped);
+
+            let missing = client
+                .chat_stream(
+                    ChatRequest::new(crate::LlmOperation::CharacterChat, "deepseek/model")
+                        .max_tokens(1_024),
+                )
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            assert!(missing.into_iter().any(|item| item.is_err()));
+
+            let provider_error = client
+                .chat_stream(
+                    ChatRequest::new(crate::LlmOperation::CharacterChat, "deepseek/model")
+                        .max_tokens(1_024),
+                )
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            assert!(provider_error.into_iter().any(|item| item.is_err()));
+        });
+    server.join().unwrap();
+
+    let rendered = handle.render();
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_llm_requests_started_total",
+            &[("operation", "character_extraction")],
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_llm_attempts_total",
+            &[
+                ("operation", "canon_extraction"),
+                ("status", "empty_json_mode")
+            ],
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_llm_retries_total",
+            &[
+                ("operation", "canon_extraction"),
+                ("reason", "json_mode_fallback")
+            ],
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_llm_tokens_total",
+            &[("operation", "canon_extraction"), ("type", "input")],
+        ),
+        12.0
+    );
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_llm_attempts_total",
+            &[
+                ("operation", "character_extraction"),
+                ("status", "rate_limited")
+            ],
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_llm_attempts_total",
+            &[("operation", "character_extraction"), ("status", "success")],
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_llm_retries_total",
+            &[("operation", "character_extraction")],
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_llm_tokens_total",
+            &[
+                ("operation", "character_extraction"),
+                ("type", "cached_input")
+            ],
+        ),
+        4.0
+    );
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_llm_billable_tokens_total",
+            &[
+                ("operation", "character_extraction"),
+                ("class", "uncached_input")
+            ],
+        ),
+        6.0
+    );
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_llm_usage_reports_total",
+            &[("operation", "branch_generation"), ("status", "missing")],
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_llm_requests_total",
+            &[("operation", "narrative_transition"), ("status", "error")],
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_llm_stream_setup_duration_seconds_count",
+            &[("operation", "character_chat"), ("status", "success")],
+        ),
+        4.0
+    );
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_llm_first_token_duration_seconds_count",
+            &[("operation", "character_chat")],
+        ),
+        3.0
+    );
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_llm_requests_total",
+            &[("operation", "character_chat"), ("status", "success")],
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_llm_requests_total",
+            &[
+                ("operation", "character_chat"),
+                ("status", "consumer_dropped")
+            ],
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_llm_requests_total",
+            &[("operation", "character_chat"), ("status", "stream_error")],
+        ),
+        2.0
+    );
 }
 
 #[test]

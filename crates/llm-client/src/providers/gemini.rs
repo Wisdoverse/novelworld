@@ -255,10 +255,12 @@ impl LlmProvider for GeminiProvider {
         Ok(ChatResponse {
             content,
             model: request.model.clone(),
-            usage: resp.usage_metadata.map(|u| Usage {
-                input_tokens: u.prompt_token_count,
-                output_tokens: u.candidates_token_count,
-            }),
+            usage: resp
+                .usage_metadata
+                .map(|usage| {
+                    Usage::new(usage.prompt_token_count, usage.candidates_token_count, None)
+                })
+                .transpose()?,
         })
     }
 

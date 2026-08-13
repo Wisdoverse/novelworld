@@ -30,12 +30,14 @@ class Handler(BaseHTTPRequestHandler):
 
         prompt = "\n".join(message.get("content", "") for message in request.get("messages", []))
         if request.get("stream"):
+            assert request.get("stream_options") == {"include_usage": True}
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
             for payload in (
                 {"choices": [{"delta": {"content": "林岚记得你，也愿意继续同行。"}, "finish_reason": None}]},
                 {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+                {"choices": [], "usage": {"prompt_tokens": 4, "completion_tokens": 2, "prompt_cache_hit_tokens": 1}},
             ):
                 self.wfile.write(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode())
             self.wfile.write(b"data: [DONE]\n\n")
@@ -45,7 +47,7 @@ class Handler(BaseHTTPRequestHandler):
         self.json_response({
             "choices": [{"message": {"content": content}}],
             "model": "e2e",
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            "usage": {"prompt_tokens": 4, "completion_tokens": 2, "prompt_cache_hit_tokens": 1},
         })
 
     @staticmethod

@@ -836,7 +836,7 @@ Exact shape: {{"rubric_version":"{rubric_version}","character_consistency":1,"me
     );
     let response = client
         .chat(
-            ChatRequest::new("")
+            ChatRequest::new(llm_client::LlmOperation::OfflineEvaluation, "")
                 .message("system", system)
                 .message("user", user)
                 .temperature(0.0)
