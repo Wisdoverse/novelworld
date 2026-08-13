@@ -106,10 +106,21 @@ export interface WorldState {
       choice_index?: number;
       choice: string;
       consequence: string;
-      timestamp: string;
+      canon_model_version?: number;
+      canonical_checkpoint_chapter?: number;
+      timestamp?: string;
     }>;
     relationships: Record<string, { score: number; last_change: string }>;
-    world_events: string[];
+    world_events: Array<string | {
+      id: string;
+      chapter: number;
+      summary: string;
+      actor_character_ids: string[];
+      location_id: string | null;
+    }>;
+    locations?: Record<string, { state: string; reason: string }>;
+    threads?: Record<string, { status: 'open' | 'resolved'; description: string }>;
+    reader_reputation?: Record<string, unknown>;
   };
 }
 

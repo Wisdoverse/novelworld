@@ -103,11 +103,29 @@ node=$("${curl_cmd[@]}" "${auth[@]}" "$api/narrative/$novel_id/1")
 node_id=$(json_get "value['id']" <<<"$node")
 
 pause
+failed_choice_file=$(mktemp)
+trap 'rm -f "$source_file" "$failed_choice_file"' EXIT
+failed_choice_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
+  --output "$failed_choice_file" --write-out '%{http_code}' "${auth[@]}" \
+  -H 'Content-Type: application/json' \
+  --data "{\"novel_id\":\"$novel_id\",\"node_id\":\"$node_id\",\"choice_index\":0}" \
+  "$api/narrative/choose")
+[ "$failed_choice_status" = 502 ]
+failed_writes=$(docker exec novel-postgres psql \
+  -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
+  -c "SELECT (SELECT COUNT(*) FROM user_choices WHERE user_id = (SELECT id FROM users WHERE email = '$email') AND node_id = '$node_id') || ':' || (SELECT COUNT(*) FROM player_chapters WHERE user_id = (SELECT id FROM users WHERE email = '$email') AND novel_id = '$novel_id' AND chapter_number = 1) || ':' || (SELECT jsonb_array_length(state -> 'choices') FROM world_states WHERE user_id = (SELECT id FROM users WHERE email = '$email') AND novel_id = '$novel_id')")
+[ "$failed_writes" = 0:0:0 ]
+
+pause
 choice=$("${curl_cmd[@]}" "${auth[@]}" \
   -H 'Content-Type: application/json' \
   --data "{\"novel_id\":\"$novel_id\",\"node_id\":\"$node_id\",\"choice_index\":0}" \
   "$api/narrative/choose")
-python3 -c "import json,sys; value=json.load(sys.stdin); assert value['chapter_number']==1; assert len(value['world_state']['state']['choices'])==1" <<<"$choice"
+python3 -c "import json,sys; value=json.load(sys.stdin); transition=value['transition']; state=value['world_state']['state']; assert value['chapter_number']==1; assert transition['schema_version']==1; assert transition['canon_model_version']==1; assert transition['canonical_checkpoint_chapter']==1; assert value['consequence']==transition['rendered_narrative']; assert len(state['choices'])==1; assert len(state['world_events'])==1; assert len(state['relationships'])==1; assert len(state['locations'])==1; assert len(state['threads'])==1" <<<"$choice"
+
+transition_snapshot=$(docker exec novel-postgres psql \
+  -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
+  -c "SELECT md5(transition::text) || ':' || md5((SELECT state::text FROM world_states WHERE user_id = user_choices.user_id AND novel_id = user_choices.novel_id)) FROM user_choices WHERE node_id = '$node_id'")
 
 pause
 chapter_two=$("${curl_cmd[@]}" "${auth[@]}" "$api/narrative/$novel_id/chapters/2")
@@ -130,6 +148,10 @@ resumed_canon_snapshot=$(docker exec novel-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT model_version || ':' || schema_version || ':' || prompt_version || ':' || md5(content::text) FROM canon_story_models WHERE novel_id = '$novel_id'")
 [ "$resumed_canon_snapshot" = "$canon_snapshot" ]
+resumed_transition_snapshot=$(docker exec novel-postgres psql \
+  -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
+  -c "SELECT md5(transition::text) || ':' || md5((SELECT state::text FROM world_states WHERE user_id = user_choices.user_id AND novel_id = user_choices.novel_id)) FROM user_choices WHERE node_id = '$node_id'")
+[ "$resumed_transition_snapshot" = "$transition_snapshot" ]
 
 pause
 resumed_progress=$("${curl_cmd[@]}" "${auth[@]}" "$api/progress/$novel_id")
@@ -151,6 +173,6 @@ replayed_choice=$("${curl_cmd[@]}" "${auth[@]}" \
   -H 'Content-Type: application/json' \
   --data "{\"novel_id\":\"$novel_id\",\"node_id\":\"$node_id\",\"choice_index\":0}" \
   "$api/narrative/choose")
-python3 -c "import json,sys; value=json.load(sys.stdin); assert len(value['world_state']['state']['choices'])==1" <<<"$replayed_choice"
+python3 -c "import json,sys; value=json.load(sys.stdin); state=value['world_state']['state']; assert len(state['choices'])==1; assert len(state['world_events'])==1; assert next(iter(state['relationships'].values()))['score']==55" <<<"$replayed_choice"
 
 printf 'core reader loop resumed after restart: novel=%s turn=%s\n' "$novel_id" "$turn_id"

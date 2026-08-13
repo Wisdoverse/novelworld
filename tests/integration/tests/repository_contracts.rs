@@ -8,6 +8,9 @@ use agent_service::infrastructure::persistence::{
 use narrative_service::domain::{
     entities::narrative_node::{NarrativeChoice, NarrativeNode},
     repositories::{ChoiceCommit, NarrativeNodeRepository, UserChoiceRepository},
+    services::narrative_transition::{
+        NarrativeTransition, TransitionEvent, TRANSITION_PROMPT_VERSION, TRANSITION_SCHEMA_VERSION,
+    },
 };
 use narrative_service::infrastructure::persistence::pg_narrative_repo::{
     PgNarrativeNodeRepository, PgUserChoiceRepository,
@@ -29,6 +32,24 @@ use uuid::Uuid;
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
         .unwrap_or_else(|_| "postgres://test:test@localhost:25432/novelworld_test".into())
+}
+
+fn transition(chapter: i32, rendered_narrative: impl Into<String>) -> NarrativeTransition {
+    NarrativeTransition {
+        schema_version: TRANSITION_SCHEMA_VERSION,
+        prompt_version: TRANSITION_PROMPT_VERSION.into(),
+        canon_model_version: 1,
+        canonical_checkpoint_chapter: chapter,
+        rendered_narrative: rendered_narrative.into(),
+        events: vec![TransitionEvent {
+            summary: "玩家的选择改变了局势".into(),
+            actor_character_ids: vec![],
+            location_id: None,
+        }],
+        relationship_changes: vec![],
+        location_changes: vec![],
+        thread_changes: vec![],
+    }
 }
 
 #[tokio::test]
@@ -898,8 +919,8 @@ async fn production_repositories_match_fresh_schema() {
         chapter_number: 1,
         choice_index: 0,
         choice_text: "Stay".into(),
-        consequence: "The character stays.".into(),
-        rewritten_chapter_content: "Canonical opening. The character stays.".into(),
+        transition: transition(1, "角色决定留下。"),
+        rewritten_chapter_content: "原著开篇。角色决定留下。".into(),
     };
     let (left, right) = tokio::join!(
         choice_repo.commit_choice(&draft),
@@ -908,10 +929,7 @@ async fn production_repositories_match_fresh_schema() {
     let left = left.unwrap();
     let right = right.unwrap();
     assert_eq!(left.choice.id, right.choice.id);
-    assert_eq!(
-        left.player_chapter_content,
-        "Canonical opening. The character stays."
-    );
+    assert_eq!(left.player_chapter_content, "原著开篇。角色决定留下。");
     assert_eq!(left.player_chapter_content, right.player_chapter_content);
     let persisted_player_chapter: (String, String) = sqlx::query_as(
         "SELECT content, origin FROM player_chapters \
@@ -924,10 +942,7 @@ async fn production_repositories_match_fresh_schema() {
     .unwrap();
     assert_eq!(
         persisted_player_chapter,
-        (
-            "Canonical opening. The character stays.".into(),
-            "choice".into()
-        )
+        ("原著开篇。角色决定留下。".into(), "choice".into())
     );
     assert_eq!(
         left.world_state.state["choices"].as_array().unwrap().len(),
@@ -973,7 +988,10 @@ async fn production_repositories_match_fresh_schema() {
             chapter_number,
             choice_index: 0,
             choice_text: format!("Choice {chapter_number}"),
-            consequence: format!("Result {chapter_number}"),
+            transition: transition(
+                chapter_number,
+                format!("第{chapter_number}章的选择已经生效。"),
+            ),
             rewritten_chapter_content: format!("Rewritten chapter {chapter_number}"),
         });
     }

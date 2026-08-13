@@ -165,45 +165,6 @@ pub fn build_branch_prompt(
     )
 }
 
-/// 构建选择后果生成提示词
-pub fn build_consequence_prompt(
-    novel_title: &str,
-    choice_text: &str,
-    chapter_content: &str,
-    world_state: &WorldState,
-    deviation_mode: &str,
-) -> String {
-    let state = serde_json::to_string_pretty(&world_state.state).unwrap_or_default();
-    format!(
-        r#"你是《{title}》的叙事引擎。用户作为原著中不存在的新玩家角色，在关键时刻采取了行动。请生成行动后的故事发展。
-
-## 当前章节背景
-{chapter}
-
-## 玩家的行动
-{choice}
-
-## 故事偏离度：{mode}
-
-## 当前世界状态（包含玩家此前造成的变化）
-{state}
-
-请生成300-500字的后续剧情，要求：
-1. 自然衔接原著内容
-2. 体现玩家行动的影响
-3. 保持角色性格一致
-4. 根据偏离度决定与原著的差异程度
-5. 结尾留有悬念，引导读者继续阅读
-6. 全文必须使用自然的简体中文，并以第二人称描述玩家
-7. 原著角色必须自主行动，不能表现得像被玩家直接控制"#,
-        title = safe_truncate(novel_title, MAX_TITLE_BYTES),
-        chapter = safe_truncate(chapter_content, MAX_CHAPTER_BYTES),
-        choice = safe_truncate(choice_text, MAX_CHOICE_BYTES),
-        mode = safe_truncate(deviation_mode, MAX_MODE_BYTES),
-        state = safe_truncate(&state, MAX_STATE_SECTION_BYTES),
-    )
-}
-
 /// Build a complete chapter in the player's forked timeline. The canonical
 /// chapter is reference material, never output that can be shown verbatim once
 /// causality has diverged.

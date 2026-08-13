@@ -1,4 +1,8 @@
 use crate::domain::entities::narrative_node::{NarrativeChoice, NarrativeNode, WorldState};
+use crate::domain::services::narrative_transition::{
+    NarrativeTransition, RelationshipChange, ThreadChange, ThreadStatus, TransitionEvent,
+    TRANSITION_PROMPT_VERSION, TRANSITION_SCHEMA_VERSION,
+};
 use uuid::Uuid;
 
 #[test]
@@ -125,4 +129,48 @@ fn legacy_choice_is_enriched_in_place() {
     assert_eq!(choices.len(), 1);
     assert_eq!(choices[0]["node_id"], node_id.to_string());
     assert_eq!(choices[0]["consequence"], "Dawn arrives");
+}
+
+#[test]
+fn structured_transition_mutates_world_state_exactly_once() {
+    let mut state = WorldState::new(Uuid::new_v4(), Uuid::new_v4());
+    let node_id = Uuid::new_v4();
+    let character_id = Uuid::new_v4();
+    let transition = NarrativeTransition {
+        schema_version: TRANSITION_SCHEMA_VERSION,
+        prompt_version: TRANSITION_PROMPT_VERSION.into(),
+        canon_model_version: 1,
+        canonical_checkpoint_chapter: 2,
+        rendered_narrative: "你救下阿宁，城门后的线索仍待追查。".into(),
+        events: vec![TransitionEvent {
+            summary: "玩家救下阿宁".into(),
+            actor_character_ids: vec![character_id],
+            location_id: None,
+        }],
+        relationship_changes: vec![RelationshipChange {
+            character_id,
+            delta: 10,
+            reason: "救命之恩".into(),
+        }],
+        location_changes: vec![],
+        thread_changes: vec![ThreadChange {
+            thread_id: "thread-1".into(),
+            status: ThreadStatus::Open,
+            description: "继续寻找线索".into(),
+        }],
+    };
+
+    assert!(state
+        .apply_choice_transition(node_id, 2, 0, "救下阿宁", &transition)
+        .unwrap());
+    assert!(!state
+        .apply_choice_transition(node_id, 2, 0, "救下阿宁", &transition)
+        .unwrap());
+    assert_eq!(state.state["choices"].as_array().unwrap().len(), 1);
+    assert_eq!(state.state["world_events"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        state.state["relationships"][character_id.to_string()]["score"],
+        60
+    );
+    assert_eq!(state.state["threads"]["thread-1"]["status"], "open");
 }
