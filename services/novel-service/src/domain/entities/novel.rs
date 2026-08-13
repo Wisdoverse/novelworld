@@ -78,6 +78,14 @@ impl Novel {
         });
     }
 
+    /// Persist completed source enrichment while canonical extraction is still running.
+    pub fn record_enrichment(&mut self, total_chapters: i32, world_summary: String, genre: String) {
+        self.total_chapters = total_chapters;
+        self.world_summary = Some(world_summary);
+        self.genre = Some(genre);
+        self.updated_at = Utc::now();
+    }
+
     /// 解析失败
     pub fn mark_error(&mut self, error: String) {
         self.status = NovelStatus::Error;

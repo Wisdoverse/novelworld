@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 import json
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 ANCHOR = "林岚握紧手中的旧地图，望向被风暴笼罩的北塔，决定在天黑前寻找失踪的守门人。"
+ENDING = "北塔的石门布满潮湿苔痕，林岚在门边发现守门人留下的铜铃。"
+CANON_FAILURE_LOCK = threading.Lock()
+CANON_FAILURES_REMAINING = 1
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -44,6 +48,67 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def response_for(prompt):
+        if "source-backed canonical facts" in prompt:
+            global CANON_FAILURES_REMAINING
+            with CANON_FAILURE_LOCK:
+                if CANON_FAILURES_REMAINING:
+                    CANON_FAILURES_REMAINING -= 1
+                    return "{}"
+            final_chunk = "FINAL_CHUNK: true" in prompt
+            excerpt = ENDING if final_chunk else ANCHOR
+            return json.dumps({
+                "coverage_summary": "林岚调查北塔与守门人失踪事件。",
+                "coverage_evidence": {"excerpt": excerpt, "confidence": 1.0},
+                "arc": {
+                    "key": "north-tower-investigation",
+                    "title": "北塔调查",
+                    "summary": "林岚沿线索进入北塔。",
+                    "evidence": {"excerpt": excerpt, "confidence": 1.0},
+                },
+                "events": [{
+                    "summary": "林岚推进北塔调查。",
+                    "caused_by": [],
+                    "locations": ["北塔"],
+                    "characters": ["林岚"],
+                    "factions": [],
+                    "evidence": {"excerpt": excerpt, "confidence": 1.0},
+                }],
+                "locations": [{
+                    "name": "北塔",
+                    "description": "风暴中的古老高塔。",
+                    "evidence": {"excerpt": excerpt, "confidence": 1.0},
+                }],
+                "factions": [],
+                "world_rules": [],
+                "character_goals": [{
+                    "character": "林岚",
+                    "description": "寻找失踪的守门人。",
+                    "evidence": {"excerpt": excerpt, "confidence": 1.0},
+                }],
+                "character_states": [{
+                    "name": "林岚",
+                    "state": "继续调查北塔与守门人的去向。",
+                    "evidence": {"excerpt": excerpt, "confidence": 1.0},
+                }],
+                "relationships": [],
+                "deaths": [],
+                "threads": [{
+                    "key": "missing-gatekeeper",
+                    "description": "守门人的去向仍未确定。",
+                    "status": "open",
+                    "evidence": {"excerpt": excerpt, "confidence": 1.0},
+                }],
+                "ending": ({
+                    "summary": "北塔暗门开启，守门人的去向仍待确认。",
+                    "faction_states": [],
+                    "location_states": [{
+                        "name": "北塔",
+                        "state": "地下回廊已经开启。",
+                        "evidence": {"excerpt": excerpt, "confidence": 1.0},
+                    }],
+                    "evidence": {"excerpt": excerpt, "confidence": 1.0},
+                } if final_chunk else None),
+            }, ensure_ascii=False)
         if "提取所有重要角色信息" in prompt:
             return json.dumps({
                 "characters": [{

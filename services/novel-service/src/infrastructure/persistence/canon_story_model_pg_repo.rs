@@ -46,8 +46,12 @@ impl CanonStoryModelRepository for PgCanonStoryModelRepository {
                 .await?
                 .into_iter()
                 .collect::<HashSet<_>>();
-        if novel.status != "ready" || novel.total_chapters != chapters.len() as i32 {
-            anyhow::bail!("canon story models require a ready novel with every chapter persisted");
+        if !matches!(novel.status.as_str(), "parsing" | "ready")
+            || novel.total_chapters != chapters.len() as i32
+        {
+            anyhow::bail!(
+                "canon story models require a fully enriched novel with every chapter persisted"
+            );
         }
         model
             .validate(&chapters, &character_ids)

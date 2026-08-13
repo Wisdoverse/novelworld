@@ -40,17 +40,30 @@ upload=$("${curl_cmd[@]}" "${auth[@]}" \
   "$api/novels/upload")
 novel_id=$(json_get "value['novel_id']" <<<"$upload")
 
+retried=false
 for _ in $(seq 1 45); do
   sleep 2
   status=$("${curl_cmd[@]}" "${auth[@]}" "$api/novels/$novel_id/status")
   state=$(json_get "value['status']" <<<"$status")
   [ "$state" = ready ] && break
   if [ "$state" = error ]; then
-    printf 'novel parsing failed: %s\n' "$status" >&2
-    exit 1
+    [ "$retried" = false ] || { printf 'novel retry failed: %s\n' "$status" >&2; exit 1; }
+    count=$(docker exec novel-postgres psql \
+      -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
+      -c "SELECT COUNT(*) FROM canon_story_models WHERE novel_id = '$novel_id'")
+    [ "$count" = 0 ]
+    pause
+    "${curl_cmd[@]}" --output /dev/null "${auth[@]}" -X POST "$api/novels/$novel_id/retry"
+    retried=true
   fi
 done
 [ "$state" = ready ] || { printf 'novel did not become ready: %s\n' "$status" >&2; exit 1; }
+[ "$retried" = true ]
+
+canon_snapshot=$(docker exec novel-postgres psql \
+  -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
+  -c "SELECT model_version || ':' || schema_version || ':' || prompt_version || ':' || md5(content::text) FROM canon_story_models WHERE novel_id = '$novel_id'")
+[[ "$canon_snapshot" == 1:1:canon-chunk-v1:* ]]
 
 pause
 chapters=$("${curl_cmd[@]}" "${auth[@]}" "$api/novels/$novel_id/chapters")
@@ -112,6 +125,11 @@ for _ in $(seq 1 60); do
   sleep 2
 done
 [ "$(docker inspect --format '{{.State.Health.Status}}' novel-gateway)" = healthy ]
+
+resumed_canon_snapshot=$(docker exec novel-postgres psql \
+  -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
+  -c "SELECT model_version || ':' || schema_version || ':' || prompt_version || ':' || md5(content::text) FROM canon_story_models WHERE novel_id = '$novel_id'")
+[ "$resumed_canon_snapshot" = "$canon_snapshot" ]
 
 pause
 resumed_progress=$("${curl_cmd[@]}" "${auth[@]}" "$api/progress/$novel_id")

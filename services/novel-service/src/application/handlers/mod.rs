@@ -9,10 +9,10 @@ use crate::application::commands::ImportNovelCommand;
 use crate::domain::entities::{chapter::Chapter, character::Character, novel::Novel};
 use crate::domain::ports::{ImagePort, LlmPort};
 use crate::domain::repositories::{
-    ChapterRepository, CharacterRepository, LoreExcerpt, NovelRepository, ReadingProgressRecord,
-    ReadingProgressRepository,
+    CanonStoryModelRepository, ChapterRepository, CharacterRepository, LoreExcerpt,
+    NovelRepository, ReadingProgressRecord, ReadingProgressRepository,
 };
-use crate::domain::services::node_detector;
+use crate::domain::services::{canon_story_extractor, node_detector};
 use crate::domain::services::{
     character_extractor::{
         build_chunk_extraction_prompt, build_extraction_prompt, build_representative_sample,
@@ -28,6 +28,7 @@ pub struct NovelCommandHandler {
     pub novel_repo: Arc<dyn NovelRepository>,
     pub chapter_repo: Arc<dyn ChapterRepository>,
     pub character_repo: Arc<dyn CharacterRepository>,
+    pub canon_repo: Arc<dyn CanonStoryModelRepository>,
     pub llm: Arc<dyn LlmPort>,
     pub image_client: Arc<dyn ImagePort>,
 }
@@ -66,6 +67,7 @@ impl NovelCommandHandler {
         let novel_repo_err = self.novel_repo.clone();
         let chapter_repo = self.chapter_repo.clone();
         let character_repo = self.character_repo.clone();
+        let canon_repo = self.canon_repo.clone();
         let llm = self.llm.clone();
         let image_client = self.image_client.clone();
         let title = cmd.title.clone();
@@ -78,6 +80,7 @@ impl NovelCommandHandler {
                 novel_repo,
                 chapter_repo,
                 character_repo,
+                canon_repo,
                 llm,
                 image_client,
             )
@@ -113,14 +116,15 @@ impl NovelCommandHandler {
                 "No parsed chapters are available for retry"
             ));
         }
-        if !self
-            .character_repo
-            .find_by_novel(novel_id)
-            .await?
-            .is_empty()
+        let characters = self.character_repo.find_by_novel(novel_id).await?;
+        let resume_canon = !characters.is_empty();
+        if resume_canon
+            && (novel.total_chapters != chapters.len() as i32
+                || novel.world_summary.is_none()
+                || novel.genre.is_none())
         {
             return Err(anyhow::anyhow!(
-                "This import has partial character data and cannot be retried safely"
+                "This legacy partial import cannot be retried safely"
             ));
         }
 
@@ -132,21 +136,35 @@ impl NovelCommandHandler {
         let novel_repo_err = self.novel_repo.clone();
         let chapter_repo = self.chapter_repo.clone();
         let character_repo = self.character_repo.clone();
+        let canon_repo = self.canon_repo.clone();
         let llm = self.llm.clone();
         let image_client = self.image_client.clone();
         tokio::spawn(async move {
-            if let Err(error) = Self::enrich_novel_async(
-                novel,
-                &title,
-                chapters,
-                novel_repo,
-                chapter_repo,
-                character_repo,
-                llm,
-                image_client,
-            )
-            .await
-            {
+            let result = if resume_canon {
+                Self::complete_canon_async(
+                    &mut novel,
+                    &chapters,
+                    &characters,
+                    novel_repo,
+                    canon_repo,
+                    llm,
+                )
+                .await
+            } else {
+                Self::enrich_novel_async(
+                    novel,
+                    &title,
+                    chapters,
+                    novel_repo,
+                    chapter_repo,
+                    character_repo,
+                    canon_repo,
+                    llm,
+                    image_client,
+                )
+                .await
+            };
+            if let Err(error) = result {
                 error!("Novel retry failed for {}: {}", novel_id, error);
                 if let Ok(Some(mut novel)) = novel_repo_err.find_by_id(novel_id).await {
                     novel.mark_error(error.to_string());
@@ -167,6 +185,7 @@ impl NovelCommandHandler {
         novel_repo: Arc<dyn NovelRepository>,
         chapter_repo: Arc<dyn ChapterRepository>,
         character_repo: Arc<dyn CharacterRepository>,
+        canon_repo: Arc<dyn CanonStoryModelRepository>,
         llm: Arc<dyn LlmPort>,
         image_client: Arc<dyn ImagePort>,
     ) -> Result<()> {
@@ -190,6 +209,7 @@ impl NovelCommandHandler {
             novel_repo,
             chapter_repo,
             character_repo,
+            canon_repo,
             llm,
             image_client,
         )
@@ -205,6 +225,7 @@ impl NovelCommandHandler {
         novel_repo: Arc<dyn NovelRepository>,
         chapter_repo: Arc<dyn ChapterRepository>,
         character_repo: Arc<dyn CharacterRepository>,
+        canon_repo: Arc<dyn CanonStoryModelRepository>,
         llm: Arc<dyn LlmPort>,
         image_client: Arc<dyn ImagePort>,
     ) -> Result<()> {
@@ -371,13 +392,23 @@ impl NovelCommandHandler {
             Err(e) => tracing::warn!("Node detection LLM call failed for {}: {}", novel_id, e),
         }
 
-        // 标记小说为 ready
-        novel.mark_ready(
+        // Persist completed source enrichment before canonical extraction. The
+        // novel remains non-ready until the source-complete model commits.
+        novel.record_enrichment(
             total_chapters,
             extraction.world_summary.clone(),
             extraction.genre.clone(),
         );
         novel_repo.update(&novel).await?;
+        Self::complete_canon_async(
+            &mut novel,
+            &chapters,
+            &characters,
+            novel_repo.clone(),
+            canon_repo,
+            llm,
+        )
+        .await?;
 
         // ponytail: discover every character; cap cosmetic avatar cost until demand proves otherwise.
         let semaphore = Arc::new(Semaphore::new(3));
@@ -413,6 +444,55 @@ impl NovelCommandHandler {
             characters.len()
         );
         Ok(())
+    }
+
+    async fn complete_canon_async(
+        novel: &mut Novel,
+        chapters: &[Chapter],
+        characters: &[Character],
+        novel_repo: Arc<dyn NovelRepository>,
+        canon_repo: Arc<dyn CanonStoryModelRepository>,
+        llm: Arc<dyn LlmPort>,
+    ) -> Result<()> {
+        if canon_repo.find_latest(novel.id).await?.is_none() {
+            info!(novel_id = %novel.id, "Extracting canonical story model");
+            let chunks = canon_story_extractor::build_scan_plan(chapters)?;
+            let results = stream::iter(chunks.into_iter().enumerate())
+                .map(|(position, chunk)| {
+                    let llm = llm.clone();
+                    let title = novel.title.clone();
+                    async move {
+                        let prompt =
+                            canon_story_extractor::build_prompt(&title, &chunk, characters)?;
+                        let raw = llm.chat_json(&prompt).await?;
+                        let extraction = canon_story_extractor::parse_chunk(&raw, &chunk)?;
+                        Ok::<_, anyhow::Error>((position, chunk, extraction))
+                    }
+                })
+                .buffer_unordered(3)
+                .collect::<Vec<_>>()
+                .await;
+            let mut extracted = results.into_iter().collect::<Result<Vec<_>>>()?;
+            extracted.sort_by_key(|(position, _, _)| *position);
+            let extracted = extracted
+                .into_iter()
+                .map(|(_, chunk, extraction)| (chunk, extraction))
+                .collect::<Vec<_>>();
+            let model = canon_story_extractor::assemble_model(novel.id, 1, &extracted, characters)?;
+            canon_repo.insert(&model).await?;
+        }
+
+        let total_chapters = novel.total_chapters;
+        let world_summary = novel
+            .world_summary
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("enriched novel has no world summary"))?;
+        let genre = novel
+            .genre
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("enriched novel has no genre"))?;
+        novel.mark_ready(total_chapters, world_summary, genre);
+        novel_repo.update(novel).await
     }
 
     async fn generate_avatar(
