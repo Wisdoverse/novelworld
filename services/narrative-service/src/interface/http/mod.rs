@@ -19,6 +19,7 @@ pub struct AppState {
     pub handler: Arc<NarrativeCommandHandler>,
     pub postgres_readiness: Arc<dyn ReadinessProbe>,
     pub novel_readiness: Arc<dyn ReadinessProbe>,
+    pub metrics: llm_client::MetricsHandle,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -42,7 +43,18 @@ fn routes() -> Router<AppState> {
         .route("/narrative/{novel_id}/world-state", get(get_world_state))
         .route("/health", get(health))
         .route("/ready", get(ready))
+        .route("/metrics", get(metrics))
         .layer(DefaultBodyLimit::max(4 * 1024))
+}
+
+async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
+        state.metrics.render(),
+    )
 }
 
 // ─── Request/Response DTOs ──────────────────────────────────────────────────

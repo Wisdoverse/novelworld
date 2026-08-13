@@ -62,6 +62,20 @@ jobs:
           cargo run --quiet -p h3-eval -- --recorded --git-sha "$GITHUB_SHA" > /tmp/h3-eval-a.json
           cargo run --quiet -p h3-eval -- --recorded --git-sha "$GITHUB_SHA" > /tmp/h3-eval-b.json
           cmp /tmp/h3-eval-a.json /tmp/h3-eval-b.json
+      - name: Horizon 3 LLM budget contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/llm-budget/test_verify.py
+          python3 tools/llm-budget/verify.py \
+            --policy tools/llm-budget/policy-v1.json \
+            --metrics tools/llm-budget/recorded-release.prom \
+            --commit "$GITHUB_SHA" > /tmp/llm-budget-a.json
+          python3 tools/llm-budget/verify.py \
+            --policy tools/llm-budget/policy-v1.json \
+            --metrics tools/llm-budget/recorded-release.prom \
+            --commit "$GITHUB_SHA" > /tmp/llm-budget-b.json
+          cmp /tmp/llm-budget-a.json /tmp/llm-budget-b.json
       - name: Test
         run: cargo test --workspace --exclude integration-tests
       - name: Clippy

@@ -31,6 +31,7 @@ async fn main() -> Result<()> {
         .init();
 
     dotenvy::dotenv().ok();
+    let metrics = llm_client::install_metrics("agent-service")?;
 
     // PostgreSQL connection pool
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
@@ -126,6 +127,7 @@ async fn main() -> Result<()> {
         postgres_readiness: Arc::new(PgReadinessProbe::new(pool)),
         redis_readiness: Arc::new(RedisReadinessProbe::new(redis_pool)),
         novel_readiness,
+        metrics,
     };
 
     // Router

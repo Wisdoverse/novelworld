@@ -6,6 +6,7 @@ use std::pin::Pin;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatStreamEvent {
     Delta(String),
+    Usage(Usage),
     Finished,
 }
 
@@ -24,6 +25,17 @@ impl std::fmt::Display for LlmApiError {
     }
 }
 impl std::error::Error for LlmApiError {}
+
+#[derive(Debug)]
+pub(crate) struct JsonModeEmpty(pub(crate) Option<Usage>);
+
+impl std::fmt::Display for JsonModeEmpty {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("JSON mode returned empty content")
+    }
+}
+
+impl std::error::Error for JsonModeEmpty {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -54,6 +66,7 @@ impl ChatMessage {
 
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
+    pub operation: LlmOperation,
     pub model: String,
     pub messages: Vec<ChatMessage>,
     pub temperature: Option<f32>,
@@ -64,8 +77,9 @@ pub struct ChatRequest {
 }
 
 impl ChatRequest {
-    pub fn new(model: impl Into<String>) -> Self {
+    pub fn new(operation: LlmOperation, model: impl Into<String>) -> Self {
         Self {
+            operation,
             model: model.into(),
             messages: vec![],
             temperature: None,
@@ -110,6 +124,77 @@ impl ChatRequest {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmOperation {
+    SetupConnection,
+    CharacterExtraction,
+    CanonExtraction,
+    NarrativeNodeDetection,
+    BranchGeneration,
+    NarrativeTransition,
+    PlayerChapter,
+    CharacterChat,
+    MemorySummary,
+    OfflineEvaluation,
+}
+
+impl LlmOperation {
+    pub const ALL: [Self; 10] = [
+        Self::SetupConnection,
+        Self::CharacterExtraction,
+        Self::CanonExtraction,
+        Self::NarrativeNodeDetection,
+        Self::BranchGeneration,
+        Self::NarrativeTransition,
+        Self::PlayerChapter,
+        Self::CharacterChat,
+        Self::MemorySummary,
+        Self::OfflineEvaluation,
+    ];
+
+    pub const fn to_str(self) -> &'static str {
+        match self {
+            Self::SetupConnection => "setup_connection",
+            Self::CharacterExtraction => "character_extraction",
+            Self::CanonExtraction => "canon_extraction",
+            Self::NarrativeNodeDetection => "narrative_node_detection",
+            Self::BranchGeneration => "branch_generation",
+            Self::NarrativeTransition => "narrative_transition",
+            Self::PlayerChapter => "player_chapter",
+            Self::CharacterChat => "character_chat",
+            Self::MemorySummary => "memory_summary",
+            Self::OfflineEvaluation => "offline_evaluation",
+        }
+    }
+
+    pub const fn max_output_tokens(self) -> u32 {
+        match self {
+            Self::SetupConnection => 8,
+            Self::MemorySummary => 256,
+            Self::OfflineEvaluation => 800,
+            Self::CharacterChat => 5_120,
+            Self::CharacterExtraction
+            | Self::CanonExtraction
+            | Self::NarrativeNodeDetection
+            | Self::BranchGeneration
+            | Self::NarrativeTransition => 4_096,
+            Self::PlayerChapter => 8_192,
+        }
+    }
+}
+
+impl ChatRequest {
+    pub(crate) fn effective_max_output_tokens(&self) -> Option<u32> {
+        self.max_tokens.map(|limit| {
+            if self.thinking == Some(true) {
+                limit.saturating_add(4_096).min(8_192)
+            } else {
+                limit
+            }
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatResponse {
     pub content: String,
@@ -117,10 +202,29 @@ pub struct ChatResponse {
     pub usage: Option<Usage>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Usage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<u32>,
+}
+
+impl Usage {
+    pub fn new(
+        input_tokens: u32,
+        output_tokens: u32,
+        cached_input_tokens: Option<u32>,
+    ) -> Result<Self> {
+        if cached_input_tokens.is_some_and(|cached| cached > input_tokens) {
+            anyhow::bail!("cached input tokens exceed total input tokens");
+        }
+        Ok(Self {
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]

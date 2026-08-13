@@ -33,6 +33,7 @@ pub struct AppState {
     pub progress_handler: Arc<ReadingProgressHandler>,
     pub document_extractor: Arc<dyn DocumentTextExtractor>,
     pub readiness: Arc<dyn ReadinessProbe>,
+    pub metrics: llm_client::MetricsHandle,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -67,7 +68,18 @@ fn routes() -> Router<AppState> {
         .route("/progress/{novel_id}/identity", put(set_identity))
         .route("/health", get(health))
         .route("/ready", get(ready))
+        .route("/metrics", get(metrics))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_SIZE))
+}
+
+async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
+        state.metrics.render(),
+    )
 }
 
 async fn get_canon_context(

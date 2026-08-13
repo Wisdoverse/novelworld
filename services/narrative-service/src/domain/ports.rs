@@ -3,9 +3,14 @@ use async_trait::async_trait;
 
 #[async_trait]
 pub trait LlmPort: Send + Sync {
-    async fn chat(&self, system: &str, user: &str) -> Result<String>;
     async fn chat_longform(&self, system: &str, user: &str) -> Result<String>;
-    async fn chat_json(&self, prompt: &str) -> Result<String>;
+    async fn chat_json(&self, task: NarrativeLlmTask, prompt: &str) -> Result<String>;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum NarrativeLlmTask {
+    BranchGeneration,
+    NarrativeTransition,
 }
 
 #[async_trait]

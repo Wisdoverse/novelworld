@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::application::commands::ImportNovelCommand;
 use crate::domain::entities::{chapter::Chapter, character::Character, novel::Novel};
-use crate::domain::ports::{ImagePort, LlmPort};
+use crate::domain::ports::{ImagePort, LlmPort, NovelLlmTask};
 use crate::domain::repositories::{
     CanonStoryModelRepository, ChapterRepository, CharacterRepository, LoreExcerpt,
     NovelRepository, ReadingProgressRecord, ReadingProgressRepository,
@@ -236,7 +236,9 @@ impl NovelCommandHandler {
         info!("Extracting characters for novel {}", novel_id);
         let sample_text = build_representative_sample(&chapters);
         let prompt = build_extraction_prompt(title, &sample_text);
-        let extraction_json = llm.chat_json(&prompt).await?;
+        let extraction_json = llm
+            .chat_json(NovelLlmTask::CharacterExtraction, &prompt)
+            .await?;
         let base_extraction: ExtractionResult =
             serde_json::from_str(json_object_payload(&extraction_json))?;
         validate_extraction(&base_extraction)?;
@@ -249,7 +251,9 @@ impl NovelCommandHandler {
                     let llm = llm.clone();
                     async move {
                         let prompt = build_chunk_extraction_prompt(title, &chunk, index);
-                        let json = llm.chat_json(&prompt).await?;
+                        let json = llm
+                            .chat_json(NovelLlmTask::CharacterExtraction, &prompt)
+                            .await?;
                         let result: ChunkExtractionResult =
                             serde_json::from_str(json_object_payload(&json))?;
                         validate_chunk_extraction(&result)?;
@@ -347,7 +351,10 @@ impl NovelCommandHandler {
             .map(|c| (c.chapter_number, c.content.as_str()))
             .collect();
         let node_prompt = node_detector::build_node_detection_prompt(title, &chapter_summaries);
-        match llm.chat_json(&node_prompt).await {
+        match llm
+            .chat_json(NovelLlmTask::NarrativeNodeDetection, &node_prompt)
+            .await
+        {
             Ok(node_json) => {
                 match serde_json::from_str::<node_detector::NodeDetectionResult>(
                     json_object_payload(&node_json),
@@ -464,7 +471,9 @@ impl NovelCommandHandler {
                     async move {
                         let prompt =
                             canon_story_extractor::build_prompt(&title, &chunk, characters)?;
-                        let raw = llm.chat_json(&prompt).await?;
+                        let raw = llm
+                            .chat_json(NovelLlmTask::CanonExtraction, &prompt)
+                            .await?;
                         let extraction = canon_story_extractor::parse_chunk(&raw, &chunk)?;
                         Ok::<_, anyhow::Error>((position, chunk, extraction))
                     }

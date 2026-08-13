@@ -21,6 +21,7 @@ enum ConfigSource {
 }
 
 struct RuntimeConfig {
+    provider: String,
     api_url: String,
     model: String,
     api_key: String,
@@ -76,6 +77,7 @@ impl RuntimeLlmClient {
     ) -> Self {
         Self {
             source: ConfigSource::Static(RuntimeConfig {
+                provider: provider_for_url(&api_url).into(),
                 api_url,
                 model,
                 api_key,
@@ -124,6 +126,7 @@ impl RuntimeLlmClient {
             .get_or_try_init(|| async {
                 let config = match &self.source {
                     ConfigSource::Static(config) => RuntimeConfig {
+                        provider: config.provider.clone(),
                         api_url: config.api_url.clone(),
                         model: config.model.clone(),
                         api_key: config.api_key.clone(),
@@ -155,9 +158,14 @@ impl RuntimeLlmClient {
         resolved.client.chat_stream(request).await
     }
 
-    pub async fn simple_chat(&self, system: &str, user: &str) -> Result<String> {
+    pub async fn simple_chat(
+        &self,
+        operation: crate::LlmOperation,
+        system: &str,
+        user: &str,
+    ) -> Result<String> {
         self.chat(
-            ChatRequest::new("")
+            ChatRequest::new(operation, "")
                 .message("system", system)
                 .message("user", user)
                 .temperature(0.8)
@@ -171,9 +179,14 @@ impl RuntimeLlmClient {
     /// is deliberately disabled so providers such as DeepSeek cannot consume
     /// the response budget with hidden reasoning and return an incomplete
     /// chapter instead of usable text.
-    pub async fn longform_chat(&self, system: &str, user: &str) -> Result<String> {
+    pub async fn longform_chat(
+        &self,
+        operation: crate::LlmOperation,
+        system: &str,
+        user: &str,
+    ) -> Result<String> {
         self.chat(
-            ChatRequest::new("")
+            ChatRequest::new(operation, "")
                 .message("system", system)
                 .message("user", user)
                 .temperature(0.8)
@@ -184,9 +197,9 @@ impl RuntimeLlmClient {
         .map(|response| response.content)
     }
 
-    pub async fn json_chat(&self, prompt: &str) -> Result<String> {
+    pub async fn json_chat(&self, operation: crate::LlmOperation, prompt: &str) -> Result<String> {
         self.chat(
-            ChatRequest::new("")
+            ChatRequest::new(operation, "")
                 .message(
                     "system",
                     "You are a helpful assistant that always responds with a non-empty valid JSON object. Output JSON only.",
@@ -203,8 +216,9 @@ impl RuntimeLlmClient {
 }
 
 fn build_resolved(config: RuntimeConfig) -> ResolvedClient {
-    let model = format!("runtime/{}", config.model);
-    let client = LlmClient::new().with_openai_compatible("runtime", config.api_key, config.api_url);
+    let model = format!("{}/{}", config.provider, config.model);
+    let client =
+        LlmClient::new().with_openai_compatible(&config.provider, config.api_key, config.api_url);
     ResolvedClient {
         client,
         model,
@@ -222,12 +236,26 @@ fn validate_remote_config(config: RemoteConfig) -> Result<RuntimeConfig> {
     {
         return Err(anyhow!("invalid runtime LLM configuration"));
     }
+    let provider = provider_for_url(&config.api_url).into();
     Ok(RuntimeConfig {
+        provider,
         api_url: config.api_url,
         model: config.model,
         api_key: config.api_key,
         thinking_enabled: config.thinking_enabled,
     })
+}
+
+fn provider_for_url(api_url: &str) -> &'static str {
+    match reqwest::Url::parse(api_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .as_deref()
+    {
+        Some("api.deepseek.com") => "deepseek",
+        Some("api.openai.com") => "openai",
+        _ => "environment",
+    }
 }
 
 #[cfg(test)]

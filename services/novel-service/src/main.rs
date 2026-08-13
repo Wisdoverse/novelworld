@@ -31,6 +31,7 @@ async fn main() -> Result<()> {
         .init();
 
     dotenvy::dotenv().ok();
+    let metrics = llm_client::install_metrics("novel-service")?;
 
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let pool = PgPoolOptions::new()
@@ -85,6 +86,7 @@ async fn main() -> Result<()> {
         progress_handler,
         document_extractor,
         readiness: Arc::new(PgReadinessProbe::new(pool)),
+        metrics,
     };
 
     let app = router(state).layer(

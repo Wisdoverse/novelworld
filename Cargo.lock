@@ -2067,9 +2067,12 @@ name = "llm-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
  "async-trait",
  "bytes",
  "futures",
+ "metrics",
+ "metrics-exporter-prometheus",
  "reqwest",
  "serde",
  "serde_json",
