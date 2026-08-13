@@ -15,7 +15,7 @@ exists, then the owning delete workflow removes it.
 | Character memories | PostgreSQL, for the lifetime of the novel/account. | Novel or account deletion. The existing per-character short-memory action clears only the Redis projection, not durable history. |
 | Short-memory projection | Redis lists, at most 50 messages per character/user pair. There is no time-based TTL; PostgreSQL remains the source of truth. | Internal cleanup establishes a tombstone before authoritative deletion, then removes matching keys. Account cleanup removes every matching user key; novel cleanup preserves other novels and users. |
 | Deletion tombstones | Redis keys containing only a user UUID or user/novel UUID pair, retained for one hour. They contain no source text, message, profile, or model data. | Expire automatically. They prevent an already-committed asynchronous projection from recreating deleted cache data. |
-| Choices, world state, narrative nodes, reading progress, and player timelines | PostgreSQL, for the lifetime of the novel/account. | Novel or account deletion. |
+| Choices, world state, narrative nodes, reading progress, player timelines, and world-turn audit/replay records | PostgreSQL, for the lifetime of the novel/account. Failed world turns retain their action and status but not a model transition/result. | Novel or account deletion. `world_turns` cascade through their owning world state. |
 | Generated chapter prose | PostgreSQL `player_chapters`, for the lifetime of the novel/account. | Novel or account deletion. |
 | User profile and refresh tokens | PostgreSQL, for the account lifetime. A refresh token is atomically replaced after successful refresh and removed by logout or when expired. | Account deletion. |
 | Web-managed LLM API key | Encrypted in the singleton PostgreSQL runtime configuration until replaced. | Removed when the final account is deleted. Environment-managed keys remain under operator control outside NovelWorld. |
@@ -62,7 +62,7 @@ HTTP fragments with bounded memory; it never reads downstream tables. A final
 The export contains profile metadata; owned novels, source chapters,
 characters, relationships, canon models, and reading progress; durable messages
 and memory content; and relevant narrative nodes, choices/transitions, world
-state, and player chapters. It excludes credentials, tokens, runtime model
+state, player chapters, and world-turn actions/transitions/results. It excludes credentials, tokens, runtime model
 keys, internal operational state, embeddings, Redis/search projections, and
 data held only by providers or operators. Each service uses its own statement
 snapshot, so this is a portability export rather than a globally atomic backup.

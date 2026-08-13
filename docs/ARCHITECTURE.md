@@ -22,11 +22,11 @@
 │  (Axum)     │       │              │              │
 │  Port 8080  │       │              │              │
 └──────┬──────┘       │              │              │
-       │ gRPC / HTTP  │              │              │
+       │ HTTP         │              │              │
 ┌──────▼──────┐ ┌─────▼──────┐ ┌────▼──────┐ ┌────▼──────┐
 │   novel-    │ │   agent-   │ │narrative- │ │  user-    │
 │   service   │ │   service  │ │  service  │ │  service  │
-│  Port 50051 │ │ Port 50052 │ │Port 50053 │ │Port 50054 │
+│  Port 8002  │ │ Port 8003  │ │ Port 8004 │ │ Port 8001 │
 └──────┬──────┘ └─────┬──────┘ └────┬──────┘ └────┬──────┘
        │              │              │              │
 ┌──────▼──────────────▼──────────────▼──────────────▼──────────┐
@@ -48,10 +48,25 @@
 | 服务 | 端口 | 职责 | 核心 Domain |
 |---|---|---|---|
 | `gateway` | 8080 | API 聚合、JWT 鉴权、限流、路由转发 | — |
-| `novel-service` | 50051 | 小说导入解析、章节拆分、角色提取、世界观构建 | Novel, Chapter, Character |
-| `agent-service` | 50052 | 角色 Agent 对话、4层记忆金字塔、流式 SSE | Agent, Memory, Conversation |
-| `narrative-service` | 50053 | 分支叙事引擎、关键节点生成、世界状态持久化 | NarrativeNode, Choice, WorldState |
-| `user-service` | 50054 | 用户注册登录、阅读进度、身份设置 | User, ReadingProgress, Identity |
+| `novel-service` | 8002 | 小说解析、角色/原著模型、阅读进度与防剧透上下文 | Novel, Chapter, Character, CanonStoryModel |
+| `agent-service` | 8003 | 角色对话、4层记忆、开放世界上下文、流式 SSE | Memory, Conversation |
+| `narrative-service` | 8004 | 分支叙事、玩家实体、开放世界会话与回合账本 | NarrativeNode, PlayerEntity, WorldState, WorldTurn |
+| `user-service` | 8001 | 注册、登录、JWT 与刷新令牌 | User, RefreshToken |
+
+### Living-world commit path
+
+The browser selects an already unlocked entry chapter and creates one durable
+`PlayerEntity` per user/novel. Narrative-service snapshots the source-cited
+entry context from novel-service once; later reading-progress changes do not
+rewrite that session.
+
+Each action reserves a UUID `Idempotency-Key` in `world_turns`, with one active
+turn per user/novel and an expected-turn fence. Model work runs outside the
+database transaction. Domain validation then atomically commits the typed
+transition, `WorldState`, and replay result before the API reports success.
+Agent-service reads the same committed character projection over internal HTTP,
+so chat goals, perceptions, relationships, threads, and recent player events
+share the narrative timeline.
 
 ---
 

@@ -24,6 +24,7 @@ pub struct AppState {
     pub postgres_readiness: Arc<dyn ReadinessProbe>,
     pub redis_readiness: Arc<dyn ReadinessProbe>,
     pub novel_readiness: Arc<dyn ReadinessProbe>,
+    pub narrative_readiness: Arc<dyn ReadinessProbe>,
     pub account_export: Arc<dyn AccountExportPort>,
     pub internal_service_token: Arc<str>,
     pub metrics: llm_client::MetricsHandle,
@@ -686,13 +687,14 @@ async fn health() -> impl IntoResponse {
 }
 
 async fn ready(State(state): State<AppState>) -> impl IntoResponse {
-    let (postgres_ready, redis_ready, novel_ready) = dependency_readiness(
+    let (postgres_ready, redis_ready, novel_ready, narrative_ready) = dependency_readiness(
         state.postgres_readiness.as_ref(),
         state.redis_readiness.as_ref(),
         state.novel_readiness.as_ref(),
+        state.narrative_readiness.as_ref(),
     )
     .await;
-    let status = if postgres_ready && redis_ready && novel_ready {
+    let status = if postgres_ready && redis_ready && novel_ready && narrative_ready {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
@@ -706,6 +708,7 @@ async fn ready(State(state): State<AppState>) -> impl IntoResponse {
                 "postgres": postgres_ready,
                 "redis": redis_ready,
                 "novel_service": novel_ready,
+                "narrative_service": narrative_ready,
             }
         })),
     )
@@ -716,8 +719,14 @@ async fn dependency_readiness(
     postgres: &dyn ReadinessProbe,
     redis: &dyn ReadinessProbe,
     novel: &dyn ReadinessProbe,
-) -> (bool, bool, bool) {
-    tokio::join!(postgres.is_ready(), redis.is_ready(), novel.is_ready())
+    narrative: &dyn ReadinessProbe,
+) -> (bool, bool, bool, bool) {
+    tokio::join!(
+        postgres.is_ready(),
+        redis.is_ready(),
+        novel.is_ready(),
+        narrative.is_ready()
+    )
 }
 
 #[cfg(test)]
@@ -872,8 +881,14 @@ mod principal_contract_tests {
     #[tokio::test]
     async fn dependency_readiness_fails_closed_per_dependency() {
         assert_eq!(
-            dependency_readiness(&FixedProbe(true), &FixedProbe(false), &FixedProbe(true)).await,
-            (true, false, true)
+            dependency_readiness(
+                &FixedProbe(true),
+                &FixedProbe(false),
+                &FixedProbe(true),
+                &FixedProbe(false),
+            )
+            .await,
+            (true, false, true, false)
         );
     }
 }

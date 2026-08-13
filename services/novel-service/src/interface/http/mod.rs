@@ -25,7 +25,7 @@ use crate::domain::repositories::{
     CanonStoryModelRepository, ChapterRepository, CharacterRepository, NovelRepository,
 };
 use crate::domain::services::canon_story_context::{
-    build_canon_context, original_player_name_available,
+    build_canon_context, build_world_entry_context, original_player_name_available,
 };
 use axum::routing::put;
 
@@ -69,6 +69,10 @@ fn routes() -> Router<AppState> {
         .route(
             "/internal/novels/{id}/player-entry",
             post(get_player_entry_context),
+        )
+        .route(
+            "/internal/novels/{id}/world-entry/{checkpoint}",
+            get(get_world_entry_context),
         )
         .route(
             "/internal/privacy/users/{user_id}/export",
@@ -215,6 +219,7 @@ async fn get_canon_context(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PlayerEntryContextRequest {
+    checkpoint_chapter: Option<i32>,
     proposed_name: Option<String>,
 }
 
@@ -250,6 +255,13 @@ async fn get_player_entry_context(
         Ok(progress) => progress,
         Err(error) => return progress_error_response(error),
     };
+    let checkpoint = req.checkpoint_chapter.unwrap_or(progress.current_chapter);
+    if checkpoint < 1 || checkpoint > progress.current_chapter {
+        return api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Player checkpoint must be within unlocked reading progress",
+        );
+    }
     let model = match state.canon_repo.find_latest(novel_id).await {
         Ok(Some(model)) => model,
         Ok(None) => return api_error(StatusCode::NOT_FOUND, "Canon context not found"),
@@ -265,7 +277,7 @@ async fn get_player_entry_context(
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error");
         }
     };
-    let context = match build_canon_context(&model, &characters, progress.current_chapter) {
+    let context = match build_canon_context(&model, &characters, checkpoint) {
         Ok(context) => context,
         Err(error) => {
             tracing::error!(%error, %novel_id, "invalid player entry context");
@@ -285,6 +297,49 @@ async fn get_player_entry_context(
         }),
     )
         .into_response()
+}
+
+async fn get_world_entry_context(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((novel_id, checkpoint)): Path<(Uuid, i32)>,
+) -> Response {
+    let user_id = match extract_user_id(&headers) {
+        Some(id) => id,
+        None => return api_error(StatusCode::UNAUTHORIZED, "Missing user ID"),
+    };
+    let progress = match state.progress_handler.get(user_id, novel_id).await {
+        Ok(progress) => progress,
+        Err(error) => return progress_error_response(error),
+    };
+    if checkpoint < 1 || checkpoint > progress.current_chapter {
+        return api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "World checkpoint must be within unlocked reading progress",
+        );
+    }
+    let model = match state.canon_repo.find_latest(novel_id).await {
+        Ok(Some(model)) => model,
+        Ok(None) => return api_error(StatusCode::NOT_FOUND, "Canon context not found"),
+        Err(error) => {
+            tracing::error!(%error, %novel_id, "failed to load world-entry canon");
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error");
+        }
+    };
+    let characters = match state.character_repo.find_by_novel(novel_id).await {
+        Ok(characters) => characters,
+        Err(error) => {
+            tracing::error!(%error, %novel_id, "failed to load world-entry characters");
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error");
+        }
+    };
+    match build_world_entry_context(&model, &characters, checkpoint, progress.current_chapter) {
+        Ok(context) => (StatusCode::OK, Json(context)).into_response(),
+        Err(error) => {
+            tracing::error!(%error, %novel_id, checkpoint, "invalid world-entry context");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
+        }
+    }
 }
 
 // ─── Request/Response DTOs ────────────────────────────────────────────────────

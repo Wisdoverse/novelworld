@@ -10,6 +10,7 @@ use uuid::Uuid;
 use crate::domain::entities::{
     narrative_node::WorldState,
     player_entity::{PlayerEntity, RelationshipState},
+    world_session::WorldEntryContext,
 };
 use crate::domain::repositories::WorldStateRepository;
 
@@ -131,6 +132,54 @@ impl WorldStateRepository for PgWorldStateRepository {
         .await?;
         transaction.commit().await?;
         Ok(stored)
+    }
+
+    async fn start_open_world(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        context: &WorldEntryContext,
+    ) -> Result<WorldState> {
+        context.validate()?;
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query_as::<_, WorldStateRow>(
+            r#"
+            SELECT user_id, novel_id, state, updated_at
+            FROM world_states
+            WHERE user_id = $1 AND novel_id = $2
+            FOR UPDATE
+            "#,
+        )
+        .bind(user_id)
+        .bind(novel_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let mut world_state = WorldState::from(row);
+        if world_state.open_world()?.is_some() {
+            transaction.commit().await?;
+            return Ok(world_state);
+        }
+        let before = world_state.state.clone();
+        world_state.start_open_world(context)?;
+        if world_state.state != before {
+            let row = sqlx::query_as::<_, WorldStateRow>(
+                r#"
+                UPDATE world_states
+                SET state = $3, updated_at = $4
+                WHERE user_id = $1 AND novel_id = $2
+                RETURNING user_id, novel_id, state, updated_at
+                "#,
+            )
+            .bind(user_id)
+            .bind(novel_id)
+            .bind(&world_state.state)
+            .bind(world_state.updated_at)
+            .fetch_one(&mut *transaction)
+            .await?;
+            world_state = WorldState::from(row);
+        }
+        transaction.commit().await?;
+        Ok(world_state)
     }
 
     async fn update(&self, state: &WorldState) -> Result<()> {

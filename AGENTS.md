@@ -184,6 +184,7 @@ Schema lives in `infra/postgres/init.sql`. Key tables:
 | `character_relationships` | Entity relationship graph between characters |
 | `chat_messages` | Conversation history |
 | `chat_turns` | Idempotency, lease, and commit state for conversation turns |
+| `world_turns` | Idempotency, lease, audit, and exact replay state for open-world turns |
 | `narrative_nodes` | Branch points with JSONB choices |
 | `user_choices` | Reader's branch decisions |
 | `world_states` | JSONB world state per reader per novel |

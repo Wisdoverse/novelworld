@@ -37,6 +37,7 @@ describe('Type contracts', () => {
     const ws: WorldState = {
       user_id: 'u1',
       novel_id: 'n1',
+      updated_at: new Date().toISOString(),
       state: {
         choices: [],
         relationships: {},

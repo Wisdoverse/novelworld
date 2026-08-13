@@ -119,3 +119,80 @@ pub trait LoreContextPort: Send + Sync {
         limit: usize,
     ) -> Result<Vec<LoreExcerpt>>;
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CharacterWorldContext {
+    pub user_id: Uuid,
+    pub novel_id: Uuid,
+    pub character_id: Uuid,
+    pub character_alive: bool,
+    pub canon_model_version: i32,
+    pub checkpoint_chapter: i32,
+    pub turn_number: i64,
+    pub world_time: i64,
+    pub player_id: Uuid,
+    pub player_name: String,
+    pub player_location_id: String,
+    pub relationship: Option<WorldRelationship>,
+    pub goals: Vec<WorldCharacterGoal>,
+    pub perception_of_player: Option<String>,
+    pub current_canonical_event: Option<WorldCanonicalEvent>,
+    pub recent_player_events: Vec<WorldHistoryItem>,
+    pub active_threads: Vec<WorldActiveThread>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorldRelationship {
+    pub score: i32,
+    pub last_change: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorldCharacterGoal {
+    pub id: String,
+    pub character_id: Uuid,
+    pub description: String,
+    pub source_chapters: Vec<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorldCanonicalEvent {
+    pub id: String,
+    pub sequence: i32,
+    pub summary: String,
+    pub character_ids: Vec<Uuid>,
+    pub location_ids: Vec<String>,
+    pub faction_ids: Vec<String>,
+    pub death_character_ids: Vec<Uuid>,
+    pub source_chapters: Vec<i32>,
+    pub status: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorldHistoryItem {
+    pub id: String,
+    pub turn_id: Uuid,
+    pub turn_number: i64,
+    pub world_time: i64,
+    pub summary: String,
+    pub actor_character_ids: Vec<Uuid>,
+    pub location_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorldActiveThread {
+    pub id: String,
+    pub description: String,
+    pub origin: String,
+}
+
+#[async_trait]
+pub trait WorldContextPort: Send + Sync {
+    async fn find(
+        &self,
+        novel_id: Uuid,
+        character_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Option<CharacterWorldContext>>;
+}
