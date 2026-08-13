@@ -2,6 +2,7 @@ use std::time::Duration;
 
 const MAX_RETRIES: u32 = 3;
 const RETRY_DELAYS: [u64; 3] = [1, 2, 4];
+const MAX_RETRY_AFTER_SECS: u64 = 120;
 
 pub struct RetryPolicy;
 
@@ -12,7 +13,7 @@ impl RetryPolicy {
 
     pub fn delay(_status: u16, attempt: u32, retry_after: Option<&str>) -> Duration {
         if let Some(secs) = retry_after.and_then(|value| value.parse::<u64>().ok()) {
-            return Duration::from_secs(secs);
+            return Duration::from_secs(secs.min(MAX_RETRY_AFTER_SECS));
         }
         Duration::from_secs(RETRY_DELAYS[attempt as usize])
     }

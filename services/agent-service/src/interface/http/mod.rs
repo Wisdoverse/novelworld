@@ -185,6 +185,9 @@ fn application_error_response(
         Some(AgentRequestError::TurnInProgress {
             retry_after_seconds,
         }) => Some(*retry_after_seconds),
+        Some(AgentRequestError::Capacity {
+            retry_after_seconds,
+        }) => Some(*retry_after_seconds),
         _ => None,
     };
     let (status, code, message) = match error.downcast_ref::<AgentRequestError>() {
@@ -202,6 +205,11 @@ fn application_error_response(
             StatusCode::CONFLICT,
             "turn_in_progress",
             "Chat turn is already in progress".to_string(),
+        ),
+        Some(AgentRequestError::Capacity { .. }) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "capacity_unavailable",
+            "Chat capacity is busy; retry the request".to_string(),
         ),
         Some(AgentRequestError::TurnConflict) => (
             StatusCode::CONFLICT,

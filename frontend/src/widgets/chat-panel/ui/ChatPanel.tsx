@@ -1,11 +1,18 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Send, X, Minimize2, Maximize2, Brain } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { type Components } from 'react-markdown';
 import { useChatStore } from '@/features/character-chat/model/useChatStore';
 import type { Character, ChatMessage } from '@/shared/types';
 
 const EMPTY_MESSAGES: ChatMessage[] = [];
+const SAFE_MARKDOWN_COMPONENTS: Components = {
+  img: ({ alt }) => <span>{alt}</span>,
+};
+
+export function ChatMarkdown({ children }: { children: string }) {
+  return <ReactMarkdown components={SAFE_MARKDOWN_COMPONENTS}>{children}</ReactMarkdown>;
+}
 
 interface ChatPanelProps {
   character: Character;
@@ -180,7 +187,7 @@ export function ChatPanel({
                           msg.role === 'user' ? 'chat-bubble-user' : 'chat-bubble-character'
                         }`}
                       >
-                        <ReactMarkdown>{msg.content}</ReactMarkdown>
+                        <ChatMarkdown>{msg.content}</ChatMarkdown>
                       </div>
                     </div>
                   ))}
@@ -195,7 +202,7 @@ export function ChatPanel({
                         {character.name[0]}
                       </div>
                       <div className="chat-bubble-character max-w-[80%] text-sm leading-relaxed">
-                        <ReactMarkdown>{currentStreamText}</ReactMarkdown>
+                        <ChatMarkdown>{currentStreamText}</ChatMarkdown>
                         <span className="inline-block w-1 h-4 ml-0.5 animate-pulse" style={{ background: '#22d3ee' }} />
                       </div>
                     </div>

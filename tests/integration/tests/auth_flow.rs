@@ -4,6 +4,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
+use tokio::sync::Semaphore;
 use user_service::{
     application::handlers::{AuthError, AuthHandler},
     domain::{
@@ -84,6 +85,7 @@ async fn initial_admin_is_durable_and_single_winner() {
         privacy_cleanup: Arc::new(RecordingPrivacyCleanup::default()),
         environment_llm_config: None,
         refresh_token_expiry: 60,
+        password_work: Arc::new(Semaphore::new(1)),
     };
     assert!(matches!(
         empty_handler
@@ -147,6 +149,18 @@ async fn initial_admin_is_durable_and_single_winner() {
             .unwrap(),
         1
     );
+    let _held = empty_handler
+        .password_work
+        .clone()
+        .acquire_owned()
+        .await
+        .unwrap();
+    assert!(matches!(
+        empty_handler
+            .register("capacity@test.invalid", "password123", None)
+            .await,
+        Err(AuthError::Capacity)
+    ));
 
     pool.close().await;
     sqlx::query("DROP DATABASE novelworld_setup_contract WITH (FORCE)")
@@ -337,6 +351,7 @@ async fn account_erasure_fails_closed_cascades_owned_data_and_resets_final_setup
         privacy_cleanup,
         environment_llm_config: None,
         refresh_token_expiry: 60,
+        password_work: Arc::new(Semaphore::new(2)),
     };
     assert!(matches!(
         handler(last_admin_cleanup.clone())
@@ -500,8 +515,7 @@ async fn test_refresh_token_lifecycle() {
         .unwrap();
 
     let user_id = Uuid::new_v4();
-    let token_id = Uuid::new_v4();
-    let token_str = format!("refresh_{}", Uuid::new_v4());
+    let token_str = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
 
     // Create user
     sqlx::query("INSERT INTO users (id, email, password_hash, role) VALUES ($1, $2, $3, 'user')")
@@ -512,34 +526,26 @@ async fn test_refresh_token_lifecycle() {
         .await
         .unwrap();
 
-    // Create refresh token
-    sqlx::query(
-        "INSERT INTO refresh_tokens (id, user_id, token, expires_at) VALUES ($1, $2, $3, NOW() + INTERVAL '7 days')"
-    )
-    .bind(token_id).bind(user_id).bind(&token_str)
-    .execute(&pool).await.unwrap();
-
-    // Verify token exists
-    let row: (Uuid,) = sqlx::query_as("SELECT user_id FROM refresh_tokens WHERE token = $1")
-        .bind(&token_str)
-        .fetch_one(&pool)
+    let repo = PgUserRepository::new(pool.clone(), CONFIG_KEY).unwrap();
+    repo.save_refresh_token(&RefreshToken::new(user_id, token_str.clone(), 60))
         .await
         .unwrap();
-    assert_eq!(row.0, user_id);
-
-    // Delete token (logout)
-    sqlx::query("DELETE FROM refresh_tokens WHERE token = $1")
-        .bind(&token_str)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM refresh_tokens WHERE token = $1")
-        .bind(&token_str)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(count.0, 0);
+    let left = RefreshToken::new(user_id, "b".repeat(64), 60);
+    let right = RefreshToken::new(user_id, "c".repeat(64), 60);
+    let (left_won, right_won) = tokio::join!(
+        repo.rotate_refresh_token(&token_str, &left),
+        repo.rotate_refresh_token(&token_str, &right)
+    );
+    assert_ne!(left_won.unwrap(), right_won.unwrap());
+    assert!(repo.find_refresh_token(&token_str).await.unwrap().is_none());
+    let replacements: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM refresh_tokens WHERE token = $1 OR token = $2")
+            .bind(&left.token)
+            .bind(&right.token)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(replacements, 1);
 
     // Cleanup
     sqlx::query("DELETE FROM users WHERE id = $1")

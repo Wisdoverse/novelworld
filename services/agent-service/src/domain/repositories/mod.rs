@@ -100,7 +100,6 @@ pub struct CharacterInfo {
     pub id: Uuid,
     pub name: String,
     pub novel_id: Uuid,
-    pub speaking_style: Option<String>,
     pub first_appearance_chapter: Option<i32>,
 }
 

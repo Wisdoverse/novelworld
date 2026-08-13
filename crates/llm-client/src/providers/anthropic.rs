@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    response_error,
+    json_response, response_error,
     sse::{decode_stream, SseFrame},
     LlmProvider,
 };
@@ -109,10 +109,7 @@ pub(crate) fn parse_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>
         payload_type
     } else {
         if payload_type != frame.event {
-            return Err(anyhow!(
-                "Anthropic event type mismatch: event={}, payload={payload_type}",
-                frame.event
-            ));
+            return Err(anyhow!("Anthropic stream event type mismatch"));
         }
         frame.event.as_str()
     };
@@ -122,14 +119,7 @@ pub(crate) fn parse_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>
     }
 
     match event_type {
-        "error" => {
-            let message = payload
-                .get("error")
-                .and_then(|error| error.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or("unknown error");
-            Err(anyhow!("Anthropic stream error: {message}"))
-        }
+        "error" => Err(anyhow!("Anthropic stream failed")),
         "message_stop" => Ok(vec![ChatStreamEvent::Finished]),
         "content_block_delta" => {
             let delta = payload
@@ -193,7 +183,7 @@ impl LlmProvider for AnthropicProvider {
             return Err(response_error(response).await);
         }
 
-        let resp: AnthropicResponse = response.json().await?;
+        let resp: AnthropicResponse = json_response(response).await?;
 
         let content = resp
             .content

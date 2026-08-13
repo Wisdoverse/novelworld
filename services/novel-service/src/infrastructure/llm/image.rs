@@ -1,7 +1,9 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use async_trait::async_trait;
+use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 use crate::domain::ports::ImagePort;
 
@@ -35,7 +37,11 @@ pub struct ImageClient {
 impl ImageClient {
     pub fn new(api_url: String, api_key: String, model: String) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(300))
+                .build()
+                .expect("valid static image HTTP client configuration"),
             api_url,
             api_key,
             model,
@@ -62,10 +68,18 @@ impl ImagePort for ImageClient {
             .await?;
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("Image API error {}: {}", status, body));
+            return Err(anyhow::anyhow!("Image API error {status}"));
         }
-        let resp: ImageResponse = response.json().await?;
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if body.len().saturating_add(chunk.len()) > 1024 * 1024 {
+                bail!("Image API response exceeded 1048576 bytes");
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let resp: ImageResponse = serde_json::from_slice(&body)?;
         resp.data
             .first()
             .map(|d| d.url.clone())

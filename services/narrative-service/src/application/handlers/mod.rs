@@ -650,46 +650,47 @@ impl NarrativeCommandHandler {
             });
         }
 
+        if let Some(choice) = committed_choices
+            .iter()
+            .find(|choice| choice.chapter_number == chapter_number)
+        {
+            let chapter = self.reconstruct_choice_chapter(choice).await?;
+            return Ok(ResolvedChapter {
+                canonical,
+                content: chapter.content,
+                generated: true,
+            });
+        }
+        if !is_next_chapter(previous.chapter_number, chapter_number) {
+            if let Some(choice) = committed_choices
+                .iter()
+                .find(|choice| choice.chapter_number == chapter_number - 1)
+            {
+                previous = self.reconstruct_choice_chapter(choice).await?;
+            }
+        }
+        if !is_next_chapter(previous.chapter_number, chapter_number) {
+            return Err(NarrativeError::Validation(
+                "Request the next effective chapter before advancing further".into(),
+            ));
+        }
+
         let world_state = self
             .world_state_repo
             .get_or_create(user_id, novel_id)
             .await
             .map_err(NarrativeError::Internal)?;
-        for next_chapter_number in (previous.chapter_number + 1)..=chapter_number {
-            if let Some(existing) = self
-                .player_chapter_repo
-                .find(user_id, novel_id, next_chapter_number)
-                .await
-                .map_err(NarrativeError::Internal)?
-            {
-                previous = existing;
-                continue;
-            }
-            if let Some(choice) = committed_choices
-                .iter()
-                .find(|choice| choice.chapter_number == next_chapter_number)
-            {
-                previous = self.reconstruct_choice_chapter(choice).await?;
-                continue;
-            }
-            let source = self
-                .chapter_repo
-                .get_chapter(novel_id, next_chapter_number, user_id)
-                .await
-                .map_err(NarrativeError::Unavailable)?
-                .ok_or(NarrativeError::NotFound)?;
-            previous = self
-                .generate_player_chapter(
-                    user_id,
-                    novel_id,
-                    next_chapter_number,
-                    &previous.content,
-                    &source.content,
-                    novel_info,
-                    &world_state,
-                )
-                .await?;
-        }
+        previous = self
+            .generate_player_chapter(
+                user_id,
+                novel_id,
+                chapter_number,
+                &previous.content,
+                &canonical.content,
+                novel_info,
+                &world_state,
+            )
+            .await?;
         Ok(ResolvedChapter {
             canonical,
             content: previous.content,
@@ -795,6 +796,10 @@ impl NarrativeCommandHandler {
     }
 }
 
+fn is_next_chapter(previous: i32, requested: i32) -> bool {
+    previous.checked_add(1) == Some(requested)
+}
+
 fn choice_draft(existing: &UserChoiceRecord, rewritten_chapter_content: String) -> ChoiceCommit {
     ChoiceCommit {
         user_id: existing.user_id,
@@ -876,5 +881,12 @@ mod timeline_tests {
     fn generated_player_chapter_must_be_bounded_chinese() {
         assert!(validate_player_chapter("你进入了新的时间线。").is_ok());
         assert!(validate_player_chapter("English only").is_err());
+    }
+
+    #[test]
+    fn timeline_generation_advances_one_chapter_per_request() {
+        assert!(is_next_chapter(9, 10));
+        assert!(!is_next_chapter(8, 10));
+        assert!(!is_next_chapter(i32::MAX, i32::MIN));
     }
 }

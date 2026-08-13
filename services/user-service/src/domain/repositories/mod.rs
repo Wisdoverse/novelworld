@@ -36,6 +36,8 @@ pub trait UserRepository: Send + Sync {
     async fn update(&self, user: &User) -> Result<()>;
     async fn save_refresh_token(&self, token: &RefreshToken) -> Result<()>;
     async fn find_refresh_token(&self, token: &str) -> Result<Option<RefreshToken>>;
+    async fn rotate_refresh_token(&self, current: &str, replacement: &RefreshToken)
+        -> Result<bool>;
     async fn delete_refresh_token(&self, token: &str) -> Result<()>;
     async fn delete_refresh_tokens_for_user(&self, user_id: Uuid) -> Result<()>;
     async fn delete_account(&self, user_id: Uuid) -> Result<AccountDeletion>;

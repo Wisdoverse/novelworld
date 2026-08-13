@@ -2,6 +2,7 @@
 use anyhow::Result;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -77,6 +78,7 @@ async fn main() -> Result<()> {
         privacy_cleanup,
         environment_llm_config,
         refresh_token_expiry,
+        password_work: Arc::new(Semaphore::new(2)),
     });
 
     let readiness = Arc::new(PgReadinessProbe::new(pool));

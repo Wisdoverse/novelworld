@@ -901,6 +901,9 @@ Access token claims:
 
 The JWT MUST be signed with HMAC-SHA256 using the `JWT_SECRET` environment variable.
 
+A refresh token is single-use: a successful refresh atomically consumes it and
+returns both a new access token and a replacement refresh token.
+
 ### 9.4 Authorization Rules
 
 - All endpoints except setup status/init, the deprecated setup LLM probe,
@@ -930,7 +933,7 @@ service.
 | POST | `/api/setup/init` | User | None | Validate AI settings and atomically create the initial configuration |
 | POST | `/api/auth/register` | User | None | Register new user |
 | POST | `/api/auth/login` | User | None | Login, returns tokens |
-| POST | `/api/auth/refresh` | User | Refresh token | Issue new access token |
+| POST | `/api/auth/refresh` | User | Refresh token | Atomically rotate and issue new access and refresh tokens |
 | GET | `/api/auth/me` | User | JWT | Current user profile |
 | DELETE | `/api/auth/me` | User | JWT | Permanently delete the acting account and owned application data |
 | POST | `/api/auth/logout` | User | JWT | Invalidate refresh token |
@@ -942,7 +945,7 @@ service.
 |---|---|---|---|---|
 | GET | `/api/novels` | Novel | JWT | List user's novels |
 | POST | `/api/novels` | Novel | JWT | Import novel (text paste) |
-| POST | `/api/novels/upload` | Novel | JWT | Upload TXT or PDF file |
+| POST | `/api/novels/upload` | Novel | JWT | Upload one bounded TXT, EPUB, or PDF file |
 | GET | `/api/novels/:id` | Novel | JWT | Novel detail |
 | GET | `/api/novels/:id/status` | Novel | JWT | Parse status (poll) |
 | DELETE | `/api/novels/:id` | Novel | JWT | Delete novel |
@@ -1037,6 +1040,7 @@ Standard error codes:
 | `storage_error` | 502 | Object storage operation failed |
 | `bad_gateway` | 502 | Upstream response was invalid |
 | `service_unavailable` | 503 | A required dependency is unavailable |
+| `capacity_unavailable` | 503 | Bounded local work capacity is busy; retry later |
 | `internal_error` | 500 | Unexpected server error |
 
 ---

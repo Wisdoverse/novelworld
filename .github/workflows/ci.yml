@@ -151,6 +151,8 @@ jobs:
           exit 1
       - name: Verify public probes and rate-limit exemption
         run: |
+          docker exec novel-nginx nginx -T 2>&1 | grep -F 'limit_req_zone $binary_remote_addr zone=api_per_client:'
+          docker exec novel-nginx nginx -T 2>&1 | grep -F 'limit_req zone=api_per_client burst=40 nodelay;'
           for attempt in $(seq 1 30); do
             if curl --fail --silent http://127.0.0.1/live >/dev/null; then
               break
@@ -172,7 +174,7 @@ jobs:
             --data '{"email":"pre-setup@test.invalid","password":"RuntimeSmokeOnly123!"}' \
             http://127.0.0.1/api/auth/register)" = 409
           sleep 2
-          test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+          test "$(curl --silent --output /tmp/setup-init.json --write-out '%{http_code}' \
             -H 'Content-Type: application/json' \
             --data '{"email":"admin@test.invalid","password":"RuntimeSmokeOnly123!","name":"Runtime Admin"}' \
             http://127.0.0.1/api/setup/init)" = 201
@@ -191,6 +193,14 @@ jobs:
           sleep 1
           test "$(curl --silent --output /tmp/setup-status.json --write-out '%{http_code}' http://127.0.0.1/api/setup/status)" = 200
           grep -q '"configured":true' /tmp/setup-status.json
+          sleep 2
+          token=$(python3 -c 'import json; print(json.load(open("/tmp/setup-init.json"))["access_token"])')
+          for attempt in 1 2 3; do
+            test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+              -H 'Authorization: Bearer invalid' http://127.0.0.1:18081/api/auth/me)" = 401
+          done
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            -H "Authorization: Bearer $token" http://127.0.0.1:18081/api/auth/me)" = 200
       - name: Verify dependency failure semantics
         run: |
           docker stop novel-redis
