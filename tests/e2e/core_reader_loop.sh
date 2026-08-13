@@ -31,6 +31,8 @@ login=$("${curl_cmd[@]}" \
   --data "{\"email\":\"$email\",\"password\":\"$password\"}" \
   "$api/auth/login")
 token=$(json_get "value['access_token']" <<<"$login")
+refresh_token=$(json_get "value['refresh_token']" <<<"$login")
+user_id=$(json_get "value['user']['id']" <<<"$login")
 auth=(-H "Authorization: Bearer $token")
 
 pause
@@ -242,4 +244,67 @@ replayed_choice=$("${curl_cmd[@]}" "${auth[@]}" \
   "$api/narrative/choose")
 python3 -c "import json,sys; value=json.load(sys.stdin); state=value['world_state']['state']; assert len(state['choices'])==1; assert len(state['world_events'])==1; assert 'relationships' not in state; assert next(iter(state['player_entity']['relationships'].values()))['score']==55" <<<"$replayed_choice"
 
-printf 'core reader loop resumed after restart: novel=%s turn=%s\n' "$novel_id" "$turn_id"
+delete_novel_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
+delete_character_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
+delete_message_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
+docker exec novel-postgres psql \
+  -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -v ON_ERROR_STOP=1 \
+  -c "INSERT INTO novels (id, user_id, title, status) VALUES ('$delete_novel_id', '$user_id', 'Deletion contract', 'ready'); INSERT INTO characters (id, novel_id, name) VALUES ('$delete_character_id', '$delete_novel_id', 'Deletion witness');" >/dev/null
+delete_cache_message=$(python3 -c "import json; print(json.dumps({'id':'$delete_message_id','turn_id':None,'user_id':'$user_id','character_id':'$delete_character_id','novel_id':'$delete_novel_id','role':'user','content':'delete this projection','reader_identity':None,'chapter_context':1,'created_at':'2026-01-01T00:00:00Z'}, separators=(',',':')))")
+docker exec novel-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD:-runtime-redis-only}" \
+  LPUSH "chat:$delete_character_id:$user_id" "$delete_cache_message" >/dev/null
+pause
+test "$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
+  --output /dev/null --write-out '%{http_code}' "${auth[@]}" \
+  -X DELETE "$api/novels/$delete_novel_id")" = 204
+test "$(docker exec novel-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD:-runtime-redis-only}" EXISTS "chat:$delete_character_id:$user_id")" = 0
+test "$(docker exec novel-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD:-runtime-redis-only}" EXISTS "chat:$character_id:$user_id")" = 1
+test "$(docker exec novel-postgres psql \
+  -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
+  -c "SELECT (SELECT COUNT(*) FROM novels WHERE id = '$delete_novel_id') || ':' || (SELECT COUNT(*) FROM characters WHERE id = '$delete_character_id')")" = 0:0
+pause
+test "$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
+  --output /dev/null --write-out '%{http_code}' "${auth[@]}" \
+  -X DELETE "$api/novels/$delete_novel_id")" = 404
+
+test "$(docker exec novel-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD:-runtime-redis-only}" EXISTS "chat:$character_id:$user_id")" = 1
+test "$(docker exec novel-agent-service curl --silent --output /dev/null --write-out '%{http_code}' \
+  -X DELETE -H 'X-Internal-Service-Token: wrong-token' \
+  "http://127.0.0.1:8003/internal/privacy/users/$user_id")" = 401
+pause
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  "${auth[@]}" -X DELETE "$api/internal/privacy/users/$user_id")" = 404
+pause
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  -X DELETE "$api/auth/me")" = 401
+
+pause
+test "$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
+  --output /dev/null --write-out '%{http_code}' "${auth[@]}" \
+  -X DELETE "$api/auth/me")" = 204
+pause
+test "$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
+  --output /dev/null --write-out '%{http_code}' "${auth[@]}" \
+  -X DELETE "$api/auth/me")" = 204
+test "$(docker exec novel-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD:-runtime-redis-only}" EXISTS "chat:$character_id:$user_id")" = 0
+
+erased_counts=$(docker exec novel-postgres psql \
+  -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
+  -c "SELECT (SELECT COUNT(*) FROM users) || ':' || (SELECT COUNT(*) FROM novels) || ':' || (SELECT COUNT(*) FROM chapters) || ':' || (SELECT COUNT(*) FROM chapter_chunks) || ':' || (SELECT COUNT(*) FROM characters) || ':' || (SELECT COUNT(*) FROM character_relationships) || ':' || (SELECT COUNT(*) FROM character_memories) || ':' || (SELECT COUNT(*) FROM chat_turns) || ':' || (SELECT COUNT(*) FROM chat_messages) || ':' || (SELECT COUNT(*) FROM narrative_nodes) || ':' || (SELECT COUNT(*) FROM user_choices) || ':' || (SELECT COUNT(*) FROM world_states) || ':' || (SELECT COUNT(*) FROM player_chapters) || ':' || (SELECT COUNT(*) FROM canon_story_models) || ':' || (SELECT COUNT(*) FROM reading_progress) || ':' || (SELECT COUNT(*) FROM refresh_tokens) || ':' || (SELECT COUNT(*) FROM runtime_llm_config)")
+[ "$erased_counts" = 0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0 ]
+
+pause
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  -H 'Content-Type: application/json' \
+  --data "{\"email\":\"$email\",\"password\":\"$password\"}" \
+  "$api/auth/login")" = 401
+pause
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  -H 'Content-Type: application/json' \
+  --data "{\"refresh_token\":\"$refresh_token\"}" \
+  "$api/auth/refresh")" = 401
+pause
+setup_status=$("${curl_cmd[@]}" "$api/setup/status")
+python3 -c "import json,sys; value=json.load(sys.stdin); assert value['configured'] is False; assert value['admin_configured'] is False" <<<"$setup_status"
+
+printf 'core reader loop resumed and account data erased: novel=%s turn=%s\n' "$novel_id" "$turn_id"

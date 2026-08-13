@@ -21,5 +21,6 @@ dotenvy.workspace = true
 jsonwebtoken.workspace = true
 bcrypt.workspace = true
 async-trait.workspace = true
+reqwest.workspace = true
 aes-gcm.workspace = true
 llm-client.workspace = true

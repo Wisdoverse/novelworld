@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::domain::entities::runtime_config::RuntimeLlmConfig;
 use crate::domain::entities::user::{RefreshToken, User, UserRole};
-use crate::domain::repositories::UserRepository;
+use crate::domain::repositories::{AccountDeletion, UserRepository, UserSave};
 
 const CONFIG_AAD: &[u8] = b"novelworld-runtime-llm-v1";
 
@@ -78,7 +78,22 @@ fn decode_hex_key(value: &str) -> Result<[u8; 32]> {
 
 #[async_trait]
 impl UserRepository for PgUserRepository {
-    async fn save(&self, user: &User) -> Result<bool> {
+    async fn save(&self, user: &User) -> Result<UserSave> {
+        let mut transaction = self.pool.begin().await?;
+        // Coordinate ordinary registration with final-admin deletion without serializing other inserts.
+        sqlx::query("LOCK TABLE users IN ROW EXCLUSIVE MODE")
+            .execute(&mut *transaction)
+            .await?;
+        if user.role != UserRole::Admin {
+            let has_admin: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE role = 'admin')")
+                    .fetch_one(&mut *transaction)
+                    .await?;
+            if !has_admin {
+                transaction.rollback().await?;
+                return Ok(UserSave::SetupRequired);
+            }
+        }
         let result = sqlx::query(
             r#"INSERT INTO users (id, email, password_hash, name, avatar_url, role, email_verified, created_at, updated_at)
                VALUES ($1, $2, $3, $4, $5, $6::public.user_role, $7, $8, $9)
@@ -93,9 +108,14 @@ impl UserRepository for PgUserRepository {
         .bind(user.email_verified)
         .bind(user.created_at)
         .bind(user.updated_at)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
-        Ok(result.rows_affected() == 1)
+        transaction.commit().await?;
+        Ok(if result.rows_affected() == 1 {
+            UserSave::Saved
+        } else {
+            UserSave::EmailConflict
+        })
     }
 
     async fn save_initial_setup(
@@ -304,6 +324,43 @@ impl UserRepository for PgUserRepository {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    async fn delete_account(&self, user_id: Uuid) -> Result<AccountDeletion> {
+        let mut transaction = self.pool.begin().await?;
+        // ponytail: account deletion is rare; a global lock makes the last-admin invariant atomic.
+        sqlx::query("LOCK TABLE users IN EXCLUSIVE MODE")
+            .execute(&mut *transaction)
+            .await?;
+        let account = sqlx::query_as::<_, (String, i64, i64)>(
+            r#"SELECT role::text,
+                      (SELECT COUNT(*) FROM users),
+                      (SELECT COUNT(*) FROM users WHERE role = 'admin')
+               FROM users WHERE id = $1"#,
+        )
+        .bind(user_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some((role, user_count, admin_count)) = account else {
+            transaction.rollback().await?;
+            return Ok(AccountDeletion::AlreadyAbsent);
+        };
+        if role == UserRole::Admin.as_str() && admin_count == 1 && user_count > 1 {
+            transaction.rollback().await?;
+            return Ok(AccountDeletion::LastAdministrator);
+        }
+
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(&mut *transaction)
+            .await?;
+        if user_count == 1 {
+            sqlx::query("DELETE FROM runtime_llm_config")
+                .execute(&mut *transaction)
+                .await?;
+        }
+        transaction.commit().await?;
+        Ok(AccountDeletion::Deleted)
     }
 }
 

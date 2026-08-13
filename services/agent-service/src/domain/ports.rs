@@ -38,9 +38,17 @@ pub trait MessageCache: Send + Sync {
         user_id: Uuid,
         user_message: &ChatMessage,
         character_message: &ChatMessage,
-    ) -> Result<()>;
+    ) -> Result<bool>;
 
     async fn clear(&self, character_id: Uuid, user_id: Uuid) -> Result<()>;
+
+    async fn clear_user(&self, user_id: Uuid) -> Result<()>;
+
+    async fn clear_novel(&self, user_id: Uuid, novel_id: Uuid) -> Result<()>;
+
+    async fn allow_user(&self, user_id: Uuid) -> Result<()>;
+
+    async fn allow_novel(&self, user_id: Uuid, novel_id: Uuid) -> Result<()>;
 }
 
 /// Port for LLM text summarization.

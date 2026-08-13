@@ -144,7 +144,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/setup/status", get(proxy::forward_to_user))
         .route("/api/setup/init", post(proxy::forward_to_user))
         // Protected routes
-        .route("/api/auth/me", get(proxy::forward_to_user))
+        .route(
+            "/api/auth/me",
+            get(proxy::forward_to_user).delete(proxy::forward_to_user),
+        )
         .route("/api/auth/logout", post(proxy::forward_to_user))
         .route("/api/settings/{*path}", any(proxy::forward_to_user))
         .route("/api/novels", post(proxy::forward_to_novel))

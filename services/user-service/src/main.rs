@@ -12,6 +12,7 @@ use user_service::{
         auth::jwt::JwtService,
         llm::LlmClientTester,
         persistence::{pg_user_repo::PgUserRepository, PgReadinessProbe},
+        privacy::AgentPrivacyClient,
     },
     interface::http::{router, AppState},
 };
@@ -61,12 +62,19 @@ async fn main() -> Result<()> {
 
     let jwt = Arc::new(JwtService::new(&jwt_secret, access_token_expiry));
     let user_repo = Arc::new(PgUserRepository::new(pool.clone(), &runtime_config_key)?);
+    let agent_service_url =
+        std::env::var("AGENT_SERVICE_URL").unwrap_or_else(|_| "http://agent-service:8003".into());
+    let privacy_cleanup = Arc::new(AgentPrivacyClient::new(
+        agent_service_url,
+        internal_service_token.clone(),
+    )?);
 
     let token_issuer: Arc<dyn domain::ports::AccessTokenIssuer> = jwt;
     let handler = Arc::new(AuthHandler {
         user_repo,
         jwt: token_issuer,
         llm_tester: Arc::new(LlmClientTester),
+        privacy_cleanup,
         environment_llm_config,
         refresh_token_expiry,
     });
