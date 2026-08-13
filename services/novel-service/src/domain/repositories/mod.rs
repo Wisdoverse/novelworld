@@ -2,7 +2,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use uuid::Uuid;
 
-use crate::domain::entities::{chapter::Chapter, character::Character, novel::Novel};
+use crate::domain::entities::{
+    canon_story_model::CanonStoryModel, chapter::Chapter, character::Character, novel::Novel,
+};
 
 #[async_trait]
 pub trait NovelRepository: Send + Sync {
@@ -11,6 +13,17 @@ pub trait NovelRepository: Send + Sync {
     async fn find_by_user(&self, user_id: Uuid) -> Result<Vec<Novel>>;
     async fn update(&self, novel: &Novel) -> Result<()>;
     async fn delete(&self, id: Uuid) -> Result<()>;
+}
+
+#[async_trait]
+pub trait CanonStoryModelRepository: Send + Sync {
+    async fn insert(&self, model: &CanonStoryModel) -> Result<()>;
+    async fn find_version(
+        &self,
+        novel_id: Uuid,
+        model_version: i32,
+    ) -> Result<Option<CanonStoryModel>>;
+    async fn find_latest(&self, novel_id: Uuid) -> Result<Option<CanonStoryModel>>;
 }
 
 #[async_trait]

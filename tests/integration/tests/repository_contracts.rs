@@ -12,14 +12,160 @@ use narrative_service::domain::{
 use narrative_service::infrastructure::persistence::pg_narrative_repo::{
     PgNarrativeNodeRepository, PgUserChoiceRepository,
 };
-use novel_service::domain::repositories::ReadingProgressRepository;
-use novel_service::infrastructure::persistence::pg_progress_repo::PgReadingProgressRepository;
+use novel_service::domain::{
+    entities::canon_story_model::{
+        CanonEndingSnapshot, CanonEvent, CanonStoryContent, CanonStoryModel, SourceCitation,
+        SourceEvidence, StoryArc, CANON_STORY_SCHEMA_VERSION,
+    },
+    repositories::{CanonStoryModelRepository, ReadingProgressRepository},
+};
+use novel_service::infrastructure::persistence::{
+    canon_story_model_pg_repo::PgCanonStoryModelRepository,
+    pg_progress_repo::PgReadingProgressRepository,
+};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use uuid::Uuid;
 
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
         .unwrap_or_else(|_| "postgres://test:test@localhost:25432/novelworld_test".into())
+}
+
+#[tokio::test]
+async fn canon_story_models_are_versioned_and_immutable() {
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let user_id = Uuid::new_v4();
+    let novel_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO users (id, email, password_hash) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(format!("canon-contract-{user_id}@test.invalid"))
+        .bind("not-a-real-password-hash")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO novels (id, user_id, title, total_chapters, status) \
+         VALUES ($1, $2, $3, 1, 'ready')",
+    )
+    .bind(novel_id)
+    .bind(user_id)
+    .bind("Canon contract")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO chapters (novel_id, chapter_number, content) VALUES ($1, 1, $2)")
+        .bind(novel_id)
+        .bind("The journey begins.")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let character_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO characters (id, novel_id, name) VALUES ($1, $2, 'Hero')")
+        .bind(character_id)
+        .bind(novel_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let source = SourceEvidence {
+        provenance: vec![SourceCitation {
+            chapter_number: 1,
+            excerpt: "The journey begins.".into(),
+        }],
+        confidence: 1.0,
+    };
+    let mut model = CanonStoryModel {
+        id: Uuid::new_v4(),
+        novel_id,
+        model_version: 1,
+        schema_version: CANON_STORY_SCHEMA_VERSION,
+        prompt_version: "canon-extraction-v1".into(),
+        content: CanonStoryContent {
+            arcs: vec![StoryArc {
+                id: "arc-1".into(),
+                title: "Journey".into(),
+                summary: "The mainline.".into(),
+                event_ids: vec!["event-1".into()],
+                evidence: source.clone(),
+            }],
+            events: vec![CanonEvent {
+                id: "event-1".into(),
+                sequence: 1,
+                summary: "The journey begins.".into(),
+                caused_by: vec![],
+                location_ids: vec![],
+                character_ids: vec![character_id],
+                faction_ids: vec![],
+                evidence: source.clone(),
+            }],
+            locations: vec![],
+            factions: vec![],
+            world_rules: vec![],
+            character_goals: vec![],
+            relationships: vec![],
+            deaths: vec![],
+            unresolved_threads: vec![],
+            ending: CanonEndingSnapshot {
+                summary: "The journey ends.".into(),
+                character_states: std::collections::BTreeMap::from([(
+                    character_id,
+                    "The hero reaches the ending.".into(),
+                )]),
+                faction_states: Default::default(),
+                location_states: Default::default(),
+                unresolved_thread_ids: vec![],
+                evidence: source,
+            },
+        },
+        created_at: std::time::SystemTime::UNIX_EPOCH.into(),
+    };
+    let repository = PgCanonStoryModelRepository::new(pool.clone());
+    sqlx::query("UPDATE novels SET status = 'parsing' WHERE id = $1")
+        .bind(novel_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(repository.insert(&model).await.is_err());
+    sqlx::query("UPDATE novels SET status = 'ready' WHERE id = $1")
+        .bind(novel_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut fabricated = model.clone();
+    fabricated.content.events[0].evidence.provenance[0].excerpt = "Invented evidence".into();
+    assert!(repository.insert(&fabricated).await.is_err());
+    repository.insert(&model).await.unwrap();
+    assert_eq!(
+        repository.find_version(novel_id, 1).await.unwrap(),
+        Some(model.clone())
+    );
+
+    model.id = Uuid::new_v4();
+    model.model_version = 2;
+    repository.insert(&model).await.unwrap();
+    assert_eq!(
+        repository.find_latest(novel_id).await.unwrap(),
+        Some(model.clone())
+    );
+    model.id = Uuid::new_v4();
+    assert!(repository.insert(&model).await.is_err());
+
+    let immutable_error =
+        sqlx::query("UPDATE canon_story_models SET prompt_version = 'changed' WHERE novel_id = $1")
+            .bind(novel_id)
+            .execute(&pool)
+            .await
+            .unwrap_err();
+    assert_eq!(
+        immutable_error
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some(std::borrow::Cow::Borrowed("55000"))
+    );
 }
 
 async fn wait_for_blocked_query(pool: &PgPool, needle: &str) {
