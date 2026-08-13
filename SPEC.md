@@ -1226,12 +1226,26 @@ any required service is unavailable. Gateway probe and metrics endpoints MUST
 not require application authentication or consume business rate-limit capacity.
 Deployments MAY restrict `/metrics` to their internal monitoring network.
 
-### 14.3 Metrics (OPTIONAL)
+### 14.3 Metrics
 
-Implementations MAY expose Prometheus-compatible metrics at `GET /metrics`. Recommended metrics:
+Each LLM-calling service exposes Prometheus-compatible metrics at its internal
+`GET /metrics`. The public Nginx route MUST remain unavailable. The bounded
+`llm-observability-v1` contract includes:
 
-- `novelworld_llm_requests_total` (counter, labels: `service`, `model`, `status`)
-- `novelworld_llm_tokens_total` (counter, labels: `service`, `model`, `type`)
+- `novelworld_llm_requests_started_total` and `novelworld_llm_requests_total`
+- `novelworld_llm_attempts_total` and `novelworld_llm_retries_total`
+- request, attempt, stream-setup, and first-token latency histograms
+- `novelworld_llm_usage_reports_total`, `novelworld_llm_tokens_total`, and
+  `novelworld_llm_billable_tokens_total`
+- actual and static per-operation output-token ceilings
+
+LLM labels MUST come from bounded configuration and MUST NOT include prompts,
+raw URLs/errors, secrets, principals, or resource identifiers. Dollar cost is
+derived at query time from billable token classes and current provider pricing.
+The checked-in versioned release policy is the source of truth for H3 budgets.
+
+Other recommended metrics:
+
 - `novelworld_memory_compression_total` (counter, labels: `character_id`)
 - `novelworld_active_streams` (gauge)
 - `novelworld_novel_parse_duration_seconds` (histogram)

@@ -204,10 +204,11 @@ impl LlmProvider for AnthropicProvider {
         Ok(ChatResponse {
             content,
             model: resp.model,
-            usage: Some(Usage {
-                input_tokens: resp.usage.input_tokens,
-                output_tokens: resp.usage.output_tokens,
-            }),
+            usage: Some(Usage::new(
+                resp.usage.input_tokens,
+                resp.usage.output_tokens,
+                None,
+            )?),
         })
     }
 

@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "policy_version": "h3-llm-budget-v1",
+  "metrics_contract": "llm-observability-v1",
+  "required_services": [
+    "user-service",
+    "novel-service",
+    "agent-service",
+    "narrative-service"
+  ],
+  "max_error_rate": 0.01,
+  "max_retry_rate": 0.05,
+  "max_missing_usage_rate": 0.01,
+  "operations": {
+    "setup_connection": {
+      "output_token_ceiling": 8,
+      "min_samples": 0,
+      "max_p95_seconds": 5,
+      "max_average_billable_tokens": 1000
+    },
+    "character_extraction": {
+      "output_token_ceiling": 4096,
+      "min_samples": 1,
+      "max_p95_seconds": 30,
+      "max_average_billable_tokens": 40000
+    },
+    "canon_extraction": {
+      "output_token_ceiling": 4096,
+      "min_samples": 1,
+      "max_p95_seconds": 30,
+      "max_average_billable_tokens": 30000
+    },
+    "narrative_node_detection": {
+      "output_token_ceiling": 4096,
+      "min_samples": 1,
+      "max_p95_seconds": 30,
+      "max_average_billable_tokens": 64000
+    },
+    "branch_generation": {
+      "output_token_ceiling": 4096,
+      "min_samples": 1,
+      "max_p95_seconds": 30,
+      "max_average_billable_tokens": 24000
+    },
+    "narrative_transition": {
+      "output_token_ceiling": 4096,
+      "min_samples": 1,
+      "max_p95_seconds": 30,
+      "max_average_billable_tokens": 24000
+    },
+    "player_chapter": {
+      "output_token_ceiling": 8192,
+      "min_samples": 1,
+      "max_p95_seconds": 60,
+      "max_average_billable_tokens": 40000
+    },
+    "character_chat": {
+      "output_token_ceiling": 5120,
+      "min_samples": 1,
+      "max_p95_seconds": 30,
+      "max_first_token_p95_seconds": 10,
+      "max_average_billable_tokens": 40000
+    },
+    "memory_summary": {
+      "output_token_ceiling": 256,
+      "min_samples": 0,
+      "max_p95_seconds": 30,
+      "max_average_billable_tokens": 32000
+    },
+    "offline_evaluation": {
+      "output_token_ceiling": 800,
+      "min_samples": 0,
+      "max_p95_seconds": 60,
+      "max_average_billable_tokens": 32000
+    }
+  }
+}

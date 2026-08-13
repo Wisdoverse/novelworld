@@ -230,6 +230,33 @@ PUT    /api/progress/:novelId/identity  — 设置读者身份
 
 ---
 
+## LLM 指标与发布预算
+
+`user-service`、`novel-service`、`agent-service` 和 `narrative-service`
+在各自的内部端口暴露 `/metrics`。公网 Nginx 对 `/metrics` 返回 404；由
+内部 Prometheus 网络直接抓取服务端口。
+
+指标按受控的 `service/provider/model/operation/mode/status` 标签记录逻辑
+请求、实际 provider 尝试、重试、延迟、首 token、usage 缺失、输入/输出/
+缓存命中 token，以及 cached-input/uncached-input/output 计费 token。指标不
+包含 prompt、URL、错误正文、用户或小说标识。美元成本应在查询时用当前
+provider 价格乘计费 token；代码不内置会过期的价格表。
+
+H3 发布样本使用版本化策略校验：
+
+```bash
+python3 tools/llm-budget/verify.py \
+  --policy tools/llm-budget/policy-v1.json \
+  --metrics release-sample.prom \
+  --commit "$(git rev-parse HEAD)"
+```
+
+样本必须来自一个完成的、有边界的发布测试窗口；进程重启会重置计数器。
+校验器会拒绝缺服务、缺 operation、usage 缺失、未完成请求、未知/敏感标签、
+超出重试/错误/延迟/首 token/计费 token 预算或 provider 实际 token 上限的样本。
+
+---
+
 ## 常见问题
 
 **Q: Rust 编译太慢怎么办？**
@@ -263,4 +290,4 @@ docker exec novel-postgres pg_dump -U novel novel_world > backup_$(date +%Y%m%d)
 2. **防火墙**：只开放 80/443 端口，关闭 5432/6379/8080
 3. **数据库密码**：使用 `openssl rand -base64 24` 生成强密码
 4. **定期备份**：设置 cron 任务每日备份 PostgreSQL
-5. **监控**：可选接入 Prometheus + Grafana（gateway 暴露 `/metrics`）
+5. **监控**：从内部网络抓取各服务 `/metrics`；公网 Nginx 保持 404

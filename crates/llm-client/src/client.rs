@@ -1,11 +1,14 @@
 use anyhow::{anyhow, Result};
-use std::collections::HashMap;
+use async_stream::stream;
+use futures::StreamExt;
+use std::{collections::HashMap, time::Instant};
 
 use crate::providers::anthropic::AnthropicProvider;
 use crate::providers::gemini::GeminiProvider;
 use crate::providers::openai::OpenAIProvider;
 use crate::providers::LlmProvider;
 use crate::retry::RetryPolicy;
+use crate::telemetry::RequestLabels;
 use crate::types::*;
 
 pub struct LlmClient {
@@ -314,7 +317,7 @@ impl LlmClient {
         self
     }
 
-    fn resolve_provider(&self, model: &str) -> Result<(&dyn LlmProvider, &str, String)> {
+    fn resolve_provider(&self, model: &str) -> Result<(&dyn LlmProvider, &str, String, String)> {
         if let Some(idx) = model.find('/') {
             let provider_name = &model[..idx];
             let model_name = &model[idx + 1..];
@@ -325,13 +328,23 @@ impl LlmClient {
                     self.providers.keys().collect::<Vec<_>>()
                 )
             })?;
-            Ok((provider.as_ref(), api_key, model_name.to_string()))
+            Ok((
+                provider.as_ref(),
+                api_key,
+                provider_name.to_string(),
+                model_name.to_string(),
+            ))
         } else if let Some(default) = &self.default_provider {
             let (provider, api_key) = self
                 .providers
                 .get(default)
                 .ok_or_else(|| anyhow!("Default provider '{}' not configured", default))?;
-            Ok((provider.as_ref(), api_key, model.to_string()))
+            Ok((
+                provider.as_ref(),
+                api_key,
+                default.clone(),
+                model.to_string(),
+            ))
         } else {
             Err(anyhow!(
                 "No provider specified in model '{}' and no default set",
@@ -341,54 +354,110 @@ impl LlmClient {
     }
 
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
-        let (provider, api_key, model_name) = self.resolve_provider(&request.model)?;
+        validate_request(&request)?;
+        let started = Instant::now();
+        let (provider, api_key, provider_name, model_name) =
+            self.resolve_provider(&request.model)?;
+        let labels = RequestLabels::new(
+            &provider_name,
+            &model_name,
+            request.operation,
+            "sync",
+            request.effective_max_output_tokens().unwrap(),
+        );
+        labels.started();
         let mut req = request;
         req.model = model_name;
 
-        for attempt in 0..=RetryPolicy::max_retries() {
+        let mut retry_attempt = 0;
+        loop {
+            let attempt_started = Instant::now();
             match provider.chat(&self.http, api_key, &req).await {
-                Ok(resp) => return Ok(resp),
+                Ok(resp) => {
+                    labels.attempt("success", attempt_started.elapsed().as_secs_f64());
+                    labels.usage(resp.usage.as_ref());
+                    labels.finish("success", started);
+                    return Ok(resp);
+                }
                 Err(e) => {
+                    if req.json_mode && e.downcast_ref::<JsonModeEmpty>().is_some() {
+                        if let Some(usage) = e
+                            .downcast_ref::<JsonModeEmpty>()
+                            .and_then(|empty| empty.0.as_ref())
+                        {
+                            labels.additional_usage(usage);
+                        }
+                        labels.attempt("empty_json_mode", attempt_started.elapsed().as_secs_f64());
+                        labels.retry("json_mode_fallback");
+                        req.json_mode = false;
+                        continue;
+                    }
                     let api_error = e.downcast_ref::<LlmApiError>();
                     let status = api_error.map(|error| error.status).unwrap_or(500);
+                    let metric_status = error_status(api_error);
+                    labels.attempt(metric_status, attempt_started.elapsed().as_secs_f64());
 
-                    if RetryPolicy::should_retry(status, attempt) {
+                    if RetryPolicy::should_retry(status, retry_attempt) {
+                        labels.retry(metric_status);
                         let delay = RetryPolicy::delay(
                             status,
-                            attempt,
+                            retry_attempt,
                             api_error.and_then(|error| error.retry_after.as_deref()),
                         );
+                        retry_attempt += 1;
                         tracing::warn!(
                             "LLM error ({}), retry {}/{}: {}",
                             status,
-                            attempt + 1,
+                            retry_attempt,
                             RetryPolicy::max_retries(),
                             e
                         );
                         tokio::time::sleep(delay).await;
                         continue;
                     }
+                    labels.finish("error", started);
                     return Err(e);
                 }
             }
         }
-        unreachable!()
     }
 
     pub async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream> {
-        let (provider, api_key, model_name) = self.resolve_provider(&request.model)?;
+        validate_request(&request)?;
+        let started = Instant::now();
+        let (provider, api_key, provider_name, model_name) =
+            self.resolve_provider(&request.model)?;
+        let labels = RequestLabels::new(
+            &provider_name,
+            &model_name,
+            request.operation,
+            "stream",
+            request.effective_max_output_tokens().unwrap(),
+        );
+        labels.started();
         let mut req = request;
         req.model = model_name;
         req.stream = true;
 
         for attempt in 0..=RetryPolicy::max_retries() {
+            let attempt_started = Instant::now();
             match provider.chat_stream(&self.http, api_key, &req).await {
-                Ok(stream) => return Ok(stream),
+                Ok(upstream) => {
+                    let setup = attempt_started.elapsed().as_secs_f64();
+                    labels.attempt("success", setup);
+                    labels.stream_setup("success", setup);
+                    return Ok(observe_stream(upstream, labels, started));
+                }
                 Err(error) => {
                     let api_error = error.downcast_ref::<LlmApiError>();
                     let status = api_error.map(|error| error.status).unwrap_or(500);
+                    let metric_status = error_status(api_error);
+                    let setup = attempt_started.elapsed().as_secs_f64();
+                    labels.attempt(metric_status, setup);
+                    labels.stream_setup(metric_status, setup);
 
                     if RetryPolicy::should_retry(status, attempt) {
+                        labels.retry(metric_status);
                         let delay = RetryPolicy::delay(
                             status,
                             attempt,
@@ -404,6 +473,7 @@ impl LlmClient {
                         tokio::time::sleep(delay).await;
                         continue;
                     }
+                    labels.finish("setup_error", started);
                     return Err(error);
                 }
             }
@@ -412,7 +482,7 @@ impl LlmClient {
     }
 
     pub async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
-        let (provider, api_key, model_name) = self.resolve_provider(&request.model)?;
+        let (provider, api_key, _, model_name) = self.resolve_provider(&request.model)?;
         let req = EmbeddingRequest {
             model: model_name,
             input: request.input,
@@ -420,8 +490,14 @@ impl LlmClient {
         provider.embed(&self.http, api_key, &req).await
     }
 
-    pub async fn simple_chat(&self, model: &str, system: &str, user: &str) -> Result<String> {
-        let request = ChatRequest::new(model)
+    pub async fn simple_chat(
+        &self,
+        operation: LlmOperation,
+        model: &str,
+        system: &str,
+        user: &str,
+    ) -> Result<String> {
+        let request = ChatRequest::new(operation, model)
             .message("system", system)
             .message("user", user)
             .temperature(0.8)
@@ -429,8 +505,13 @@ impl LlmClient {
         self.chat(request).await.map(|r| r.content)
     }
 
-    pub async fn json_chat(&self, model: &str, prompt: &str) -> Result<String> {
-        let request = ChatRequest::new(model)
+    pub async fn json_chat(
+        &self,
+        operation: LlmOperation,
+        model: &str,
+        prompt: &str,
+    ) -> Result<String> {
+        let request = ChatRequest::new(operation, model)
             .message(
                 "system",
                 "You are a helpful assistant that always responds with a non-empty valid JSON object. Output JSON only.",
@@ -441,4 +522,100 @@ impl LlmClient {
             .json();
         self.chat(request).await.map(|r| r.content)
     }
+}
+
+fn validate_request(request: &ChatRequest) -> Result<()> {
+    let max_tokens = request
+        .effective_max_output_tokens()
+        .ok_or_else(|| anyhow!("LLM request must declare an output-token limit"))?;
+    if max_tokens == 0 || max_tokens > request.operation.max_output_tokens() {
+        return Err(anyhow!(
+            "LLM operation {} allows at most {} output tokens",
+            request.operation.to_str(),
+            request.operation.max_output_tokens()
+        ));
+    }
+    Ok(())
+}
+
+fn error_status(error: Option<&LlmApiError>) -> &'static str {
+    match error.map(|error| error.status) {
+        Some(429) => "rate_limited",
+        Some(500..) => "provider_error",
+        Some(_) => "rejected",
+        None => "client_or_transport_error",
+    }
+}
+
+struct StreamGuard {
+    labels: RequestLabels,
+    started: Instant,
+    first_token: bool,
+    usage: Option<Usage>,
+    terminal: bool,
+}
+
+impl StreamGuard {
+    fn finish(&mut self, status: &'static str) {
+        if self.terminal {
+            return;
+        }
+        if self.usage.is_some() || status == "success" {
+            self.labels.usage(self.usage.as_ref());
+        }
+        self.labels.finish(status, self.started);
+        self.terminal = true;
+    }
+}
+
+impl Drop for StreamGuard {
+    fn drop(&mut self) {
+        self.finish("consumer_dropped");
+    }
+}
+
+fn observe_stream(mut upstream: ChatStream, labels: RequestLabels, started: Instant) -> ChatStream {
+    let mut guard = StreamGuard {
+        labels,
+        started,
+        first_token: false,
+        usage: None,
+        terminal: false,
+    };
+
+    Box::pin(stream! {
+        while let Some(item) = upstream.next().await {
+            match item {
+                Ok(ChatStreamEvent::Delta(text)) => {
+                    if !guard.first_token && !text.is_empty() {
+                        guard.labels.first_token(guard.started);
+                        guard.first_token = true;
+                    }
+                    yield Ok(ChatStreamEvent::Delta(text));
+                }
+                Ok(ChatStreamEvent::Usage(usage)) => {
+                    if guard.usage.is_some()
+                        || usage.cached_input_tokens.is_some_and(|cached| cached > usage.input_tokens)
+                    {
+                        guard.finish("stream_error");
+                        yield Err(anyhow!("invalid or duplicate LLM stream usage"));
+                        return;
+                    }
+                    guard.usage = Some(usage);
+                }
+                Ok(ChatStreamEvent::Finished) => {
+                    guard.finish("success");
+                    yield Ok(ChatStreamEvent::Finished);
+                    return;
+                }
+                Err(error) => {
+                    guard.finish("stream_error");
+                    yield Err(error);
+                    return;
+                }
+            }
+        }
+        guard.finish("stream_error");
+        yield Err(anyhow!("LLM stream ended without a terminal event"));
+    })
 }

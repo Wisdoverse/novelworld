@@ -49,9 +49,16 @@ struct OpenAIRequest {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+struct StreamOptions {
+    include_usage: bool,
 }
 
 #[derive(Deserialize)]
@@ -75,6 +82,47 @@ struct OpenAIMessage {
 struct OpenAIUsage {
     prompt_tokens: u32,
     completion_tokens: u32,
+    #[serde(default)]
+    prompt_cache_hit_tokens: Option<u32>,
+    #[serde(default)]
+    prompt_cache_miss_tokens: Option<u32>,
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokenDetails>,
+}
+
+#[derive(Deserialize)]
+struct PromptTokenDetails {
+    #[serde(default)]
+    cached_tokens: Option<u32>,
+}
+
+impl OpenAIUsage {
+    fn into_usage(self) -> Result<Usage> {
+        let standard_cached = self
+            .prompt_tokens_details
+            .and_then(|details| details.cached_tokens);
+        let deepseek_cached = match (self.prompt_cache_hit_tokens, self.prompt_cache_miss_tokens) {
+            (Some(hit), Some(miss)) if hit.checked_add(miss) == Some(self.prompt_tokens) => {
+                Some(hit)
+            }
+            (Some(_), Some(_)) => return Err(anyhow!("provider returned invalid cache usage")),
+            (Some(hit), None) => Some(hit),
+            (None, Some(miss)) if miss <= self.prompt_tokens => Some(self.prompt_tokens - miss),
+            (None, Some(_)) => return Err(anyhow!("provider returned invalid cache usage")),
+            (None, None) => None,
+        };
+        if deepseek_cached.is_some()
+            && standard_cached.is_some()
+            && deepseek_cached != standard_cached
+        {
+            return Err(anyhow!("provider returned conflicting cache usage"));
+        }
+        Usage::new(
+            self.prompt_tokens,
+            self.completion_tokens,
+            deepseek_cached.or(standard_cached),
+        )
+    }
 }
 
 #[derive(Serialize)]
@@ -87,6 +135,31 @@ struct ResponsesRequest {
     max_output_tokens: Option<u32>,
     stream: bool,
     reasoning: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct ResponsesUsage {
+    input_tokens: u32,
+    output_tokens: u32,
+    #[serde(default)]
+    input_tokens_details: Option<InputTokenDetails>,
+}
+
+#[derive(Deserialize)]
+struct InputTokenDetails {
+    #[serde(default)]
+    cached_tokens: Option<u32>,
+}
+
+impl ResponsesUsage {
+    fn into_usage(self) -> Result<Usage> {
+        Usage::new(
+            self.input_tokens,
+            self.output_tokens,
+            self.input_tokens_details
+                .and_then(|details| details.cached_tokens),
+        )
+    }
 }
 
 fn parse_responses_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>> {
@@ -103,7 +176,16 @@ fn parse_responses_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>>
             .filter(|delta| !delta.is_empty())
             .map(|delta| vec![ChatStreamEvent::Delta(delta.to_owned())])
             .ok_or_else(|| anyhow!("Responses API text delta is missing")),
-        "response.completed" => Ok(vec![ChatStreamEvent::Finished]),
+        "response.completed" => {
+            let mut events = Vec::new();
+            if let Some(usage) = payload.pointer("/response/usage") {
+                events.push(ChatStreamEvent::Usage(
+                    serde_json::from_value::<ResponsesUsage>(usage.clone())?.into_usage()?,
+                ));
+            }
+            events.push(ChatStreamEvent::Finished);
+            Ok(events)
+        }
         "response.incomplete" => Err(anyhow!("Responses API output was incomplete")),
         "response.failed" => {
             let message = payload
@@ -158,12 +240,17 @@ pub(crate) fn parse_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>
         return Err(anyhow!("OpenAI stream error: {message}"));
     }
 
+    let mut events = Vec::new();
+    if let Some(usage) = payload.get("usage").filter(|usage| !usage.is_null()) {
+        events.push(ChatStreamEvent::Usage(
+            serde_json::from_value::<OpenAIUsage>(usage.clone())?.into_usage()?,
+        ));
+    }
+
     let choices = payload
         .get("choices")
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow!("OpenAI stream payload is missing choices"))?;
-    let mut events = Vec::new();
-
     for choice in choices {
         let choice = choice
             .as_object()
@@ -213,13 +300,7 @@ impl LlmProvider for OpenAIProvider {
                 model: request.model.clone(),
                 input: request.messages.clone(),
                 temperature: request.temperature,
-                max_output_tokens: Some(
-                    request
-                        .max_tokens
-                        .unwrap_or(1_024)
-                        .saturating_add(4_096)
-                        .min(8_192),
-                ),
+                max_output_tokens: Some(request.effective_max_output_tokens().unwrap_or(1_024)),
                 stream: false,
                 reasoning: serde_json::json!({"effort": "high"}),
             };
@@ -258,16 +339,13 @@ impl LlmProvider for OpenAIProvider {
                     .and_then(Value::as_str)
                     .unwrap_or(&request.model)
                     .to_owned(),
-                usage: payload.get("usage").map(|usage| Usage {
-                    input_tokens: usage
-                        .get("input_tokens")
-                        .and_then(Value::as_u64)
-                        .unwrap_or_default() as u32,
-                    output_tokens: usage
-                        .get("output_tokens")
-                        .and_then(Value::as_u64)
-                        .unwrap_or_default() as u32,
-                }),
+                usage: payload
+                    .get("usage")
+                    .filter(|usage| !usage.is_null())
+                    .map(|usage| {
+                        serde_json::from_value::<ResponsesUsage>(usage.clone())?.into_usage()
+                    })
+                    .transpose()?,
             });
         }
 
@@ -277,6 +355,7 @@ impl LlmProvider for OpenAIProvider {
             temperature: request.temperature,
             max_tokens: request.max_tokens,
             stream: false,
+            stream_options: None,
             response_format: if request.json_mode {
                 Some(serde_json::json!({"type": "json_object"}))
             } else {
@@ -299,37 +378,15 @@ impl LlmProvider for OpenAIProvider {
 
         let resp: OpenAIResponse = response.json().await?;
 
-        let content = match response_content(&resp) {
+        let content = response_content(&resp);
+        let usage = resp.usage.map(OpenAIUsage::into_usage).transpose()?;
+        let content = match content {
             Ok(content) => content,
-            Err(error) if request.json_mode => {
+            Err(_) if request.json_mode => {
                 // DeepSeek documents that JSON mode can occasionally return an
-                // empty content field. Retrying the identical JSON-mode request
-                // does not change that failure condition, so make one compatible
-                // request without response_format while retaining the explicit
-                // JSON-only system prompt.
-                tracing::warn!(
-                    "JSON mode returned empty content; retrying without response_format"
-                );
-                let fallback_body = OpenAIRequest {
-                    model: request.model.clone(),
-                    messages: request.messages.clone(),
-                    temperature: request.temperature,
-                    max_tokens: request.max_tokens,
-                    stream: false,
-                    response_format: None,
-                    thinking: self.thinking_control(request.thinking),
-                };
-                let fallback_response = client
-                    .post(format!("{}/v1/chat/completions", self.base_url))
-                    .header(&hk, &hv)
-                    .json(&fallback_body)
-                    .send()
-                    .await?;
-                if !fallback_response.status().is_success() {
-                    return Err(response_error(fallback_response).await);
-                }
-                let fallback: OpenAIResponse = fallback_response.json().await?;
-                response_content(&fallback).map_err(|_| error)?
+                // empty content field. The shared client owns the single
+                // response_format-free fallback so it is counted as an attempt.
+                return Err(JsonModeEmpty(usage).into());
             }
             Err(error) => return Err(error),
         };
@@ -337,10 +394,7 @@ impl LlmProvider for OpenAIProvider {
         Ok(ChatResponse {
             content,
             model: resp.model,
-            usage: resp.usage.map(|u| Usage {
-                input_tokens: u.prompt_tokens,
-                output_tokens: u.completion_tokens,
-            }),
+            usage,
         })
     }
 
@@ -355,13 +409,7 @@ impl LlmProvider for OpenAIProvider {
                 model: request.model.clone(),
                 input: request.messages.clone(),
                 temperature: request.temperature,
-                max_output_tokens: Some(
-                    request
-                        .max_tokens
-                        .unwrap_or(1_024)
-                        .saturating_add(4_096)
-                        .min(8_192),
-                ),
+                max_output_tokens: Some(request.effective_max_output_tokens().unwrap_or(1_024)),
                 stream: true,
                 reasoning: serde_json::json!({"effort": "high"}),
             };
@@ -387,6 +435,9 @@ impl LlmProvider for OpenAIProvider {
             temperature: request.temperature,
             max_tokens: request.max_tokens,
             stream: true,
+            stream_options: Some(StreamOptions {
+                include_usage: true,
+            }),
             response_format: None,
             thinking: self.thinking_control(request.thinking),
         };
@@ -477,6 +528,41 @@ mod response_tests {
                 .unwrap(),
             serde_json::json!({"type": "enabled"})
         );
+    }
+
+    #[test]
+    fn usage_accepts_standard_or_deepseek_cache_fields_and_rejects_conflicts() {
+        for payload in [
+            r#"{"prompt_tokens":10,"completion_tokens":2}"#,
+            r#"{"prompt_tokens":10,"completion_tokens":2,"prompt_cache_hit_tokens":4}"#,
+            r#"{"prompt_tokens":10,"completion_tokens":2,"prompt_cache_hit_tokens":4,"prompt_cache_miss_tokens":6}"#,
+            r#"{"prompt_tokens":10,"completion_tokens":2,"prompt_cache_miss_tokens":6}"#,
+            r#"{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":4}}"#,
+        ] {
+            let usage = serde_json::from_str::<OpenAIUsage>(payload)
+                .unwrap()
+                .into_usage()
+                .unwrap();
+            assert!(usage.cached_input_tokens.is_none() || usage.cached_input_tokens == Some(4));
+        }
+        assert!(serde_json::from_str::<OpenAIUsage>(
+            r#"{"prompt_tokens":3,"completion_tokens":2,"prompt_cache_hit_tokens":4}"#,
+        )
+        .unwrap()
+        .into_usage()
+        .is_err());
+        assert!(serde_json::from_str::<OpenAIUsage>(
+            r#"{"prompt_tokens":10,"completion_tokens":2,"prompt_cache_hit_tokens":4,"prompt_cache_miss_tokens":7}"#,
+        )
+        .unwrap()
+        .into_usage()
+        .is_err());
+        assert!(serde_json::from_str::<OpenAIUsage>(
+            r#"{"prompt_tokens":10,"completion_tokens":2,"prompt_cache_hit_tokens":4,"prompt_tokens_details":{"cached_tokens":5}}"#,
+        )
+        .unwrap()
+        .into_usage()
+        .is_err());
     }
 
     #[test]

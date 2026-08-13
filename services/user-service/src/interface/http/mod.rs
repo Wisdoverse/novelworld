@@ -17,6 +17,7 @@ pub struct AppState {
     pub handler: Arc<AuthHandler>,
     pub readiness: Arc<dyn ReadinessProbe>,
     pub internal_service_token: Arc<str>,
+    pub metrics: llm_client::MetricsHandle,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -33,8 +34,19 @@ pub fn router(state: AppState) -> Router {
         .route("/internal/runtime/llm", get(runtime_llm_config))
         .route("/health", get(health))
         .route("/ready", get(ready))
+        .route("/metrics", get(metrics))
         .layer(DefaultBodyLimit::max(16 * 1024))
         .with_state(state)
+}
+
+async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
+        state.metrics.render(),
+    )
 }
 
 #[derive(Debug, Deserialize)]

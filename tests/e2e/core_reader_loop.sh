@@ -2,10 +2,12 @@
 set -euo pipefail
 
 api=${E2E_API_URL:-http://127.0.0.1/api}
+public_url=${E2E_PUBLIC_URL:-http://127.0.0.1}
 email=admin@test.invalid
 password='RuntimeSmokeOnly123!'
 source_file=$(mktemp)
-trap 'rm -f "$source_file"' EXIT
+metrics_file=$(mktemp)
+trap 'rm -f "$source_file" "$metrics_file"' EXIT
 curl_cmd=(curl --connect-timeout 5 --max-time 120 --fail --silent --show-error)
 
 json_get() {
@@ -141,7 +143,7 @@ node_id=$(json_get "value['id']" <<<"$node")
 
 pause
 failed_choice_file=$(mktemp)
-trap 'rm -f "$source_file" "$failed_choice_file"' EXIT
+trap 'rm -f "$source_file" "$failed_choice_file" "$metrics_file"' EXIT
 failed_choice_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   --output "$failed_choice_file" --write-out '%{http_code}' "${auth[@]}" \
   -H 'Content-Type: application/json' \
@@ -171,6 +173,23 @@ pause
 chapter_two=$("${curl_cmd[@]}" "${auth[@]}" "$api/narrative/$novel_id/chapters/2")
 python3 -c "import json,sys; value=json.load(sys.stdin); assert value['generated'] is True; assert '北塔深处' in value['content']" <<<"$chapter_two"
 chapter_hash=$(printf '%s' "$chapter_two" | sha256sum | cut -d' ' -f1)
+
+for target in \
+  'novel-user-service:8001' \
+  'novel-novel-service:8002' \
+  'novel-agent-service:8003' \
+  'novel-narrative-service:8004'; do
+  container=${target%%:*}
+  port=${target##*:}
+  docker exec "$container" curl --fail --silent "http://127.0.0.1:$port/metrics" >>"$metrics_file"
+  printf '\n' >>"$metrics_file"
+done
+grep -Fq 'type="cached_input"' "$metrics_file"
+python3 tools/llm-budget/verify.py \
+  --policy tools/llm-budget/policy-v1.json \
+  --metrics "$metrics_file" \
+  --commit "$(git rev-parse HEAD)"
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' "$public_url/metrics")" = 404
 
 pause
 "${curl_cmd[@]}" --output /dev/null "${auth[@]}" \

@@ -1,0 +1,261 @@
+use std::time::Instant;
+
+use metrics::{counter, gauge, histogram};
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+
+use crate::{LlmOperation, Usage};
+
+const MAX_LABEL_CHARS: usize = 200;
+
+#[derive(Clone)]
+pub struct MetricsHandle(PrometheusHandle);
+
+impl MetricsHandle {
+    pub fn render(&self) -> String {
+        self.0.render()
+    }
+}
+
+pub fn install_metrics(service: &'static str) -> anyhow::Result<MetricsHandle> {
+    let handle = PrometheusBuilder::new()
+        .add_global_label("service", service)
+        .add_global_label("contract", "llm-observability-v1")
+        .install_recorder()?;
+    gauge!("novelworld_llm_observability_info").set(1.0);
+    for operation in LlmOperation::ALL {
+        gauge!(
+            "novelworld_llm_operation_output_token_ceiling",
+            "operation" => operation.to_str(),
+        )
+        .set(operation.max_output_tokens() as f64);
+    }
+    Ok(MetricsHandle(handle))
+}
+
+#[derive(Clone)]
+pub(crate) struct RequestLabels {
+    provider: String,
+    model: String,
+    operation: &'static str,
+    mode: &'static str,
+    output_token_limit: u32,
+}
+
+impl RequestLabels {
+    pub(crate) fn new(
+        provider: &str,
+        model: &str,
+        operation: LlmOperation,
+        mode: &'static str,
+        output_token_limit: u32,
+    ) -> Self {
+        Self {
+            provider: bounded_label(provider),
+            model: bounded_label(model),
+            operation: operation.to_str(),
+            mode,
+            output_token_limit,
+        }
+    }
+
+    pub(crate) fn started(&self) {
+        counter!(
+            "novelworld_llm_requests_started_total",
+            "provider" => self.provider.clone(),
+            "model" => self.model.clone(),
+            "operation" => self.operation,
+            "mode" => self.mode,
+        )
+        .increment(1);
+        histogram!(
+            "novelworld_llm_output_token_limit",
+            "provider" => self.provider.clone(),
+            "model" => self.model.clone(),
+            "operation" => self.operation,
+            "mode" => self.mode,
+        )
+        .record(self.output_token_limit as f64);
+    }
+
+    pub(crate) fn attempt(&self, status: &'static str, elapsed: f64) {
+        counter!(
+            "novelworld_llm_attempts_total",
+            "provider" => self.provider.clone(),
+            "model" => self.model.clone(),
+            "operation" => self.operation,
+            "mode" => self.mode,
+            "status" => status,
+        )
+        .increment(1);
+        histogram!(
+            "novelworld_llm_attempt_duration_seconds",
+            "provider" => self.provider.clone(),
+            "model" => self.model.clone(),
+            "operation" => self.operation,
+            "mode" => self.mode,
+            "status" => status,
+        )
+        .record(elapsed);
+    }
+
+    pub(crate) fn retry(&self, reason: &'static str) {
+        counter!(
+            "novelworld_llm_retries_total",
+            "provider" => self.provider.clone(),
+            "model" => self.model.clone(),
+            "operation" => self.operation,
+            "mode" => self.mode,
+            "reason" => reason,
+        )
+        .increment(1);
+    }
+
+    pub(crate) fn stream_setup(&self, status: &'static str, elapsed: f64) {
+        histogram!(
+            "novelworld_llm_stream_setup_duration_seconds",
+            "provider" => self.provider.clone(),
+            "model" => self.model.clone(),
+            "operation" => self.operation,
+            "status" => status,
+        )
+        .record(elapsed);
+    }
+
+    pub(crate) fn finish(&self, status: &'static str, started: Instant) {
+        counter!(
+            "novelworld_llm_requests_total",
+            "provider" => self.provider.clone(),
+            "model" => self.model.clone(),
+            "operation" => self.operation,
+            "mode" => self.mode,
+            "status" => status,
+        )
+        .increment(1);
+        histogram!(
+            "novelworld_llm_request_duration_seconds",
+            "provider" => self.provider.clone(),
+            "model" => self.model.clone(),
+            "operation" => self.operation,
+            "mode" => self.mode,
+            "status" => status,
+        )
+        .record(started.elapsed().as_secs_f64());
+    }
+
+    pub(crate) fn first_token(&self, started: Instant) {
+        histogram!(
+            "novelworld_llm_first_token_duration_seconds",
+            "provider" => self.provider.clone(),
+            "model" => self.model.clone(),
+            "operation" => self.operation,
+        )
+        .record(started.elapsed().as_secs_f64());
+    }
+
+    pub(crate) fn usage(&self, usage: Option<&Usage>) {
+        let Some(usage) = usage else {
+            counter!(
+                "novelworld_llm_usage_reports_total",
+                "provider" => self.provider.clone(),
+                "model" => self.model.clone(),
+                "operation" => self.operation,
+                "mode" => self.mode,
+                "status" => "missing",
+            )
+            .increment(1);
+            return;
+        };
+
+        counter!(
+            "novelworld_llm_usage_reports_total",
+            "provider" => self.provider.clone(),
+            "model" => self.model.clone(),
+            "operation" => self.operation,
+            "mode" => self.mode,
+            "status" => "present",
+        )
+        .increment(1);
+        self.record_usage(usage);
+    }
+
+    pub(crate) fn additional_usage(&self, usage: &Usage) {
+        self.record_usage(usage);
+    }
+
+    fn record_usage(&self, usage: &Usage) {
+        self.tokens("input", usage.input_tokens);
+        self.tokens("output", usage.output_tokens);
+        self.tokens_per_request("input", usage.input_tokens);
+        self.tokens_per_request("output", usage.output_tokens);
+        if let Some(cached) = usage.cached_input_tokens {
+            self.tokens("cached_input", cached);
+            self.tokens_per_request("cached_input", cached);
+            self.billable_tokens("cached_input", cached);
+            self.billable_tokens("uncached_input", usage.input_tokens - cached);
+        } else {
+            self.billable_tokens("uncached_input", usage.input_tokens);
+        }
+        self.billable_tokens("output", usage.output_tokens);
+    }
+
+    fn tokens(&self, token_type: &'static str, value: u32) {
+        counter!(
+            "novelworld_llm_tokens_total",
+            "provider" => self.provider.clone(),
+            "model" => self.model.clone(),
+            "operation" => self.operation,
+            "type" => token_type,
+        )
+        .increment(value.into());
+    }
+
+    fn tokens_per_request(&self, token_type: &'static str, value: u32) {
+        histogram!(
+            "novelworld_llm_tokens_per_request",
+            "provider" => self.provider.clone(),
+            "model" => self.model.clone(),
+            "operation" => self.operation,
+            "type" => token_type,
+        )
+        .record(value as f64);
+    }
+
+    fn billable_tokens(&self, class: &'static str, value: u32) {
+        counter!(
+            "novelworld_llm_billable_tokens_total",
+            "provider" => self.provider.clone(),
+            "model" => self.model.clone(),
+            "operation" => self.operation,
+            "class" => class,
+        )
+        .increment(value.into());
+    }
+}
+
+fn bounded_label(value: &str) -> String {
+    if value.is_empty()
+        || value.chars().count() > MAX_LABEL_CHARS
+        || value.chars().any(|character| {
+            character.is_control()
+                || !(character.is_ascii_alphanumeric()
+                    || matches!(character, '.' | '-' | '_' | '/' | ':'))
+        })
+    {
+        "invalid".into()
+    } else {
+        value.into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bounded_label;
+
+    #[test]
+    fn labels_are_bounded_and_cannot_carry_secrets_or_control_text() {
+        assert_eq!(bounded_label("deepseek-v4-pro"), "deepseek-v4-pro");
+        assert_eq!(bounded_label("https://secret.invalid?q=key"), "invalid");
+        assert_eq!(bounded_label("line\nbreak"), "invalid");
+        assert_eq!(bounded_label(&"x".repeat(201)), "invalid");
+    }
+}
