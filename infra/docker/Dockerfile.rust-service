@@ -10,6 +10,7 @@ COPY crates ./crates
 COPY gateway ./gateway
 COPY services ./services
 COPY tests ./tests
+COPY tools ./tools
 
 RUN --mount=type=cache,id=novel-world-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=novel-world-cargo-target,target=/app/target,sharing=locked \
