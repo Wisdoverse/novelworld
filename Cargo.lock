@@ -1446,6 +1446,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "h3-eval"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "llm-client",
+ "narrative-service",
+ "novel-service",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "hashbag"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
