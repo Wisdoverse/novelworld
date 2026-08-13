@@ -65,7 +65,7 @@ async fn main() -> Result<()> {
         novel_repo: novel_repo.clone(),
         chapter_repo: chapter_repo.clone(),
         character_repo: character_repo.clone(),
-        canon_repo,
+        canon_repo: canon_repo.clone(),
         llm,
         image_client,
     });
@@ -81,6 +81,7 @@ async fn main() -> Result<()> {
         novel_repo,
         chapter_repo,
         character_repo,
+        canon_repo,
         progress_handler,
         document_extractor,
         readiness: Arc::new(PgReadinessProbe::new(pool)),

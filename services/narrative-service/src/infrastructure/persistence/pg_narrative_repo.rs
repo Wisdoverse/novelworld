@@ -10,6 +10,7 @@ use crate::domain::repositories::{
     ChoiceCommit, ChoiceCommitResult, NarrativeNodeRepository, PlayerChapter, PlayerChapterOrigin,
     PlayerChapterRepository, UserChoiceRecord, UserChoiceRepository,
 };
+use crate::domain::services::narrative_transition::NarrativeTransition;
 
 // ─── NarrativeNode persistence ──────────────────────────────────────────────
 
@@ -135,13 +136,24 @@ struct UserChoiceRow {
     chapter_number: i32,
     choice_index: i32,
     choice_text: String,
-    consequence: Option<String>,
+    consequence: String,
+    transition: serde_json::Value,
     created_at: DateTime<Utc>,
 }
 
-impl From<UserChoiceRow> for UserChoiceRecord {
-    fn from(r: UserChoiceRow) -> Self {
-        UserChoiceRecord {
+impl TryFrom<UserChoiceRow> for UserChoiceRecord {
+    type Error = anyhow::Error;
+
+    fn try_from(r: UserChoiceRow) -> Result<Self> {
+        let transition = serde_json::from_value::<NarrativeTransition>(r.transition)?;
+        transition.validate_shape()?;
+        if transition.rendered_narrative != r.consequence {
+            anyhow::bail!("persisted narrative transition does not match consequence");
+        }
+        if transition.canonical_checkpoint_chapter != r.chapter_number {
+            anyhow::bail!("persisted narrative transition has the wrong checkpoint");
+        }
+        Ok(UserChoiceRecord {
             id: r.id,
             user_id: r.user_id,
             novel_id: r.novel_id,
@@ -150,8 +162,9 @@ impl From<UserChoiceRow> for UserChoiceRecord {
             choice_index: r.choice_index,
             choice_text: r.choice_text,
             consequence: r.consequence,
+            transition,
             created_at: r.created_at,
-        }
+        })
     }
 }
 
@@ -168,6 +181,11 @@ impl PgUserChoiceRepository {
 #[async_trait]
 impl UserChoiceRepository for PgUserChoiceRepository {
     async fn commit_choice(&self, draft: &ChoiceCommit) -> Result<ChoiceCommitResult> {
+        draft.transition.validate_shape()?;
+        if draft.transition.canonical_checkpoint_chapter != draft.chapter_number {
+            anyhow::bail!("narrative transition checkpoint does not match the choice chapter");
+        }
+        let transition_json = serde_json::to_value(&draft.transition)?;
         let mut transaction = self.pool.begin().await?;
         let initial_state = WorldState::new(draft.user_id, draft.novel_id);
         sqlx::query(
@@ -203,11 +221,11 @@ impl UserChoiceRepository for PgUserChoiceRepository {
             r#"
             INSERT INTO user_choices (
                 id, user_id, novel_id, node_id, chapter_number,
-                choice_index, choice_text, consequence, created_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                choice_index, choice_text, consequence, transition, created_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             ON CONFLICT (user_id, node_id) DO NOTHING
             RETURNING id, user_id, novel_id, node_id, chapter_number,
-                      choice_index, choice_text, consequence, created_at
+                      choice_index, choice_text, consequence, transition, created_at
             "#,
         )
         .bind(Uuid::new_v4())
@@ -217,17 +235,18 @@ impl UserChoiceRepository for PgUserChoiceRepository {
         .bind(draft.chapter_number)
         .bind(draft.choice_index)
         .bind(&draft.choice_text)
-        .bind(&draft.consequence)
+        .bind(&draft.transition.rendered_narrative)
+        .bind(transition_json)
         .bind(Utc::now())
         .fetch_optional(&mut *transaction)
         .await?;
 
-        let mut choice = match inserted {
-            Some(row) => UserChoiceRecord::from(row),
+        let choice = match inserted {
+            Some(row) => UserChoiceRecord::try_from(row)?,
             None => sqlx::query_as::<_, UserChoiceRow>(
                 r#"
                 SELECT id, user_id, novel_id, node_id, chapter_number,
-                       choice_index, choice_text, consequence, created_at
+                       choice_index, choice_text, consequence, transition, created_at
                 FROM user_choices
                 WHERE user_id = $1 AND node_id = $2
                 FOR UPDATE
@@ -237,27 +256,15 @@ impl UserChoiceRepository for PgUserChoiceRepository {
             .bind(draft.node_id)
             .fetch_one(&mut *transaction)
             .await?
-            .into(),
+            .try_into()?,
         };
 
-        if choice.consequence.as_deref().is_none_or(str::is_empty) {
-            sqlx::query(
-                "UPDATE user_choices SET consequence = $3 WHERE user_id = $1 AND node_id = $2",
-            )
-            .bind(choice.user_id)
-            .bind(choice.node_id)
-            .bind(&draft.consequence)
-            .execute(&mut *transaction)
-            .await?;
-            choice.consequence = Some(draft.consequence.clone());
-        }
-        let consequence = choice.consequence.as_deref().unwrap_or_default();
-        if world_state.record_choice(
+        if world_state.apply_choice_transition(
             choice.node_id,
             choice.chapter_number,
             choice.choice_index,
             &choice.choice_text,
-            consequence,
+            &choice.transition,
         )? {
             sqlx::query(
                 "UPDATE world_states SET state = $3, updated_at = $4 WHERE user_id = $1 AND novel_id = $2",
@@ -320,7 +327,7 @@ impl UserChoiceRepository for PgUserChoiceRepository {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(UserChoiceRecord::from))
+        row.map(UserChoiceRecord::try_from).transpose()
     }
 
     async fn find_by_novel(&self, user_id: Uuid, novel_id: Uuid) -> Result<Vec<UserChoiceRecord>> {
@@ -332,7 +339,7 @@ impl UserChoiceRepository for PgUserChoiceRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.into_iter().map(UserChoiceRecord::from).collect())
+        rows.into_iter().map(UserChoiceRecord::try_from).collect()
     }
 }
 

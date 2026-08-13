@@ -8,6 +8,8 @@ ANCHOR = "林岚握紧手中的旧地图，望向被风暴笼罩的北塔，决�
 ENDING = "北塔的石门布满潮湿苔痕，林岚在门边发现守门人留下的铜铃。"
 CANON_FAILURE_LOCK = threading.Lock()
 CANON_FAILURES_REMAINING = 1
+TRANSITION_FAILURE_LOCK = threading.Lock()
+TRANSITION_FAILURES_REMAINING = 1
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -144,8 +146,40 @@ class Handler(BaseHTTPRequestHandler):
                     {"text": "先向边城居民调查", "hint": "有人隐瞒了旧日真相……"},
                 ],
             }, ensure_ascii=False)
-        if "生成行动后的故事发展" in prompt:
-            return "你与林岚踏入风暴，沿着旧地图找到北塔暗门。守门人的灯仍在风中闪烁，新的脚印却通向地下。"
+        if "You generate one structured transition" in prompt:
+            global TRANSITION_FAILURES_REMAINING
+            with TRANSITION_FAILURE_LOCK:
+                if TRANSITION_FAILURES_REMAINING:
+                    TRANSITION_FAILURES_REMAINING -= 1
+                    return "{}"
+            canon = json.loads(prompt.split("CANON_CONTEXT:\n", 1)[1].split("\nWORLD_STATE:", 1)[0])
+            character_id = canon["characters"][0]["id"]
+            location_id = canon["locations"][0]["id"]
+            thread_id = canon["threads"][0]["id"]
+            return json.dumps({
+                "schema_version": 1,
+                "rendered_narrative": "你与林岚踏入风暴，沿着旧地图找到北塔暗门。守门人的灯仍在风中闪烁，新的脚印却通向地下。",
+                "events": [{
+                    "summary": "你与林岚找到北塔暗门",
+                    "actor_character_ids": [character_id],
+                    "location_id": location_id,
+                }],
+                "relationship_changes": [{
+                    "character_id": character_id,
+                    "delta": 5,
+                    "reason": "共同进入风暴",
+                }],
+                "location_changes": [{
+                    "location_id": location_id,
+                    "state": "暗门已经开启",
+                    "reason": "玩家与林岚找到了入口",
+                }],
+                "thread_changes": [{
+                    "thread_id": thread_id,
+                    "status": "open",
+                    "description": "守门人的去向仍待确认",
+                }],
+            }, ensure_ascii=False)
         if "玩家时间线主笔" in prompt:
             return "你和林岚沿暗门进入北塔深处。守门人留下的铜铃突然响起，墙后传来低沉回应，新的道路由此展开。"
         return "林岚记得你，也愿意继续同行。"

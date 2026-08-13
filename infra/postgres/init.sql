@@ -256,7 +256,8 @@ CREATE TABLE user_choices (
     chapter_number  INTEGER NOT NULL,
     choice_index    INTEGER NOT NULL,
     choice_text     TEXT NOT NULL,
-    consequence     TEXT,                    -- AI 生成的后果描述
+    consequence     TEXT NOT NULL,           -- transition 的读者可见投影
+    transition      JSONB NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT user_choices_user_node_key UNIQUE(user_id, node_id),
     CONSTRAINT user_choices_node_scope_fkey
@@ -264,7 +265,23 @@ CREATE TABLE user_choices (
         REFERENCES narrative_nodes(id, novel_id, chapter_number) ON DELETE CASCADE,
     CONSTRAINT user_choices_chapter_check CHECK (chapter_number >= 1),
     CONSTRAINT user_choices_index_check CHECK (choice_index >= 0),
-    CONSTRAINT user_choices_text_check CHECK (choice_text <> '')
+    CONSTRAINT user_choices_text_check CHECK (choice_text <> ''),
+    CONSTRAINT user_choices_consequence_check CHECK (consequence <> ''),
+    CONSTRAINT user_choices_transition_check CHECK (
+        jsonb_typeof(transition) = 'object'
+        AND transition @> '{"schema_version": 1}'::jsonb
+        AND jsonb_typeof(transition -> 'prompt_version') = 'string'
+        AND jsonb_typeof(transition -> 'canon_model_version') = 'number'
+        AND jsonb_typeof(transition -> 'canonical_checkpoint_chapter') = 'number'
+        AND jsonb_typeof(transition -> 'rendered_narrative') = 'string'
+        AND jsonb_typeof(transition -> 'events') = 'array'
+        AND jsonb_typeof(transition -> 'relationship_changes') = 'array'
+        AND jsonb_typeof(transition -> 'location_changes') = 'array'
+        AND jsonb_typeof(transition -> 'thread_changes') = 'array'
+    ),
+    CONSTRAINT user_choices_transition_projection_check CHECK (
+        transition ->> 'rendered_narrative' = consequence
+    )
 );
 
 CREATE INDEX idx_user_choices_user_novel ON user_choices(user_id, novel_id, chapter_number);

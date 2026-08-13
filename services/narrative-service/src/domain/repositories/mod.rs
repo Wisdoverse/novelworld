@@ -3,6 +3,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use uuid::Uuid;
 
+use crate::domain::services::narrative_transition::{CanonContext, NarrativeTransition};
+
 #[async_trait]
 pub trait NarrativeNodeRepository: Send + Sync {
     async fn save(&self, node: &NarrativeNode) -> Result<()>;
@@ -42,6 +44,12 @@ pub trait ChapterReadRepository: Send + Sync {
         user_id: Uuid,
     ) -> Result<Option<ChapterInfo>>;
     async fn get_novel_info(&self, novel_id: Uuid, user_id: Uuid) -> Result<Option<NovelInfo>>;
+    async fn get_canon_context(
+        &self,
+        novel_id: Uuid,
+        checkpoint_chapter: i32,
+        user_id: Uuid,
+    ) -> Result<Option<CanonContext>>;
 }
 
 #[async_trait]
@@ -112,7 +120,8 @@ pub struct UserChoiceRecord {
     pub chapter_number: i32,
     pub choice_index: i32,
     pub choice_text: String,
-    pub consequence: Option<String>,
+    pub consequence: String,
+    pub transition: NarrativeTransition,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -124,7 +133,7 @@ pub struct ChoiceCommit {
     pub chapter_number: i32,
     pub choice_index: i32,
     pub choice_text: String,
-    pub consequence: String,
+    pub transition: NarrativeTransition,
     pub rewritten_chapter_content: String,
 }
 

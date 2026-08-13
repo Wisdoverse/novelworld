@@ -15,7 +15,10 @@ use crate::application::handlers::{
 };
 use crate::domain::entities::novel::Novel;
 use crate::domain::ports::{DocumentExtractionError, DocumentTextExtractor, ReadinessProbe};
-use crate::domain::repositories::{ChapterRepository, CharacterRepository, NovelRepository};
+use crate::domain::repositories::{
+    CanonStoryModelRepository, ChapterRepository, CharacterRepository, NovelRepository,
+};
+use crate::domain::services::canon_story_context::build_canon_context;
 use axum::routing::put;
 
 #[derive(Clone)]
@@ -24,6 +27,7 @@ pub struct AppState {
     pub novel_repo: Arc<dyn NovelRepository>,
     pub chapter_repo: Arc<dyn ChapterRepository>,
     pub character_repo: Arc<dyn CharacterRepository>,
+    pub canon_repo: Arc<dyn CanonStoryModelRepository>,
     pub progress_handler: Arc<ReadingProgressHandler>,
     pub document_extractor: Arc<dyn DocumentTextExtractor>,
     pub readiness: Arc<dyn ReadinessProbe>,
@@ -46,6 +50,10 @@ fn routes() -> Router<AppState> {
         .route("/novels/{id}/lore/search", post(search_lore))
         .route("/novels/{id}/characters", get(list_characters))
         .route("/characters/{id}", get(get_character_by_id))
+        .route(
+            "/internal/novels/{id}/canon-context/{chapter}",
+            get(get_canon_context),
+        )
         .route("/novels/{id}/relationships", get(list_relationships))
         .route("/novels/{id}/status", get(get_parse_status))
         .route("/progress/{novel_id}", get(get_progress))
@@ -54,6 +62,87 @@ fn routes() -> Router<AppState> {
         .route("/health", get(health))
         .route("/ready", get(ready))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_SIZE))
+}
+
+async fn get_canon_context(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((novel_id, requested_chapter)): Path<(Uuid, i32)>,
+) -> Response {
+    let user_id = match extract_user_id(&headers) {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiError {
+                    error: "Missing user ID".into(),
+                }),
+            )
+                .into_response()
+        }
+    };
+    if requested_chapter < 1 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "chapter must be at least 1".into(),
+            }),
+        )
+            .into_response();
+    }
+    let progress = match state.progress_handler.get(user_id, novel_id).await {
+        Ok(progress) => progress,
+        Err(error) => return progress_error_response(error),
+    };
+    let checkpoint = requested_chapter.min(progress.current_chapter);
+    let model = match state.canon_repo.find_latest(novel_id).await {
+        Ok(Some(model)) => model,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiError {
+                    error: "Canon context not found".into(),
+                }),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            tracing::error!(%error, %novel_id, "failed to load canon context");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "Internal server error".into(),
+                }),
+            )
+                .into_response();
+        }
+    };
+    let characters = match state.character_repo.find_by_novel(novel_id).await {
+        Ok(characters) => characters,
+        Err(error) => {
+            tracing::error!(%error, %novel_id, "failed to load canon characters");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "Internal server error".into(),
+                }),
+            )
+                .into_response();
+        }
+    };
+    match build_canon_context(&model, &characters, checkpoint) {
+        Ok(context) => (StatusCode::OK, Json(context)).into_response(),
+        Err(error) => {
+            tracing::error!(%error, %novel_id, checkpoint, "invalid canon context");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "Internal server error".into(),
+                }),
+            )
+                .into_response()
+        }
+    }
 }
 
 // ─── Request/Response DTOs ────────────────────────────────────────────────────
