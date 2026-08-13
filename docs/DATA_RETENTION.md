@@ -52,8 +52,19 @@ Container logs, database snapshots, volume copies, and external backups are also
 operator-owned. NovelWorld does not create or prune backups, so operators must
 apply their own retention and deletion schedules to those copies.
 
-## Export status
+## Account export
 
-An account data export is not implemented yet. The Horizon 3 roadmap keeps it as
-an independent release-gated privacy slice so export does not bypass service
-ownership or load unbounded account data into one process.
+Settings and `GET /api/account/export` provide the acting user a versioned
+`account-export-v1` NDJSON download. The Gateway composes ordered, service-owned
+HTTP fragments with bounded memory; it never reads downstream tables. A final
+`complete` record is required before the browser saves the file.
+
+The export contains profile metadata; owned novels, source chapters,
+characters, relationships, canon models, and reading progress; durable messages
+and memory content; and relevant narrative nodes, choices/transitions, world
+state, and player chapters. It excludes credentials, tokens, runtime model
+keys, internal operational state, embeddings, Redis/search projections, and
+data held only by providers or operators. Each service uses its own statement
+snapshot, so this is a portability export rather than a globally atomic backup.
+The complete wire contract and consumer rules are in
+[ACCOUNT_EXPORT.md](./ACCOUNT_EXPORT.md).

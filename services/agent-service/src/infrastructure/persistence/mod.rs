@@ -1,3 +1,4 @@
+pub mod account_export;
 pub mod pg_chat_repo;
 pub mod pg_memory_repo;
 

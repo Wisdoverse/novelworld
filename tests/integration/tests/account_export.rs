@@ -1,0 +1,378 @@
+use agent_service::{
+    domain::ports::AccountExportPort as AgentAccountExportPort,
+    infrastructure::persistence::account_export::PgAccountExport as AgentAccountExport,
+};
+use futures::StreamExt;
+use narrative_service::{
+    domain::ports::AccountExportPort as NarrativeAccountExportPort,
+    infrastructure::persistence::account_export::PgAccountExport as NarrativeAccountExport,
+};
+use novel_service::{
+    domain::ports::AccountExportPort as NovelAccountExportPort,
+    infrastructure::persistence::account_export::PgAccountExport as NovelAccountExport,
+};
+use serde_json::{json, Value};
+use sqlx::postgres::PgPoolOptions;
+use std::collections::BTreeSet;
+use uuid::Uuid;
+
+fn db_url() -> String {
+    std::env::var("TEST_DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://test:test@localhost:25432/novelworld_test".into())
+}
+
+#[tokio::test]
+async fn production_account_exports_are_complete_scoped_deterministic_and_secret_free() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let user_id = Uuid::new_v4();
+    let other_user_id = Uuid::new_v4();
+    let novel_id = Uuid::new_v4();
+    let other_novel_id = Uuid::new_v4();
+    let chapter_id = Uuid::new_v4();
+    let character_id = Uuid::new_v4();
+    let second_character_id = Uuid::new_v4();
+    let canonical_node_id = Uuid::new_v4();
+    let player_node_id = Uuid::new_v4();
+    let other_private_node_id = Uuid::new_v4();
+
+    for (id, marker) in [(user_id, "owner"), (other_user_id, "other-user-marker")] {
+        sqlx::query("INSERT INTO users (id, email, password_hash) VALUES ($1, $2, $3)")
+            .bind(id)
+            .bind(format!("account-export-{marker}-{id}@test.invalid"))
+            .bind(format!("SENTINEL_PASSWORD_{marker}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO novels (id, user_id, title, cover_url, original_file_key, status) \
+         VALUES ($1, $2, 'Portable novel', 'https://assets.invalid/cover', \
+                 'SENTINEL_OBJECT_KEY', 'ready'), \
+                ($3, $4, 'other-user-marker novel', NULL, NULL, 'ready')",
+    )
+    .bind(novel_id)
+    .bind(user_id)
+    .bind(other_novel_id)
+    .bind(other_user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO chapters (id, novel_id, chapter_number, title, content) \
+         VALUES ($1, $2, 1, 'Beginning', 'Portable source chapter'), \
+                (uuid_generate_v4(), $3, 1, NULL, 'other-user-marker chapter')",
+    )
+    .bind(chapter_id)
+    .bind(novel_id)
+    .bind(other_novel_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO characters (id, novel_id, name, avatar_url, personality) \
+         VALUES ($1, $3, 'Aster', 'https://assets.invalid/avatar', 'patient'), \
+                ($2, $3, 'Bryn', NULL, 'bold'), \
+                (uuid_generate_v4(), $4, 'other-user-marker character', NULL, NULL)",
+    )
+    .bind(character_id)
+    .bind(second_character_id)
+    .bind(novel_id)
+    .bind(other_novel_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO character_relationships \
+         (novel_id, from_character_id, to_character_id, relationship_type, description) \
+         VALUES ($1, $2, $3, 'ally', 'Trusted ally')",
+    )
+    .bind(novel_id)
+    .bind(character_id)
+    .bind(second_character_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO canon_story_models \
+         (novel_id, model_version, schema_version, prompt_version, content) \
+         VALUES ($1, 1, 1, 'account-export-test', $2)",
+    )
+    .bind(novel_id)
+    .bind(json!({"world": "portable canon"}))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO reading_progress (user_id, novel_id, current_chapter) \
+         VALUES ($1, $2, 1), ($1, $3, 1)",
+    )
+    .bind(user_id)
+    .bind(novel_id)
+    .bind(other_novel_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO chat_messages \
+         (character_id, user_id, novel_id, role, content, chapter_context) \
+         VALUES ($1, $2, $3, 'user', 'Portable conversation', 1)",
+    )
+    .bind(character_id)
+    .bind(user_id)
+    .bind(novel_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let embedding = format!("[0.3141592653589793,{}]", vec!["0"; 1535].join(","));
+    sqlx::query(
+        "INSERT INTO character_memories \
+         (character_id, user_id, novel_id, layer, content, importance, chapter_number, \
+          embedding, access_count, last_accessed) \
+         VALUES ($1, $2, $3, 'long', 'Portable memory', 9, 1, $4::vector, 777777, NOW())",
+    )
+    .bind(character_id)
+    .bind(user_id)
+    .bind(novel_id)
+    .bind(embedding)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO chat_turns \
+         (id, user_id, character_id, novel_id, request_fingerprint, chapter_context, \
+          reader_identity_type, deviation_mode, status, failure_code) \
+         VALUES ($1, $2, $3, $4, $5, 1, 'self', 'canon', 'failed', \
+                 'SENTINEL_CHAT_FAILURE')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(character_id)
+    .bind(novel_id)
+    .bind(vec![0x5a_u8; 32])
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO narrative_nodes \
+         (id, novel_id, chapter_number, description, choices) \
+         VALUES ($1, $2, 1, 'Portable canonical branch', '[]'), \
+                (uuid_generate_v4(), $3, 1, 'other-user-marker branch', '[]')",
+    )
+    .bind(canonical_node_id)
+    .bind(novel_id)
+    .bind(other_novel_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO narrative_nodes \
+         (id, user_id, novel_id, chapter_number, description, choices) \
+         VALUES ($1, $2, $3, 2, 'Portable player branch', '[]'), \
+                ($4, $5, $6, 2, 'other-user-marker player branch', '[]')",
+    )
+    .bind(player_node_id)
+    .bind(user_id)
+    .bind(novel_id)
+    .bind(other_private_node_id)
+    .bind(other_user_id)
+    .bind(other_novel_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let transition = json!({
+        "schema_version": 1,
+        "prompt_version": "account-export-test",
+        "canon_model_version": 1,
+        "canonical_checkpoint_chapter": 1,
+        "rendered_narrative": "Portable consequence",
+        "events": [],
+        "relationship_changes": [],
+        "location_changes": [],
+        "thread_changes": []
+    });
+    // Simulate legacy/dirty data that points at another reader's private node.
+    // The choice belongs to this user, but the private node content must not.
+    sqlx::query(
+        "INSERT INTO user_choices \
+         (user_id, novel_id, node_id, chapter_number, choice_index, choice_text, \
+          consequence, transition) \
+         VALUES ($1, $2, $3, 2, 0, 'Legacy scoped choice', 'Portable consequence', $4)",
+    )
+    .bind(user_id)
+    .bind(other_novel_id)
+    .bind(other_private_node_id)
+    .bind(&transition)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO user_choices \
+         (user_id, novel_id, node_id, chapter_number, choice_index, choice_text, \
+          consequence, transition) \
+         VALUES ($1, $2, $3, 1, 0, 'Portable choice', 'Portable consequence', $4)",
+    )
+    .bind(user_id)
+    .bind(novel_id)
+    .bind(canonical_node_id)
+    .bind(&transition)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO world_states (user_id, novel_id, state) VALUES ($1, $2, $3), ($4, $5, $6)",
+    )
+    .bind(user_id)
+    .bind(novel_id)
+    .bind(json!({"world_events": ["portable"]}))
+    .bind(other_user_id)
+    .bind(other_novel_id)
+    .bind(json!({"world_events": ["other-user-marker"]}))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO player_chapters (user_id, novel_id, chapter_number, content, origin) \
+         VALUES ($1, $2, 2, 'Portable generated chapter', 'continuation'), \
+                ($3, $4, 2, 'other-user-marker generated chapter', 'continuation')",
+    )
+    .bind(user_id)
+    .bind(novel_id)
+    .bind(other_user_id)
+    .bind(other_novel_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let novel_export = NovelAccountExport::new(pool.clone());
+    let mut novel_stream = NovelAccountExportPort::export_user(&novel_export, user_id);
+    let mut novel_records = Vec::new();
+    while let Some(record) = novel_stream.next().await {
+        let record = record.unwrap();
+        novel_records.push(json!({"kind": record.kind, "data": record.data}));
+    }
+    let mut second_novel_stream = NovelAccountExportPort::export_user(&novel_export, user_id);
+    let mut second_novel_records = Vec::new();
+    while let Some(record) = second_novel_stream.next().await {
+        let record = record.unwrap();
+        second_novel_records.push(json!({"kind": record.kind, "data": record.data}));
+    }
+    assert_eq!(novel_records, second_novel_records);
+    assert_eq!(
+        novel_records
+            .iter()
+            .filter(|record| record["kind"] == "reading_progress")
+            .count(),
+        2
+    );
+
+    let agent_export = AgentAccountExport::new(pool.clone());
+    let mut agent_stream = AgentAccountExportPort::export_user(&agent_export, user_id);
+    let mut agent_records = Vec::new();
+    while let Some(record) = agent_stream.next().await {
+        let record = record.unwrap();
+        agent_records.push(json!({"kind": record.kind, "data": record.data}));
+    }
+    let mut second_agent_stream = AgentAccountExportPort::export_user(&agent_export, user_id);
+    let mut second_agent_records = Vec::new();
+    while let Some(record) = second_agent_stream.next().await {
+        let record = record.unwrap();
+        second_agent_records.push(json!({"kind": record.kind, "data": record.data}));
+    }
+    assert_eq!(agent_records, second_agent_records);
+
+    let narrative_export = NarrativeAccountExport::new(pool.clone());
+    let mut narrative_stream = NarrativeAccountExportPort::export_user(&narrative_export, user_id);
+    let mut narrative_records = Vec::new();
+    while let Some(record) = narrative_stream.next().await {
+        let record = record.unwrap();
+        narrative_records.push(json!({"kind": record.kind, "data": record.data}));
+    }
+    let mut second_narrative_stream =
+        NarrativeAccountExportPort::export_user(&narrative_export, user_id);
+    let mut second_narrative_records = Vec::new();
+    while let Some(record) = second_narrative_stream.next().await {
+        let record = record.unwrap();
+        second_narrative_records.push(json!({"kind": record.kind, "data": record.data}));
+    }
+    assert_eq!(narrative_records, second_narrative_records);
+
+    assert_eq!(
+        kinds(&novel_records),
+        BTreeSet::from([
+            "canon_story_model",
+            "chapter",
+            "character",
+            "character_relationship",
+            "novel",
+            "reading_progress",
+        ])
+    );
+    assert_eq!(
+        kinds(&agent_records),
+        BTreeSet::from(["character_memory", "chat_message"])
+    );
+    assert_eq!(
+        kinds(&narrative_records),
+        BTreeSet::from([
+            "narrative_node",
+            "player_chapter",
+            "user_choice",
+            "world_state",
+        ])
+    );
+
+    let serialized = serde_json::to_string(&json!({
+        "novel": novel_records,
+        "agent": agent_records,
+        "narrative": narrative_records,
+    }))
+    .unwrap();
+    for portable in [
+        "Portable source chapter",
+        "Portable conversation",
+        "Portable memory",
+        "Portable canonical branch",
+        "Portable player branch",
+        "Portable choice",
+        "Portable generated chapter",
+        "https://assets.invalid/cover",
+        "https://assets.invalid/avatar",
+    ] {
+        assert!(serialized.contains(portable), "missing {portable}");
+    }
+    for excluded in [
+        "other-user-marker",
+        "SENTINEL_PASSWORD",
+        "SENTINEL_OBJECT_KEY",
+        "SENTINEL_CHAT_FAILURE",
+        "0.3141592653589793",
+        "password_hash",
+        "original_file_key",
+        "request_fingerprint",
+        "failure_code",
+        "embedding",
+        "access_count",
+        "last_accessed",
+    ] {
+        assert!(!serialized.contains(excluded), "leaked {excluded}");
+    }
+
+    sqlx::query("DELETE FROM users WHERE id = ANY($1)")
+        .bind(vec![user_id, other_user_id])
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+fn kinds(records: &[Value]) -> BTreeSet<&str> {
+    records
+        .iter()
+        .map(|record| record["kind"].as_str().unwrap())
+        .collect()
+}

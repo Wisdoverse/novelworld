@@ -1,10 +1,12 @@
 use axum::{
+    body::Body,
     extract::{multipart::MultipartRejection, DefaultBodyLimit, Json, Multipart, Path, State},
-    http::{HeaderMap, StatusCode},
+    http::{header::CACHE_CONTROL, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Router,
 };
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -14,7 +16,9 @@ use crate::application::handlers::{
     NovelCommandHandler, NovelDeletionError, ReadingProgressError, ReadingProgressHandler,
 };
 use crate::domain::entities::novel::Novel;
-use crate::domain::ports::{DocumentExtractionError, DocumentTextExtractor, ReadinessProbe};
+use crate::domain::ports::{
+    AccountExportPort, DocumentExtractionError, DocumentTextExtractor, ReadinessProbe,
+};
 use crate::domain::repositories::{
     CanonStoryModelRepository, ChapterRepository, CharacterRepository, NovelRepository,
 };
@@ -32,6 +36,8 @@ pub struct AppState {
     pub canon_repo: Arc<dyn CanonStoryModelRepository>,
     pub progress_handler: Arc<ReadingProgressHandler>,
     pub document_extractor: Arc<dyn DocumentTextExtractor>,
+    pub account_export: Arc<dyn AccountExportPort>,
+    pub internal_service_token: Arc<str>,
     pub readiness: Arc<dyn ReadinessProbe>,
     pub metrics: llm_client::MetricsHandle,
 }
@@ -61,6 +67,10 @@ fn routes() -> Router<AppState> {
             "/internal/novels/{id}/player-entry",
             post(get_player_entry_context),
         )
+        .route(
+            "/internal/privacy/users/{user_id}/export",
+            get(export_account),
+        )
         .route("/novels/{id}/relationships", get(list_relationships))
         .route("/novels/{id}/status", get(get_parse_status))
         .route("/progress/{novel_id}", get(get_progress))
@@ -70,6 +80,42 @@ fn routes() -> Router<AppState> {
         .route("/ready", get(ready))
         .route("/metrics", get(metrics))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_SIZE))
+}
+
+async fn export_account(
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Response {
+    if !internal_request_authorized(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ApiError {
+                error: "Invalid internal service identity".into(),
+            }),
+        )
+            .into_response();
+    }
+
+    let stream = state.account_export.export_user(user_id).map(|result| {
+        let record = result.map_err(std::io::Error::other)?;
+        let mut line = serde_json::to_vec(&serde_json::json!({
+            "type": "record",
+            "service": "novel",
+            "kind": record.kind,
+            "data": record.data,
+        }))
+        .map_err(std::io::Error::other)?;
+        line.push(b'\n');
+        Ok::<_, std::io::Error>(line)
+    });
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/x-ndjson")
+        .header(CACHE_CONTROL, "no-store")
+        .body(Body::from_stream(stream))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
@@ -836,6 +882,28 @@ fn extract_user_id(headers: &HeaderMap) -> Option<Uuid> {
         .and_then(|v| Uuid::parse_str(v).ok())
 }
 
+fn internal_request_authorized(state: &AppState, headers: &HeaderMap) -> bool {
+    internal_token_authorized(headers, state.internal_service_token.as_ref())
+}
+
+fn internal_token_authorized(headers: &HeaderMap, expected: &str) -> bool {
+    headers
+        .get("X-Internal-Service-Token")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| secrets_equal(value, expected))
+}
+
+fn secrets_equal(left: &str, right: &str) -> bool {
+    left.len() == right.len()
+        && left
+            .bytes()
+            .zip(right.bytes())
+            .fold(0_u8, |difference, (left, right)| {
+                difference | (left ^ right)
+            })
+            == 0
+}
+
 async fn owned_novel(
     state: &AppState,
     headers: &HeaderMap,
@@ -1115,5 +1183,18 @@ mod ownership_tests {
             readiness_status(&FixedProbe(false)).await,
             StatusCode::SERVICE_UNAVAILABLE
         );
+    }
+
+    #[test]
+    fn internal_export_auth_rejects_missing_and_wrong_tokens() {
+        let mut headers = HeaderMap::new();
+        assert!(!internal_token_authorized(&headers, "expected-token"));
+        headers.insert("X-Internal-Service-Token", "wrong-token".parse().unwrap());
+        assert!(!internal_token_authorized(&headers, "expected-token"));
+        headers.insert(
+            "X-Internal-Service-Token",
+            "expected-token".parse().unwrap(),
+        );
+        assert!(internal_token_authorized(&headers, "expected-token"));
     }
 }
