@@ -1,6 +1,9 @@
 use axum::{
-    extract::{DefaultBodyLimit, Json, State},
-    http::{header::CACHE_CONTROL, HeaderMap, StatusCode},
+    extract::{DefaultBodyLimit, Json, Path, State},
+    http::{
+        header::{CACHE_CONTROL, CONTENT_TYPE},
+        HeaderMap, StatusCode,
+    },
     response::IntoResponse,
     routing::{get, post, put},
     Router,
@@ -32,11 +35,76 @@ pub fn router(state: AppState) -> Router {
         .route("/settings/llm", get(get_llm_settings))
         .route("/settings/llm", put(update_llm_settings))
         .route("/internal/runtime/llm", get(runtime_llm_config))
+        .route(
+            "/internal/privacy/users/{user_id}/export",
+            get(export_account),
+        )
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/metrics", get(metrics))
         .layer(DefaultBodyLimit::max(16 * 1024))
         .with_state(state)
+}
+
+async fn export_account(
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if !internal_request_authorized(&state, &headers) {
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "Invalid internal service identity",
+        )
+        .into_response();
+    }
+
+    match state.handler.get_me(user_id).await {
+        Ok(user) => {
+            let record = profile_export_record(&user);
+            match serde_json::to_string(&record) {
+                Ok(line) => (
+                    StatusCode::OK,
+                    [
+                        (CONTENT_TYPE, "application/x-ndjson"),
+                        (CACHE_CONTROL, "no-store"),
+                    ],
+                    format!("{line}\n"),
+                )
+                    .into_response(),
+                Err(error) => {
+                    tracing::error!(?error, %user_id, "failed to serialize account export");
+                    error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "internal_error",
+                        "Account export failed",
+                    )
+                    .into_response()
+                }
+            }
+        }
+        Err(error) => auth_error_response(error),
+    }
+}
+
+fn profile_export_record(user: &crate::domain::entities::user::User) -> serde_json::Value {
+    serde_json::json!({
+        "type": "record",
+        "service": "user",
+        "kind": "profile",
+        "data": {
+            "id": user.id,
+            "email": user.email,
+            "name": user.name,
+            "avatar_url": user.avatar_url,
+            "role": user.role.as_str(),
+            "email_verified": user.email_verified,
+            "created_at": user.created_at,
+            "updated_at": user.updated_at,
+            "last_sign_in": user.last_sign_in,
+        }
+    })
 }
 
 async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
@@ -369,11 +437,7 @@ async fn runtime_llm_config(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let authorized = headers
-        .get("X-Internal-Service-Token")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| secrets_equal(value, state.internal_service_token.as_ref()));
-    if !authorized {
+    if !internal_request_authorized(&state, &headers) {
         return error_response(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
@@ -397,6 +461,17 @@ async fn runtime_llm_config(
             .into_response(),
         Err(error) => auth_error_response(error),
     }
+}
+
+fn internal_request_authorized(state: &AppState, headers: &HeaderMap) -> bool {
+    internal_token_authorized(headers, state.internal_service_token.as_ref())
+}
+
+fn internal_token_authorized(headers: &HeaderMap, expected: &str) -> bool {
+    headers
+        .get("X-Internal-Service-Token")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| secrets_equal(value, expected))
 }
 
 async fn get_llm_settings(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
@@ -515,5 +590,32 @@ mod readiness_tests {
             readiness_status(&FixedProbe(false)).await,
             StatusCode::SERVICE_UNAVAILABLE
         );
+    }
+
+    #[test]
+    fn internal_export_auth_rejects_missing_and_wrong_tokens() {
+        let mut headers = HeaderMap::new();
+        assert!(!internal_token_authorized(&headers, "expected-token"));
+        headers.insert("X-Internal-Service-Token", "wrong-token".parse().unwrap());
+        assert!(!internal_token_authorized(&headers, "expected-token"));
+        headers.insert(
+            "X-Internal-Service-Token",
+            "expected-token".parse().unwrap(),
+        );
+        assert!(internal_token_authorized(&headers, "expected-token"));
+    }
+
+    #[test]
+    fn profile_export_has_an_explicit_secret_free_shape() {
+        let user = crate::domain::entities::user::User::new(
+            "portable@test.invalid".into(),
+            "SENTINEL_PASSWORD_HASH".into(),
+            Some("Portable Reader".into()),
+        );
+        let serialized = serde_json::to_string(&profile_export_record(&user)).unwrap();
+        assert!(serialized.contains("portable@test.invalid"));
+        assert!(serialized.contains("Portable Reader"));
+        assert!(!serialized.contains("SENTINEL_PASSWORD_HASH"));
+        assert!(!serialized.contains("password_hash"));
     }
 }

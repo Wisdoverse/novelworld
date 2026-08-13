@@ -1,5 +1,20 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use std::pin::Pin;
+use uuid::Uuid;
+
+#[derive(Debug)]
+pub struct AccountExportRecord {
+    pub kind: String,
+    pub data: serde_json::Value,
+}
+
+pub type AccountExportStream =
+    Pin<Box<dyn futures::Stream<Item = Result<AccountExportRecord>> + Send>>;
+
+pub trait AccountExportPort: Send + Sync {
+    fn export_user(&self, user_id: Uuid) -> AccountExportStream;
+}
 
 #[async_trait]
 pub trait LlmPort: Send + Sync {

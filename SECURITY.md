@@ -37,6 +37,10 @@ We will acknowledge receipt within 48 hours and provide a timeline for resolutio
 - API gateway enforces rate limiting (configurable, default 500 req/s)
 - Retention and application-layer erasure boundaries are documented in
   [docs/DATA_RETENTION.md](./docs/DATA_RETENTION.md)
+- Account export uses JWT-derived identity, internal-token-authenticated service
+  fragments, explicit field allowlists, a two-request concurrency ceiling, and
+  a 15-minute end-to-end deadline. See
+  [docs/ACCOUNT_EXPORT.md](./docs/ACCOUNT_EXPORT.md).
 
 ### Infrastructure
 - All inter-service communication over internal Docker network
@@ -55,4 +59,5 @@ We will acknowledge receipt within 48 hours and provide a timeline for resolutio
 - LLM prompt injection cannot be fully mitigated at the application layer
 - Provider logs, provider-hosted generated images, and operator backups are
   outside the application-layer erasure transaction
-- Account data export is not yet implemented
+- Account export snapshots are service-local and sequential, not a globally
+  atomic database backup

@@ -934,6 +934,7 @@ service.
 | GET | `/api/auth/me` | User | JWT | Current user profile |
 | DELETE | `/api/auth/me` | User | JWT | Permanently delete the acting account and owned application data |
 | POST | `/api/auth/logout` | User | JWT | Invalidate refresh token |
+| GET | `/api/account/export` | Gateway | JWT | Stream the acting user's complete `account-export-v1` NDJSON data |
 
 ### 10.2 Novel Endpoints
 
@@ -987,7 +988,22 @@ service.
 | PUT | `/api/progress/:novelId` | Novel | JWT | Update chapter position |
 | PUT | `/api/progress/:novelId/identity` | Novel | JWT | Set reader identity |
 
-### 10.8 Error Response Format
+### 10.8 Account Export
+
+`GET /api/account/export` MUST derive the subject from the Gateway-validated
+JWT, compose internal-token-authenticated fragments in `user`, `novel`, `agent`,
+and `narrative` order, and stream with bounded server memory. The response MUST
+use `application/x-ndjson`, `Cache-Control: no-store`, and no `Content-Length`.
+It MUST begin with an `account-export-v1` manifest and emit `complete` only after
+all four service fragments finish. Clients MUST reject a file without that
+terminal record. Queries MUST use explicit field allowlists and deterministic
+ordering; credentials, tokens, runtime keys, chat-turn operational state,
+embeddings, Redis/search projections, and external provider/operator data MUST
+be excluded. Each fragment is a service-local statement snapshot, not a
+distributed point-in-time backup. The Gateway MUST bound concurrency and total
+elapsed work.
+
+### 10.9 Error Response Format
 
 All error responses MUST use the following JSON structure:
 
@@ -1043,7 +1059,7 @@ Required variables:
 | `LLM_API_KEY` | User, Novel, Agent, Narrative | Optional environment override for LLM authentication |
 | `LLM_MODEL` | User, Novel, Agent, Narrative | Model identifier for the environment override |
 | `RUNTIME_CONFIG_KEY` | User | 32-byte hex key for encrypting web-provided credentials |
-| `INTERNAL_SERVICE_TOKEN` | User, Novel, Agent, Narrative | Authenticates internal runtime configuration reads |
+| `INTERNAL_SERVICE_TOKEN` | Gateway, User, Novel, Agent, Narrative | Authenticates internal runtime configuration and account-export reads |
 | `IMAGE_GEN_API_URL` | Novel | Image generation API base URL |
 | `IMAGE_GEN_API_KEY` | Novel | Image generation API key |
 | `EMBEDDING_API_URL` | Agent | Embedding API base URL |

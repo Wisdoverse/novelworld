@@ -22,7 +22,7 @@ use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -36,6 +36,7 @@ pub struct AppState {
     pub proxy: Arc<ServiceProxy>,
     pub metrics_handle: PrometheusHandle,
     pub rate_limiter: Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
+    pub account_export_permits: Arc<Semaphore>,
     readiness_cache: Arc<ReadinessCache>,
 }
 
@@ -95,6 +96,11 @@ async fn main() -> anyhow::Result<()> {
 
     let jwt_secret = std::env::var("JWT_SECRET").expect("JWT_SECRET must be set");
     let jwt = Arc::new(JwtMiddleware::new(&jwt_secret));
+    let internal_service_token =
+        std::env::var("INTERNAL_SERVICE_TOKEN").expect("INTERNAL_SERVICE_TOKEN must be set");
+    if internal_service_token.len() < 32 {
+        anyhow::bail!("INTERNAL_SERVICE_TOKEN must be at least 32 characters");
+    }
 
     let proxy = Arc::new(ServiceProxy {
         novel_service_url: std::env::var("NOVEL_SERVICE_URL")
@@ -106,6 +112,7 @@ async fn main() -> anyhow::Result<()> {
         user_service_url: std::env::var("USER_SERVICE_URL")
             .unwrap_or_else(|_| "http://user-service:8001".into()),
         client: reqwest::Client::new(),
+        internal_service_token: internal_service_token.into(),
     });
 
     // --- Global rate limiter: configurable via env, default 500 req/s ---
@@ -128,6 +135,9 @@ async fn main() -> anyhow::Result<()> {
         proxy,
         metrics_handle,
         rate_limiter,
+        // ponytail: The production topology has one Gateway process. Add
+        // distributed admission only when Gateway replicas actually exist.
+        account_export_permits: Arc::new(Semaphore::new(2)),
         readiness_cache: Arc::new(ReadinessCache::new()),
     };
 
@@ -149,6 +159,7 @@ async fn main() -> anyhow::Result<()> {
             get(proxy::forward_to_user).delete(proxy::forward_to_user),
         )
         .route("/api/auth/logout", post(proxy::forward_to_user))
+        .route("/api/account/export", get(proxy::export_account))
         .route("/api/settings/{*path}", any(proxy::forward_to_user))
         .route("/api/novels", post(proxy::forward_to_novel))
         .route("/api/novels", get(proxy::forward_to_novel))

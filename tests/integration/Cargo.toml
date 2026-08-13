@@ -14,6 +14,7 @@ serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 anyhow = "1"
 async-trait.workspace = true
+futures.workspace = true
 agent-service = { path = "../../services/agent-service" }
 novel-service = { path = "../../services/novel-service" }
 narrative-service = { path = "../../services/narrative-service" }

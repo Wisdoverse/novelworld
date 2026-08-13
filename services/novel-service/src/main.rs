@@ -7,11 +7,14 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use novel_service::{
     application::handlers::{NovelCommandHandler, ReadingProgressHandler},
-    domain::ports::{DocumentTextExtractor, ImagePort, LlmPort, PrivacyCleanupPort},
+    domain::ports::{
+        AccountExportPort, DocumentTextExtractor, ImagePort, LlmPort, PrivacyCleanupPort,
+    },
     infrastructure::{
         document::EbookTextExtractor,
         llm::{image::ImageClient, LlmAdapter},
         persistence::{
+            account_export::PgAccountExport,
             canon_story_model_pg_repo::PgCanonStoryModelRepository,
             chapter_pg_repo::ChapterPgRepository, character_pg_repo::CharacterPgRepository,
             novel_pg_repo::NovelPgRepository, pg_progress_repo::PgReadingProgressRepository,
@@ -63,13 +66,14 @@ async fn main() -> Result<()> {
     let character_repo = Arc::new(CharacterPgRepository::new(pool.clone()));
     let canon_repo = Arc::new(PgCanonStoryModelRepository::new(pool.clone()));
     let progress_repo = Arc::new(PgReadingProgressRepository::new(pool.clone()));
+    let account_export: Arc<dyn AccountExportPort> = Arc::new(PgAccountExport::new(pool.clone()));
 
     let llm: Arc<dyn LlmPort> = llm;
     let image_client: Arc<dyn ImagePort> = image_client;
     let document_extractor: Arc<dyn DocumentTextExtractor> = Arc::new(EbookTextExtractor);
     let privacy_cleanup: Arc<dyn PrivacyCleanupPort> = Arc::new(AgentPrivacyClient::new(
         std::env::var("AGENT_SERVICE_URL").unwrap_or_else(|_| "http://agent-service:8003".into()),
-        internal_service_token,
+        internal_service_token.clone(),
     )?);
 
     let handler = Arc::new(NovelCommandHandler {
@@ -96,6 +100,8 @@ async fn main() -> Result<()> {
         canon_repo,
         progress_handler,
         document_extractor,
+        account_export,
+        internal_service_token: internal_service_token.into(),
         readiness: Arc::new(PgReadinessProbe::new(pool)),
         metrics,
     };

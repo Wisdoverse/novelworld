@@ -1294,6 +1294,7 @@ name = "gateway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
  "async-trait",
  "axum",
  "bytes",
@@ -1877,6 +1878,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "deadpool-redis",
+ "futures",
  "narrative-service",
  "novel-service",
  "redis",
@@ -2293,6 +2295,7 @@ name = "narrative-service"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
  "async-trait",
  "axum",
  "chrono",
@@ -2338,6 +2341,7 @@ name = "novel-service"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
  "async-trait",
  "axum",
  "bytes",

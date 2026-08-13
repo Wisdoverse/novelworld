@@ -1,7 +1,11 @@
 use axum::{
+    body::Body,
     extract::{DefaultBodyLimit, Json, Path, Query, State},
-    http::{header::RETRY_AFTER, HeaderMap, HeaderValue, StatusCode},
-    response::{sse::Event, sse::KeepAlive, IntoResponse, Sse},
+    http::{
+        header::{CACHE_CONTROL, RETRY_AFTER},
+        HeaderMap, HeaderValue, StatusCode,
+    },
+    response::{sse::Event, sse::KeepAlive, IntoResponse, Response, Sse},
     routing::{get, post},
     Router,
 };
@@ -12,7 +16,7 @@ use uuid::{Uuid, Variant, Version};
 
 use crate::application::handlers::{AgentCommandHandler, AgentRequestError, AgentStreamEvent};
 use crate::domain::entities::memory::MemoryLayer;
-use crate::domain::ports::ReadinessProbe;
+use crate::domain::ports::{AccountExportPort, ReadinessProbe};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -20,6 +24,7 @@ pub struct AppState {
     pub postgres_readiness: Arc<dyn ReadinessProbe>,
     pub redis_readiness: Arc<dyn ReadinessProbe>,
     pub novel_readiness: Arc<dyn ReadinessProbe>,
+    pub account_export: Arc<dyn AccountExportPort>,
     pub internal_service_token: Arc<str>,
     pub metrics: llm_client::MetricsHandle,
 }
@@ -59,10 +64,44 @@ fn routes() -> Router<AppState> {
             "/internal/privacy/tombstones/users/{user_id}/novels/{novel_id}",
             axum::routing::delete(allow_novel_cache),
         )
+        .route(
+            "/internal/privacy/users/{user_id}/export",
+            get(export_account),
+        )
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/metrics", get(metrics))
         .layer(DefaultBodyLimit::max(MAX_CHAT_BODY_BYTES))
+}
+
+async fn export_account(
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Response {
+    if !internal_request_authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let stream = state.account_export.export_user(user_id).map(|result| {
+        let record = result.map_err(std::io::Error::other)?;
+        let mut line = serde_json::to_vec(&serde_json::json!({
+            "type": "record",
+            "service": "agent",
+            "kind": record.kind,
+            "data": record.data,
+        }))
+        .map_err(std::io::Error::other)?;
+        line.push(b'\n');
+        Ok::<_, std::io::Error>(line)
+    });
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/x-ndjson")
+        .header(CACHE_CONTROL, "no-store")
+        .body(Body::from_stream(stream))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
@@ -605,10 +644,14 @@ async fn allow_novel_cache(
 }
 
 fn internal_request_authorized(state: &AppState, headers: &HeaderMap) -> bool {
+    internal_token_authorized(headers, state.internal_service_token.as_ref())
+}
+
+fn internal_token_authorized(headers: &HeaderMap, expected: &str) -> bool {
     headers
         .get("X-Internal-Service-Token")
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| secrets_equal(value, state.internal_service_token.as_ref()))
+        .is_some_and(|value| secrets_equal(value, expected))
 }
 
 fn secrets_equal(left: &str, right: &str) -> bool {
@@ -800,6 +843,22 @@ mod principal_contract_tests {
     #[test]
     fn routes_construct_with_axum_08_syntax() {
         let _ = routes();
+    }
+
+    #[test]
+    fn internal_export_auth_rejects_missing_and_wrong_tokens() {
+        let mut headers = HeaderMap::new();
+        assert!(!internal_token_authorized(&headers, "expected-token"));
+        headers.insert(
+            "X-Internal-Service-Token",
+            HeaderValue::from_static("wrong-token"),
+        );
+        assert!(!internal_token_authorized(&headers, "expected-token"));
+        headers.insert(
+            "X-Internal-Service-Token",
+            HeaderValue::from_static("expected-token"),
+        );
+        assert!(internal_token_authorized(&headers, "expected-token"));
     }
 
     #[tokio::test]

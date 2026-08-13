@@ -7,14 +7,15 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use agent_service::{
     application::handlers::AgentCommandHandler,
-    domain::{self, services::memory_manager::MemoryManager},
+    domain::{self, ports::AccountExportPort, services::memory_manager::MemoryManager},
     infrastructure::{
         cache::{RedisCache, RedisReadinessProbe},
         embedding::EmbeddingAdapter,
         http::novel_client::NovelServiceClient,
         llm::LlmAdapter,
         persistence::{
-            pg_chat_repo::PgChatRepository, pg_memory_repo::PgMemoryRepository, PgReadinessProbe,
+            account_export::PgAccountExport, pg_chat_repo::PgChatRepository,
+            pg_memory_repo::PgMemoryRepository, PgReadinessProbe,
         },
     },
     interface::http::{router, AppState},
@@ -67,6 +68,7 @@ async fn main() -> Result<()> {
     // Repositories
     let memory_repo = Arc::new(PgMemoryRepository::new(pool.clone()));
     let chat_repo = Arc::new(PgChatRepository::new(pool.clone()));
+    let account_export: Arc<dyn AccountExportPort> = Arc::new(PgAccountExport::new(pool.clone()));
 
     // Character info via HTTP to novel-service (replaces direct DB coupling)
     let novel_service_url =
@@ -132,6 +134,7 @@ async fn main() -> Result<()> {
         postgres_readiness: Arc::new(PgReadinessProbe::new(pool)),
         redis_readiness: Arc::new(RedisReadinessProbe::new(redis_pool)),
         novel_readiness,
+        account_export,
         internal_service_token: internal_service_token.into(),
         metrics,
     };

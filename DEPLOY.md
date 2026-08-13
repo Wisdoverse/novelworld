@@ -163,7 +163,14 @@ POST   /api/auth/login        — 登录，返回 JWT
 POST   /api/auth/refresh      — 刷新 Token
 GET    /api/auth/me           — 当前用户信息
 DELETE /api/auth/me           — 永久删除当前账号及应用内数据
+GET    /api/account/export    — 流式导出当前账号的 account-export-v1 NDJSON
 ```
+
+账号导出由 Gateway 依次读取四个内部服务，要求所有容器使用同一个至少 32 字符的
+`INTERNAL_SERVICE_TOKEN`。响应不落盘、不进入队列，最多同时运行两个导出并在 15
+分钟后终止；只有文件末尾存在 `complete` 记录才表示完整。该文件是服务级快照组成的
+可移植数据，不替代 PostgreSQL 备份。完整契约见
+[docs/ACCOUNT_EXPORT.md](./docs/ACCOUNT_EXPORT.md)。
 
 ### 小说管理
 ```

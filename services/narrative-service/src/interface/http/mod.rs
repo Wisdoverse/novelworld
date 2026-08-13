@@ -1,10 +1,12 @@
 use axum::{
+    body::Body,
     extract::{DefaultBodyLimit, Json, Path, State},
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    http::{header::CACHE_CONTROL, HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Router,
 };
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -12,13 +14,15 @@ use uuid::Uuid;
 use crate::application::handlers::{
     CreatePlayerEntityCommand, NarrativeCommandHandler, NarrativeError,
 };
-use crate::domain::ports::ReadinessProbe;
+use crate::domain::ports::{AccountExportPort, ReadinessProbe};
 
 #[derive(Clone)]
 pub struct AppState {
     pub handler: Arc<NarrativeCommandHandler>,
     pub postgres_readiness: Arc<dyn ReadinessProbe>,
     pub novel_readiness: Arc<dyn ReadinessProbe>,
+    pub account_export: Arc<dyn AccountExportPort>,
+    pub internal_service_token: Arc<str>,
     pub metrics: llm_client::MetricsHandle,
 }
 
@@ -41,10 +45,44 @@ fn routes() -> Router<AppState> {
         .route("/narrative/{novel_id}/{chapter}", get(get_branch_node))
         .route("/narrative/choose", post(submit_choice))
         .route("/narrative/{novel_id}/world-state", get(get_world_state))
+        .route(
+            "/internal/privacy/users/{user_id}/export",
+            get(export_account),
+        )
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/metrics", get(metrics))
         .layer(DefaultBodyLimit::max(4 * 1024))
+}
+
+async fn export_account(
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Response {
+    if !internal_request_authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let stream = state.account_export.export_user(user_id).map(|result| {
+        let record = result.map_err(std::io::Error::other)?;
+        let mut line = serde_json::to_vec(&serde_json::json!({
+            "type": "record",
+            "service": "narrative",
+            "kind": record.kind,
+            "data": record.data,
+        }))
+        .map_err(std::io::Error::other)?;
+        line.push(b'\n');
+        Ok::<_, std::io::Error>(line)
+    });
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/x-ndjson")
+        .header(CACHE_CONTROL, "no-store")
+        .body(Body::from_stream(stream))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
@@ -353,6 +391,28 @@ fn extract_user_id(headers: &HeaderMap) -> Option<Uuid> {
         .and_then(|s| Uuid::parse_str(s).ok())
 }
 
+fn internal_request_authorized(state: &AppState, headers: &HeaderMap) -> bool {
+    internal_token_authorized(headers, state.internal_service_token.as_ref())
+}
+
+fn internal_token_authorized(headers: &HeaderMap, expected: &str) -> bool {
+    headers
+        .get("X-Internal-Service-Token")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| secrets_equal(value, expected))
+}
+
+fn secrets_equal(left: &str, right: &str) -> bool {
+    left.len() == right.len()
+        && left
+            .bytes()
+            .zip(right.bytes())
+            .fold(0_u8, |difference, (left, right)| {
+                difference | (left ^ right)
+            })
+            == 0
+}
+
 #[cfg(test)]
 mod principal_contract_tests {
     use super::*;
@@ -394,6 +454,19 @@ mod principal_contract_tests {
     #[test]
     fn routes_construct_with_axum_08_syntax() {
         let _ = routes();
+    }
+
+    #[test]
+    fn internal_export_auth_rejects_missing_and_wrong_tokens() {
+        let mut headers = HeaderMap::new();
+        assert!(!internal_token_authorized(&headers, "expected-token"));
+        headers.insert("X-Internal-Service-Token", "wrong-token".parse().unwrap());
+        assert!(!internal_token_authorized(&headers, "expected-token"));
+        headers.insert(
+            "X-Internal-Service-Token",
+            "expected-token".parse().unwrap(),
+        );
+        assert!(internal_token_authorized(&headers, "expected-token"));
     }
 
     #[tokio::test]

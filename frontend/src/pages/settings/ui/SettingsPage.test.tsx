@@ -5,11 +5,19 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SettingsPage } from './SettingsPage';
 import { useAuthStore } from '@/features/auth/model/useAuthStore';
 
-const mocks = vi.hoisted(() => ({ delete: vi.fn(), get: vi.fn(), put: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  delete: vi.fn(),
+  error: vi.fn(),
+  get: vi.fn(),
+  put: vi.fn(),
+  success: vi.fn(),
+}));
+
+vi.mock('sonner', () => ({ toast: { error: mocks.error, success: mocks.success } }));
 
 vi.mock('@/shared/api/client', () => ({
   apiClient: { delete: mocks.delete, get: mocks.get, put: mocks.put },
-  getApiErrorMessage: () => '设置失败',
+  getApiErrorMessage: (_error: unknown, fallback: string) => fallback,
 }));
 
 describe('SettingsPage', () => {
@@ -17,6 +25,8 @@ describe('SettingsPage', () => {
     mocks.get.mockReset();
     mocks.put.mockReset();
     mocks.delete.mockReset();
+    mocks.error.mockReset();
+    mocks.success.mockReset();
     useAuthStore.setState({
       user: { id: 'admin', email: 'admin@example.com', role: 'admin' },
       loading: false,
@@ -28,6 +38,14 @@ describe('SettingsPage', () => {
         thinking_enabled: false,
         api_key_configured: true,
       },
+    });
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:account-export'),
+    });
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: vi.fn(),
     });
   });
 
@@ -80,5 +98,54 @@ describe('SettingsPage', () => {
     render(<MemoryRouter><SettingsPage /></MemoryRouter>);
 
     expect(await screen.findByRole('button', { name: '删除账号' })).toBeTruthy();
+  });
+
+  it('downloads an account export only after the completion record arrives', async () => {
+    useAuthStore.setState({
+      user: { id: 'reader', email: 'reader@example.com', role: 'user' },
+    });
+    localStorage.setItem('auth_token', 'access');
+    const exportBlob = new Blob([
+      '{"type":"manifest","schema":"account-export-v1"}\n',
+      '{"type":"complete","schema":"account-export-v1"}\n',
+    ], { type: 'application/x-ndjson' });
+    mocks.get.mockResolvedValueOnce({ data: exportBlob });
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+
+    render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: '导出账号数据' }));
+
+    await waitFor(() => expect(URL.createObjectURL).toHaveBeenCalledWith(exportBlob));
+    expect(mocks.get).toHaveBeenCalledWith('/account/export', {
+      responseType: 'blob',
+      timeout: 16 * 60 * 1000,
+    });
+    expect(click).toHaveBeenCalledOnce();
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:account-export');
+    expect(mocks.success).toHaveBeenCalledWith('账号数据导出完成');
+    expect(useAuthStore.getState().user?.id).toBe('reader');
+    expect(localStorage.getItem('auth_token')).toBe('access');
+    click.mockRestore();
+  });
+
+  it('does not save or sign out after an incomplete account export', async () => {
+    useAuthStore.setState({
+      user: { id: 'reader', email: 'reader@example.com', role: 'user' },
+    });
+    localStorage.setItem('auth_token', 'access');
+    mocks.get.mockResolvedValueOnce({
+      data: new Blob(['{"type":"manifest","schema":"account-export-v1"}\n']),
+    });
+
+    render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: '导出账号数据' }));
+
+    await waitFor(() => expect(
+      screen.getByRole('button', { name: '导出账号数据' }).hasAttribute('disabled'),
+    ).toBe(false));
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
+    expect(mocks.error).toHaveBeenCalledWith('账号导出未完整完成，请重试');
+    expect(useAuthStore.getState().user?.id).toBe('reader');
+    expect(localStorage.getItem('auth_token')).toBe('access');
   });
 });
