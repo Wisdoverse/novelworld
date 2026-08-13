@@ -1,0 +1,48 @@
+services:
+  llm-stub:
+    image: python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
+    working_dir: /app
+    command: [python3, mock_openai.py]
+    volumes:
+      - ./tests/e2e:/app:ro
+    networks:
+      - novel-net
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18080/health')"]
+      interval: 1s
+      timeout: 2s
+      retries: 10
+
+  user-service:
+    environment:
+      LLM_API_URL: http://llm-stub:18080
+    depends_on:
+      llm-stub:
+        condition: service_healthy
+
+  novel-service:
+    environment:
+      LLM_API_URL: http://llm-stub:18080
+      IMAGE_GEN_API_URL: http://llm-stub:18080
+    depends_on:
+      llm-stub:
+        condition: service_healthy
+
+  agent-service:
+    environment:
+      LLM_API_URL: http://llm-stub:18080
+      EMBEDDING_API_URL: http://llm-stub:18080
+    depends_on:
+      llm-stub:
+        condition: service_healthy
+
+  narrative-service:
+    environment:
+      LLM_API_URL: http://llm-stub:18080
+    depends_on:
+      llm-stub:
+        condition: service_healthy
+
+  gateway:
+    ports:
+      - 127.0.0.1:18081:8080
