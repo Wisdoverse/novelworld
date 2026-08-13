@@ -28,4 +28,4 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
 
 # Rate limiting
-governor = "0.8"
+governor = "0.10"
