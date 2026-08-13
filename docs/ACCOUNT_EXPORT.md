@@ -36,7 +36,7 @@ never create additional records.
 | user | `profile` |
 | novel | `novel`, `chapter`, `character`, `character_relationship`, `canon_story_model`, `reading_progress` |
 | agent | `chat_message`, `character_memory` |
-| narrative | `narrative_node`, `user_choice`, `world_state`, `player_chapter` |
+| narrative | `narrative_node`, `user_choice`, `world_state`, `player_chapter`, `world_turn` |
 
 Profile fields include identity, email, display/avatar metadata, role,
 verification state, and account timestamps. Novel and character records retain
@@ -44,9 +44,10 @@ provider-returned asset URLs, not provider-hosted bytes. Narrative nodes include
 the user's own nodes and shared/canonical nodes referenced by that user's
 choices.
 
-Explicitly excluded data includes password hashes, access and refresh tokens,
+World-turn records include the portable action, status, committed transition
+and exact replay result when present. Explicitly excluded data includes password hashes, access and refresh tokens,
 runtime LLM keys, internal service tokens, source object keys, chat-turn
-fingerprints/leases/failure state, vector embeddings and memory access metadata,
+and world-turn fingerprints, leases, and failure codes, vector embeddings and memory access metadata,
 Redis projections, chapter search chunks, provider logs/asset bytes, and
 operator backups.
 

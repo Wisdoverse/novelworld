@@ -1,11 +1,13 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import type { CreatePlayerEntityInput } from '@/entities/narrative/api';
 
 interface PlayerEntryFormProps {
   checkpointChapter: number;
+  unlockedThroughChapter: number;
   locations: Array<{ id: string; name: string }>;
   isPending: boolean;
   error?: string;
+  onCheckpointChange: (chapter: number) => void;
   onSubmit: (input: CreatePlayerEntityInput) => Promise<unknown>;
 }
 
@@ -15,9 +17,11 @@ function tokens(value: string) {
 
 export function PlayerEntryForm({
   checkpointChapter,
+  unlockedThroughChapter,
   locations,
   isPending,
   error,
+  onCheckpointChange,
   onSubmit,
 }: PlayerEntryFormProps) {
   const [name, setName] = useState('');
@@ -26,11 +30,18 @@ export function PlayerEntryForm({
   const [locationId, setLocationId] = useState(locations[0]?.id ?? '');
   const [inventory, setInventory] = useState('');
 
+  useEffect(() => {
+    if (!locations.some(location => location.id === locationId)) {
+      setLocationId(locations[0]?.id ?? '');
+    }
+  }, [locationId, locations]);
+
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!locationId) return;
     try {
       await onSubmit({
+        checkpoint_chapter: checkpointChapter,
         name: name.trim(),
         background: background.trim(),
         capabilities: tokens(capabilities),
@@ -52,9 +63,22 @@ export function PlayerEntryForm({
         创建你的原创角色
       </h2>
       <p className="mt-2 text-sm" style={{ color: '#94a3b8' }}>
-        角色将从你已读到的第 {checkpointChapter} 章进入故事；可选地点不会剧透后续内容。
+        从已解锁章节选择入场点；后续原著事件会从该处继续运行。
       </p>
       <form className="mt-5 space-y-4" onSubmit={submit}>
+        <label className="block text-sm" style={{ color: '#cbd5e1' }}>
+          入场章节
+          <select
+            className="mt-1 w-full rounded-lg px-3 py-2"
+            style={{ background: 'rgba(15, 23, 42, 0.8)', border: '1px solid #334155' }}
+            value={checkpointChapter}
+            onChange={event => onCheckpointChange(Number(event.target.value))}
+          >
+            {Array.from({ length: unlockedThroughChapter }, (_, index) => index + 1).map(chapter => (
+              <option key={chapter} value={chapter}>第 {chapter} 章</option>
+            ))}
+          </select>
+        </label>
         <label className="block text-sm" style={{ color: '#cbd5e1' }}>
           名字
           <input

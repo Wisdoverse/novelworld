@@ -1,9 +1,11 @@
 use crate::domain::entities::{
     narrative_node::{NarrativeNode, WorldState},
     player_entity::PlayerEntity,
+    world_session::{WorldAction, WorldEntryContext, WorldTurnTransition},
 };
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::services::narrative_transition::{CanonContext, NarrativeTransition};
@@ -35,7 +37,70 @@ pub trait UserChoiceRepository: Send + Sync {
 pub trait WorldStateRepository: Send + Sync {
     async fn get_or_create(&self, user_id: Uuid, novel_id: Uuid) -> Result<WorldState>;
     async fn create_player_entity(&self, player: &PlayerEntity) -> Result<PlayerEntity>;
+    async fn start_open_world(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        context: &WorldEntryContext,
+    ) -> Result<WorldState>;
     async fn update(&self, state: &WorldState) -> Result<()>;
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorldTurnClaim {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub novel_id: Uuid,
+    pub request_fingerprint: Vec<u8>,
+    pub action: WorldAction,
+    pub expected_turn_number: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorldTurnResult {
+    pub turn_id: Uuid,
+    pub action: WorldAction,
+    pub transition: WorldTurnTransition,
+    pub world_state: WorldState,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BeginWorldTurn {
+    Acquired { claim: WorldTurnClaim, attempt: i64 },
+    Completed(Box<WorldTurnResult>),
+    InProgress { retry_after_seconds: u64 },
+    Conflict,
+    Stale,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorldTurnJournalEntry {
+    pub turn_id: Uuid,
+    pub turn_number: i64,
+    pub action: WorldAction,
+    pub transition: WorldTurnTransition,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub completed_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[async_trait]
+pub trait WorldTurnRepository: Send + Sync {
+    async fn begin_turn(&self, claim: &WorldTurnClaim) -> Result<BeginWorldTurn>;
+    async fn renew_turn(&self, turn_id: Uuid, attempt: i64) -> Result<bool>;
+    async fn complete_turn(
+        &self,
+        claim: &WorldTurnClaim,
+        attempt: i64,
+        transition: &WorldTurnTransition,
+        context: &WorldEntryContext,
+    ) -> Result<WorldTurnResult>;
+    async fn fail_turn(&self, turn_id: Uuid, attempt: i64, failure_code: &str) -> Result<bool>;
+    async fn journal(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        limit: usize,
+    ) -> Result<Vec<WorldTurnJournalEntry>>;
 }
 
 /// Read-only access to novel-service data through its HTTP API.
@@ -58,9 +123,16 @@ pub trait ChapterReadRepository: Send + Sync {
         &self,
         novel_id: Uuid,
         user_id: Uuid,
+        checkpoint_chapter: Option<i32>,
         proposed_name: Option<&str>,
     ) -> Result<Option<PlayerEntryContext>>;
     async fn uses_original_player_identity(&self, novel_id: Uuid, user_id: Uuid) -> Result<bool>;
+    async fn get_world_entry_context(
+        &self,
+        novel_id: Uuid,
+        checkpoint_chapter: i32,
+        user_id: Uuid,
+    ) -> Result<Option<WorldEntryContext>>;
 }
 
 #[async_trait]

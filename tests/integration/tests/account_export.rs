@@ -237,6 +237,26 @@ async fn production_account_exports_are_complete_scoped_deterministic_and_secret
     .await
     .unwrap();
     sqlx::query(
+        "INSERT INTO world_turns \
+         (id, user_id, novel_id, request_fingerprint, action, expected_turn_number, \
+          status, failure_code) \
+         VALUES ($1, $2, $3, $4, $5, 0, 'failed', 'test_failure'), \
+                ($6, $7, $8, $9, $10, 0, 'failed', 'test_failure')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(novel_id)
+    .bind(vec![0x11_u8; 32])
+    .bind(json!({"kind": "investigate", "target_id": "thread", "intent": "Portable world action"}))
+    .bind(Uuid::new_v4())
+    .bind(other_user_id)
+    .bind(other_novel_id)
+    .bind(vec![0x12_u8; 32])
+    .bind(json!({"kind": "investigate", "target_id": "thread", "intent": "other-user-marker world action"}))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
         "INSERT INTO player_chapters (user_id, novel_id, chapter_number, content, origin) \
          VALUES ($1, $2, 2, 'Portable generated chapter', 'continuation'), \
                 ($3, $4, 2, 'other-user-marker generated chapter', 'continuation')",
@@ -323,6 +343,7 @@ async fn production_account_exports_are_complete_scoped_deterministic_and_secret
             "narrative_node",
             "player_chapter",
             "user_choice",
+            "world_turn",
             "world_state",
         ])
     );
@@ -341,6 +362,7 @@ async fn production_account_exports_are_complete_scoped_deterministic_and_secret
         "Portable player branch",
         "Portable choice",
         "Portable generated chapter",
+        "Portable world action",
         "https://assets.invalid/cover",
         "https://assets.invalid/avatar",
     ] {

@@ -1,7 +1,10 @@
 use axum::{
     body::Body,
-    extract::{DefaultBodyLimit, Json, Path, State},
-    http::{header::CACHE_CONTROL, HeaderMap, StatusCode},
+    extract::{DefaultBodyLimit, Json, Path, Query, State},
+    http::{
+        header::{CACHE_CONTROL, RETRY_AFTER},
+        HeaderMap, HeaderValue, StatusCode,
+    },
     response::{IntoResponse, Response},
     routing::{get, post},
     Router,
@@ -14,6 +17,7 @@ use uuid::Uuid;
 use crate::application::handlers::{
     CreatePlayerEntityCommand, NarrativeCommandHandler, NarrativeError,
 };
+use crate::domain::entities::world_session::WorldAction;
 use crate::domain::ports::{AccountExportPort, ReadinessProbe};
 
 #[derive(Clone)]
@@ -46,8 +50,17 @@ fn routes() -> Router<AppState> {
         .route("/narrative/choose", post(submit_choice))
         .route("/narrative/{novel_id}/world-state", get(get_world_state))
         .route(
+            "/narrative/{novel_id}/world",
+            get(get_open_world).post(start_open_world),
+        )
+        .route("/narrative/{novel_id}/world/turns", post(submit_world_turn))
+        .route(
             "/internal/privacy/users/{user_id}/export",
             get(export_account),
+        )
+        .route(
+            "/internal/narrative/{novel_id}/characters/{character_id}/context",
+            get(get_character_world_context),
         )
         .route("/health", get(health))
         .route("/ready", get(ready))
@@ -85,6 +98,28 @@ async fn export_account(
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
+async fn get_character_world_context(
+    State(state): State<AppState>,
+    Path((novel_id, character_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Response {
+    if !internal_request_authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(user_id) = extract_user_id(&headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    match state
+        .handler
+        .get_character_world_context(user_id, novel_id, character_id)
+        .await
+    {
+        Ok(Some(context)) => (StatusCode::OK, Json(context)).into_response(),
+        Ok(None) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => narrative_error_response(error),
+    }
+}
+
 async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     (
         [(
@@ -108,11 +143,18 @@ pub struct SubmitChoiceRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreatePlayerEntityRequest {
+    pub checkpoint_chapter: Option<i32>,
     pub name: String,
     pub background: String,
     pub capabilities: Vec<String>,
     pub location_id: String,
     pub inventory: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlayerEntryQuery {
+    pub checkpoint_chapter: Option<i32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -156,6 +198,19 @@ fn narrative_error_response(error: NarrativeError) -> axum::response::Response {
         NarrativeError::Conflict(message) => {
             return error_response(StatusCode::CONFLICT, "conflict", &message)
         }
+        NarrativeError::TurnInProgress {
+            retry_after_seconds,
+        } => {
+            let mut response = error_response(
+                StatusCode::CONFLICT,
+                "turn_in_progress",
+                "World turn is already in progress",
+            );
+            if let Ok(value) = HeaderValue::from_str(&retry_after_seconds.to_string()) {
+                response.headers_mut().insert(RETRY_AFTER, value);
+            }
+            return response;
+        }
         NarrativeError::Unavailable(error) => {
             tracing::warn!(error = ?error, "novel dependency unavailable");
             (
@@ -189,6 +244,7 @@ fn narrative_error_response(error: NarrativeError) -> axum::response::Response {
 async fn get_player_entry(
     State(state): State<AppState>,
     Path(novel_id): Path<Uuid>,
+    Query(query): Query<PlayerEntryQuery>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let Some(user_id) = extract_user_id(&headers) else {
@@ -198,7 +254,11 @@ async fn get_player_entry(
             "Missing or invalid user identity",
         );
     };
-    match state.handler.get_player_entry(user_id, novel_id).await {
+    match state
+        .handler
+        .get_player_entry(user_id, novel_id, query.checkpoint_chapter)
+        .await
+    {
         Ok(entry) => (StatusCode::OK, Json(serde_json::json!(entry))).into_response(),
         Err(error) => narrative_error_response(error),
     }
@@ -218,6 +278,7 @@ async fn put_player_entry(
         );
     };
     let command = CreatePlayerEntityCommand {
+        checkpoint_chapter: req.checkpoint_chapter,
         name: req.name,
         background: req.background,
         capabilities: req.capabilities,
@@ -350,6 +411,69 @@ async fn get_world_state(
     }
 }
 
+async fn start_open_world(
+    State(state): State<AppState>,
+    Path(novel_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some(user_id) = extract_user_id(&headers) else {
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "Missing or invalid user identity",
+        );
+    };
+    match state.handler.start_open_world(user_id, novel_id).await {
+        Ok(view) => (StatusCode::OK, Json(view)).into_response(),
+        Err(error) => narrative_error_response(error),
+    }
+}
+
+async fn get_open_world(
+    State(state): State<AppState>,
+    Path(novel_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some(user_id) = extract_user_id(&headers) else {
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "Missing or invalid user identity",
+        );
+    };
+    match state.handler.get_open_world(user_id, novel_id).await {
+        Ok(view) => (StatusCode::OK, Json(view)).into_response(),
+        Err(error) => narrative_error_response(error),
+    }
+}
+
+async fn submit_world_turn(
+    State(state): State<AppState>,
+    Path(novel_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(action): Json<WorldAction>,
+) -> impl IntoResponse {
+    let Some(user_id) = extract_user_id(&headers) else {
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "Missing or invalid user identity",
+        );
+    };
+    let turn_id = match extract_idempotency_key(&headers) {
+        Ok(turn_id) => turn_id,
+        Err(message) => return error_response(StatusCode::BAD_REQUEST, "invalid_request", message),
+    };
+    match state
+        .handler
+        .submit_world_turn(turn_id, user_id, novel_id, action)
+        .await
+    {
+        Ok(result) => (StatusCode::OK, Json(result)).into_response(),
+        Err(error) => narrative_error_response(error),
+    }
+}
+
 /// GET /health
 async fn health() -> impl IntoResponse {
     (StatusCode::OK, "OK")
@@ -389,6 +513,19 @@ fn extract_user_id(headers: &HeaderMap) -> Option<Uuid> {
         .get("X-User-Id")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| Uuid::parse_str(s).ok())
+}
+
+fn extract_idempotency_key(headers: &HeaderMap) -> Result<Uuid, &'static str> {
+    let value = headers
+        .get("Idempotency-Key")
+        .ok_or("Idempotency-Key is required")?
+        .to_str()
+        .map_err(|_| "Idempotency-Key must be a UUID v4")?;
+    let id = Uuid::parse_str(value).map_err(|_| "Idempotency-Key must be a UUID v4")?;
+    if id.get_version_num() != 4 || id.to_string() != value.to_ascii_lowercase() {
+        return Err("Idempotency-Key must be a canonical UUID v4");
+    }
+    Ok(id)
 }
 
 fn internal_request_authorized(state: &AppState, headers: &HeaderMap) -> bool {
@@ -454,6 +591,19 @@ mod principal_contract_tests {
     #[test]
     fn routes_construct_with_axum_08_syntax() {
         let _ = routes();
+    }
+
+    #[test]
+    fn world_turn_idempotency_key_requires_canonical_uuid_v4() {
+        let mut headers = HeaderMap::new();
+        assert!(extract_idempotency_key(&headers).is_err());
+        headers.insert("Idempotency-Key", "not-a-uuid".parse().unwrap());
+        assert!(extract_idempotency_key(&headers).is_err());
+        headers.insert("Idempotency-Key", Uuid::nil().to_string().parse().unwrap());
+        assert!(extract_idempotency_key(&headers).is_err());
+        let id = Uuid::new_v4();
+        headers.insert("Idempotency-Key", id.to_string().parse().unwrap());
+        assert_eq!(extract_idempotency_key(&headers), Ok(id));
     }
 
     #[test]

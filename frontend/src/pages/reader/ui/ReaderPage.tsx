@@ -14,13 +14,16 @@ import {
   useEffectiveChapter,
   useCreatePlayerEntity,
   useNarrativeNode,
+  useOpenWorld,
   usePlayerEntry,
+  useStartOpenWorld,
   useSubmitNarrativeChoice,
   useWorldState,
   type ChoiceResult,
 } from '@/entities/narrative/api';
 import { ChatPanel } from '@/widgets/chat-panel/ui/ChatPanel';
 import { BranchChoice } from '@/widgets/branch-choice/ui/BranchChoice';
+import { WorldDashboard } from '@/widgets/world-dashboard/ui/WorldDashboard';
 import { PlayerEntryForm } from '@/features/player-entry/ui/PlayerEntryForm';
 import { getApiErrorMessage } from '@/shared/api/client';
 import type { Character, NarrativeChoice } from '@/shared/types';
@@ -73,16 +76,30 @@ export function ReaderPage() {
     readingProgress?.current_chapter ?? 0,
   );
   const isSelfMode = readingProgress?.reader_identity_type === 'self';
+  const [entryCheckpoint, setEntryCheckpoint] = useState<number>();
+  const requestedEntryCheckpoint = entryCheckpoint ?? readingProgress?.current_chapter;
   const {
     data: playerEntry,
     isLoading: isPlayerEntryLoading,
     isError: isPlayerEntryError,
     refetch: refetchPlayerEntry,
-  } = usePlayerEntry(novelId || '', Boolean(readingProgress && isSelfMode));
+  } = usePlayerEntry(
+    novelId || '',
+    Boolean(readingProgress && isSelfMode),
+    requestedEntryCheckpoint,
+  );
   const createPlayerEntity = useCreatePlayerEntity(novelId || '');
   const playerEntryReady = Boolean(readingProgress)
     && (!isSelfMode || Boolean(playerEntry?.player));
   const playerEntityRequired = Boolean(isSelfMode && !playerEntry?.player);
+  const openWorldEnabled = Boolean(isSelfMode && playerEntry?.player);
+  const {
+    data: openWorld,
+    isLoading: isOpenWorldLoading,
+    isError: isOpenWorldError,
+    refetch: refetchOpenWorld,
+  } = useOpenWorld(novelId || '', openWorldEnabled);
+  const startOpenWorld = useStartOpenWorld(novelId || '');
 
   const [activeChatCharacter, setActiveChatCharacter] = useState<Character | null>(null);
   const [showCharacterList, setShowCharacterList] = useState(false);
@@ -143,7 +160,8 @@ export function ReaderPage() {
   );
   const activeCharacterIsAvailable = Boolean(
     activeChatCharacter
-      && characters?.some(character => character.id === activeChatCharacter.id),
+      && characters?.some(character => character.id === activeChatCharacter.id)
+      && !openWorld?.session.dead_character_ids.includes(activeChatCharacter.id),
   );
 
   useEffect(() => {
@@ -158,6 +176,10 @@ export function ReaderPage() {
     setChoiceError(undefined);
   }, [currentChapter, novelId]);
 
+  useEffect(() => {
+    setEntryCheckpoint(undefined);
+  }, [novelId]);
+
   const savedChoice = currentBranchNode
     ? worldState?.state.choices.find(choice => choice.node_id === currentBranchNode.id)
     : undefined;
@@ -168,11 +190,11 @@ export function ReaderPage() {
     ? splitChapterAtAnchor(displayContent, currentBranchNode.anchor_quote)
     : undefined;
   const branchChoiceRequired = Boolean(
-    currentBranchNode && selectedChoiceIndex === undefined,
+    currentBranchNode && selectedChoiceIndex === undefined && !openWorld,
   );
 
   const handleChoose = async (choice: NarrativeChoice) => {
-    if (!currentBranchNode) return;
+    if (!currentBranchNode || openWorld) return;
     setChoiceError(undefined);
     try {
       const result = await submitChoice.mutateAsync({
@@ -297,11 +319,13 @@ export function ReaderPage() {
         {isSelfMode && playerEntry && !playerEntry.player ? (
           <PlayerEntryForm
             checkpointChapter={playerEntry.checkpoint_chapter}
+            unlockedThroughChapter={readingProgress?.current_chapter ?? playerEntry.checkpoint_chapter}
             locations={playerEntry.locations}
             isPending={createPlayerEntity.isPending}
             error={createPlayerEntity.isError
               ? getApiErrorMessage(createPlayerEntity.error, '原创角色创建失败')
               : undefined}
+            onCheckpointChange={setEntryCheckpoint}
             onSubmit={createPlayerEntity.mutateAsync}
           />
         ) : null}
@@ -370,7 +394,7 @@ export function ReaderPage() {
                 <button className="text-sm underline" onClick={() => refetchBranch()}>重试</button>
               </div>
             )}
-            {currentBranchNode && (
+            {currentBranchNode && (!openWorld || selectedChoiceIndex !== undefined) && (
               <BranchChoice
                 node={currentBranchNode}
                 onChoose={handleChoose}
@@ -401,6 +425,37 @@ export function ReaderPage() {
             )}
           </motion.div>
         ) : null}
+        {openWorldEnabled && isOpenWorldLoading ? (
+          <p className="mt-12 text-sm" style={{ color: '#94a3b8' }}>正在恢复开放世界…</p>
+        ) : null}
+        {openWorldEnabled && isOpenWorldError ? (
+          <div className="mt-12 p-4 rounded-xl flex items-center justify-between gap-4" role="alert" style={{ background: 'rgba(220, 38, 38, 0.1)', color: '#fca5a5' }}>
+            <span className="text-sm">开放世界加载失败，已暂停新的行动。</span>
+            <button className="text-sm underline" onClick={() => refetchOpenWorld()}>重试</button>
+          </div>
+        ) : null}
+        {openWorldEnabled && !isOpenWorldLoading && !isOpenWorldError && !openWorld ? (
+          <section className="mt-12 p-6 rounded-2xl" style={{ background: 'rgba(6, 182, 212, 0.07)', border: '1px solid rgba(6, 182, 212, 0.25)' }} aria-labelledby="enter-world-title">
+            <h2 id="enter-world-title" className="text-xl font-semibold" style={{ color: '#e2e8f0' }}>进入小说的开放世界</h2>
+            <p className="mt-2 text-sm leading-6" style={{ color: '#94a3b8' }}>
+              从角色创建时的第 {playerEntry?.player?.canonical_checkpoint_chapter} 章进入；原著角色保有自己的目标，你只决定自己的行动。
+            </p>
+            {startOpenWorld.isError ? (
+              <p role="alert" className="mt-3 text-sm" style={{ color: '#fca5a5' }}>
+                {getApiErrorMessage(startOpenWorld.error, '进入开放世界失败')}
+              </p>
+            ) : null}
+            <button
+              className="mt-4 px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50"
+              style={{ background: '#0891b2', color: 'white' }}
+              disabled={startOpenWorld.isPending}
+              onClick={() => startOpenWorld.mutate()}
+            >
+              {startOpenWorld.isPending ? '正在创建时间线…' : '进入开放世界'}
+            </button>
+          </section>
+        ) : null}
+        {openWorld ? <WorldDashboard novelId={novelId || ''} view={openWorld} /> : null}
       </div>
 
       {/* 底部翻页导航 */}
@@ -472,41 +527,44 @@ export function ReaderPage() {
             <div className="text-xs font-semibold uppercase tracking-widest mb-4" style={{ color: '#6d28d9' }}>
               故事角色
             </div>
-            {characters?.map((char) => (
-              <button
-                key={char.id}
-                disabled={!isChatReady}
-                onClick={() => {
-                  if (!isChatReady) return;
-                  setActiveChatCharacter(char);
-                  setShowCharacterList(false);
-                }}
-                className="w-full flex items-center gap-3 p-3 rounded-xl text-left transition-all"
-                style={{
-                  background: 'rgba(15, 21, 53, 0.6)',
-                  border: '1px solid rgba(109, 40, 217, 0.2)',
-                }}
-              >
-                {char.avatar_url ? (
-                  <img src={char.avatar_url} alt={char.name}
-                    className="w-10 h-10 rounded-full object-cover flex-shrink-0"
-                    style={{ border: '2px solid rgba(6, 182, 212, 0.3)' }}
-                  />
-                ) : (
-                  <div className="w-10 h-10 rounded-full flex-shrink-0 flex items-center justify-center font-bold"
-                    style={{ background: 'linear-gradient(135deg, #6d28d9, #06b6d4)', color: 'white' }}>
-                    {char.name[0]}
+            {characters?.map((char) => {
+              const isDead = openWorld?.session.dead_character_ids.includes(char.id) ?? false;
+              return (
+                <button
+                  key={char.id}
+                  disabled={!isChatReady || isDead}
+                  onClick={() => {
+                    if (!isChatReady || isDead) return;
+                    setActiveChatCharacter(char);
+                    setShowCharacterList(false);
+                  }}
+                  className="w-full flex items-center gap-3 p-3 rounded-xl text-left transition-all disabled:opacity-50"
+                  style={{
+                    background: 'rgba(15, 21, 53, 0.6)',
+                    border: '1px solid rgba(109, 40, 217, 0.2)',
+                  }}
+                >
+                  {char.avatar_url ? (
+                    <img src={char.avatar_url} alt={char.name}
+                      className="w-10 h-10 rounded-full object-cover flex-shrink-0"
+                      style={{ border: '2px solid rgba(6, 182, 212, 0.3)' }}
+                    />
+                  ) : (
+                    <div className="w-10 h-10 rounded-full flex-shrink-0 flex items-center justify-center font-bold"
+                      style={{ background: 'linear-gradient(135deg, #6d28d9, #06b6d4)', color: 'white' }}>
+                      {char.name[0]}
+                    </div>
+                  )}
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium truncate" style={{ color: '#e2e8f0' }}>{char.name}</div>
+                    <div className="text-xs truncate" style={{ color: '#475569' }}>
+                      {isDead ? '当前时间线已死亡' : char.role === 'protagonist' ? '主角' : char.role === 'antagonist' ? '反派' : '配角'}
+                    </div>
                   </div>
-                )}
-                <div className="min-w-0">
-                  <div className="text-sm font-medium truncate" style={{ color: '#e2e8f0' }}>{char.name}</div>
-                  <div className="text-xs truncate" style={{ color: '#475569' }}>
-                    {char.role === 'protagonist' ? '主角' : char.role === 'antagonist' ? '反派' : '配角'}
-                  </div>
-                </div>
-                <MessageCircle size={14} className="flex-shrink-0 ml-auto" style={{ color: '#22d3ee' }} />
-              </button>
-            ))}
+                  <MessageCircle size={14} className="flex-shrink-0 ml-auto" style={{ color: '#22d3ee' }} />
+                </button>
+              );
+            })}
           </motion.div>
         )}
       </AnimatePresence>

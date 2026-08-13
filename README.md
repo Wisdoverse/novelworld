@@ -33,6 +33,7 @@ Then you can:
 
 - 💬 **Talk to any character** — they respond in their authentic voice and remember your conversations
 - 🔀 **Make story choices** — your decisions change the narrative direction
+- 🧭 **Enter a living world** — choose an unlocked checkpoint, act as your own player, and inspect canon versus player-created history
 - 🎭 **Assume a character's identity** — enter the world as someone from the book
 - 🛡️ **No spoilers** — characters only know events up to your current chapter
 
@@ -72,6 +73,13 @@ At key story moments, you're presented with 2–3 choices. Each decision:
 Choose how to enter the world:
 - **As yourself** — interact with characters as an outsider
 - **As a character** — assume any character's identity for a different perspective
+
+### 🧭 Living Open World
+
+Create an original player at any unlocked chapter, then travel, investigate,
+converse, ally, oppose, resolve a thread, or pursue your own goal. Canonical
+characters retain their own agency. Every turn is validated, committed once,
+auditable, and resumed exactly after a service restart.
 
 ---
 

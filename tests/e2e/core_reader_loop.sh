@@ -101,20 +101,25 @@ pause
   "$api/progress/$novel_id/identity"
 
 pause
+"${curl_cmd[@]}" --output /dev/null "${auth[@]}" \
+  -X PUT -H 'Content-Type: application/json' --data '{"current_chapter":2}' \
+  "$api/progress/$novel_id"
+
+pause
 blocked_branch_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   --output /dev/null --write-out '%{http_code}' "${auth[@]}" \
   "$api/narrative/$novel_id/1")
 [ "$blocked_branch_status" = 409 ]
 
 pause
-player_entry=$("${curl_cmd[@]}" "${auth[@]}" "$api/narrative/$novel_id/player-entry")
+player_entry=$("${curl_cmd[@]}" "${auth[@]}" "$api/narrative/$novel_id/player-entry?checkpoint_chapter=1")
 location_id=$(json_get "value['locations'][0]['id']" <<<"$player_entry")
 python3 -c "import json,sys; value=json.load(sys.stdin); assert value['player'] is None; assert value['checkpoint_chapter']==1; assert len(value['locations'])==1" <<<"$player_entry"
 
 pause
 player=$("${curl_cmd[@]}" "${auth[@]}" \
   -X PUT -H 'Content-Type: application/json' \
-  --data "{\"name\":\"云舟\",\"background\":\"来自边城的地图学徒。\",\"capabilities\":[\"辨认古地图\"],\"location_id\":\"$location_id\",\"inventory\":[\"旧地图\"]}" \
+  --data "{\"checkpoint_chapter\":1,\"name\":\"云舟\",\"background\":\"来自边城的地图学徒。\",\"capabilities\":[\"辨认古地图\"],\"location_id\":\"$location_id\",\"inventory\":[\"旧地图\"]}" \
   "$api/narrative/$novel_id/player-entry")
 player_id=$(json_get "value['player']['id']" <<<"$player")
 python3 -c "import json,sys; value=json.load(sys.stdin); player=value['player']; assert value['checkpoint_chapter']==1; assert player['name']=='云舟'; assert player['location_id']=='$location_id'; assert player['relationships']=={}" <<<"$player"
@@ -122,14 +127,14 @@ python3 -c "import json,sys; value=json.load(sys.stdin); player=value['player'];
 pause
 same_player=$("${curl_cmd[@]}" "${auth[@]}" \
   -X PUT -H 'Content-Type: application/json' \
-  --data "{\"name\":\"云舟\",\"background\":\"来自边城的地图学徒。\",\"capabilities\":[\"辨认古地图\"],\"location_id\":\"$location_id\",\"inventory\":[\"旧地图\"]}" \
+  --data "{\"checkpoint_chapter\":1,\"name\":\"云舟\",\"background\":\"来自边城的地图学徒。\",\"capabilities\":[\"辨认古地图\"],\"location_id\":\"$location_id\",\"inventory\":[\"旧地图\"]}" \
   "$api/narrative/$novel_id/player-entry")
 [ "$(json_get "value['player']['id']" <<<"$same_player")" = "$player_id" ]
 pause
 conflict_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   --output /dev/null --write-out '%{http_code}' "${auth[@]}" \
   -X PUT -H 'Content-Type: application/json' \
-  --data "{\"name\":\"另一名玩家\",\"background\":\"来自另一条时间线。\",\"capabilities\":[\"观察\"],\"location_id\":\"$location_id\",\"inventory\":[]}" \
+  --data "{\"checkpoint_chapter\":1,\"name\":\"另一名玩家\",\"background\":\"来自另一条时间线。\",\"capabilities\":[\"观察\"],\"location_id\":\"$location_id\",\"inventory\":[]}" \
   "$api/narrative/$novel_id/player-entry")
 [ "$conflict_status" = 409 ]
 player_snapshot=$(docker exec novel-postgres psql \
@@ -193,6 +198,65 @@ chapter_two=$("${curl_cmd[@]}" "${auth[@]}" "$api/narrative/$novel_id/chapters/2
 python3 -c "import json,sys; value=json.load(sys.stdin); assert value['generated'] is True; assert '北塔深处' in value['content']" <<<"$chapter_two"
 chapter_hash=$(printf '%s' "$chapter_two" | sha256sum | cut -d' ' -f1)
 
+pause
+open_world=$("${curl_cmd[@]}" "${auth[@]}" -X POST "$api/narrative/$novel_id/world")
+canon_event_id=$(json_get "value['session']['canonical_events'][0]['id']" <<<"$open_world")
+python3 -c "import json,sys; value=json.load(sys.stdin); session=value['session']; assert value['player']['id']=='$player_id'; assert session['entry_context']['checkpoint_chapter']==1; assert session['entry_context']['unlocked_through_chapter']==2; assert len(session['canonical_events'])==1; assert session['canonical_events'][0]['source_chapters']==[2]; assert session['canonical_events'][0]['status']=='scheduled'; assert session['turn_number']==0" <<<"$open_world"
+
+pause
+same_open_world=$("${curl_cmd[@]}" "${auth[@]}" -X POST "$api/narrative/$novel_id/world")
+[ "$(printf '%s' "$same_open_world" | sha256sum | cut -d' ' -f1)" = "$(printf '%s' "$open_world" | sha256sum | cut -d' ' -f1)" ]
+
+world_turn_one_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
+world_action_one="{\"kind\":\"investigate\",\"target_id\":\"$canon_event_id\",\"intent\":\"查清北塔换防并阻止伏击\"}"
+pause
+world_turn_one=$("${curl_cmd[@]}" "${auth[@]}" \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: $world_turn_one_id" \
+  --data "$world_action_one" "$api/narrative/$novel_id/world/turns")
+world_turn_one_hash=$(printf '%s' "$world_turn_one" | sha256sum | cut -d' ' -f1)
+python3 -c "import json,sys; value=json.load(sys.stdin); transition=value['transition']; session=value['world_state']['state']['open_world']; assert value['turn_id']=='$world_turn_one_id'; assert transition['canonical_event_change']['event_id']=='$canon_event_id'; assert transition['canonical_event_change']['status']=='obstructed'; assert transition['events'][0]['actor_character_ids']==[]; assert session['turn_number']==1; assert session['canonical_events'][0]['status']=='obstructed'" <<<"$world_turn_one"
+
+pause
+replayed_world_turn_one=$("${curl_cmd[@]}" "${auth[@]}" \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: $world_turn_one_id" \
+  --data "$world_action_one" "$api/narrative/$novel_id/world/turns")
+[ "$(printf '%s' "$replayed_world_turn_one" | sha256sum | cut -d' ' -f1)" = "$world_turn_one_hash" ]
+
+pause
+test "$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
+  --output /dev/null --write-out '%{http_code}' "${auth[@]}" \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: $world_turn_one_id" \
+  --data "{\"kind\":\"investigate\",\"target_id\":\"$canon_event_id\",\"intent\":\"提交冲突的另一项行动\"}" \
+  "$api/narrative/$novel_id/world/turns")" = 409
+
+world_turn_two_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
+world_action_two='{"kind":"pursue_goal","target_id":null,"intent":"绘制地下回廊并寻找守门人的踪迹"}'
+pause
+world_turn_two=$("${curl_cmd[@]}" "${auth[@]}" \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: $world_turn_two_id" \
+  --data "$world_action_two" "$api/narrative/$novel_id/world/turns")
+python3 -c "import json,sys; value=json.load(sys.stdin); session=value['world_state']['state']['open_world']; assert value['turn_id']=='$world_turn_two_id'; assert value['transition']['canonical_event_change'] is None; assert session['turn_number']==2; assert session['world_time']==2" <<<"$world_turn_two"
+
+pause
+world_view=$("${curl_cmd[@]}" "${auth[@]}" "$api/narrative/$novel_id/world")
+python3 -c "import json,sys; value=json.load(sys.stdin); state=value['world_state']['state']; assert value['session']['turn_number']==2; assert value['session']['canonical_events'][0]['status']=='obstructed'; assert [entry['turn_number'] for entry in value['journal']]==[1,2]; assert len([event for event in state['world_events'] if isinstance(event,dict) and event.get('origin')=='player'])==2" <<<"$world_view"
+world_view_hash=$(printf '%s' "$world_view" | sha256sum | cut -d' ' -f1)
+player_snapshot=$(docker exec novel-postgres psql \
+  -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
+  -c "SELECT md5((state -> 'player_entity')::text) FROM world_states WHERE user_id = (SELECT id FROM users WHERE email = '$email') AND novel_id = '$novel_id'")
+transition_snapshot=$(docker exec novel-postgres psql \
+  -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
+  -c "SELECT md5(transition::text) || ':' || md5((SELECT state::text FROM world_states WHERE user_id = user_choices.user_id AND novel_id = user_choices.novel_id)) FROM user_choices WHERE node_id = '$node_id'")
+
+world_chat_turn_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
+pause
+world_chat=$("${curl_cmd[@]}" --no-buffer "${auth[@]}" \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: $world_chat_turn_id" \
+  --data "{\"message\":\"这两回合之后你准备做什么？\",\"novel_id\":\"$novel_id\"}" \
+  "$api/chat/$character_id/stream")
+grep -Fq '林岚知道你已经改变了两回合的世界，也会依照自己的目标继续调查。' <<<"$world_chat"
+grep -Fq 'event: done' <<<"$world_chat"
+
 for target in \
   'novel-user-service:8001' \
   'novel-novel-service:8002' \
@@ -209,11 +273,6 @@ python3 tools/llm-budget/verify.py \
   --metrics "$metrics_file" \
   --commit "$(git rev-parse HEAD)"
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' "$public_url/metrics")" = 404
-
-pause
-"${curl_cmd[@]}" --output /dev/null "${auth[@]}" \
-  -X PUT -H 'Content-Type: application/json' --data '{"current_chapter":2}' \
-  "$api/progress/$novel_id"
 
 docker restart novel-user-service novel-novel-service novel-agent-service novel-narrative-service novel-gateway >/dev/null
 for _ in $(seq 1 60); do
@@ -234,6 +293,19 @@ resumed_player_snapshot=$(docker exec novel-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT md5((state -> 'player_entity')::text) FROM world_states WHERE user_id = (SELECT id FROM users WHERE email = '$email') AND novel_id = '$novel_id'")
 [ "$resumed_player_snapshot" = "$player_snapshot" ]
+
+pause
+resumed_world=$("${curl_cmd[@]}" "${auth[@]}" "$api/narrative/$novel_id/world")
+[ "$(printf '%s' "$resumed_world" | sha256sum | cut -d' ' -f1)" = "$world_view_hash" ]
+
+pause
+resumed_world_replay=$("${curl_cmd[@]}" "${auth[@]}" \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: $world_turn_one_id" \
+  --data "$world_action_one" "$api/narrative/$novel_id/world/turns")
+[ "$(printf '%s' "$resumed_world_replay" | sha256sum | cut -d' ' -f1)" = "$world_turn_one_hash" ]
+pause
+current_world=$("${curl_cmd[@]}" "${auth[@]}" "$api/narrative/$novel_id/world")
+python3 -c "import json,sys; value=json.load(sys.stdin); assert value['session']['turn_number']==2; assert len(value['journal'])==2" <<<"$current_world"
 
 pause
 resumed_player=$("${curl_cmd[@]}" "${auth[@]}" "$api/narrative/$novel_id/player-entry")
@@ -259,7 +331,7 @@ replayed_choice=$("${curl_cmd[@]}" "${auth[@]}" \
   -H 'Content-Type: application/json' \
   --data "{\"novel_id\":\"$novel_id\",\"node_id\":\"$node_id\",\"choice_index\":0}" \
   "$api/narrative/choose")
-python3 -c "import json,sys; value=json.load(sys.stdin); state=value['world_state']['state']; assert len(state['choices'])==1; assert len(state['world_events'])==1; assert 'relationships' not in state; assert next(iter(state['player_entity']['relationships'].values()))['score']==55" <<<"$replayed_choice"
+python3 -c "import json,sys; value=json.load(sys.stdin); state=value['world_state']['state']; assert len(state['choices'])==1; assert len(state['world_events'])==3; assert len([event for event in state['world_events'] if event.get('origin')=='player'])==2; assert 'relationships' not in state; assert next(iter(state['player_entity']['relationships'].values()))['score']==57; assert state['open_world']['turn_number']==2" <<<"$replayed_choice"
 
 privacy_turn_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
 docker exec novel-postgres psql \
@@ -340,7 +412,7 @@ assert completed == expected_services
 assert {
     "profile", "novel", "chapter", "character", "character_relationship",
     "canon_story_model", "reading_progress", "chat_message", "character_memory",
-    "narrative_node", "user_choice", "world_state", "player_chapter",
+    "narrative_node", "user_choice", "world_state", "player_chapter", "world_turn",
 } <= kinds
 assert "Portable E2E relationship" in raw
 assert "Portable E2E memory" in raw
@@ -414,8 +486,8 @@ test "$(docker exec novel-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD
 
 erased_counts=$(docker exec novel-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
-  -c "SELECT (SELECT COUNT(*) FROM users) || ':' || (SELECT COUNT(*) FROM novels) || ':' || (SELECT COUNT(*) FROM chapters) || ':' || (SELECT COUNT(*) FROM chapter_chunks) || ':' || (SELECT COUNT(*) FROM characters) || ':' || (SELECT COUNT(*) FROM character_relationships) || ':' || (SELECT COUNT(*) FROM character_memories) || ':' || (SELECT COUNT(*) FROM chat_turns) || ':' || (SELECT COUNT(*) FROM chat_messages) || ':' || (SELECT COUNT(*) FROM narrative_nodes) || ':' || (SELECT COUNT(*) FROM user_choices) || ':' || (SELECT COUNT(*) FROM world_states) || ':' || (SELECT COUNT(*) FROM player_chapters) || ':' || (SELECT COUNT(*) FROM canon_story_models) || ':' || (SELECT COUNT(*) FROM reading_progress) || ':' || (SELECT COUNT(*) FROM refresh_tokens) || ':' || (SELECT COUNT(*) FROM runtime_llm_config)")
-[ "$erased_counts" = 0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0 ]
+  -c "SELECT (SELECT COUNT(*) FROM users) || ':' || (SELECT COUNT(*) FROM novels) || ':' || (SELECT COUNT(*) FROM chapters) || ':' || (SELECT COUNT(*) FROM chapter_chunks) || ':' || (SELECT COUNT(*) FROM characters) || ':' || (SELECT COUNT(*) FROM character_relationships) || ':' || (SELECT COUNT(*) FROM character_memories) || ':' || (SELECT COUNT(*) FROM chat_turns) || ':' || (SELECT COUNT(*) FROM chat_messages) || ':' || (SELECT COUNT(*) FROM narrative_nodes) || ':' || (SELECT COUNT(*) FROM user_choices) || ':' || (SELECT COUNT(*) FROM world_states) || ':' || (SELECT COUNT(*) FROM world_turns) || ':' || (SELECT COUNT(*) FROM player_chapters) || ':' || (SELECT COUNT(*) FROM canon_story_models) || ':' || (SELECT COUNT(*) FROM reading_progress) || ':' || (SELECT COUNT(*) FROM refresh_tokens) || ':' || (SELECT COUNT(*) FROM runtime_llm_config)")
+[ "$erased_counts" = 0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0 ]
 
 pause
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
@@ -431,4 +503,4 @@ pause
 setup_status=$("${curl_cmd[@]}" "$api/setup/status")
 python3 -c "import json,sys; value=json.load(sys.stdin); assert value['configured'] is False; assert value['admin_configured'] is False" <<<"$setup_status"
 
-printf 'core reader loop resumed and account data erased: novel=%s turn=%s\n' "$novel_id" "$turn_id"
+printf 'core reader loop and living world resumed, then account data erased: novel=%s chat_turn=%s world_turns=%s,%s\n' "$novel_id" "$turn_id" "$world_turn_one_id" "$world_turn_two_id"

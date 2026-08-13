@@ -9,9 +9,15 @@ use narrative_service::domain::{
     entities::{
         narrative_node::{NarrativeChoice, NarrativeNode},
         player_entity::PlayerEntity,
+        world_session::{
+            CharacterGoalRef, FactionStandingChange, ScheduledCanonEvent, WorldAction,
+            WorldActionKind, WorldCharacterRef, WorldEntityRef, WorldEntryContext, WorldRuleRef,
+            WorldTurnTransition, WORLD_TURN_PROMPT_VERSION, WORLD_TURN_SCHEMA_VERSION,
+        },
     },
     repositories::{
-        ChoiceCommit, NarrativeNodeRepository, UserChoiceRepository, WorldStateRepository,
+        BeginWorldTurn, ChoiceCommit, NarrativeNodeRepository, UserChoiceRepository,
+        WorldStateRepository, WorldTurnClaim, WorldTurnRepository,
     },
     services::narrative_transition::{
         NarrativeTransition, RelationshipChange, TransitionEvent, TRANSITION_PROMPT_VERSION,
@@ -22,6 +28,7 @@ use narrative_service::infrastructure::persistence::pg_narrative_repo::{
     PgNarrativeNodeRepository, PgUserChoiceRepository,
 };
 use narrative_service::infrastructure::persistence::pg_world_state_repo::PgWorldStateRepository;
+use narrative_service::infrastructure::persistence::pg_world_turn_repo::PgWorldTurnRepository;
 use novel_service::domain::{
     entities::canon_story_model::{
         CanonEndingSnapshot, CanonEvent, CanonStoryContent, CanonStoryModel, SourceCitation,
@@ -1165,6 +1172,245 @@ async fn production_repositories_match_fresh_schema() {
         .await
         .unwrap();
     choice_repo.commit_choice(&more_drafts[2]).await.unwrap();
+
+    let world_context = WorldEntryContext {
+        model_version: 1,
+        checkpoint_chapter: 1,
+        unlocked_through_chapter: 2,
+        characters: vec![WorldCharacterRef {
+            id: character_id,
+            name: "Hero".into(),
+        }],
+        locations: vec![WorldEntityRef {
+            id: "north-tower".into(),
+            name: "North Tower".into(),
+        }],
+        factions: vec![WorldEntityRef {
+            id: "wardens".into(),
+            name: "Wardens".into(),
+        }],
+        hard_rules: vec![WorldRuleRef {
+            id: "rule-1".into(),
+            description: "The dead remain dead.".into(),
+        }],
+        dead_character_ids: vec![],
+        threads: vec![WorldEntityRef {
+            id: "thread-1".into(),
+            name: "Find the hidden path".into(),
+        }],
+        scheduled_events: vec![ScheduledCanonEvent {
+            id: "event-2".into(),
+            sequence: 2,
+            summary: "The wardens defend the tower.".into(),
+            character_ids: vec![character_id],
+            location_ids: vec!["north-tower".into()],
+            faction_ids: vec!["wardens".into()],
+            death_character_ids: vec![],
+            source_chapters: vec![2],
+        }],
+        character_goals: vec![CharacterGoalRef {
+            id: "goal-1".into(),
+            character_id,
+            description: "Protect the tower.".into(),
+            source_chapters: vec![1],
+        }],
+    };
+    let started = world_state_repo
+        .start_open_world(user_id, novel_id, &world_context)
+        .await
+        .unwrap();
+    assert_eq!(started.open_world().unwrap().unwrap().turn_number, 0);
+    let mut drifted_context = world_context.clone();
+    drifted_context.model_version = 2;
+    let resumed = world_state_repo
+        .start_open_world(user_id, novel_id, &drifted_context)
+        .await
+        .unwrap();
+    assert_eq!(resumed, started);
+    assert_eq!(
+        resumed
+            .open_world()
+            .unwrap()
+            .unwrap()
+            .entry_context
+            .model_version,
+        1
+    );
+
+    let world_turn_repo = PgWorldTurnRepository::new(pool.clone());
+    let action = WorldAction {
+        kind: WorldActionKind::Investigate,
+        target_id: Some("thread-1".into()),
+        intent: "追查塔中的隐秘道路".into(),
+    };
+    let claim = WorldTurnClaim {
+        id: Uuid::new_v4(),
+        user_id,
+        novel_id,
+        request_fingerprint: vec![7; 32],
+        action: action.clone(),
+        expected_turn_number: 0,
+    };
+    let attempt = match world_turn_repo.begin_turn(&claim).await.unwrap() {
+        BeginWorldTurn::Acquired { attempt, .. } => attempt,
+        result => panic!("unexpected world turn reservation: {result:?}"),
+    };
+    let competing = WorldTurnClaim {
+        id: Uuid::new_v4(),
+        request_fingerprint: vec![8; 32],
+        ..claim.clone()
+    };
+    assert!(matches!(
+        world_turn_repo.begin_turn(&competing).await.unwrap(),
+        BeginWorldTurn::InProgress { .. }
+    ));
+    let world_transition = WorldTurnTransition {
+        schema_version: WORLD_TURN_SCHEMA_VERSION,
+        prompt_version: WORLD_TURN_PROMPT_VERSION.into(),
+        canon_model_version: 1,
+        canonical_checkpoint_chapter: 1,
+        rendered_narrative: "你在塔中找到一条隐秘道路，守门人开始相信你的判断。".into(),
+        events: vec![TransitionEvent {
+            summary: "玩家找到隐秘道路".into(),
+            actor_character_ids: vec![],
+            location_id: Some("north-tower".into()),
+        }],
+        relationship_changes: vec![RelationshipChange {
+            character_id,
+            delta: 5,
+            reason: "共享隐秘道路".into(),
+        }],
+        location_changes: vec![],
+        thread_changes: vec![],
+        player_location_id: None,
+        inventory_additions: vec!["隐秘地图".into()],
+        inventory_removals: vec![],
+        knowledge_discoveries: vec!["北塔有隐秘道路".into()],
+        faction_changes: vec![FactionStandingChange {
+            faction_id: "wardens".into(),
+            delta: 5,
+            reason: "帮助守军".into(),
+        }],
+        canonical_event_change: None,
+    };
+    let completed = world_turn_repo
+        .complete_turn(&claim, attempt, &world_transition, &world_context)
+        .await
+        .unwrap();
+    assert_eq!(
+        completed
+            .world_state
+            .open_world()
+            .unwrap()
+            .unwrap()
+            .turn_number,
+        1
+    );
+    assert_eq!(
+        completed
+            .world_state
+            .player_entity()
+            .unwrap()
+            .unwrap()
+            .inventory,
+        vec!["旧地图", "隐秘地图"]
+    );
+    assert_eq!(
+        world_state_repo
+            .get_or_create(user_id, novel_id)
+            .await
+            .unwrap(),
+        completed.world_state
+    );
+    match world_turn_repo.begin_turn(&claim).await.unwrap() {
+        BeginWorldTurn::Completed(replayed) => assert_eq!(*replayed, completed),
+        result => panic!("completed world turn did not replay: {result:?}"),
+    }
+    let advanced_replay = WorldTurnClaim {
+        expected_turn_number: 1,
+        ..claim.clone()
+    };
+    match world_turn_repo.begin_turn(&advanced_replay).await.unwrap() {
+        BeginWorldTurn::Completed(replayed) => assert_eq!(*replayed, completed),
+        result => panic!("advanced completed world turn did not replay: {result:?}"),
+    }
+    let conflicting_reuse = WorldTurnClaim {
+        action: WorldAction {
+            intent: "不同动作".into(),
+            ..action.clone()
+        },
+        ..claim.clone()
+    };
+    assert!(matches!(
+        world_turn_repo
+            .begin_turn(&conflicting_reuse)
+            .await
+            .unwrap(),
+        BeginWorldTurn::Conflict
+    ));
+    assert!(matches!(
+        world_turn_repo.begin_turn(&competing).await.unwrap(),
+        BeginWorldTurn::Stale
+    ));
+    assert_eq!(
+        world_turn_repo
+            .journal(user_id, novel_id, 100)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let rollback_claim = WorldTurnClaim {
+        id: Uuid::new_v4(),
+        request_fingerprint: vec![9; 32],
+        expected_turn_number: 1,
+        ..claim.clone()
+    };
+    let rollback_attempt = match world_turn_repo.begin_turn(&rollback_claim).await.unwrap() {
+        BeginWorldTurn::Acquired { attempt, .. } => attempt,
+        result => panic!("unexpected rollback reservation: {result:?}"),
+    };
+    let rollback_transition = WorldTurnTransition {
+        inventory_additions: vec![],
+        inventory_removals: vec!["不存在的物品".into()],
+        knowledge_discoveries: vec![],
+        faction_changes: vec![],
+        relationship_changes: vec![],
+        rendered_narrative: "你试图使用一件并不存在的物品，世界拒绝了这次变化。".into(),
+        events: vec![TransitionEvent {
+            summary: "无效物品操作".into(),
+            actor_character_ids: vec![],
+            location_id: Some("north-tower".into()),
+        }],
+        ..world_transition.clone()
+    };
+    assert!(world_turn_repo
+        .complete_turn(
+            &rollback_claim,
+            rollback_attempt,
+            &rollback_transition,
+            &world_context,
+        )
+        .await
+        .is_err());
+    let (persisted_turn, rollback_status): (i64, String) = sqlx::query_as(
+        "SELECT (state #>> '{open_world,turn_number}')::BIGINT, \
+                (SELECT status FROM world_turns WHERE id = $3) \
+         FROM world_states WHERE user_id = $1 AND novel_id = $2",
+    )
+    .bind(user_id)
+    .bind(novel_id)
+    .bind(rollback_claim.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(persisted_turn, 1);
+    assert_eq!(rollback_status, "in_progress");
+    assert!(world_turn_repo
+        .fail_turn(rollback_claim.id, rollback_attempt, "test_cleanup")
+        .await
+        .unwrap());
 
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)

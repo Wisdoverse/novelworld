@@ -176,6 +176,7 @@ services:
       MEMORY_COMPRESS_THRESHOLD: ${MEMORY_COMPRESS_THRESHOLD:-15}
       PORT: 8003
       NOVEL_SERVICE_URL: http://novel-service:8002
+      NARRATIVE_SERVICE_URL: http://narrative-service:8004
       RUST_LOG: info
     depends_on:
       postgres-migrate:
@@ -183,6 +184,8 @@ services:
       redis:
         condition: service_healthy
       novel-service:
+        condition: service_healthy
+      narrative-service:
         condition: service_healthy
     networks:
       - novel-net

@@ -17,6 +17,7 @@ use narrative_service::{
                 PgNarrativeNodeRepository, PgPlayerChapterRepository, PgUserChoiceRepository,
             },
             pg_world_state_repo::PgWorldStateRepository,
+            pg_world_turn_repo::PgWorldTurnRepository,
             PgReadinessProbe,
         },
     },
@@ -59,6 +60,7 @@ async fn main() -> Result<()> {
     let node_repo = Arc::new(PgNarrativeNodeRepository::new(pool.clone()));
     let choice_repo = Arc::new(PgUserChoiceRepository::new(pool.clone()));
     let world_state_repo = Arc::new(PgWorldStateRepository::new(pool.clone()));
+    let world_turn_repo = Arc::new(PgWorldTurnRepository::new(pool.clone()));
     let player_chapter_repo = Arc::new(PgPlayerChapterRepository::new(pool.clone()));
     let account_export: Arc<dyn domain::ports::AccountExportPort> =
         Arc::new(PgAccountExport::new(pool.clone()));
@@ -72,6 +74,7 @@ async fn main() -> Result<()> {
         node_repo,
         choice_repo,
         world_state_repo,
+        world_turn_repo,
         player_chapter_repo,
         chapter_repo,
         llm,

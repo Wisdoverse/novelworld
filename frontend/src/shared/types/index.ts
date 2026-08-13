@@ -118,9 +118,119 @@ export interface PlayerEntry {
   locations: Array<{ id: string; name: string }>;
 }
 
+export type WorldActionKind =
+  | 'travel'
+  | 'investigate'
+  | 'converse'
+  | 'ally'
+  | 'oppose'
+  | 'resolve_thread'
+  | 'pursue_goal';
+
+export interface WorldAction {
+  kind: WorldActionKind;
+  target_id: string | null;
+  intent: string;
+}
+
+export interface WorldEntryContext {
+  model_version: number;
+  checkpoint_chapter: number;
+  unlocked_through_chapter: number;
+  characters: Array<{ id: string; name: string }>;
+  locations: Array<{ id: string; name: string }>;
+  factions: Array<{ id: string; name: string }>;
+  hard_rules: Array<{ id: string; description: string }>;
+  dead_character_ids: string[];
+  threads: Array<{ id: string; name: string }>;
+  scheduled_events: ScheduledCanonEvent[];
+  character_goals: Array<{
+    id: string;
+    character_id: string;
+    description: string;
+    source_chapters: number[];
+  }>;
+}
+
+export interface ScheduledCanonEvent {
+  id: string;
+  sequence: number;
+  summary: string;
+  character_ids: string[];
+  location_ids: string[];
+  faction_ids: string[];
+  death_character_ids: string[];
+  source_chapters: number[];
+}
+
+export type CanonicalEventStatus =
+  | 'scheduled'
+  | 'occurred'
+  | 'witnessed'
+  | 'assisted'
+  | 'obstructed'
+  | 'delayed'
+  | 'redirected'
+  | 'prevented';
+
+export interface CanonicalEventState extends ScheduledCanonEvent {
+  status: CanonicalEventStatus;
+  reason: string | null;
+}
+
+export interface WorldSession {
+  schema_version: number;
+  entry_context: WorldEntryContext;
+  world_time: number;
+  turn_number: number;
+  canonical_events: CanonicalEventState[];
+  dead_character_ids: string[];
+  character_perceptions: Record<string, string>;
+}
+
+export interface WorldTurnTransition {
+  schema_version: number;
+  prompt_version: string;
+  canon_model_version: number;
+  canonical_checkpoint_chapter: number;
+  rendered_narrative: string;
+  events: Array<{
+    summary: string;
+    actor_character_ids: string[];
+    location_id: string | null;
+  }>;
+  relationship_changes: Array<{ character_id: string; delta: number; reason: string }>;
+  location_changes: Array<{ location_id: string; state: string; reason: string }>;
+  thread_changes: Array<{
+    thread_id: string;
+    status: 'open' | 'resolved';
+    description: string;
+  }>;
+  player_location_id: string | null;
+  inventory_additions: string[];
+  inventory_removals: string[];
+  knowledge_discoveries: string[];
+  faction_changes: Array<{ faction_id: string; delta: number; reason: string }>;
+  canonical_event_change: {
+    event_id: string;
+    status: CanonicalEventStatus;
+    reason: string;
+  } | null;
+}
+
+export interface WorldTurnJournalEntry {
+  turn_id: string;
+  turn_number: number;
+  action: WorldAction;
+  transition: WorldTurnTransition;
+  created_at: string;
+  completed_at: string;
+}
+
 export interface WorldState {
   user_id: string;
   novel_id: string;
+  updated_at: string;
   state: {
     choices: Array<{
       node_id?: string;
@@ -136,15 +246,39 @@ export interface WorldState {
     player_entity?: PlayerEntity;
     world_events: Array<string | {
       id: string;
-      chapter: number;
+      chapter?: number;
+      origin?: 'player';
+      turn_id?: string;
+      turn_number?: number;
+      world_time?: number;
       summary: string;
       actor_character_ids: string[];
       location_id: string | null;
     }>;
     locations?: Record<string, { state: string; reason: string }>;
-    threads?: Record<string, { status: 'open' | 'resolved'; description: string }>;
+    threads?: Record<string, {
+      status: 'open' | 'resolved';
+      description: string;
+      origin?: 'canon' | 'player';
+      turn_id?: string;
+    }>;
+    open_world?: WorldSession;
     reader_reputation?: Record<string, unknown>;
   };
+}
+
+export interface OpenWorldView {
+  player: PlayerEntity;
+  session: WorldSession;
+  world_state: WorldState;
+  journal: WorldTurnJournalEntry[];
+}
+
+export interface WorldTurnResult {
+  turn_id: string;
+  action: WorldAction;
+  transition: WorldTurnTransition;
+  world_state: WorldState;
 }
 
 // ─── 阅读进度 ─────────────────────────────────────────────────────────────────

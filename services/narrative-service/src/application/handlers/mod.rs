@@ -1,16 +1,23 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use sha2::{Digest, Sha256};
+use std::{future::Future, sync::Arc, time::Duration};
+use tokio::sync::{oneshot, watch};
 use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::domain::entities::narrative_node::{NarrativeChoice, NarrativeNode, WorldState};
 use crate::domain::entities::player_entity::PlayerEntity;
+use crate::domain::entities::world_session::{
+    build_world_turn_prompt, parse_world_turn_transition, CharacterWorldContext, WorldAction,
+    WorldSession,
+};
 use crate::domain::ports::{LlmPort, NarrativeLlmTask};
 use crate::domain::repositories::{
-    ChapterInfo, ChapterReadRepository, ChoiceCommit, NarrativeNodeRepository, NovelInfo,
-    PlayerChapter, PlayerChapterOrigin, PlayerChapterRepository, UserChoiceRecord,
-    UserChoiceRepository, WorldStateRepository,
+    BeginWorldTurn, ChapterInfo, ChapterReadRepository, ChoiceCommit, NarrativeNodeRepository,
+    NovelInfo, PlayerChapter, PlayerChapterOrigin, PlayerChapterRepository, UserChoiceRecord,
+    UserChoiceRepository, WorldStateRepository, WorldTurnClaim, WorldTurnJournalEntry,
+    WorldTurnRepository, WorldTurnResult,
 };
 use crate::domain::services::narrative_engine::{
     build_branch_prompt, build_player_chapter_prompt, is_chinese_narrative, parse_generated_branch,
@@ -26,6 +33,10 @@ const MAX_CONSEQUENCE_CHARS: usize = 8_000;
 const MAX_TRANSITION_BYTES: usize = 128 * 1024;
 const MAX_PLAYER_CHAPTER_BYTES: usize = 64 * 1024;
 const MAX_PLAYER_CHAPTER_CHARS: usize = 20_000;
+const MAX_WORLD_TURN_PROMPT_BYTES: usize = 64 * 1024;
+const MAX_WORLD_TURN_PROMPT_CHARS: usize = 32_000;
+const MAX_WORLD_TRANSITION_BYTES: usize = 128 * 1024;
+const WORLD_TURN_LEASE_HEARTBEAT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, thiserror::Error)]
 pub enum NarrativeError {
@@ -35,6 +46,8 @@ pub enum NarrativeError {
     Validation(String),
     #[error("{0}")]
     Conflict(String),
+    #[error("World turn is already in progress")]
+    TurnInProgress { retry_after_seconds: u64 },
     #[error("Novel service is unavailable")]
     Unavailable(#[source] anyhow::Error),
     #[error("Consequence generation failed")]
@@ -63,6 +76,7 @@ pub struct EffectiveChapter {
 
 #[derive(Debug, Clone)]
 pub struct CreatePlayerEntityCommand {
+    pub checkpoint_chapter: Option<i32>,
     pub name: String,
     pub background: String,
     pub capabilities: Vec<String>,
@@ -77,6 +91,14 @@ pub struct PlayerEntry {
     pub locations: Vec<CanonEntityRef>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OpenWorldView {
+    pub player: PlayerEntity,
+    pub session: WorldSession,
+    pub world_state: WorldState,
+    pub journal: Vec<WorldTurnJournalEntry>,
+}
+
 struct ResolvedChapter {
     canonical: ChapterInfo,
     content: String,
@@ -89,7 +111,76 @@ pub struct NarrativeCommandHandler {
     pub world_state_repo: Arc<dyn WorldStateRepository>,
     pub player_chapter_repo: Arc<dyn PlayerChapterRepository>,
     pub chapter_repo: Arc<dyn ChapterReadRepository>,
+    pub world_turn_repo: Arc<dyn WorldTurnRepository>,
     pub llm: Arc<dyn LlmPort>,
+}
+
+struct WorldTurnLease {
+    stop: Option<oneshot::Sender<()>>,
+    lost: watch::Receiver<bool>,
+}
+
+impl WorldTurnLease {
+    fn start(repo: Arc<dyn WorldTurnRepository>, turn_id: Uuid, attempt: i64) -> Self {
+        let (stop, mut stopped) = oneshot::channel();
+        let (lost, receiver) = watch::channel(false);
+        tokio::spawn(async move {
+            let mut heartbeat = tokio::time::interval(WORLD_TURN_LEASE_HEARTBEAT);
+            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            heartbeat.tick().await;
+            loop {
+                tokio::select! {
+                    _ = &mut stopped => return,
+                    _ = heartbeat.tick() => {
+                        match repo.renew_turn(turn_id, attempt).await {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                tracing::warn!(%turn_id, attempt, "world turn lease was fenced");
+                                let _ = lost.send(true);
+                                return;
+                            }
+                            Err(error) => {
+                                tracing::error!(%turn_id, attempt, error = ?error, "world turn lease renewal failed");
+                                let _ = lost.send(true);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        Self {
+            stop: Some(stop),
+            lost: receiver,
+        }
+    }
+
+    async fn run<T>(&mut self, operation: impl Future<Output = T>) -> Option<T> {
+        if *self.lost.borrow() {
+            return None;
+        }
+        tokio::select! {
+            biased;
+            result = operation => Some(result),
+            _ = self.wait_until_lost() => None,
+        }
+    }
+
+    async fn wait_until_lost(&mut self) {
+        while !*self.lost.borrow() && self.lost.changed().await.is_ok() {}
+    }
+
+    fn stop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+    }
+}
+
+impl Drop for WorldTurnLease {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 impl NarrativeCommandHandler {
@@ -133,7 +224,13 @@ impl NarrativeCommandHandler {
         &self,
         user_id: Uuid,
         novel_id: Uuid,
+        checkpoint_chapter: Option<i32>,
     ) -> NarrativeResult<PlayerEntry> {
+        if checkpoint_chapter.is_some_and(|chapter| chapter < 1) {
+            return Err(NarrativeError::Validation(
+                "Player checkpoint must be a positive chapter".into(),
+            ));
+        }
         self.owned_novel(novel_id, user_id).await?;
         let world_state = self
             .world_state_repo
@@ -152,7 +249,7 @@ impl NarrativeCommandHandler {
         }
         let context = self
             .chapter_repo
-            .get_player_entry_context(novel_id, user_id, None)
+            .get_player_entry_context(novel_id, user_id, checkpoint_chapter, None)
             .await
             .map_err(NarrativeError::Unavailable)?
             .ok_or(NarrativeError::NotFound)?;
@@ -171,6 +268,14 @@ impl NarrativeCommandHandler {
         command: CreatePlayerEntityCommand,
     ) -> NarrativeResult<PlayerEntity> {
         self.owned_novel(novel_id, user_id).await?;
+        if command
+            .checkpoint_chapter
+            .is_some_and(|chapter| chapter < 1)
+        {
+            return Err(NarrativeError::Validation(
+                "Player checkpoint must be a positive chapter".into(),
+            ));
+        }
         PlayerEntity::validate_definition(
             &command.name,
             &command.background,
@@ -188,13 +293,17 @@ impl NarrativeCommandHandler {
             .player_entity()
             .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
         {
-            return if existing.matches_definition(
-                &command.name,
-                &command.background,
-                &command.capabilities,
-                &command.location_id,
-                &command.inventory,
-            ) {
+            let checkpoint_matches = command
+                .checkpoint_chapter
+                .is_none_or(|chapter| chapter == existing.canonical_checkpoint_chapter);
+            return if checkpoint_matches
+                && existing.matches_definition(
+                    &command.name,
+                    &command.background,
+                    &command.capabilities,
+                    &command.location_id,
+                    &command.inventory,
+                ) {
                 Ok(existing)
             } else {
                 Err(NarrativeError::Conflict(
@@ -204,7 +313,12 @@ impl NarrativeCommandHandler {
         }
         let context = self
             .chapter_repo
-            .get_player_entry_context(novel_id, user_id, Some(&command.name))
+            .get_player_entry_context(
+                novel_id,
+                user_id,
+                command.checkpoint_chapter,
+                Some(&command.name),
+            )
             .await
             .map_err(NarrativeError::Unavailable)?
             .ok_or(NarrativeError::NotFound)?;
@@ -250,6 +364,270 @@ impl NarrativeCommandHandler {
             ));
         }
         Ok(stored)
+    }
+
+    #[tracing::instrument(skip(self))]
+    pub async fn start_open_world(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+    ) -> NarrativeResult<OpenWorldView> {
+        self.owned_novel(novel_id, user_id).await?;
+        let state = self
+            .world_state_repo
+            .get_or_create(user_id, novel_id)
+            .await
+            .map_err(NarrativeError::Internal)?;
+        let player = state
+            .player_entity()
+            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
+            .ok_or_else(|| {
+                NarrativeError::Conflict("Create PlayerEntity before entering the world".into())
+            })?;
+        if state
+            .open_world()
+            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
+            .is_some()
+        {
+            return self.open_world_view(user_id, novel_id, state).await;
+        }
+        let context = self
+            .chapter_repo
+            .get_world_entry_context(novel_id, player.canonical_checkpoint_chapter, user_id)
+            .await
+            .map_err(NarrativeError::Unavailable)?
+            .ok_or(NarrativeError::NotFound)?;
+        let state = self
+            .world_state_repo
+            .start_open_world(user_id, novel_id, &context)
+            .await
+            .map_err(NarrativeError::Internal)?;
+        self.open_world_view(user_id, novel_id, state).await
+    }
+
+    #[tracing::instrument(skip(self))]
+    pub async fn get_open_world(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+    ) -> NarrativeResult<OpenWorldView> {
+        self.owned_novel(novel_id, user_id).await?;
+        let state = self
+            .world_state_repo
+            .get_or_create(user_id, novel_id)
+            .await
+            .map_err(NarrativeError::Internal)?;
+        self.open_world_view(user_id, novel_id, state).await
+    }
+
+    pub async fn get_character_world_context(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        character_id: Uuid,
+    ) -> NarrativeResult<Option<CharacterWorldContext>> {
+        self.owned_novel(novel_id, user_id).await?;
+        let state = self
+            .world_state_repo
+            .get_or_create(user_id, novel_id)
+            .await
+            .map_err(NarrativeError::Internal)?;
+        state
+            .character_world_context(character_id)
+            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))
+    }
+
+    async fn open_world_view(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        world_state: WorldState,
+    ) -> NarrativeResult<OpenWorldView> {
+        let player = world_state
+            .player_entity()
+            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
+            .ok_or(NarrativeError::NotFound)?;
+        let session = world_state
+            .open_world()
+            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
+            .ok_or(NarrativeError::NotFound)?;
+        let journal = self
+            .world_turn_repo
+            .journal(user_id, novel_id, 100)
+            .await
+            .map_err(NarrativeError::Internal)?;
+        Ok(OpenWorldView {
+            player,
+            session,
+            world_state,
+            journal,
+        })
+    }
+
+    #[tracing::instrument(skip(self, action), fields(turn_id = %turn_id))]
+    pub async fn submit_world_turn(
+        &self,
+        turn_id: Uuid,
+        user_id: Uuid,
+        novel_id: Uuid,
+        action: WorldAction,
+    ) -> NarrativeResult<WorldTurnResult> {
+        let novel = self.owned_novel(novel_id, user_id).await?;
+        let world_state = self
+            .world_state_repo
+            .get_or_create(user_id, novel_id)
+            .await
+            .map_err(NarrativeError::Internal)?;
+        let player = world_state
+            .player_entity()
+            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
+            .ok_or(NarrativeError::NotFound)?;
+        let session = world_state
+            .open_world()
+            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
+            .ok_or(NarrativeError::NotFound)?;
+        let request =
+            serde_json::to_vec(&action).map_err(|error| NarrativeError::Internal(error.into()))?;
+        let claim = WorldTurnClaim {
+            id: turn_id,
+            user_id,
+            novel_id,
+            request_fingerprint: Sha256::digest(&request).to_vec(),
+            action,
+            expected_turn_number: session.turn_number,
+        };
+        let (claim, attempt) = match self
+            .world_turn_repo
+            .begin_turn(&claim)
+            .await
+            .map_err(NarrativeError::Internal)?
+        {
+            BeginWorldTurn::Acquired { claim, attempt } => (claim, attempt),
+            BeginWorldTurn::Completed(result) => return Ok(*result),
+            BeginWorldTurn::InProgress {
+                retry_after_seconds,
+            } => {
+                return Err(NarrativeError::TurnInProgress {
+                    retry_after_seconds,
+                })
+            }
+            BeginWorldTurn::Conflict => {
+                return Err(NarrativeError::Conflict(
+                    "Idempotency-Key conflicts with an existing world turn".into(),
+                ))
+            }
+            BeginWorldTurn::Stale => {
+                return Err(NarrativeError::Conflict(
+                    "World state advanced; reload before submitting this action".into(),
+                ))
+            }
+        };
+        if let Err(error) = session.validate_action(&claim.action) {
+            self.fail_world_turn(&claim, attempt, "validation_error")
+                .await;
+            return Err(NarrativeError::Validation(error.to_string()));
+        }
+
+        let mut lease = WorldTurnLease::start(self.world_turn_repo.clone(), claim.id, attempt);
+        let prompt = match build_world_turn_prompt(
+            &novel.title,
+            &player,
+            &claim.action,
+            &session,
+            &world_state.state,
+        ) {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                self.fail_world_turn(&claim, attempt, "prompt_error").await;
+                return Err(NarrativeError::Internal(anyhow::anyhow!(error)));
+            }
+        };
+        if prompt.len() > MAX_WORLD_TURN_PROMPT_BYTES
+            || prompt.chars().count() > MAX_WORLD_TURN_PROMPT_CHARS
+        {
+            self.fail_world_turn(&claim, attempt, "prompt_budget").await;
+            return Err(NarrativeError::Internal(anyhow::anyhow!(
+                "world turn prompt exceeded its budget"
+            )));
+        }
+
+        let raw = match lease
+            .run(
+                self.llm
+                    .chat_json(NarrativeLlmTask::NarrativeTransition, &prompt),
+            )
+            .await
+        {
+            Some(Ok(raw)) => raw,
+            Some(Err(error)) => {
+                self.fail_world_turn(&claim, attempt, "llm_error").await;
+                return Err(NarrativeError::Llm(error));
+            }
+            None => {
+                self.fail_world_turn(&claim, attempt, "lease_lost").await;
+                return Err(NarrativeError::Conflict(
+                    "World turn lease was lost; retry with the same Idempotency-Key".into(),
+                ));
+            }
+        };
+        if raw.len() > MAX_WORLD_TRANSITION_BYTES {
+            self.fail_world_turn(&claim, attempt, "response_budget")
+                .await;
+            return Err(NarrativeError::Llm(anyhow::anyhow!(
+                "world transition exceeded its budget"
+            )));
+        }
+        let transition = match parse_world_turn_transition(
+            &raw,
+            &claim.action,
+            &session.entry_context,
+            &session,
+        ) {
+            Ok(transition) => transition,
+            Err(error) => {
+                self.fail_world_turn(&claim, attempt, "invalid_transition")
+                    .await;
+                return Err(NarrativeError::Llm(anyhow::anyhow!(error)));
+            }
+        };
+        let committed = match lease
+            .run(self.world_turn_repo.complete_turn(
+                &claim,
+                attempt,
+                &transition,
+                &session.entry_context,
+            ))
+            .await
+        {
+            Some(Ok(result)) => result,
+            Some(Err(error)) => {
+                self.fail_world_turn(&claim, attempt, "commit_error").await;
+                return Err(NarrativeError::Internal(error));
+            }
+            None => {
+                self.fail_world_turn(&claim, attempt, "lease_lost").await;
+                return Err(NarrativeError::Conflict(
+                    "World turn lease was lost; retry with the same Idempotency-Key".into(),
+                ));
+            }
+        };
+        lease.stop();
+        Ok(committed)
+    }
+
+    async fn fail_world_turn(
+        &self,
+        claim: &WorldTurnClaim,
+        attempt: i64,
+        failure_code: &'static str,
+    ) {
+        if let Err(error) = self
+            .world_turn_repo
+            .fail_turn(claim.id, attempt, failure_code)
+            .await
+        {
+            tracing::error!(turn_id = %claim.id, attempt, error = ?error, "failed to record world turn failure");
+        }
     }
 
     #[tracing::instrument(skip(self))]
@@ -452,27 +830,24 @@ impl NarrativeCommandHandler {
                 .commit_result(choice_draft(existing, full_content))
                 .await;
         }
-
-        let (choice_index, choice_text) = match existing.as_ref() {
-            Some(existing) => (existing.choice_index, existing.choice_text.clone()),
-            None => {
-                let choice = usize::try_from(requested_choice_index)
-                    .ok()
-                    .and_then(|index| node.choices.get(index))
-                    .ok_or_else(|| {
-                        NarrativeError::Validation(
-                            "choice_index is outside the node choices".into(),
-                        )
-                    })?;
-                (requested_choice_index, choice.text.clone())
-            }
-        };
-
-        if choice_index < 0 {
-            return Err(NarrativeError::Internal(anyhow::anyhow!(
-                "persisted choice index is invalid"
-            )));
+        if world_state
+            .open_world()
+            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
+            .is_some()
+        {
+            return Err(NarrativeError::Conflict(
+                "Use world actions after entering the open world".into(),
+            ));
         }
+
+        let choice = usize::try_from(requested_choice_index)
+            .ok()
+            .and_then(|index| node.choices.get(index))
+            .ok_or_else(|| {
+                NarrativeError::Validation("choice_index is outside the node choices".into())
+            })?;
+        let choice_index = requested_choice_index;
+        let choice_text = choice.text.clone();
         let chapter = self
             .resolve_chapter(user_id, novel_id, node.chapter_number, &novel_info)
             .await?;

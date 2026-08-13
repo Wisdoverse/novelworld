@@ -15,7 +15,7 @@ use agent_service::{
     infrastructure::{
         cache::{RedisCache, RedisReadinessProbe},
         embedding::EmbeddingAdapter,
-        http::novel_client::NovelServiceClient,
+        http::{narrative_client::NarrativeServiceClient, novel_client::NovelServiceClient},
         llm::LlmAdapter,
         persistence::{
             account_export::PgAccountExport, pg_chat_repo::PgChatRepository,
@@ -83,6 +83,14 @@ async fn main() -> Result<()> {
     let reading_context: Arc<dyn domain::ports::ReadingContextPort> = novel_client.clone();
     let lore_context: Arc<dyn domain::ports::LoreContextPort> = novel_client.clone();
     let novel_readiness: Arc<dyn domain::ports::ReadinessProbe> = novel_client;
+    let narrative_service_url = std::env::var("NARRATIVE_SERVICE_URL")
+        .unwrap_or_else(|_| "http://narrative-service:8004".into());
+    let narrative_client = Arc::new(NarrativeServiceClient::new(
+        narrative_service_url,
+        internal_service_token.clone(),
+    ));
+    let world_context: Arc<dyn domain::ports::WorldContextPort> = narrative_client.clone();
+    let narrative_readiness: Arc<dyn domain::ports::ReadinessProbe> = narrative_client;
 
     // Redis cache
     let cache = Arc::new(RedisCache::new(redis_pool.clone()));
@@ -130,6 +138,7 @@ async fn main() -> Result<()> {
         character_repo,
         reading_context,
         lore_context,
+        world_context,
         llm: chat_llm,
         // ponytail: process-local admission is sufficient for the current
         // single agent-service replica; use distributed leases when scaling.
@@ -142,6 +151,7 @@ async fn main() -> Result<()> {
         postgres_readiness: Arc::new(PgReadinessProbe::new(pool)),
         redis_readiness: Arc::new(RedisReadinessProbe::new(redis_pool)),
         novel_readiness,
+        narrative_readiness,
         account_export,
         internal_service_token: internal_service_token.into(),
         metrics,

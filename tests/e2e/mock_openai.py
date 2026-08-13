@@ -31,11 +31,16 @@ class Handler(BaseHTTPRequestHandler):
         prompt = "\n".join(message.get("content", "") for message in request.get("messages", []))
         if request.get("stream"):
             assert request.get("stream_options") == {"include_usage": True}
+            reply = (
+                "林岚知道你已经改变了两回合的世界，也会依照自己的目标继续调查。"
+                if "## 已提交开放世界上下文" in prompt and '"turn_number":2' in prompt
+                else "林岚记得你，也愿意继续同行。"
+            )
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
             for payload in (
-                {"choices": [{"delta": {"content": "林岚记得你，也愿意继续同行。"}, "finish_reason": None}]},
+                {"choices": [{"delta": {"content": reply}, "finish_reason": None}]},
                 {"choices": [{"delta": {}, "finish_reason": "stop"}]},
                 {"choices": [], "usage": {"prompt_tokens": 4, "completion_tokens": 2, "prompt_cache_hit_tokens": 1}},
             ):
@@ -147,6 +152,45 @@ class Handler(BaseHTTPRequestHandler):
                     {"text": "与林岚立即前往北塔", "hint": "塔门之后危机四伏……"},
                     {"text": "先向边城居民调查", "hint": "有人隐瞒了旧日真相……"},
                 ],
+            }, ensure_ascii=False)
+        if "You propose one bounded world transition" in prompt:
+            action = json.loads(prompt.split("ACTION: ", 1)[1].split("\nWORLD_SESSION:", 1)[0])
+            session = json.loads(prompt.split("WORLD_SESSION: ", 1)[1].split("\nWORLD_STATE:", 1)[0])
+            context = session["entry_context"]
+            current_event = next((
+                event for event in session["canonical_events"]
+                if event["status"] in ("scheduled", "delayed")
+            ), None)
+            first_turn = session["turn_number"] == 0
+            return json.dumps({
+                "schema_version": 1,
+                "rendered_narrative": (
+                    "云舟沿北塔外墙查清换防规律，在不替林岚作决定的前提下封住了伏击通道。林岚仍按自己的目标追查守门人，原定围堵因此受阻。"
+                    if first_turn else
+                    "云舟整理两回合积累的线索，决定继续绘制地下回廊。林岚独自核对铜铃上的刻痕，两人的行动在同一世界里彼此印证。"
+                ),
+                "events": [{
+                    "summary": "云舟调查北塔换防" if first_turn else "云舟整理地下回廊线索",
+                    "actor_character_ids": [],
+                    "location_id": context["locations"][0]["id"],
+                }],
+                "relationship_changes": ([{
+                    "character_id": context["characters"][0]["id"],
+                    "delta": 2,
+                    "reason": "林岚看见云舟独立完成了调查",
+                }] if first_turn else []),
+                "location_changes": [],
+                "thread_changes": [],
+                "player_location_id": None,
+                "inventory_additions": [],
+                "inventory_removals": [],
+                "knowledge_discoveries": ["北塔换防规律"] if first_turn else [],
+                "faction_changes": [],
+                "canonical_event_change": ({
+                    "event_id": current_event["id"],
+                    "status": "obstructed",
+                    "reason": "玩家封住伏击通道，但没有控制任何原著角色",
+                } if first_turn and current_event else None),
             }, ensure_ascii=False)
         if "You generate one structured transition" in prompt:
             global TRANSITION_FAILURES_REMAINING

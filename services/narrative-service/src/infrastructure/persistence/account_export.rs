@@ -90,6 +90,18 @@ WITH relevant_nodes AS (
            )
     FROM player_chapters p
     WHERE p.user_id = $1
+
+    UNION ALL
+    SELECT 50, t.novel_id::text, t.expected_turn_number + 1, t.id::text, 'world_turn',
+           jsonb_build_object(
+               'id', t.id, 'user_id', t.user_id, 'novel_id', t.novel_id,
+               'action', t.action, 'expected_turn_number', t.expected_turn_number,
+               'status', t.status, 'transition', t.transition, 'result', t.result,
+               'created_at', t.created_at, 'updated_at', t.updated_at,
+               'completed_at', t.completed_at
+           )
+    FROM world_turns t
+    WHERE t.user_id = $1
 )
 SELECT kind, data
 FROM export_records
@@ -105,5 +117,7 @@ mod tests {
         assert!(!EXPORT_SQL.to_ascii_lowercase().contains("select *"));
         assert!(EXPORT_SQL.contains("n.user_id IS NULL"));
         assert!(EXPORT_SQL.contains("c.user_id = $1 AND c.node_id = n.id"));
+        assert!(EXPORT_SQL.contains("FROM world_turns t"));
+        assert!(!EXPORT_SQL.contains("request_fingerprint"));
     }
 }
