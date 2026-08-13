@@ -46,6 +46,9 @@ jobs:
             exit 1
           fi
           grep -Fx 'release: another release operation is running' release-lock.err
+          exec 9>&-
+          rm release-lock.err .release/release.lock
+          rmdir .release
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Format
