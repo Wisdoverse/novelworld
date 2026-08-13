@@ -17,7 +17,7 @@ exists, then the owning delete workflow removes it.
 | Deletion tombstones | Redis keys containing only a user UUID or user/novel UUID pair, retained for one hour. They contain no source text, message, profile, or model data. | Expire automatically. They prevent an already-committed asynchronous projection from recreating deleted cache data. |
 | Choices, world state, narrative nodes, reading progress, and player timelines | PostgreSQL, for the lifetime of the novel/account. | Novel or account deletion. |
 | Generated chapter prose | PostgreSQL `player_chapters`, for the lifetime of the novel/account. | Novel or account deletion. |
-| User profile and refresh tokens | PostgreSQL, for the account lifetime. A refresh token is also removed by logout or when an expired token is presented. | Account deletion. |
+| User profile and refresh tokens | PostgreSQL, for the account lifetime. A refresh token is atomically replaced after successful refresh and removed by logout or when expired. | Account deletion. |
 | Web-managed LLM API key | Encrypted in the singleton PostgreSQL runtime configuration until replaced. | Removed when the final account is deleted. Environment-managed keys remain under operator control outside NovelWorld. |
 
 Database foreign keys perform the authoritative cascade. Redis cleanup is a

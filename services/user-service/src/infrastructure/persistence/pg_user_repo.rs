@@ -310,6 +310,40 @@ impl UserRepository for PgUserRepository {
         }))
     }
 
+    async fn rotate_refresh_token(
+        &self,
+        current: &str,
+        replacement: &RefreshToken,
+    ) -> Result<bool> {
+        let mut transaction = self.pool.begin().await?;
+        let deleted = sqlx::query(
+            "DELETE FROM refresh_tokens WHERE token = $1 AND user_id = $2 AND expires_at > NOW()",
+        )
+        .bind(current)
+        .bind(replacement.user_id)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected()
+            == 1;
+        if !deleted {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        sqlx::query(
+            r#"INSERT INTO refresh_tokens (id, user_id, token, expires_at, created_at)
+               VALUES ($1, $2, $3, $4, $5)"#,
+        )
+        .bind(replacement.id)
+        .bind(replacement.user_id)
+        .bind(&replacement.token)
+        .bind(replacement.expires_at)
+        .bind(replacement.created_at)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(true)
+    }
+
     async fn delete_refresh_token(&self, token: &str) -> Result<()> {
         sqlx::query("DELETE FROM refresh_tokens WHERE token = $1")
             .bind(token)

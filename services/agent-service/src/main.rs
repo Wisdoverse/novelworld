@@ -1,7 +1,11 @@
 #![allow(dead_code, unused_imports)]
 use anyhow::Result;
 use sqlx::postgres::PgPoolOptions;
-use std::sync::Arc;
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
+use tokio::sync::Semaphore;
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -127,6 +131,10 @@ async fn main() -> Result<()> {
         reading_context,
         lore_context,
         llm: chat_llm,
+        // ponytail: process-local admission is sufficient for the current
+        // single agent-service replica; use distributed leases when scaling.
+        chat_permits: Arc::new(Semaphore::new(8)),
+        active_chat_users: Arc::new(Mutex::new(HashSet::new())),
     });
 
     let state = AppState {

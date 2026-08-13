@@ -35,7 +35,22 @@ login=$("${curl_cmd[@]}" \
 token=$(json_get "value['access_token']" <<<"$login")
 refresh_token=$(json_get "value['refresh_token']" <<<"$login")
 user_id=$(json_get "value['user']['id']" <<<"$login")
+old_refresh_token=$refresh_token
+
+pause
+rotated=$("${curl_cmd[@]}" \
+  -H 'Content-Type: application/json' \
+  --data "{\"refresh_token\":\"$old_refresh_token\"}" \
+  "$api/auth/refresh")
+token=$(json_get "value['access_token']" <<<"$rotated")
+refresh_token=$(json_get "value['refresh_token']" <<<"$rotated")
 auth=(-H "Authorization: Bearer $token")
+
+pause
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  -H 'Content-Type: application/json' \
+  --data "{\"refresh_token\":\"$old_refresh_token\"}" \
+  "$api/auth/refresh")" = 401
 
 pause
 upload=$("${curl_cmd[@]}" "${auth[@]}" \

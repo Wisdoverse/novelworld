@@ -160,7 +160,7 @@ GET    /api/setup/status     — 管理员与模型设置是否完成
 POST   /api/setup/init       — 验证模型并原子创建首次设置（仅空库）
 POST   /api/auth/register     — 注册
 POST   /api/auth/login        — 登录，返回 JWT
-POST   /api/auth/refresh      — 刷新 Token
+POST   /api/auth/refresh      — 原子轮换并返回新的 access/refresh Token
 GET    /api/auth/me           — 当前用户信息
 DELETE /api/auth/me           — 永久删除当前账号及应用内数据
 GET    /api/account/export    — 流式导出当前账号的 account-export-v1 NDJSON
@@ -176,7 +176,7 @@ GET    /api/account/export    — 流式导出当前账号的 account-export-v1 
 ```
 GET    /api/novels            — 书架列表
 POST   /api/novels            — 导入小说（粘贴文本）
-POST   /api/novels/upload     — 上传文件（TXT/PDF）
+POST   /api/novels/upload     — 上传单个文件（TXT/EPUB/PDF）
 GET    /api/novels/:id        — 小说详情
 GET    /api/novels/:id/status — 解析状态（轮询）
 DELETE /api/novels/:id        — 删除小说

@@ -170,14 +170,15 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/progress/{*path}", any(proxy::forward_to_novel))
         .route("/api/users/{*path}", any(proxy::forward_to_user))
         .route("/api/characters/{*path}", any(proxy::forward_to_novel))
-        // --- Middleware layers (outermost applied first) ---
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            auth_middleware,
-        ))
+        // Apply the global backstop inside authentication so rejected protected
+        // requests cannot spend shared capacity.
         .layer(middleware::from_fn_with_state(
             state.clone(),
             rate_limit_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
         ))
         .layer(middleware::from_fn(request_id_middleware))
         .layer(middleware::from_fn(metrics::metrics_middleware))

@@ -2,7 +2,7 @@ use axum::{
     extract::{DefaultBodyLimit, Json, Path, State},
     http::{
         header::{CACHE_CONTROL, CONTENT_TYPE},
-        HeaderMap, StatusCode,
+        HeaderMap, HeaderValue, StatusCode,
     },
     response::IntoResponse,
     routing::{get, post, put},
@@ -154,6 +154,7 @@ struct AuthResponse {
 #[derive(Debug, Serialize)]
 struct TokenResponse {
     access_token: String,
+    refresh_token: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -243,6 +244,18 @@ fn error_response(status: StatusCode, code: &'static str, msg: &str) -> impl Int
 }
 
 fn auth_error_response(error: AuthError) -> axum::response::Response {
+    if matches!(&error, AuthError::Capacity) {
+        let mut response = error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "capacity_unavailable",
+            "Authentication capacity is busy; retry the request",
+        )
+        .into_response();
+        response
+            .headers_mut()
+            .insert("Retry-After", HeaderValue::from_static("1"));
+        return response;
+    }
     let (status, code, message) = match error {
         AuthError::Validation(message) => (
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -291,6 +304,7 @@ fn auth_error_response(error: AuthError) -> axum::response::Response {
             "privacy_cleanup_unavailable",
             "Account deletion is temporarily unavailable; retry without signing out".into(),
         ),
+        AuthError::Capacity => unreachable!("capacity errors return above"),
         AuthError::Internal(error) => {
             tracing::error!(error = ?error, "user-service operation failed");
             (
@@ -345,7 +359,14 @@ async fn refresh(
     Json(req): Json<RefreshRequest>,
 ) -> impl IntoResponse {
     match state.handler.refresh(&req.refresh_token).await {
-        Ok(access_token) => (StatusCode::OK, Json(TokenResponse { access_token })).into_response(),
+        Ok((access_token, refresh_token)) => (
+            StatusCode::OK,
+            Json(TokenResponse {
+                access_token,
+                refresh_token,
+            }),
+        )
+            .into_response(),
         Err(error) => auth_error_response(error),
     }
 }

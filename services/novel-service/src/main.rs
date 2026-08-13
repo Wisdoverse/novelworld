@@ -1,7 +1,11 @@
 #![allow(dead_code, unused_imports)]
 use anyhow::Result;
 use sqlx::postgres::PgPoolOptions;
-use std::sync::Arc;
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
+use tokio::sync::Semaphore;
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -84,6 +88,10 @@ async fn main() -> Result<()> {
         llm,
         image_client,
         privacy_cleanup,
+        // ponytail: process-local admission matches the single service replica;
+        // replace with a durable queue before horizontally scaling imports.
+        import_permits: Arc::new(Semaphore::new(2)),
+        active_import_users: Arc::new(Mutex::new(HashSet::new())),
     });
     let progress_handler = Arc::new(ReadingProgressHandler {
         novel_repo: novel_repo.clone(),
@@ -100,6 +108,7 @@ async fn main() -> Result<()> {
         canon_repo,
         progress_handler,
         document_extractor,
+        document_parse_permits: Arc::new(Semaphore::new(2)),
         account_export,
         internal_service_token: internal_service_token.into(),
         readiness: Arc::new(PgReadinessProbe::new(pool)),

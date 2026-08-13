@@ -1,7 +1,15 @@
 use anyhow::{anyhow, Result};
 use async_stream::stream;
 use futures::StreamExt;
-use std::{collections::HashMap, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+    time::{Duration, Instant},
+};
+use tokio::{
+    sync::{OwnedSemaphorePermit, Semaphore},
+    time::Instant as TokioInstant,
+};
 
 use crate::providers::anthropic::AnthropicProvider;
 use crate::providers::gemini::GeminiProvider;
@@ -15,6 +23,21 @@ pub struct LlmClient {
     http: reqwest::Client,
     providers: HashMap<String, (Box<dyn LlmProvider>, String)>,
     default_provider: Option<String>,
+    admission: Arc<Semaphore>,
+}
+
+const MAX_CONCURRENT_LLM_REQUESTS: usize = 8;
+const LLM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(not(test))]
+const LLM_TOTAL_TIMEOUT: Duration = Duration::from_secs(300);
+#[cfg(test)]
+const LLM_TOTAL_TIMEOUT: Duration = Duration::from_millis(250);
+
+fn shared_admission() -> Arc<Semaphore> {
+    static ADMISSION: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    ADMISSION
+        .get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_LLM_REQUESTS)))
+        .clone()
 }
 
 impl Default for LlmClient {
@@ -26,10 +49,22 @@ impl Default for LlmClient {
 impl LlmClient {
     pub fn new() -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .connect_timeout(LLM_CONNECT_TIMEOUT)
+                .timeout(LLM_TOTAL_TIMEOUT)
+                .build()
+                .expect("valid static LLM HTTP client configuration"),
             providers: HashMap::new(),
             default_provider: None,
+            admission: shared_admission(),
         }
+    }
+
+    fn admit(&self) -> Result<OwnedSemaphorePermit> {
+        self.admission
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| anyhow!("LLM request capacity is busy"))
     }
 
     /// Auto-detect providers from environment variables.
@@ -358,6 +393,7 @@ impl LlmClient {
         let started = Instant::now();
         let (provider, api_key, provider_name, model_name) =
             self.resolve_provider(&request.model)?;
+        let _permit = self.admit()?;
         let labels = RequestLabels::new(
             &provider_name,
             &model_name,
@@ -369,55 +405,69 @@ impl LlmClient {
         let mut req = request;
         req.model = model_name;
 
-        let mut retry_attempt = 0;
-        loop {
-            let attempt_started = Instant::now();
-            match provider.chat(&self.http, api_key, &req).await {
-                Ok(resp) => {
-                    labels.attempt("success", attempt_started.elapsed().as_secs_f64());
-                    labels.usage(resp.usage.as_ref());
-                    labels.finish("success", started);
-                    return Ok(resp);
-                }
-                Err(e) => {
-                    if req.json_mode && e.downcast_ref::<JsonModeEmpty>().is_some() {
-                        if let Some(usage) = e
-                            .downcast_ref::<JsonModeEmpty>()
-                            .and_then(|empty| empty.0.as_ref())
-                        {
-                            labels.additional_usage(usage);
+        let deadline = TokioInstant::now() + LLM_TOTAL_TIMEOUT;
+        match tokio::time::timeout_at(deadline, async {
+            let mut retry_attempt = 0;
+            loop {
+                let attempt_started = Instant::now();
+                match provider.chat(&self.http, api_key, &req).await {
+                    Ok(resp) => {
+                        labels.attempt("success", attempt_started.elapsed().as_secs_f64());
+                        labels.usage(resp.usage.as_ref());
+                        labels.finish("success", started);
+                        return Ok(resp);
+                    }
+                    Err(e) => {
+                        if req.json_mode && e.downcast_ref::<JsonModeEmpty>().is_some() {
+                            if let Some(usage) = e
+                                .downcast_ref::<JsonModeEmpty>()
+                                .and_then(|empty| empty.0.as_ref())
+                            {
+                                labels.additional_usage(usage);
+                            }
+                            labels.attempt(
+                                "empty_json_mode",
+                                attempt_started.elapsed().as_secs_f64(),
+                            );
+                            labels.retry("json_mode_fallback");
+                            req.json_mode = false;
+                            continue;
                         }
-                        labels.attempt("empty_json_mode", attempt_started.elapsed().as_secs_f64());
-                        labels.retry("json_mode_fallback");
-                        req.json_mode = false;
-                        continue;
-                    }
-                    let api_error = e.downcast_ref::<LlmApiError>();
-                    let status = api_error.map(|error| error.status).unwrap_or(500);
-                    let metric_status = error_status(api_error);
-                    labels.attempt(metric_status, attempt_started.elapsed().as_secs_f64());
+                        let api_error = e.downcast_ref::<LlmApiError>();
+                        let status = api_error.map(|error| error.status).unwrap_or(500);
+                        let metric_status = error_status(api_error);
+                        labels.attempt(metric_status, attempt_started.elapsed().as_secs_f64());
 
-                    if RetryPolicy::should_retry(status, retry_attempt) {
-                        labels.retry(metric_status);
-                        let delay = RetryPolicy::delay(
-                            status,
-                            retry_attempt,
-                            api_error.and_then(|error| error.retry_after.as_deref()),
-                        );
-                        retry_attempt += 1;
-                        tracing::warn!(
-                            "LLM error ({}), retry {}/{}: {}",
-                            status,
-                            retry_attempt,
-                            RetryPolicy::max_retries(),
-                            e
-                        );
-                        tokio::time::sleep(delay).await;
-                        continue;
+                        if RetryPolicy::should_retry(status, retry_attempt) {
+                            labels.retry(metric_status);
+                            let delay = RetryPolicy::delay(
+                                status,
+                                retry_attempt,
+                                api_error.and_then(|error| error.retry_after.as_deref()),
+                            );
+                            retry_attempt += 1;
+                            tracing::warn!(
+                                "LLM error ({}), retry {}/{}: {}",
+                                status,
+                                retry_attempt,
+                                RetryPolicy::max_retries(),
+                                e
+                            );
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                        labels.finish("error", started);
+                        return Err(e);
                     }
-                    labels.finish("error", started);
-                    return Err(e);
                 }
+            }
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                labels.finish("timeout", started);
+                Err(anyhow!("LLM request exceeded the total deadline"))
             }
         }
     }
@@ -427,6 +477,7 @@ impl LlmClient {
         let started = Instant::now();
         let (provider, api_key, provider_name, model_name) =
             self.resolve_provider(&request.model)?;
+        let permit = self.admit()?;
         let labels = RequestLabels::new(
             &provider_name,
             &model_name,
@@ -439,55 +490,70 @@ impl LlmClient {
         req.model = model_name;
         req.stream = true;
 
-        for attempt in 0..=RetryPolicy::max_retries() {
-            let attempt_started = Instant::now();
-            match provider.chat_stream(&self.http, api_key, &req).await {
-                Ok(upstream) => {
-                    let setup = attempt_started.elapsed().as_secs_f64();
-                    labels.attempt("success", setup);
-                    labels.stream_setup("success", setup);
-                    return Ok(observe_stream(upstream, labels, started));
-                }
-                Err(error) => {
-                    let api_error = error.downcast_ref::<LlmApiError>();
-                    let status = api_error.map(|error| error.status).unwrap_or(500);
-                    let metric_status = error_status(api_error);
-                    let setup = attempt_started.elapsed().as_secs_f64();
-                    labels.attempt(metric_status, setup);
-                    labels.stream_setup(metric_status, setup);
-
-                    if RetryPolicy::should_retry(status, attempt) {
-                        labels.retry(metric_status);
-                        let delay = RetryPolicy::delay(
-                            status,
-                            attempt,
-                            api_error.and_then(|error| error.retry_after.as_deref()),
-                        );
-                        tracing::warn!(
-                            "LLM stream setup error ({}), retry {}/{}: {}",
-                            status,
-                            attempt + 1,
-                            RetryPolicy::max_retries(),
-                            error
-                        );
-                        tokio::time::sleep(delay).await;
-                        continue;
+        let deadline = TokioInstant::now() + LLM_TOTAL_TIMEOUT;
+        let upstream = match tokio::time::timeout_at(deadline, async {
+            for attempt in 0..=RetryPolicy::max_retries() {
+                let attempt_started = Instant::now();
+                match provider.chat_stream(&self.http, api_key, &req).await {
+                    Ok(upstream) => {
+                        let setup = attempt_started.elapsed().as_secs_f64();
+                        labels.attempt("success", setup);
+                        labels.stream_setup("success", setup);
+                        return Ok(upstream);
                     }
-                    labels.finish("setup_error", started);
-                    return Err(error);
+                    Err(error) => {
+                        let api_error = error.downcast_ref::<LlmApiError>();
+                        let status = api_error.map(|error| error.status).unwrap_or(500);
+                        let metric_status = error_status(api_error);
+                        let setup = attempt_started.elapsed().as_secs_f64();
+                        labels.attempt(metric_status, setup);
+                        labels.stream_setup(metric_status, setup);
+
+                        if RetryPolicy::should_retry(status, attempt) {
+                            labels.retry(metric_status);
+                            let delay = RetryPolicy::delay(
+                                status,
+                                attempt,
+                                api_error.and_then(|error| error.retry_after.as_deref()),
+                            );
+                            tracing::warn!(
+                                "LLM stream setup error ({}), retry {}/{}: {}",
+                                status,
+                                attempt + 1,
+                                RetryPolicy::max_retries(),
+                                error
+                            );
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                        labels.finish("setup_error", started);
+                        return Err(error);
+                    }
                 }
             }
-        }
-        unreachable!()
+            unreachable!()
+        })
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                labels.finish("setup_timeout", started);
+                return Err(anyhow!("LLM request exceeded the total deadline"));
+            }
+        };
+        Ok(observe_stream(upstream, labels, started, permit, deadline))
     }
 
     pub async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
         let (provider, api_key, _, model_name) = self.resolve_provider(&request.model)?;
+        let _permit = self.admit()?;
         let req = EmbeddingRequest {
             model: model_name,
             input: request.input,
         };
-        provider.embed(&self.http, api_key, &req).await
+        tokio::time::timeout(LLM_TOTAL_TIMEOUT, provider.embed(&self.http, api_key, &req))
+            .await
+            .map_err(|_| anyhow!("LLM request exceeded the total deadline"))?
     }
 
     pub async fn simple_chat(
@@ -553,6 +619,7 @@ struct StreamGuard {
     first_token: bool,
     usage: Option<Usage>,
     terminal: bool,
+    _permit: OwnedSemaphorePermit,
 }
 
 impl StreamGuard {
@@ -574,17 +641,37 @@ impl Drop for StreamGuard {
     }
 }
 
-fn observe_stream(mut upstream: ChatStream, labels: RequestLabels, started: Instant) -> ChatStream {
+fn observe_stream(
+    mut upstream: ChatStream,
+    labels: RequestLabels,
+    started: Instant,
+    permit: OwnedSemaphorePermit,
+    deadline: TokioInstant,
+) -> ChatStream {
     let mut guard = StreamGuard {
         labels,
         started,
         first_token: false,
         usage: None,
         terminal: false,
+        _permit: permit,
     };
 
     Box::pin(stream! {
-        while let Some(item) = upstream.next().await {
+        loop {
+            let item = match tokio::time::timeout_at(deadline, upstream.next()).await {
+                Ok(item) => item,
+                Err(_) => {
+                    guard.finish("timeout");
+                    yield Err(anyhow!("LLM request exceeded the total deadline"));
+                    return;
+                }
+            };
+            let Some(item) = item else {
+                guard.finish("stream_error");
+                yield Err(anyhow!("LLM stream ended without a terminal event"));
+                return;
+            };
             match item {
                 Ok(ChatStreamEvent::Delta(text)) => {
                     if !guard.first_token && !text.is_empty() {
@@ -615,7 +702,5 @@ fn observe_stream(mut upstream: ChatStream, labels: RequestLabels, started: Inst
                 }
             }
         }
-        guard.finish("stream_error");
-        yield Err(anyhow!("LLM stream ended without a terminal event"));
     })
 }

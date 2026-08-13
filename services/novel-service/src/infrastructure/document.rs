@@ -2,7 +2,7 @@ use crate::domain::ports::{DocumentExtractionError, DocumentTextExtractor};
 use encoding_rs::GBK;
 use percent_encoding::percent_decode_str;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read};
 use std::path::{Component, Path, PathBuf};
 use zip::ZipArchive;
@@ -231,6 +231,9 @@ fn extract_epub_text(data: &[u8]) -> Result<String, DocumentExtractionError> {
         std::str::from_utf8(&package).map_err(|_| invalid_epub("package document is not UTF-8"))?;
     let package: PackageDocument = quick_xml::de::from_str(package)
         .map_err(|error| invalid_epub(format!("invalid package document: {error}")))?;
+    if package.spine.items.len() > MAX_EPUB_ENTRIES {
+        return Err(invalid_epub("package spine contains too many items"));
+    }
 
     let manifest: HashMap<_, _> = package
         .manifest
@@ -240,6 +243,8 @@ fn extract_epub_text(data: &[u8]) -> Result<String, DocumentExtractionError> {
         .map(|item| (item.id, item.href))
         .collect();
     let mut result = String::new();
+    let mut processed = HashSet::new();
+    let mut expanded_bytes = 0usize;
     for item in package.spine.items {
         if item.linear.as_deref() == Some("no") {
             continue;
@@ -248,7 +253,16 @@ fn extract_epub_text(data: &[u8]) -> Result<String, DocumentExtractionError> {
             continue;
         };
         let chapter_path = safe_archive_path(Some(&package_path), href)?;
+        if !processed.insert(chapter_path.clone()) {
+            return Err(invalid_epub("package spine repeats a chapter resource"));
+        }
         let chapter = read_entry(&mut archive, &chapter_path, MAX_CHAPTER_SIZE)?;
+        expanded_bytes = expanded_bytes.saturating_add(chapter.len());
+        if expanded_bytes > MAX_EXTRACTED_TEXT_SIZE {
+            return Err(DocumentExtractionError::ExtractedTextTooLarge {
+                max_bytes: MAX_EXTRACTED_TEXT_SIZE,
+            });
+        }
         let chapter_text = html2text::from_read(chapter.as_slice(), 120)
             .map_err(|error| invalid_epub(format!("invalid XHTML in {chapter_path}: {error}")))?;
         if !chapter_text.trim().is_empty() {
@@ -371,7 +385,7 @@ mod tests {
     use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
 
-    fn sample_epub() -> Vec<u8> {
+    fn sample_epub_with_spine(spine: &str) -> Vec<u8> {
         let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
         let stored =
             SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
@@ -393,14 +407,17 @@ mod tests {
         writer.start_file("OPS/book.opf", options).unwrap();
         writer
             .write_all(
-                br#"<?xml version="1.0"?>
+                format!(
+                    r#"<?xml version="1.0"?>
                 <package xmlns="http://www.idpf.org/2007/opf">
                   <manifest>
                     <item id="two" href="chapters/two.xhtml" media-type="application/xhtml+xml"/>
                     <item id="one" href="chapters/one.xhtml" media-type="application/xhtml+xml"/>
                   </manifest>
-                  <spine><itemref idref="one"/><itemref idref="two"/></spine>
-                </package>"#,
+                  <spine>{spine}</spine>
+                </package>"#
+                )
+                .as_bytes(),
             )
             .unwrap();
         writer
@@ -418,6 +435,10 @@ mod tests {
         writer.finish().unwrap().into_inner()
     }
 
+    fn sample_epub() -> Vec<u8> {
+        sample_epub_with_spine(r#"<itemref idref="one"/><itemref idref="two"/>"#)
+    }
+
     #[test]
     fn extracts_epub_in_spine_order() {
         let text = EbookTextExtractor
@@ -430,6 +451,15 @@ mod tests {
         assert!(text.find("第一章").unwrap() < text.find("Chapter Two").unwrap());
         assert!(text.contains("山雨欲来"));
         assert!(text.contains("The journey begins"));
+    }
+
+    #[test]
+    fn rejects_repeated_spine_resources() {
+        let epub = sample_epub_with_spine(r#"<itemref idref="one"/><itemref idref="one"/>"#);
+        assert!(matches!(
+            EbookTextExtractor.extract_text(Some("story.epub"), None, &epub),
+            Err(DocumentExtractionError::InvalidEpub(_))
+        ));
     }
 
     #[test]
