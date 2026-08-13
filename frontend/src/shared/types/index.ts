@@ -96,6 +96,28 @@ export interface NarrativeNode {
 
 // ─── 世界状态 ─────────────────────────────────────────────────────────────────
 
+export interface PlayerEntity {
+  id: string;
+  user_id: string;
+  novel_id: string;
+  canonical_checkpoint_chapter: number;
+  name: string;
+  background: string;
+  capabilities: string[];
+  location_id: string;
+  inventory: string[];
+  relationships: Record<string, { score: number; last_change: string }>;
+  faction_standing: Record<string, number>;
+  discovered_knowledge: string[];
+  created_at: string;
+}
+
+export interface PlayerEntry {
+  player: PlayerEntity | null;
+  checkpoint_chapter: number;
+  locations: Array<{ id: string; name: string }>;
+}
+
 export interface WorldState {
   user_id: string;
   novel_id: string;
@@ -110,7 +132,8 @@ export interface WorldState {
       canonical_checkpoint_chapter?: number;
       timestamp?: string;
     }>;
-    relationships: Record<string, { score: number; last_change: string }>;
+    relationships?: Record<string, { score: number; last_change: string }>;
+    player_entity?: PlayerEntity;
     world_events: Array<string | {
       id: string;
       chapter: number;

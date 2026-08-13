@@ -6,15 +6,22 @@ use agent_service::infrastructure::persistence::{
     pg_chat_repo::PgChatRepository, pg_memory_repo::PgMemoryRepository,
 };
 use narrative_service::domain::{
-    entities::narrative_node::{NarrativeChoice, NarrativeNode},
-    repositories::{ChoiceCommit, NarrativeNodeRepository, UserChoiceRepository},
+    entities::{
+        narrative_node::{NarrativeChoice, NarrativeNode},
+        player_entity::PlayerEntity,
+    },
+    repositories::{
+        ChoiceCommit, NarrativeNodeRepository, UserChoiceRepository, WorldStateRepository,
+    },
     services::narrative_transition::{
-        NarrativeTransition, TransitionEvent, TRANSITION_PROMPT_VERSION, TRANSITION_SCHEMA_VERSION,
+        NarrativeTransition, RelationshipChange, TransitionEvent, TRANSITION_PROMPT_VERSION,
+        TRANSITION_SCHEMA_VERSION,
     },
 };
 use narrative_service::infrastructure::persistence::pg_narrative_repo::{
     PgNarrativeNodeRepository, PgUserChoiceRepository,
 };
+use narrative_service::infrastructure::persistence::pg_world_state_repo::PgWorldStateRepository;
 use novel_service::domain::{
     entities::canon_story_model::{
         CanonEndingSnapshot, CanonEvent, CanonStoryContent, CanonStoryModel, SourceCitation,
@@ -887,6 +894,78 @@ async fn production_repositories_match_fresh_schema() {
     assert_eq!(rollback_status, "in_progress");
     assert_eq!(rollback_messages, 0);
 
+    let world_state_repo = PgWorldStateRepository::new(pool.clone());
+    let mut legacy_state = world_state_repo
+        .get_or_create(user_id, novel_id)
+        .await
+        .unwrap();
+    let player = PlayerEntity::new(
+        user_id,
+        novel_id,
+        1,
+        "云舟".into(),
+        "来自边城的地图学徒。".into(),
+        vec!["辨认古地图".into()],
+        "north-tower".into(),
+        vec!["旧地图".into()],
+    )
+    .unwrap();
+    legacy_state.state["relationships"] = serde_json::json!({
+        "not-a-uuid": {"score": 55, "last_change": "malformed legacy state"}
+    });
+    world_state_repo.update(&legacy_state).await.unwrap();
+    let malformed_before: (serde_json::Value, String) = sqlx::query_as(
+        "SELECT state, updated_at::text FROM world_states WHERE user_id = $1 AND novel_id = $2",
+    )
+    .bind(user_id)
+    .bind(novel_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(world_state_repo
+        .create_player_entity(&player)
+        .await
+        .is_err());
+    let malformed_after: (serde_json::Value, String) = sqlx::query_as(
+        "SELECT state, updated_at::text FROM world_states WHERE user_id = $1 AND novel_id = $2",
+    )
+    .bind(user_id)
+    .bind(novel_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(malformed_after, malformed_before);
+
+    legacy_state.state["relationships"] = serde_json::json!({});
+    legacy_state
+        .update_relationship(&character_id.to_string(), 5, "legacy trust")
+        .unwrap();
+    world_state_repo.update(&legacy_state).await.unwrap();
+    let (left_player, right_player) = tokio::join!(
+        world_state_repo.create_player_entity(&player),
+        world_state_repo.create_player_entity(&player)
+    );
+    assert_eq!(left_player.unwrap(), right_player.unwrap());
+    let competing = PlayerEntity::new(
+        user_id,
+        novel_id,
+        1,
+        "另一名玩家".into(),
+        "来自另一条时间线。".into(),
+        vec!["观察".into()],
+        "north-tower".into(),
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(
+        world_state_repo
+            .create_player_entity(&competing)
+            .await
+            .unwrap()
+            .id,
+        player.id
+    );
+
     let node_repo = PgNarrativeNodeRepository::new(pool.clone());
     let node = NarrativeNode::new(
         novel_id,
@@ -912,6 +991,14 @@ async fn production_repositories_match_fresh_schema() {
     );
 
     let choice_repo = PgUserChoiceRepository::new(pool.clone());
+    let mut first_transition = transition(1, "角色决定留下。");
+    first_transition
+        .relationship_changes
+        .push(RelationshipChange {
+            character_id,
+            delta: 10,
+            reason: "kept a promise".into(),
+        });
     let draft = ChoiceCommit {
         user_id,
         novel_id,
@@ -919,7 +1006,7 @@ async fn production_repositories_match_fresh_schema() {
         chapter_number: 1,
         choice_index: 0,
         choice_text: "Stay".into(),
-        transition: transition(1, "角色决定留下。"),
+        transition: first_transition,
         rewritten_chapter_content: "原著开篇。角色决定留下。".into(),
     };
     let (left, right) = tokio::join!(
@@ -957,6 +1044,18 @@ async fn production_repositories_match_fresh_schema() {
     .await
     .unwrap();
     assert_eq!(persisted_choices.as_array().unwrap().len(), 1);
+    let persisted_state: serde_json::Value =
+        sqlx::query_scalar("SELECT state FROM world_states WHERE user_id = $1 AND novel_id = $2")
+            .bind(user_id)
+            .bind(novel_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(persisted_state.get("relationships").is_none());
+    assert_eq!(
+        persisted_state["player_entity"]["relationships"][character_id.to_string()]["score"],
+        65
+    );
     assert_eq!(
         choice_repo
             .find_user_choice(user_id, node.id)
@@ -1009,6 +1108,34 @@ async fn production_repositories_match_fresh_schema() {
             .await
             .unwrap();
     assert_eq!(valid_state["choices"].as_array().unwrap().len(), 3);
+
+    sqlx::query(
+        "UPDATE world_states SET state = jsonb_set(state, '{player_entity,unknown}', 'true'::jsonb) WHERE user_id = $1 AND novel_id = $2",
+    )
+    .bind(user_id)
+    .bind(novel_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(choice_repo.commit_choice(&more_drafts[2]).await.is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM user_choices WHERE user_id = $1 AND node_id = $2",
+        )
+        .bind(user_id)
+        .bind(more_drafts[2].node_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+    sqlx::query("UPDATE world_states SET state = $3 WHERE user_id = $1 AND novel_id = $2")
+        .bind(user_id)
+        .bind(novel_id)
+        .bind(&valid_state)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     sqlx::query(
         "UPDATE world_states SET state = '{\"choices\":{}}'::jsonb WHERE user_id = $1 AND novel_id = $2",

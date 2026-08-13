@@ -10,6 +10,12 @@ const mocks = vi.hoisted(() => ({
   progressSaving: false,
   progressError: true,
   progressChapter: 1,
+  identityType: 'self',
+  hasBranch: false,
+  player: { id: 'player', name: '云舟' } as Record<string, unknown> | null,
+  playerEntryEnabled: false,
+  branchEnabled: false,
+  createPlayer: vi.fn(),
   characters: [] as Array<Record<string, unknown>>,
   effectiveContent: 'Chapter two',
   effectiveGenerated: false,
@@ -24,7 +30,13 @@ vi.mock('react-router-dom', () => ({
 vi.mock('@/entities/novel/api', () => ({
   useNovel: () => ({ data: { id: 'novel', title: 'Novel', total_chapters: 3 } }),
   useChapter: () => ({
-    data: { chapter_number: 2, title: 'Two', content: 'Chapter two', is_key_node: false },
+    data: {
+      chapter_number: 2,
+      title: 'Two',
+      content: 'Chapter two',
+      is_key_node: mocks.hasBranch,
+      key_node_description: mocks.hasBranch ? 'A choice' : undefined,
+    },
     isLoading: false,
   }),
   useCharacters: () => ({ data: mocks.characters }),
@@ -34,7 +46,7 @@ vi.mock('@/entities/reading-progress/api', () => ({
   useReadingProgress: () => ({
     data: {
       current_chapter: mocks.progressChapter,
-      reader_identity_type: 'self',
+      reader_identity_type: mocks.identityType,
       deviation_mode: 'canon',
     },
     isLoading: false,
@@ -60,11 +72,32 @@ vi.mock('@/entities/narrative/api', () => ({
     isError: mocks.effectiveError,
     refetch: vi.fn(),
   }),
-  useNarrativeNode: () => ({
-    data: undefined,
-    isLoading: false,
+  useNarrativeNode: (_novelId: string, _chapter: number, enabled: boolean) => {
+    mocks.branchEnabled = enabled;
+    return {
+      data: undefined,
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    };
+  },
+  usePlayerEntry: (_novelId: string, enabled: boolean) => {
+    mocks.playerEntryEnabled = enabled;
+    return {
+      data: {
+        player: mocks.player,
+        checkpoint_chapter: 2,
+        locations: [{ id: 'tower', name: '北塔' }],
+      },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    };
+  },
+  useCreatePlayerEntity: () => ({
+    mutateAsync: mocks.createPlayer,
+    isPending: false,
     isError: false,
-    refetch: vi.fn(),
   }),
   useWorldState: () => ({ data: undefined }),
   useSubmitNarrativeChoice: () => ({
@@ -86,6 +119,11 @@ describe('ReaderPage progress gate', () => {
     mocks.progressSaving = false;
     mocks.progressError = true;
     mocks.progressChapter = 1;
+    mocks.identityType = 'self';
+    mocks.hasBranch = false;
+    mocks.player = { id: 'player', name: '云舟' };
+    mocks.playerEntryEnabled = false;
+    mocks.branchEnabled = false;
     mocks.characters = [];
     mocks.effectiveContent = 'Chapter two';
     mocks.effectiveGenerated = false;
@@ -133,6 +171,47 @@ describe('ReaderPage progress gate', () => {
     mocks.characters = [];
     view.rerender(<ReaderPage />);
     await waitFor(() => expect(screen.queryByTestId('chat-panel')).toBeNull());
+  });
+
+  it('requires a durable player before enabling self-mode branches', async () => {
+    mocks.progressChapter = 2;
+    mocks.progressError = false;
+    mocks.hasBranch = true;
+    mocks.player = null;
+
+    render(<ReaderPage />);
+
+    expect(screen.getByRole('heading', { name: '创建你的原创角色' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '请先创建角色' }).hasAttribute('disabled')).toBe(true);
+    expect(mocks.branchEnabled).toBe(false);
+
+    fireEvent.change(screen.getByLabelText('名字'), { target: { value: '云舟' } });
+    fireEvent.change(screen.getByLabelText('背景'), { target: { value: '来自边城的地图学徒。' } });
+    fireEvent.change(screen.getByLabelText('能力（用逗号分隔）'), { target: { value: '识图，追踪' } });
+    fireEvent.change(screen.getByLabelText('随身物品（可选，用逗号分隔）'), { target: { value: '旧地图' } });
+    fireEvent.click(screen.getByRole('button', { name: '进入故事' }));
+
+    await waitFor(() => expect(mocks.createPlayer).toHaveBeenCalledWith({
+      name: '云舟',
+      background: '来自边城的地图学徒。',
+      capabilities: ['识图', '追踪'],
+      location_id: 'tower',
+      inventory: ['旧地图'],
+    }));
+  });
+
+  it('keeps character-identity branches compatible without PlayerEntity', () => {
+    mocks.progressChapter = 2;
+    mocks.progressError = false;
+    mocks.identityType = 'character';
+    mocks.hasBranch = true;
+    mocks.player = null;
+
+    render(<ReaderPage />);
+
+    expect(mocks.playerEntryEnabled).toBe(false);
+    expect(mocks.branchEnabled).toBe(true);
+    expect(screen.queryByRole('heading', { name: '创建你的原创角色' })).toBeNull();
   });
 });
 

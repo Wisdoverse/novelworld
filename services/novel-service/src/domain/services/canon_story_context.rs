@@ -141,6 +141,17 @@ pub fn build_canon_context(
     })
 }
 
+pub fn original_player_name_available(name: &str, characters: &[Character]) -> bool {
+    let proposed = normalize(name);
+    !characters.iter().any(|character| {
+        normalize(&character.name) == proposed
+            || character
+                .aliases
+                .iter()
+                .any(|alias| normalize(alias) == proposed)
+    })
+}
+
 fn visible_at(evidence: &SourceEvidence, checkpoint_chapter: i32) -> bool {
     evidence
         .provenance
@@ -148,10 +159,20 @@ fn visible_at(evidence: &SourceEvidence, checkpoint_chapter: i32) -> bool {
         .any(|citation| citation.chapter_number <= checkpoint_chapter)
 }
 
+fn normalize(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::visible_at;
+    use super::{original_player_name_available, visible_at};
     use crate::domain::entities::canon_story_model::{SourceCitation, SourceEvidence};
+    use crate::domain::{entities::character::Character, value_objects::CharacterRole};
+    use uuid::Uuid;
 
     #[test]
     fn evidence_is_not_visible_before_its_first_source_chapter() {
@@ -165,5 +186,22 @@ mod tests {
 
         assert!(!visible_at(&evidence, 2));
         assert!(visible_at(&evidence, 3));
+    }
+
+    #[test]
+    fn original_player_name_checks_all_canonical_names_and_aliases() {
+        let mut character =
+            Character::new(Uuid::new_v4(), "林岚".into(), CharacterRole::Protagonist);
+        character.aliases = vec!["守门人".into()];
+
+        assert!(!original_player_name_available(
+            " 林岚 ",
+            &[character.clone()]
+        ));
+        assert!(!original_player_name_available(
+            "守门人",
+            &[character.clone()]
+        ));
+        assert!(original_player_name_available("云舟", &[character]));
     }
 }

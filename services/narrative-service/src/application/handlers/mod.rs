@@ -5,6 +5,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::domain::entities::narrative_node::{NarrativeChoice, NarrativeNode, WorldState};
+use crate::domain::entities::player_entity::PlayerEntity;
 use crate::domain::ports::LlmPort;
 use crate::domain::repositories::{
     ChapterInfo, ChapterReadRepository, ChoiceCommit, NarrativeNodeRepository, NovelInfo,
@@ -15,7 +16,7 @@ use crate::domain::services::narrative_engine::{
     build_branch_prompt, build_player_chapter_prompt, is_chinese_narrative, parse_generated_branch,
 };
 use crate::domain::services::narrative_transition::{
-    build_transition_prompt, parse_transition, NarrativeTransition,
+    build_transition_prompt, parse_transition, CanonEntityRef, NarrativeTransition,
 };
 
 const MAX_NARRATIVE_PROMPT_BYTES: usize = 32 * 1024;
@@ -32,6 +33,8 @@ pub enum NarrativeError {
     NotFound,
     #[error("{0}")]
     Validation(String),
+    #[error("{0}")]
+    Conflict(String),
     #[error("Novel service is unavailable")]
     Unavailable(#[source] anyhow::Error),
     #[error("Consequence generation failed")]
@@ -58,6 +61,22 @@ pub struct EffectiveChapter {
     pub generated: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct CreatePlayerEntityCommand {
+    pub name: String,
+    pub background: String,
+    pub capabilities: Vec<String>,
+    pub location_id: String,
+    pub inventory: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlayerEntry {
+    pub player: Option<PlayerEntity>,
+    pub checkpoint_chapter: i32,
+    pub locations: Vec<CanonEntityRef>,
+}
+
 struct ResolvedChapter {
     canonical: ChapterInfo,
     content: String,
@@ -82,6 +101,157 @@ impl NarrativeCommandHandler {
             .ok_or(NarrativeError::NotFound)
     }
 
+    async fn narrative_world_state(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+    ) -> NarrativeResult<(WorldState, Option<PlayerEntity>)> {
+        let world_state = self
+            .world_state_repo
+            .get_or_create(user_id, novel_id)
+            .await
+            .map_err(NarrativeError::Internal)?;
+        let player = world_state
+            .player_entity()
+            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?;
+        if player.is_none()
+            && self
+                .chapter_repo
+                .uses_original_player_identity(novel_id, user_id)
+                .await
+                .map_err(NarrativeError::Unavailable)?
+        {
+            return Err(NarrativeError::Conflict(
+                "Create PlayerEntity before entering an original-player branch".into(),
+            ));
+        }
+        Ok((world_state, player))
+    }
+
+    #[tracing::instrument(skip(self))]
+    pub async fn get_player_entry(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+    ) -> NarrativeResult<PlayerEntry> {
+        self.owned_novel(novel_id, user_id).await?;
+        let world_state = self
+            .world_state_repo
+            .get_or_create(user_id, novel_id)
+            .await
+            .map_err(NarrativeError::Internal)?;
+        if let Some(player) = world_state
+            .player_entity()
+            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
+        {
+            return Ok(PlayerEntry {
+                checkpoint_chapter: player.canonical_checkpoint_chapter,
+                player: Some(player),
+                locations: Vec::new(),
+            });
+        }
+        let context = self
+            .chapter_repo
+            .get_player_entry_context(novel_id, user_id, None)
+            .await
+            .map_err(NarrativeError::Unavailable)?
+            .ok_or(NarrativeError::NotFound)?;
+        Ok(PlayerEntry {
+            player: None,
+            checkpoint_chapter: context.checkpoint_chapter,
+            locations: context.locations,
+        })
+    }
+
+    #[tracing::instrument(skip(self, command))]
+    pub async fn create_player_entity(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        command: CreatePlayerEntityCommand,
+    ) -> NarrativeResult<PlayerEntity> {
+        self.owned_novel(novel_id, user_id).await?;
+        PlayerEntity::validate_definition(
+            &command.name,
+            &command.background,
+            &command.capabilities,
+            &command.location_id,
+            &command.inventory,
+        )
+        .map_err(|error| NarrativeError::Validation(error.to_string()))?;
+        let world_state = self
+            .world_state_repo
+            .get_or_create(user_id, novel_id)
+            .await
+            .map_err(NarrativeError::Internal)?;
+        if let Some(existing) = world_state
+            .player_entity()
+            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
+        {
+            return if existing.matches_definition(
+                &command.name,
+                &command.background,
+                &command.capabilities,
+                &command.location_id,
+                &command.inventory,
+            ) {
+                Ok(existing)
+            } else {
+                Err(NarrativeError::Conflict(
+                    "PlayerEntity already exists with a different definition".into(),
+                ))
+            };
+        }
+        let context = self
+            .chapter_repo
+            .get_player_entry_context(novel_id, user_id, Some(&command.name))
+            .await
+            .map_err(NarrativeError::Unavailable)?
+            .ok_or(NarrativeError::NotFound)?;
+        if !context.name_available {
+            return Err(NarrativeError::Validation(
+                "Player name conflicts with a canonical character".into(),
+            ));
+        }
+        if !context
+            .locations
+            .iter()
+            .any(|location| location.id == command.location_id)
+        {
+            return Err(NarrativeError::Validation(
+                "Player location is not visible at the unlocked checkpoint".into(),
+            ));
+        }
+        let candidate = PlayerEntity::new(
+            user_id,
+            novel_id,
+            context.checkpoint_chapter,
+            command.name,
+            command.background,
+            command.capabilities,
+            command.location_id,
+            command.inventory,
+        )
+        .map_err(|error| NarrativeError::Validation(error.to_string()))?;
+        let stored = self
+            .world_state_repo
+            .create_player_entity(&candidate)
+            .await
+            .map_err(NarrativeError::Internal)?;
+        if !stored.matches_definition(
+            &candidate.name,
+            &candidate.background,
+            &candidate.capabilities,
+            &candidate.location_id,
+            &candidate.inventory,
+        ) {
+            return Err(NarrativeError::Conflict(
+                "PlayerEntity was concurrently created with a different definition".into(),
+            ));
+        }
+        Ok(stored)
+    }
+
     #[tracing::instrument(skip(self))]
     pub async fn get_branch_node(
         &self,
@@ -95,6 +265,7 @@ impl NarrativeCommandHandler {
             ));
         }
         let novel_info = self.owned_novel(novel_id, user_id).await?;
+        let (world_state, player) = self.narrative_world_state(user_id, novel_id).await?;
         let chapter = self
             .resolve_chapter(user_id, novel_id, chapter_number, &novel_info)
             .await?;
@@ -140,18 +311,13 @@ impl NarrativeCommandHandler {
                     "key chapter is missing its node description"
                 ))
             })?;
-        let world_state = self
-            .world_state_repo
-            .get_or_create(user_id, novel_id)
-            .await
-            .map_err(NarrativeError::Internal)?;
         let prompt = build_branch_prompt(
             &novel_info.title,
             &chapter.content,
             key_node_description,
             &world_state,
             &novel_info.deviation_mode,
-            "读者",
+            player.as_ref(),
         );
         if prompt.len() > MAX_NARRATIVE_PROMPT_BYTES
             || prompt.chars().count() > MAX_NARRATIVE_PROMPT_CHARS
@@ -238,6 +404,7 @@ impl NarrativeCommandHandler {
         requested_choice_index: i32,
     ) -> NarrativeResult<ChoiceResult> {
         let novel_info = self.owned_novel(novel_id, user_id).await?;
+        let (world_state, _) = self.narrative_world_state(user_id, novel_id).await?;
         let node = self
             .node_repo
             .find_by_id(node_id)
@@ -311,11 +478,6 @@ impl NarrativeCommandHandler {
             .await?;
         let chapter_prefix =
             chapter_prefix_through_anchor(&chapter.content, node.anchor_quote.as_deref())?;
-        let world_state = self
-            .world_state_repo
-            .get_or_create(user_id, novel_id)
-            .await
-            .map_err(NarrativeError::Internal)?;
         let canon_context = self
             .chapter_repo
             .get_canon_context(novel_id, node.chapter_number, user_id)
