@@ -220,6 +220,24 @@ narrative choice bounds, world state relationship clamping.
 Integration tests use PostgreSQL and Redis from `docker-compose.test.yml` and
 exercise production repositories plus replayable migrations.
 
+## GitHub Project Governance
+
+- `docs/ROADMAP.md` owns product direction, invariants, horizon ordering, and
+  exit criteria. [NovelWorld Roadmap](https://github.com/users/schorsch888/projects/2)
+  owns execution status, horizon assignment, and priority.
+- Roadmap work starts from the roadmap Issue Form. One issue represents one
+  independently mergeable outcome and records scope, non-goals, invariants,
+  acceptance evidence, dependencies, and rollback. Do not pre-create
+  speculative work for a horizon that has not started.
+- Add active roadmap issues and their pull requests to the Project. Set
+  `Horizon`, `Priority`, and `Status`; use `In Progress` only while work is
+  actively owned.
+- Roadmap pull requests must link their issue with `Closes #<issue>`. `Done`
+  means the final commit is merged to `main` and required CI is green. A pushed
+  branch, open pull request, or delegated auto-merge is not done.
+- Update the roadmap status only when its stated evidence or exit criteria are
+  true. Record blockers on the issue instead of reporting optimistic status.
+
 ## Gotchas
 
 - Use `sqlx::query()` with `.bind()`, NOT `sqlx::query!()` macro — no DATABASE_URL at compile time.
