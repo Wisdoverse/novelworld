@@ -884,6 +884,28 @@ impl AgentCommandHandler {
         self.owned_character(character_id, user_id, None).await?;
         self.memory_manager.cache.clear(character_id, user_id).await
     }
+
+    pub async fn clear_user_cache(&self, user_id: Uuid) -> Result<()> {
+        self.memory_manager.cache.clear_user(user_id).await
+    }
+
+    pub async fn clear_novel_cache(&self, user_id: Uuid, novel_id: Uuid) -> Result<()> {
+        self.memory_manager
+            .cache
+            .clear_novel(user_id, novel_id)
+            .await
+    }
+
+    pub async fn allow_user_cache(&self, user_id: Uuid) -> Result<()> {
+        self.memory_manager.cache.allow_user(user_id).await
+    }
+
+    pub async fn allow_novel_cache(&self, user_id: Uuid, novel_id: Uuid) -> Result<()> {
+        self.memory_manager
+            .cache
+            .allow_novel(user_id, novel_id)
+            .await
+    }
 }
 
 #[cfg(test)]
@@ -1121,11 +1143,27 @@ mod tests {
             _user_id: Uuid,
             _user_message: &ChatMessage,
             _character_message: &ChatMessage,
-        ) -> Result<()> {
-            Ok(())
+        ) -> Result<bool> {
+            Ok(true)
         }
 
         async fn clear(&self, _character_id: Uuid, _user_id: Uuid) -> Result<()> {
+            Ok(())
+        }
+
+        async fn clear_user(&self, _user_id: Uuid) -> Result<()> {
+            Ok(())
+        }
+
+        async fn clear_novel(&self, _user_id: Uuid, _novel_id: Uuid) -> Result<()> {
+            Ok(())
+        }
+
+        async fn allow_user(&self, _user_id: Uuid) -> Result<()> {
+            Ok(())
+        }
+
+        async fn allow_novel(&self, _user_id: Uuid, _novel_id: Uuid) -> Result<()> {
             Ok(())
         }
     }

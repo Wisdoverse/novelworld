@@ -1875,6 +1875,7 @@ version = "0.1.0"
 dependencies = [
  "agent-service",
  "anyhow",
+ "async-trait",
  "deadpool-redis",
  "narrative-service",
  "novel-service",
@@ -4480,6 +4481,7 @@ dependencies = [
  "dotenvy",
  "jsonwebtoken",
  "llm-client",
+ "reqwest",
  "serde",
  "serde_json",
  "sqlx",

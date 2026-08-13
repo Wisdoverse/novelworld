@@ -20,6 +20,7 @@ pub struct AppState {
     pub postgres_readiness: Arc<dyn ReadinessProbe>,
     pub redis_readiness: Arc<dyn ReadinessProbe>,
     pub novel_readiness: Arc<dyn ReadinessProbe>,
+    pub internal_service_token: Arc<str>,
     pub metrics: llm_client::MetricsHandle,
 }
 
@@ -41,6 +42,22 @@ fn routes() -> Router<AppState> {
         .route(
             "/memories/{character_id}/short",
             axum::routing::delete(clear_short_memory),
+        )
+        .route(
+            "/internal/privacy/users/{user_id}",
+            axum::routing::delete(clear_user_cache),
+        )
+        .route(
+            "/internal/privacy/users/{user_id}/novels/{novel_id}",
+            axum::routing::delete(clear_novel_cache),
+        )
+        .route(
+            "/internal/privacy/tombstones/users/{user_id}",
+            axum::routing::delete(allow_user_cache),
+        )
+        .route(
+            "/internal/privacy/tombstones/users/{user_id}/novels/{novel_id}",
+            axum::routing::delete(allow_novel_cache),
         )
         .route("/health", get(health))
         .route("/ready", get(ready))
@@ -529,6 +546,80 @@ async fn clear_short_memory(
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => application_error_response(error, StatusCode::INTERNAL_SERVER_ERROR),
     }
+}
+
+async fn clear_user_cache(
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !internal_request_authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match state.handler.clear_user_cache(user_id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => application_error_response(error, StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn clear_novel_cache(
+    State(state): State<AppState>,
+    Path((user_id, novel_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !internal_request_authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match state.handler.clear_novel_cache(user_id, novel_id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => application_error_response(error, StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn allow_user_cache(
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !internal_request_authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match state.handler.allow_user_cache(user_id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => application_error_response(error, StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn allow_novel_cache(
+    State(state): State<AppState>,
+    Path((user_id, novel_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !internal_request_authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match state.handler.allow_novel_cache(user_id, novel_id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => application_error_response(error, StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+fn internal_request_authorized(state: &AppState, headers: &HeaderMap) -> bool {
+    headers
+        .get("X-Internal-Service-Token")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| secrets_equal(value, state.internal_service_token.as_ref()))
+}
+
+fn secrets_equal(left: &str, right: &str) -> bool {
+    left.len() == right.len()
+        && left
+            .bytes()
+            .zip(right.bytes())
+            .fold(0_u8, |difference, (left, right)| {
+                difference | (left ^ right)
+            })
+            == 0
 }
 
 /// Extract user_id from X-User-Id header; returns None if missing or invalid.

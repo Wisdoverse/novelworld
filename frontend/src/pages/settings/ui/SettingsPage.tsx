@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
-import { ArrowLeft, Brain, Key, Loader2, Save, Settings } from 'lucide-react';
+import { ArrowLeft, Brain, Key, Loader2, Save, Settings, Trash2 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { apiClient, getApiErrorMessage } from '@/shared/api/client';
+import { useAuthStore } from '@/features/auth/model/useAuthStore';
 
 type LlmSettings = {
   provider: 'deepseek' | 'openai';
@@ -23,16 +24,21 @@ const MODELS = {
 
 export function SettingsPage() {
   const navigate = useNavigate();
+  const user = useAuthStore(state => state.user);
+  const deleteAccount = useAuthStore(state => state.deleteAccount);
   const [settings, setSettings] = useState<LlmSettings | null>(null);
   const [apiKey, setApiKey] = useState('');
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const isAdmin = user?.role === 'admin';
   const models = useMemo(() => settings ? MODELS[settings.provider] : [], [settings]);
 
   useEffect(() => {
+    if (!isAdmin) return;
     apiClient.get<LlmSettings>('/settings/llm')
       .then(response => setSettings(response.data))
       .catch(error => toast.error(getApiErrorMessage(error, '模型设置加载失败')));
-  }, []);
+  }, [isAdmin]);
 
   const selectProvider = (provider: LlmSettings['provider']) => {
     setSettings(current => current ? {
@@ -64,13 +70,19 @@ export function SettingsPage() {
     }
   };
 
-  if (!settings) {
-    return (
-      <div className="min-h-screen flex items-center justify-center" style={{ background: 'var(--color-void)' }}>
-        <Loader2 className="animate-spin" style={{ color: '#22d3ee' }} aria-label="正在加载模型设置" />
-      </div>
-    );
-  }
+  const eraseAccount = async () => {
+    if (!window.confirm('永久删除账号及全部小说、对话、记忆和时间线？此操作无法撤销。')) return;
+    setDeleting(true);
+    try {
+      await deleteAccount();
+      toast.success('账号数据已删除');
+      navigate('/', { replace: true });
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, '账号删除失败，请稍后重试'));
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   return (
     <main className="min-h-screen px-4 py-8" style={{ background: 'var(--color-void)' }}>
@@ -78,7 +90,10 @@ export function SettingsPage() {
         <button type="button" onClick={() => navigate('/shelf')} className="mb-6 flex items-center gap-2 text-sm" style={{ color: '#94a3b8' }}>
           <ArrowLeft size={16} /> 返回书架
         </button>
-        <div className="glass-card p-6 md:p-8">
+        {isAdmin && !settings && <div className="glass-card flex items-center justify-center p-8">
+          <Loader2 className="animate-spin" style={{ color: '#22d3ee' }} aria-label="正在加载模型设置" />
+        </div>}
+        {isAdmin && settings && <div className="glass-card p-6 md:p-8">
           <div className="mb-7 flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-xl" style={{ background: 'rgba(109,40,217,0.25)', color: '#a78bfa' }}>
               <Settings size={20} />
@@ -131,7 +146,26 @@ export function SettingsPage() {
               {saving ? '正在验证并保存…' : '保存模型设置'}
             </button>
           </form>
-        </div>
+        </div>}
+
+        <section className="glass-card mt-6 p-6 md:p-8" aria-labelledby="account-settings-heading">
+          <div className="mb-5 flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl" style={{ background: 'rgba(239,68,68,0.12)', color: '#f87171' }}>
+              <Trash2 size={20} />
+            </div>
+            <div>
+              <h1 id="account-settings-heading" className="text-xl font-semibold" style={{ color: '#e2e8f0' }}>账号设置</h1>
+              <p className="text-sm" style={{ color: '#64748b' }}>{user?.email}</p>
+            </div>
+          </div>
+          <p className="mb-5 text-sm leading-relaxed" style={{ color: '#94a3b8' }}>
+            删除后，NovelWorld 保存的小说正文、对话、记忆、世界模型与个人时间线将永久移除。模型服务商可能保留的数据受其政策约束。
+          </p>
+          <button type="button" disabled={deleting} onClick={eraseAccount} className="flex w-full items-center justify-center gap-2 rounded-lg py-3 font-semibold" style={{ background: 'rgba(127,29,29,0.5)', border: '1px solid rgba(248,113,113,0.5)', color: '#fecaca', opacity: deleting ? 0.65 : 1 }}>
+            {deleting ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
+            {deleting ? '正在删除…' : '删除账号'}
+          </button>
+        </section>
       </div>
     </main>
   );

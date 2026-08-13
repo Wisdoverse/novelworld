@@ -17,3 +17,9 @@ pub trait ReadinessProbe: Send + Sync {
 pub trait LlmConnectionTester: Send + Sync {
     async fn test(&self, config: &RuntimeLlmConfig) -> Result<()>;
 }
+
+#[async_trait]
+pub trait PrivacyCleanupPort: Send + Sync {
+    async fn clear_user(&self, user_id: Uuid) -> Result<()>;
+    async fn allow_user(&self, user_id: Uuid) -> Result<()>;
+}

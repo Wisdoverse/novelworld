@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::application::commands::ImportNovelCommand;
 use crate::domain::entities::{chapter::Chapter, character::Character, novel::Novel};
-use crate::domain::ports::{ImagePort, LlmPort, NovelLlmTask};
+use crate::domain::ports::{ImagePort, LlmPort, NovelLlmTask, PrivacyCleanupPort};
 use crate::domain::repositories::{
     CanonStoryModelRepository, ChapterRepository, CharacterRepository, LoreExcerpt,
     NovelRepository, ReadingProgressRecord, ReadingProgressRepository,
@@ -31,11 +31,51 @@ pub struct NovelCommandHandler {
     pub canon_repo: Arc<dyn CanonStoryModelRepository>,
     pub llm: Arc<dyn LlmPort>,
     pub image_client: Arc<dyn ImagePort>,
+    pub privacy_cleanup: Arc<dyn PrivacyCleanupPort>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum NovelDeletionError {
+    #[error("Novel not found")]
+    NotFound,
+    #[error("Novel privacy cleanup is unavailable")]
+    PrivacyCleanup(#[source] anyhow::Error),
+    #[error("Novel deletion failed")]
+    Repository(#[source] anyhow::Error),
 }
 
 const MAX_AVATARS_PER_NOVEL: usize = 30;
 
 impl NovelCommandHandler {
+    pub async fn delete_owned_novel(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+    ) -> Result<(), NovelDeletionError> {
+        let owned = self
+            .novel_repo
+            .find_by_id(novel_id)
+            .await
+            .map_err(NovelDeletionError::Repository)?
+            .is_some_and(|novel| novel.user_id == user_id);
+        if !owned {
+            return Err(NovelDeletionError::NotFound);
+        }
+        if let Err(error) = self.privacy_cleanup.clear_novel(user_id, novel_id).await {
+            if let Err(rollback_error) = self.privacy_cleanup.allow_novel(user_id, novel_id).await {
+                tracing::warn!(error = ?rollback_error, %user_id, %novel_id, "novel privacy cleanup rollback failed");
+            }
+            return Err(NovelDeletionError::PrivacyCleanup(error));
+        }
+        if let Err(error) = self.novel_repo.delete(novel_id).await {
+            if let Err(rollback_error) = self.privacy_cleanup.allow_novel(user_id, novel_id).await {
+                tracing::error!(error = ?rollback_error, %user_id, %novel_id, "novel privacy cleanup rollback failed");
+            }
+            return Err(NovelDeletionError::Repository(error));
+        }
+        Ok(())
+    }
+
     /// 处理小说导入命令（异步解析流程）
     #[tracing::instrument(
         skip(self, cmd),

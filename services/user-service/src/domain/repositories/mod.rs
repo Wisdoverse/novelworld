@@ -5,9 +5,23 @@ use uuid::Uuid;
 use crate::domain::entities::runtime_config::RuntimeLlmConfig;
 use crate::domain::entities::user::{RefreshToken, User};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountDeletion {
+    Deleted,
+    AlreadyAbsent,
+    LastAdministrator,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserSave {
+    Saved,
+    EmailConflict,
+    SetupRequired,
+}
+
 #[async_trait]
 pub trait UserRepository: Send + Sync {
-    async fn save(&self, user: &User) -> Result<bool>;
+    async fn save(&self, user: &User) -> Result<UserSave>;
     async fn save_initial_setup(
         &self,
         user: &User,
@@ -24,4 +38,5 @@ pub trait UserRepository: Send + Sync {
     async fn find_refresh_token(&self, token: &str) -> Result<Option<RefreshToken>>;
     async fn delete_refresh_token(&self, token: &str) -> Result<()>;
     async fn delete_refresh_tokens_for_user(&self, user_id: Uuid) -> Result<()>;
+    async fn delete_account(&self, user_id: Uuid) -> Result<AccountDeletion>;
 }

@@ -932,6 +932,7 @@ service.
 | POST | `/api/auth/login` | User | None | Login, returns tokens |
 | POST | `/api/auth/refresh` | User | Refresh token | Issue new access token |
 | GET | `/api/auth/me` | User | JWT | Current user profile |
+| DELETE | `/api/auth/me` | User | JWT | Permanently delete the acting account and owned application data |
 | POST | `/api/auth/logout` | User | JWT | Invalidate refresh token |
 
 ### 10.2 Novel Endpoints

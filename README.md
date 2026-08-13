@@ -207,6 +207,7 @@ novelworld/
 | [AGENTS.md](./AGENTS.md) | Instructions for AI coding assistants |
 | [DEPLOY.md](./DEPLOY.md) | Deployment guide |
 | [ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Architecture decisions |
+| [DATA_RETENTION.md](./docs/DATA_RETENTION.md) | Data retention, erasure, and provider boundaries |
 
 ---
 

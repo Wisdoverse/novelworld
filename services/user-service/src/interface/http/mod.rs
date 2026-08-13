@@ -25,7 +25,7 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))
         .route("/auth/refresh", post(refresh))
-        .route("/auth/me", get(get_me))
+        .route("/auth/me", get(get_me).delete(delete_me))
         .route("/auth/logout", post(logout))
         .route("/setup/status", get(setup_status))
         .route("/setup/init", post(setup_init))
@@ -212,6 +212,17 @@ fn auth_error_response(error: AuthError) -> axum::response::Response {
             "Invalid or expired refresh token".into(),
         ),
         AuthError::NotFound => (StatusCode::NOT_FOUND, "not_found", "User not found".into()),
+        AuthError::LastAdministrator => (
+            StatusCode::CONFLICT,
+            "last_administrator",
+            "The other users must delete their accounts before the only administrator can be deleted"
+                .into(),
+        ),
+        AuthError::PrivacyCleanupUnavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "privacy_cleanup_unavailable",
+            "Account deletion is temporarily unavailable; retry without signing out".into(),
+        ),
         AuthError::Internal(error) => {
             tracing::error!(error = ?error, "user-service operation failed");
             (
@@ -285,6 +296,17 @@ async fn get_me(State(state): State<AppState>, headers: HeaderMap) -> impl IntoR
     };
     match state.handler.get_me(user_id).await {
         Ok(user) => (StatusCode::OK, Json(user_dto(&user))).into_response(),
+        Err(error) => auth_error_response(error),
+    }
+}
+
+async fn delete_me(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let user_id = match extract_user_id(&headers) {
+        Some(id) => id,
+        None => return auth_error_response(AuthError::InvalidCredentials),
+    };
+    match state.handler.delete_account(user_id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => auth_error_response(error),
     }
 }

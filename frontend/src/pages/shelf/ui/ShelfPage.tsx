@@ -398,7 +398,7 @@ export function ShelfPage() {
         </div>
 
         <div className="flex items-center gap-2">
-          <button type="button" aria-label="模型设置" onClick={() => navigate('/settings')} className="flex h-9 w-9 items-center justify-center rounded-lg transition-all" style={{ background: 'rgba(109,40,217,0.15)', border: '1px solid rgba(109,40,217,0.3)', color: '#a78bfa' }}>
+          <button type="button" aria-label="设置" onClick={() => navigate('/settings')} className="flex h-9 w-9 items-center justify-center rounded-lg transition-all" style={{ background: 'rgba(109,40,217,0.15)', border: '1px solid rgba(109,40,217,0.3)', color: '#a78bfa' }}>
             <Settings size={16} />
           </button>
           <button

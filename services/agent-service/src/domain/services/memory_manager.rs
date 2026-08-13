@@ -195,9 +195,13 @@ impl MemoryManager {
     ) -> Result<()> {
         // PostgreSQL is the durable source of truth. This projection runs only
         // after the atomic turn transaction commits.
-        self.cache
+        let projected = self
+            .cache
             .push_turn(character_id, user_id, &user_msg, &char_msg)
             .await?;
+        if !projected {
+            return Ok(());
+        }
 
         // 检查是否需要触发中期记忆摘要
         let total_count = self

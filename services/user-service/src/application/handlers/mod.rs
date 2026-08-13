@@ -5,8 +5,8 @@ use crate::domain::entities::{
     runtime_config::RuntimeLlmConfig,
     user::{RefreshToken, User, UserRole},
 };
-use crate::domain::ports::{AccessTokenIssuer, LlmConnectionTester};
-use crate::domain::repositories::UserRepository;
+use crate::domain::ports::{AccessTokenIssuer, LlmConnectionTester, PrivacyCleanupPort};
+use crate::domain::repositories::{AccountDeletion, UserRepository, UserSave};
 
 const MAX_PASSWORD_BYTES: usize = 72;
 const MAX_NAME_CHARS: usize = 200;
@@ -30,6 +30,10 @@ pub enum AuthError {
     InvalidRefreshToken,
     #[error("User not found")]
     NotFound,
+    #[error("The only administrator cannot be deleted while other users remain")]
+    LastAdministrator,
+    #[error("Account privacy cleanup is temporarily unavailable")]
+    PrivacyCleanupUnavailable,
     #[error("Authentication operation failed")]
     Internal(#[source] anyhow::Error),
 }
@@ -40,6 +44,7 @@ pub struct AuthHandler {
     pub user_repo: Arc<dyn UserRepository>,
     pub jwt: Arc<dyn AccessTokenIssuer>,
     pub llm_tester: Arc<dyn LlmConnectionTester>,
+    pub privacy_cleanup: Arc<dyn PrivacyCleanupPort>,
     pub environment_llm_config: Option<RuntimeLlmConfig>,
     pub refresh_token_expiry: i64,
 }
@@ -87,13 +92,15 @@ impl AuthHandler {
             .map_err(AuthError::Internal)?;
         let user = User::new(email, password_hash, name);
         let (access_token, refresh_token) = self.issue_tokens(&user)?;
-        if !self
+        match self
             .user_repo
             .save(&user)
             .await
             .map_err(AuthError::Internal)?
         {
-            return Err(AuthError::EmailAlreadyRegistered);
+            UserSave::Saved => {}
+            UserSave::EmailConflict => return Err(AuthError::EmailAlreadyRegistered),
+            UserSave::SetupRequired => return Err(AuthError::SetupRequired),
         }
         self.user_repo
             .save_refresh_token(&refresh_token)
@@ -313,6 +320,44 @@ impl AuthHandler {
             .await
             .map_err(AuthError::Internal)?
             .ok_or(AuthError::NotFound)
+    }
+
+    pub async fn delete_account(&self, user_id: Uuid) -> AuthResult<()> {
+        self.clear_user_cache(user_id).await?;
+        let deletion = match self.user_repo.delete_account(user_id).await {
+            Ok(deletion) => deletion,
+            Err(error) => {
+                self.allow_user_cache(user_id).await?;
+                return Err(AuthError::Internal(error));
+            }
+        };
+        match deletion {
+            AccountDeletion::LastAdministrator => {
+                self.allow_user_cache(user_id).await?;
+                return Err(AuthError::LastAdministrator);
+            }
+            AccountDeletion::Deleted | AccountDeletion::AlreadyAbsent => {}
+        }
+        Ok(())
+    }
+
+    async fn clear_user_cache(&self, user_id: Uuid) -> AuthResult<()> {
+        if let Err(error) = self.privacy_cleanup.clear_user(user_id).await {
+            let _ = self.allow_user_cache(user_id).await;
+            tracing::warn!(error = ?error, %user_id, "account privacy cleanup failed");
+            return Err(AuthError::PrivacyCleanupUnavailable);
+        }
+        Ok(())
+    }
+
+    async fn allow_user_cache(&self, user_id: Uuid) -> AuthResult<()> {
+        self.privacy_cleanup
+            .allow_user(user_id)
+            .await
+            .map_err(|error| {
+                tracing::warn!(error = ?error, %user_id, "account privacy cleanup rollback failed");
+                AuthError::PrivacyCleanupUnavailable
+            })
     }
 
     fn issue_tokens(&self, user: &User) -> AuthResult<(String, RefreshToken)> {

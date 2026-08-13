@@ -162,6 +162,7 @@ POST   /api/auth/register     — 注册
 POST   /api/auth/login        — 登录，返回 JWT
 POST   /api/auth/refresh      — 刷新 Token
 GET    /api/auth/me           — 当前用户信息
+DELETE /api/auth/me           — 永久删除当前账号及应用内数据
 ```
 
 ### 小说管理
