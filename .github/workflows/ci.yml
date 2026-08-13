@@ -52,6 +52,13 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Check
         run: cargo check --workspace --exclude integration-tests
+      - name: Horizon 3 offline evaluation gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --quiet -p h3-eval -- --recorded --git-sha "$GITHUB_SHA" > /tmp/h3-eval-a.json
+          cargo run --quiet -p h3-eval -- --recorded --git-sha "$GITHUB_SHA" > /tmp/h3-eval-b.json
+          cmp /tmp/h3-eval-a.json /tmp/h3-eval-b.json
       - name: Test
         run: cargo test --workspace --exclude integration-tests
       - name: Clippy

@@ -9,6 +9,7 @@ members = [
     "services/user-service",
     "crates/llm-client",
     "tests/integration",
+    "tools/h3-eval",
 ]
 
 [workspace.dependencies]
