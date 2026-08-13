@@ -1,34 +1,144 @@
 #!/usr/bin/env python3
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 ANCHOR = "林岚握紧手中的旧地图，望向被风暴笼罩的北塔，决定在天黑前寻找失踪的守门人。"
 ENDING = "北塔的石门布满潮湿苔痕，林岚在门边发现守门人留下的铜铃。"
-CANON_FAILURE_LOCK = threading.Lock()
-CANON_FAILURES_REMAINING = 1
-TRANSITION_FAILURE_LOCK = threading.Lock()
-TRANSITION_FAILURES_REMAINING = 1
+CONTROL_LOCK = threading.Lock()
+DELAYS_MS = {}
+FAILURES_REMAINING = {"canon": 1, "narrative_transition": 1, "world_turn": 0}
+CALLS = {}
+ACTIVE = {}
+PEAK = {}
+
+
+def operation_for(path, request, prompt=""):
+    if path == "/v1/images/generations":
+        return "image"
+    if path == "/v1/embeddings":
+        return "embedding"
+    if request.get("stream"):
+        return "stream"
+    for marker, operation in (
+        ("source-backed canonical facts", "canon"),
+        ("提取所有重要角色信息", "characters"),
+        ("提取角色和角色关系", "character_chunk"),
+        ("找出 2-5 个玩家", "nodes"),
+        ("anchor_quote", "branch"),
+        ("You propose one bounded world transition", "world_turn"),
+        ("You generate one structured transition", "narrative_transition"),
+        ("玩家时间线主笔", "player_chapter"),
+        ("对话摘要助手", "summary"),
+    ):
+        if marker in prompt:
+            return operation
+    return "chat"
+
+
+def start_operation(operation):
+    with CONTROL_LOCK:
+        CALLS[operation] = CALLS.get(operation, 0) + 1
+        ACTIVE[operation] = ACTIVE.get(operation, 0) + 1
+        PEAK[operation] = max(PEAK.get(operation, 0), ACTIVE[operation])
+        return DELAYS_MS.get(operation, DELAYS_MS.get("default", 0))
+
+
+def finish_operation(operation):
+    with CONTROL_LOCK:
+        ACTIVE[operation] -= 1
+
+
+def consume_failure(operation):
+    with CONTROL_LOCK:
+        if FAILURES_REMAINING.get(operation, 0) == 0:
+            return False
+        FAILURES_REMAINING[operation] -= 1
+        return True
+
+
+def control_snapshot():
+    with CONTROL_LOCK:
+        return {
+            "calls": dict(CALLS),
+            "active": dict(ACTIVE),
+            "peak": dict(PEAK),
+            "delays_ms": dict(DELAYS_MS),
+            "failures_remaining": dict(FAILURES_REMAINING),
+        }
+
+
+def reset_control(request):
+    delays = request.get("delays_ms", {})
+    failures = request.get("failures_remaining", {})
+    if not isinstance(delays, dict) or not isinstance(failures, dict):
+        raise ValueError("control values must be objects")
+    if any(
+        not isinstance(key, str)
+        or not isinstance(value, int)
+        or isinstance(value, bool)
+        or not 0 <= value <= 10_000
+        for key, value in delays.items()
+    ):
+        raise ValueError("delays must be integer milliseconds from 0 to 10000")
+    if any(
+        key not in FAILURES_REMAINING
+        or not isinstance(value, int)
+        or isinstance(value, bool)
+        or not 0 <= value <= 100
+        for key, value in failures.items()
+    ):
+        raise ValueError("invalid failure controls")
+    with CONTROL_LOCK:
+        if any(ACTIVE.values()):
+            raise RuntimeError("provider requests are still active")
+        DELAYS_MS.clear()
+        DELAYS_MS.update(delays)
+        for key in FAILURES_REMAINING:
+            FAILURES_REMAINING[key] = failures.get(key, 0)
+        CALLS.clear()
+        ACTIVE.clear()
+        PEAK.clear()
+    return control_snapshot()
 
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200 if self.path == "/health" else 404)
-        self.end_headers()
+        if self.path == "/health":
+            return self.json_response({"status": "ok"})
+        if self.path == "/__control__/stats":
+            return self.json_response(control_snapshot())
+        return self.json_response({"error": "not found"}, 404)
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
         request = json.loads(self.rfile.read(length) or b"{}")
 
+        if self.path == "/__control__/reset":
+            try:
+                return self.json_response(reset_control(request))
+            except (RuntimeError, ValueError) as error:
+                return self.json_response({"error": str(error)}, 409)
+
+        prompt = "\n".join(message.get("content", "") for message in request.get("messages", []))
+        operation = operation_for(self.path, request, prompt)
+        delay_ms = start_operation(operation)
+        try:
+            if delay_ms:
+                time.sleep(delay_ms / 1000)
+            return self.provider_response(request, prompt)
+        finally:
+            finish_operation(operation)
+
+    def provider_response(self, request, prompt):
         if self.path == "/v1/images/generations":
             return self.json_response({"data": [{"url": "https://example.invalid/lin-lan.png"}]})
         if self.path == "/v1/embeddings":
             return self.json_response({"data": [{"embedding": [0.0] * 1536}], "model": "e2e"})
         if self.path != "/v1/chat/completions":
             return self.json_response({"error": {"message": "not found"}}, 404)
-
-        prompt = "\n".join(message.get("content", "") for message in request.get("messages", []))
         if request.get("stream"):
             assert request.get("stream_options") == {"include_usage": True}
             reply = (
@@ -58,11 +168,8 @@ class Handler(BaseHTTPRequestHandler):
     @staticmethod
     def response_for(prompt):
         if "source-backed canonical facts" in prompt:
-            global CANON_FAILURES_REMAINING
-            with CANON_FAILURE_LOCK:
-                if CANON_FAILURES_REMAINING:
-                    CANON_FAILURES_REMAINING -= 1
-                    return "{}"
+            if consume_failure("canon"):
+                return "{}"
             final_chunk = "FINAL_CHUNK: true" in prompt
             excerpt = ENDING if final_chunk else ANCHOR
             return json.dumps({
@@ -135,6 +242,21 @@ class Handler(BaseHTTPRequestHandler):
                 "world_summary": "风暴笼罩的北境中，古塔与失踪的守门人牵动着边城命运。",
                 "genre": "奇幻",
             }, ensure_ascii=False)
+        if "提取角色和角色关系" in prompt:
+            return json.dumps({
+                "characters": [{
+                    "name": "林岚",
+                    "aliases": [],
+                    "role": "protagonist",
+                    "description": "寻找失踪守门人的年轻旅者。",
+                    "personality": "谨慎、坚定、重视承诺。",
+                    "background": "来自北境边城，熟悉古塔传说。",
+                    "speaking_style": "语气沉静，表达直接。",
+                    "appearance": "黑发灰眼，身穿深蓝旅行斗篷。",
+                    "first_appearance_chapter": 1,
+                }],
+                "relationships": [],
+            }, ensure_ascii=False)
         if "找出 2-5 个玩家" in prompt:
             return json.dumps({"nodes": [{
                 "chapter_number": 1,
@@ -154,7 +276,8 @@ class Handler(BaseHTTPRequestHandler):
                 ],
             }, ensure_ascii=False)
         if "You propose one bounded world transition" in prompt:
-            action = json.loads(prompt.split("ACTION: ", 1)[1].split("\nWORLD_SESSION:", 1)[0])
+            if consume_failure("world_turn"):
+                return "{}"
             session = json.loads(prompt.split("WORLD_SESSION: ", 1)[1].split("\nWORLD_STATE:", 1)[0])
             context = session["entry_context"]
             current_event = next((
@@ -193,11 +316,8 @@ class Handler(BaseHTTPRequestHandler):
                 } if first_turn and current_event else None),
             }, ensure_ascii=False)
         if "You generate one structured transition" in prompt:
-            global TRANSITION_FAILURES_REMAINING
-            with TRANSITION_FAILURE_LOCK:
-                if TRANSITION_FAILURES_REMAINING:
-                    TRANSITION_FAILURES_REMAINING -= 1
-                    return "{}"
+            if consume_failure("narrative_transition"):
+                return "{}"
             canon = json.loads(prompt.split("CANON_CONTEXT:\n", 1)[1].split("\nWORLD_STATE:", 1)[0])
             character_id = canon["characters"][0]["id"]
             location_id = canon["locations"][0]["id"]
@@ -242,5 +362,12 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+class LlmServer(ThreadingHTTPServer):
+    # Capacity tests intentionally open more than socketserver's default five
+    # queued connections; the stub must not become the measured bottleneck.
+    request_queue_size = 128
+    daemon_threads = True
+
+
 if __name__ == "__main__":
-    ThreadingHTTPServer(("0.0.0.0", 18080), Handler).serve_forever()
+    LlmServer(("0.0.0.0", 18080), Handler).serve_forever()
