@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::domain::entities::{
@@ -11,6 +12,7 @@ use crate::domain::repositories::{AccountDeletion, UserRepository, UserSave};
 const MAX_PASSWORD_BYTES: usize = 72;
 const MAX_NAME_CHARS: usize = 200;
 const REFRESH_TOKEN_BYTES: usize = 64;
+const DUMMY_PASSWORD_HASH: &str = "$2b$12$ll3uh.KED.qBVam69C6YoO.chFDr2ecTxuwqoopuPN69e0cmTYU92";
 
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
@@ -34,6 +36,8 @@ pub enum AuthError {
     LastAdministrator,
     #[error("Account privacy cleanup is temporarily unavailable")]
     PrivacyCleanupUnavailable,
+    #[error("Authentication capacity is busy")]
+    Capacity,
     #[error("Authentication operation failed")]
     Internal(#[source] anyhow::Error),
 }
@@ -47,6 +51,7 @@ pub struct AuthHandler {
     pub privacy_cleanup: Arc<dyn PrivacyCleanupPort>,
     pub environment_llm_config: Option<RuntimeLlmConfig>,
     pub refresh_token_expiry: i64,
+    pub password_work: Arc<Semaphore>,
 }
 
 pub struct SetupStatus {
@@ -61,6 +66,39 @@ impl SetupStatus {
 }
 
 impl AuthHandler {
+    async fn hash_password(&self, password: &str) -> AuthResult<String> {
+        let permit = self
+            .password_work
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| AuthError::Capacity)?;
+        let password = password.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            bcrypt::hash(password, 12)
+        })
+        .await
+        .map_err(|error| AuthError::Internal(error.into()))?
+        .map_err(|error| AuthError::Internal(error.into()))
+    }
+
+    async fn verify_password(&self, password: &str, hash: &str) -> AuthResult<bool> {
+        let permit = self
+            .password_work
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| AuthError::Capacity)?;
+        let password = password.to_owned();
+        let hash = hash.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            bcrypt::verify(password, &hash)
+        })
+        .await
+        .map_err(|error| AuthError::Internal(error.into()))?
+        .map_err(|error| AuthError::Internal(error.into()))
+    }
+
     #[tracing::instrument(skip(self, password))]
     pub async fn register(
         &self,
@@ -87,9 +125,7 @@ impl AuthHandler {
             return Err(AuthError::EmailAlreadyRegistered);
         }
 
-        let password_hash = bcrypt::hash(password, 12)
-            .map_err(anyhow::Error::from)
-            .map_err(AuthError::Internal)?;
+        let password_hash = self.hash_password(password).await?;
         let user = User::new(email, password_hash, name);
         let (access_token, refresh_token) = self.issue_tokens(&user)?;
         match self
@@ -144,9 +180,7 @@ impl AuthHandler {
             Some(config)
         };
 
-        let password_hash = bcrypt::hash(password, 12)
-            .map_err(anyhow::Error::from)
-            .map_err(AuthError::Internal)?;
+        let password_hash = self.hash_password(password).await?;
         let user = User::new_admin(email, password_hash, name);
         let (access_token, refresh_token) = self.issue_tokens(&user)?;
 
@@ -249,19 +283,19 @@ impl AuthHandler {
 
     #[tracing::instrument(skip(self, password))]
     pub async fn login(&self, email: &str, password: &str) -> AuthResult<(User, String, String)> {
-        let mut user = self
+        let user = self
             .user_repo
             .find_by_email(email.trim())
             .await
-            .map_err(AuthError::Internal)?
-            .ok_or(AuthError::InvalidCredentials)?;
-
-        if !bcrypt::verify(password, &user.password_hash)
-            .map_err(anyhow::Error::from)
-            .map_err(AuthError::Internal)?
-        {
+            .map_err(AuthError::Internal)?;
+        let password_hash = user
+            .as_ref()
+            .map(|user| user.password_hash.as_str())
+            .unwrap_or(DUMMY_PASSWORD_HASH);
+        let valid = self.verify_password(password, password_hash).await?;
+        let Some(mut user) = user.filter(|_| valid) else {
             return Err(AuthError::InvalidCredentials);
-        }
+        };
 
         user.record_sign_in();
         self.user_repo
@@ -277,7 +311,7 @@ impl AuthHandler {
         Ok((user, access_token, refresh_token.token))
     }
 
-    pub async fn refresh(&self, refresh_token: &str) -> AuthResult<String> {
+    pub async fn refresh(&self, refresh_token: &str) -> AuthResult<(String, String)> {
         validate_refresh_token(refresh_token)?;
         let token = self
             .user_repo
@@ -301,9 +335,16 @@ impl AuthHandler {
             .map_err(AuthError::Internal)?
             .ok_or(AuthError::InvalidRefreshToken)?;
 
-        self.jwt
-            .generate_token(user.id, &user.email, user.role.as_str())
-            .map_err(AuthError::Internal)
+        let (access_token, replacement) = self.issue_tokens(&user)?;
+        if !self
+            .user_repo
+            .rotate_refresh_token(refresh_token, &replacement)
+            .await
+            .map_err(AuthError::Internal)?
+        {
+            return Err(AuthError::InvalidRefreshToken);
+        }
+        Ok((access_token, replacement.token))
     }
 
     pub async fn logout(&self, refresh_token: &str) -> AuthResult<()> {
@@ -423,4 +464,15 @@ pub fn is_valid_email(email: &str) -> bool {
 
 fn generate_refresh_token() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+#[cfg(test)]
+mod password_tests {
+    use super::*;
+
+    #[test]
+    fn dummy_password_hash_is_a_valid_cost_twelve_hash() {
+        assert!(DUMMY_PASSWORD_HASH.starts_with("$2b$12$"));
+        assert!(!bcrypt::verify("not-the-dummy-password", DUMMY_PASSWORD_HASH).unwrap());
+    }
 }

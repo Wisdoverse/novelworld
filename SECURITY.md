@@ -26,15 +26,21 @@ We will acknowledge receipt within 48 hours and provide a timeline for resolutio
 ## Security Measures
 
 ### Authentication
-- Passwords hashed with bcrypt (cost factor 12)
+- Passwords hashed with bcrypt (cost factor 12) in a bounded blocking pool
 - JWT tokens with configurable expiry (default 1 hour)
-- Refresh token rotation with server-side storage
+- Refresh tokens are atomically consumed and rotated in server-side storage
 - 401 responses do not leak user existence information
 
 ### Data Protection
 - All SQL queries use parameterized bindings (no string interpolation)
-- File upload validates MIME type and enforces size limits (10MB txt, 20MB pdf)
-- API gateway enforces rate limiting (configurable, default 500 req/s)
+- File upload accepts TXT, EPUB, and PDF with 10 MiB/20 MiB input limits,
+  a 20 MiB extracted-text ceiling, bounded blocking parsers, and EPUB aggregate
+  expansion and duplicate-spine checks
+- Production Nginx enforces 20 requests/second per client with burst 40; the
+  Gateway applies its configurable global backstop after authentication on
+  protected routes (default 500 requests/second)
+- Novel imports, chats, bcrypt, and provider calls have process-wide admission;
+  imports also have a fixed provider-call budget
 - Retention and application-layer erasure boundaries are documented in
   [docs/DATA_RETENTION.md](./docs/DATA_RETENTION.md)
 - Account export uses JWT-derived identity, internal-token-authenticated service
@@ -51,6 +57,10 @@ We will acknowledge receipt within 48 hours and provide a timeline for resolutio
 ### LLM Security
 - User input passed to LLM prompts includes behavioral constraints
 - System prompts instruct models to stay in character and refuse harmful content
+- Shared provider requests have a 10-second connect timeout, 5-minute total
+  deadline, 1 MiB JSON response ceiling, bounded Retry-After, and normalized
+  provider errors
+- Chat rendering suppresses model-authored Markdown image requests
 - This is defense-in-depth — prompt injection is not fully preventable
 
 ### Known Limitations

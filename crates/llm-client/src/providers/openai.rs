@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    response_error,
+    json_response, response_error,
     sse::{decode_stream, SseFrame},
     LlmProvider,
 };
@@ -187,14 +187,7 @@ fn parse_responses_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>>
             Ok(events)
         }
         "response.incomplete" => Err(anyhow!("Responses API output was incomplete")),
-        "response.failed" => {
-            let message = payload
-                .pointer("/response/error/message")
-                .or_else(|| payload.pointer("/error/message"))
-                .and_then(Value::as_str)
-                .unwrap_or("unknown error");
-            Err(anyhow!("Responses API failed: {message}"))
-        }
+        "response.failed" => Err(anyhow!("Responses API failed")),
         _ => Ok(Vec::new()),
     }
 }
@@ -221,7 +214,7 @@ struct OpenAIEmbeddingData {
 
 pub(crate) fn parse_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>> {
     if frame.event == "error" {
-        return Err(anyhow!("OpenAI stream error: {}", frame.data));
+        return Err(anyhow!("OpenAI stream failed"));
     }
     if frame.event != "message" {
         return Ok(Vec::new());
@@ -232,12 +225,8 @@ pub(crate) fn parse_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>
 
     let payload: Value = serde_json::from_str(&frame.data)
         .map_err(|error| anyhow!("invalid OpenAI stream payload: {error}"))?;
-    if let Some(error) = payload.get("error") {
-        let message = error
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown error");
-        return Err(anyhow!("OpenAI stream error: {message}"));
+    if payload.get("error").is_some() {
+        return Err(anyhow!("OpenAI stream failed"));
     }
 
     let mut events = Vec::new();
@@ -314,7 +303,7 @@ impl LlmProvider for OpenAIProvider {
             if !response.status().is_success() {
                 return Err(response_error(response).await);
             }
-            let payload: Value = response.json().await?;
+            let payload: Value = json_response(response).await?;
             if payload.get("status").and_then(Value::as_str) != Some("completed") {
                 return Err(anyhow!("Responses API output was not completed"));
             }
@@ -376,7 +365,7 @@ impl LlmProvider for OpenAIProvider {
             return Err(response_error(response).await);
         }
 
-        let resp: OpenAIResponse = response.json().await?;
+        let resp: OpenAIResponse = json_response(response).await?;
 
         let content = response_content(&resp);
         let usage = resp.usage.map(OpenAIUsage::into_usage).transpose()?;
@@ -480,7 +469,7 @@ impl LlmProvider for OpenAIProvider {
             return Err(response_error(response).await);
         }
 
-        let resp: OpenAIEmbeddingResponse = response.json().await?;
+        let resp: OpenAIEmbeddingResponse = json_response(response).await?;
 
         let embedding = resp
             .data

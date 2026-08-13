@@ -1,7 +1,10 @@
 use anyhow::Result;
 use futures::{stream, StreamExt};
-use std::sync::Arc;
-use tokio::sync::Semaphore;
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -32,7 +35,52 @@ pub struct NovelCommandHandler {
     pub llm: Arc<dyn LlmPort>,
     pub image_client: Arc<dyn ImagePort>,
     pub privacy_cleanup: Arc<dyn PrivacyCleanupPort>,
+    pub import_permits: Arc<Semaphore>,
+    pub active_import_users: Arc<Mutex<HashSet<Uuid>>>,
 }
+
+struct ImportAdmission {
+    _permit: OwnedSemaphorePermit,
+    active_users: Arc<Mutex<HashSet<Uuid>>>,
+    user_id: Uuid,
+}
+
+impl Drop for ImportAdmission {
+    fn drop(&mut self) {
+        if let Ok(mut users) = self.active_users.lock() {
+            users.remove(&self.user_id);
+        }
+    }
+}
+
+fn try_import_admission(
+    permits: &Arc<Semaphore>,
+    active_users: &Arc<Mutex<HashSet<Uuid>>>,
+    user_id: Uuid,
+) -> std::result::Result<ImportAdmission, ImportCapacityUnavailable> {
+    let permit = permits
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ImportCapacityUnavailable)?;
+    let mut users = active_users.lock().map_err(|_| ImportCapacityUnavailable)?;
+    if !users.insert(user_id) {
+        return Err(ImportCapacityUnavailable);
+    }
+    drop(users);
+    Ok(ImportAdmission {
+        _permit: permit,
+        active_users: active_users.clone(),
+        user_id,
+    })
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Novel import capacity is busy")]
+pub struct ImportCapacityUnavailable;
+
+#[derive(Debug, thiserror::Error)]
+#[error("Novel import exceeds the processing budget")]
+pub struct ImportBudgetExceeded;
 
 #[derive(Debug, thiserror::Error)]
 pub enum NovelDeletionError {
@@ -45,8 +93,38 @@ pub enum NovelDeletionError {
 }
 
 const MAX_AVATARS_PER_NOVEL: usize = 30;
+const MAX_IMPORT_CHAPTERS: usize = 2_048;
+const MAX_IMPORT_PROVIDER_CALLS: usize = 640;
+
+fn ensure_import_budget(chapters: &[Chapter]) -> std::result::Result<(), ImportBudgetExceeded> {
+    if chapters.len() > MAX_IMPORT_CHAPTERS {
+        return Err(ImportBudgetExceeded);
+    }
+    let character_scans = if needs_chunk_scan(chapters) {
+        build_scan_plan(chapters).len()
+    } else {
+        0
+    };
+    let canon_scans = canon_story_extractor::build_scan_plan(chapters)
+        .map_err(|_| ImportBudgetExceeded)?
+        .len();
+    let calls = 2usize
+        .saturating_add(character_scans)
+        .saturating_add(canon_scans)
+        .saturating_add(MAX_AVATARS_PER_NOVEL);
+    (calls <= MAX_IMPORT_PROVIDER_CALLS)
+        .then_some(())
+        .ok_or(ImportBudgetExceeded)
+}
 
 impl NovelCommandHandler {
+    fn try_admit_import(
+        &self,
+        user_id: Uuid,
+    ) -> std::result::Result<ImportAdmission, ImportCapacityUnavailable> {
+        try_import_admission(&self.import_permits, &self.active_import_users, user_id)
+    }
+
     pub async fn delete_owned_novel(
         &self,
         user_id: Uuid,
@@ -84,6 +162,11 @@ impl NovelCommandHandler {
     pub async fn handle_import(&self, cmd: ImportNovelCommand) -> Result<Uuid> {
         info!("Importing novel: {}", cmd.title);
 
+        let raw_text = cmd
+            .raw_content
+            .ok_or_else(|| anyhow::anyhow!("Novel content is required"))?;
+        let admission = self.try_admit_import(cmd.user_id)?;
+
         // 1. 创建 Novel 聚合根
         let mut novel = Novel::create(cmd.user_id, cmd.title.clone(), cmd.author.clone());
         if let Some(mode) = cmd.deviation_mode {
@@ -93,16 +176,7 @@ impl NovelCommandHandler {
 
         let novel_id = novel.id;
 
-        // 2. 获取原始文本
-        let raw_text = match cmd.raw_content {
-            Some(text) => text,
-            None => {
-                // TODO: 从 S3 下载文件并解析 PDF/TXT
-                return Err(anyhow::anyhow!("File upload parsing not yet implemented"));
-            }
-        };
-
-        // 3. 异步执行解析（不阻塞响应）
+        // 2. 异步执行解析（不阻塞响应）
         let novel_repo = self.novel_repo.clone();
         let novel_repo_err = self.novel_repo.clone();
         let chapter_repo = self.chapter_repo.clone();
@@ -113,10 +187,11 @@ impl NovelCommandHandler {
         let title = cmd.title.clone();
 
         tokio::spawn(async move {
+            let _admission = admission;
             if let Err(e) = Self::parse_novel_async(
                 novel_id,
                 &title,
-                &raw_text,
+                raw_text,
                 novel_repo,
                 chapter_repo,
                 character_repo,
@@ -156,6 +231,12 @@ impl NovelCommandHandler {
                 "No parsed chapters are available for retry"
             ));
         }
+        let chapters = tokio::task::spawn_blocking(move || {
+            ensure_import_budget(&chapters)?;
+            Ok::<_, anyhow::Error>(chapters)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("import budget task failed: {error}"))??;
         let characters = self.character_repo.find_by_novel(novel_id).await?;
         let resume_canon = !characters.is_empty();
         if resume_canon
@@ -168,6 +249,7 @@ impl NovelCommandHandler {
             ));
         }
 
+        let admission = self.try_admit_import(user_id)?;
         novel.start_parsing();
         self.novel_repo.update(&novel).await?;
 
@@ -180,6 +262,7 @@ impl NovelCommandHandler {
         let llm = self.llm.clone();
         let image_client = self.image_client.clone();
         tokio::spawn(async move {
+            let _admission = admission;
             let result = if resume_canon {
                 Self::complete_canon_async(
                     &mut novel,
@@ -221,7 +304,7 @@ impl NovelCommandHandler {
     async fn parse_novel_async(
         novel_id: Uuid,
         title: &str,
-        raw_text: &str,
+        raw_text: String,
         novel_repo: Arc<dyn NovelRepository>,
         chapter_repo: Arc<dyn ChapterRepository>,
         character_repo: Arc<dyn CharacterRepository>,
@@ -239,7 +322,13 @@ impl NovelCommandHandler {
 
         // 拆分章节
         info!("Parsing chapters for novel {}", novel_id);
-        let chapters = NovelParserService::parse_chapters(novel_id, raw_text)?;
+        let chapters = tokio::task::spawn_blocking(move || {
+            let chapters = NovelParserService::parse_chapters(novel_id, &raw_text)?;
+            ensure_import_budget(&chapters)?;
+            Ok::<_, anyhow::Error>(chapters)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("chapter parser task failed: {error}"))??;
         chapter_repo.save_batch(&chapters).await?;
 
         Self::enrich_novel_async(
@@ -458,7 +547,6 @@ impl NovelCommandHandler {
         .await?;
 
         // ponytail: discover every character; cap cosmetic avatar cost until demand proves otherwise.
-        let semaphore = Arc::new(Semaphore::new(3));
         if characters.len() > MAX_AVATARS_PER_NOVEL {
             info!(
                 novel_id = %novel_id,
@@ -466,23 +554,33 @@ impl NovelCommandHandler {
                 "avatar generation capped; all characters remain available"
             );
         }
-        for character in characters.iter().take(MAX_AVATARS_PER_NOVEL) {
-            if let Some(appearance) = &character.appearance {
-                let char_id = character.id;
-                let appearance = appearance.clone();
-                let char_repo = character_repo.clone();
-                let img_client = image_client.clone();
-                let sem = semaphore.clone();
-                tokio::spawn(async move {
-                    let _permit = sem.acquire().await.unwrap();
-                    if let Err(e) =
-                        Self::generate_avatar(char_id, &appearance, char_repo, img_client).await
+        let avatar_jobs = characters
+            .iter()
+            .take(MAX_AVATARS_PER_NOVEL)
+            .filter_map(|character| {
+                character
+                    .appearance
+                    .clone()
+                    .map(|appearance| (character.id, appearance))
+            });
+        stream::iter(avatar_jobs)
+            .for_each_concurrent(3, |(character_id, appearance)| {
+                let character_repo = character_repo.clone();
+                let image_client = image_client.clone();
+                async move {
+                    if let Err(error) = Self::generate_avatar(
+                        character_id,
+                        &appearance,
+                        character_repo,
+                        image_client,
+                    )
+                    .await
                     {
-                        error!("Avatar generation failed for {}: {}", char_id, e);
+                        error!(%error, %character_id, "avatar generation failed");
                     }
-                });
-            }
-        }
+                }
+            })
+            .await;
 
         info!(
             "Novel {} parsed successfully: {} chapters, {} characters",
@@ -565,6 +663,36 @@ impl NovelCommandHandler {
         character.set_avatar(url);
         character_repo.update(&character).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod import_budget_tests {
+    use super::*;
+
+    #[test]
+    fn import_budget_accepts_paste_limit_and_rejects_provider_fanout() {
+        let novel_id = Uuid::new_v4();
+        let at_paste_limit = vec![Chapter::new(novel_id, 1, None, "a".repeat(5 * 1024 * 1024))];
+        let above_budget = vec![Chapter::new(novel_id, 1, None, "a".repeat(6 * 1024 * 1024))];
+
+        assert!(ensure_import_budget(&at_paste_limit).is_ok());
+        assert!(ensure_import_budget(&above_budget).is_err());
+    }
+
+    #[test]
+    fn import_admission_is_per_user_and_service_wide() {
+        let permits = Arc::new(Semaphore::new(2));
+        let users = Arc::new(Mutex::new(HashSet::new()));
+        let first_user = Uuid::new_v4();
+        let second_user = Uuid::new_v4();
+        let first = try_import_admission(&permits, &users, first_user).unwrap();
+        assert!(try_import_admission(&permits, &users, first_user).is_err());
+        let second = try_import_admission(&permits, &users, second_user).unwrap();
+        assert!(try_import_admission(&permits, &users, Uuid::new_v4()).is_err());
+        drop(first);
+        drop(second);
+        assert!(try_import_admission(&permits, &users, first_user).is_ok());
     }
 }
 

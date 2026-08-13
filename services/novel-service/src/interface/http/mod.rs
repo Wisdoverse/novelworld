@@ -1,7 +1,7 @@
 use axum::{
     body::Body,
     extract::{multipart::MultipartRejection, DefaultBodyLimit, Json, Multipart, Path, State},
-    http::{header::CACHE_CONTROL, HeaderMap, StatusCode},
+    http::{header::CACHE_CONTROL, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Router,
@@ -9,11 +9,13 @@ use axum::{
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::application::commands::ImportNovelCommand;
 use crate::application::handlers::{
-    NovelCommandHandler, NovelDeletionError, ReadingProgressError, ReadingProgressHandler,
+    ImportBudgetExceeded, ImportCapacityUnavailable, NovelCommandHandler, NovelDeletionError,
+    ReadingProgressError, ReadingProgressHandler,
 };
 use crate::domain::entities::novel::Novel;
 use crate::domain::ports::{
@@ -36,6 +38,7 @@ pub struct AppState {
     pub canon_repo: Arc<dyn CanonStoryModelRepository>,
     pub progress_handler: Arc<ReadingProgressHandler>,
     pub document_extractor: Arc<dyn DocumentTextExtractor>,
+    pub document_parse_permits: Arc<Semaphore>,
     pub account_export: Arc<dyn AccountExportPort>,
     pub internal_service_token: Arc<str>,
     pub readiness: Arc<dyn ReadinessProbe>,
@@ -383,13 +386,7 @@ async fn import_novel(
             }),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(error) => import_error_response(error),
     }
 }
 
@@ -412,6 +409,27 @@ fn api_error(status: StatusCode, message: impl Into<String>) -> Response {
         }),
     )
         .into_response()
+}
+
+fn import_error_response(error: anyhow::Error) -> Response {
+    if error.downcast_ref::<ImportCapacityUnavailable>().is_some() {
+        let mut response = api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Novel import capacity is busy; retry the request",
+        );
+        response
+            .headers_mut()
+            .insert("Retry-After", HeaderValue::from_static("1"));
+        return response;
+    }
+    if error.downcast_ref::<ImportBudgetExceeded>().is_some() {
+        return api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Novel exceeds the supported processing budget",
+        );
+    }
+    tracing::error!(%error, "novel import request failed");
+    api_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
 }
 
 fn validate_metadata(
@@ -497,6 +515,7 @@ async fn upload_novel(
     let mut title: Option<String> = None;
     let mut author: Option<String> = None;
     let mut content: Option<String> = None;
+    let mut file_seen = false;
     let mut deviation_mode_str: Option<String> = None;
 
     loop {
@@ -531,28 +550,48 @@ async fn upload_novel(
                 };
             }
             "file" => {
+                if file_seen {
+                    return api_error(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "Exactly one file must be uploaded",
+                    );
+                }
+                file_seen = true;
                 let file_name = field.file_name().map(str::to_owned);
                 let content_type = field.content_type().map(str::to_owned);
                 let data = match field.bytes().await {
                     Ok(d) => d,
-                    Err(e) => {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(ApiError {
-                                error: format!("Failed to read uploaded file: {}", e),
-                            }),
-                        )
-                            .into_response();
+                    Err(_) => return api_error(StatusCode::BAD_REQUEST, "Invalid file upload"),
+                };
+                let permit = match state.document_parse_permits.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        let mut response = api_error(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "Document parser capacity is busy; retry the request",
+                        );
+                        response
+                            .headers_mut()
+                            .insert("Retry-After", HeaderValue::from_static("1"));
+                        return response;
                     }
                 };
-
-                content = match state.document_extractor.extract_text(
-                    file_name.as_deref(),
-                    content_type.as_deref(),
-                    &data,
-                ) {
-                    Ok(text) => Some(text),
-                    Err(error) => return document_error_response(error),
+                let extractor = state.document_extractor.clone();
+                let extracted = tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    extractor.extract_text(file_name.as_deref(), content_type.as_deref(), &data)
+                })
+                .await;
+                content = match extracted {
+                    Err(error) => {
+                        tracing::error!(%error, "document parser task failed");
+                        return api_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "Internal server error",
+                        );
+                    }
+                    Ok(Ok(text)) => Some(text),
+                    Ok(Err(error)) => return document_error_response(error),
                 };
             }
             _ => {
@@ -615,13 +654,7 @@ async fn upload_novel(
             }),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(error) => import_error_response(error),
     }
 }
 
@@ -730,6 +763,12 @@ async fn retry_novel(
             }),
         )
             .into_response(),
+        Err(error)
+            if error.downcast_ref::<ImportCapacityUnavailable>().is_some()
+                || error.downcast_ref::<ImportBudgetExceeded>().is_some() =>
+        {
+            import_error_response(error)
+        }
         Err(error) => api_error(StatusCode::CONFLICT, error.to_string()),
     }
 }

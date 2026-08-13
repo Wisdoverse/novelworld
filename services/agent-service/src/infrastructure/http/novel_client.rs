@@ -19,15 +19,12 @@ pub struct NovelServiceClient {
     base_url: String,
 }
 
-/// Intermediate deserialization type for the novel-service character response.
-/// Handles both pre-built system_prompt and component fields used to build one.
+/// Minimal deserialization type for the character data used at chat time.
 #[derive(Debug, Deserialize)]
 struct CharacterResponse {
     id: Uuid,
     name: String,
     novel_id: Uuid,
-    #[serde(default)]
-    speaking_style: Option<String>,
     #[serde(default)]
     first_appearance_chapter: Option<i32>,
 }
@@ -98,7 +95,6 @@ impl CharacterInfoRepository for NovelServiceClient {
             id: ch.id,
             name: ch.name,
             novel_id: ch.novel_id,
-            speaking_style: ch.speaking_style,
             first_appearance_chapter: ch.first_appearance_chapter,
         }))
     }

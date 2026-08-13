@@ -98,6 +98,117 @@ fn test_retry_after_header() {
     assert_eq!(d.as_secs(), 30);
     let d = RetryPolicy::delay(503, 0, Some("120"));
     assert_eq!(d.as_secs(), 120);
+    let d = RetryPolicy::delay(429, 0, Some("86400"));
+    assert_eq!(d.as_secs(), 120);
+}
+
+#[test]
+fn provider_error_text_is_discarded_and_success_bodies_are_bounded() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let oversized = " ".repeat(1024 * 1024 + 1);
+    let responses = vec![
+        http_response(
+            "400 Bad Request",
+            "application/json",
+            "sentinel-private-provider-text",
+            "",
+        ),
+        http_response("200 OK", "application/json", &oversized, ""),
+    ];
+    let server = thread::spawn(move || {
+        for response in responses {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0; 8192];
+            assert!(socket.read(&mut request).unwrap() > 0);
+            socket.write_all(&response).unwrap();
+        }
+    });
+
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let client =
+            LlmClient::new().with_openai_compatible("test", "key", format!("http://{address}"));
+        let request = || {
+            ChatRequest::new(crate::LlmOperation::CharacterExtraction, "test/model")
+                .max_tokens(4_096)
+        };
+        let error = client.chat(request()).await.unwrap_err().to_string();
+        assert!(!error.contains("sentinel-private-provider-text"));
+        assert!(error.contains("provider request failed"));
+
+        let error = client.chat(request()).await.unwrap_err().to_string();
+        assert!(error.contains("provider response exceeds"), "{error}");
+    });
+    server.join().unwrap();
+}
+
+#[test]
+fn retry_delay_cannot_outlive_the_total_deadline() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let mut request = [0; 8192];
+        assert!(socket.read(&mut request).unwrap() > 0);
+        socket
+            .write_all(&http_response(
+                "429 Too Many Requests",
+                "application/json",
+                "{}",
+                "Retry-After: 1\r\n",
+            ))
+            .unwrap();
+    });
+
+    let started = Instant::now();
+    let error = tokio::runtime::Runtime::new().unwrap().block_on(async {
+        LlmClient::new()
+            .with_openai_compatible("test", "key", format!("http://{address}"))
+            .chat(
+                ChatRequest::new(crate::LlmOperation::CharacterExtraction, "test/model")
+                    .max_tokens(4_096),
+            )
+            .await
+            .unwrap_err()
+    });
+    assert!(error.to_string().contains("total deadline"));
+    assert!(started.elapsed() < Duration::from_secs(1));
+    server.join().unwrap();
+}
+
+#[test]
+fn provider_stream_cannot_outlive_the_total_timeout() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let mut request = [0; 8192];
+        assert!(socket.read(&mut request).unwrap() > 0);
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
+            )
+            .unwrap();
+        socket.flush().unwrap();
+        thread::sleep(Duration::from_secs(2));
+    });
+
+    let started = Instant::now();
+    let events = tokio::runtime::Runtime::new().unwrap().block_on(async {
+        LlmClient::new()
+            .with_openai_compatible("test", "key", format!("http://{address}"))
+            .chat_stream(
+                ChatRequest::new(crate::LlmOperation::CharacterChat, "test/model")
+                    .max_tokens(1_024),
+            )
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await
+    });
+    assert!(events.into_iter().any(|event| event.is_err()));
+    assert!(started.elapsed() < Duration::from_secs(1));
+    server.join().unwrap();
 }
 
 #[test]

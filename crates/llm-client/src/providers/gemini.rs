@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    response_error,
+    json_response, response_error,
     sse::{decode_stream, SseFrame},
     LlmProvider,
 };
@@ -125,7 +125,7 @@ impl GeminiProvider {
 
 pub(crate) fn parse_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>> {
     if frame.event == "error" {
-        return Err(anyhow!("Gemini stream error: {}", frame.data));
+        return Err(anyhow!("Gemini stream failed"));
     }
     if frame.event != "message" {
         return Ok(Vec::new());
@@ -133,12 +133,8 @@ pub(crate) fn parse_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>
 
     let payload: Value = serde_json::from_str(&frame.data)
         .map_err(|error| anyhow!("invalid Gemini stream payload: {error}"))?;
-    if let Some(error) = payload.get("error") {
-        let message = error
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown error");
-        return Err(anyhow!("Gemini stream error: {message}"));
+    if payload.get("error").is_some() {
+        return Err(anyhow!("Gemini stream failed"));
     }
 
     if let Some(block_reason) = payload
@@ -147,8 +143,8 @@ pub(crate) fn parse_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>
     {
         match block_reason {
             Value::Null => {}
-            Value::String(reason) => {
-                return Err(anyhow!("Gemini prompt was blocked: {reason}"));
+            Value::String(_) => {
+                return Err(anyhow!("Gemini prompt was blocked"));
             }
             _ => return Err(anyhow!("Gemini blockReason is not a string or null")),
         }
@@ -194,8 +190,8 @@ pub(crate) fn parse_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>
         Some(Value::String(reason)) if reason == "STOP" || reason == "MAX_TOKENS" => {
             events.push(ChatStreamEvent::Finished);
         }
-        Some(Value::String(reason)) => {
-            return Err(anyhow!("Gemini stream failed with finish reason {reason}"));
+        Some(Value::String(_)) => {
+            return Err(anyhow!("Gemini stream failed"));
         }
         Some(Value::Null) | None => {}
         Some(_) => return Err(anyhow!("Gemini finishReason is not a string or null")),
@@ -243,7 +239,7 @@ impl LlmProvider for GeminiProvider {
             return Err(response_error(response).await);
         }
 
-        let resp: GeminiResponse = response.json().await?;
+        let resp: GeminiResponse = json_response(response).await?;
 
         let content = resp
             .candidates
@@ -319,7 +315,7 @@ impl LlmProvider for GeminiProvider {
             return Err(response_error(response).await);
         }
 
-        let resp: GeminiEmbedResponse = response.json().await?;
+        let resp: GeminiEmbedResponse = json_response(response).await?;
 
         Ok(EmbeddingResponse {
             embedding: resp.embedding.values,
