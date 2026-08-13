@@ -13,8 +13,8 @@ green; it does not claim that an operator has deployed the release.
 |---|---|---|
 | 0 — Trust boundary | Complete | [PR #72](https://github.com/schorsch888/novelworld/pull/72) merged as `6b62c44`; ownership, principal, and boundary checks are in required CI. |
 | 1 — Reliability | Complete | PR #72 completed atomic chat/narrative persistence, durable setup, migrations, readiness, and release checks; CI passed 5/5. |
-| 2 — Core reader loop | In progress | Bounded TXT/EPUB/PDF ingestion, persisted-chapter retry, the auth-aware journey entry, and operator model settings are implemented locally. The exit gate remains a restart-safe upload-to-resume end-to-end test. |
-| 3 — Canonical world model | Queued | Starts after Horizon 2 exits; requires a versioned story schema and extraction/coherence evaluation set. |
+| 2 — Core reader loop | Complete | PR #76 gates upload -> parse -> read -> chat -> choose -> resume across a full process restart; all required CI checks passed. |
+| 3 — Canonical world model | In progress | The versioned, source-cited model contract and immutable persistence boundary are established; source-complete extraction and coherence evaluation remain. |
 | 4 — Living open world | Queued | Starts after the canonical model and structured transition quality gates pass. |
 | 5 — Measured scale | Queued | Starts only for a named SLO or measured bottleneck. |
 
