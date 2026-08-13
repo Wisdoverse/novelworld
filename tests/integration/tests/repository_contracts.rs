@@ -124,13 +124,13 @@ async fn canon_story_models_are_versioned_and_immutable() {
         created_at: std::time::SystemTime::UNIX_EPOCH.into(),
     };
     let repository = PgCanonStoryModelRepository::new(pool.clone());
-    sqlx::query("UPDATE novels SET status = 'parsing' WHERE id = $1")
+    sqlx::query("UPDATE novels SET total_chapters = 2, status = 'parsing' WHERE id = $1")
         .bind(novel_id)
         .execute(&pool)
         .await
         .unwrap();
     assert!(repository.insert(&model).await.is_err());
-    sqlx::query("UPDATE novels SET status = 'ready' WHERE id = $1")
+    sqlx::query("UPDATE novels SET total_chapters = 1 WHERE id = $1")
         .bind(novel_id)
         .execute(&pool)
         .await
