@@ -35,6 +35,8 @@ const NARRATIVE_TRANSITION_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0012_narrative_transitions.sql");
 const LIVING_WORLD_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0013_living_world_turns.sql");
+const SOURCE_FILE_STORAGE_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0014_source_file_storage.sql");
 
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
@@ -109,6 +111,10 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
             .await
             .unwrap();
         sqlx::raw_sql(LIVING_WORLD_MIGRATION)
+            .execute(&fresh)
+            .await
+            .unwrap();
+        sqlx::raw_sql(SOURCE_FILE_STORAGE_MIGRATION)
             .execute(&fresh)
             .await
             .unwrap();
@@ -328,6 +334,7 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
         "0011_canon_story_models.sql",
         "0012_narrative_transitions.sql",
         "0013_living_world_turns.sql",
+        "0014_source_file_storage.sql",
     ] {
         let migration_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../infra/postgres/migrations")
@@ -400,6 +407,10 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
             .await
             .unwrap();
         sqlx::raw_sql(LIVING_WORLD_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
+        sqlx::raw_sql(SOURCE_FILE_STORAGE_MIGRATION)
             .execute(&mut *non_default_path)
             .await
             .unwrap();

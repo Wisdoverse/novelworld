@@ -133,10 +133,14 @@ services:
       AGENT_SERVICE_URL: http://agent-service:8003
       IMAGE_GEN_API_URL: ${IMAGE_GEN_API_URL:-https://api.openai.com}
       IMAGE_GEN_API_KEY: ${IMAGE_GEN_API_KEY:-}
+      S3_ENABLED: ${S3_ENABLED:-false}
       S3_ENDPOINT: ${S3_ENDPOINT:-}
-      S3_BUCKET: ${S3_BUCKET:-novel-world}
+      S3_BUCKET: ${S3_BUCKET:-novel-world-uploads}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-false}
       S3_ACCESS_KEY: ${S3_ACCESS_KEY:-}
       S3_SECRET_KEY: ${S3_SECRET_KEY:-}
+      S3_SESSION_TOKEN: ${S3_SESSION_TOKEN:-}
       PORT: 8002
       RUST_LOG: info
     depends_on:

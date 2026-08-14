@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::{Duration as ChronoDuration, Utc};
 use futures::{stream, StreamExt};
 use std::{
     collections::HashSet,
@@ -10,10 +11,13 @@ use uuid::Uuid;
 
 use crate::application::commands::ImportNovelCommand;
 use crate::domain::entities::{chapter::Chapter, character::Character, novel::Novel};
-use crate::domain::ports::{ImagePort, LlmPort, NovelLlmTask, PrivacyCleanupPort};
+use crate::domain::ports::{
+    ImagePort, LlmPort, NovelLlmTask, PrivacyCleanupPort, SourceFileStorage,
+};
 use crate::domain::repositories::{
     CanonStoryModelRepository, ChapterRepository, CharacterRepository, LoreExcerpt,
     NovelRepository, ReadingProgressRecord, ReadingProgressRepository,
+    SourceFileDeletionRepository,
 };
 use crate::domain::services::{canon_story_extractor, node_detector};
 use crate::domain::services::{
@@ -35,6 +39,8 @@ pub struct NovelCommandHandler {
     pub llm: Arc<dyn LlmPort>,
     pub image_client: Arc<dyn ImagePort>,
     pub privacy_cleanup: Arc<dyn PrivacyCleanupPort>,
+    pub source_storage: Option<Arc<dyn SourceFileStorage>>,
+    pub source_deletions: Arc<dyn SourceFileDeletionRepository>,
     pub import_permits: Arc<Semaphore>,
     pub active_import_users: Arc<Mutex<HashSet<Uuid>>>,
 }
@@ -81,6 +87,10 @@ pub struct ImportCapacityUnavailable;
 #[derive(Debug, thiserror::Error)]
 #[error("Novel import exceeds the processing budget")]
 pub struct ImportBudgetExceeded;
+
+#[derive(Debug, thiserror::Error)]
+#[error("Source file storage is unavailable")]
+pub struct SourceFileStorageUnavailable(#[source] pub anyhow::Error);
 
 #[derive(Debug, thiserror::Error)]
 pub enum NovelDeletionError {
@@ -172,6 +182,13 @@ impl NovelCommandHandler {
         if let Some(mode) = cmd.deviation_mode {
             novel.set_deviation_mode(mode);
         }
+        retain_source_file(
+            &mut novel,
+            cmd.source_bytes,
+            self.source_storage.as_deref(),
+            self.source_deletions.as_ref(),
+        )
+        .await?;
         self.novel_repo.save(&novel).await?;
 
         let novel_id = novel.id;
@@ -666,9 +683,88 @@ impl NovelCommandHandler {
     }
 }
 
+fn source_file_key(user_id: Uuid, novel_id: Uuid) -> String {
+    format!("source-files/{user_id}/{novel_id}")
+}
+
+async fn retain_source_file(
+    novel: &mut Novel,
+    source_bytes: Option<bytes::Bytes>,
+    storage: Option<&dyn SourceFileStorage>,
+    deletions: &dyn SourceFileDeletionRepository,
+) -> Result<()> {
+    let (Some(data), Some(storage)) = (source_bytes, storage) else {
+        return Ok(());
+    };
+    let key = source_file_key(novel.user_id, novel.id);
+    deletions
+        .enqueue(&key, Utc::now() + ChronoDuration::minutes(5))
+        .await?;
+    storage
+        .put(&key, data)
+        .await
+        .map_err(SourceFileStorageUnavailable)?;
+    novel.retain_source_file(key);
+    Ok(())
+}
+
 #[cfg(test)]
 mod import_budget_tests {
     use super::*;
+
+    struct RecordingStorage {
+        events: Arc<Mutex<Vec<&'static str>>>,
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl SourceFileStorage for RecordingStorage {
+        async fn put(&self, _key: &str, _data: bytes::Bytes) -> Result<()> {
+            self.events.lock().unwrap().push("put");
+            if self.fail {
+                anyhow::bail!("simulated S3 failure");
+            }
+            Ok(())
+        }
+
+        async fn delete(&self, _key: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct RecordingDeletions(Arc<Mutex<Vec<&'static str>>>);
+
+    #[async_trait::async_trait]
+    impl SourceFileDeletionRepository for RecordingDeletions {
+        async fn enqueue(
+            &self,
+            _object_key: &str,
+            _not_before: chrono::DateTime<Utc>,
+        ) -> Result<()> {
+            self.0.lock().unwrap().push("enqueue");
+            Ok(())
+        }
+
+        async fn due(
+            &self,
+            _limit: i64,
+        ) -> Result<Vec<crate::domain::repositories::PendingSourceFileDeletion>> {
+            Ok(vec![])
+        }
+
+        async fn complete(&self, _object_key: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn retry(
+            &self,
+            _object_key: &str,
+            _error: &str,
+            _not_before: chrono::DateTime<Utc>,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn import_budget_accepts_paste_limit_and_rejects_provider_fanout() {
@@ -693,6 +789,55 @@ mod import_budget_tests {
         drop(first);
         drop(second);
         assert!(try_import_admission(&permits, &users, first_user).is_ok());
+    }
+
+    #[test]
+    fn source_file_key_ignores_untrusted_file_names() {
+        let user_id = Uuid::nil();
+        let novel_id = Uuid::from_u128(1);
+        assert_eq!(
+            source_file_key(user_id, novel_id),
+            "source-files/00000000-0000-0000-0000-000000000000/00000000-0000-0000-0000-000000000001"
+        );
+    }
+
+    #[tokio::test]
+    async fn source_retention_queues_cleanup_before_write_and_binds_only_on_success() {
+        let events = Arc::new(Mutex::new(vec![]));
+        let deletions = RecordingDeletions(events.clone());
+        let mut novel = Novel::create(Uuid::new_v4(), "test".into(), None);
+        retain_source_file(
+            &mut novel,
+            Some(bytes::Bytes::from_static(b"novel")),
+            Some(&RecordingStorage {
+                events: events.clone(),
+                fail: false,
+            }),
+            &deletions,
+        )
+        .await
+        .unwrap();
+        assert_eq!(*events.lock().unwrap(), ["enqueue", "put"]);
+        assert!(novel.file_key.is_some());
+
+        events.lock().unwrap().clear();
+        let mut failed_novel = Novel::create(Uuid::new_v4(), "test".into(), None);
+        let error = retain_source_file(
+            &mut failed_novel,
+            Some(bytes::Bytes::from_static(b"novel")),
+            Some(&RecordingStorage {
+                events: events.clone(),
+                fail: true,
+            }),
+            &deletions,
+        )
+        .await
+        .unwrap_err();
+        assert!(error
+            .downcast_ref::<SourceFileStorageUnavailable>()
+            .is_some());
+        assert_eq!(*events.lock().unwrap(), ["enqueue", "put"]);
+        assert!(failed_novel.file_key.is_none());
     }
 }
 

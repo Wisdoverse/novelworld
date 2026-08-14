@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::application::commands::ImportNovelCommand;
 use crate::application::handlers::{
     ImportBudgetExceeded, ImportCapacityUnavailable, NovelCommandHandler, NovelDeletionError,
-    ReadingProgressError, ReadingProgressHandler,
+    ReadingProgressError, ReadingProgressHandler, SourceFileStorageUnavailable,
 };
 use crate::domain::entities::novel::Novel;
 use crate::domain::ports::{
@@ -42,6 +42,7 @@ pub struct AppState {
     pub account_export: Arc<dyn AccountExportPort>,
     pub internal_service_token: Arc<str>,
     pub readiness: Arc<dyn ReadinessProbe>,
+    pub source_storage_readiness: Option<Arc<dyn ReadinessProbe>>,
     pub metrics: llm_client::MetricsHandle,
 }
 
@@ -427,7 +428,7 @@ async fn import_novel(
         title,
         author,
         raw_content: content,
-        file_key: None,
+        source_bytes: None,
         deviation_mode,
     };
 
@@ -482,6 +483,19 @@ fn import_error_response(error: anyhow::Error) -> Response {
             StatusCode::UNPROCESSABLE_ENTITY,
             "Novel exceeds the supported processing budget",
         );
+    }
+    if error
+        .downcast_ref::<SourceFileStorageUnavailable>()
+        .is_some()
+    {
+        let mut response = api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Source file storage is unavailable; retry the upload",
+        );
+        response
+            .headers_mut()
+            .insert("Retry-After", HeaderValue::from_static("5"));
+        return response;
     }
     tracing::error!(%error, "novel import request failed");
     api_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
@@ -570,6 +584,7 @@ async fn upload_novel(
     let mut title: Option<String> = None;
     let mut author: Option<String> = None;
     let mut content: Option<String> = None;
+    let mut source_bytes = None;
     let mut file_seen = false;
     let mut deviation_mode_str: Option<String> = None;
 
@@ -634,10 +649,12 @@ async fn upload_novel(
                 let extractor = state.document_extractor.clone();
                 let extracted = tokio::task::spawn_blocking(move || {
                     let _permit = permit;
-                    extractor.extract_text(file_name.as_deref(), content_type.as_deref(), &data)
+                    extractor
+                        .extract_text(file_name.as_deref(), content_type.as_deref(), &data)
+                        .map(|text| (text, data))
                 })
                 .await;
-                content = match extracted {
+                match extracted {
                     Err(error) => {
                         tracing::error!(%error, "document parser task failed");
                         return api_error(
@@ -645,9 +662,12 @@ async fn upload_novel(
                             "Internal server error",
                         );
                     }
-                    Ok(Ok(text)) => Some(text),
+                    Ok(Ok((text, data))) => {
+                        content = Some(text);
+                        source_bytes = Some(data);
+                    }
                     Ok(Err(error)) => return document_error_response(error),
-                };
+                }
             }
             _ => {
                 // Ignore unknown fields
@@ -693,7 +713,7 @@ async fn upload_novel(
         title,
         author,
         raw_content: Some(content),
-        file_key: None,
+        source_bytes,
         deviation_mode,
     };
 
@@ -1194,7 +1214,11 @@ async fn health() -> impl IntoResponse {
 }
 
 async fn ready(State(state): State<AppState>) -> impl IntoResponse {
-    let status = readiness_status(state.readiness.as_ref()).await;
+    let status = readiness_status(
+        state.readiness.as_ref(),
+        state.source_storage_readiness.as_deref(),
+    )
+    .await;
     if status == StatusCode::SERVICE_UNAVAILABLE {
         tracing::warn!("novel-service readiness check failed");
     }
@@ -1206,8 +1230,17 @@ async fn ready(State(state): State<AppState>) -> impl IntoResponse {
     (status, Json(body)).into_response()
 }
 
-async fn readiness_status(probe: &dyn ReadinessProbe) -> StatusCode {
-    if probe.is_ready().await {
+async fn readiness_status(
+    postgres: &dyn ReadinessProbe,
+    source_storage: Option<&dyn ReadinessProbe>,
+) -> StatusCode {
+    let (postgres_ready, storage_ready) = tokio::join!(postgres.is_ready(), async {
+        match source_storage {
+            Some(probe) => probe.is_ready().await,
+            None => true,
+        }
+    });
+    if postgres_ready && storage_ready {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
@@ -1272,9 +1305,16 @@ mod ownership_tests {
 
     #[tokio::test]
     async fn readiness_status_fails_closed() {
-        assert_eq!(readiness_status(&FixedProbe(true)).await, StatusCode::OK);
         assert_eq!(
-            readiness_status(&FixedProbe(false)).await,
+            readiness_status(&FixedProbe(true), None).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            readiness_status(&FixedProbe(false), None).await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            readiness_status(&FixedProbe(true), Some(&FixedProbe(false))).await,
             StatusCode::SERVICE_UNAVAILABLE
         );
     }

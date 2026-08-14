@@ -8,7 +8,7 @@ exists, then the owning delete workflow removes it.
 
 | Data | Storage and retention | Erasure |
 |---|---|---|
-| Uploaded TXT, EPUB, or PDF bytes | Held only while the upload request extracts text. NovelWorld does not persist the original file or write `original_file_key` in the current runtime. | Released after request processing; there is no stored upload object to delete. |
+| Uploaded TXT, EPUB, or PDF bytes | With `S3_ENABLED=true`, stored privately under a server-generated key for the lifetime of the novel. With S3 disabled, held only while the request extracts text. | Novel/account deletion atomically queues the object key in PostgreSQL; novel-service deletes it asynchronously and retries with bounded backoff until S3 acknowledges deletion. |
 | Extracted source text and lore chunks | PostgreSQL `chapters` and `chapter_chunks`, for the lifetime of the novel. | `DELETE /api/novels/{id}` or account deletion. |
 | Characters, relationships, and canonical models | PostgreSQL, for the lifetime of the novel. Avatar bytes are not copied into NovelWorld; only provider-returned URL metadata is stored. | Novel or account deletion removes the rows and URL metadata. |
 | Chat turns and messages | PostgreSQL, for the lifetime of the novel/account. PostgreSQL is authoritative. | Novel or account deletion. |
@@ -23,6 +23,15 @@ exists, then the owning delete workflow removes it.
 Database foreign keys perform the authoritative cascade. Redis cleanup is a
 service-owned operation: user-service and novel-service do not read or delete
 agent-service tables directly.
+
+S3 is opt-in and belongs to novel-service. Enabling it requires a pre-created
+private bucket. Upload acceptance requires a successful object write and stores
+only a server-generated key in PostgreSQL. Disabling S3 while stored objects or
+pending deletion records exist is rejected at startup. Original object bytes and
+keys are not included in account export; the extracted source chapters remain
+portable through `account-export-v1`. The service identity needs `s3:ListBucket`
+on that bucket for readiness and `s3:PutObject`/`s3:DeleteObject` only on the
+`source-files/*` prefix.
 
 ## Delete behavior
 
@@ -39,6 +48,10 @@ agent-service tables directly.
   no longer an owned resource and returns `404`.
 - Deleted application data is intentionally unrecoverable. NovelWorld does not
   provide a restore or recycle-bin workflow.
+- S3 deletion is eventually complete rather than transactionally coupled to
+  PostgreSQL. The durable `source_file_deletions` outbox survives novel and
+  account cascades and service restarts; `/ready` fails while an enabled S3
+  bucket is unavailable.
 
 ## Data outside NovelWorld
 

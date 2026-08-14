@@ -39,6 +39,8 @@
 │    Redis    │  短期记忆缓存 · 会话状态 · SSE 连接管理
 │  Port 6379  │
 └─────────────┘
+
+       novel-service ── optional private source bytes ──▶ S3-compatible storage
 ```
 
 ---

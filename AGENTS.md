@@ -31,7 +31,7 @@ Browser (Vite dev server or Nginx static)
   → Novel Service (:8002) — ingestion, parsing, progress
   → Agent Service (:8003) — memory, chat, SSE streaming
   → Narrative Service (:8004) — branches, choices, world state
-  → PostgreSQL (:5432) / Redis (:6379)
+  → PostgreSQL (:5432) / Redis (:6379) / optional S3-compatible object storage
 ```
 
 Data flow for a conversation turn:
@@ -207,6 +207,11 @@ Copy `.env.example` to `.env`. Required:
 or leave it empty and complete the DeepSeek/OpenAI setup in the first-run web
 page.
 
+`S3_ENABLED` is optional. When true, configure `S3_BUCKET` and `S3_REGION`;
+`S3_ENDPOINT` and path-style addressing support S3-compatible providers. Use
+either explicit `S3_ACCESS_KEY`/`S3_SECRET_KEY` credentials or the standard AWS
+credential provider chain.
+
 See `.env.example` for the full list with defaults.
 
 ## Testing
@@ -267,9 +272,7 @@ exercise production repositories plus replayable migrations.
 
 ## Known Gaps (Not Yet Implemented)
 
-All previously listed gaps have been resolved. Remaining minor items:
-
-- S3 object storage for uploaded files — upload endpoint extracts text directly, no S3 persistence yet.
+All previously listed implementation gaps have been resolved.
 
 ## Security Notes
 

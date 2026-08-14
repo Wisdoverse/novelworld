@@ -15,6 +15,20 @@ pub trait NovelRepository: Send + Sync {
     async fn delete(&self, id: Uuid) -> Result<()>;
 }
 
+#[derive(Debug, Clone)]
+pub struct PendingSourceFileDeletion {
+    pub object_key: String,
+    pub attempts: i32,
+}
+
+#[async_trait]
+pub trait SourceFileDeletionRepository: Send + Sync {
+    async fn enqueue(&self, object_key: &str, not_before: DateTime<Utc>) -> Result<()>;
+    async fn due(&self, limit: i64) -> Result<Vec<PendingSourceFileDeletion>>;
+    async fn complete(&self, object_key: &str) -> Result<()>;
+    async fn retry(&self, object_key: &str, error: &str, not_before: DateTime<Utc>) -> Result<()>;
+}
+
 #[async_trait]
 pub trait CanonStoryModelRepository: Send + Sync {
     async fn insert(&self, model: &CanonStoryModel) -> Result<()>;

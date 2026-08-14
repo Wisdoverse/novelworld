@@ -10,19 +10,24 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use novel_service::{
-    application::handlers::{NovelCommandHandler, ReadingProgressHandler},
+    application::{
+        handlers::{NovelCommandHandler, ReadingProgressHandler},
+        source_file_cleanup::SourceFileCleanupWorker,
+    },
     domain::ports::{
         AccountExportPort, DocumentTextExtractor, ImagePort, LlmPort, PrivacyCleanupPort,
+        ReadinessProbe, SourceFileStorage,
     },
     infrastructure::{
         document::EbookTextExtractor,
         llm::{image::ImageClient, LlmAdapter},
+        object_storage::{S3SourceFileStorage, S3StorageConfig},
         persistence::{
             account_export::PgAccountExport,
             canon_story_model_pg_repo::PgCanonStoryModelRepository,
             chapter_pg_repo::ChapterPgRepository, character_pg_repo::CharacterPgRepository,
             novel_pg_repo::NovelPgRepository, pg_progress_repo::PgReadingProgressRepository,
-            PgReadinessProbe,
+            source_file_deletion_pg_repo::PgSourceFileDeletionRepository, PgReadinessProbe,
         },
         privacy::AgentPrivacyClient,
     },
@@ -71,6 +76,27 @@ async fn main() -> Result<()> {
     let canon_repo = Arc::new(PgCanonStoryModelRepository::new(pool.clone()));
     let progress_repo = Arc::new(PgReadingProgressRepository::new(pool.clone()));
     let account_export: Arc<dyn AccountExportPort> = Arc::new(PgAccountExport::new(pool.clone()));
+    let source_deletions_impl = Arc::new(PgSourceFileDeletionRepository::new(pool.clone()));
+    let (source_storage, source_storage_readiness) = match S3StorageConfig::from_env()? {
+        Some(config) => {
+            let storage = Arc::new(S3SourceFileStorage::new(config).await?);
+            let port: Arc<dyn SourceFileStorage> = storage.clone();
+            let readiness: Arc<dyn ReadinessProbe> = storage;
+            (Some(port), Some(readiness))
+        }
+        None => {
+            if source_deletions_impl.storage_required().await? {
+                anyhow::bail!("S3_ENABLED must remain true while stored source files exist");
+            }
+            (None, None)
+        }
+    };
+    let source_deletions: Arc<
+        dyn novel_service::domain::repositories::SourceFileDeletionRepository,
+    > = source_deletions_impl;
+    if let Some(storage) = source_storage.clone() {
+        SourceFileCleanupWorker::new(storage, source_deletions.clone()).spawn();
+    }
 
     let llm: Arc<dyn LlmPort> = llm;
     let image_client: Arc<dyn ImagePort> = image_client;
@@ -88,6 +114,8 @@ async fn main() -> Result<()> {
         llm,
         image_client,
         privacy_cleanup,
+        source_storage,
+        source_deletions,
         // ponytail: process-local admission matches the single service replica;
         // replace with a durable queue before horizontally scaling imports.
         import_permits: Arc::new(Semaphore::new(2)),
@@ -112,6 +140,7 @@ async fn main() -> Result<()> {
         account_export,
         internal_service_token: internal_service_token.into(),
         readiness: Arc::new(PgReadinessProbe::new(pool)),
+        source_storage_readiness,
         metrics,
     };
 

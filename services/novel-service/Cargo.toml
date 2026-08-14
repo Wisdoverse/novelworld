@@ -27,6 +27,8 @@ futures.workspace = true
 bytes.workspace = true
 async-stream.workspace = true
 llm-client.workspace = true
+aws-config.workspace = true
+aws-sdk-s3.workspace = true
 
 # PDF parsing
 pdf-extract = "0.12"

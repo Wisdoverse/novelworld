@@ -103,6 +103,11 @@ impl Novel {
         self.updated_at = Utc::now();
     }
 
+    pub fn retain_source_file(&mut self, key: String) {
+        self.file_key = Some(key);
+        self.updated_at = Utc::now();
+    }
+
     /// 取出并清空领域事件
     pub fn take_events(&mut self) -> Vec<NovelEvent> {
         std::mem::take(&mut self.domain_events)
