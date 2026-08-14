@@ -545,7 +545,7 @@ evidence.
 | Another language, format, provider, model, or client | A named user outcome justifies it and the new slice adds versioned live/adversarial evidence |
 | Multiple named timelines | Single-timeline lifecycle is observed reliable and user demand exceeds its limitation |
 | Durable external queue | Database-owned jobs cannot meet measured recovery or throughput SLOs |
-| Object storage/CDN | Retention, reprocessing, multi-node assets, durability, or delivery SLO requires retained objects |
+| Broader object-storage use or CDN | A measured retention, reprocessing, multi-node asset, durability, or delivery SLO cannot be met by the existing opt-in source-file storage |
 | Replicas or orchestration | A named availability/capacity objective repeatedly fails after simpler component tuning |
 | Physical service databases | Measured contention, blast radius, compliance, or independent-operation need exceeds migration cost |
 | Another vector/search database | pgvector fails a versioned relevance/latency objective on representative data after query/index tuning |
