@@ -17,6 +17,7 @@ itself.
 | What product are we trying to create? | [`README.md`](../README.md), limited to claims backed by the supported envelope |
 | What is supported now, and who owns each responsibility? | [`PRODUCT_CONTRACT.md`](./PRODUCT_CONTRACT.md) |
 | What behavior is required? | The approved version of [`SPEC.md`](../SPEC.md) |
+| What is each reviewed SPEC clause's evidence state? | [`SPEC_CONFORMANCE.md`](./SPEC_CONFORMANCE.md) |
 | What does the system do today? | Runtime code, migrations, and tests; documentation is not runtime evidence |
 | What engineering constraints apply today? | [`AGENTS.md`](../AGENTS.md) and accepted architecture decisions until explicitly superseded |
 | What outcome comes next? | This roadmap |

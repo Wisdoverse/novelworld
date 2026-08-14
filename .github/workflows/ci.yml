@@ -22,6 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Specification conformance ledger
+        run: sha256sum --check docs/SPEC_CONFORMANCE.sha256
       - name: Release manifest boundary
         shell: bash
         run: |

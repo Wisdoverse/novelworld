@@ -67,6 +67,7 @@ provider-hosted image bytes, operator logs, or backups.
 
 | Product claim | State now | Evidence or gap | Owner |
 |---|---|---|---|
+| First-run administrator and model setup | Structurally verified | The first administrator is a single durable winner; web-supplied provider keys are encrypted before PostgreSQL storage and environment configuration takes precedence | H2 |
 | One-click import | Accepted and structurally verified inside the input limits | Parsing runs in a process-local task; restart-safe claim/resume and live semantic quality are missing | H1 |
 | Canonical world model and relationship graph | Structurally verified | Source coverage exists in deterministic tests; representative live quality is not qualified | H1, H3 |
 | Character personality and authentic voice | Intended gap | Novel stores persona fields, but chat currently consumes essentially the character name plus lore/memory/world context | H3 |
@@ -119,6 +120,8 @@ product claim, SPEC target, runtime behavior, and evidence together when they
 are affected. Thresholds and supported slices must be approved before the
 change they judge; a candidate cannot weaken its own gate.
 
-This slice deliberately does not approve the full SPEC conformance ledger or
-the clean-checkout CI entry point required to exit H0. It also does not replace
-independent maintainer, product, security, accessibility, or legal review.
+The clause dispositions and their owning horizons are recorded in the
+candidate [`SPEC conformance ledger`](./SPEC_CONFORMANCE.md). That ledger and
+this contract do not by themselves complete H0: the clean-checkout verification
+entry point and independent maintainer, product, security, accessibility, or
+legal review remain separate gates where applicable.
