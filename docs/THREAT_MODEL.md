@@ -31,7 +31,7 @@ The assets that require protection are:
 
 - Password hashes, access and refresh tokens, JWT signing material, the runtime
   configuration encryption key, provider API keys, database/Redis credentials,
-  and the internal service token.
+  S3 credentials, and the internal service token.
 - Private source novels, chapters, characters, chat messages, character
   memories, reading progress and identity, choices, world state, generated
   player chapters, open-world sessions and turn journals, and account exports.
@@ -143,12 +143,15 @@ limit but cannot enforce.
    data. The model proposes bounded typed changes over IDs in a persisted entry
    snapshot; it cannot select the acting player or commit.
 
-7. **Services to PostgreSQL and Redis.** All services currently share one
+7. **Services to PostgreSQL, Redis, and S3.** All services currently share one
    PostgreSQL deployment, but ownership is logical and enforced by service APIs
    and user-scoped parameterized queries. Redis is a projection/cache, not the
    only durable copy of account data. Database credentials, schema privileges,
    migrations, backups, and a compromised service process are a stronger trust
-   boundary than a normal reader.
+   boundary than a normal reader. When enabled, novel-service alone writes
+   private source objects to S3 using server-generated UUID paths. S3 endpoint,
+   bucket, region, and credentials are operator-controlled; readiness fails when
+   the configured bucket is unavailable.
 
 8. **Administrator setup and runtime configuration.** Initial setup is public
    only while no administrator exists and persists the administrator, refresh
@@ -233,7 +236,11 @@ for cross-service table reads or unscoped records.
 and PDF and bounds uploaded and extracted bytes. EPUB processing limits entry
 count, container/package/chapter sizes, follows the package spine, and reads ZIP
 entries into memory without writing archive paths to disk. The HTTP layer limits
-the complete request and metadata.
+the complete request and metadata. Accepted files are written to S3 only after
+format validation, under a key that never includes the attacker-controlled
+filename. A delayed cleanup intent covers crashes between S3 and PostgreSQL;
+novel/account deletion uses a durable outbox so database cascades cannot orphan
+objects.
 
 Relevant stories are ZIP bombs with misleading declared sizes, duplicate or
 path-like ZIP names, XML/HTML parser edge cases, PDFs that consume excessive CPU
@@ -297,6 +304,8 @@ data, future secret columns leaking through broad serialization, partial success
 presented as complete, and sensitive provider bodies or prompts reaching logs.
 Error normalization, field allowlists, sentinel-secret tests, and explicit
 retention documentation are controls; they must be maintained as schemas grow.
+S3 object keys are excluded from export, deletion intents survive account
+cascade, and adapter errors must never expose credentials.
 
 ### Availability and economic abuse
 
