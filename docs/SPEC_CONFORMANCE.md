@@ -148,6 +148,7 @@ state in two places.
    recovery, security, accessibility, deployment, and observation retain their
    Roadmap gates.
 
-Open H0 work after this ledger remains: versioned journey/evaluation policy,
-independent adversarial overclaim approval, and the clean-checkout verification
-entry point.
+The candidate [`qualification policy`](./QUALIFICATION_POLICY.md) owns the
+journey/evaluation slices and threshold process. Open H0 work after these
+candidates remains independent adversarial overclaim approval and the
+clean-checkout verification entry point.
