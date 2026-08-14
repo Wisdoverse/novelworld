@@ -67,9 +67,9 @@ impl ReadinessProbe for PgReadinessProbe {
                            SELECT 1 FROM pg_catalog.pg_constraint
                            WHERE conrelid =
                                      'public.novel_import_jobs'::pg_catalog.regclass
-                             AND confrelid = 'public.novels'::pg_catalog.regclass
                              AND contype::pg_catalog.text = 'f'
-                             AND confdeltype::pg_catalog.text = 'c'
+                             AND pg_catalog.pg_get_constraintdef(oid) =
+                                 'FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE'
                        )
                        AND EXISTS (
                            SELECT 1

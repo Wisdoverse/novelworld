@@ -57,14 +57,15 @@ CREATE INDEX IF NOT EXISTS idx_novel_import_jobs_recoverable
 -- content; UNIQUE(novel_id, chapter_number) makes count/min/max sufficient.
 -- They are additionally authoritative when the novel's advertised
 -- total_chapters agrees, which is what enrichment and publication require.
+-- Readable means "contains a non-whitespace character": btrim() strips only
+-- spaces, so it would accept tab/newline-only text the runtime rejects.
 WITH chapter_shape AS (
     SELECT chapter.novel_id,
            pg_catalog.count(*)::pg_catalog.int4 AS chapter_count,
            pg_catalog.min(chapter.chapter_number) AS lowest_chapter,
            pg_catalog.max(chapter.chapter_number) AS highest_chapter,
-           pg_catalog.bool_and(
-               NULLIF(pg_catalog.btrim(chapter.content), '') IS NOT NULL
-           ) AS every_chapter_readable
+           pg_catalog.bool_and(chapter.content ~ '[^[:space:]]')
+               AS every_chapter_readable
     FROM public.chapters AS chapter
     GROUP BY chapter.novel_id
 ),
@@ -87,8 +88,8 @@ classified AS (
                AND n.total_chapters = shape.chapter_count,
                FALSE
            ) AS chapters_authoritative,
-           NULLIF(pg_catalog.btrim(n.world_summary), '') IS NOT NULL
-               AND NULLIF(pg_catalog.btrim(n.genre), '') IS NOT NULL
+           COALESCE(n.world_summary ~ '[^[:space:]]', FALSE)
+               AND COALESCE(n.genre ~ '[^[:space:]]', FALSE)
                AND EXISTS (
                    SELECT 1 FROM public.characters AS extracted
                    WHERE extracted.novel_id = n.id
@@ -135,6 +136,79 @@ SELECT
     n.updated_at
 FROM resolved AS n
 ON CONFLICT (novel_id) DO NOTHING;
+
+-- Databases upgraded by the first revision of this migration recorded ready
+-- novels with gapped or blank chapters as completed imports. ON CONFLICT above
+-- leaves those rows untouched, so re-classify the ones that never satisfied
+-- import completeness. Downgraded rows are 'failed' and cannot re-fire.
+WITH chapter_shape AS (
+    SELECT chapter.novel_id,
+           pg_catalog.count(*)::pg_catalog.int4 AS chapter_count,
+           pg_catalog.min(chapter.chapter_number) AS lowest_chapter,
+           pg_catalog.max(chapter.chapter_number) AS highest_chapter,
+           pg_catalog.bool_and(chapter.content ~ '[^[:space:]]')
+               AS every_chapter_readable
+    FROM public.chapters AS chapter
+    GROUP BY chapter.novel_id
+),
+classified AS (
+    SELECT n.id,
+           n.status::pg_catalog.text AS novel_status,
+           shape.novel_id IS NOT NULL AS has_chapters,
+           COALESCE(
+               shape.lowest_chapter = 1
+               AND shape.highest_chapter = shape.chapter_count
+               AND shape.every_chapter_readable,
+               FALSE
+           ) AS chapters_resumable,
+           COALESCE(
+               shape.lowest_chapter = 1
+               AND shape.highest_chapter = shape.chapter_count
+               AND shape.every_chapter_readable
+               AND n.total_chapters = shape.chapter_count,
+               FALSE
+           ) AS chapters_authoritative,
+           COALESCE(n.world_summary ~ '[^[:space:]]', FALSE)
+               AND COALESCE(n.genre ~ '[^[:space:]]', FALSE)
+               AND EXISTS (
+                   SELECT 1 FROM public.characters AS extracted
+                   WHERE extracted.novel_id = n.id
+               ) AS enrichment_present,
+           EXISTS (
+               SELECT 1 FROM public.canon_story_models AS canon
+               WHERE canon.novel_id = n.id
+           ) AS canon_present
+    FROM public.novels AS n
+    LEFT JOIN chapter_shape AS shape ON shape.novel_id = n.id
+),
+resolved AS (
+    SELECT classified.*,
+           classified.novel_status = 'ready'
+               AND classified.chapters_authoritative
+               AND classified.enrichment_present
+               AND classified.canon_present AS import_complete
+    FROM classified
+)
+UPDATE public.novel_import_jobs AS job
+SET stage = CASE
+        WHEN n.has_chapters AND NOT n.chapters_resumable THEN 'source'
+        WHEN n.chapters_authoritative AND n.enrichment_present THEN 'enriched'
+        WHEN n.has_chapters THEN 'chapters'
+        ELSE 'source'
+    END,
+    status = 'failed',
+    lease_expires_at = NULL,
+    failure_code = CASE
+        WHEN n.has_chapters AND NOT n.chapters_resumable THEN 'legacy_chapters_invalid'
+        WHEN n.novel_status = 'ready' THEN 'legacy_incomplete'
+        WHEN n.novel_status = 'error' THEN 'legacy_error'
+        ELSE 'interrupted_upgrade'
+    END,
+    updated_at = pg_catalog.now()
+FROM resolved AS n
+WHERE n.id = job.novel_id
+  AND job.status = 'completed'
+  AND NOT n.import_complete;
 
 -- Compose runs every migration on each deployment, so only touch novels that
 -- are not already carrying the converted failure.

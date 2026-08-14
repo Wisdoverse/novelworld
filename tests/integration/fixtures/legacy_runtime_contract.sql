@@ -189,3 +189,24 @@ VALUES (
     '00000000-0000-0000-0000-000000000002',
     7
 );
+
+INSERT INTO public.user_choices (
+    id, user_id, novel_id, node_id, chapter_number, choice_index,
+    choice_text, consequence
+) VALUES (
+    '00000000-0000-0000-0000-000000000022',
+    '00000000-0000-0000-0000-000000000001',
+    '00000000-0000-0000-0000-000000000002',
+    '00000000-0000-0000-0000-000000000006',
+    7,
+    0,
+    'legacy choice',
+    'legacy consequence'
+);
+
+INSERT INTO public.world_states (id, user_id, novel_id)
+VALUES (
+    '00000000-0000-0000-0000-000000000023',
+    '00000000-0000-0000-0000-000000000001',
+    '00000000-0000-0000-0000-000000000002'
+);

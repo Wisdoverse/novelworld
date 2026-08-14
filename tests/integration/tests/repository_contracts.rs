@@ -604,8 +604,22 @@ async fn complete_import_rejects_gapped_chapters_with_matching_count() {
         "parsing"
     );
 
+    // Contiguous again, but tabs and newlines survive BTRIM(): a chapter that
+    // carries no readable character must still block publication.
     sqlx::query(
-        "UPDATE chapters SET chapter_number = 2 WHERE novel_id = $1 AND chapter_number = 3",
+        "UPDATE chapters SET chapter_number = 2, content = $2 \
+         WHERE novel_id = $1 AND chapter_number = 3",
+    )
+    .bind(novel_id)
+    .bind("\t\n \t")
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(repo.complete_import(novel_id, 1).await.is_err());
+
+    sqlx::query(
+        "UPDATE chapters SET content = 'A durable second chapter.' \
+         WHERE novel_id = $1 AND chapter_number = 2",
     )
     .bind(novel_id)
     .execute(&pool)

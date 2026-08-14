@@ -258,11 +258,14 @@ impl NovelRepository for NovelPgRepository {
             stage == ImportStage::Enriched,
             "import completion is invalid for the current stage"
         );
+        // Blank means "carries no non-whitespace character": BTRIM() strips
+        // only spaces and would accept tab/newline-only text that the domain
+        // predicate chapters_are_importable rejects.
         let complete = sqlx::query_scalar::<_, bool>(
             r#"
             SELECT novel.total_chapters > 0
-               AND NULLIF(BTRIM(novel.world_summary), '') IS NOT NULL
-               AND NULLIF(BTRIM(novel.genre), '') IS NOT NULL
+               AND COALESCE(novel.world_summary ~ '[^[:space:]]', FALSE)
+               AND COALESCE(novel.genre ~ '[^[:space:]]', FALSE)
                AND novel.total_chapters = (
                    SELECT COUNT(*)::INTEGER FROM chapters WHERE novel_id = novel.id
                )
@@ -271,7 +274,7 @@ impl NovelRepository for NovelPgRepository {
                    WHERE c.novel_id = novel.id
                      AND (c.chapter_number < 1
                           OR c.chapter_number > novel.total_chapters
-                          OR NULLIF(BTRIM(c.content), '') IS NULL)
+                          OR c.content !~ '[^[:space:]]')
                )
                AND EXISTS (
                    SELECT 1 FROM characters WHERE novel_id = novel.id
