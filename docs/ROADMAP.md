@@ -129,6 +129,7 @@ full product completion:
 | Canon/timeline structures, transition validation, replay, evaluation harness, provider telemetry, erasure, export, and threat model | [#79](https://github.com/schorsch888/novelworld/pull/79), [#84](https://github.com/schorsch888/novelworld/pull/84), [#86](https://github.com/schorsch888/novelworld/pull/86), [#88](https://github.com/schorsch888/novelworld/pull/88), [#90](https://github.com/schorsch888/novelworld/pull/90), [#92](https://github.com/schorsch888/novelworld/pull/92), [#94](https://github.com/schorsch888/novelworld/pull/94), [#96](https://github.com/schorsch888/novelworld/pull/96), [#98](https://github.com/schorsch888/novelworld/pull/98) | The recorded synthetic evaluation explicitly does not qualify a live provider |
 | Single-timeline living-world commit path | [PR #100](https://github.com/schorsch888/novelworld/pull/100) | Structural and end-to-end contract evidence, not long-term user coherence |
 | `single-node-v1` capacity policy | [PR #102](https://github.com/schorsch888/novelworld/pull/102) | Small deterministic single-node baseline; it does not predict internet scale |
+| Opt-in original-source retention and deletion lifecycle | [PR #105](https://github.com/schorsch888/novelworld/pull/105) | S3 retains original bytes when enabled and deletion is eventually enforced; parsing remains process-local and non-resumable |
 
 ## Current truth that changes the plan
 
@@ -141,8 +142,8 @@ list:
 | Four-layer memory provides cross-session continuity | Mid-term summaries exist; no demonstrated production path populates long-term memory, and permanent-memory writing is not connected to the journey | H0 decides the contract; H3 proves the outcome |
 | “Any language” interactive world | Ingestion accepts multiple document types, while narrative-node and generated-world paths require Simplified Chinese | H0 defines support; H4 verifies it |
 | Reader may assume a canonical character's identity | README and SPEC §8 retain an optional `character` perspective while SPEC §7.6 makes an original `PlayerEntity` the primary open-world actor | H0 resolves the contract; H4 verifies any retained mode |
-| One-click import survives interruption | Parsing runs in process-local tasks; original upload bytes are not retained and an early process exit may not be recoverable | H1 |
-| `SPEC.md` storage, avatar, and node algorithms describe runtime | Raw files are not persisted; provider image URLs are stored directly; avatar generation is capped; nodes are sampled then generated lazily | H0 decides outcomes rather than blindly implementing algorithms |
+| One-click import survives interruption | With S3 enabled, original upload bytes are retained; parsing still runs in a process-local task, and an early process exit neither claims nor resumes unfinished work | H1 |
+| `SPEC.md` storage, avatar, and node algorithms describe runtime | Original-file persistence is opt-in S3 without a resume/reprocessing path; provider image URLs are stored directly; avatar generation is capped; nodes are sampled then generated lazily | H0 decides outcomes rather than blindly implementing algorithms |
 | Production data can be recovered | Deployment docs show an operator `pg_dump` example, but no versioned RPO/RTO, backup validation, or fresh-host restore drill exists | H1 and H5 |
 | Quality and scale were completed | Current quality evidence is mostly recorded synthetic data; capacity evidence is a test-only single-node profile | H3–H6 |
 | Internet-hosted operation is ready | Threat modeling is strong, but deployment mode, rights/content policy, provider disclosure, TLS/session/CORS posture, abuse economics, and release provenance still need explicit gates | H2 |
@@ -233,9 +234,9 @@ Scope:
   Assign unrelated draft clauses to their owning horizon instead of blocking
   known safety work.
 - Resolve internal contradictions before implementation, including draft-spec
-  authority, EPUB acceptance, permanent-memory deletion, object storage,
-  avatars, narrative-node timing, prompt-injection guarantees, and active-doc
-  drift.
+  authority, EPUB acceptance, permanent-memory deletion, the source-retention
+  and reprocessing contract, avatars, narrative-node timing, prompt-injection
+  guarantees, and active-doc drift.
 - Version and approve the specification and its change process. Freeze the
   journey, quality, SLO, security, and cost measurement contracts, hard
   guardrails, and threshold-approval rules. Where evidence is missing, schedule
@@ -283,9 +284,10 @@ Scope:
   the provider offers that contract; otherwise bound, meter, and budget the
   crash window where receipt is unknowable instead of claiming exactly-once
   external calls.
-- Decide source-byte retention from reprocessing, recovery, privacy, and cost
-  requirements. Use object storage only if the retained outcome requires it;
-  otherwise make re-upload and failure semantics explicit.
+- Use the retained source object, when enabled, as the input to resumed or
+  replayed ingestion. For deployments without object storage, make re-upload
+  and failure semantics explicit. Do not add another storage abstraction or
+  treat persistence alone as a durable import job.
 - Require valid chapter provenance for accepted canon facts and make
   uncertainty visible rather than silently promoting it to canon.
 - Define non-vacuous extraction gates for each supported positive slice:
