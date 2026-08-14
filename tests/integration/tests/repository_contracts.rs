@@ -34,11 +34,16 @@ use novel_service::domain::{
         CanonEndingSnapshot, CanonEvent, CanonStoryContent, CanonStoryModel, SourceCitation,
         SourceEvidence, StoryArc, CANON_STORY_SCHEMA_VERSION,
     },
-    repositories::{CanonStoryModelRepository, ReadingProgressRepository},
+    entities::novel::Novel,
+    repositories::{
+        CanonStoryModelRepository, NovelRepository, ReadingProgressRepository,
+        SourceFileDeletionRepository,
+    },
 };
 use novel_service::infrastructure::persistence::{
-    canon_story_model_pg_repo::PgCanonStoryModelRepository,
+    canon_story_model_pg_repo::PgCanonStoryModelRepository, novel_pg_repo::NovelPgRepository,
     pg_progress_repo::PgReadingProgressRepository,
+    source_file_deletion_pg_repo::PgSourceFileDeletionRepository,
 };
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use uuid::Uuid;
@@ -64,6 +69,84 @@ fn transition(chapter: i32, rendered_narrative: impl Into<String>) -> NarrativeT
         location_changes: vec![],
         thread_changes: vec![],
     }
+}
+
+#[tokio::test]
+async fn source_file_cleanup_intent_is_atomic_and_survives_account_cascade() {
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let user_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO users (id, email, password_hash) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(format!("source-file-{user_id}@test.invalid"))
+        .bind("not-a-real-password-hash")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut novel = Novel::create(user_id, "Stored source".into(), None);
+    let object_key = format!("source-files/{user_id}/{}", novel.id);
+    novel.retain_source_file(object_key.clone());
+    let deletions = PgSourceFileDeletionRepository::new(pool.clone());
+    deletions
+        .enqueue(
+            &object_key,
+            chrono::Utc::now() + chrono::Duration::minutes(5),
+        )
+        .await
+        .unwrap();
+    NovelPgRepository::new(pool.clone())
+        .save(&novel)
+        .await
+        .unwrap();
+    let unmanaged_keys = [
+        "legacy-source.txt".to_owned(),
+        format!("source-files/{}", "x".repeat(1_024)),
+    ];
+    for unmanaged_key in &unmanaged_keys {
+        sqlx::query(
+            "INSERT INTO novels (id, user_id, title, original_file_key) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(user_id)
+        .bind("Unmanaged source")
+        .bind(unmanaged_key)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    assert!(!sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM source_file_deletions WHERE object_key = $1)",
+    )
+    .bind(&object_key)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(deletions
+        .due(100)
+        .await
+        .unwrap()
+        .iter()
+        .any(|pending| pending.object_key == object_key));
+    for unmanaged_key in unmanaged_keys {
+        assert!(!sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM source_file_deletions WHERE object_key = $1)",
+        )
+        .bind(unmanaged_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap());
+    }
+    deletions.complete(&object_key).await.unwrap();
 }
 
 #[tokio::test]

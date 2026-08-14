@@ -45,6 +45,12 @@ pub trait PrivacyCleanupPort: Send + Sync {
     async fn allow_novel(&self, user_id: Uuid, novel_id: Uuid) -> Result<()>;
 }
 
+#[async_trait]
+pub trait SourceFileStorage: Send + Sync {
+    async fn put(&self, key: &str, data: bytes::Bytes) -> Result<()>;
+    async fn delete(&self, key: &str) -> Result<()>;
+}
+
 #[derive(Debug, Error)]
 pub enum DocumentExtractionError {
     #[error("unsupported file type; upload a TXT, EPUB, or PDF file")]

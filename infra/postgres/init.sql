@@ -63,6 +63,45 @@ CREATE INDEX idx_novels_user_id ON novels(user_id);
 CREATE INDEX idx_novels_status ON novels(status);
 CREATE INDEX idx_novels_title_trgm ON novels USING gin(title gin_trgm_ops);
 
+-- S3 删除 outbox 不使用外键，确保账户级联删除小说后仍保留清理证据。
+CREATE TABLE source_file_deletions (
+    object_key      TEXT PRIMARY KEY CHECK (
+        object_key LIKE 'source-files/%'
+        AND octet_length(object_key) BETWEEN 1 AND 1024
+    ),
+    attempts        INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_error      VARCHAR(500),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_source_file_deletions_due
+    ON source_file_deletions(next_attempt_at, object_key);
+
+CREATE OR REPLACE FUNCTION queue_source_file_deletion()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $function$
+BEGIN
+    IF OLD.original_file_key LIKE 'source-files/%'
+       AND pg_catalog.octet_length(OLD.original_file_key) BETWEEN 1 AND 1024 THEN
+        INSERT INTO public.source_file_deletions (object_key)
+        VALUES (OLD.original_file_key)
+        ON CONFLICT (object_key) DO UPDATE
+        SET next_attempt_at = LEAST(
+            public.source_file_deletions.next_attempt_at,
+            EXCLUDED.next_attempt_at
+        );
+    END IF;
+    RETURN OLD;
+END
+$function$;
+
+CREATE TRIGGER queue_source_file_deletion
+    AFTER DELETE ON novels
+    FOR EACH ROW EXECUTE FUNCTION queue_source_file_deletion();
+
 -- ─── 章节表 ────────────────────────────────────────────────────────────────
 
 CREATE TABLE chapters (
