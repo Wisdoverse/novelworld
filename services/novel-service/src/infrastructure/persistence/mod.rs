@@ -4,6 +4,7 @@ pub mod chapter_pg_repo;
 pub mod character_pg_repo;
 pub mod novel_pg_repo;
 pub mod pg_progress_repo;
+pub mod source_file_deletion_pg_repo;
 
 use crate::domain::ports::ReadinessProbe;
 use async_trait::async_trait;

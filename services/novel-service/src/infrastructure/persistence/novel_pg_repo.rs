@@ -20,6 +20,7 @@ impl NovelPgRepository {
 #[async_trait]
 impl NovelRepository for NovelPgRepository {
     async fn save(&self, novel: &Novel) -> Result<()> {
+        let mut transaction = self.pool.begin().await?;
         sqlx::query(
             r#"INSERT INTO novels (
                 id, user_id, title, author, cover_url, description,
@@ -42,8 +43,15 @@ impl NovelRepository for NovelPgRepository {
         .bind(novel.deviation_mode.to_str())
         .bind(novel.created_at)
         .bind(novel.updated_at)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
+        if let Some(key) = &novel.file_key {
+            sqlx::query("DELETE FROM source_file_deletions WHERE object_key = $1")
+                .bind(key)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        transaction.commit().await?;
         Ok(())
     }
 
