@@ -5,9 +5,13 @@
 NovelWorld is a self-hosted, multi-user web application that accepts novels and
 turns them into interactive worlds. Its production topology is an Nginx edge,
 a React browser client, an Axum Gateway, four data-owning Rust services,
-PostgreSQL, Redis, and operator-selected OpenAI-compatible model
-providers. The browser reaches only Nginx and the Gateway. Downstream services
+PostgreSQL, Redis, and operator-selected model/image providers. The browser
+reaches only Nginx and the Gateway. Downstream services
 trust identity headers inserted by a Gateway that has verified a JWT.
+
+The current supported profile is the private self-hosted preview defined in the
+[`product contract`](./PRODUCT_CONTRACT.md). Modeling an Internet attacker or a
+public edge is defensive analysis, not approval for public hosting.
 
 The primary runtime is:
 
