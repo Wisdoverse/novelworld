@@ -1,6 +1,6 @@
 # NovelWorld Service Specification
 
-Status: H0 candidate v1
+Status: H0 candidate `private-preview-v1`
 
 Purpose: Define a platform that transforms a supported novel into an interactive world where readers engage
 with AI-driven character agents, influence narrative branches, and maintain persistent memory across
@@ -10,7 +10,9 @@ This document is the intended normative target, not evidence that the current
 runtime conforms to every clause. The current supported envelope, known gaps,
 and claim dispositions are recorded in
 [`docs/PRODUCT_CONTRACT.md`](./docs/PRODUCT_CONTRACT.md). Runtime code,
-migrations, and tests remain the source of truth for current behavior.
+migrations, and tests remain the source of truth for current behavior. The
+clause-by-clause review state is recorded in
+[`docs/SPEC_CONFORMANCE.md`](./docs/SPEC_CONFORMANCE.md).
 
 ## Normative Language
 
@@ -78,8 +80,10 @@ Important boundary:
 - Multi-reader shared world state or collaborative sessions.
 - Real-time multiplayer interaction between readers.
 - Authoring tools for creating original novels.
-- Prescribing a specific LLM provider; any OpenAI-compatible endpoint is acceptable.
-- Built-in content moderation beyond what the configured LLM provides.
+- Prescribing a specific LLM provider. Operators may configure compatible
+  endpoints, but only separately qualified provider/model slices are supported.
+- Built-in content moderation in the private-preview profile. A public profile
+  remains blocked on the H2 policy and enforcement controls.
 
 ---
 
@@ -208,7 +212,7 @@ Fields:
 - `status` (enum: `pending` | `parsing` | `ready` | `error`)
   - `pending`: uploaded but not yet parsed.
   - `parsing`: LLM pipeline is running.
-  - `ready`: all chapters and characters extracted.
+  - `ready`: accepted chapters and the current extraction results are committed.
   - `error`: pipeline failed; `parse_error` contains the reason.
 - `parse_error` (string or null)
 - `deviation_mode` (enum: `canon` | `creative` | `remix`)
@@ -510,19 +514,32 @@ Input: full novel text or per-chapter summaries (implementation-defined).
 The extractor MUST invoke the LLM with a structured output schema requesting:
 
 ```json
-[
-  {
-    "name": "string",
-    "aliases": ["string"],
-    "role": "protagonist|antagonist|supporting|minor",
-    "description": "string",
-    "personality": "string",
-    "background": "string",
-    "speaking_style": "string",
-    "appearance": "string",
-    "first_appearance_chapter": "integer or null"
-  }
-]
+{
+  "characters": [
+    {
+      "name": "string",
+      "aliases": ["string"],
+      "role": "protagonist|antagonist|supporting|minor",
+      "description": "string",
+      "personality": "string",
+      "background": "string",
+      "speaking_style": "string",
+      "appearance": "string",
+      "first_appearance_chapter": "integer or null"
+    }
+  ],
+  "relationships": [
+    {
+      "from_character": "string",
+      "to_character": "string",
+      "relationship_type": "string",
+      "description": "string",
+      "strength": "integer 0-100"
+    }
+  ],
+  "world_summary": "string",
+  "genre": "string"
+}
 ```
 
 The extractor MUST:
@@ -533,9 +550,11 @@ The extractor MUST:
 
 ### 5.5 World Summarizer
 
-Input: novel title, author, and the first 4000 tokens of the novel text.
+Input: the novel title and the bounded representative sample used by character
+extraction (§5.4). The current implementation returns the world summary in the
+same structured extraction response rather than making a second provider call.
 
-The summarizer MUST invoke the LLM and request a world summary covering:
+The extraction request MUST request a world summary covering:
 
 - Setting (time period, geography, society).
 - Major factions or groups.
@@ -664,9 +683,9 @@ The current mid-term projection is triggered every 20 committed messages.
 
 Steps:
 
-1. Retrieve all `short` layer entries for the `(character_id, user_id)` pair, ordered by
-   `created_at` ascending.
-2. Send the entries to the LLM with a prompt requesting a concise summary of the key events,
+1. Retrieve the twenty most recent committed `ChatMessage` records for the
+   `(character_id, user_id, novel_id)` conversation in chronological order.
+2. Send those messages to the LLM with a prompt requesting a concise summary of the key events,
    emotional tone, and relationship developments.
 3. Store the summary as a new `mid` layer entry with bounded importance.
 4. Keep committed chat messages in PostgreSQL; the Redis projection remains bounded independently.
@@ -927,24 +946,26 @@ returns both a new access token and a replacement refresh token.
 
 ### 9.4 Authorization Rules
 
-- All endpoints except setup status/init, the deprecated setup LLM probe,
+- All application endpoints under `/api` except setup status/init, the
+  deprecated setup LLM probe,
   `POST /api/auth/register`, `POST /api/auth/login`, and
-  `POST /api/auth/refresh` REQUIRE a valid JWT. Setup init succeeds only while
+  `POST /api/auth/refresh` MUST present a valid JWT. Setup init succeeds only while
   the `users` table is empty and atomically creates one administrator, its
   refresh token, and (when not supplied by the environment) an encrypted model
   configuration. Anonymous setup only accepts provider presets with fixed
-  HTTPS endpoints; it never accepts an arbitrary URL.
+  HTTPS endpoints; it never accepts an arbitrary URL. Process probes and the
+  internal metrics routes follow §14 instead of application authentication.
 - A user MAY only access novels, characters, memories, and world states that belong to their own
   `user_id`.
-- Admin users MAY access all resources.
 - The Gateway MUST reject requests with expired or invalid JWTs with HTTP 401.
 
 ---
 
 ## 10. API Contract
 
-All endpoints are prefixed with `/api/`. The Gateway routes requests to the appropriate downstream
-service.
+All application endpoints below are prefixed with `/api/`. The Gateway routes
+them to the appropriate downstream service; process probes and internal service
+routes are outside this public contract.
 
 ### 10.1 Authentication Endpoints
 
@@ -958,6 +979,8 @@ service.
 | GET | `/api/auth/me` | User | JWT | Current user profile |
 | DELETE | `/api/auth/me` | User | JWT | Permanently delete the acting account and owned application data |
 | POST | `/api/auth/logout` | User | JWT | Invalidate refresh token |
+| GET | `/api/settings/llm` | User | JWT + admin | Read the effective model configuration without returning its secret |
+| PUT | `/api/settings/llm` | User | JWT + admin | Validate and update the encrypted model configuration |
 | GET | `/api/account/export` | Gateway | JWT | Stream the acting user's complete `account-export-v1` NDJSON data |
 
 ### 10.2 Novel Endpoints
@@ -969,6 +992,9 @@ service.
 | POST | `/api/novels/upload` | Novel | JWT | Upload one bounded TXT, EPUB, or PDF file |
 | GET | `/api/novels/:id` | Novel | JWT | Novel detail |
 | GET | `/api/novels/:id/status` | Novel | JWT | Parse status (poll) |
+| POST | `/api/novels/:id/retry` | Novel | JWT | Retry an owned failed import from its retained source, when available |
+| POST | `/api/novels/:id/lore/search` | Novel | JWT | Search owned, progress-bounded source lore |
+| GET | `/api/novels/:id/relationships` | Novel | JWT | Source-extracted character relationships |
 | DELETE | `/api/novels/:id` | Novel | JWT | Delete novel |
 
 ### 10.3 Chapter Endpoints
@@ -984,16 +1010,16 @@ service.
 |---|---|---|---|---|
 | GET | `/api/novels/:id/characters` | Novel | JWT | Character list |
 | GET | `/api/characters/:id` | Novel | JWT | Character detail |
-| POST | `/api/characters/:id/generate-avatar` | Novel | JWT | Trigger avatar regeneration |
 
 ### 10.5 Agent Endpoints
 
 | Method | Path | Service | Auth | Description |
 |---|---|---|---|---|
 | POST | `/api/chat/:characterId/stream` | Agent | JWT | Stream conversation turn (SSE) |
+| POST | `/api/chat/:characterId` | Agent | JWT | Complete one non-streaming conversation turn |
 | GET | `/api/chat/:characterId/history` | Agent | JWT | Conversation history |
-| DELETE | `/api/chat/:characterId/history` | Agent | JWT | Clear conversation history |
-| GET | `/api/chat/:characterId/memories` | Agent | JWT | Memory layer summary |
+| GET | `/api/memories/:characterId` | Agent | JWT | Memory layer summary |
+| DELETE | `/api/memories/:characterId/short` | Agent | JWT | Clear the reconstructable short-term projection |
 
 ### 10.6 Narrative Endpoints
 
@@ -1001,8 +1027,13 @@ service.
 |---|---|---|---|---|
 | GET | `/api/narrative/:novelId/:chapter` | Narrative | JWT | Get branch node for chapter |
 | GET | `/api/narrative/:novelId/chapters/:chapter` | Narrative | JWT | Get or generate the player's effective full chapter |
+| GET | `/api/narrative/:novelId/player-entry` | Narrative | JWT | Read checkpoint options and the current original player |
+| PUT | `/api/narrative/:novelId/player-entry` | Narrative | JWT | Create the original player at an unlocked checkpoint |
 | POST | `/api/narrative/choose` | Narrative | JWT | Submit choice |
 | GET | `/api/narrative/:novelId/world-state` | Narrative | JWT | Reader's world state |
+| GET | `/api/narrative/:novelId/world` | Narrative | JWT | Read the current open-world session |
+| POST | `/api/narrative/:novelId/world` | Narrative | JWT | Start the open-world session |
+| POST | `/api/narrative/:novelId/world/turns` | Narrative | JWT | Commit an idempotent player action |
 
 ### 10.7 Progress Endpoints
 
@@ -1175,11 +1206,14 @@ src/
 | Route | Component | Description |
 |---|---|---|
 | `/` | `HomePage` | Landing page with product introduction and login/register CTA |
+| `/login`, `/register` | `LoginPage` | Sign-in and registration modes |
 | `/shelf` | `ShelfPage` | User's novel library with import button and progress indicators |
-| `/import` | `ImportPage` | Novel import form (file upload or text paste) |
 | `/reader/:novelId/:chapterNum` | `ReaderPage` | Chapter reader with slide-in chat panel |
 | `/characters/:novelId` | `CharactersPage` | Character gallery for a novel |
 | `/settings` | `SettingsPage` | User profile and identity settings |
+
+First-run setup renders `SetupPage` before authenticated application routing;
+it is a state gate rather than a public URL.
 
 ### 13.3 Required Widgets
 
@@ -1188,8 +1222,10 @@ src/
 - `BranchChoice` — Modal or inline card presenting narrative choices. MUST block chapter
   advancement until a choice is made.
 - `CharacterCard` — Avatar, name, role badge, and "Talk" button.
-- `ImportWizard` — Multi-step form: upload/paste → parsing progress → character review.
-- `ProgressBar` — Chapter progress indicator in the reader header.
+- Shelf import controls — upload/paste plus parsing progress in the existing
+  shelf flow; no standalone wizard component is required.
+- Reader progress — chapter position in the reader header; no standalone
+  progress component is required.
 
 ### 13.4 Visual Theme
 
@@ -1286,19 +1322,15 @@ raw URLs/errors, secrets, principals, or resource identifiers. Dollar cost is
 derived at query time from billable token classes and current provider pricing.
 The checked-in versioned release policy is the source of truth for H3 budgets.
 
-Other recommended metrics:
-
-- `novelworld_memory_compression_total` (counter, labels: `character_id`)
-- `novelworld_active_streams` (gauge)
-- `novelworld_novel_parse_duration_seconds` (histogram)
-
 ---
 
 ## 15. Security Requirements
 
 - All inter-service communication MUST occur on an internal network not exposed to the public
   internet.
-- The Gateway MUST be the only service with a public-facing port.
+- The deployment ingress (Nginx in the current Compose profile) MUST be the
+  only component with a host-published port, and application traffic MUST pass
+  through the Gateway behind it.
 - JWT secrets MUST be at least 32 characters and MUST NOT be committed to version control.
 - Passwords MUST be hashed with bcrypt at cost factor 12 or higher.
 - File uploads MUST be validated for MIME type and size before storage.
@@ -1312,135 +1344,16 @@ Other recommended metrics:
 
 ---
 
-## 16. Implementation Notes for Coding Agents
+## 16. Implementation Guidance
 
-This section provides non-normative guidance for coding agents implementing this specification.
-
-### 16.1 Recommended Implementation Order
-
-1. Database schema and migrations (§12).
-2. User Service: registration, login, JWT (§9).
-3. Gateway: JWT middleware, routing skeleton (§3.1).
-4. Novel Service: file upload, chapter splitting, character extraction (§5).
-5. Agent Service: prompt construction, SSE streaming, short-term memory (§6.4, §6.5).
-6. Narrative Service: node detection, choice submission, world state (§7).
-7. Memory compression pipeline (§6.3).
-8. Long-term and permanent memory with pgvector (§6.2.3, §6.2.4).
-9. Avatar generation (§5.7).
-10. Frontend: FSD structure, pages, widgets, SSE client (§13).
-
-### 16.2 LLM Prompt Design
-
-All LLM calls that require structured output MUST use `response_format: { type: "json_schema" }`
-when the model supports it, or instruct the model to return only valid JSON in the system prompt
-when it does not. Implementations MUST validate the returned JSON against the expected schema and
-retry once on parse failure before returning an error.
-
-### 16.3 Rust Implementation Notes
-
-When implementing in Rust:
-
-- Use `axum` for HTTP servers and SSE.
-- Use `sqlx` with the `postgres` feature for database access.
-- Use `redis` crate for Redis operations.
-- Use `aws-sdk-s3` for object storage.
-- Use `reqwest` for LLM API calls.
-- Use `serde_json` for JSON serialization.
-- Use `jsonwebtoken` for JWT operations.
-- Use `bcrypt` crate for password hashing.
-- Structure each service as a Cargo workspace member.
-- Use `tokio` as the async runtime.
-- Implement the four-layer memory pyramid as a `MemoryManager` struct with methods:
-  `add_short_term`, `compress`, `retrieve_for_prompt`, `add_permanent`.
-
-### 16.4 Testing Requirements
-
-Implementations MUST include:
-
-- Unit tests for the Chapter Splitter covering at least: Chinese chapter headers, English chapter
-  headers, standalone number headers, and the LLM fallback path.
-- Unit tests for the Memory Manager covering: short-term insertion, compression trigger, and
-  prompt retrieval ordering.
-- Integration tests for the authentication flow: register, login, token refresh, and logout.
-- Integration tests for the novel parsing pipeline using a short sample text.
+This specification does not duplicate implementation order, dependency advice,
+test inventories, or prompt templates. [`AGENTS.md`](./AGENTS.md) owns current
+engineering constraints; runtime code owns the exact prompts, validators, and
+tests. Roadmap issues define the next approved implementation slice.
 
 ---
 
-## Appendix A: Sample LLM Prompts
-
-### A.1 Character Extraction Prompt
-
-```
-You are analyzing a novel to extract its characters. Return a JSON array of character objects.
-Each object must have these fields:
-- name (string): the character's primary name
-- aliases (array of strings): alternative names used in the text
-- role (string): one of "protagonist", "antagonist", "supporting", "minor"
-- description (string): 1-2 sentence narrative description
-- personality (string): key personality traits, comma-separated
-- background (string): brief backstory as revealed in the text
-- speaking_style (string): how the character speaks (formal/casual, verbose/terse, etc.)
-- appearance (string): physical description for portrait generation
-- first_appearance_chapter (integer or null): chapter number of first appearance
-
-Extract all characters who appear in more than one scene. Return at most 50 characters.
-Return only valid JSON, no markdown fences.
-```
-
-### A.2 Character Agent System Prompt Template
-
-```
-You are {{character.name}}, a character from the novel "{{novel.title}}".
-
-## Your Identity
-Role: {{character.role}}
-Personality: {{character.personality}}
-Background: {{character.background}}
-Speaking style: {{character.speaking_style}}
-
-## World Context
-{{novel.world_summary}}
-
-## Current Situation
-The reader is at chapter {{reader.current_chapter}} of {{novel.total_chapters}}.
-{{#if reader.identity_type == "self"}}
-You are speaking with {{reader.identity}}, a visitor to your world.
-{{else}}
-You are speaking with someone who has taken on the role of {{reader.identity}}.
-{{/if}}
-
-## Constraints
-- Stay in character at all times.
-- Do not reveal events from chapters after chapter {{reader.current_chapter}}.
-- Speak in your established voice and style.
-- Deviation mode: {{reader.deviation_mode}}
-
-<memories>
-{{memories}}
-</memories>
-
-<world_state>
-{{world_state}}
-</world_state>
-```
-
-### A.3 Memory Compression Prompt
-
-```
-The following is a conversation history between a reader and the character {{character.name}}.
-Summarize the key events, emotional developments, and relationship changes in 2-3 sentences.
-Focus on information that would be important for the character to remember in future conversations.
-Rate the importance of this summary on a scale of 1-10.
-Return JSON: { "summary": "...", "importance": N }
-Return only valid JSON, no markdown fences.
-
-Conversation:
-{{conversation_turns}}
-```
-
----
-
-## Appendix B: Glossary
+## Appendix A: Glossary
 
 | Term | Definition |
 |---|---|
