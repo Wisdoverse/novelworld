@@ -64,6 +64,14 @@ impl ReadinessProbe for PgReadinessProbe {
                                  'CHECK (((((status)::text = ''pending''::text) AND (attempt = 0) AND (lease_expires_at IS NULL) AND (failure_code IS NULL) AND ((stage)::text <> ''completed''::text)) OR (((status)::text = ''in_progress''::text) AND (attempt >= 1) AND (lease_expires_at IS NOT NULL) AND (failure_code IS NULL) AND ((stage)::text <> ''completed''::text)) OR (((status)::text = ''failed''::text) AND (lease_expires_at IS NULL) AND (failure_code IS NOT NULL) AND ((stage)::text <> ''completed''::text)) OR (((status)::text = ''completed''::text) AND (lease_expires_at IS NULL) AND (failure_code IS NULL) AND ((stage)::text = ''completed''::text))))'
                        )
                        AND EXISTS (
+                           SELECT 1 FROM pg_catalog.pg_constraint
+                           WHERE conrelid =
+                                     'public.novel_import_jobs'::pg_catalog.regclass
+                             AND confrelid = 'public.novels'::pg_catalog.regclass
+                             AND contype::pg_catalog.text = 'f'
+                             AND confdeltype::pg_catalog.text = 'c'
+                       )
+                       AND EXISTS (
                            SELECT 1
                            FROM pg_catalog.pg_index AS index_definition
                            WHERE index_definition.indexrelid =

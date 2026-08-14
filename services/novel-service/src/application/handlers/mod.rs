@@ -12,7 +12,11 @@ use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::application::commands::ImportNovelCommand;
-use crate::domain::entities::{chapter::Chapter, character::Character, novel::Novel};
+use crate::domain::entities::{
+    chapter::{chapters_are_importable, Chapter},
+    character::Character,
+    novel::Novel,
+};
 use crate::domain::ports::{
     ImagePort, LlmPort, NovelLlmTask, PrivacyCleanupPort, SourceFileStorage,
 };
@@ -97,6 +101,10 @@ pub struct ImportRetryConflict(pub &'static str);
 #[derive(Debug, thiserror::Error)]
 #[error("Source file storage is unavailable")]
 pub struct SourceFileStorageUnavailable(#[source] pub anyhow::Error);
+
+#[derive(Debug, thiserror::Error)]
+#[error("Persisted import chapters cannot be resumed")]
+pub struct ImportChaptersUnusable;
 
 #[derive(Debug, thiserror::Error)]
 pub enum NovelDeletionError {
@@ -343,7 +351,7 @@ impl NovelCommandHandler {
         }
 
         let chapters = self.chapter_repo.find_by_novel(novel_id).await?;
-        if chapters.is_empty() {
+        if !chapters_are_importable(&chapters) {
             return Err(ImportRetryConflict(
                 "No parsed chapters are available; re-upload the source",
             )
@@ -392,7 +400,9 @@ impl NovelCommandHandler {
                     attempt = claim.attempt,
                     "novel import processing failed"
                 );
-                let (code, public_error) = if claim.stage == ImportStage::Source {
+                let (code, public_error) = if claim.stage == ImportStage::Source
+                    || error.downcast_ref::<ImportChaptersUnusable>().is_some()
+                {
                     (
                         "source_unavailable",
                         "No parsed chapters are available; re-upload the source",
@@ -431,8 +441,8 @@ impl NovelCommandHandler {
             .filter(|novel| novel.user_id == claim.user_id)
             .ok_or_else(|| anyhow::anyhow!("Novel not found"))?;
         let chapters = self.chapter_repo.find_by_novel(claim.novel_id).await?;
-        if chapters.is_empty() {
-            return Err(anyhow::anyhow!("durable import has no chapters"));
+        if !chapters_are_importable(&chapters) {
+            return Err(ImportChaptersUnusable.into());
         }
         ensure_import_budget(&chapters)?;
 

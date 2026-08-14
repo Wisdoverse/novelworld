@@ -3,7 +3,10 @@ use async_trait::async_trait;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::domain::entities::{chapter::Chapter, novel::Novel};
+use crate::domain::entities::{
+    chapter::{chapters_are_importable, Chapter},
+    novel::Novel,
+};
 use crate::domain::repositories::{ImportClaim, NovelRepository, RecoverableImport};
 use crate::domain::value_objects::{DeviationMode, ImportStage, NovelStatus};
 use crate::infrastructure::persistence::chapter_pg_repo::save_batch_in_transaction;
@@ -83,10 +86,7 @@ impl NovelRepository for NovelPgRepository {
             "durable import chapters belong to another novel"
         );
         ensure!(
-            chapters.iter().enumerate().all(|(index, chapter)| {
-                usize::try_from(chapter.chapter_number).ok() == Some(index + 1)
-                    && !chapter.content.trim().is_empty()
-            }),
+            chapters_are_importable(chapters),
             "durable import chapters must be contiguous and non-empty"
         );
         let mut transaction = self.pool.begin().await?;
@@ -265,6 +265,13 @@ impl NovelRepository for NovelPgRepository {
                AND NULLIF(BTRIM(novel.genre), '') IS NOT NULL
                AND novel.total_chapters = (
                    SELECT COUNT(*)::INTEGER FROM chapters WHERE novel_id = novel.id
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM chapters AS c
+                   WHERE c.novel_id = novel.id
+                     AND (c.chapter_number < 1
+                          OR c.chapter_number > novel.total_chapters
+                          OR NULLIF(BTRIM(c.content), '') IS NULL)
                )
                AND EXISTS (
                    SELECT 1 FROM characters WHERE novel_id = novel.id

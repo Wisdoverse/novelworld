@@ -461,6 +461,159 @@ async fn durable_import_claim_is_recoverable_and_attempt_fenced() {
     .unwrap());
 }
 
+/// Seed a legacy-shaped novel whose persisted chapters skip chapter 2.
+async fn seed_gapped_novel(
+    pool: &PgPool,
+    novel_status: &str,
+    job: Option<(&str, &str)>,
+) -> (Uuid, Uuid) {
+    let user_id = Uuid::new_v4();
+    let novel_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO users (id, email, password_hash) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(format!("gapped-import-{user_id}@test.invalid"))
+        .bind("not-a-real-password-hash")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO novels (id, user_id, title, world_summary, genre, total_chapters, status) \
+         VALUES ($1, $2, 'Gapped legacy novel', 'world', 'genre', 2, $3::novel_status)",
+    )
+    .bind(novel_id)
+    .bind(user_id)
+    .bind(novel_status)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO chapters (novel_id, chapter_number, content) \
+         VALUES ($1, 1, 'A durable first chapter.'), ($1, 3, 'A durable third chapter.')",
+    )
+    .bind(novel_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    if let Some((stage, status)) = job {
+        // Recovery orders candidates by age, so the pending job is claimed
+        // before any leftover import of a neighbouring test.
+        sqlx::query(
+            "INSERT INTO novel_import_jobs \
+                 (novel_id, stage, status, attempt, lease_expires_at, failure_code, created_at) \
+             VALUES ($1, $2, $3, \
+                     CASE WHEN $3 = 'in_progress' THEN 1 ELSE 0 END, \
+                     CASE WHEN $3 = 'in_progress' THEN NOW() + INTERVAL '2 minutes' END, \
+                     CASE WHEN $3 = 'failed' THEN 'legacy_chapters_invalid' END, \
+                     NOW() - INTERVAL '500 years')",
+        )
+        .bind(novel_id)
+        .bind(stage)
+        .bind(status)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    (user_id, novel_id)
+}
+
+#[tokio::test]
+async fn resumed_import_with_gapped_chapters_fails_with_reupload_guidance() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (user_id, novel_id) =
+        seed_gapped_novel(&pool, "error", Some(("chapters", "pending"))).await;
+
+    let handler = blocking_import_handler(&pool);
+    assert_eq!(
+        handler
+            .retry_import(user_id, novel_id)
+            .await
+            .unwrap_err()
+            .to_string(),
+        "No parsed chapters are available; re-upload the source"
+    );
+
+    let recovery = handler.spawn_import_recovery();
+    let failure = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let state = sqlx::query_as::<_, (String, Option<String>, String, Option<String>)>(
+                "SELECT job.status, job.failure_code, novel.status::text, novel.parse_error \
+                 FROM novel_import_jobs AS job \
+                 JOIN novels AS novel ON novel.id = job.novel_id \
+                 WHERE job.novel_id = $1",
+            )
+            .bind(novel_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if state.0 == "failed" {
+                break state;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a gapped import must fail instead of waiting on a provider");
+    recovery.abort();
+    assert_eq!(
+        failure,
+        (
+            "failed".into(),
+            Some("source_unavailable".into()),
+            "error".into(),
+            Some("No parsed chapters are available; re-upload the source".into()),
+        )
+    );
+}
+
+#[tokio::test]
+async fn complete_import_rejects_gapped_chapters_with_matching_count() {
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (_, novel_id) =
+        seed_gapped_novel(&pool, "parsing", Some(("enriched", "in_progress"))).await;
+    sqlx::query("INSERT INTO characters (novel_id, name) VALUES ($1, 'Gapped hero')")
+        .bind(novel_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO canon_story_models \
+             (novel_id, model_version, schema_version, prompt_version, content) \
+         VALUES ($1, 1, 1, 'gapped-import-test-v1', '{}'::jsonb)",
+    )
+    .bind(novel_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let repo = NovelPgRepository::new(pool.clone());
+    assert!(repo.complete_import(novel_id, 1).await.is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status::text FROM novels WHERE id = $1")
+            .bind(novel_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "parsing"
+    );
+
+    sqlx::query(
+        "UPDATE chapters SET chapter_number = 2 WHERE novel_id = $1 AND chapter_number = 3",
+    )
+    .bind(novel_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(repo.complete_import(novel_id, 1).await.unwrap());
+}
+
 #[tokio::test]
 async fn import_character_snapshot_is_atomic_and_attempt_fenced() {
     let pool = PgPoolOptions::new()
