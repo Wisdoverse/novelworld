@@ -244,8 +244,8 @@ Scope:
   journey, quality, SLO, security, and cost measurement contracts, hard
   guardrails, and threshold-approval rules. Where evidence is missing, schedule
   a baseline-only change instead of inventing a target.
-- Provide one clean-checkout verification entry point that runs the same
-  required checks as CI from version-controlled configuration.
+- Provide one clean-checkout verification entry point (`make verify`) that runs
+  the same required checks as CI from version-controlled configuration.
 
 Exit evidence:
 
@@ -261,7 +261,7 @@ Exit evidence:
   by review rather than a full language × format × provider Cartesian product.
 - Current-truth, contract, and independent adversarial overclaim reviews pass.
 - A clean checkout reproduces the required CI checks through the documented
-  verification entry point.
+  `make verify` entry point.
 - Required CI is green on the final commit. Evidence state: **Landed**.
 
 Primary SPEC focus: all normative sections, especially §1–§3, §5–§8, §13, and
