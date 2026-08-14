@@ -22,6 +22,7 @@ itself.
 | What engineering constraints apply today? | [`AGENTS.md`](../AGENTS.md) and accepted architecture decisions until explicitly superseded |
 | What outcome comes next? | This roadmap |
 | What thresholds gate a release? | Versioned SLO, quality, security, and cost policies approved in a separate reviewed change before the candidate is judged |
+| What defines the initial slices and threshold process? | [`QUALIFICATION_POLICY.md`](./QUALIFICATION_POLICY.md) |
 | What is being executed now? | [GitHub Project](https://github.com/users/schorsch888/projects/2) and one independently mergeable roadmap issue |
 
 When these disagree, do not silently implement the document or rewrite history.

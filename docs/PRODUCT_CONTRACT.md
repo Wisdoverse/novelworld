@@ -120,6 +120,10 @@ product claim, SPEC target, runtime behavior, and evidence together when they
 are affected. Thresholds and supported slices must be approved before the
 change they judge; a candidate cannot weaken its own gate.
 
+The candidate [`qualification policy`](./QUALIFICATION_POLICY.md) defines the
+initial journey slices, hard guardrails, evidence classes, and threshold
+approval process without claiming that a live slice has passed them.
+
 The clause dispositions and their owning horizons are recorded in the
 candidate [`SPEC conformance ledger`](./SPEC_CONFORMANCE.md). That ledger and
 this contract do not by themselves complete H0: the clean-checkout verification

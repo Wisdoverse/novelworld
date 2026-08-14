@@ -221,6 +221,7 @@ novelworld/
 | [DEPLOY.md](./DEPLOY.md) | Deployment guide |
 | [ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Architecture decisions |
 | [ROADMAP.md](./docs/ROADMAP.md) | Evidence-gated engineering horizons |
+| [QUALIFICATION_POLICY.md](./docs/QUALIFICATION_POLICY.md) | Versioned journey, slice, guardrail, and threshold-approval rules |
 | [SLOS.md](./docs/SLOS.md) | Versioned single-node capacity and scaling decision contract |
 | [DATA_RETENTION.md](./docs/DATA_RETENTION.md) | Data retention, erasure, and provider boundaries |
 | [ACCOUNT_EXPORT.md](./docs/ACCOUNT_EXPORT.md) | Versioned account export wire contract and completeness rules |
