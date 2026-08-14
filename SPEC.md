@@ -468,26 +468,36 @@ On receipt, the service MUST:
 1. Validate the declared type, size, and extractable content before accepting the import.
 2. If source retention is enabled, store uploaded bytes under a server-generated managed key with
    durable cleanup intent. With retention disabled, extraction is request-local.
-3. Create a Novel record with `status = pending` and return its ID.
-4. Start the process-local parsing pipeline asynchronously. Restart-safe claim/resume remains an H1
-   requirement and MUST NOT be inferred from source retention alone.
+3. Split and validate deterministic chapters before acceptance.
+4. Atomically commit the `pending` Novel, chapters/chunks, and a `novel_import_jobs` row. Attempt an
+   immediate claim with a renewable lease; startup recovery claims any job left pending. Return
+   `202` and the Novel ID only after the durable boundary commits.
+
+An accepted import MUST be recoverable after process death from its committed `chapters` or
+`enriched` stage. Source retention alone is not evidence of replay: retained-object reprocessing is
+an H1 gap until the runtime reads that object during recovery.
 
 ### 5.2 Parsing Pipeline
 
-The parsing pipeline runs asynchronously after file acceptance. It MUST:
+Provider-backed enrichment runs asynchronously after file acceptance. It MUST:
 
 1. Set `status = parsing`.
-2. Extract plain text from the source file (TXT, EPUB, or PDF).
-3. Split the text into chapters using the Chapter Splitter (see §5.3).
-4. For each chapter, store a Chapter record with `content` and `word_count`.
-5. Extract characters using the Character Extractor (see §5.4).
-6. Generate a world summary using the World Summarizer (see §5.5).
-7. Identify key narrative nodes using the Node Detector (see §5.6).
-8. Start bounded avatar generation for eligible characters (see §5.7).
-9. Set `status = ready` and `total_chapters = <count>`.
+2. Claim exactly one current attempt; renew its lease during external work and fence every
+   authoritative write by `(novel_id, attempt)`.
+3. Atomically replace the character and relationship snapshot produced by the Character Extractor
+   (see §5.4).
+4. Identify key narrative nodes using the Node Detector (see §5.6); retries MUST NOT duplicate
+   authoritative node state.
+5. Persist the world summary and chapter count, advancing the durable stage to `enriched`.
+6. Commit a source-validated canonical model before advancing the job and Novel to `completed` and
+   `ready` in one transaction.
+7. Start bounded avatar generation for eligible characters (see §5.7) as a non-authoritative
+   projection that cannot block readiness.
 
-On any unrecoverable error, the pipeline MUST set `status = error` and store the error message in
-`parse_error`.
+On an unrecoverable current-attempt error, the pipeline MUST atomically set the job to `failed` and
+the Novel to `error`, store an actionable public message in `parse_error`, and keep detailed
+provider/internal errors in logs rather than exposing them to readers. Pending or expired
+in-progress jobs MUST be reclaimed after restart; completed jobs MUST NOT call a provider again.
 
 ### 5.3 Chapter Splitter
 
@@ -992,7 +1002,7 @@ routes are outside this public contract.
 | POST | `/api/novels/upload` | Novel | JWT | Upload one bounded TXT, EPUB, or PDF file |
 | GET | `/api/novels/:id` | Novel | JWT | Novel detail |
 | GET | `/api/novels/:id/status` | Novel | JWT | Parse status (poll) |
-| POST | `/api/novels/:id/retry` | Novel | JWT | Retry an owned failed import from its retained source, when available |
+| POST | `/api/novels/:id/retry` | Novel | JWT | Retry an owned failed import from its last committed durable stage; re-upload is required when no chapters remain |
 | POST | `/api/novels/:id/lore/search` | Novel | JWT | Search owned, progress-bounded source lore |
 | GET | `/api/novels/:id/relationships` | Novel | JWT | Source-extracted character relationships |
 | DELETE | `/api/novels/:id` | Novel | JWT | Delete novel |

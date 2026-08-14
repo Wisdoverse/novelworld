@@ -29,28 +29,87 @@ use narrative_service::infrastructure::persistence::pg_narrative_repo::{
 };
 use narrative_service::infrastructure::persistence::pg_world_state_repo::PgWorldStateRepository;
 use narrative_service::infrastructure::persistence::pg_world_turn_repo::PgWorldTurnRepository;
+use novel_service::application::{commands::ImportNovelCommand, handlers::NovelCommandHandler};
 use novel_service::domain::{
     entities::canon_story_model::{
         CanonEndingSnapshot, CanonEvent, CanonStoryContent, CanonStoryModel, SourceCitation,
         SourceEvidence, StoryArc, CANON_STORY_SCHEMA_VERSION,
     },
+    entities::chapter::Chapter,
+    entities::character::Character,
     entities::novel::Novel,
+    ports::{ImagePort, LlmPort, NovelLlmTask, PrivacyCleanupPort},
     repositories::{
-        CanonStoryModelRepository, NovelRepository, ReadingProgressRepository,
+        CanonStoryModelRepository, ChapterRepository, CharacterRelationshipRecord,
+        CharacterRepository, NovelRepository, ReadingProgressRepository,
         SourceFileDeletionRepository,
     },
+    value_objects::{CharacterRole, ImportStage},
 };
 use novel_service::infrastructure::persistence::{
-    canon_story_model_pg_repo::PgCanonStoryModelRepository, novel_pg_repo::NovelPgRepository,
+    canon_story_model_pg_repo::PgCanonStoryModelRepository, chapter_pg_repo::ChapterPgRepository,
+    character_pg_repo::CharacterPgRepository, novel_pg_repo::NovelPgRepository,
     pg_progress_repo::PgReadingProgressRepository,
     source_file_deletion_pg_repo::PgSourceFileDeletionRepository,
 };
 use sqlx::{postgres::PgPoolOptions, PgPool};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
         .unwrap_or_else(|_| "postgres://test:test@localhost:25432/novelworld_test".into())
+}
+
+struct BlockingImportLlm;
+
+#[async_trait::async_trait]
+impl LlmPort for BlockingImportLlm {
+    async fn chat_json(&self, _task: NovelLlmTask, _prompt: &str) -> anyhow::Result<String> {
+        futures::future::pending().await
+    }
+}
+
+struct UnusedImage;
+
+#[async_trait::async_trait]
+impl ImagePort for UnusedImage {
+    async fn generate(&self, _prompt: &str) -> anyhow::Result<String> {
+        anyhow::bail!("image generation must not run before import completion")
+    }
+}
+
+struct NoopNovelPrivacy;
+
+#[async_trait::async_trait]
+impl PrivacyCleanupPort for NoopNovelPrivacy {
+    async fn clear_novel(&self, _user_id: Uuid, _novel_id: Uuid) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn allow_novel(&self, _user_id: Uuid, _novel_id: Uuid) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+fn blocking_import_handler(pool: &PgPool) -> Arc<NovelCommandHandler> {
+    Arc::new(NovelCommandHandler {
+        novel_repo: Arc::new(NovelPgRepository::new(pool.clone())),
+        chapter_repo: Arc::new(ChapterPgRepository::new(pool.clone())),
+        character_repo: Arc::new(CharacterPgRepository::new(pool.clone())),
+        canon_repo: Arc::new(PgCanonStoryModelRepository::new(pool.clone())),
+        llm: Arc::new(BlockingImportLlm),
+        image_client: Arc::new(UnusedImage),
+        privacy_cleanup: Arc::new(NoopNovelPrivacy),
+        source_storage: None,
+        source_deletions: Arc::new(PgSourceFileDeletionRepository::new(pool.clone())),
+        import_permits: Arc::new(Semaphore::new(1)),
+        active_import_users: Arc::new(Mutex::new(HashSet::new())),
+    })
 }
 
 fn transition(chapter: i32, rendered_narrative: impl Into<String>) -> NarrativeTransition {
@@ -69,6 +128,484 @@ fn transition(chapter: i32, rendered_narrative: impl Into<String>) -> NarrativeT
         location_changes: vec![],
         thread_changes: vec![],
     }
+}
+
+#[tokio::test]
+async fn accepted_import_already_has_durable_chapters_and_claim() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let user_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO users (id, email, password_hash) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(format!("accepted-import-{user_id}@test.invalid"))
+        .bind("not-a-real-password-hash")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let handler = blocking_import_handler(&pool);
+    let novel_id = handler
+        .handle_import(ImportNovelCommand {
+            user_id,
+            title: "Accepted import".into(),
+            author: None,
+            raw_content: Some("A durable source paragraph. ".repeat(20)),
+            source_bytes: None,
+            deviation_mode: None,
+        })
+        .await
+        .unwrap();
+
+    let state: (String, String, String, i64, bool, i64) = sqlx::query_as(
+        "SELECT novel.status::text, job.stage, job.status, job.attempt, \
+                job.lease_expires_at IS NOT NULL, \
+                (SELECT COUNT(*) FROM chapters WHERE novel_id = novel.id) \
+         FROM novels AS novel \
+         JOIN novel_import_jobs AS job ON job.novel_id = novel.id \
+         WHERE novel.id = $1",
+    )
+    .bind(novel_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        state,
+        (
+            "parsing".into(),
+            "chapters".into(),
+            "in_progress".into(),
+            1,
+            true,
+            1,
+        )
+    );
+}
+
+#[tokio::test]
+async fn startup_recovery_claims_a_pending_import() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let user_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO users (id, email, password_hash) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(format!("startup-recovery-{user_id}@test.invalid"))
+        .bind("not-a-real-password-hash")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let novel = Novel::create(user_id, "Startup recovery".into(), None);
+    let chapter = Chapter::new(
+        novel.id,
+        1,
+        None,
+        "A durable source chapter waiting for startup recovery.".repeat(4),
+    );
+    NovelPgRepository::new(pool.clone())
+        .create_import(&novel, &[chapter])
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE novel_import_jobs \
+         SET created_at = NOW() - INTERVAL '100 years', \
+             updated_at = NOW() - INTERVAL '100 years' \
+         WHERE novel_id = $1",
+    )
+    .bind(novel.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let recovery = blocking_import_handler(&pool).spawn_import_recovery();
+    let state = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let state = sqlx::query_as::<_, (String, i64, bool)>(
+                "SELECT status, attempt, lease_expires_at IS NOT NULL \
+                 FROM novel_import_jobs WHERE novel_id = $1",
+            )
+            .bind(novel.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if state.0 == "in_progress" {
+                break state;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("startup recovery must claim the oldest pending import");
+    recovery.abort();
+    assert_eq!(state, ("in_progress".into(), 1, true));
+}
+
+#[tokio::test]
+async fn durable_import_claim_is_recoverable_and_attempt_fenced() {
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let user_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO users (id, email, password_hash) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(format!("durable-import-{user_id}@test.invalid"))
+        .bind("not-a-real-password-hash")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let novel = Novel::create(user_id, "Durable import".into(), None);
+    let chapters = vec![Chapter::new(
+        novel.id,
+        1,
+        Some("Chapter 1".into()),
+        "A source-backed chapter long enough for durable import testing.".repeat(4),
+    )];
+    let repo = NovelPgRepository::new(pool.clone());
+    let invalid_chapter = Chapter::new(novel.id, 2, None, "out of order".repeat(20));
+    assert!(repo
+        .create_import(&novel, &[invalid_chapter])
+        .await
+        .is_err());
+    assert!(repo.find_by_id(novel.id).await.unwrap().is_none());
+    repo.create_import(&novel, &chapters).await.unwrap();
+
+    let (status, stage, attempt, lease): (
+        String,
+        String,
+        i64,
+        Option<chrono::DateTime<chrono::Utc>>,
+    ) = sqlx::query_as(
+        "SELECT novel.status::text, job.stage, job.attempt, job.lease_expires_at \
+         FROM novels AS novel \
+         JOIN novel_import_jobs AS job ON job.novel_id = novel.id \
+         WHERE novel.id = $1",
+    )
+    .bind(novel.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (status.as_str(), stage.as_str(), attempt),
+        ("pending", "chapters", 0)
+    );
+    assert!(lease.is_none());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chapters WHERE novel_id = $1")
+            .bind(novel.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+
+    let first = repo
+        .claim_import(novel.id, user_id)
+        .await
+        .unwrap()
+        .expect("pending import must be claimable");
+    assert_eq!(first.stage, ImportStage::Chapters);
+    assert_eq!(first.attempt, 1);
+    assert!(repo
+        .claim_import(novel.id, user_id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(repo.renew_import(novel.id, first.attempt).await.unwrap());
+
+    sqlx::query(
+        "UPDATE novel_import_jobs \
+         SET lease_expires_at = NOW() - INTERVAL '1 second' \
+         WHERE novel_id = $1",
+    )
+    .bind(novel.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(repo
+        .recoverable_imports(100)
+        .await
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate.novel_id == novel.id && candidate.user_id == user_id));
+
+    let second = repo
+        .claim_import(novel.id, user_id)
+        .await
+        .unwrap()
+        .expect("expired import must be reclaimable");
+    assert_eq!(second.attempt, 2);
+    assert!(!repo.renew_import(novel.id, first.attempt).await.unwrap());
+    assert!(repo
+        .complete_import(novel.id, second.attempt)
+        .await
+        .is_err());
+    sqlx::query("UPDATE novel_import_jobs SET stage = 'source' WHERE novel_id = $1")
+        .bind(novel.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(repo
+        .record_import_enrichment(novel.id, second.attempt, 1, "world", "genre")
+        .await
+        .is_err());
+    sqlx::query("UPDATE novel_import_jobs SET stage = 'chapters' WHERE novel_id = $1")
+        .bind(novel.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let chapter_repo = ChapterPgRepository::new(pool.clone());
+    assert!(!chapter_repo
+        .replace_import_nodes(
+            novel.id,
+            first.attempt,
+            &[(1, "过期任务不能覆盖节点。".into())],
+        )
+        .await
+        .unwrap());
+    assert!(chapter_repo
+        .replace_import_nodes(
+            novel.id,
+            second.attempt,
+            &[(1, "当前任务提交可信节点。".into())],
+        )
+        .await
+        .unwrap());
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT key_node_description FROM chapters \
+             WHERE novel_id = $1 AND chapter_number = 1",
+        )
+        .bind(novel.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .as_deref(),
+        Some("当前任务提交可信节点。")
+    );
+    assert!(!repo
+        .record_import_enrichment(novel.id, first.attempt, 1, "world", "genre")
+        .await
+        .unwrap());
+    assert!(!repo
+        .fail_import(novel.id, first.attempt, "stale", "stale worker")
+        .await
+        .unwrap());
+
+    let character_repo = CharacterPgRepository::new(pool.clone());
+    let character = Character::new(novel.id, "Durable hero".into(), CharacterRole::Protagonist);
+    assert!(character_repo
+        .replace_import(novel.id, second.attempt, &[character], &[])
+        .await
+        .unwrap());
+    assert!(repo
+        .record_import_enrichment(novel.id, second.attempt, 2, "world", "genre")
+        .await
+        .is_err());
+    assert!(repo
+        .record_import_enrichment(novel.id, second.attempt, 1, "world", "genre")
+        .await
+        .unwrap());
+    assert!(repo
+        .complete_import(novel.id, second.attempt)
+        .await
+        .is_err());
+    sqlx::query(
+        "INSERT INTO canon_story_models (novel_id, model_version, schema_version, prompt_version, content) \
+         VALUES ($1, 1, 1, 'durable-import-test-v1', '{}'::jsonb)",
+    )
+    .bind(novel.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(repo
+        .complete_import(novel.id, second.attempt)
+        .await
+        .unwrap());
+
+    let (status, stage, lease): (String, String, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as(
+            "SELECT novel.status::text, job.stage, job.lease_expires_at \
+             FROM novels AS novel \
+             JOIN novel_import_jobs AS job ON job.novel_id = novel.id \
+             WHERE novel.id = $1",
+        )
+        .bind(novel.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!((status.as_str(), stage.as_str()), ("ready", "completed"));
+    assert!(lease.is_none());
+    assert!(repo
+        .claim_import(novel.id, user_id)
+        .await
+        .unwrap()
+        .is_none());
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(!sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM novel_import_jobs WHERE novel_id = $1)",
+    )
+    .bind(novel.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+}
+
+#[tokio::test]
+async fn import_character_snapshot_is_atomic_and_attempt_fenced() {
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let user_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO users (id, email, password_hash) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(format!("character-snapshot-{user_id}@test.invalid"))
+        .bind("not-a-real-password-hash")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let novel = Novel::create(user_id, "Character snapshot".into(), None);
+    let chapters = vec![Chapter::new(
+        novel.id,
+        1,
+        Some("Chapter 1".into()),
+        "A source-backed chapter long enough for character snapshot testing.".repeat(4),
+    )];
+    let novel_repo = NovelPgRepository::new(pool.clone());
+    novel_repo.create_import(&novel, &chapters).await.unwrap();
+    let first = novel_repo
+        .claim_import(novel.id, user_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let alice = Character::new(novel.id, "Alice".into(), CharacterRole::Protagonist);
+    let bob = Character::new(novel.id, "Bob".into(), CharacterRole::Supporting);
+    let relationship = CharacterRelationshipRecord {
+        id: Uuid::new_v4(),
+        novel_id: novel.id,
+        from_character_id: alice.id,
+        to_character_id: bob.id,
+        relationship_type: "ally".into(),
+        description: Some("Source-backed allies".into()),
+        strength: 80,
+    };
+    let character_repo = CharacterPgRepository::new(pool.clone());
+    assert!(character_repo
+        .replace_import(
+            novel.id,
+            first.attempt,
+            &[alice.clone(), bob],
+            &[relationship],
+        )
+        .await
+        .unwrap());
+
+    sqlx::query(
+        "UPDATE novel_import_jobs \
+         SET lease_expires_at = NOW() - INTERVAL '1 second' \
+         WHERE novel_id = $1",
+    )
+    .bind(novel.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let second = novel_repo
+        .claim_import(novel.id, user_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let stale = Character::new(novel.id, "Stale".into(), CharacterRole::Supporting);
+    assert!(!character_repo
+        .replace_import(novel.id, first.attempt, &[stale], &[])
+        .await
+        .unwrap());
+    assert_eq!(
+        character_repo
+            .find_by_novel(novel.id)
+            .await
+            .unwrap()
+            .iter()
+            .map(|character| character.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Alice", "Bob"]
+    );
+    assert_eq!(
+        character_repo
+            .find_relationships(novel.id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let current = Character::new(novel.id, "Current".into(), CharacterRole::Protagonist);
+    assert!(character_repo
+        .replace_import(novel.id, second.attempt, &[current], &[])
+        .await
+        .unwrap());
+
+    let candidate_a = Character::new(novel.id, "Candidate A".into(), CharacterRole::Protagonist);
+    let candidate_b = Character::new(novel.id, "Candidate B".into(), CharacterRole::Supporting);
+    let duplicate_id = Uuid::new_v4();
+    let duplicate_relationships = [
+        CharacterRelationshipRecord {
+            id: duplicate_id,
+            novel_id: novel.id,
+            from_character_id: candidate_a.id,
+            to_character_id: candidate_b.id,
+            relationship_type: "ally".into(),
+            description: None,
+            strength: 80,
+        },
+        CharacterRelationshipRecord {
+            id: duplicate_id,
+            novel_id: novel.id,
+            from_character_id: candidate_b.id,
+            to_character_id: candidate_a.id,
+            relationship_type: "ally".into(),
+            description: None,
+            strength: 80,
+        },
+    ];
+    assert!(character_repo
+        .replace_import(
+            novel.id,
+            second.attempt,
+            &[candidate_a, candidate_b],
+            &duplicate_relationships,
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        character_repo
+            .find_by_novel(novel.id)
+            .await
+            .unwrap()
+            .iter()
+            .map(|character| character.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Current"]
+    );
+    assert!(character_repo
+        .find_relationships(novel.id)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -98,8 +635,14 @@ async fn source_file_cleanup_intent_is_atomic_and_survives_account_cascade() {
         )
         .await
         .unwrap();
+    let chapter = Chapter::new(
+        novel.id,
+        1,
+        None,
+        "A retained source chapter long enough for the cleanup contract.".repeat(3),
+    );
     NovelPgRepository::new(pool.clone())
-        .save(&novel)
+        .create_import(&novel, &[chapter])
         .await
         .unwrap();
     let unmanaged_keys = [
@@ -247,7 +790,16 @@ async fn canon_story_models_are_versioned_and_immutable() {
         .execute(&pool)
         .await
         .unwrap();
-    assert!(repository.insert(&model).await.is_err());
+    sqlx::query(
+        "INSERT INTO novel_import_jobs ( \
+             novel_id, stage, status, attempt, lease_expires_at \
+         ) VALUES ($1, 'enriched', 'in_progress', 2, NOW() + INTERVAL '2 minutes')",
+    )
+    .bind(novel_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(repository.insert_import(&model, 2).await.is_err());
     sqlx::query("UPDATE novels SET total_chapters = 1 WHERE id = $1")
         .bind(novel_id)
         .execute(&pool)
@@ -255,8 +807,8 @@ async fn canon_story_models_are_versioned_and_immutable() {
         .unwrap();
     let mut fabricated = model.clone();
     fabricated.content.events[0].evidence.provenance[0].excerpt = "Invented evidence".into();
-    assert!(repository.insert(&fabricated).await.is_err());
-    repository.insert(&model).await.unwrap();
+    assert!(repository.insert_import(&fabricated, 2).await.is_err());
+    assert!(repository.insert_import(&model, 2).await.unwrap());
     assert_eq!(
         repository.find_version(novel_id, 1).await.unwrap(),
         Some(model.clone())
@@ -264,13 +816,23 @@ async fn canon_story_models_are_versioned_and_immutable() {
 
     model.id = Uuid::new_v4();
     model.model_version = 2;
-    repository.insert(&model).await.unwrap();
+    assert!(repository.insert_import(&model, 2).await.unwrap());
     assert_eq!(
         repository.find_latest(novel_id).await.unwrap(),
         Some(model.clone())
     );
     model.id = Uuid::new_v4();
-    assert!(repository.insert(&model).await.is_err());
+    assert!(repository.insert_import(&model, 2).await.is_err());
+
+    model.id = Uuid::new_v4();
+    model.model_version = 3;
+    assert!(!repository.insert_import(&model, 1).await.unwrap());
+    assert!(repository
+        .find_version(novel_id, 3)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(repository.insert_import(&model, 2).await.unwrap());
 
     let immutable_error =
         sqlx::query("UPDATE canon_story_models SET prompt_version = 'changed' WHERE novel_id = $1")

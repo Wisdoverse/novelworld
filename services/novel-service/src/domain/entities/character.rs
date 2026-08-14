@@ -117,12 +117,6 @@ impl Character {
         ch.build_system_prompt(novel_title, world_summary);
         Some(ch)
     }
-
-    pub fn set_avatar(&mut self, url: String) {
-        self.avatar_url = Some(url);
-        self.avatar_status = AvatarStatus::Ready;
-        self.updated_at = Utc::now();
-    }
 }
 
 #[cfg(test)]

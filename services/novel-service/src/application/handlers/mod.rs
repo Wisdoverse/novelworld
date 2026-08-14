@@ -2,10 +2,12 @@ use anyhow::Result;
 use chrono::{Duration as ChronoDuration, Utc};
 use futures::{stream, StreamExt};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
+    future::Future,
     sync::{Arc, Mutex},
+    time::Duration,
 };
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{oneshot, watch, OwnedSemaphorePermit, Semaphore};
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -15,8 +17,8 @@ use crate::domain::ports::{
     ImagePort, LlmPort, NovelLlmTask, PrivacyCleanupPort, SourceFileStorage,
 };
 use crate::domain::repositories::{
-    CanonStoryModelRepository, ChapterRepository, CharacterRepository, LoreExcerpt,
-    NovelRepository, ReadingProgressRecord, ReadingProgressRepository,
+    CanonStoryModelRepository, ChapterRepository, CharacterRelationshipRecord, CharacterRepository,
+    ImportClaim, LoreExcerpt, NovelRepository, ReadingProgressRecord, ReadingProgressRepository,
     SourceFileDeletionRepository,
 };
 use crate::domain::services::{canon_story_extractor, node_detector};
@@ -29,7 +31,7 @@ use crate::domain::services::{
     },
     novel_parser::NovelParserService,
 };
-use crate::domain::value_objects::{NovelStatus, ReaderIdentityType};
+use crate::domain::value_objects::{ImportStage, NovelStatus, ReaderIdentityType};
 
 pub struct NovelCommandHandler {
     pub novel_repo: Arc<dyn NovelRepository>,
@@ -89,6 +91,10 @@ pub struct ImportCapacityUnavailable;
 pub struct ImportBudgetExceeded;
 
 #[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct ImportRetryConflict(pub &'static str);
+
+#[derive(Debug, thiserror::Error)]
 #[error("Source file storage is unavailable")]
 pub struct SourceFileStorageUnavailable(#[source] pub anyhow::Error);
 
@@ -105,6 +111,80 @@ pub enum NovelDeletionError {
 const MAX_AVATARS_PER_NOVEL: usize = 30;
 const MAX_IMPORT_CHAPTERS: usize = 2_048;
 const MAX_IMPORT_PROVIDER_CALLS: usize = 640;
+const IMPORT_LEASE_HEARTBEAT: Duration = Duration::from_secs(30);
+const IMPORT_RECOVERY_INTERVAL: Duration = Duration::from_secs(30);
+
+#[derive(Debug, thiserror::Error)]
+#[error("Novel import lease was lost")]
+struct ImportLeaseLost;
+
+struct ImportLease {
+    stop: Option<oneshot::Sender<()>>,
+    lost: watch::Receiver<bool>,
+}
+
+impl ImportLease {
+    fn start(repo: Arc<dyn NovelRepository>, novel_id: Uuid, attempt: i64) -> Self {
+        let (stop, mut stopped) = oneshot::channel();
+        let (lost, receiver) = watch::channel(false);
+        tokio::spawn(async move {
+            let mut heartbeat = tokio::time::interval(IMPORT_LEASE_HEARTBEAT);
+            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            heartbeat.tick().await;
+            loop {
+                tokio::select! {
+                    _ = &mut stopped => return,
+                    _ = heartbeat.tick() => {
+                        match repo.renew_import(novel_id, attempt).await {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                tracing::warn!(%novel_id, attempt, "novel import lease was fenced");
+                                let _ = lost.send(true);
+                                return;
+                            }
+                            Err(error) => {
+                                tracing::error!(%novel_id, attempt, error = ?error, "novel import lease renewal failed");
+                                let _ = lost.send(true);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        Self {
+            stop: Some(stop),
+            lost: receiver,
+        }
+    }
+
+    async fn run<T>(&mut self, operation: impl Future<Output = T>) -> Option<T> {
+        if *self.lost.borrow() {
+            return None;
+        }
+        tokio::select! {
+            biased;
+            result = operation => Some(result),
+            _ = self.wait_until_lost() => None,
+        }
+    }
+
+    async fn wait_until_lost(&mut self) {
+        while !*self.lost.borrow() && self.lost.changed().await.is_ok() {}
+    }
+
+    fn stop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+    }
+}
+
+impl Drop for ImportLease {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
 
 fn ensure_import_budget(chapters: &[Chapter]) -> std::result::Result<(), ImportBudgetExceeded> {
     if chapters.len() > MAX_IMPORT_CHAPTERS {
@@ -164,12 +244,51 @@ impl NovelCommandHandler {
         Ok(())
     }
 
-    /// 处理小说导入命令（异步解析流程）
+    pub fn spawn_import_recovery(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let handler = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(IMPORT_RECOVERY_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                if let Err(error) = handler.recover_imports_once().await {
+                    error!(error = ?error, "novel import recovery scan failed");
+                }
+            }
+        })
+    }
+
+    async fn recover_imports_once(self: &Arc<Self>) -> Result<()> {
+        for candidate in self.novel_repo.recoverable_imports(100).await? {
+            let Ok(admission) = self.try_admit_import(candidate.user_id) else {
+                continue;
+            };
+            match self
+                .novel_repo
+                .claim_import(candidate.novel_id, candidate.user_id)
+                .await
+            {
+                Ok(Some(claim)) => self.spawn_claimed_import(claim, admission),
+                Ok(None) => {}
+                Err(error) => {
+                    error!(
+                        error = ?error,
+                        novel_id = %candidate.novel_id,
+                        "recoverable novel import claim failed"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Accept an import only after deterministic chapters and its durable job
+    /// have committed atomically. Provider enrichment remains asynchronous.
     #[tracing::instrument(
         skip(self, cmd),
         fields(user_id = %cmd.user_id, title = %cmd.title)
     )]
-    pub async fn handle_import(&self, cmd: ImportNovelCommand) -> Result<Uuid> {
+    pub async fn handle_import(self: &Arc<Self>, cmd: ImportNovelCommand) -> Result<Uuid> {
         info!("Importing novel: {}", cmd.title);
 
         let raw_text = cmd
@@ -177,11 +296,18 @@ impl NovelCommandHandler {
             .ok_or_else(|| anyhow::anyhow!("Novel content is required"))?;
         let admission = self.try_admit_import(cmd.user_id)?;
 
-        // 1. 创建 Novel 聚合根
         let mut novel = Novel::create(cmd.user_id, cmd.title.clone(), cmd.author.clone());
         if let Some(mode) = cmd.deviation_mode {
             novel.set_deviation_mode(mode);
         }
+        let novel_id = novel.id;
+        let (chapters, admission) = tokio::task::spawn_blocking(move || {
+            let chapters = NovelParserService::parse_chapters(novel_id, &raw_text)?;
+            ensure_import_budget(&chapters)?;
+            Ok::<_, anyhow::Error>((chapters, admission))
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("chapter parser task failed: {error}"))??;
         retain_source_file(
             &mut novel,
             cmd.source_bytes,
@@ -189,200 +315,166 @@ impl NovelCommandHandler {
             self.source_deletions.as_ref(),
         )
         .await?;
-        self.novel_repo.save(&novel).await?;
-
-        let novel_id = novel.id;
-
-        // 2. 异步执行解析（不阻塞响应）
-        let novel_repo = self.novel_repo.clone();
-        let novel_repo_err = self.novel_repo.clone();
-        let chapter_repo = self.chapter_repo.clone();
-        let character_repo = self.character_repo.clone();
-        let canon_repo = self.canon_repo.clone();
-        let llm = self.llm.clone();
-        let image_client = self.image_client.clone();
-        let title = cmd.title.clone();
-
-        tokio::spawn(async move {
-            let _admission = admission;
-            if let Err(e) = Self::parse_novel_async(
-                novel_id,
-                &title,
-                raw_text,
-                novel_repo,
-                chapter_repo,
-                character_repo,
-                canon_repo,
-                llm,
-                image_client,
-            )
-            .await
-            {
-                error!("Novel parsing failed for {}: {}", novel_id, e);
-                if let Ok(Some(mut novel)) = novel_repo_err.find_by_id(novel_id).await {
-                    novel.mark_error(e.to_string());
-                    let _ = novel_repo_err.update(&novel).await;
-                }
+        self.novel_repo.create_import(&novel, &chapters).await?;
+        match self.novel_repo.claim_import(novel_id, cmd.user_id).await {
+            Ok(Some(claim)) => self.spawn_claimed_import(claim, admission),
+            Ok(None) => {
+                info!(%novel_id, "durable novel import was claimed by another worker");
             }
-        });
+            Err(error) => {
+                error!(error = ?error, %novel_id, "durable novel import awaits recovery");
+            }
+        }
 
         Ok(novel_id)
     }
 
     /// Retry enrichment for an owned failed import using the chapters that were
     /// already persisted. The original upload does not need to be sent again.
-    pub async fn retry_import(&self, user_id: Uuid, novel_id: Uuid) -> Result<()> {
-        let mut novel = self
+    pub async fn retry_import(self: &Arc<Self>, user_id: Uuid, novel_id: Uuid) -> Result<()> {
+        let novel = self
             .novel_repo
             .find_by_id(novel_id)
             .await?
             .filter(|novel| novel.user_id == user_id)
-            .ok_or_else(|| anyhow::anyhow!("Novel not found"))?;
+            .ok_or(ImportRetryConflict("Novel cannot be retried"))?;
         if !matches!(novel.status, NovelStatus::Error) {
-            return Err(anyhow::anyhow!("Only failed imports can be retried"));
+            return Err(ImportRetryConflict("Only failed imports can be retried").into());
         }
 
         let chapters = self.chapter_repo.find_by_novel(novel_id).await?;
         if chapters.is_empty() {
-            return Err(anyhow::anyhow!(
-                "No parsed chapters are available for retry"
-            ));
+            return Err(ImportRetryConflict(
+                "No parsed chapters are available; re-upload the source",
+            )
+            .into());
         }
-        let chapters = tokio::task::spawn_blocking(move || {
-            ensure_import_budget(&chapters)?;
-            Ok::<_, anyhow::Error>(chapters)
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("import budget task failed: {error}"))??;
-        let characters = self.character_repo.find_by_novel(novel_id).await?;
-        let resume_canon = !characters.is_empty();
-        if resume_canon
-            && (novel.total_chapters != chapters.len() as i32
-                || novel.world_summary.is_none()
-                || novel.genre.is_none())
-        {
-            return Err(anyhow::anyhow!(
-                "This legacy partial import cannot be retried safely"
-            ));
-        }
+        ensure_import_budget(&chapters)?;
 
         let admission = self.try_admit_import(user_id)?;
-        novel.start_parsing();
-        self.novel_repo.update(&novel).await?;
-
-        let title = novel.title.clone();
-        let novel_repo = self.novel_repo.clone();
-        let novel_repo_err = self.novel_repo.clone();
-        let chapter_repo = self.chapter_repo.clone();
-        let character_repo = self.character_repo.clone();
-        let canon_repo = self.canon_repo.clone();
-        let llm = self.llm.clone();
-        let image_client = self.image_client.clone();
-        tokio::spawn(async move {
-            let _admission = admission;
-            let result = if resume_canon {
-                Self::complete_canon_async(
-                    &mut novel,
-                    &chapters,
-                    &characters,
-                    novel_repo,
-                    canon_repo,
-                    llm,
-                )
-                .await
-            } else {
-                Self::enrich_novel_async(
-                    novel,
-                    &title,
-                    chapters,
-                    novel_repo,
-                    chapter_repo,
-                    character_repo,
-                    canon_repo,
-                    llm,
-                    image_client,
-                )
-                .await
-            };
-            if let Err(error) = result {
-                error!("Novel retry failed for {}: {}", novel_id, error);
-                if let Ok(Some(mut novel)) = novel_repo_err.find_by_id(novel_id).await {
-                    novel.mark_error(error.to_string());
-                    let _ = novel_repo_err.update(&novel).await;
-                }
-            }
-        });
+        let claim = self
+            .novel_repo
+            .claim_import(novel_id, user_id)
+            .await?
+            .ok_or(ImportRetryConflict("Import cannot be retried"))?;
+        self.spawn_claimed_import(claim, admission);
         Ok(())
     }
 
-    #[tracing::instrument(skip_all, fields(novel_id = %novel_id))]
-    // ponytail: keep the one-shot task explicit until ingestion becomes a durable job.
-    #[allow(clippy::too_many_arguments)]
-    async fn parse_novel_async(
-        novel_id: Uuid,
-        title: &str,
-        raw_text: String,
-        novel_repo: Arc<dyn NovelRepository>,
-        chapter_repo: Arc<dyn ChapterRepository>,
-        character_repo: Arc<dyn CharacterRepository>,
-        canon_repo: Arc<dyn CanonStoryModelRepository>,
-        llm: Arc<dyn LlmPort>,
-        image_client: Arc<dyn ImagePort>,
-    ) -> Result<()> {
-        // 更新状态为解析中
-        let mut novel = novel_repo
-            .find_by_id(novel_id)
+    fn spawn_claimed_import(self: &Arc<Self>, claim: ImportClaim, admission: ImportAdmission) {
+        let handler = self.clone();
+        tokio::spawn(async move {
+            handler.run_claimed_import(claim, admission).await;
+        });
+    }
+
+    async fn run_claimed_import(&self, claim: ImportClaim, admission: ImportAdmission) {
+        let _admission = admission;
+        let mut lease = ImportLease::start(self.novel_repo.clone(), claim.novel_id, claim.attempt);
+        match lease.run(self.process_import(&claim)).await {
+            None => tracing::warn!(
+                novel_id = %claim.novel_id,
+                attempt = claim.attempt,
+                "novel import stopped after losing its lease"
+            ),
+            Some(Err(error)) if error.downcast_ref::<ImportLeaseLost>().is_some() => {
+                tracing::warn!(
+                    novel_id = %claim.novel_id,
+                    attempt = claim.attempt,
+                    "novel import write was fenced"
+                );
+            }
+            Some(Err(error)) => {
+                lease.stop();
+                error!(
+                    error = ?error,
+                    novel_id = %claim.novel_id,
+                    attempt = claim.attempt,
+                    "novel import processing failed"
+                );
+                let (code, public_error) = if claim.stage == ImportStage::Source {
+                    (
+                        "source_unavailable",
+                        "No parsed chapters are available; re-upload the source",
+                    )
+                } else {
+                    (
+                        "processing_failed",
+                        "Import processing failed; retry the import",
+                    )
+                };
+                if let Err(failure_error) = self
+                    .novel_repo
+                    .fail_import(claim.novel_id, claim.attempt, code, public_error)
+                    .await
+                {
+                    error!(
+                        error = ?failure_error,
+                        novel_id = %claim.novel_id,
+                        attempt = claim.attempt,
+                        "novel import failure could not be recorded"
+                    );
+                }
+            }
+            Some(Ok(characters)) => {
+                lease.stop();
+                self.generate_avatars(claim.novel_id, &characters).await;
+            }
+        }
+    }
+
+    async fn process_import(&self, claim: &ImportClaim) -> Result<Vec<Character>> {
+        let mut novel = self
+            .novel_repo
+            .find_by_id(claim.novel_id)
             .await?
+            .filter(|novel| novel.user_id == claim.user_id)
             .ok_or_else(|| anyhow::anyhow!("Novel not found"))?;
-        novel.start_parsing();
-        novel_repo.update(&novel).await?;
+        let chapters = self.chapter_repo.find_by_novel(claim.novel_id).await?;
+        if chapters.is_empty() {
+            return Err(anyhow::anyhow!("durable import has no chapters"));
+        }
+        ensure_import_budget(&chapters)?;
 
-        // 拆分章节
-        info!("Parsing chapters for novel {}", novel_id);
-        let chapters = tokio::task::spawn_blocking(move || {
-            let chapters = NovelParserService::parse_chapters(novel_id, &raw_text)?;
-            ensure_import_budget(&chapters)?;
-            Ok::<_, anyhow::Error>(chapters)
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("chapter parser task failed: {error}"))??;
-        chapter_repo.save_batch(&chapters).await?;
-
-        Self::enrich_novel_async(
-            novel,
-            title,
-            chapters,
-            novel_repo,
-            chapter_repo,
-            character_repo,
-            canon_repo,
-            llm,
-            image_client,
-        )
-        .await
+        let characters = match claim.stage {
+            ImportStage::Chapters => {
+                self.enrich_novel_async(&mut novel, &chapters, claim)
+                    .await?
+            }
+            ImportStage::Enriched => {
+                let characters = self.character_repo.find_by_novel(claim.novel_id).await?;
+                if characters.is_empty() {
+                    return Err(anyhow::anyhow!("enriched import has no characters"));
+                }
+                characters
+            }
+            ImportStage::Source => {
+                return Err(anyhow::anyhow!("durable import source is unavailable"));
+            }
+            ImportStage::Completed => return Err(ImportLeaseLost.into()),
+        };
+        self.complete_canon_async(&novel, &chapters, &characters, claim)
+            .await?;
+        Ok(characters)
     }
 
     #[tracing::instrument(skip_all, fields(novel_id = %novel.id))]
-    #[allow(clippy::too_many_arguments)]
     async fn enrich_novel_async(
-        mut novel: Novel,
-        title: &str,
-        chapters: Vec<Chapter>,
-        novel_repo: Arc<dyn NovelRepository>,
-        chapter_repo: Arc<dyn ChapterRepository>,
-        character_repo: Arc<dyn CharacterRepository>,
-        canon_repo: Arc<dyn CanonStoryModelRepository>,
-        llm: Arc<dyn LlmPort>,
-        image_client: Arc<dyn ImagePort>,
-    ) -> Result<()> {
+        &self,
+        novel: &mut Novel,
+        chapters: &[Chapter],
+        claim: &ImportClaim,
+    ) -> Result<Vec<Character>> {
         let novel_id = novel.id;
         let total_chapters = chapters.len() as i32;
+        let title = novel.title.clone();
 
         // 提取角色和世界观（代表性样本 + 分块全文扫描）
         info!("Extracting characters for novel {}", novel_id);
-        let sample_text = build_representative_sample(&chapters);
-        let prompt = build_extraction_prompt(title, &sample_text);
-        let extraction_json = llm
+        let sample_text = build_representative_sample(chapters);
+        let prompt = build_extraction_prompt(&title, &sample_text);
+        let extraction_json = self
+            .llm
             .chat_json(NovelLlmTask::CharacterExtraction, &prompt)
             .await?;
         let base_extraction: ExtractionResult =
@@ -390,13 +482,14 @@ impl NovelCommandHandler {
         validate_extraction(&base_extraction)?;
 
         let mut chunk_extractions = Vec::new();
-        if needs_chunk_scan(&chapters) {
-            let scans = build_scan_plan(&chapters);
+        if needs_chunk_scan(chapters) {
+            let scans = build_scan_plan(chapters);
             let results = stream::iter(scans.into_iter().enumerate())
                 .map(|(index, chunk)| {
-                    let llm = llm.clone();
+                    let llm = self.llm.clone();
+                    let title = title.clone();
                     async move {
-                        let prompt = build_chunk_extraction_prompt(title, &chunk, index);
+                        let prompt = build_chunk_extraction_prompt(&title, &chunk, index);
                         let json = llm
                             .chat_json(NovelLlmTask::CharacterExtraction, &prompt)
                             .await?;
@@ -428,13 +521,13 @@ impl NovelCommandHandler {
             .characters
             .iter()
             .filter_map(|ec| {
-                let first_appearance = find_first_appearance(ec, &chapters);
+                let first_appearance = find_first_appearance(ec, chapters);
                 let Some(first_appearance) = first_appearance else {
                     tracing::warn!(character = %ec.name, "omitting character without a source-proven first appearance");
                     return None;
                 };
                 let Some(mut character) =
-                    Character::from_extraction(novel_id, ec, &extraction.world_summary, title)
+                    Character::from_extraction(novel_id, ec, &extraction.world_summary, &title)
                 else {
                     tracing::warn!(character = %ec.name, "omitting character with invalid name");
                     return None;
@@ -450,44 +543,34 @@ impl NovelCommandHandler {
             ));
         }
 
-        character_repo.save_batch(&characters).await?;
-
-        // Save character relationship graph
-        if !extraction.relationships.is_empty() {
-            let char_name_to_id: std::collections::HashMap<String, Uuid> = characters
-                .iter()
-                .map(|c| (c.name.to_lowercase(), c.id))
-                .collect();
-
-            for rel in &extraction.relationships {
-                let from_id = char_name_to_id.get(&rel.from_character.trim().to_lowercase());
-                let to_id = char_name_to_id.get(&rel.to_character.trim().to_lowercase());
-                if let (Some(&from), Some(&to)) = (from_id, to_id) {
-                    if let Err(e) = character_repo
-                        .save_relationship(
-                            novel_id,
-                            from,
-                            to,
-                            &rel.relationship_type,
-                            Some(rel.description.as_str()),
-                            rel.strength,
-                        )
-                        .await
-                    {
-                        tracing::error!(
-                            "Failed to save relationship {}->{}: {}",
-                            rel.from_character,
-                            rel.to_character,
-                            e
-                        );
-                    }
-                }
-            }
-            info!(
-                "Saved {} character relationships for novel {}",
-                extraction.relationships.len(),
-                novel_id
-            );
+        let char_name_to_id: HashMap<String, Uuid> = characters
+            .iter()
+            .map(|character| (character.name.to_lowercase(), character.id))
+            .collect();
+        let relationships = extraction
+            .relationships
+            .iter()
+            .filter_map(|relationship| {
+                let from_id =
+                    char_name_to_id.get(&relationship.from_character.trim().to_lowercase());
+                let to_id = char_name_to_id.get(&relationship.to_character.trim().to_lowercase());
+                Some(CharacterRelationshipRecord {
+                    id: Uuid::new_v4(),
+                    novel_id,
+                    from_character_id: *from_id?,
+                    to_character_id: *to_id?,
+                    relationship_type: relationship.relationship_type.clone(),
+                    description: Some(relationship.description.clone()),
+                    strength: relationship.strength,
+                })
+            })
+            .collect::<Vec<_>>();
+        if !self
+            .character_repo
+            .replace_import(novel_id, claim.attempt, &characters, &relationships)
+            .await?
+        {
+            return Err(ImportLeaseLost.into());
         }
 
         // Detect narrative branch nodes
@@ -496,8 +579,9 @@ impl NovelCommandHandler {
             .iter()
             .map(|c| (c.chapter_number, c.content.as_str()))
             .collect();
-        let node_prompt = node_detector::build_node_detection_prompt(title, &chapter_summaries);
-        match llm
+        let node_prompt = node_detector::build_node_detection_prompt(&title, &chapter_summaries);
+        match self
+            .llm
             .chat_json(NovelLlmTask::NarrativeNodeDetection, &node_prompt)
             .await
         {
@@ -513,22 +597,17 @@ impl NovelCommandHandler {
                         if let Err(error) = validation {
                             tracing::warn!(%error, %novel_id, "node detection output rejected");
                         } else {
-                            for node in &detection.nodes {
-                                if let Some(ch) = chapters
-                                    .iter()
-                                    .find(|c| c.chapter_number == node.chapter_number)
-                                {
-                                    // Mark chapter as key node
-                                    let mut updated_ch = ch.clone();
-                                    updated_ch.mark_as_key_node(node.description.clone());
-                                    if let Err(e) = chapter_repo.update(&updated_ch).await {
-                                        tracing::error!(
-                                            "Failed to mark chapter {} as key node: {}",
-                                            node.chapter_number,
-                                            e
-                                        );
-                                    }
-                                }
+                            let nodes = detection
+                                .nodes
+                                .iter()
+                                .map(|node| (node.chapter_number, node.description.clone()))
+                                .collect::<Vec<_>>();
+                            if !self
+                                .chapter_repo
+                                .replace_import_nodes(novel_id, claim.attempt, &nodes)
+                                .await?
+                            {
+                                return Err(ImportLeaseLost.into());
                             }
                             info!(
                                 "Detected {} narrative nodes for novel {}",
@@ -545,83 +624,40 @@ impl NovelCommandHandler {
             Err(e) => tracing::warn!("Node detection LLM call failed for {}: {}", novel_id, e),
         }
 
-        // Persist completed source enrichment before canonical extraction. The
-        // novel remains non-ready until the source-complete model commits.
+        if !self
+            .novel_repo
+            .record_import_enrichment(
+                novel_id,
+                claim.attempt,
+                total_chapters,
+                &extraction.world_summary,
+                &extraction.genre,
+            )
+            .await?
+        {
+            return Err(ImportLeaseLost.into());
+        }
         novel.record_enrichment(
             total_chapters,
             extraction.world_summary.clone(),
             extraction.genre.clone(),
         );
-        novel_repo.update(&novel).await?;
-        Self::complete_canon_async(
-            &mut novel,
-            &chapters,
-            &characters,
-            novel_repo.clone(),
-            canon_repo,
-            llm,
-        )
-        .await?;
-
-        // ponytail: discover every character; cap cosmetic avatar cost until demand proves otherwise.
-        if characters.len() > MAX_AVATARS_PER_NOVEL {
-            info!(
-                novel_id = %novel_id,
-                skipped = characters.len() - MAX_AVATARS_PER_NOVEL,
-                "avatar generation capped; all characters remain available"
-            );
-        }
-        let avatar_jobs = characters
-            .iter()
-            .take(MAX_AVATARS_PER_NOVEL)
-            .filter_map(|character| {
-                character
-                    .appearance
-                    .clone()
-                    .map(|appearance| (character.id, appearance))
-            });
-        stream::iter(avatar_jobs)
-            .for_each_concurrent(3, |(character_id, appearance)| {
-                let character_repo = character_repo.clone();
-                let image_client = image_client.clone();
-                async move {
-                    if let Err(error) = Self::generate_avatar(
-                        character_id,
-                        &appearance,
-                        character_repo,
-                        image_client,
-                    )
-                    .await
-                    {
-                        error!(%error, %character_id, "avatar generation failed");
-                    }
-                }
-            })
-            .await;
-
-        info!(
-            "Novel {} parsed successfully: {} chapters, {} characters",
-            novel_id,
-            total_chapters,
-            characters.len()
-        );
-        Ok(())
+        Ok(characters)
     }
 
     async fn complete_canon_async(
-        novel: &mut Novel,
+        &self,
+        novel: &Novel,
         chapters: &[Chapter],
         characters: &[Character],
-        novel_repo: Arc<dyn NovelRepository>,
-        canon_repo: Arc<dyn CanonStoryModelRepository>,
-        llm: Arc<dyn LlmPort>,
+        claim: &ImportClaim,
     ) -> Result<()> {
-        if canon_repo.find_latest(novel.id).await?.is_none() {
+        if self.canon_repo.find_latest(novel.id).await?.is_none() {
             info!(novel_id = %novel.id, "Extracting canonical story model");
             let chunks = canon_story_extractor::build_scan_plan(chapters)?;
             let results = stream::iter(chunks.into_iter().enumerate())
                 .map(|(position, chunk)| {
-                    let llm = llm.clone();
+                    let llm = self.llm.clone();
                     let title = novel.title.clone();
                     async move {
                         let prompt =
@@ -643,20 +679,62 @@ impl NovelCommandHandler {
                 .map(|(_, chunk, extraction)| (chunk, extraction))
                 .collect::<Vec<_>>();
             let model = canon_story_extractor::assemble_model(novel.id, 1, &extracted, characters)?;
-            canon_repo.insert(&model).await?;
+            if !self.canon_repo.insert_import(&model, claim.attempt).await? {
+                return Err(ImportLeaseLost.into());
+            }
         }
+        if !self
+            .novel_repo
+            .complete_import(novel.id, claim.attempt)
+            .await?
+        {
+            return Err(ImportLeaseLost.into());
+        }
+        info!(
+            novel_id = %novel.id,
+            chapters = chapters.len(),
+            characters = characters.len(),
+            "novel import completed"
+        );
+        Ok(())
+    }
 
-        let total_chapters = novel.total_chapters;
-        let world_summary = novel
-            .world_summary
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("enriched novel has no world summary"))?;
-        let genre = novel
-            .genre
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("enriched novel has no genre"))?;
-        novel.mark_ready(total_chapters, world_summary, genre);
-        novel_repo.update(novel).await
+    async fn generate_avatars(&self, novel_id: Uuid, characters: &[Character]) {
+        // ponytail: discover every character; cap cosmetic avatar cost until demand proves otherwise.
+        if characters.len() > MAX_AVATARS_PER_NOVEL {
+            info!(
+                novel_id = %novel_id,
+                skipped = characters.len() - MAX_AVATARS_PER_NOVEL,
+                "avatar generation capped; all characters remain available"
+            );
+        }
+        let avatar_jobs = characters
+            .iter()
+            .take(MAX_AVATARS_PER_NOVEL)
+            .filter_map(|character| {
+                character
+                    .appearance
+                    .clone()
+                    .map(|appearance| (character.id, appearance))
+            });
+        stream::iter(avatar_jobs)
+            .for_each_concurrent(3, |(character_id, appearance)| {
+                let character_repo = self.character_repo.clone();
+                let image_client = self.image_client.clone();
+                async move {
+                    if let Err(error) = Self::generate_avatar(
+                        character_id,
+                        &appearance,
+                        character_repo,
+                        image_client,
+                    )
+                    .await
+                    {
+                        error!(%error, %character_id, "avatar generation failed");
+                    }
+                }
+            })
+            .await;
     }
 
     async fn generate_avatar(
@@ -673,12 +751,7 @@ impl NovelCommandHandler {
             appearance = appearance
         );
         let url = image_client.generate(&prompt).await?;
-        let mut character = character_repo
-            .find_by_id(character_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Character not found"))?;
-        character.set_avatar(url);
-        character_repo.update(&character).await?;
+        character_repo.set_avatar(character_id, &url).await?;
         Ok(())
     }
 }
