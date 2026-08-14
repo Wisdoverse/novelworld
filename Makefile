@@ -1,4 +1,4 @@
-.PHONY: start stop restart logs status clean setup dev test
+.PHONY: start stop restart logs status clean setup dev test verify
 
 # One-click start (interactive setup on first run)
 start:
@@ -38,3 +38,7 @@ dev:
 test:
 	cargo test --workspace
 	cd frontend && pnpm test
+
+# Run the exact required cross-platform CI workflow for the current pushed SHA
+verify:
+	@bash tools/verify-ci.sh

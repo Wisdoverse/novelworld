@@ -50,11 +50,25 @@ chore: upgrade dependencies
 
 ## Pull Request Process
 
-1. Ensure CI passes (Rust build + test + clippy, Frontend type-check + build)
+1. Ensure required CI passes
 2. Update documentation if adding new features or changing behavior
 3. Add tests for new functionality
 4. Keep PRs focused — one feature or fix per PR
 5. Fill in the PR template with summary, test plan, and screenshots if UI changes
+
+Pull requests trigger CI automatically. To reproduce the complete
+cross-platform gate on demand, use a clean checkout whose current branch is
+pushed to its upstream and run:
+
+```bash
+make verify
+```
+
+This requires authenticated GitHub CLI access, intentionally creates one
+GitHub Actions run for the exact current commit, and waits for its result. It
+fails closed for dirty, detached, untracked, or unpushed checkouts. The command
+reuses [`.github/workflows/ci.yml`](./.github/workflows/ci.yml); it does not
+maintain a second list of checks.
 
 ## Architecture Constraints
 
