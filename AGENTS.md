@@ -40,7 +40,7 @@ Data flow for a conversation turn:
 Browser POST /api/chat/:characterId/stream
   → Gateway validates JWT, injects X-User-Id
   → Agent Service reserves the Idempotency-Key and snapshots server-side progress
-  → Agent Service retrieves 4-layer memory pyramid
+  → Agent Service retrieves committed chat and the available memory layers
   → Agent Service retrieves relevant lore up to the reader's current chapter
   → Agent Service builds system prompt (character + lore + memories + anti-spoiler)
   → Agent Service streams LLM response via SSE
@@ -55,14 +55,17 @@ Browser POST /api/chat/:characterId/stream
 - `services/novel-service/` — Novel ingestion pipeline. Chapter splitting
   (regex + LLM fallback), character extraction, relationship graph, avatar
   generation, reading progress.
-- `services/agent-service/` — Character AI. 4-layer memory pyramid
-  (short/mid/long/permanent), SSE streaming, memory compression.
+- `services/agent-service/` — Character AI. Durable chat, memory retrieval and
+  projections (short/mid/long/permanent schema), SSE streaming, compression.
 - `services/narrative-service/` — Branch logic. Narrative nodes, choice
   submission, consequence generation, world state mutations.
 - `frontend/` — React/TypeScript/Tailwind app. Feature-Sliced Design.
 - `infra/postgres/` — Schema (`init.sql`), explicit development seed fixture, extensions.
 - `infra/nginx/` — Reverse proxy config with SSE support.
 - `docs/` — Architecture docs.
+
+The current supported product/deployment envelope and evidence limits are in
+`docs/PRODUCT_CONTRACT.md`.
 
 Each Rust service follows layered architecture:
 
@@ -180,7 +183,7 @@ Schema lives in `infra/postgres/init.sql`. Key tables:
 | `chapters` | Split chapter content |
 | `chapter_chunks` | Derived chunks for spoiler-bounded lore retrieval |
 | `characters` | Extracted characters with system prompts |
-| `character_memories` | 4-layer memory pyramid + pgvector embeddings |
+| `character_memories` | Layered memory records + optional pgvector embeddings |
 | `character_relationships` | Entity relationship graph between characters |
 | `chat_messages` | Conversation history |
 | `chat_turns` | Idempotency, lease, and commit state for conversation turns |
@@ -272,7 +275,9 @@ exercise production repositories plus replayable migrations.
 
 ## Known Gaps (Not Yet Implemented)
 
-All previously listed implementation gaps have been resolved.
+Product, quality, recovery, and release gaps are owned by `docs/ROADMAP.md` and
+the active GitHub Project issue. Do not infer completion from this section or
+from a merged structural-control PR.
 
 ## Security Notes
 

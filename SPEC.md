@@ -1,10 +1,16 @@
 # NovelWorld Service Specification
 
-Status: Draft v1 (language-agnostic)
+Status: H0 candidate v1
 
-Purpose: Define a platform that transforms any novel into an interactive world where readers engage
+Purpose: Define a platform that transforms a supported novel into an interactive world where readers engage
 with AI-driven character agents, influence narrative branches, and maintain persistent memory across
 sessions.
+
+This document is the intended normative target, not evidence that the current
+runtime conforms to every clause. The current supported envelope, known gaps,
+and claim dispositions are recorded in
+[`docs/PRODUCT_CONTRACT.md`](./docs/PRODUCT_CONTRACT.md). Runtime code,
+migrations, and tests remain the source of truth for current behavior.
 
 ## Normative Language
 
@@ -15,13 +21,14 @@ The key words `MUST`, `MUST NOT`, `REQUIRED`, `SHOULD`, `SHOULD NOT`, `RECOMMEND
 specification does not prescribe one universal policy. Implementations MUST document the selected
 behavior.
 
-`LLM` refers to any Large Language Model reachable via an OpenAI-compatible chat completions API.
+`LLM` refers to a Large Language Model reached through a configured provider
+adapter. A working adapter does not by itself qualify a provider or model.
 
 ---
 
 ## 1. Problem Statement
 
-NovelWorld is a platform that ingests arbitrary novel text, extracts its characters and world
+NovelWorld is a platform that ingests supported novel text, extracts its characters and world
 structure via LLM analysis, and exposes each character as a stateful AI agent that readers can
 converse with. The platform solves five problems:
 
@@ -32,8 +39,8 @@ converse with. The platform solves five problems:
   so character relationships evolve naturally over time.
 - It surfaces key narrative branch points and lets readers make choices that diverge the story,
   with the LLM generating canon-consistent consequences.
-- It generates character avatars from textual appearance descriptions so every character has a
-  visual identity without manual artwork.
+- It can generate bounded, optional character portraits from textual appearance descriptions;
+  missing portraits do not remove a character or block import readiness.
 
 Important boundary:
 
@@ -48,7 +55,7 @@ Important boundary:
 
 ### 2.1 Goals
 
-- Accept novel text via file upload (TXT, PDF) or direct paste and parse it into chapters and
+- Accept novel text via file upload (TXT, EPUB, PDF) or direct paste and parse it into chapters and
   characters without manual annotation.
 - Generate a character agent for every extracted character, with personality, background, and
   speaking style derived from the source text.
@@ -58,8 +65,8 @@ Important boundary:
   progressively.
 - Present branch choice nodes at key chapters and persist the reader's selections in a world state
   document.
-- Allow readers to adopt either their own identity or a character's identity when entering the
-  world.
+- Use an original `PlayerEntity` as the primary identity; retain character identity only as a
+  compatibility path until its agency boundary is qualified.
 - Generate character avatar images from appearance descriptions using an image generation API.
 - Enforce per-reader memory isolation so no reader can observe another reader's conversation
   history or world state.
@@ -95,15 +102,17 @@ Important boundary:
    - Accepts novel uploads and text pastes.
    - Orchestrates LLM-based parsing: chapter splitting, character extraction, world summary
      generation.
-   - Triggers avatar generation for extracted characters.
-   - Stores parsed artefacts in the database and novel files in object storage.
+   - Triggers bounded avatar generation for eligible extracted characters.
+   - Stores parsed artefacts in PostgreSQL and, when enabled, original upload bytes in object
+     storage.
 
 4. `Agent Service`
    - Manages character agent sessions.
    - Builds LLM prompts from character profile, world state, and memory layers.
    - Streams LLM responses back to the caller via SSE.
-   - Writes new memories after each conversation turn.
-   - Compresses short-term memories when the layer exceeds its configured threshold.
+   - Projects committed turns into bounded recent context and periodic mid-term summaries.
+   - Retrieves any available long-term and permanent records without implying that current writers
+     populate them.
 
 5. `Narrative Service`
    - Identifies key branch nodes in chapters.
@@ -115,13 +124,13 @@ Important boundary:
    - Single source of truth for all structured data.
    - Uses `pgvector` extension for semantic memory retrieval.
 
-7. `Object Storage` (S3-compatible)
-   - Stores uploaded novel files and generated avatar images.
-   - All file references in the database are storage keys, not local paths.
+7. `Object Storage` (optional, S3-compatible)
+   - Retains original uploaded bytes only when the operator enables source retention.
+   - Uses server-generated storage keys. Provider-hosted avatar bytes remain outside NovelWorld;
+     only returned URL metadata is stored.
 
 8. `Cache` (Redis)
-   - Stores short-term memory entries for fast access during active conversations.
-   - Caches parsed chapter content to reduce database load.
+   - Stores a bounded, reconstructable recent-message projection.
 
 ### 3.2 Abstraction Layers
 
@@ -148,12 +157,11 @@ NovelWorld is easiest to implement when organized into these layers:
 
 ### 3.3 External Dependencies
 
-- An LLM reachable via an OpenAI-compatible chat completions API (`/v1/chat/completions`).
-- An image generation API reachable via an OpenAI-compatible endpoint (`/v1/images/generations`).
-- An embedding API reachable via an OpenAI-compatible endpoint (`/v1/embeddings`).
+- A configured LLM provider adapter.
+- Optionally, configured image-generation and embedding adapters.
 - PostgreSQL 18 with the `pgvector` and `uuid-ossp` extensions installed.
 - Redis 7 or later.
-- An S3-compatible object storage endpoint.
+- Optionally, an S3-compatible object storage endpoint for retained source bytes.
 
 ---
 
@@ -446,29 +454,32 @@ Constraint: unique on `(user_id, novel_id)`.
 
 The Novel Service MUST accept:
 
-- Plain text files (`.txt`) up to 10 MB.
-- PDF files (`.pdf`) up to 20 MB.
-- Direct text paste payloads up to 5 MB (UTF-8 encoded JSON string body).
+- Plain text files (`.txt`) in UTF-8, BOM-marked UTF-16, or GBK up to 10 MiB.
+- EPUB files (`.epub`) up to 20 MiB.
+- PDF files (`.pdf`) up to 20 MiB.
+- Direct text paste payloads up to 5 MiB (UTF-8 encoded JSON string body).
 
 On receipt, the service MUST:
 
-1. Store the raw file in object storage under the key `novels/<user_id>/<novel_id>/source.<ext>`.
-2. Create a Novel record with `status = pending`.
-3. Return the novel ID to the caller immediately.
-4. Enqueue the parsing pipeline asynchronously.
+1. Validate the declared type, size, and extractable content before accepting the import.
+2. If source retention is enabled, store uploaded bytes under a server-generated managed key with
+   durable cleanup intent. With retention disabled, extraction is request-local.
+3. Create a Novel record with `status = pending` and return its ID.
+4. Start the process-local parsing pipeline asynchronously. Restart-safe claim/resume remains an H1
+   requirement and MUST NOT be inferred from source retention alone.
 
 ### 5.2 Parsing Pipeline
 
 The parsing pipeline runs asynchronously after file acceptance. It MUST:
 
 1. Set `status = parsing`.
-2. Extract plain text from the source file (PDF text extraction, TXT read).
+2. Extract plain text from the source file (TXT, EPUB, or PDF).
 3. Split the text into chapters using the Chapter Splitter (see §5.3).
 4. For each chapter, store a Chapter record with `content` and `word_count`.
 5. Extract characters using the Character Extractor (see §5.4).
 6. Generate a world summary using the World Summarizer (see §5.5).
 7. Identify key narrative nodes using the Node Detector (see §5.6).
-8. Enqueue avatar generation for each character (see §5.7).
+8. Start bounded avatar generation for eligible characters (see §5.7).
 9. Set `status = ready` and `total_chapters = <count>`.
 
 On any unrecoverable error, the pipeline MUST set `status = error` and store the error message in
@@ -535,42 +546,53 @@ The summary MUST be stored in `novels.world_summary` and MUST NOT exceed 2000 ch
 
 ### 5.6 Node Detector
 
-Input: chapter content and chapter number.
+Input: bounded chapter summaries with their real chapter numbers.
 
-For each chapter, the Node Detector MUST invoke the LLM to determine whether the chapter contains
-a narrative branch point. The LLM response MUST use a structured schema:
+The Node Detector MUST return bounded candidate branch points. It MAY batch or
+sample chapter summaries; the product contract does not require one provider
+call per chapter. Model output MUST use a structured schema:
 
 ```json
 {
-  "is_key_node": "boolean",
-  "description": "string or null",
-  "choices": [
-    { "index": 0, "text": "string", "consequence_hint": "string or null" }
+  "nodes": [
+    {
+      "chapter_number": "integer",
+      "description": "string",
+      "choices": [
+        { "text": "string", "hint": "string" }
+      ]
+    }
   ]
 }
 ```
 
-If `is_key_node = true`, the service MUST:
+For each accepted node, the service MUST:
 
 - Set `chapters.is_key_node = true`.
 - Store the `description` in `chapters.key_node_description`.
-- Create a `NarrativeNode` record with the returned choices.
+- Let the Narrative Service validate and persist the user-visible node and
+  choices when they are requested.
 
-The number of choices per node MUST be between 2 and 4 inclusive.
+The number of choices per node MUST be between 2 and 3 inclusive. Current
+reader-facing node text is Simplified Chinese; other languages remain outside
+the supported journey.
 
 ### 5.7 Avatar Generation
 
-For each extracted character with a non-null `appearance` field:
+For each eligible extracted character with a non-null `appearance` field, up to
+the documented cost cap of 30 characters per import:
 
 1. Set `characters.avatar_status = generating`.
-2. Construct an image generation prompt from the `appearance` field, prefixed with the instruction:
-   `"Character portrait illustration, detailed, fantasy art style: "`.
-3. Invoke the image generation API with size `512x512` and `n=1`.
-4. Upload the returned image to object storage under the key
-   `avatars/<novel_id>/<character_id>.png`.
-5. Set `characters.avatar_url` to the storage URL and `characters.avatar_status = ready`.
-6. On failure, set `characters.avatar_status = error`. Avatar failure MUST NOT block the novel
+2. Construct a bounded image-generation prompt from the `appearance` field.
+3. Invoke the configured image adapter; rendering parameters are adapter-owned.
+4. Store the provider-returned URL as non-authoritative metadata and set
+   `characters.avatar_status = ready`.
+5. On failure, set `characters.avatar_status = error`. Avatar failure MUST NOT block the novel
    from reaching `status = ready`.
+
+Characters beyond the cap remain available without generated avatars. The
+provider owns image-byte retention and deletion unless a future reviewed change
+adds a NovelWorld-owned media lifecycle.
 
 ---
 
@@ -602,26 +624,25 @@ The memory pyramid has four layers. Each layer has distinct characteristics:
 
 | Layer | Storage | Max Entries | Retrieval | Expiry |
 |---|---|---|---|---|
-| `short` | Redis + PostgreSQL | Configurable (default 20) | Recency | Configurable TTL |
-| `mid` | PostgreSQL | Configurable (default 50) | Recency + Importance | None |
-| `long` | PostgreSQL + pgvector | Unbounded | Semantic similarity | None |
-| `permanent` | PostgreSQL + pgvector | Unbounded | Semantic similarity + Importance | Never |
+| `short` | PostgreSQL messages + bounded Redis projection | 50 projected messages | Recency | Account/novel lifecycle |
+| `mid` | PostgreSQL | Implementation-defined | Recency + Importance | Account/novel lifecycle |
+| `long` | PostgreSQL + pgvector | Implementation-defined | Semantic similarity | Account/novel lifecycle |
+| `permanent` | PostgreSQL + pgvector | Implementation-defined | Semantic similarity + Importance | No automatic eviction; account/novel lifecycle still applies |
 
 #### 6.2.1 Short-Term Layer
 
 - Contains raw conversation turns from the current and recent sessions.
-- Stored in Redis with a TTL equal to `memory.short_term_ttl_seconds` (default: 86400).
-- Also persisted to PostgreSQL for durability.
-- When the count of short-term entries for a `(character_id, user_id)` pair exceeds
-  `memory.compress_threshold` (default: 15), the Compression Pipeline (§6.3) MUST be triggered.
+- Persisted to PostgreSQL for durability; Redis holds only a bounded projection and has no
+  time-based expiry.
+- The current runtime creates a mid-term summary every 20 committed messages. A later contract may
+  make this threshold configurable.
 
 #### 6.2.2 Mid-Term Layer
 
 - Contains compressed summaries of past conversation sessions.
 - Created by the Compression Pipeline from short-term entries.
 - Retrieved by recency and importance score during prompt construction.
-- When the count of mid-term entries exceeds `memory.mid_term_limit` (default: 50), the oldest
-  low-importance entries are promoted to long-term or discarded.
+- Production promotion to long-term memory is an H3 gap.
 
 #### 6.2.3 Long-Term Layer
 
@@ -632,13 +653,14 @@ The memory pyramid has four layers. Each layer has distinct characteristics:
 #### 6.2.4 Permanent Layer
 
 - Contains immutable facts: the reader's name, major choices, and critical relationship events.
-- Entries in this layer MUST NOT be deleted or compressed.
+- Entries in this layer MUST NOT be compressed or removed by memory maintenance.
+- Novel or account deletion MUST erase them under the data-lifecycle contract.
 - Each entry MUST have an `embedding` vector.
 - Retrieved via cosine similarity search, weighted by `importance`.
 
 ### 6.3 Compression Pipeline
 
-Triggered when `short` layer count exceeds `memory.compress_threshold`.
+The current mid-term projection is triggered every 20 committed messages.
 
 Steps:
 
@@ -646,11 +668,10 @@ Steps:
    `created_at` ascending.
 2. Send the entries to the LLM with a prompt requesting a concise summary of the key events,
    emotional tone, and relationship developments.
-3. Store the summary as a new `mid` layer entry with `importance` derived from the LLM's assessment
-   (1–10).
-4. Delete the compressed `short` layer entries from both Redis and PostgreSQL.
-5. If the summary contains any permanent facts (character name, major choices), extract them and
-   store as `permanent` layer entries with embeddings.
+3. Store the summary as a new `mid` layer entry with bounded importance.
+4. Keep committed chat messages in PostgreSQL; the Redis projection remains bounded independently.
+5. Long-term and permanent promotion is not part of the current production path and remains an H3
+   requirement.
 
 ### 6.4 Prompt Construction
 
@@ -837,9 +858,9 @@ existing wire name is retained for compatibility:
   new person. The display name does not have to be the user's real identity.
   Agents address the player in second person and canonical characters perceive
   the player as another person in their world.
-- `character`: The reader adopts a character's identity. The agent system prompt acknowledges the
-  reader as that character and adjusts the dynamic accordingly. This is an
-  optional alternate mode, not the primary open-world experience.
+- `character`: A legacy compatibility mode in which the reader adopts a character identity for
+  conversation and branch paths. It is not a supported open-world agency promise until H4 defines
+  and qualifies its control boundary.
 
 ### 8.2 Identity Constraints
 
@@ -1052,7 +1073,7 @@ Standard error codes:
 All services read configuration from environment variables. No configuration file format is
 mandated; implementations MAY use `.env` files for local development.
 
-Required variables:
+Runtime variables (some are required only when their integration is enabled):
 
 | Variable | Service | Description |
 |---|---|---|
@@ -1281,9 +1302,12 @@ Other recommended metrics:
 - JWT secrets MUST be at least 32 characters and MUST NOT be committed to version control.
 - Passwords MUST be hashed with bcrypt at cost factor 12 or higher.
 - File uploads MUST be validated for MIME type and size before storage.
-- LLM prompts MUST NOT include raw user-supplied content without sanitization to prevent prompt
-  injection.
-- Object storage keys MUST be scoped to `<user_id>/` prefixes to prevent cross-user access.
+- Source text and user input passed to an LLM MUST be explicitly delimited and treated as untrusted.
+  Prompt wording MUST NOT be relied on for authorization or commit validity; model-derived
+  transitions require bounded schema and domain validation.
+- Object storage keys MUST be server-generated under the managed
+  `source-files/<user_id>/<novel_id>` namespace; uploaded filenames MUST NOT
+  influence a key.
 - Database queries MUST use parameterized statements; string interpolation into SQL is forbidden.
 
 ---

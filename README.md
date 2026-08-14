@@ -2,7 +2,7 @@
 
 # 📖 NovelWorld
 
-### Turn any novel into a world you can step into
+### Turn a supported novel into a world you can step into
 
 **Upload a novel → AI extracts characters → Chat with them in real time → Reshape the story with your choices**
 
@@ -11,8 +11,13 @@
 </div>
 
 > **For coding agents:** Start with [AGENTS.md](./AGENTS.md) (also symlinked as `CLAUDE.md`) for
-> runtime contract, repo map, naming rules, and code style. The full implementation guide is in
-> [IMPLEMENTATION.md](./IMPLEMENTATION.md). The normative spec is [SPEC.md](./SPEC.md).
+> runtime contract, repo map, naming rules, and code style. [SPEC.md](./SPEC.md) is the candidate
+> normative target; runtime code and tests remain conformance evidence.
+
+> **Current status:** NovelWorld is an operator-controlled private self-hosted
+> preview, not a public hosted service. Accepted inputs and landed controls are
+> not universal language, model, quality, scale, or accessibility guarantees.
+> See the [product contract](./docs/PRODUCT_CONTRACT.md).
 
 ---
 
@@ -22,20 +27,20 @@ Imagine you just finished *The Three-Body Problem* and want to ask Ye Wenjie abo
 
 **NovelWorld makes that possible.**
 
-Upload any novel's text and NovelWorld will automatically:
+Inside the current preview envelope, upload or paste a novel and NovelWorld can:
 
 1. 🔍 **Analyze the book** — detect chapter structure, extract characters, understand world lore
-2. 🎭 **Create AI characters** — each with their own personality, speaking style, and memory
-3. 🖼️ **Generate portraits** — AI-generated avatars based on appearance descriptions
+2. 🎭 **Create AI characters** — extracted characters with source-bounded conversation context
+3. 🖼️ **Generate portraits** — optional provider-hosted avatars for a bounded character set
 4. 🗺️ **Build a relationship graph** — map connections between characters
 
 Then you can:
 
-- 💬 **Talk to any character** — they respond in their authentic voice and remember your conversations
+- 💬 **Talk to extracted characters** — committed conversations resume across sessions
 - 🔀 **Make story choices** — your decisions change the narrative direction
 - 🧭 **Enter a living world** — choose an unlocked checkpoint, act as your own player, and inspect canon versus player-created history
-- 🎭 **Assume a character's identity** — enter the world as someone from the book
-- 🛡️ **No spoilers** — characters only know events up to your current chapter
+- 🎭 **Use the primary self mode** — enter as an original player; character identity remains experimental
+- 🛡️ **Bound source context** — server-owned reading progress excludes future lore from prompts
 
 ---
 
@@ -43,23 +48,16 @@ Then you can:
 
 ### 📚 One-Click Import
 
-Paste text or upload a file. AI handles all parsing automatically. Supports novels in any language with automatic chapter detection.
+Paste up to 5 MiB of text; upload UTF-8, BOM-marked UTF-16, or GBK TXT up to
+10 MiB; or upload EPUB or text-extractable PDF up to 20 MiB. Simplified Chinese
+and English have deterministic structural coverage; no language/model pair is
+release-qualified.
 
-### 🧠 Characters That Remember
+### 🧠 Durable Conversations
 
-NovelWorld uses a **4-Layer Memory Pyramid** so every character remembers your interactions:
-
-```
-┌──────────────────────┐
-│   Permanent Memory   │ ← Your name, major choices, critical events
-├──────────────────────┤
-│   Long-term Memory   │ ← Semantic search over past conversations
-├──────────────────────┤
-│   Mid-term Memory    │ ← Auto-summarized every 20 conversation turns
-├──────────────────────┤
-│   Short-term Memory  │ ← Recent conversation context
-└──────────────────────┘
-```
+PostgreSQL keeps committed chat history and the current runtime creates
+mid-term summaries. The four-layer memory model remains the target contract;
+production writers for long-term and permanent memories are an H3 gap.
 
 ### 🔀 Branching Narrative
 
@@ -70,16 +68,17 @@ At key story moments, you're presented with 2–3 choices. Each decision:
 
 ### 🎭 Reader Identity
 
-Choose how to enter the world:
-- **As yourself** — interact with characters as an outsider
-- **As a character** — assume any character's identity for a different perspective
+The primary mode creates an original `PlayerEntity` so canonical characters
+retain their own agency. A legacy character-identity path remains available for
+compatibility, but its agency model is not a supported product promise.
 
 ### 🧭 Living Open World
 
 Create an original player at any unlocked chapter, then travel, investigate,
 converse, ally, oppose, resolve a thread, or pursue your own goal. Canonical
 characters retain their own agency. Every turn is validated, committed once,
-auditable, and resumed exactly after a service restart.
+auditable, and resumed exactly after a service restart in the structurally
+tested single-timeline path; live causal quality is not yet qualified.
 
 ---
 
@@ -96,6 +95,10 @@ cd novelworld
 
 On Windows, start Docker Desktop and run `start.cmd` from Command Prompt, or
 double-click it in Explorer.
+
+Keep the default preview on localhost. Non-localhost access requires an
+operator-managed encrypted tunnel or TLS boundary; the stack does not supply
+the controls required for public Internet hosting.
 
 The startup scripts will:
 1. Check Docker is installed
@@ -182,10 +185,10 @@ Sign up → Upload novel → Wait for parsing → Start reading
 |-------|-------|---------|
 | Backend | Rust / Axum | 5 async microservices |
 | Database | PostgreSQL 18 | pgvector semantic search, pg_trgm fuzzy matching |
-| Cache | Redis 7 | Short-term memory store |
-| AI | OpenAI-compatible API | Structured output + streaming, 3x exponential backoff retry |
+| Cache | Redis | Reconstructable recent-message projection |
+| AI | Operator-configured provider | Structured output + streaming, bounded retry |
 | Frontend | React + TypeScript | Tailwind CSS, Feature-Sliced Design |
-| Deploy | Docker Compose | Full stack in 7 containers |
+| Deploy | Docker Compose | 9 long-running containers plus a migration job |
 
 ---
 
@@ -210,8 +213,9 @@ novelworld/
 
 | Document | Description |
 |----------|-------------|
-| [SPEC.md](./SPEC.md) | Full technical specification (RFC 2119) |
-| [IMPLEMENTATION.md](./IMPLEMENTATION.md) | Detailed implementation guide |
+| [SPEC.md](./SPEC.md) | Candidate normative specification (RFC 2119) |
+| [PRODUCT_CONTRACT.md](./docs/PRODUCT_CONTRACT.md) | Current supported envelope, responsibility boundary, and claim ledger |
+| [IMPLEMENTATION.md](./IMPLEMENTATION.md) | Entry point to current implementation sources |
 | [AGENTS.md](./AGENTS.md) | Instructions for AI coding assistants |
 | [DEPLOY.md](./DEPLOY.md) | Deployment guide |
 | [ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Architecture decisions |
