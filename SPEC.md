@@ -1211,10 +1211,15 @@ The authoritative PostgreSQL database is recoverable under the versioned policy 
    row no longer exists exactly once per record within a database lineage, tracked by durable
    per-record bookkeeping; a restore starts a new lineage, so it MAY cause at most one
    additional re-queue per record.
-3. Every database carries a migration-created lineage token; a restore regenerates it and
-   records its parent. Backup artifacts MUST embed an erasure-record export taken from the
-   same database snapshot as the dump, and record that snapshot's covered-through timestamp
-   and the lineage token. The restore procedure MUST stop application writes before exporting
+3. Every database carries exactly one lineage token: a version-4 UUID created by the standard
+   migration path only when none exists; ordinary deployments preserve it, and only a restore
+   regenerates it — as a fresh version-4 UUID, atomically with the restored data becoming
+   reachable, recording the artifact's token as parent, so no crashed or partial restore can
+   present the artifact's token as live. Backup artifacts MUST embed an erasure-record export
+   taken from the same database snapshot as the dump, and record that snapshot's
+   covered-through timestamp and the lineage token. The restore procedure MUST verify the
+   manifest token equals the token inside the verified dump and abort on mismatch or absence
+   (an absent token never compares equal), MUST stop application writes before exporting
    erasure records, MUST treat a reachable database as live continuation only when its
    lineage token equals the artifact's, MUST replay the union of every available erasure
    source, MUST abort when sources disagree on a deletion fact of the same subject (the
@@ -1223,13 +1228,14 @@ The authoritative PostgreSQL database is recoverable under the versioned policy 
    timestamp to the writes-stopped or declared-failure time — is non-empty. The only
    sanctioned continuation is attest-or-erase: every restored account not already covered by
    a collected erasure record receives a retain-with-listed-novels or erase decision before
-   completion (a collected record is the pre-decided fact replay enforces; no decision may
-   retain or designate such a subject); erasure records are written and replayed for every
-   erase-decided account and every unlisted novel before services start; and each decision is
-   durably recorded in the restored database with subject identity, decision, both
-   residual-window bounds, the verified artifact digest inventory, an operator identity
-   string, and a timestamp. The deployment MUST NOT contain an undecided subject and MUST NOT
-   serve any subject covered by a collected or decision-written erasure record. Every restore MUST, after verification passes and before services start, rotate the
+   completion; an account covered by a collected record is the pre-decided fact replay
+   enforces — no decision may retain or designate it, and the restore records an automatic
+   `replayed` attestation row for it. Erasure records are written and replayed for every
+   erase-decided account and every unlisted novel before services start, and each decision or
+   `replayed` row is durably recorded in the restored database with subject identity,
+   decision, both residual-window bounds, the verified artifact digest inventory, an operator
+   identity string, and a timestamp. The deployment MUST NOT contain an undecided subject and
+   MUST NOT serve any subject covered by a collected or decision-written erasure record. Every restore MUST, after verification passes and before services start, rotate the
    JWT secret and delete every persisted refresh token, so no pre-restore session survives.
    Replay and attest-or-erase MUST preserve the deletion-path invariants: removing the final
    account clears the runtime configuration, and decisions that would leave retained accounts

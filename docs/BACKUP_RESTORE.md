@@ -86,7 +86,7 @@ functionality that costs.
 | RPO | ≤ 24 hours | The operator schedules the scripted backup at least daily. Data committed after the newest verified backup may be lost. Drill A proves the mechanism; schedule adherence is an operator duty recorded as such, never proven by a drill. |
 | RTO | ≤ 30 minutes | Applies to restores with an empty residual window. Judged by the **scale rehearsal**: a scripted restore of a synthetic database whose plain dump is at least 5 GB completes within 30 minutes on the reference envelope (2-core / 4 GB / SSD, `DEPLOY.md` minimum), measured from starting the restore procedure to the deployment passing readiness. Recorded once per policy version and re-run after any change to the backup or restore scripts. A disaster restore's duration is dominated by owner attest-or-erase decisions and carries no RTO target in this version. |
 | Drill bound | ≤ 10 minutes | CI assertion for the drill dataset defined under Drills; keeps every CI run sensitive to procedure regressions without depending on data volume. |
-| Backup retention ceiling | 30 days default; operator override bounded to 7–90 days | Backups older than the ceiling must be destroyed by the operator. Values outside 7–90 days require `backup-restore-v2`. |
+| Backup retention ceiling | 30 days default; operator override bounded to 7–90 days | Backups older than the ceiling must be destroyed by the operator. Values outside 7–90 days require `backup-restore-v3`. |
 
 The RPO and RTO values are policy for the private preview profile. Public or
 multi-node profiles require a new reviewed version of this document.
@@ -141,12 +141,15 @@ The scripted restore procedure, in order:
    its end is the moment writes stopped (or the declared failure time for a
    lost database). Deletions committed inside the window cannot be
    replayed.
-5. **Load** the decrypted dump into a clean database, re-insert the
-   union of erasure sources (idempotent for identical rows), **rotate
-   `JWT_SECRET`, and delete every persisted refresh token**, so no
-   session issued before the restore survives it. Rotation and token
-   deletion happen only after verification passes, as part of preparing
-   the new deployment.
+5. **Load** the decrypted dump into a clean database and, atomically
+   with the load becoming reachable, **regenerate the lineage token**
+   (fresh version-4 UUID, artifact token recorded as parent); then
+   re-insert the union of erasure sources (idempotent for identical
+   rows), **rotate `JWT_SECRET`, and delete every persisted refresh
+   token**, so no session issued before the restore survives it and no
+   crashed attempt can present the artifact's token as live. Rotation
+   and token deletion happen only after verification passes, as part of
+   preparing the new deployment.
 6. **Gate on the residual window.** When the current database was reachable
    in step 4 with a matching lineage token, the residual window is empty
    and the restore proceeds. When
@@ -157,9 +160,12 @@ The scripted restore procedure, in order:
    as the owner, for their own account), supplies one decision — retain
    the account together with the explicit list of its retained novels, or
    erase it. An account already covered by a collected erasure record is
-   a pre-decided fact: replay enforces it, no decision may retain or
-   designate it, and it needs no decision row — the collected record is
-   the durable decision. The script then, before any service starts,
+   a pre-decided fact: replay enforces it, and no decision may retain or
+   designate it. The restore records an automatic attestation row for it
+   with decision `replayed`, carrying the same window bounds, inventory,
+   operator identity, and timestamp, so restore-level audit provenance is
+   preserved without operator burden. The script then, before any service
+   starts,
    writes erasure records for every erase-decided account and for every
    novel not on a retained account's retained list, and replays them, so
    **no subject is ever served ahead of its decision and nothing deleted
@@ -181,17 +187,36 @@ The scripted restore procedure, in order:
    erasure before any service starts, so a restored deployment can never
    serve a subject covered by any collected erasure record.
 
+## Lineage identity
+
+Every database carries exactly one lineage token: a version-4 UUID created
+by the standard migration path only when no token exists. Ordinary
+deployments and migration replays preserve it unchanged; only a restore
+regenerates it. The backup script records the token in the manifest, and
+the restore verifies that the manifest token equals the token inside the
+verified dump, aborting on mismatch or when either is absent — an absent
+token never compares equal, so pre-token artifacts always face the
+disaster gate. Live continuation is established only by the reachable
+database's token equalling the artifact's. The restore regenerates the
+token as a fresh version-4 UUID atomically with making the restored data
+reachable, recording the artifact's token as the new token's parent in
+the same table: a crashed or partial restore must never present the
+artifact's token as a live lineage, so a retry after any failure faces
+the same gate the first attempt did.
+
 ## Erasure records and replay
 
 Deletion of a user or a novel writes a durable erasure record in the same
 database transaction as the authoritative delete, via `AFTER DELETE`
 triggers, so every deletion path — including per-novel records under an
-account cascade — is covered without service coordination. A record contains
-only the subject type and UUIDs (for novels, the owning user UUID as well,
-so the deterministic retained-source object key
-`source-files/{user_id}/{novel_id}` can be reconstructed). Records contain
-no content, no email, and no derived data; they are excluded from account
-export and are retained as deletion-enforcement evidence. UUID v4 identity
+account cascade — is covered without service coordination. A record's
+identifying payload is limited to the subject type and UUIDs (for novels,
+the owning user UUID as well, so the deterministic retained-source object
+key `source-files/{user_id}/{novel_id}` can be reconstructed); its
+operational bookkeeping fields — deletion time, retained-source marker,
+re-queue stamp — contain no content, no email, and no derived data.
+Records are excluded from account export and are retained as
+deletion-enforcement evidence. UUID v4 identity
 guarantees replay can never affect a legitimately re-created account or
 re-imported novel.
 
@@ -268,7 +293,13 @@ and their dependent rows (refresh tokens, world state, chat) removed by
 cascade; a JWT issued before the restore is rejected after the rotation and no
 pre-restore refresh token remains;
 and the window bounds are computed from covered-through timestamps, not
-wall-clock archive times.
+wall-clock archive times. The drill also proves the token lifecycle:
+ordinary migration replay preserves the live token; two restores of one
+artifact produce distinct tokens, each recording the artifact's token as
+parent; a manifest whose token disagrees with its dump is refused; an
+artifact without a token faces the disaster gate; and a retry after a
+failure injected between dump load and completion still faces the gate
+rather than appearing lineage-matching.
 
 Negative cases: a corrupted artifact and a wrong or missing encryption key
 must fail closed with actionable errors before any data change; erasure
@@ -279,7 +310,7 @@ restore.
 
 Changes to targets, artifact requirements, the restore contract, the
 retention-ceiling bounds, or drill definitions require a new version of this
-document approved in its own reviewed change, as `backup-restore-v2` and
-onward. Possible v2 hardening, deliberately out of v1: an off-database
+document approved in its own reviewed change, as `backup-restore-v3` and
+onward. Possible future hardening, deliberately out of this version: an off-database
 deletion-receipt append log that narrows the disaster residual window
 toward zero.
