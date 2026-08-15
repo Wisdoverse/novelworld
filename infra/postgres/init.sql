@@ -63,6 +63,39 @@ CREATE INDEX idx_novels_user_id ON novels(user_id);
 CREATE INDEX idx_novels_status ON novels(status);
 CREATE INDEX idx_novels_title_trgm ON novels USING gin(title gin_trgm_ops);
 
+CREATE TABLE novel_import_jobs (
+    novel_id         UUID PRIMARY KEY REFERENCES novels(id) ON DELETE CASCADE,
+    stage            VARCHAR(16) NOT NULL DEFAULT 'source',
+    status           VARCHAR(16) NOT NULL DEFAULT 'pending',
+    attempt          BIGINT NOT NULL DEFAULT 0,
+    lease_expires_at TIMESTAMPTZ,
+    failure_code     VARCHAR(64),
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT novel_import_jobs_stage_check
+        CHECK (stage IN ('source', 'chapters', 'enriched', 'completed')),
+    CONSTRAINT novel_import_jobs_status_check
+        CHECK (status IN ('pending', 'in_progress', 'failed', 'completed')),
+    CONSTRAINT novel_import_jobs_attempt_check CHECK (attempt >= 0),
+    CONSTRAINT novel_import_jobs_failure_code_check CHECK (
+        failure_code IS NULL OR char_length(failure_code) BETWEEN 1 AND 64
+    ),
+    CONSTRAINT novel_import_jobs_state_check CHECK (
+        (status = 'pending' AND attempt = 0 AND lease_expires_at IS NULL
+            AND failure_code IS NULL AND stage <> 'completed')
+        OR (status = 'in_progress' AND attempt >= 1 AND lease_expires_at IS NOT NULL
+            AND failure_code IS NULL AND stage <> 'completed')
+        OR (status = 'failed' AND lease_expires_at IS NULL
+            AND failure_code IS NOT NULL AND stage <> 'completed')
+        OR (status = 'completed' AND lease_expires_at IS NULL
+            AND failure_code IS NULL AND stage = 'completed')
+    )
+);
+
+CREATE INDEX idx_novel_import_jobs_recoverable
+    ON novel_import_jobs(status, lease_expires_at, created_at)
+    WHERE status IN ('pending', 'in_progress');
+
 -- S3 删除 outbox 不使用外键，确保账户级联删除小说后仍保留清理证据。
 CREATE TABLE source_file_deletions (
     object_key      TEXT PRIMARY KEY CHECK (

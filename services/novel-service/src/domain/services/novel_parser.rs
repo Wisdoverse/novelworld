@@ -45,7 +45,9 @@ impl NovelParserService {
             let title = m.as_str().trim().to_string();
             let content = text[start..end].trim().to_string();
             if !content.is_empty() {
-                let ch = Chapter::new(novel_id, (i + 1) as i32, Some(title), content);
+                // 章节号按保留的章节顺序编号：跳过的目录页不能留下编号空洞，
+                // 否则整本书会因章节不连续而被导入拒绝。
+                let ch = Chapter::new(novel_id, (chapters.len() + 1) as i32, Some(title), content);
                 // 章节内容过短（< 100字）可能是目录，跳过
                 if ch.word_count() > 100 {
                     chapters.push(ch);

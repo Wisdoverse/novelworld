@@ -1,11 +1,15 @@
-use anyhow::Result;
+use anyhow::{ensure, Result};
 use async_trait::async_trait;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::domain::entities::novel::Novel;
-use crate::domain::repositories::NovelRepository;
-use crate::domain::value_objects::{DeviationMode, NovelStatus};
+use crate::domain::entities::{
+    chapter::{chapters_are_importable, Chapter},
+    novel::Novel,
+};
+use crate::domain::repositories::{ImportClaim, NovelRepository, RecoverableImport};
+use crate::domain::value_objects::{DeviationMode, ImportStage, NovelStatus};
+use crate::infrastructure::persistence::chapter_pg_repo::save_batch_in_transaction;
 
 pub struct NovelPgRepository {
     pool: PgPool,
@@ -17,42 +21,349 @@ impl NovelPgRepository {
     }
 }
 
+async fn insert_novel(tx: &mut Transaction<'_, Postgres>, novel: &Novel) -> Result<()> {
+    sqlx::query(
+        r#"INSERT INTO novels (
+            id, user_id, title, author, cover_url, description,
+            world_summary, genre, original_file_key, total_chapters,
+            status, parse_error, deviation_mode, created_at, updated_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::novel_status,$12,$13::deviation_mode,$14,$15)"#,
+    )
+    .bind(novel.id)
+    .bind(novel.user_id)
+    .bind(&novel.title)
+    .bind(&novel.author)
+    .bind(&novel.cover_url)
+    .bind(&novel.description)
+    .bind(&novel.world_summary)
+    .bind(&novel.genre)
+    .bind(&novel.file_key)
+    .bind(novel.total_chapters)
+    .bind(novel.status.to_str())
+    .bind(&novel.parse_error)
+    .bind(novel.deviation_mode.to_str())
+    .bind(novel.created_at)
+    .bind(novel.updated_at)
+    .execute(&mut **tx)
+    .await?;
+    if let Some(key) = &novel.file_key {
+        sqlx::query("DELETE FROM source_file_deletions WHERE object_key = $1")
+            .bind(key)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn lock_import(
+    tx: &mut Transaction<'_, Postgres>,
+    novel_id: Uuid,
+    attempt: i64,
+) -> Result<Option<ImportStage>> {
+    let stage = sqlx::query_scalar::<_, String>(
+        "SELECT stage FROM novel_import_jobs \
+         WHERE novel_id = $1 AND attempt = $2 AND status = 'in_progress' \
+         FOR UPDATE",
+    )
+    .bind(novel_id)
+    .bind(attempt)
+    .fetch_optional(&mut **tx)
+    .await?;
+    stage
+        .map(|value| {
+            ImportStage::from_str(&value)
+                .ok_or_else(|| anyhow::anyhow!("invalid persisted import stage"))
+        })
+        .transpose()
+}
+
 #[async_trait]
 impl NovelRepository for NovelPgRepository {
-    async fn save(&self, novel: &Novel) -> Result<()> {
+    async fn create_import(&self, novel: &Novel, chapters: &[Chapter]) -> Result<()> {
+        ensure!(!chapters.is_empty(), "durable import requires chapters");
+        ensure!(
+            chapters.iter().all(|chapter| chapter.novel_id == novel.id),
+            "durable import chapters belong to another novel"
+        );
+        ensure!(
+            chapters_are_importable(chapters),
+            "durable import chapters must be contiguous and non-empty"
+        );
         let mut transaction = self.pool.begin().await?;
+        insert_novel(&mut transaction, novel).await?;
+        save_batch_in_transaction(&mut transaction, chapters).await?;
         sqlx::query(
-            r#"INSERT INTO novels (
-                id, user_id, title, author, cover_url, description,
-                world_summary, genre, original_file_key, total_chapters,
-                status, parse_error, deviation_mode, created_at, updated_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::novel_status,$12,$13::deviation_mode,$14,$15)"#
+            "INSERT INTO novel_import_jobs (novel_id, stage, status) \
+             VALUES ($1, 'chapters', 'pending')",
         )
         .bind(novel.id)
-        .bind(novel.user_id)
-        .bind(&novel.title)
-        .bind(&novel.author)
-        .bind(&novel.cover_url)
-        .bind(&novel.description)
-        .bind(&novel.world_summary)
-        .bind(&novel.genre)
-        .bind(&novel.file_key)
-        .bind(novel.total_chapters)
-        .bind(novel.status.to_str())
-        .bind(&novel.parse_error)
-        .bind(novel.deviation_mode.to_str())
-        .bind(novel.created_at)
-        .bind(novel.updated_at)
         .execute(&mut *transaction)
         .await?;
-        if let Some(key) = &novel.file_key {
-            sqlx::query("DELETE FROM source_file_deletions WHERE object_key = $1")
-                .bind(key)
-                .execute(&mut *transaction)
-                .await?;
-        }
         transaction.commit().await?;
         Ok(())
+    }
+
+    async fn claim_import(&self, novel_id: Uuid, user_id: Uuid) -> Result<Option<ImportClaim>> {
+        let row = sqlx::query_as::<_, ImportClaimRow>(
+            r#"
+            WITH claimed AS (
+                UPDATE novel_import_jobs AS job
+                SET status = 'in_progress', attempt = attempt + 1,
+                    lease_expires_at = NOW() + INTERVAL '2 minutes',
+                    failure_code = NULL, updated_at = NOW()
+                WHERE job.novel_id = $1
+                  AND job.stage IN ('source', 'chapters', 'enriched')
+                  AND EXISTS (
+                      SELECT 1 FROM novels AS owned
+                      WHERE owned.id = job.novel_id AND owned.user_id = $2
+                  )
+                  AND (
+                      job.status IN ('pending', 'failed')
+                      OR (job.status = 'in_progress' AND job.lease_expires_at <= NOW())
+                  )
+                RETURNING job.stage, job.attempt
+            )
+            UPDATE novels AS novel
+            SET status = 'parsing', parse_error = NULL, updated_at = NOW()
+            FROM claimed
+            WHERE novel.id = $1 AND novel.user_id = $2
+            RETURNING novel.id AS novel_id, novel.user_id, claimed.stage, claimed.attempt
+            "#,
+        )
+        .bind(novel_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(ImportClaimRow::into_domain).transpose()
+    }
+
+    async fn recoverable_imports(&self, limit: i64) -> Result<Vec<RecoverableImport>> {
+        ensure!(
+            (1..=100).contains(&limit),
+            "recoverable import limit is invalid"
+        );
+        let rows = sqlx::query_as::<_, RecoverableImportRow>(
+            r#"
+            SELECT job.novel_id, novel.user_id
+            FROM novel_import_jobs AS job
+            JOIN novels AS novel ON novel.id = job.novel_id
+            WHERE job.status = 'pending'
+               OR (job.status = 'in_progress' AND job.lease_expires_at <= NOW())
+            ORDER BY COALESCE(job.lease_expires_at, job.created_at), job.novel_id
+            LIMIT $1
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| RecoverableImport {
+                novel_id: row.novel_id,
+                user_id: row.user_id,
+            })
+            .collect())
+    }
+
+    async fn renew_import(&self, novel_id: Uuid, attempt: i64) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE novel_import_jobs
+            SET lease_expires_at = NOW() + INTERVAL '2 minutes', updated_at = NOW()
+            WHERE novel_id = $1 AND attempt = $2 AND status = 'in_progress'
+            "#,
+        )
+        .bind(novel_id)
+        .bind(attempt)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn record_import_enrichment(
+        &self,
+        novel_id: Uuid,
+        attempt: i64,
+        total_chapters: i32,
+        world_summary: &str,
+        genre: &str,
+    ) -> Result<bool> {
+        ensure!(total_chapters > 0, "enriched import requires chapters");
+        ensure!(!world_summary.trim().is_empty(), "world summary is empty");
+        ensure!(
+            !genre.trim().is_empty() && genre.chars().count() <= 100,
+            "genre is invalid"
+        );
+        let mut transaction = self.pool.begin().await?;
+        let Some(stage) = lock_import(&mut transaction, novel_id, attempt).await? else {
+            return Ok(false);
+        };
+        ensure!(
+            matches!(stage, ImportStage::Chapters | ImportStage::Enriched),
+            "import enrichment is invalid for the current stage"
+        );
+        let chapter_count =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chapters WHERE novel_id = $1")
+                .bind(novel_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+        ensure!(
+            chapter_count == i64::from(total_chapters),
+            "enriched import chapter count does not match persisted chapters"
+        );
+        let novel = sqlx::query(
+            r#"
+            UPDATE novels
+            SET total_chapters = $2, world_summary = $3, genre = $4,
+                updated_at = NOW()
+            WHERE id = $1 AND status = 'parsing'::novel_status
+            "#,
+        )
+        .bind(novel_id)
+        .bind(total_chapters)
+        .bind(world_summary)
+        .bind(genre)
+        .execute(&mut *transaction)
+        .await?;
+        ensure!(
+            novel.rows_affected() == 1,
+            "enriched import novel is not parsing"
+        );
+        let job = sqlx::query(
+            r#"
+            UPDATE novel_import_jobs
+            SET stage = 'enriched', lease_expires_at = NOW() + INTERVAL '2 minutes',
+                updated_at = NOW()
+            WHERE novel_id = $1 AND attempt = $2 AND status = 'in_progress'
+            "#,
+        )
+        .bind(novel_id)
+        .bind(attempt)
+        .execute(&mut *transaction)
+        .await?;
+        ensure!(
+            job.rows_affected() == 1,
+            "enriched import job update failed"
+        );
+        transaction.commit().await?;
+        Ok(true)
+    }
+
+    async fn complete_import(&self, novel_id: Uuid, attempt: i64) -> Result<bool> {
+        let mut transaction = self.pool.begin().await?;
+        let Some(stage) = lock_import(&mut transaction, novel_id, attempt).await? else {
+            return Ok(false);
+        };
+        ensure!(
+            stage == ImportStage::Enriched,
+            "import completion is invalid for the current stage"
+        );
+        // Blank means "carries no character outside Unicode White_Space". The
+        // explicit BTRIM() set mirrors exactly what Rust str::trim() strips, so
+        // it agrees with the domain predicate chapters_are_importable. Unlike
+        // POSIX [:space:] it is locale-independent: under LC_CTYPE=C the regex
+        // class matches no non-ASCII character, so NBSP-only text would pass
+        // here while the domain rejects it.
+        let complete = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT novel.total_chapters > 0
+               AND COALESCE(BTRIM(novel.world_summary, U&' \0009\000A\000B\000C\000D\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000') <> '', FALSE)
+               AND COALESCE(BTRIM(novel.genre, U&' \0009\000A\000B\000C\000D\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000') <> '', FALSE)
+               AND novel.total_chapters = (
+                   SELECT COUNT(*)::INTEGER FROM chapters WHERE novel_id = novel.id
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM chapters AS c
+                   WHERE c.novel_id = novel.id
+                     AND (c.chapter_number < 1
+                          OR c.chapter_number > novel.total_chapters
+                          OR BTRIM(c.content, U&' \0009\000A\000B\000C\000D\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000') = '')
+               )
+               AND EXISTS (
+                   SELECT 1 FROM characters WHERE novel_id = novel.id
+               )
+               AND EXISTS (
+                   SELECT 1 FROM canon_story_models WHERE novel_id = novel.id
+               )
+            FROM novels AS novel
+            WHERE novel.id = $1 AND novel.status = 'parsing'::novel_status
+            "#,
+        )
+        .bind(novel_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .unwrap_or(false);
+        ensure!(complete, "completed import is missing authoritative data");
+        let novel = sqlx::query(
+            "UPDATE novels SET status = 'ready'::novel_status, parse_error = NULL, \
+             updated_at = NOW() WHERE id = $1",
+        )
+        .bind(novel_id)
+        .execute(&mut *transaction)
+        .await?;
+        ensure!(
+            novel.rows_affected() == 1,
+            "completed import novel update failed"
+        );
+        let job = sqlx::query(
+            r#"
+            UPDATE novel_import_jobs
+            SET stage = 'completed', status = 'completed', lease_expires_at = NULL,
+                failure_code = NULL, updated_at = NOW()
+            WHERE novel_id = $1 AND attempt = $2 AND status = 'in_progress'
+            "#,
+        )
+        .bind(novel_id)
+        .bind(attempt)
+        .execute(&mut *transaction)
+        .await?;
+        ensure!(
+            job.rows_affected() == 1,
+            "completed import job update failed"
+        );
+        transaction.commit().await?;
+        Ok(true)
+    }
+
+    async fn fail_import(
+        &self,
+        novel_id: Uuid,
+        attempt: i64,
+        failure_code: &str,
+        public_error: &str,
+    ) -> Result<bool> {
+        ensure!(
+            !failure_code.is_empty()
+                && failure_code.len() <= 64
+                && !failure_code.chars().any(char::is_control),
+            "import failure code is invalid"
+        );
+        ensure!(
+            !public_error.trim().is_empty() && public_error.chars().count() <= 500,
+            "public import error is invalid"
+        );
+        let result = sqlx::query(
+            r#"
+            WITH failed AS (
+                UPDATE novel_import_jobs
+                SET status = 'failed', lease_expires_at = NULL,
+                    failure_code = $3, updated_at = NOW()
+                WHERE novel_id = $1 AND attempt = $2 AND status = 'in_progress'
+                RETURNING novel_id
+            )
+            UPDATE novels AS novel
+            SET status = 'error'::novel_status, parse_error = $4, updated_at = NOW()
+            FROM failed
+            WHERE novel.id = failed.novel_id
+            "#,
+        )
+        .bind(novel_id)
+        .bind(attempt)
+        .bind(failure_code)
+        .bind(public_error)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
     }
 
     async fn find_by_id(&self, id: Uuid) -> Result<Option<Novel>> {
@@ -75,31 +386,6 @@ impl NovelRepository for NovelPgRepository {
         .await?;
 
         Ok(rows.into_iter().map(|r| r.into()).collect())
-    }
-
-    async fn update(&self, novel: &Novel) -> Result<()> {
-        sqlx::query(
-            r#"UPDATE novels SET
-                title=$2, author=$3, cover_url=$4, description=$5,
-                world_summary=$6, genre=$7, total_chapters=$8,
-                status=$9::novel_status, parse_error=$10, deviation_mode=$11::deviation_mode, updated_at=$12
-            WHERE id=$1"#
-        )
-        .bind(novel.id)
-        .bind(&novel.title)
-        .bind(&novel.author)
-        .bind(&novel.cover_url)
-        .bind(&novel.description)
-        .bind(&novel.world_summary)
-        .bind(&novel.genre)
-        .bind(novel.total_chapters)
-        .bind(novel.status.to_str())
-        .bind(&novel.parse_error)
-        .bind(novel.deviation_mode.to_str())
-        .bind(novel.updated_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
     }
 
     async fn delete(&self, id: Uuid) -> Result<()> {
@@ -128,6 +414,32 @@ struct NovelRow {
     deviation_mode: String,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(sqlx::FromRow)]
+struct ImportClaimRow {
+    novel_id: Uuid,
+    user_id: Uuid,
+    stage: String,
+    attempt: i64,
+}
+
+impl ImportClaimRow {
+    fn into_domain(self) -> Result<ImportClaim> {
+        Ok(ImportClaim {
+            novel_id: self.novel_id,
+            user_id: self.user_id,
+            stage: ImportStage::from_str(&self.stage)
+                .ok_or_else(|| anyhow::anyhow!("invalid persisted import stage"))?,
+            attempt: self.attempt,
+        })
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct RecoverableImportRow {
+    novel_id: Uuid,
+    user_id: Uuid,
 }
 
 impl From<NovelRow> for Novel {

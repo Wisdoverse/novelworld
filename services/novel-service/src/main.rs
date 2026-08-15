@@ -121,6 +121,7 @@ async fn main() -> Result<()> {
         import_permits: Arc::new(Semaphore::new(2)),
         active_import_users: Arc::new(Mutex::new(HashSet::new())),
     });
+    let _import_recovery = handler.spawn_import_recovery();
     let progress_handler = Arc::new(ReadingProgressHandler {
         novel_repo: novel_repo.clone(),
         chapter_repo: chapter_repo.clone(),

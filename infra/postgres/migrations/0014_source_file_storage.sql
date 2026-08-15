@@ -1,3 +1,7 @@
+-- The deletion trigger below reads OLD.original_file_key, so legacy databases
+-- that predate source file storage need the column before any novel is deleted.
+ALTER TABLE public.novels ADD COLUMN IF NOT EXISTS original_file_key TEXT;
+
 CREATE TABLE IF NOT EXISTS public.source_file_deletions (
     object_key      TEXT PRIMARY KEY CHECK (
         object_key LIKE 'source-files/%'

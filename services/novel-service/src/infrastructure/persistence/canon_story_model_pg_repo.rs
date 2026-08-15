@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::domain::{
@@ -20,59 +20,89 @@ impl PgCanonStoryModelRepository {
     }
 }
 
+async fn validate_model_source(
+    transaction: &mut Transaction<'_, Postgres>,
+    model: &CanonStoryModel,
+) -> Result<()> {
+    let novel = sqlx::query_as::<_, SourceNovelRow>(
+        "SELECT status::text, total_chapters FROM novels WHERE id = $1",
+    )
+    .bind(model.novel_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .context("canon story model source novel does not exist")?;
+    let chapters = sqlx::query_as::<_, ChapterSourceRow>(
+        "SELECT chapter_number, content FROM chapters WHERE novel_id = $1",
+    )
+    .bind(model.novel_id)
+    .fetch_all(&mut **transaction)
+    .await?
+    .into_iter()
+    .map(|chapter| (chapter.chapter_number, chapter.content))
+    .collect::<BTreeMap<_, _>>();
+    let character_ids =
+        sqlx::query_scalar::<_, Uuid>("SELECT id FROM characters WHERE novel_id = $1")
+            .bind(model.novel_id)
+            .fetch_all(&mut **transaction)
+            .await?
+            .into_iter()
+            .collect::<HashSet<_>>();
+    if !matches!(novel.status.as_str(), "parsing" | "ready")
+        || novel.total_chapters != chapters.len() as i32
+    {
+        anyhow::bail!(
+            "canon story models require a fully enriched novel with every chapter persisted"
+        );
+    }
+    model
+        .validate(&chapters, &character_ids)
+        .context("canon story model failed source validation")
+}
+
+async fn insert_model(
+    transaction: &mut Transaction<'_, Postgres>,
+    model: &CanonStoryModel,
+) -> Result<()> {
+    sqlx::query(
+        r#"INSERT INTO canon_story_models (
+            id, novel_id, model_version, schema_version,
+            prompt_version, content, created_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+    )
+    .bind(model.id)
+    .bind(model.novel_id)
+    .bind(model.model_version)
+    .bind(model.schema_version)
+    .bind(&model.prompt_version)
+    .bind(serde_json::to_value(&model.content)?)
+    .bind(model.created_at)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 #[async_trait]
 impl CanonStoryModelRepository for PgCanonStoryModelRepository {
-    async fn insert(&self, model: &CanonStoryModel) -> Result<()> {
-        let novel = sqlx::query_as::<_, SourceNovelRow>(
-            "SELECT status::text, total_chapters FROM novels WHERE id = $1",
+    async fn insert_import(&self, model: &CanonStoryModel, attempt: i64) -> Result<bool> {
+        let mut transaction = self.pool.begin().await?;
+        let fenced = sqlx::query_scalar::<_, bool>(
+            "SELECT TRUE FROM novel_import_jobs \
+             WHERE novel_id = $1 AND attempt = $2 AND status = 'in_progress' \
+               AND stage = 'enriched' \
+             FOR UPDATE",
         )
         .bind(model.novel_id)
-        .fetch_optional(&self.pool)
+        .bind(attempt)
+        .fetch_optional(&mut *transaction)
         .await?
-        .context("canon story model source novel does not exist")?;
-        let chapters = sqlx::query_as::<_, ChapterSourceRow>(
-            "SELECT chapter_number, content FROM chapters WHERE novel_id = $1",
-        )
-        .bind(model.novel_id)
-        .fetch_all(&self.pool)
-        .await?
-        .into_iter()
-        .map(|chapter| (chapter.chapter_number, chapter.content))
-        .collect::<BTreeMap<_, _>>();
-        let character_ids =
-            sqlx::query_scalar::<_, Uuid>("SELECT id FROM characters WHERE novel_id = $1")
-                .bind(model.novel_id)
-                .fetch_all(&self.pool)
-                .await?
-                .into_iter()
-                .collect::<HashSet<_>>();
-        if !matches!(novel.status.as_str(), "parsing" | "ready")
-            || novel.total_chapters != chapters.len() as i32
-        {
-            anyhow::bail!(
-                "canon story models require a fully enriched novel with every chapter persisted"
-            );
+        .unwrap_or(false);
+        if !fenced {
+            return Ok(false);
         }
-        model
-            .validate(&chapters, &character_ids)
-            .context("canon story model failed source validation")?;
-
-        sqlx::query(
-            r#"INSERT INTO canon_story_models (
-                id, novel_id, model_version, schema_version,
-                prompt_version, content, created_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
-        )
-        .bind(model.id)
-        .bind(model.novel_id)
-        .bind(model.model_version)
-        .bind(model.schema_version)
-        .bind(&model.prompt_version)
-        .bind(serde_json::to_value(&model.content)?)
-        .bind(model.created_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        validate_model_source(&mut transaction, model).await?;
+        insert_model(&mut transaction, model).await?;
+        transaction.commit().await?;
+        Ok(true)
     }
 
     async fn find_version(
