@@ -1,4 +1,6 @@
-use anyhow::Result;
+use std::collections::HashSet;
+
+use anyhow::{ensure, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::prelude::FromRow;
@@ -152,6 +154,39 @@ pub struct ChapterPgRepository {
     pool: PgPool,
 }
 
+pub(crate) async fn save_batch_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    chapters: &[Chapter],
+) -> Result<()> {
+    for chapter in chapters {
+        let chapter_id = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            INSERT INTO chapters (
+                id, novel_id, chapter_number, title, content,
+                summary, is_key_node, key_node_description,
+                word_count, created_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            RETURNING id
+            "#,
+        )
+        .bind(chapter.id)
+        .bind(chapter.novel_id)
+        .bind(chapter.chapter_number)
+        .bind(&chapter.title)
+        .bind(&chapter.content)
+        .bind(&chapter.summary)
+        .bind(chapter.is_key_node)
+        .bind(&chapter.key_node_description)
+        .bind(chapter.word_count() as i32)
+        .bind(chapter.created_at)
+        .fetch_one(&mut **tx)
+        .await?;
+
+        replace_chapter_chunks(tx, chapter_id, &chapter.content).await?;
+    }
+    Ok(())
+}
+
 impl ChapterPgRepository {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
@@ -160,46 +195,67 @@ impl ChapterPgRepository {
 
 #[async_trait]
 impl ChapterRepository for ChapterPgRepository {
-    async fn save_batch(&self, chapters: &[Chapter]) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+    async fn replace_import_nodes(
+        &self,
+        novel_id: Uuid,
+        attempt: i64,
+        nodes: &[(i32, String)],
+    ) -> Result<bool> {
+        let chapter_numbers = nodes
+            .iter()
+            .map(|(chapter_number, _)| *chapter_number)
+            .collect::<HashSet<_>>();
+        ensure!(
+            chapter_numbers.len() == nodes.len()
+                && nodes.iter().all(|(chapter_number, description)| {
+                    *chapter_number >= 1
+                        && !description.trim().is_empty()
+                        && description.chars().count() <= 1_000
+                        && !description.chars().any(char::is_control)
+                }),
+            "import narrative nodes are invalid"
+        );
 
-        for ch in chapters {
-            let word_count = ch.word_count() as i32;
-            let chapter_id = sqlx::query_scalar::<_, Uuid>(
-                r#"
-                INSERT INTO chapters (
-                    id, novel_id, chapter_number, title, content,
-                    summary, is_key_node, key_node_description,
-                    word_count, created_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                ON CONFLICT (novel_id, chapter_number) DO UPDATE SET
-                    title = EXCLUDED.title,
-                    content = EXCLUDED.content,
-                    summary = EXCLUDED.summary,
-                    is_key_node = EXCLUDED.is_key_node,
-                    key_node_description = EXCLUDED.key_node_description,
-                    word_count = EXCLUDED.word_count
-                RETURNING id
-                "#,
-            )
-            .bind(ch.id)
-            .bind(ch.novel_id)
-            .bind(ch.chapter_number)
-            .bind(&ch.title)
-            .bind(&ch.content)
-            .bind(&ch.summary)
-            .bind(ch.is_key_node)
-            .bind(&ch.key_node_description)
-            .bind(word_count)
-            .bind(ch.created_at)
-            .fetch_one(&mut *tx)
-            .await?;
-
-            replace_chapter_chunks(&mut tx, chapter_id, &ch.content).await?;
+        let mut transaction = self.pool.begin().await?;
+        let fenced = sqlx::query_scalar::<_, bool>(
+            "SELECT TRUE FROM novel_import_jobs \
+             WHERE novel_id = $1 AND attempt = $2 AND status = 'in_progress' \
+               AND stage = 'chapters' \
+             FOR UPDATE",
+        )
+        .bind(novel_id)
+        .bind(attempt)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .unwrap_or(false);
+        if !fenced {
+            return Ok(false);
         }
 
-        tx.commit().await?;
-        Ok(())
+        sqlx::query(
+            "UPDATE chapters SET is_key_node = FALSE, key_node_description = NULL \
+             WHERE novel_id = $1",
+        )
+        .bind(novel_id)
+        .execute(&mut *transaction)
+        .await?;
+        for (chapter_number, description) in nodes {
+            let result = sqlx::query(
+                "UPDATE chapters SET is_key_node = TRUE, key_node_description = $3 \
+                 WHERE novel_id = $1 AND chapter_number = $2",
+            )
+            .bind(novel_id)
+            .bind(chapter_number)
+            .bind(description)
+            .execute(&mut *transaction)
+            .await?;
+            ensure!(
+                result.rows_affected() == 1,
+                "import narrative node references a missing chapter"
+            );
+        }
+        transaction.commit().await?;
+        Ok(true)
     }
 
     async fn find_by_novel(&self, novel_id: Uuid) -> Result<Vec<Chapter>> {
@@ -275,32 +331,6 @@ impl ChapterRepository for ChapterPgRepository {
         .await?;
 
         Ok(rows.into_iter().map(LoreExcerpt::from).collect())
-    }
-
-    async fn update(&self, chapter: &Chapter) -> Result<()> {
-        let word_count = chapter.word_count() as i32;
-        let mut tx = self.pool.begin().await?;
-        sqlx::query(
-            r#"
-            UPDATE chapters SET
-                title = $2, content = $3, summary = $4,
-                is_key_node = $5, key_node_description = $6,
-                word_count = $7
-            WHERE id = $1
-            "#,
-        )
-        .bind(chapter.id)
-        .bind(&chapter.title)
-        .bind(&chapter.content)
-        .bind(&chapter.summary)
-        .bind(chapter.is_key_node)
-        .bind(&chapter.key_node_description)
-        .bind(word_count)
-        .execute(&mut *tx)
-        .await?;
-        replace_chapter_chunks(&mut tx, chapter.id, &chapter.content).await?;
-        tx.commit().await?;
-        Ok(())
     }
 }
 

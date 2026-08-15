@@ -4,6 +4,10 @@ use narrative_service::{
     domain::ports::ReadinessProbe as NarrativeReadinessPort,
     infrastructure::persistence::PgReadinessProbe as NarrativePgReadinessProbe,
 };
+use novel_service::{
+    domain::ports::ReadinessProbe as NovelReadinessPort,
+    infrastructure::persistence::PgReadinessProbe as NovelPgReadinessProbe,
+};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::str::FromStr;
 
@@ -37,6 +41,8 @@ const LIVING_WORLD_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0013_living_world_turns.sql");
 const SOURCE_FILE_STORAGE_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0014_source_file_storage.sql");
+const DURABLE_IMPORT_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0015_durable_import_jobs.sql");
 
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
@@ -69,6 +75,143 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
         .unwrap();
 
     sqlx::raw_sql(FRESH_SCHEMA).execute(&fresh).await.unwrap();
+    let incomplete_user = uuid::Uuid::new_v4();
+    let incomplete_novel = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO users (id, email, password_hash) VALUES ($1, $2, 'test-hash')")
+        .bind(incomplete_user)
+        .bind(format!("incomplete-ready-{incomplete_user}@test.invalid"))
+        .execute(&fresh)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO novels (id, user_id, title, status) VALUES ($1, $2, 'Incomplete ready', 'ready')",
+    )
+    .bind(incomplete_novel)
+    .bind(incomplete_user)
+    .execute(&fresh)
+    .await
+    .unwrap();
+    let mismatched_novel = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO novels (id, user_id, title, world_summary, genre, total_chapters, status) \
+         VALUES ($1, $2, 'Mismatched ready', 'world', 'fantasy', 2, 'ready')",
+    )
+    .bind(mismatched_novel)
+    .bind(incomplete_user)
+    .execute(&fresh)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO chapters (novel_id, chapter_number, content) \
+         VALUES ($1, 1, 'Only one durable chapter')",
+    )
+    .bind(mismatched_novel)
+    .execute(&fresh)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO characters (novel_id, name) VALUES ($1, 'Legacy character')")
+        .bind(mismatched_novel)
+        .execute(&fresh)
+        .await
+        .unwrap();
+    let failed_novel = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO novels (id, user_id, title, status, parse_error) \
+         VALUES ($1, $2, 'Failed with internal detail', 'error', \
+                 'provider secret from the old runtime')",
+    )
+    .bind(failed_novel)
+    .bind(incomplete_user)
+    .execute(&fresh)
+    .await
+    .unwrap();
+    // total_chapters agrees with the row count, but chapter 2 is missing: the
+    // novel must not be backfilled as a terminal completed import.
+    let gapped_novel = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO novels (id, user_id, title, world_summary, genre, total_chapters, status) \
+         VALUES ($1, $2, 'Gapped ready', 'world', 'fantasy', 2, 'ready')",
+    )
+    .bind(gapped_novel)
+    .bind(incomplete_user)
+    .execute(&fresh)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO chapters (novel_id, chapter_number, content) \
+         VALUES ($1, 1, 'First durable chapter'), ($1, 3, 'Third durable chapter')",
+    )
+    .bind(gapped_novel)
+    .execute(&fresh)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO characters (novel_id, name) VALUES ($1, 'Gapped character')")
+        .bind(gapped_novel)
+        .execute(&fresh)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO canon_story_models \
+             (novel_id, model_version, schema_version, prompt_version, content) \
+         VALUES ($1, 1, 1, 'legacy-backfill-test-v1', '{}'::jsonb)",
+    )
+    .bind(gapped_novel)
+    .execute(&fresh)
+    .await
+    .unwrap();
+    let blank_novel = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO novels (id, user_id, title, world_summary, genre, total_chapters, status) \
+         VALUES ($1, $2, 'Blank ready', 'world', 'fantasy', 1, 'ready')",
+    )
+    .bind(blank_novel)
+    .bind(incomplete_user)
+    .execute(&fresh)
+    .await
+    .unwrap();
+    // Tabs and newlines survive a default BTRIM(), which strips only spaces.
+    sqlx::query("INSERT INTO chapters (novel_id, chapter_number, content) VALUES ($1, 1, $2)")
+        .bind(blank_novel)
+        .bind("\t\n \t")
+        .execute(&fresh)
+        .await
+        .unwrap();
+    // Non-ASCII whitespace survives a POSIX [:space:] test under LC_CTYPE=C,
+    // while Rust str::trim() strips it: the backfill must agree with Rust
+    // regardless of the database locale.
+    let non_ascii_blank_novel = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO novels (id, user_id, title, world_summary, genre, total_chapters, status) \
+         VALUES ($1, $2, 'Non-ASCII blank ready', 'world', 'fantasy', 1, 'ready')",
+    )
+    .bind(non_ascii_blank_novel)
+    .bind(incomplete_user)
+    .execute(&fresh)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO chapters (novel_id, chapter_number, content) VALUES ($1, 1, $2)")
+        .bind(non_ascii_blank_novel)
+        .bind("\u{00a0}\u{3000}")
+        .execute(&fresh)
+        .await
+        .unwrap();
+    // An import interrupted before enrichment still carries total_chapters = 0
+    // with every chapter durably stored, and must stay resumable.
+    let resumable_novel = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO novels (id, user_id, title) VALUES ($1, $2, 'Interrupted import')")
+        .bind(resumable_novel)
+        .bind(incomplete_user)
+        .execute(&fresh)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO chapters (novel_id, chapter_number, content) \
+         VALUES ($1, 1, 'First durable chapter'), ($1, 2, 'Second durable chapter')",
+    )
+    .bind(resumable_novel)
+    .execute(&fresh)
+    .await
+    .unwrap();
     for _ in 0..2 {
         sqlx::raw_sql(CHAT_TURN_MIGRATION)
             .execute(&fresh)
@@ -118,7 +261,193 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
             .execute(&fresh)
             .await
             .unwrap();
+        sqlx::raw_sql(DURABLE_IMPORT_MIGRATION)
+            .execute(&fresh)
+            .await
+            .unwrap();
     }
+
+    let repaired_incomplete: (String, Option<String>, String, String, Option<String>) =
+        sqlx::query_as(
+            "SELECT novel.status::text, novel.parse_error, job.stage, job.status, job.failure_code \
+             FROM novels AS novel \
+             JOIN novel_import_jobs AS job ON job.novel_id = novel.id \
+             WHERE novel.id = $1",
+        )
+        .bind(incomplete_novel)
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(
+        repaired_incomplete,
+        (
+            "error".into(),
+            Some("Import data is incomplete after upgrade; retry or re-upload the source".into()),
+            "source".into(),
+            "failed".into(),
+            Some("legacy_incomplete".into()),
+        )
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, String, Option<String>)>(
+            "SELECT stage, status, failure_code FROM novel_import_jobs WHERE novel_id = $1",
+        )
+        .bind(mismatched_novel)
+        .fetch_one(&fresh)
+        .await
+        .unwrap(),
+        (
+            "chapters".into(),
+            "failed".into(),
+            Some("legacy_incomplete".into()),
+        )
+    );
+    for invalid_novel in [gapped_novel, blank_novel, non_ascii_blank_novel] {
+        assert_eq!(
+            sqlx::query_as::<_, (String, String, Option<String>, Option<String>)>(
+                "SELECT job.stage, job.status, job.failure_code, novel.parse_error \
+                 FROM novels AS novel \
+                 JOIN novel_import_jobs AS job ON job.novel_id = novel.id \
+                 WHERE novel.id = $1",
+            )
+            .bind(invalid_novel)
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+            (
+                "source".into(),
+                "failed".into(),
+                Some("legacy_chapters_invalid".into()),
+                Some("Imported chapters are unusable after upgrade; re-upload the source".into()),
+            )
+        );
+    }
+    assert_eq!(
+        sqlx::query_as::<_, (String, String, Option<String>)>(
+            "SELECT stage, status, failure_code FROM novel_import_jobs WHERE novel_id = $1",
+        )
+        .bind(resumable_novel)
+        .fetch_one(&fresh)
+        .await
+        .unwrap(),
+        (
+            "chapters".into(),
+            "failed".into(),
+            Some("interrupted_upgrade".into()),
+        )
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT job.failure_code, novel.parse_error \
+             FROM novels AS novel \
+             JOIN novel_import_jobs AS job ON job.novel_id = novel.id \
+             WHERE novel.id = $1",
+        )
+        .bind(failed_novel)
+        .fetch_one(&fresh)
+        .await
+        .unwrap(),
+        (
+            "legacy_error".into(),
+            Some("Previous import failed; retry or re-upload the source".into()),
+        )
+    );
+
+    // The first revision of this migration recorded ready novels with gapped
+    // chapters as completed imports. Replay must downgrade the misclassified
+    // job instead of leaving the novel falsely ready forever.
+    let misclassified_novel = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO novels (id, user_id, title, world_summary, genre, total_chapters, status) \
+         VALUES ($1, $2, 'Misclassified completed', 'world', 'fantasy', 2, 'ready')",
+    )
+    .bind(misclassified_novel)
+    .bind(incomplete_user)
+    .execute(&fresh)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO chapters (novel_id, chapter_number, content) \
+         VALUES ($1, 1, 'First durable chapter'), ($1, 3, 'Third durable chapter')",
+    )
+    .bind(misclassified_novel)
+    .execute(&fresh)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO characters (novel_id, name) VALUES ($1, 'Misclassified character')")
+        .bind(misclassified_novel)
+        .execute(&fresh)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO canon_story_models \
+             (novel_id, model_version, schema_version, prompt_version, content) \
+         VALUES ($1, 1, 1, 'legacy-misclassified-test-v1', '{}'::jsonb)",
+    )
+    .bind(misclassified_novel)
+    .execute(&fresh)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO novel_import_jobs (novel_id, stage, status) \
+         VALUES ($1, 'completed', 'completed')",
+    )
+    .bind(misclassified_novel)
+    .execute(&fresh)
+    .await
+    .unwrap();
+    sqlx::raw_sql(DURABLE_IMPORT_MIGRATION)
+        .execute(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_as::<_, (String, String, Option<String>, String, Option<String>)>(
+            "SELECT job.stage, job.status, job.failure_code, \
+                    novel.status::text, novel.parse_error \
+             FROM novels AS novel \
+             JOIN novel_import_jobs AS job ON job.novel_id = novel.id \
+             WHERE novel.id = $1",
+        )
+        .bind(misclassified_novel)
+        .fetch_one(&fresh)
+        .await
+        .unwrap(),
+        (
+            "source".into(),
+            "failed".into(),
+            Some("legacy_chapters_invalid".into()),
+            "error".into(),
+            Some("Imported chapters are unusable after upgrade; re-upload the source".into()),
+        )
+    );
+    let downgrade_stamps =
+        sqlx::query_as::<_, (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
+            "SELECT job.updated_at, novel.updated_at \
+             FROM novels AS novel \
+             JOIN novel_import_jobs AS job ON job.novel_id = novel.id \
+             WHERE novel.id = $1",
+        )
+        .bind(misclassified_novel)
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    sqlx::raw_sql(DURABLE_IMPORT_MIGRATION)
+        .execute(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_as::<_, (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
+            "SELECT job.updated_at, novel.updated_at \
+                 FROM novels AS novel \
+                 JOIN novel_import_jobs AS job ON job.novel_id = novel.id \
+                 WHERE novel.id = $1",
+        )
+        .bind(misclassified_novel)
+        .fetch_one(&fresh)
+        .await
+        .unwrap(),
+        downgrade_stamps
+    );
 
     let contract_exists: bool = sqlx::query_scalar(
         "SELECT to_regclass('public.chat_turns') IS NOT NULL \
@@ -141,6 +470,8 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
 
     let narrative_readiness = NarrativePgReadinessProbe::new(fresh.clone());
     assert!(narrative_readiness.is_ready().await);
+    let novel_readiness = NovelPgReadinessProbe::new(fresh.clone());
+    assert!(novel_readiness.is_ready().await);
     sqlx::raw_sql(
         "ALTER TABLE public.user_choices DROP CONSTRAINT user_choices_user_node_key; \
          ALTER TABLE public.user_choices ADD CONSTRAINT user_choices_user_node_key \
@@ -254,6 +585,102 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
         .await
         .unwrap();
 
+    sqlx::query(
+        "ALTER TABLE public.novel_import_jobs \
+         DROP CONSTRAINT novel_import_jobs_stage_check, \
+         ADD CONSTRAINT novel_import_jobs_stage_check CHECK (TRUE)",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    assert!(!novel_readiness.is_ready().await);
+    sqlx::query(
+        "ALTER TABLE public.novel_import_jobs \
+         DROP CONSTRAINT novel_import_jobs_stage_check, \
+         ADD CONSTRAINT novel_import_jobs_stage_check \
+             CHECK (stage IN ('source', 'chapters', 'enriched', 'completed'))",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    assert!(novel_readiness.is_ready().await);
+
+    sqlx::query(
+        "ALTER TABLE public.novel_import_jobs \
+         DROP CONSTRAINT novel_import_jobs_novel_id_fkey, \
+         ADD CONSTRAINT novel_import_jobs_novel_id_fkey \
+             FOREIGN KEY (novel_id) REFERENCES public.novels(id)",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    assert!(!novel_readiness.is_ready().await);
+    sqlx::query(
+        "ALTER TABLE public.novel_import_jobs \
+         DROP CONSTRAINT novel_import_jobs_novel_id_fkey",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    assert!(!novel_readiness.is_ready().await);
+    // A cascading foreign key on any other column must not stand in for the
+    // one that protects novel_id.
+    sqlx::query(
+        "ALTER TABLE public.novel_import_jobs \
+         ADD COLUMN decoy_novel_id UUID \
+             REFERENCES public.novels(id) ON DELETE CASCADE",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    assert!(!novel_readiness.is_ready().await);
+    sqlx::query("ALTER TABLE public.novel_import_jobs DROP COLUMN decoy_novel_id")
+        .execute(&fresh)
+        .await
+        .unwrap();
+    // A validated cascading key onto a clone of novels deparses identically to
+    // the real one, so readiness has to compare catalog identity instead.
+    sqlx::raw_sql(
+        "CREATE TABLE public.novels_clone (id UUID PRIMARY KEY); \
+         INSERT INTO public.novels_clone (id) \
+             SELECT novel_id FROM public.novel_import_jobs; \
+         ALTER TABLE public.novel_import_jobs \
+         ADD CONSTRAINT novel_import_jobs_novel_id_fkey \
+             FOREIGN KEY (novel_id) REFERENCES public.novels_clone(id) \
+             ON DELETE CASCADE",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    assert!(!novel_readiness.is_ready().await);
+    sqlx::raw_sql(
+        "ALTER TABLE public.novel_import_jobs \
+         DROP CONSTRAINT novel_import_jobs_novel_id_fkey; \
+         DROP TABLE public.novels_clone",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    sqlx::query(
+        "ALTER TABLE public.novel_import_jobs \
+         ADD CONSTRAINT novel_import_jobs_novel_id_fkey \
+             FOREIGN KEY (novel_id) REFERENCES public.novels(id) ON DELETE CASCADE",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    assert!(novel_readiness.is_ready().await);
+
+    sqlx::query(
+        "ALTER TABLE public.novel_import_jobs \
+         DROP CONSTRAINT novel_import_jobs_state_check, \
+         ADD CONSTRAINT novel_import_jobs_state_check CHECK (TRUE)",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    assert!(!novel_readiness.is_ready().await);
+
     fresh.close().await;
     sqlx::query("DROP DATABASE novelworld_fresh_contract WITH (FORCE)")
         .execute(&admin)
@@ -335,6 +762,7 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
         "0012_narrative_transitions.sql",
         "0013_living_world_turns.sql",
         "0014_source_file_storage.sql",
+        "0015_durable_import_jobs.sql",
     ] {
         let migration_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../infra/postgres/migrations")
@@ -411,6 +839,10 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
             .await
             .unwrap();
         sqlx::raw_sql(SOURCE_FILE_STORAGE_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
+        sqlx::raw_sql(DURABLE_IMPORT_MIGRATION)
             .execute(&mut *non_default_path)
             .await
             .unwrap();
@@ -551,16 +983,80 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
     .unwrap();
     assert_eq!(memory_nullable, "NO");
 
-    let row_counts: (i64, i64, i64) = sqlx::query_as(
+    let row_counts: (i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT \
             (SELECT COUNT(*) FROM public.character_memories), \
             (SELECT COUNT(*) FROM public.chat_messages), \
-            (SELECT COUNT(*) FROM public.narrative_nodes)",
+            (SELECT COUNT(*) FROM public.narrative_nodes), \
+            (SELECT COUNT(*) FROM public.user_choices), \
+            (SELECT COUNT(*) FROM public.world_states)",
     )
     .fetch_one(&legacy)
     .await
     .unwrap();
-    assert_eq!(row_counts, (1, 1, 1));
+    assert_eq!(row_counts, (1, 1, 1, 1, 1));
+
+    let import_jobs: Vec<(String, String, i64, Option<String>)> = sqlx::query_as(
+        "SELECT stage, status, attempt, failure_code \
+         FROM public.novel_import_jobs ORDER BY novel_id",
+    )
+    .fetch_all(&legacy)
+    .await
+    .unwrap();
+    // Both fixture novels carry gapped chapter numbers with unrecoverable blank
+    // content, so neither may be resumed from its persisted chapters.
+    assert_eq!(
+        import_jobs,
+        vec![
+            (
+                "source".into(),
+                "failed".into(),
+                0,
+                Some("legacy_chapters_invalid".into()),
+            ),
+            (
+                "source".into(),
+                "failed".into(),
+                0,
+                Some("legacy_chapters_invalid".into()),
+            ),
+        ]
+    );
+    let unusable_novels: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM public.novels \
+         WHERE id IN ( \
+             '00000000-0000-0000-0000-000000000002', \
+             '00000000-0000-0000-0000-000000000010' \
+         ) \
+           AND status::text = 'error' \
+           AND parse_error = \
+               'Imported chapters are unusable after upgrade; re-upload the source'",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    assert_eq!(unusable_novels, 2);
+
+    // Compose replays every migration on each deployment; the converted
+    // failures must not be rewritten and reordered every time.
+    let stamped: Vec<(uuid::Uuid, chrono::DateTime<chrono::Utc>)> =
+        sqlx::query_as("SELECT id, updated_at FROM public.novels ORDER BY id")
+            .fetch_all(&legacy)
+            .await
+            .unwrap();
+    sqlx::raw_sql(DURABLE_IMPORT_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_as::<_, (uuid::Uuid, chrono::DateTime<chrono::Utc>)>(
+            "SELECT id, updated_at FROM public.novels ORDER BY id",
+        )
+        .fetch_all(&legacy)
+        .await
+        .unwrap(),
+        stamped
+    );
 
     let chat_turn_contract_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM pg_constraint \
@@ -1007,6 +1503,29 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
     assert!(duplicate_error
         .to_string()
         .contains("duplicate novel/chapter rows exist"));
+
+    // Account deletion is the authority on the upgraded deletion graph: legacy
+    // foreign keys were created without ON DELETE CASCADE.
+    sqlx::query("DELETE FROM public.users")
+        .execute(&legacy)
+        .await
+        .unwrap();
+    let remaining: (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM public.users), \
+                (SELECT COUNT(*) FROM public.novels), \
+                (SELECT COUNT(*) FROM public.chapters), \
+                (SELECT COUNT(*) FROM public.characters), \
+                (SELECT COUNT(*) FROM public.novel_import_jobs), \
+                (SELECT COUNT(*) FROM public.reading_progress), \
+                (SELECT COUNT(*) FROM public.chat_messages), \
+                (SELECT COUNT(*) FROM public.character_memories), \
+                (SELECT COUNT(*) FROM public.user_choices), \
+                (SELECT COUNT(*) FROM public.world_states)",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    assert_eq!(remaining, (0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
 
     legacy.close().await;
     sqlx::query("DROP DATABASE novelworld_legacy_contract WITH (FORCE)")

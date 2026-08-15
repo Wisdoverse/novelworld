@@ -12,6 +12,15 @@ pub enum NovelStatus {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportStage {
+    Source,
+    Chapters,
+    Enriched,
+    Completed,
+}
+
 /// 故事偏离度（借鉴 KathaaVerse）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
@@ -102,6 +111,18 @@ impl NovelStatus {
     }
 }
 
+impl ImportStage {
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "source" => Some(Self::Source),
+            "chapters" => Some(Self::Chapters),
+            "enriched" => Some(Self::Enriched),
+            "completed" => Some(Self::Completed),
+            _ => None,
+        }
+    }
+}
+
 impl DeviationMode {
     pub fn to_str(&self) -> &str {
         match self {
@@ -142,5 +163,19 @@ impl ReaderIdentityType {
             "character" => Some(Self::Character),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ImportStage;
+
+    #[test]
+    fn import_stage_rejects_unknown_persisted_values() {
+        assert_eq!(
+            ImportStage::from_str("chapters"),
+            Some(ImportStage::Chapters)
+        );
+        assert_eq!(ImportStage::from_str("unknown"), None);
     }
 }

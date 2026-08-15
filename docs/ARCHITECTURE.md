@@ -46,7 +46,10 @@ are reached through domain ports and infrastructure adapters.
 PostgreSQL is authoritative for application state. Redis, provider-hosted
 avatars, generated prose, and search/cache data are projections with explicit
 loss or reconstruction boundaries. Optional S3 retention owns original upload
-bytes but does not make the process-local ingestion task resumable.
+bytes. Before returning `202`, import acceptance atomically commits deterministic
+chapters and a PostgreSQL job; claims use renewable leases, and restart recovery
+resumes from the `chapters` or `enriched` boundary. The runtime does not yet read
+retained S3 objects for full reprocessing.
 
 Chat and world turns reserve a UUID idempotency key, perform model work outside
 the transaction, validate bounded output, and emit success only after the

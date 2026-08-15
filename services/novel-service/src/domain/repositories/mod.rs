@@ -5,13 +5,46 @@ use uuid::Uuid;
 use crate::domain::entities::{
     canon_story_model::CanonStoryModel, chapter::Chapter, character::Character, novel::Novel,
 };
+use crate::domain::value_objects::ImportStage;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportClaim {
+    pub novel_id: Uuid,
+    pub user_id: Uuid,
+    pub stage: ImportStage,
+    pub attempt: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoverableImport {
+    pub novel_id: Uuid,
+    pub user_id: Uuid,
+}
 
 #[async_trait]
 pub trait NovelRepository: Send + Sync {
-    async fn save(&self, novel: &Novel) -> Result<()>;
+    async fn create_import(&self, novel: &Novel, chapters: &[Chapter]) -> Result<()>;
+    async fn claim_import(&self, novel_id: Uuid, user_id: Uuid) -> Result<Option<ImportClaim>>;
+    async fn recoverable_imports(&self, limit: i64) -> Result<Vec<RecoverableImport>>;
+    async fn renew_import(&self, novel_id: Uuid, attempt: i64) -> Result<bool>;
+    async fn record_import_enrichment(
+        &self,
+        novel_id: Uuid,
+        attempt: i64,
+        total_chapters: i32,
+        world_summary: &str,
+        genre: &str,
+    ) -> Result<bool>;
+    async fn complete_import(&self, novel_id: Uuid, attempt: i64) -> Result<bool>;
+    async fn fail_import(
+        &self,
+        novel_id: Uuid,
+        attempt: i64,
+        failure_code: &str,
+        public_error: &str,
+    ) -> Result<bool>;
     async fn find_by_id(&self, id: Uuid) -> Result<Option<Novel>>;
     async fn find_by_user(&self, user_id: Uuid) -> Result<Vec<Novel>>;
-    async fn update(&self, novel: &Novel) -> Result<()>;
     async fn delete(&self, id: Uuid) -> Result<()>;
 }
 
@@ -31,7 +64,7 @@ pub trait SourceFileDeletionRepository: Send + Sync {
 
 #[async_trait]
 pub trait CanonStoryModelRepository: Send + Sync {
-    async fn insert(&self, model: &CanonStoryModel) -> Result<()>;
+    async fn insert_import(&self, model: &CanonStoryModel, attempt: i64) -> Result<bool>;
     async fn find_version(
         &self,
         novel_id: Uuid,
@@ -42,7 +75,12 @@ pub trait CanonStoryModelRepository: Send + Sync {
 
 #[async_trait]
 pub trait ChapterRepository: Send + Sync {
-    async fn save_batch(&self, chapters: &[Chapter]) -> Result<()>;
+    async fn replace_import_nodes(
+        &self,
+        novel_id: Uuid,
+        attempt: i64,
+        nodes: &[(i32, String)],
+    ) -> Result<bool>;
     async fn find_by_novel(&self, novel_id: Uuid) -> Result<Vec<Chapter>>;
     async fn find_by_number(&self, novel_id: Uuid, number: i32) -> Result<Option<Chapter>>;
     async fn search_lore(
@@ -52,7 +90,6 @@ pub trait ChapterRepository: Send + Sync {
         query: &str,
         limit: usize,
     ) -> Result<Vec<LoreExcerpt>>;
-    async fn update(&self, chapter: &Chapter) -> Result<()>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -65,19 +102,16 @@ pub struct LoreExcerpt {
 
 #[async_trait]
 pub trait CharacterRepository: Send + Sync {
-    async fn save_batch(&self, characters: &[Character]) -> Result<()>;
-    async fn find_by_novel(&self, novel_id: Uuid) -> Result<Vec<Character>>;
-    async fn find_by_id(&self, id: Uuid) -> Result<Option<Character>>;
-    async fn update(&self, character: &Character) -> Result<()>;
-    async fn save_relationship(
+    async fn replace_import(
         &self,
         novel_id: Uuid,
-        from_id: Uuid,
-        to_id: Uuid,
-        rel_type: &str,
-        description: Option<&str>,
-        strength: i32,
-    ) -> Result<()>;
+        attempt: i64,
+        characters: &[Character],
+        relationships: &[CharacterRelationshipRecord],
+    ) -> Result<bool>;
+    async fn find_by_novel(&self, novel_id: Uuid) -> Result<Vec<Character>>;
+    async fn find_by_id(&self, id: Uuid) -> Result<Option<Character>>;
+    async fn set_avatar(&self, character_id: Uuid, avatar_url: &str) -> Result<()>;
     async fn find_relationships(&self, novel_id: Uuid) -> Result<Vec<CharacterRelationshipRecord>>;
 }
 

@@ -14,8 +14,8 @@ use uuid::Uuid;
 
 use crate::application::commands::ImportNovelCommand;
 use crate::application::handlers::{
-    ImportBudgetExceeded, ImportCapacityUnavailable, NovelCommandHandler, NovelDeletionError,
-    ReadingProgressError, ReadingProgressHandler, SourceFileStorageUnavailable,
+    ImportBudgetExceeded, ImportCapacityUnavailable, ImportRetryConflict, NovelCommandHandler,
+    NovelDeletionError, ReadingProgressError, ReadingProgressHandler, SourceFileStorageUnavailable,
 };
 use crate::domain::entities::novel::Novel;
 use crate::domain::ports::{
@@ -501,6 +501,19 @@ fn import_error_response(error: anyhow::Error) -> Response {
     api_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
 }
 
+fn retry_error_response(error: anyhow::Error, novel_id: Uuid) -> Response {
+    if error.downcast_ref::<ImportCapacityUnavailable>().is_some()
+        || error.downcast_ref::<ImportBudgetExceeded>().is_some()
+    {
+        return import_error_response(error);
+    }
+    if let Some(conflict) = error.downcast_ref::<ImportRetryConflict>() {
+        return api_error(StatusCode::CONFLICT, conflict.0);
+    }
+    tracing::error!(%error, %novel_id, "novel import retry failed");
+    api_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
+}
+
 fn validate_metadata(
     title: String,
     author: Option<String>,
@@ -838,13 +851,7 @@ async fn retry_novel(
             }),
         )
             .into_response(),
-        Err(error)
-            if error.downcast_ref::<ImportCapacityUnavailable>().is_some()
-                || error.downcast_ref::<ImportBudgetExceeded>().is_some() =>
-        {
-            import_error_response(error)
-        }
-        Err(error) => api_error(StatusCode::CONFLICT, error.to_string()),
+        Err(error) => retry_error_response(error, id),
     }
 }
 
@@ -1042,13 +1049,13 @@ async fn owned_novel(
             }),
         )
             .into_response()),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError {
-                error: e.to_string(),
-            }),
-        )
-            .into_response()),
+        Err(error) => {
+            tracing::error!(%error, %novel_id, "owned novel lookup failed");
+            Err(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error",
+            ))
+        }
     }
 }
 
@@ -1316,6 +1323,32 @@ mod ownership_tests {
         assert_eq!(
             readiness_status(&FixedProbe(true), Some(&FixedProbe(false))).await,
             StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_errors_expose_only_safe_messages() {
+        let internal = retry_error_response(anyhow::anyhow!("database-secret"), Uuid::nil());
+        assert_eq!(internal.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(internal.into_body(), 1_024)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({"error": "Internal server error"})
+        );
+
+        let conflict = retry_error_response(
+            ImportRetryConflict("Import cannot be retried").into(),
+            Uuid::nil(),
+        );
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(conflict.into_body(), 1_024)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({"error": "Import cannot be retried"})
         );
     }
 

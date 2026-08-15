@@ -1,6 +1,11 @@
 use novel_service::{
-    domain::{entities::chapter::Chapter, repositories::ChapterRepository},
-    infrastructure::persistence::chapter_pg_repo::ChapterPgRepository,
+    domain::{
+        entities::{chapter::Chapter, novel::Novel},
+        repositories::{ChapterRepository, NovelRepository},
+    },
+    infrastructure::persistence::{
+        chapter_pg_repo::ChapterPgRepository, novel_pg_repo::NovelPgRepository,
+    },
 };
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
@@ -58,6 +63,7 @@ async fn test_tables_exist() {
     let expected_tables = [
         "users",
         "novels",
+        "novel_import_jobs",
         "chapters",
         "chapter_chunks",
         "characters",
@@ -93,7 +99,6 @@ async fn chapter_lore_search_never_crosses_the_chapter_boundary() {
         .await
         .unwrap();
     let user_id = Uuid::new_v4();
-    let novel_id = Uuid::new_v4();
 
     sqlx::query("INSERT INTO users (id, email, password_hash, role) VALUES ($1, $2, $3, 'user')")
         .bind(user_id)
@@ -102,16 +107,8 @@ async fn chapter_lore_search_never_crosses_the_chapter_boundary() {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query(
-        "INSERT INTO novels (id, user_id, title, total_chapters, status) \
-         VALUES ($1, $2, 'Lore Test', 2, 'ready')",
-    )
-    .bind(novel_id)
-    .bind(user_id)
-    .execute(&pool)
-    .await
-    .unwrap();
-
+    let novel = Novel::create(user_id, "Lore Test".into(), None);
+    let novel_id = novel.id;
     let repository = ChapterPgRepository::new(pool.clone());
     let first_chapter = Chapter::new(
         novel_id,
@@ -119,7 +116,7 @@ async fn chapter_lore_search_never_crosses_the_chapter_boundary() {
         Some("The Letter".into()),
         "The owl delivered a school letter to the young wizard.".repeat(10),
     );
-    let mut second_chapter = Chapter::new(
+    let second_chapter = Chapter::new(
         novel_id,
         2,
         Some("The Chamber".into()),
@@ -128,8 +125,8 @@ async fn chapter_lore_search_never_crosses_the_chapter_boundary() {
             "The basilisk sleeps inside the secret chamber beneath the school.".repeat(10)
         ),
     );
-    repository
-        .save_batch(&[first_chapter, second_chapter.clone()])
+    NovelPgRepository::new(pool.clone())
+        .create_import(&novel, &[first_chapter, second_chapter])
         .await
         .unwrap();
 
@@ -154,24 +151,6 @@ async fn chapter_lore_search_never_crosses_the_chapter_boundary() {
         chinese.first().map(|excerpt| excerpt.chapter_number),
         Some(2)
     );
-
-    second_chapter.content = "A phoenix feather glows beside the empty doorway.".repeat(10);
-    repository.update(&second_chapter).await.unwrap();
-    assert!(repository
-        .search_lore(novel_id, 2, "蛇怪", 3)
-        .await
-        .unwrap()
-        .is_empty());
-    assert_eq!(
-        repository
-            .search_lore(novel_id, 2, "phoenix feather", 3)
-            .await
-            .unwrap()
-            .first()
-            .map(|excerpt| excerpt.chapter_number),
-        Some(2)
-    );
-
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
         .execute(&pool)

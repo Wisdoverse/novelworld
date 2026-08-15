@@ -1,3 +1,4 @@
+use crate::domain::entities::chapter::chapters_are_importable;
 use crate::domain::entities::novel::Novel;
 use crate::domain::services::novel_parser::NovelParserService;
 use crate::domain::value_objects::{AvatarStatus, CharacterRole, DeviationMode, NovelStatus};
@@ -51,6 +52,25 @@ After many months the hero finally returned home. He was stronger and wiser. The
         .as_ref()
         .unwrap()
         .contains("The Beginning"));
+}
+
+#[test]
+fn test_chapter_split_renumbers_after_dropping_short_chapters() {
+    let body = "The hero walked on through the quiet valley for a very long while, \
+                thinking about everything that had happened along the way.";
+    let text = format!(
+        "Chapter 1 The Beginning\n\n{body}\n\n\
+         Chapter 2 Contents\n\nA short table of contents.\n\n\
+         Chapter 3 The Return\n\n{body}"
+    );
+
+    let chapters = NovelParserService::parse_chapters(Uuid::new_v4(), &text).unwrap();
+
+    assert_eq!(chapters.len(), 2);
+    assert_eq!(chapters[0].chapter_number, 1);
+    assert_eq!(chapters[1].chapter_number, 2);
+    assert!(chapters[1].title.as_ref().unwrap().contains("The Return"));
+    assert!(chapters_are_importable(&chapters));
 }
 
 #[test]
