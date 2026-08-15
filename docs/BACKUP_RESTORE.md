@@ -39,10 +39,11 @@ enabled) and the `BACKUP_ENCRYPTION_KEY`. A fresh host that regenerates
 `RUNTIME_CONFIG_KEY` cannot decrypt a web-managed LLM key stored in the
 database; the restore procedure therefore begins by installing the
 preserved `.env`. `JWT_SECRET` is deliberately excluded: the restore
-procedure always rotates it, so no session or refresh token issued before
-the restore survives one — a stale token for an erased subject can
-therefore never reach a service or trigger provider work, with no new
-runtime enforcement point. Losing the
+procedure always rotates it and deletes every persisted refresh token
+before services start, so no session issued before the restore survives
+one — a stale access token fails gateway signature validation and a
+restored refresh token no longer exists — with no new runtime
+enforcement point. Losing the
 preserved secrets is a recorded recovery limitation, not a silent failure:
 the restore script must state which secrets were not preserved and what
 functionality that costs.
@@ -85,8 +86,7 @@ multi-node profiles require a new reviewed version of this document.
 The scripted restore procedure, in order:
 
 1. **Install preserved secrets** (`.env`, `BACKUP_ENCRYPTION_KEY`) per the
-   custody prerequisite, and **rotate `JWT_SECRET`** so no pre-restore
-   session or refresh token survives.
+   custody prerequisite.
 2. **Verify** the artifact against its checksum manifest and refuse to
    proceed on any mismatch or on a missing/invalid encryption key. No data
    is changed before verification passes.
@@ -104,8 +104,12 @@ The scripted restore procedure, in order:
    its end is the moment writes stopped (or the declared failure time for a
    lost database). Deletions committed inside the window cannot be
    replayed.
-5. **Load** the decrypted dump into a clean database and re-insert the
-   union of erasure sources (idempotent for identical rows).
+5. **Load** the decrypted dump into a clean database, re-insert the
+   union of erasure sources (idempotent for identical rows), **rotate
+   `JWT_SECRET`, and delete every persisted refresh token**, so no
+   session issued before the restore survives it. Rotation and token
+   deletion happen only after verification passes, as part of preparing
+   the new deployment.
 6. **Gate on the residual window.** When the current database was reachable
    in step 4, the residual window is empty and the restore proceeds. When
    it is not — a disaster restore — the script **refuses to complete by
@@ -124,9 +128,9 @@ The scripted restore procedure, in order:
    start and writes-stopped or declared-failure end), the artifact digest
    inventory used as erasure sources, an operator-supplied identity
    string, and a timestamp. This requires no runtime enforcement point:
-   an unretained subject does not exist in the served deployment, and a
-   stale JWT for an erased account fails downstream exactly as it does
-   after ordinary deletion. The procedure's guarantee is conditional on
+   an unretained subject does not exist in the served deployment, stale
+   access tokens fail gateway signature validation after rotation, and
+   restored refresh tokens were deleted before services started. The procedure's guarantee is conditional on
    truthful decisions, as any recovery procedure is conditional on its
    inputs; a factually false retention is undetectable by construction
    and equivalent to restoring a hand-edited dump. Silent resurrection is
@@ -169,8 +173,10 @@ MUST be idempotent:
   when replay or attest-or-erase removes the final account, the runtime
   configuration is cleared and the installation returns to first-run
   setup; when decisions would leave retained accounts without any
-  administrator, the script requires an explicit recorded operator
-  decision before completing.
+  administrator, the script requires the operator to designate one
+  retained account as administrator before completion, recorded with
+  the decisions, so the installation is never left without an
+  operator.
 
 ## Drills
 
@@ -212,7 +218,8 @@ decision, both residual-window bounds, artifact digest inventory,
 operator identity, and timestamp; the erased account and the unlisted
 novel are absent from the served deployment with erasure records written
 and their dependent rows (refresh tokens, world state, chat) removed by
-cascade; a JWT issued before the restore is rejected after the rotation;
+cascade; a JWT issued before the restore is rejected after the rotation and no
+pre-restore refresh token remains;
 and the window bounds are computed from covered-through timestamps, not
 wall-clock archive times.
 

@@ -1222,11 +1222,13 @@ The authoritative PostgreSQL database is recoverable under the versioned policy 
    identity, decision, both residual-window bounds, the artifact digest inventory, an
    operator identity string, and a timestamp. The deployment MUST NOT contain an undecided
    subject and MUST NOT serve any subject covered by a collected or decision-written erasure
-   record. Every restore MUST rotate the JWT secret so no pre-restore session or refresh token
-   survives. Replay and attest-or-erase MUST preserve the deletion-path invariants: removing
-   the final account clears the runtime configuration, and decisions that would leave retained
-   accounts without an administrator require an explicit recorded operator decision. Silent
-   resurrection is prohibited in every case.
+   record. Every restore MUST, after verification passes and before services start, rotate the
+   JWT secret and delete every persisted refresh token, so no pre-restore session survives.
+   Replay and attest-or-erase MUST preserve the deletion-path invariants: removing the final
+   account clears the runtime configuration, and decisions that would leave retained accounts
+   without an administrator require the operator to designate a retained account as
+   administrator before completion, recorded with the decisions. Silent resurrection is
+   prohibited in every case.
 4. Backup artifacts MUST be produced by the scripted procedure, encrypted at rest, and verified
    against their integrity manifest before any restore changes data; corrupt or unverifiable
    artifacts MUST fail closed without side effects.
