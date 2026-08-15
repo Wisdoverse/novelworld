@@ -33,12 +33,16 @@ weaken it.
 
 The backup artifact contains no secrets. Restoring a working deployment
 additionally requires the operator to preserve, outside the artifact and
-under their own custody: the deployment `.env` (at minimum `JWT_SECRET`,
+under their own custody: the deployment `.env` (at minimum
 `RUNTIME_CONFIG_KEY`, `INTERNAL_SERVICE_TOKEN`, and S3 credentials when
 enabled) and the `BACKUP_ENCRYPTION_KEY`. A fresh host that regenerates
 `RUNTIME_CONFIG_KEY` cannot decrypt a web-managed LLM key stored in the
-database, and a regenerated `JWT_SECRET` invalidates sessions; the restore
-procedure therefore begins by installing the preserved `.env`. Losing the
+database; the restore procedure therefore begins by installing the
+preserved `.env`. `JWT_SECRET` is deliberately excluded: the restore
+procedure always rotates it, so no session or refresh token issued before
+the restore survives one — a stale token for an erased subject can
+therefore never reach a service or trigger provider work, with no new
+runtime enforcement point. Losing the
 preserved secrets is a recorded recovery limitation, not a silent failure:
 the restore script must state which secrets were not preserved and what
 functionality that costs.
@@ -48,7 +52,7 @@ functionality that costs.
 | Target | Value | Evidence that judges it |
 |---|---|---|
 | RPO | ≤ 24 hours | The operator schedules the scripted backup at least daily. Data committed after the newest verified backup may be lost. Drill A proves the mechanism; schedule adherence is an operator duty recorded as such, never proven by a drill. |
-| RTO | ≤ 30 minutes | Judged by the **scale rehearsal**: a scripted restore of a synthetic database whose plain dump is at least 5 GB completes within 30 minutes on the reference envelope (2-core / 4 GB / SSD, `DEPLOY.md` minimum), measured from starting the restore procedure to the deployment passing readiness. Recorded once per policy version and re-run after any change to the backup or restore scripts. |
+| RTO | ≤ 30 minutes | Applies to restores with an empty residual window. Judged by the **scale rehearsal**: a scripted restore of a synthetic database whose plain dump is at least 5 GB completes within 30 minutes on the reference envelope (2-core / 4 GB / SSD, `DEPLOY.md` minimum), measured from starting the restore procedure to the deployment passing readiness. Recorded once per policy version and re-run after any change to the backup or restore scripts. A disaster restore's duration is dominated by owner attest-or-erase decisions and carries no RTO target in this version. |
 | Drill bound | ≤ 10 minutes | CI assertion for the drill dataset defined under Drills; keeps every CI run sensitive to procedure regressions without depending on data volume. |
 | Backup retention ceiling | 30 days default; operator override bounded to 7–90 days | Backups older than the ceiling must be destroyed by the operator. Values outside 7–90 days require `backup-restore-v2`. |
 
@@ -81,7 +85,8 @@ multi-node profiles require a new reviewed version of this document.
 The scripted restore procedure, in order:
 
 1. **Install preserved secrets** (`.env`, `BACKUP_ENCRYPTION_KEY`) per the
-   custody prerequisite.
+   custody prerequisite, and **rotate `JWT_SECRET`** so no pre-restore
+   session or refresh token survives.
 2. **Verify** the artifact against its checksum manifest and refuse to
    proceed on any mismatch or on a missing/invalid encryption key. No data
    is changed before verification passes.
@@ -159,12 +164,18 @@ MUST be idempotent:
   restore may cause at most one additional re-queue per record; S3 object
   deletion is idempotent, so the repeat is safe as well as bounded;
 - never produce unbounded per-deployment work: replay against an
-  already-clean database is a no-op apart from bounded bookkeeping.
+  already-clean database is a no-op apart from bounded bookkeeping;
+- preserve the deletion-path invariants the interactive flow enforces:
+  when replay or attest-or-erase removes the final account, the runtime
+  configuration is cleared and the installation returns to first-run
+  setup; when decisions would leave retained accounts without any
+  administrator, the script requires an explicit recorded operator
+  decision before completing.
 
 ## Drills
 
-Both drills are release evidence for H1 and run in CI against the supported
-compose topology. The **drill dataset** is the seeded end-to-end reader
+All three drills are release evidence for H1 and run in CI against the
+supported compose topology. The **drill dataset** is the seeded end-to-end reader
 journey extended to cover both deletion paths: at least two accounts and
 three imported novels (each novel with at least two durable chapters), at
 least two novels carrying retained-source keys when the drill topology
@@ -195,11 +206,14 @@ no new re-queue, no row changes, no new provider work.
 database and a non-empty residual window: the script must refuse to
 complete, including when decisions cover only some accounts. Re-run with a
 complete attest-or-erase input that retains one account (with a partial
-novel list) and erases the other: the restore completes; the decision rows
-exist in the restored database with the residual-window bounds and
-artifact digest inventory; the erased account and the unlisted novel are
-absent from the served deployment with erasure records written; and the
-window bounds are computed from covered-through timestamps, not
+novel list) and erases the other: the restore completes; the decision
+rows exist in the restored database with every required field — subject,
+decision, both residual-window bounds, artifact digest inventory,
+operator identity, and timestamp; the erased account and the unlisted
+novel are absent from the served deployment with erasure records written
+and their dependent rows (refresh tokens, world state, chat) removed by
+cascade; a JWT issued before the restore is rejected after the rotation;
+and the window bounds are computed from covered-through timestamps, not
 wall-clock archive times.
 
 Negative cases: a corrupted artifact and a wrong or missing encryption key

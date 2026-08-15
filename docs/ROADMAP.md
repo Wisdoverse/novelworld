@@ -303,10 +303,12 @@ Scope:
   Restoration of a backup predating an account/novel deletion must replay a
   durable erasure record; it cannot silently resurrect visible user data. A
   disaster restore whose newest durable erasure source predates the failure
-  refuses to complete by default and may continue only through per-account
-  attestation durably recorded with the residual-window bounds; the declared
-  backup retention ceiling bounds how stale a restorable backup and its
-  embedded erasure source can be.
+  refuses to complete by default and may continue only through
+  attest-or-erase: every restored account receives a durably recorded
+  retain-with-listed-novels or erase decision, and undecided or unretained
+  subjects are erased before any service starts. The declared backup
+  retention ceiling bounds how stale a restorable backup and its embedded
+  erasure source can be.
 - Prove forward-compatible migrations and repair/rollback behavior for the
   supported release window.
 
@@ -327,7 +329,9 @@ Exit evidence:
   mechanism plus the operator schedule duty satisfy the RPO policy.
 - A backup → user/novel deletion → older-backup restore drill proves the deleted
   subject remains unavailable to login, reads, export, provider work, and
-  derived projections after the documented erasure procedure runs.
+  derived projections after the documented erasure procedure runs. A disaster
+  gate drill proves a restore with a non-empty residual window refuses by
+  default and completes only through recorded attest-or-erase decisions.
 - Upgrade, migration interruption, rollback/repair, deletion-race, and—when
   supported—cancellation tests pass on the final commit.
 - Contract/design, failure-recovery adversarial, and final-evidence reviews
