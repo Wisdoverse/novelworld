@@ -285,6 +285,11 @@ A: pgvector 是当前 schema 的必需扩展。不要修改 `init.sql` 绕过它
 docker exec novel-postgres pg_dump -U novel novel_world > backup_$(date +%Y%m%d).sql
 ```
 
+以上示例未加密、未做完整性校验，也未经恢复演练验证。已批准的恢复目标
+（RPO/RTO）、加密与完整性要求、保留上限和擦除重放契约见
+[`docs/BACKUP_RESTORE.md`](docs/BACKUP_RESTORE.md)；配套的脚本化备份/恢复
+工具随该政策的实现变更交付。
+
 ---
 
 ## 私有部署安全基线

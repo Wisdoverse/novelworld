@@ -18,7 +18,7 @@ exists, then the owning delete workflow removes it.
 | Deletion tombstones | Redis keys containing only a user UUID or user/novel UUID pair, retained for one hour. They contain no source text, message, profile, or model data. | Expire automatically. They prevent an already-committed asynchronous projection from recreating deleted cache data. |
 | Choices, world state, narrative nodes, reading progress, player timelines, and world-turn audit/replay records | PostgreSQL, for the lifetime of the novel/account. Failed world turns retain their action and status but not a model transition/result. | Novel or account deletion. `world_turns` cascade through their owning world state. |
 | Generated chapter prose | PostgreSQL `player_chapters`, for the lifetime of the novel/account. | Novel or account deletion. |
-| User profile and refresh tokens | PostgreSQL, for the account lifetime. A refresh token is atomically replaced after successful refresh and removed by logout or when expired. | Account deletion. |
+| User profile and refresh tokens | PostgreSQL, for the account lifetime. A refresh token is atomically replaced after successful refresh and removed by logout or when expired. | Account deletion. The approved [`BACKUP_RESTORE.md`](./BACKUP_RESTORE.md) procedure additionally deletes every refresh token during a restore, so sessions never survive one. |
 | Web-managed LLM API key | Encrypted in the singleton PostgreSQL runtime configuration until replaced. | Removed when the final account is deleted. Environment-managed keys remain under operator control outside NovelWorld. |
 
 Database foreign keys perform the authoritative cascade. Redis cleanup is a
@@ -48,7 +48,12 @@ on that bucket for readiness and `s3:PutObject`/`s3:DeleteObject` only on the
   is state-idempotent; a deleted account returns `204`, while a deleted novel is
   no longer an owned resource and returns `404`.
 - Deleted application data is intentionally unrecoverable. NovelWorld does not
-  provide a restore or recycle-bin workflow.
+  provide a per-item restore or recycle-bin workflow. Whole-database operator
+  recovery is governed separately by the approved
+  [`BACKUP_RESTORE.md`](./BACKUP_RESTORE.md) policy, whose erasure-replay
+  contract exists precisely so that restoring an older backup cannot bring a
+  deleted subject back; its implementation state is tracked in
+  [`SPEC_CONFORMANCE.md`](./SPEC_CONFORMANCE.md) (§12.4).
 - S3 deletion is eventually complete rather than transactionally coupled to
   PostgreSQL. The durable `source_file_deletions` outbox survives novel and
   account cascades and service restarts; `/ready` fails while an enabled S3
@@ -63,8 +68,11 @@ configures a separate deletion contract. Their retention is governed by the
 operator's provider agreement.
 
 Container logs, database snapshots, volume copies, and external backups are also
-operator-owned. NovelWorld does not create or prune backups, so operators must
-apply their own retention and deletion schedules to those copies.
+operator-owned. NovelWorld does not schedule, upload, or prune backups, so
+operators must apply their own retention and deletion schedules to those copies,
+bounded by the retention ceiling in
+[`BACKUP_RESTORE.md`](./BACKUP_RESTORE.md) once that policy's scripted backup is
+implemented.
 
 ## Account export
 
