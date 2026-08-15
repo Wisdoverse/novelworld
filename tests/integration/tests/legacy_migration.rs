@@ -43,6 +43,8 @@ const SOURCE_FILE_STORAGE_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0014_source_file_storage.sql");
 const DURABLE_IMPORT_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0015_durable_import_jobs.sql");
+const ERASURE_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0016_erasure_records.sql");
 
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
@@ -262,6 +264,10 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
             .await
             .unwrap();
         sqlx::raw_sql(DURABLE_IMPORT_MIGRATION)
+            .execute(&fresh)
+            .await
+            .unwrap();
+        sqlx::raw_sql(ERASURE_MIGRATION)
             .execute(&fresh)
             .await
             .unwrap();
@@ -928,6 +934,10 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
             .await
             .unwrap();
         sqlx::raw_sql(DURABLE_IMPORT_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
+        sqlx::raw_sql(ERASURE_MIGRATION)
             .execute(&mut *non_default_path)
             .await
             .unwrap();
