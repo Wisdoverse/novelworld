@@ -1193,6 +1193,48 @@ Implementations MUST create the following indexes:
 Implementations MUST apply schema changes through versioned migration files. Migrations MUST be
 idempotent where possible. The initial migration MUST be applied before the first service start.
 
+### 12.4 Backup, Restore, and Erasure Replay
+
+The authoritative PostgreSQL database is recoverable under the versioned policy in
+[`docs/BACKUP_RESTORE.md`](docs/BACKUP_RESTORE.md). Implementations MUST satisfy:
+
+1. Deleting a user or a novel MUST write a durable erasure record in the same database
+   transaction as the authoritative delete. The record carries only subject type and UUIDs
+   (including the owning user UUID for novels), MUST be written for every deletion path
+   including per-novel records under an account cascade, and MUST survive account and novel
+   cascades.
+2. Erasure replay MUST run in the standard migration path before services start, MUST be
+   idempotent across deployments, MUST remove any subject row matching an erasure record, and
+   MUST re-queue the deterministic retained-source object key for an erased novel whose subject
+   row no longer exists exactly once per record within a database lineage, tracked by durable
+   per-record bookkeeping; a restore starts a new lineage, so it MAY cause at most one
+   additional re-queue per record.
+3. Backup artifacts MUST embed an erasure-record export taken from the same database snapshot
+   as the dump, and record that snapshot's covered-through timestamp. The restore procedure
+   MUST stop application writes before exporting erasure records, MUST replay the union of
+   every available erasure source, MUST abort when sources disagree on the same subject, and
+   MUST refuse to complete a restore whose residual window — from the newest source's
+   covered-through timestamp to the writes-stopped or declared-failure time — is non-empty.
+   The only sanctioned continuation is attest-or-erase: every restored account receives a
+   retain-with-listed-novels or erase decision before completion; erasure records are written
+   and replayed for every erase-decided account and every unlisted novel before services
+   start; and each decision is durably recorded in the restored database with subject
+   identity, decision, both residual-window bounds, the artifact digest inventory, an
+   operator identity string, and a timestamp. The deployment MUST NOT contain an undecided
+   subject and MUST NOT serve any subject covered by a collected or decision-written erasure
+   record. Every restore MUST, after verification passes and before services start, rotate the
+   JWT secret and delete every persisted refresh token, so no pre-restore session survives.
+   Replay and attest-or-erase MUST preserve the deletion-path invariants: removing the final
+   account clears the runtime configuration, and decisions that would leave retained accounts
+   without an administrator require the operator to designate a retained account as
+   administrator before completion, recorded with the decisions. Silent resurrection is
+   prohibited in every case.
+4. Backup artifacts MUST be produced by the scripted procedure, encrypted at rest, and verified
+   against their integrity manifest before any restore changes data; corrupt or unverifiable
+   artifacts MUST fail closed without side effects.
+5. Erasure records are internal operational state: they MUST NOT appear in account export and
+   MUST NOT contain source text, message content, profile data, or credentials.
+
 ---
 
 ## 13. Frontend Specification

@@ -68,9 +68,9 @@ state in two places.
 | §4.1.6 — chat-turn status, lease, failure, and completion fields agree | Verified | H3, H5 | E1, E3 |
 | §4.2 — UUID v4, UTC `TIMESTAMPTZ`, case-insensitive character deduplication | Verified | H1, H2 | E1, E2 |
 | §5.1 — accepted formats, byte limits, validation, optional retention, and pending record | Verified | H1 | E0, E2 |
-| §5.1 — retained bytes do not imply restart-safe ingestion | Verified | H1 | E0 records the limitation; restart-safe claim/resume remains an H1 gate |
+| §5.1 — accepted imports recoverable after process death from committed stages; retained bytes still do not imply retained-object replay | Verified | H1 | E1, E2; durable jobs, leases, and startup recovery landed in PR #116, retained-object reprocessing remains an H1 gap |
 | §5.2 — current parsing stages reach `ready` or store a terminal parse error | Verified | H1 | E2 |
-| §5.2 — interruption recovery across persisted stages | Intended gap | H1 | E0; the current task is process-local |
+| §5.2 — interruption recovery, fenced attempts, and reclaim of pending or expired jobs | Verified | H1 | E1, E2; attempt-fenced claims, lease reclaim, and replay-safe backfill landed in PR #116 |
 | §5.3 — non-empty, sequential chapters | Verified | H1 | E2 |
 | §5.4 — structured character output validation and case-insensitive merge | Verified | H1 | E2 |
 | §5.4 — complete repeated-character coverage and 50-character cost bound | Intended gap | H1 | E2 shows heuristic/model extraction without a release corpus or enforced final cap |
@@ -109,6 +109,11 @@ state in two places.
 | §12.1 — required PostgreSQL extensions | Verified | H1 | E1 |
 | §12.2 — required indexes | Verified | H1 | E1 |
 | §12.3 — versioned migrations, replay safety, and initial application | Verified | H1, H5 | E1 |
+| §12.4.1 — erasure records atomic with every deletion path, minimal UUID-only fields, per-novel records under account cascade, cascade-surviving | Intended gap | H1 | [`BACKUP_RESTORE.md`](./BACKUP_RESTORE.md) approved; no `erasure_records` journal exists yet |
+| §12.4.2 — migration-path replay before services start, idempotent, removes matching subject rows, exactly-once source-key re-queue per database lineage with durable per-record bookkeeping (at most one repeat per restore) | Intended gap | H1 | Policy approved; replay is unimplemented |
+| §12.4.3 — artifacts embed same-snapshot erasure exports with covered-through timestamps; restore stops writes, replays the union of sources, aborts on conflicting records, refuses non-empty residual windows except through attest-or-erase (every account decided retain-with-listed-novels or erase; erasure records written and replayed for erased accounts and unlisted novels before services start; decisions durably recorded with subject, decision, both window bounds, artifact digest inventory, operator identity, and timestamp), never contains an undecided subject or serves one covered by any erasure record, rotates the JWT secret and deletes all persisted refresh tokens after verification and before services start, clears runtime configuration on final-account removal, and requires designating a retained administrator when decisions would leave none | Intended gap | H1 | Policy approved; awaits the drill change judged by `backup-restore-v1` |
+| §12.4.4 — scripted, encrypted, integrity-verified artifacts and fail-closed restore on corrupt or unverifiable input | Intended gap | H1 | Policy approved; no backup or restore script exists yet |
+| §12.4.5 — erasure records excluded from account export and free of source text, messages, profile data, and credentials | Intended gap | H1 | Contract defined with the journal it governs |
 | §13.1 — FSD import direction | Verified | H4 | E7 and frontend CI |
 | §13.2–§13.3 — standalone import route/wizard and named progress component | Obsolete/corrected | H0 | Removed implementation prescriptions; the shelf and reader own those user outcomes directly |
 | §13.3 — chat preserves reading context and branch choice blocks advancement | Verified | H4 | E7 |
