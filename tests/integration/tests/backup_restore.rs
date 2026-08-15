@@ -542,6 +542,18 @@ async fn restore_attestations_record_every_required_decision_field() {
     assert!(row.get::<bool, _>("designated_admin"));
     let _: chrono::DateTime<chrono::Utc> = row.get("recorded_at");
 
+    // A window that ends before it starts is not a residual window.
+    let inverted = sqlx::query(
+        "INSERT INTO restore_attestations \
+         (subject_id, decision, window_start, window_end, artifact_inventory, operator_identity) \
+         VALUES ($1, 'retain', '2026-08-02 00:00:00+00', '2026-08-01 00:00:00+00', \
+                 'dump:aaa', 'operator')",
+    )
+    .bind(subject)
+    .execute(&pool)
+    .await;
+    assert!(inverted.is_err());
+
     // Only the two sanctioned decisions may be recorded.
     let rejected = sqlx::query(
         "INSERT INTO restore_attestations \

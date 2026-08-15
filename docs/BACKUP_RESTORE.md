@@ -99,8 +99,11 @@ The scripted restore procedure, in order:
    current database when it is still reachable after writes stopped, and
    (c) the embedded erasure records of every newer artifact the operator
    holds. Records are immutable facts keyed by subject; if two sources
-   disagree on any field of the same key, the restore aborts with an
-   actionable error rather than guessing. The newest source's
+   disagree on any deletion fact of the same key — subject type, subject,
+   owning user, deletion time — the restore aborts with an actionable error
+   rather than guessing. The retained-source marker is monotone bookkeeping
+   that only an authoritative delete can raise, so it merges upward instead
+   of counting as a disagreement. The newest source's
    covered-through timestamp defines the start of the **residual window**;
    its end is the moment writes stopped (or the declared failure time for a
    lost database). Deletions committed inside the window cannot be
@@ -115,16 +118,19 @@ The scripted restore procedure, in order:
    in step 4, the residual window is empty and the restore proceeds. When
    it is not — a disaster restore — the script **refuses to complete by
    default**. The only sanctioned continuation is **attest-or-erase**: the
-   script lists every account in the restored data with its novels, and
-   for each account the operator, confirming with that account's owner (or
+   script lists every account in the restored data that is not already
+   covered by a collected erasure record, with its not-already-erased
+   novels, and for each such account the operator, confirming with that
+   account's owner (or
    as the owner, for their own account), supplies one decision — retain
    the account together with the explicit list of its retained novels, or
    erase it. The script then, before any service starts, writes erasure
    records for every erase-decided account and for every novel not on a
    retained account's retained list, and replays them, so **no subject is
    ever served ahead of its decision and nothing deleted is served at
-   all**. The restore does not complete while any account lacks a
-   decision. Each decision is recorded durably in the restored database —
+   all**. The restore does not complete while any such account lacks a
+   decision; an account or novel already covered by a collected record is a
+   pre-decided fact that replay enforces and no decision may retain. Each decision is recorded durably in the restored database —
    subject identity, decision, residual-window bounds (covered-through
    start and writes-stopped or declared-failure end), the artifact digest
    inventory used as erasure sources, an operator-supplied identity
@@ -146,10 +152,11 @@ The scripted restore procedure, in order:
 Deletion of a user or a novel writes a durable erasure record in the same
 database transaction as the authoritative delete, via `AFTER DELETE`
 triggers, so every deletion path — including per-novel records under an
-account cascade — is covered without service coordination. A record contains
-only the subject type and UUIDs (for novels, the owning user UUID as well,
-so the deterministic retained-source object key
-`source-files/{user_id}/{novel_id}` can be reconstructed). Records contain
+account cascade — is covered without service coordination. A record's identifying
+payload is limited to the subject type and UUIDs (for novels, the owning user
+UUID as well, so the deterministic retained-source object key
+`source-files/{user_id}/{novel_id}` can be reconstructed); its operational
+bookkeeping — deletion time, retained-source marker, re-queue stamp — carries
 no content, no email, and no derived data; they are excluded from account
 export and are retained as deletion-enforcement evidence. UUID v4 identity
 guarantees replay can never affect a legitimately re-created account or
@@ -164,10 +171,15 @@ MUST be idempotent:
 - re-queue the deterministic retained-source key for a novel erasure record
   whose subject row no longer exists **exactly once per record within a
   database lineage**, tracked by durable per-record bookkeeping (the
-  self-consuming cleanup outbox is not that bookkeeping). Restoring an
-  artifact starts a new lineage and discards bookkeeping with it, so a
-  restore may cause at most one additional re-queue per record; S3 object
-  deletion is idempotent, so the repeat is safe as well as bounded;
+  self-consuming cleanup outbox is not that bookkeeping). Bookkeeping
+  restored from an artifact's own dump is retained: that dump is one
+  snapshot and the stamp and its outbox row are written in one transaction,
+  so either both are in the artifact or the object was already deleted, and
+  such records repeat zero re-queues. A record arriving from a foreign
+  erasure source enters the new lineage unstamped, because its outbox row
+  belongs to a different artifact, and re-queues once — the sanctioned at
+  most one additional re-queue per record. S3 object deletion is
+  idempotent, so the repeat is safe as well as bounded;
 - never produce unbounded per-deployment work: replay against an
   already-clean database is a no-op apart from bounded bookkeeping;
 - preserve the deletion-path invariants the interactive flow enforces:

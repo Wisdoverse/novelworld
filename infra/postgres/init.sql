@@ -169,7 +169,9 @@ CREATE TABLE restore_attestations (
     designated_admin   BOOLEAN NOT NULL DEFAULT FALSE,
     recorded_at        TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.now(),
     CONSTRAINT restore_attestations_decision_check
-        CHECK (decision IN ('retain', 'erase'))
+        CHECK (decision IN ('retain', 'erase')),
+    CONSTRAINT restore_attestations_window_check
+        CHECK (window_start <= window_end)
 );
 
 CREATE OR REPLACE FUNCTION record_user_erasure()

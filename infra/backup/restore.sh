@@ -49,21 +49,33 @@ abspath() {
 # Manifests and decision files are operator-supplied text that ends up inside
 # SQL literals, so every value is shape-checked at the boundary where it is
 # read. Timestamps use exactly the format backup.sh writes.
+# awk anchors match the whole string; grep -E would match any single line and
+# let a multiline payload through with a well-formed first line.
+matches() {
+  awk -v value="$1" -v pattern="$2" 'BEGIN { exit !(value ~ ("^" pattern "$")) }'
+}
+
 check_timestamp() {
-  printf '%s' "$1" |
-    grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?\+00$' ||
+  matches "$1" '[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{1,6})?[+]00' ||
     fail "$2 is not a 'YYYY-MM-DD HH:MM:SS[.ffffff]+00' UTC timestamp: '$1'"
 }
 
 check_digest() {
-  printf '%s' "$1" | grep -Eq '^[0-9a-f]{64}$' ||
-    fail "$2 is not a SHA-256 digest: '$1'"
+  matches "$1" '[0-9a-f]{64}' || fail "$2 is not a SHA-256 digest: '$1'"
 }
 
 check_uuid() {
-  printf '%s' "$1" |
-    grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' ||
+  matches "$1" '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' ||
     fail "$2 is not a UUID: '$1'"
+}
+
+# The shape check above leaves only digits and separators, so the value is safe
+# to hand to the server that will store it. PostgreSQL owns the calendar: it is
+# the only thing that agrees with the column the value lands in.
+check_calendar() {
+  docker exec "$container" psql -U "$pg_user" -d postgres -At -c \
+    "SELECT '$1'::pg_catalog.timestamptz" >/dev/null 2>&1 ||
+    fail "$2 is not a real UTC timestamp: '$1'"
 }
 
 while [ $# -gt 0 ]; do
@@ -152,7 +164,11 @@ decrypt "$dump_file" "$work/dump.sql"
 decrypt "$erasure_file" "$work/sources/artifact.tsv"
 grep -q '^COPY public\.users (' "$work/dump.sql" ||
   fail "the decrypted dump has no users table; it is not a NovelWorld artifact"
-inventory=$(manifest_value "$manifest" dump_sha256)
+# Only digests this run verified enter the inventory, each labelled with what it
+# covers: the artifact whose dump was loaded, and the erasure export of every
+# newer artifact that contributed records. A newer artifact's dump is never
+# verified here — it is not restored — so its digest is not claimed.
+inventory="dump:$(manifest_value "$manifest" dump_sha256)"
 newest_covered_through=$covered_through
 
 index=0
@@ -168,7 +184,7 @@ while IFS= read -r newer; do
   check_digest "$(manifest_value "$newer" dump_sha256)" "the dump_sha256 of $newer"
   check_digest "$(manifest_value "$newer" erasure_sha256)" "the erasure_sha256 of $newer"
   decrypt "$(verify_file "$newer" erasure erasure_sha256)" "$work/sources/newer-$index.tsv"
-  inventory="$inventory,$(manifest_value "$newer" dump_sha256)"
+  inventory="$inventory,erasure:$(manifest_value "$newer" erasure_sha256)"
   # Fixed-width UTC timestamps, so lexical order is chronological order.
   if [ "$newer_covered" \> "$newest_covered_through" ]; then
     newest_covered_through=$newer_covered
@@ -199,6 +215,12 @@ fi
 
 docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null | grep -qx true ||
   fail "postgres container '$container' is not running; start it with: docker compose up -d postgres"
+
+check_calendar "$covered_through" "the covered_through of $manifest"
+[ "$newest_covered_through" = "$covered_through" ] ||
+  check_calendar "$newest_covered_through" 'the newest covered_through'
+[ -z "$declared_failure_time" ] ||
+  check_calendar "$declared_failure_time" '--declared-failure-time'
 
 writes_stopped_at=$(docker exec "$container" psql -U "$pg_user" -d postgres -At -c \
   "SELECT pg_catalog.to_char(pg_catalog.now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US+00')")
@@ -242,30 +264,32 @@ copy_block novels id,user_id >"$work/novels.tsv" ||
 cut -f1 "$work/accounts.tsv" | sort >"$work/account-ids.txt"
 
 # The current database is an erasure source only when it is this deployment's
-# lineage: it already holds erasure records, or it holds an account that is also
-# in the artifact. UUID v4 makes that overlap impossible across lineages, so a
-# replacement host that an operator has already seeded with an unrelated account
-# is correctly treated as a disaster restore rather than silently closing the
-# residual window and skipping attest-or-erase.
-live_source=false
-live_records=$(docker exec "$container" psql -U "$pg_user" -d "$pg_db" -At -c \
-  "SELECT pg_catalog.count(*) FROM public.erasure_records" 2>/dev/null || true)
+# lineage, and lineage means shared identity with the artifact: a live account
+# the artifact also holds, or a live erasure record whose subject the artifact
+# holds as an account, a novel, or an already-erased subject. UUID v4 makes that
+# impossible across lineages, so a replacement host the operator has already
+# used — even to create and delete an account of its own — is correctly treated
+# as a disaster restore instead of silently closing the residual window.
+# Conservative edge: an artifact taken before first-run setup holds no subject at
+# all, so nothing can intersect it and the disaster gate always applies.
+{
+  cut -f1 "$work/accounts.tsv"
+  cut -f1 "$work/novels.tsv"
+  cut -f2 "$work/sources/artifact.tsv"
+} | sort -u >"$work/artifact-subjects.txt"
 docker exec "$container" psql -U "$pg_user" -d "$pg_db" -At -c \
   "COPY (SELECT id FROM public.users) TO STDOUT" 2>/dev/null |
   sort >"$work/live-user-ids.txt" || true
-case "$live_records" in
-'' | 0)
-  if [ -s "$work/live-user-ids.txt" ] &&
-    [ -n "$(comm -12 "$work/live-user-ids.txt" "$work/account-ids.txt")" ]; then
-    live_source=true
-  fi
-  ;;
-*) live_source=true ;;
-esac
-if [ "$live_source" = true ]; then
-  docker exec "$container" psql -U "$pg_user" -d "$pg_db" -At -c \
-    "COPY (SELECT subject_type, subject_id, user_id, erased_at, had_source
-             FROM public.erasure_records) TO STDOUT" >"$work/sources/live.tsv"
+docker exec "$container" psql -U "$pg_user" -d "$pg_db" -At -c \
+  "COPY (SELECT subject_type, subject_id, user_id, erased_at, had_source
+           FROM public.erasure_records) TO STDOUT" 2>/dev/null >"$work/live.tsv" || true
+cut -f2 "$work/live.tsv" | sort -u >"$work/live-subjects.txt"
+
+live_source=false
+if [ -n "$(comm -12 "$work/live-user-ids.txt" "$work/account-ids.txt")" ] ||
+  [ -n "$(comm -12 "$work/live-subjects.txt" "$work/artifact-subjects.txt")" ]; then
+  live_source=true
+  mv "$work/live.tsv" "$work/sources/live.tsv"
   inventory="$inventory,live:$writes_stopped_at"
   newest_covered_through=$writes_stopped_at
 fi
@@ -311,6 +335,11 @@ if [ "$live_source" = true ]; then
   window_state='empty (the current database was reachable and was exported)'
 else
   window_state="non-empty ($window_start .. $window_end)"
+  # A window that ends before it starts is not a window. The server that stores
+  # the bounds decides the ordering, so the check agrees with the column.
+  [ "$(docker exec "$container" psql -U "$pg_user" -d postgres -At -c \
+    "SELECT '$window_start'::pg_catalog.timestamptz <= '$window_end'::pg_catalog.timestamptz")" = t ] ||
+    fail "the residual window ends before it starts ($window_start .. $window_end); check --declared-failure-time"
 fi
 
 owns() { # owns FILE KEY VALUE
@@ -426,12 +455,17 @@ elif [ "$live_source" = false ]; then
     "$window_start" "$window_end" >&2
   printf 'restore: supply --decisions FILE with one line per account:\n' >&2
   printf '  operator=<identity string>\n  retain <user_uuid> novels=<uuid,uuid>\n  erase <user_uuid>\n' >&2
+  # Novels already covered by a collected record are erased facts; the prompt
+  # must not advertise them as retainable.
+  awk -F'\t' 'NR == FNR { erased[$1] = 1; next } !($1 in erased)' \
+    "$work/erased-novels.txt" "$work/novels.tsv" >"$work/available-novels.tsv"
   printf 'restore: accounts in this artifact that still need a decision:\n' >&2
   while IFS= read -r account; do
     printf '  %s role=%s novels=%s\n' "$account" \
       "$(awk -F'\t' -v id="$account" '$1 == id { print $2 }' "$work/accounts.tsv")" \
       "$(awk -F'\t' -v owner="$account" \
-        '$2 == owner { printf "%s%s", separator, $1; separator = "," }' "$work/novels.tsv")" >&2
+        '$2 == owner { printf "%s%s", separator, $1; separator = "," }' \
+        "$work/available-novels.tsv")" >&2
   done <"$work/decision-required.txt"
   exit 2
 fi

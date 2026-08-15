@@ -1199,10 +1199,12 @@ The authoritative PostgreSQL database is recoverable under the versioned policy 
 [`docs/BACKUP_RESTORE.md`](docs/BACKUP_RESTORE.md). Implementations MUST satisfy:
 
 1. Deleting a user or a novel MUST write a durable erasure record in the same database
-   transaction as the authoritative delete. The record carries only subject type and UUIDs
-   (including the owning user UUID for novels), MUST be written for every deletion path
-   including per-novel records under an account cascade, and MUST survive account and novel
-   cascades.
+   transaction as the authoritative delete. The record's identifying payload is limited to
+   subject type and UUIDs (including the owning user UUID for novels); its operational
+   bookkeeping fields — deletion time, retained-source marker, and re-queue stamp — MUST NOT
+   carry source text, message content, profile data, or credentials. A record MUST be written
+   for every deletion path including per-novel records under an account cascade, and MUST
+   survive account and novel cascades.
 2. Erasure replay MUST run in the standard migration path before services start, MUST be
    idempotent across deployments, MUST remove any subject row matching an erasure record, and
    MUST re-queue the deterministic retained-source object key for an erased novel whose subject
@@ -1215,8 +1217,10 @@ The authoritative PostgreSQL database is recoverable under the versioned policy 
    every available erasure source, MUST abort when sources disagree on the same subject, and
    MUST refuse to complete a restore whose residual window — from the newest source's
    covered-through timestamp to the writes-stopped or declared-failure time — is non-empty.
-   The only sanctioned continuation is attest-or-erase: every restored account receives a
-   retain-with-listed-novels or erase decision before completion; erasure records are written
+   The only sanctioned continuation is attest-or-erase: every restored account that is not
+   already covered by a collected erasure record receives a retain-with-listed-novels or erase
+   decision before completion — a collected record is a pre-decided fact that replay enforces
+   and no decision may override; erasure records are written
    and replayed for every erase-decided account and every unlisted novel before services
    start; and each decision is durably recorded in the restored database with subject
    identity, decision, both residual-window bounds, the artifact digest inventory, an

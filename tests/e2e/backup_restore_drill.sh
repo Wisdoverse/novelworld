@@ -3,9 +3,9 @@
 # (docs/BACKUP_RESTORE.md, "Drills"), against the supported compose topology.
 #
 # Runs after tests/e2e/core_reader_loop.sh, which leaves the deployment in
-# first-run state, and seeds its own drill dataset: two accounts, three novels
-# with at least two durable chapters each, two retained-source keys, committed
-# chat history and a committed world turn.
+# first-run state, and seeds its own drill dataset through the real import path:
+# two accounts, four novels with two durable chapters each, three
+# retained-source keys, committed chat history and a committed world turn.
 #
 # Retained-source coverage limit: the end-to-end topology has no S3 stub and
 # runs with S3_ENABLED=false, where novel-service refuses to start while the
@@ -502,11 +502,13 @@ check 'C refusal changed nothing' '0:0' \
 # A replacement host that the operator already seeded with an unrelated account
 # shares no UUID with the artifact, so it is not this deployment's lineage and
 # the disaster gate must still hold.
-psql -c "INSERT INTO users (email, password_hash) VALUES ('unrelated@test.invalid', 'x')" >/dev/null
-refuses 'C unrelated live account is not lineage' infra/backup/restore.sh \
+psql -c "INSERT INTO users (email, password_hash) VALUES ('unrelated@test.invalid', 'x');
+         DELETE FROM users WHERE email = 'unrelated@test.invalid'" >/dev/null
+check 'C unrelated database has its own journal row' 1 \
+  "$(psql -c "SELECT COUNT(*) FROM erasure_records")"
+refuses 'C unrelated live lineage is not this lineage' infra/backup/restore.sh \
   --manifest "$manifest_one" --env-file "$env_file"
 refusal_says 'refusing to complete a disaster restore'
-psql -c "DELETE FROM users" >/dev/null
 psql -c "DELETE FROM erasure_records" >/dev/null
 
 cat >"$work/decisions-partial" <<EOF
@@ -576,9 +578,10 @@ check 'C decisions wrote erasure records' '1:1:1' \
                         WHERE subject_type = 'novel' AND subject_id = '$novel_b2') || ':' ||
                      (SELECT COUNT(*) FROM erasure_records
                         WHERE subject_type = 'novel' AND subject_id = '$novel_a1')")"
-check 'C cascade removed dependent rows' '0:0:0' \
+check 'C cascade removed dependent rows' '0:0:0:0' \
   "$(psql -c "SELECT (SELECT COUNT(*) FROM chat_messages) || ':' ||
                      (SELECT COUNT(*) FROM chapters WHERE novel_id = '$novel_b2') || ':' ||
+                     (SELECT COUNT(*) FROM world_states WHERE user_id = '$admin_id') || ':' ||
                      (SELECT COUNT(*) FROM refresh_tokens)")"
 check 'C attestation fields' \
   "$reader_id|retain|$covered_one|$failure_time|backup-restore-v1 drill C|true|true|true" \
@@ -591,9 +594,10 @@ check 'C attestation fields' \
 check 'C erase decision recorded' "$admin_id|false" \
   "$(psql -c "SELECT subject_id || '|' || designated_admin FROM restore_attestations
                 WHERE decision = 'erase'")"
-check 'C attestation names the artifact digest' 1 \
+check 'C attestation names the verified artifact digest' 1 \
   "$(psql -c "SELECT COUNT(*) FROM restore_attestations
-                WHERE artifact_inventory = '$(awk -F= '$1 == "dump_sha256" {print $2}' "$manifest_one")'
+                WHERE artifact_inventory =
+                      'dump:$(awk -F= '$1 == "dump_sha256" {print $2}' "$manifest_one")'
                   AND decision = 'retain'")"
 
 JWT_SECRET=$(awk -F= '$1 == "JWT_SECRET" { print $2 }' "$env_file")

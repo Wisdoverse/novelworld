@@ -49,8 +49,19 @@ CREATE TABLE IF NOT EXISTS public.restore_attestations (
     designated_admin   BOOLEAN NOT NULL DEFAULT FALSE,
     recorded_at        TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.now(),
     CONSTRAINT restore_attestations_decision_check
-        CHECK (decision IN ('retain', 'erase'))
+        CHECK (decision IN ('retain', 'erase')),
+    CONSTRAINT restore_attestations_window_check
+        CHECK (window_start <= window_end)
 );
+
+-- Replay safety for databases created by an earlier revision of this migration:
+-- CREATE TABLE IF NOT EXISTS above leaves such a table untouched.
+ALTER TABLE public.restore_attestations
+    ADD COLUMN IF NOT EXISTS designated_admin BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE public.restore_attestations
+    DROP CONSTRAINT IF EXISTS restore_attestations_window_check;
+ALTER TABLE public.restore_attestations
+    ADD CONSTRAINT restore_attestations_window_check CHECK (window_start <= window_end);
 
 -- Replay re-fires these triggers against rows it deletes. The first record for
 -- a subject wins: erased_at stays the original deletion time so a restore can
