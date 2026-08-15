@@ -23,8 +23,11 @@ CREATE TABLE IF NOT EXISTS public.erasure_records (
     had_source         BOOLEAN NOT NULL DEFAULT FALSE,
     -- Durable per-record bookkeeping for the exactly-once source re-queue. The
     -- self-consuming source_file_deletions outbox cannot serve as bookkeeping.
-    -- A restore starts a new database lineage and discards this column with it,
-    -- which is the sanctioned at-most-one additional re-queue per record.
+    -- A restored dump keeps its stamps: the stamp and the outbox row are written
+    -- in one transaction and the dump is one snapshot, so a restored artifact
+    -- either carries both (the cleanup worker re-drains, idempotently) or
+    -- neither-because-already-deleted. Keeping them therefore costs zero repeats
+    -- and stays inside the policy's at-most-one-repeat-per-restore allowance.
     source_requeued_at TIMESTAMPTZ,
     CONSTRAINT erasure_records_pkey PRIMARY KEY (subject_type, subject_id),
     CONSTRAINT erasure_records_subject_type_check
@@ -41,6 +44,9 @@ CREATE TABLE IF NOT EXISTS public.restore_attestations (
     window_end         TIMESTAMPTZ NOT NULL,
     artifact_inventory TEXT NOT NULL,
     operator_identity  TEXT NOT NULL,
+    -- True on the account the operator designated as administrator because the
+    -- decisions would otherwise have left the installation without one.
+    designated_admin   BOOLEAN NOT NULL DEFAULT FALSE,
     recorded_at        TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.now(),
     CONSTRAINT restore_attestations_decision_check
         CHECK (decision IN ('retain', 'erase'))

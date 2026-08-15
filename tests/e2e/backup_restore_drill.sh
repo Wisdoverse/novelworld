@@ -106,9 +106,32 @@ drain_outbox() {
   psql -c "UPDATE novels SET original_file_key = NULL WHERE original_file_key LIKE 'source-files/%'" >/dev/null
 }
 
+# Every drill novel goes through the real upload path, so the dataset is four
+# imported novels with durable chapters, characters and canon models.
+import_novel() { # import_novel TOKEN TITLE -> novel id on stdout
+  local token=$1 title=$2 novel state
+  pause
+  novel=$(json_get "value['novel_id']" <<<"$("${curl_cmd[@]}" -H "Authorization: Bearer $token" \
+    -F "title=$title" -F 'author=Drill' -F 'deviation_mode=creative' \
+    -F "file=@$source_file;filename=storm.txt;type=text/plain" \
+    "$api/novels/upload")")
+  for _ in $(seq 1 60); do
+    sleep 2
+    state=$(json_get "value['status']" <<<"$("${curl_cmd[@]}" -H "Authorization: Bearer $token" \
+      "$api/novels/$novel/status")")
+    [ "$state" = ready ] && break
+    if [ "$state" = error ]; then
+      printf 'drill: import of %s failed\n' "$title" >&2
+      exit 1
+    fi
+  done
+  [ "$state" = ready ] || { printf 'drill: import of %s never became ready\n' "$title" >&2; exit 1; }
+  printf '%s' "$novel"
+}
+
 set_source_keys() {
   psql -c "UPDATE novels SET original_file_key = 'source-files/' || user_id || '/' || id
-             WHERE id IN ('$novel_a2', '$novel_b1')" >/dev/null
+             WHERE id IN ('$novel_a2', '$novel_b1', '$novel_b2')" >/dev/null
 }
 
 # ─── Phase 0: seed the drill dataset ───────────────────────────────────────
@@ -143,22 +166,13 @@ reader=$("${curl_cmd[@]}" -H 'Content-Type: application/json' \
   --data "{\"email\":\"$reader_email\",\"password\":\"$password\",\"name\":\"Drill Reader\"}" \
   "$api/auth/register")
 reader_id=$(json_get "value['user']['id']" <<<"$reader")
+reader_token=$(json_get "value['access_token']" <<<"$reader")
 reader_refresh=$(json_get "value['refresh_token']" <<<"$reader")
 
-pause
-upload=$("${curl_cmd[@]}" "${admin_auth[@]}" \
-  -F 'title=风暴之塔' -F 'author=Drill' -F 'deviation_mode=creative' \
-  -F "file=@$source_file;filename=storm.txt;type=text/plain" \
-  "$api/novels/upload")
-novel_a1=$(json_get "value['novel_id']" <<<"$upload")
-for _ in $(seq 1 60); do
-  sleep 2
-  state=$(json_get "value['status']" <<<"$("${curl_cmd[@]}" "${admin_auth[@]}" \
-    "$api/novels/$novel_a1/status")")
-  [ "$state" = ready ] && break
-  [ "$state" = error ] && { printf 'drill: import failed\n' >&2; exit 1; }
-done
-check 'imported novel status' ready "$state"
+novel_a1=$(import_novel "$admin_token" '风暴之塔')
+novel_a2=$(import_novel "$admin_token" '风暴之塔 II')
+novel_b1=$(import_novel "$reader_token" '边城旧事')
+novel_b2=$(import_novel "$reader_token" '边城旧事 II')
 
 pause
 "${curl_cmd[@]}" --output /dev/null "${admin_auth[@]}" -X PUT \
@@ -197,23 +211,16 @@ chat=$("${curl_cmd[@]}" --no-buffer "${admin_auth[@]}" \
   "$api/chat/$character_id/stream")
 grep -Fq 'event: done' <<<"$chat"
 
-# Two more novels with durable chapters: one more for the admin (deleted
-# directly in drill B) and one for the reader (removed by the account cascade).
-novel_a2=$(python3 -c 'import uuid; print(uuid.uuid4())')
-novel_b1=$(python3 -c 'import uuid; print(uuid.uuid4())')
-psql -c "
-  INSERT INTO novels (id, user_id, title, status, total_chapters)
-  VALUES ('$novel_a2', '$admin_id', 'Drill novel A2', 'ready', 2),
-         ('$novel_b1', '$reader_id', 'Drill novel B1', 'ready', 2);
-  INSERT INTO chapters (novel_id, chapter_number, content)
-  VALUES ('$novel_a2', 1, 'A2 首章的持久内容'), ('$novel_a2', 2, 'A2 次章的持久内容'),
-         ('$novel_b1', 1, 'B1 首章的持久内容'), ('$novel_b1', 2, 'B1 次章的持久内容');
-  INSERT INTO characters (novel_id, name) VALUES ('$novel_b1', '守门人');
-  INSERT INTO world_states (user_id, novel_id) VALUES ('$reader_id', '$novel_b1');" >/dev/null
+# The reader's dependent rows for the cascade assertions later; the novels
+# themselves all came through the import path above.
+psql -c "INSERT INTO world_states (user_id, novel_id)
+         VALUES ('$reader_id', '$novel_b1')" >/dev/null
 
 check 'dataset accounts' 2 "$(psql -c "SELECT COUNT(*) FROM users")"
-check 'dataset novels' 3 "$(psql -c "SELECT COUNT(*) FROM novels")"
-check 'dataset chapters' 6 "$(psql -c "SELECT COUNT(*) FROM chapters")"
+check 'dataset novels' 4 "$(psql -c "SELECT COUNT(*) FROM novels")"
+check 'dataset chapters' 8 "$(psql -c "SELECT COUNT(*) FROM chapters")"
+check 'dataset imports are complete' 4 \
+  "$(psql -c "SELECT COUNT(*) FROM novel_import_jobs WHERE status = 'completed'")"
 check 'dataset chat messages' 2 "$(psql -c "SELECT COUNT(*) FROM chat_messages")"
 check 'dataset world turns' 1 \
   "$(psql -c "SELECT COUNT(*) FROM world_turns WHERE status = 'completed'")"
@@ -221,7 +228,7 @@ check 'dataset world turns' 1 \
 # Retained-source keys, set after the services started: novel-service refuses to
 # start with S3 disabled while any source key or outbox row exists.
 set_source_keys
-check 'retained source keys' 2 \
+check 'retained source keys' 3 \
   "$(psql -c "SELECT COUNT(*) FROM novels WHERE original_file_key LIKE 'source-files/%'")"
 
 # ─── Backup ────────────────────────────────────────────────────────────────
@@ -252,6 +259,17 @@ refusal_says 'checksum mismatch'
 refuses 'wrong encryption key' env BACKUP_ENCRYPTION_KEY=another-key-of-at-least-32-characters \
   infra/backup/restore.sh --manifest "$manifest_one" --env-file "$env_file"
 refusal_says 'cannot decrypt'
+# Manifest metadata reaches SQL literals, so it is shape-checked at the boundary.
+mkdir -p "$work/tampered"
+cp "$BACKUP_DIR"/* "$work/tampered/"
+tampered_manifest=$work/tampered/$(basename "$manifest_one")
+awk -F= "\$1 == \"covered_through\" { print \"covered_through=2026-01-01 00:00:00+00'; DROP TABLE users; --\"; next } { print }" \
+  "$manifest_one" >"$tampered_manifest"
+refuses 'tampered covered-through metadata' infra/backup/restore.sh \
+  --manifest "$tampered_manifest" --env-file "$env_file"
+refusal_says 'is not a'
+check 'metadata negatives changed nothing' "$before_negatives" \
+  "$(psql -c "SELECT (SELECT COUNT(*) FROM users) || ':' || (SELECT COUNT(*) FROM novels)")"
 check 'negatives changed nothing' "$before_negatives" \
   "$(psql -c "SELECT (SELECT COUNT(*) FROM users) || ':' || (SELECT COUNT(*) FROM novels)")"
 
@@ -275,7 +293,7 @@ done
 cat >"$work/decisions-retain-all" <<EOF
 operator=backup-restore-v1 drill A
 retain $admin_id novels=$novel_a1,$novel_a2
-retain $reader_id novels=$novel_b1
+retain $reader_id novels=$novel_b1,$novel_b2
 EOF
 restore_started=$(date +%s)
 infra/backup/restore.sh --manifest "$manifest_one" --decisions "$work/decisions-retain-all" \
@@ -354,9 +372,9 @@ reader_login=$("${curl_cmd[@]}" -H 'Content-Type: application/json' \
 reader_token=$(json_get "value['access_token']" <<<"$reader_login")
 check 'B delete account with cascade' 204 \
   "$(http_status -H "Authorization: Bearer $reader_token" -X DELETE "$api/auth/me")"
-check 'B erasure records written' 'novel:3|user:1' \
+check 'B erasure records written' 'novel:4|user:1' \
   "$(psql -c "SELECT subject_type || ':' || COUNT(*) FROM erasure_records
-                WHERE subject_id IN ('$novel_a2','$novel_a3','$novel_b1','$reader_id')
+                WHERE subject_id IN ('$novel_a2','$novel_a3','$novel_b1','$novel_b2','$reader_id')
                 GROUP BY subject_type ORDER BY 1" | paste -sd'|')"
 
 infra/backup/backup.sh
@@ -370,17 +388,19 @@ docker compose stop gateway user-service novel-service agent-service narrative-s
 # window and no attest-or-erase decision is required.
 infra/backup/restore.sh --manifest "$manifest_one" --env-file "$env_file" --i-stopped-writes
 
-check 'B erased subjects stay deleted' '0:0:0:0' \
+check 'B erased subjects stay deleted' '0:0:0:0:0' \
   "$(psql -c "SELECT (SELECT COUNT(*) FROM users WHERE id = '$reader_id') || ':' ||
                      (SELECT COUNT(*) FROM novels WHERE id = '$novel_a2') || ':' ||
                      (SELECT COUNT(*) FROM novels WHERE id = '$novel_b1') || ':' ||
+                     (SELECT COUNT(*) FROM novels WHERE id = '$novel_b2') || ':' ||
                      (SELECT COUNT(*) FROM world_states WHERE user_id = '$reader_id')")"
 check 'B surviving journey intact' "1:$novel_a1" \
   "$(psql -c "SELECT COUNT(*) || ':' || MIN(id::text) FROM novels")"
-check 'B retained sources re-queued' '3' \
+check 'B retained sources re-queued' '4' \
   "$(psql -c "SELECT COUNT(*) FROM source_file_deletions WHERE object_key IN
                 ('source-files/$admin_id/$novel_a2',
                  'source-files/$reader_id/$novel_b1',
+                 'source-files/$reader_id/$novel_b2',
                  'source-files/$admin_id/$novel_a3')")"
 check 'B every retained-source record is bookkept' 0 \
   "$(psql -c "SELECT COUNT(*) FROM erasure_records
@@ -479,6 +499,16 @@ check 'C refusal changed nothing' '0:0' \
   "$(psql -c "SELECT (SELECT COUNT(*) FROM users) || ':' ||
                      (SELECT COUNT(*) FROM restore_attestations)")"
 
+# A replacement host that the operator already seeded with an unrelated account
+# shares no UUID with the artifact, so it is not this deployment's lineage and
+# the disaster gate must still hold.
+psql -c "INSERT INTO users (email, password_hash) VALUES ('unrelated@test.invalid', 'x')" >/dev/null
+refuses 'C unrelated live account is not lineage' infra/backup/restore.sh \
+  --manifest "$manifest_one" --env-file "$env_file"
+refusal_says 'refusing to complete a disaster restore'
+psql -c "DELETE FROM users" >/dev/null
+psql -c "DELETE FROM erasure_records" >/dev/null
+
 cat >"$work/decisions-partial" <<EOF
 operator=backup-restore-v1 drill C
 retain $admin_id novels=$novel_a1
@@ -496,44 +526,71 @@ EOF
 refuses 'C decisions leaving no administrator' infra/backup/restore.sh \
   --manifest "$manifest_one" --decisions "$work/decisions-no-admin" --env-file "$env_file"
 refusal_says 'leave no administrator'
+
+# A subject covered by a collected erasure record is an already-decided fact:
+# the newer artifact's export erased the reader, so the reader neither needs nor
+# accepts a decision.
+refuses 'C undecided restore with a newer erasure source' infra/backup/restore.sh \
+  --manifest "$manifest_one" --newer-artifact "$manifest_two" --env-file "$env_file"
+refusal_says "$admin_id"
+if grep -Fq "  $reader_id role=" "$work/refusal.txt"; then
+  printf 'drill: FAIL a collected-erasure account was still listed as undecided\n' >&2
+  exit 1
+fi
+cat >"$work/decisions-override" <<EOF
+operator=backup-restore-v1 drill C
+retain $admin_id novels=$novel_a1
+retain $reader_id novels=$novel_b1
+EOF
+refuses 'C retaining a collected-erasure account' infra/backup/restore.sh \
+  --manifest "$manifest_one" --newer-artifact "$manifest_two" \
+  --decisions "$work/decisions-override" --env-file "$env_file"
+refusal_says 'covered by a collected erasure record'
 check 'C refusals changed nothing' '0:0' \
   "$(psql -c "SELECT (SELECT COUNT(*) FROM users) || ':' ||
                      (SELECT COUNT(*) FROM restore_attestations)")"
 
+# The sanctioned continuation: erase the administrator's account, retain the
+# reader with a partial novel list, and designate the retained account as the
+# administrator the installation would otherwise lack.
 cat >"$work/decisions-complete" <<EOF
 # One account retained with a partial novel list, the other erased.
 operator=backup-restore-v1 drill C
-retain $admin_id novels=$novel_a1
-erase $reader_id
+erase $admin_id
+retain $reader_id novels=$novel_b1
+admin=$reader_id
 EOF
 failure_time=$(date -u +'%Y-%m-%d %H:%M:%S+00')
 infra/backup/restore.sh --manifest "$manifest_one" --decisions "$work/decisions-complete" \
   --declared-failure-time "$failure_time" --env-file "$env_file"
 
-check 'C erased account is gone' 0 "$(psql -c "SELECT COUNT(*) FROM users WHERE id = '$reader_id'")"
-check 'C unlisted novel is gone' 0 "$(psql -c "SELECT COUNT(*) FROM novels WHERE id = '$novel_a2'")"
-check 'C retained novel survived' 1 "$(psql -c "SELECT COUNT(*) FROM novels WHERE id = '$novel_a1'")"
+check 'C erased account is gone' 0 "$(psql -c "SELECT COUNT(*) FROM users WHERE id = '$admin_id'")"
+check 'C unlisted novel is gone' 0 "$(psql -c "SELECT COUNT(*) FROM novels WHERE id = '$novel_b2'")"
+check 'C retained novel survived' 1 "$(psql -c "SELECT COUNT(*) FROM novels WHERE id = '$novel_b1'")"
+check 'C designated administrator promoted' 'admin' \
+  "$(psql -c "SELECT role FROM users WHERE id = '$reader_id'")"
 check 'C decisions wrote erasure records' '1:1:1' \
   "$(psql -c "SELECT (SELECT COUNT(*) FROM erasure_records
-                        WHERE subject_type = 'user' AND subject_id = '$reader_id') || ':' ||
+                        WHERE subject_type = 'user' AND subject_id = '$admin_id') || ':' ||
                      (SELECT COUNT(*) FROM erasure_records
-                        WHERE subject_type = 'novel' AND subject_id = '$novel_a2') || ':' ||
+                        WHERE subject_type = 'novel' AND subject_id = '$novel_b2') || ':' ||
                      (SELECT COUNT(*) FROM erasure_records
-                        WHERE subject_type = 'novel' AND subject_id = '$novel_b1')")"
+                        WHERE subject_type = 'novel' AND subject_id = '$novel_a1')")"
 check 'C cascade removed dependent rows' '0:0:0' \
-  "$(psql -c "SELECT (SELECT COUNT(*) FROM world_states WHERE user_id = '$reader_id') || ':' ||
-                     (SELECT COUNT(*) FROM chapters WHERE novel_id = '$novel_a2') || ':' ||
+  "$(psql -c "SELECT (SELECT COUNT(*) FROM chat_messages) || ':' ||
+                     (SELECT COUNT(*) FROM chapters WHERE novel_id = '$novel_b2') || ':' ||
                      (SELECT COUNT(*) FROM refresh_tokens)")"
 check 'C attestation fields' \
-  "$admin_id|retain|$covered_one|$failure_time|backup-restore-v1 drill C|true|true" \
+  "$reader_id|retain|$covered_one|$failure_time|backup-restore-v1 drill C|true|true|true" \
   "$(psql -c "SELECT subject_id || '|' || decision || '|' ||
                      to_char(window_start AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US+00') || '|' ||
                      to_char(window_end AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS+00') || '|' ||
-                     operator_identity || '|' ||
+                     operator_identity || '|' || designated_admin || '|' ||
                      (artifact_inventory <> '') || '|' || (recorded_at IS NOT NULL)
                 FROM restore_attestations WHERE decision = 'retain'")"
-check 'C erase decision recorded' "$reader_id" \
-  "$(psql -c "SELECT subject_id FROM restore_attestations WHERE decision = 'erase'")"
+check 'C erase decision recorded' "$admin_id|false" \
+  "$(psql -c "SELECT subject_id || '|' || designated_admin FROM restore_attestations
+                WHERE decision = 'erase'")"
 check 'C attestation names the artifact digest' 1 \
   "$(psql -c "SELECT COUNT(*) FROM restore_attestations
                 WHERE artifact_inventory = '$(awk -F= '$1 == "dump_sha256" {print $2}' "$manifest_one")'
@@ -549,16 +606,40 @@ check 'C pre-restore access token rejected' 401 \
   "$(http_status -H "Authorization: Bearer $admin_token" "$api/auth/me")"
 check 'C erased account cannot log in' 401 \
   "$(http_status -H 'Content-Type: application/json' \
-    --data "{\"email\":\"$reader_email\",\"password\":\"$password\"}" "$api/auth/login")"
+    --data "{\"email\":\"$admin_email\",\"password\":\"$password\"}" "$api/auth/login")"
 pause
 login=$("${curl_cmd[@]}" -H 'Content-Type: application/json' \
-  --data "{\"email\":\"$admin_email\",\"password\":\"$password\"}" "$api/auth/login")
-admin_token=$(json_get "value['access_token']" <<<"$login")
-admin_auth=(-H "Authorization: Bearer $admin_token")
+  --data "{\"email\":\"$reader_email\",\"password\":\"$password\"}" "$api/auth/login")
+reader_token=$(json_get "value['access_token']" <<<"$login")
+reader_auth=(-H "Authorization: Bearer $reader_token")
 check 'C unlisted novel is not served' 404 \
-  "$(http_status "${admin_auth[@]}" "$api/novels/$novel_a2/chapters")"
+  "$(http_status "${reader_auth[@]}" "$api/novels/$novel_b2/chapters")"
 check 'C retained novel is served' 200 \
-  "$(http_status "${admin_auth[@]}" "$api/novels/$novel_a1/chapters")"
+  "$(http_status "${reader_auth[@]}" "$api/novels/$novel_b1/chapters")"
+
+# Erasing every account is a sanctioned outcome, not a stuck restore: no
+# administrator is designated and the installation returns to first-run setup.
+docker compose down -v >/dev/null 2>&1
+docker compose up -d postgres >/dev/null 2>&1
+for _ in $(seq 1 60); do
+  docker exec novel-postgres pg_isready -U "${POSTGRES_USER:-novel}" >/dev/null 2>&1 && break
+  sleep 2
+done
+cat >"$work/decisions-erase-all" <<EOF
+operator=backup-restore-v1 drill C erase-all
+erase $admin_id
+erase $reader_id
+EOF
+infra/backup/restore.sh --manifest "$manifest_one" --decisions "$work/decisions-erase-all" \
+  --env-file "$env_file" >/dev/null
+check 'C erase-all leaves no account' '0:0:0' \
+  "$(psql -c "SELECT (SELECT COUNT(*) FROM users) || ':' ||
+                     (SELECT COUNT(*) FROM novels) || ':' ||
+                     (SELECT COUNT(*) FROM runtime_llm_config)")"
+check 'C erase-all recorded both decisions' 2 \
+  "$(psql -c "SELECT COUNT(*) FROM restore_attestations WHERE decision = 'erase'")"
+check 'C erase-all designated nobody' 0 \
+  "$(psql -c "SELECT COUNT(*) FROM restore_attestations WHERE designated_admin")"
 printf 'drill: C — passed\n'
 
 printf 'drill: backup-restore-v1 drills A, B, C and the negative cases passed\n'

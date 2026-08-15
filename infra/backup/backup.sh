@@ -37,7 +37,7 @@ mkdir -p "$backup_dir"
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 base=$backup_dir/novelworld-$stamp
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+trap 'rm -rf "$work" "$base".*.partial' EXIT
 
 # The covered-through timestamp is read from the database immediately BEFORE
 # pg_dump opens its snapshot, so it is always slightly EARLIER than the snapshot
@@ -53,13 +53,17 @@ docker exec "$container" pg_dump -U "$pg_user" -d "$pg_db" \
   --format=plain --no-owner --no-privileges >"$work/dump.sql"
 
 # One dump, two artifacts: the sidecar is the erasure_records COPY block of the
-# dump itself. An artifact taken before the erasure journal existed has no such
-# block, which restore reports rather than silently treating as "no deletions".
+# dump itself, so the export and the dump can never come from different
+# snapshots. Fields are selected through the dump's own COPY header — validated
+# even when the table is empty — so the sidecar is always the five immutable
+# facts in a fixed order however the table is laid out.
 #
-# Fields are selected through the dump's own COPY header, so the sidecar is
-# always the five immutable facts in a fixed order however the table is laid
-# out. The lineage-local re-queue bookkeeping is deliberately not exported: a
-# restore starts a new lineage.
+# source_requeued_at is deliberately not exported. It is lineage-local, and a
+# restored dump keeps its own stamps because stamp and outbox row are written in
+# one transaction that a single-snapshot dump preserves: either both are in the
+# artifact, or the object was already deleted.
+grep -q '^COPY public\.erasure_records (' "$work/dump.sql" ||
+  fail 'this database has no erasure_records journal; apply the migrations before backing it up'
 awk '
   /^COPY public\.erasure_records \(/ {
     header = $0
@@ -69,6 +73,7 @@ awk '
     count = split(header, columns, " ")
     for (i = 1; i <= count; i++) index_of[columns[i]] = i
     wanted_count = split("subject_type,subject_id,user_id,erased_at,had_source", wanted, ",")
+    for (i = 1; i <= wanted_count; i++) if (!(wanted[i] in index_of)) exit 3
     inside = 1
     next
   }
@@ -77,34 +82,37 @@ awk '
     split($0, field, "\t")
     line = ""
     for (i = 1; i <= wanted_count; i++) {
-      if (!(wanted[i] in index_of)) exit 3
       line = line (i > 1 ? "\t" : "") field[index_of[wanted[i]]]
     }
     print line
   }
 ' "$work/dump.sql" >"$work/erasure.tsv" ||
-  fail 'the erasure export in this dump is missing a required column'
-if ! grep -q '^COPY public\.erasure_records (' "$work/dump.sql"; then
-  printf 'backup: warning: this database has no erasure_records table; the artifact carries no erasure source\n' >&2
-fi
+  fail 'the erasure journal in this dump is missing a required column'
 
+# Everything is built under temporary names and renamed into place only once all
+# three outputs exist, so a failed run never leaves a final-named artifact that
+# a restore could pick up.
 encrypt() {
   gzip -9 -c "$1" |
     openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:BACKUP_ENCRYPTION_KEY \
       -out "$2"
 }
-encrypt "$work/dump.sql" "$base.dump.gz.enc"
-encrypt "$work/erasure.tsv" "$base.erasure.tsv.gz.enc"
+encrypt "$work/dump.sql" "$base.dump.gz.enc.partial"
+encrypt "$work/erasure.tsv" "$base.erasure.tsv.gz.enc.partial"
 
 {
   printf 'schema=backup-artifact-v1\n'
   printf 'covered_through=%s\n' "$covered_through"
   printf 'database=%s\n' "$pg_db"
   printf 'dump=%s\n' "$(basename "$base.dump.gz.enc")"
-  printf 'dump_sha256=%s\n' "$(sha256sum "$base.dump.gz.enc" | cut -d' ' -f1)"
+  printf 'dump_sha256=%s\n' "$(sha256sum "$base.dump.gz.enc.partial" | cut -d' ' -f1)"
   printf 'erasure=%s\n' "$(basename "$base.erasure.tsv.gz.enc")"
-  printf 'erasure_sha256=%s\n' "$(sha256sum "$base.erasure.tsv.gz.enc" | cut -d' ' -f1)"
-} >"$base.manifest"
+  printf 'erasure_sha256=%s\n' "$(sha256sum "$base.erasure.tsv.gz.enc.partial" | cut -d' ' -f1)"
+} >"$base.manifest.partial"
+
+mv "$base.dump.gz.enc.partial" "$base.dump.gz.enc"
+mv "$base.erasure.tsv.gz.enc.partial" "$base.erasure.tsv.gz.enc"
+mv "$base.manifest.partial" "$base.manifest"
 
 printf 'backup: wrote %s.manifest (covered through %s, %s erasure records)\n' \
   "$base" "$covered_through" "$(wc -l <"$work/erasure.tsv" | tr -d ' ')"

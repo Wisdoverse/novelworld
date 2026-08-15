@@ -110,7 +110,7 @@ async fn outbox(pool: &PgPool) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn every_deletion_path_writes_a_uuid_only_erasure_record() {
+async fn every_deletion_path_writes_a_minimal_erasure_record() {
     let pool = scratch_database("novelworld_erasure_paths").await;
     let owner = Uuid::new_v4();
     let direct_novel = Uuid::new_v4();
@@ -156,9 +156,10 @@ async fn every_deletion_path_writes_a_uuid_only_erasure_record() {
     actual.sort();
     assert_eq!(actual, expected);
 
-    // Minimal fields only: subject type, subject UUID, owning user UUID, the
-    // deletion time, and the re-queue bookkeeping. Nothing derived from
-    // content, profile, or credentials (SPEC 12.4.1, 12.4.5).
+    // Minimal fields: the identifying payload is the subject type and UUIDs;
+    // erased_at, had_source and source_requeued_at are operational bookkeeping
+    // for replay. Nothing derived from content, profile, or credentials
+    // (SPEC 12.4.1, 12.4.5).
     let columns: Vec<String> = sqlx::query_scalar(
         "SELECT column_name::text FROM information_schema.columns \
          WHERE table_schema = 'public' AND table_name = 'erasure_records' \
@@ -410,6 +411,17 @@ async fn erasure_journal_drift_fails_novel_service_readiness() {
             "ALTER TABLE public.erasure_records DROP COLUMN source_requeued_at",
             "ALTER TABLE public.erasure_records ADD COLUMN source_requeued_at TIMESTAMPTZ",
         ),
+        (
+            "ALTER TABLE public.erasure_records DROP COLUMN had_source",
+            "ALTER TABLE public.erasure_records ADD COLUMN had_source BOOLEAN NOT NULL DEFAULT FALSE",
+        ),
+        (
+            "ALTER TABLE public.erasure_records \
+             DROP CONSTRAINT erasure_records_subject_type_check",
+            "ALTER TABLE public.erasure_records \
+             ADD CONSTRAINT erasure_records_subject_type_check \
+             CHECK (subject_type IN ('user', 'novel'))",
+        ),
     ] {
         sqlx::raw_sql(break_sql).execute(&pool).await.unwrap();
         assert!(!readiness.is_ready().await, "drift accepted: {break_sql}");
@@ -497,9 +509,10 @@ async fn restore_attestations_record_every_required_decision_field() {
     let subject = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO restore_attestations \
-         (subject_id, decision, window_start, window_end, artifact_inventory, operator_identity) \
+         (subject_id, decision, window_start, window_end, artifact_inventory, \
+          operator_identity, designated_admin) \
          VALUES ($1, 'retain', '2026-08-01 00:00:00+00', '2026-08-02 00:00:00+00', \
-                 'sha256:aaa,sha256:bbb', 'operator@example.invalid')",
+                 'sha256:aaa,sha256:bbb', 'operator@example.invalid', TRUE)",
     )
     .bind(subject)
     .execute(&pool)
@@ -507,7 +520,7 @@ async fn restore_attestations_record_every_required_decision_field() {
     .unwrap();
     let row = sqlx::query(
         "SELECT subject_id, decision, window_start, window_end, artifact_inventory, \
-                operator_identity, recorded_at FROM restore_attestations",
+                operator_identity, designated_admin, recorded_at FROM restore_attestations",
     )
     .fetch_one(&pool)
     .await
@@ -526,6 +539,7 @@ async fn restore_attestations_record_every_required_decision_field() {
         row.get::<String, _>("operator_identity"),
         "operator@example.invalid"
     );
+    assert!(row.get::<bool, _>("designated_admin"));
     let _: chrono::DateTime<chrono::Utc> = row.get("recorded_at");
 
     // Only the two sanctioned decisions may be recorded.

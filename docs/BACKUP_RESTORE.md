@@ -1,9 +1,10 @@
 # Backup and Restore Policy — `backup-restore-v1`
 
-Status: **approved policy; implementation pending.** This document is the
-versioned recovery policy required by H1 in [`ROADMAP.md`](./ROADMAP.md). It
-defines the targets, procedures, and drills that the implementation change is
-judged against. It is not evidence that any target is currently met; the
+Status: **approved policy; scripted implementation and drills landed.** This
+document is the versioned recovery policy required by H1 in
+[`ROADMAP.md`](./ROADMAP.md). It defines the targets, procedures, and drills
+that the implementation change is judged against, and it stays unchanged by
+that change. It is not evidence that any target is currently met; the
 conformance state of each normative clause lives in
 [`SPEC_CONFORMANCE.md`](./SPEC_CONFORMANCE.md), and
 [`DATA_RETENTION.md`](./DATA_RETENTION.md) continues to describe current

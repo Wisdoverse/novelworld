@@ -149,6 +149,8 @@ CREATE TABLE erasure_records (
     -- 该事实随记录一起流转，重放无需依赖部署状态推测。
     had_source         BOOLEAN NOT NULL DEFAULT FALSE,
     -- 每条记录一次的来源对象重新入队记账（自消费的 outbox 不能充当记账）。
+    -- 记账与 outbox 行同事务写入，转储又是同一快照，因此恢复后保留记账不会漏删对象，
+    -- 重复次数为零，仍在策略允许的「每次恢复至多重复一次」范围内。
     source_requeued_at TIMESTAMPTZ,
     CONSTRAINT erasure_records_pkey PRIMARY KEY (subject_type, subject_id),
     CONSTRAINT erasure_records_subject_type_check
@@ -163,6 +165,8 @@ CREATE TABLE restore_attestations (
     window_end         TIMESTAMPTZ NOT NULL,
     artifact_inventory TEXT NOT NULL,
     operator_identity  TEXT NOT NULL,
+    -- 决定会使安装失去管理员时，操作者显式指定的留存账户在此标记为 true。
+    designated_admin   BOOLEAN NOT NULL DEFAULT FALSE,
     recorded_at        TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.now(),
     CONSTRAINT restore_attestations_decision_check
         CHECK (decision IN ('retain', 'erase'))

@@ -68,6 +68,19 @@ impl ReadinessProbe for PgReadinessProbe {
                        )
                        AND EXISTS (
                            SELECT 1
+                           FROM pg_catalog.pg_constraint AS subject_type_check
+                           WHERE subject_type_check.conrelid =
+                                     'public.erasure_records'::pg_catalog.regclass
+                             AND subject_type_check.conname =
+                                     'erasure_records_subject_type_check'
+                             AND subject_type_check.contype::pg_catalog.text = 'c'
+                             AND pg_catalog.pg_get_constraintdef(subject_type_check.oid) IN (
+                                 'CHECK (((subject_type)::text = ANY ((ARRAY[''user''::character varying, ''novel''::character varying])::text[])))',
+                                 'CHECK (((subject_type)::text = ANY (ARRAY[(''user''::character varying)::text, (''novel''::character varying)::text])))'
+                             )
+                       )
+                       AND EXISTS (
+                           SELECT 1
                            FROM pg_catalog.pg_trigger AS erasure_trigger
                            WHERE erasure_trigger.tgrelid =
                                      'public.users'::pg_catalog.regclass

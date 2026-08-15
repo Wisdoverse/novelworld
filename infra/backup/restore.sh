@@ -46,6 +46,26 @@ abspath() {
   esac
 }
 
+# Manifests and decision files are operator-supplied text that ends up inside
+# SQL literals, so every value is shape-checked at the boundary where it is
+# read. Timestamps use exactly the format backup.sh writes.
+check_timestamp() {
+  printf '%s' "$1" |
+    grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?\+00$' ||
+    fail "$2 is not a 'YYYY-MM-DD HH:MM:SS[.ffffff]+00' UTC timestamp: '$1'"
+}
+
+check_digest() {
+  printf '%s' "$1" | grep -Eq '^[0-9a-f]{64}$' ||
+    fail "$2 is not a SHA-256 digest: '$1'"
+}
+
+check_uuid() {
+  printf '%s' "$1" |
+    grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' ||
+    fail "$2 is not a UUID: '$1'"
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
   --manifest)
@@ -81,6 +101,9 @@ done
 [ "${#BACKUP_ENCRYPTION_KEY}" -ge 32 ] || fail 'BACKUP_ENCRYPTION_KEY must be at least 32 characters'
 [ -f "$env_file" ] ||
   fail "no deployment environment at $env_file; install the preserved .env before restoring"
+[ -z "$declared_failure_time" ] ||
+  check_timestamp "$declared_failure_time" '--declared-failure-time'
+
 
 cd "$repo_root"
 work=$(mktemp -d)
@@ -120,6 +143,9 @@ decrypt() {
   fail "$manifest is not a backup-artifact-v1 manifest"
 covered_through=$(manifest_value "$manifest" covered_through)
 [ -n "$covered_through" ] || fail "$manifest has no covered_through timestamp"
+check_timestamp "$covered_through" "the covered_through of $manifest"
+check_digest "$(manifest_value "$manifest" dump_sha256)" "the dump_sha256 of $manifest"
+check_digest "$(manifest_value "$manifest" erasure_sha256)" "the erasure_sha256 of $manifest"
 dump_file=$(verify_file "$manifest" dump dump_sha256)
 erasure_file=$(verify_file "$manifest" erasure erasure_sha256)
 decrypt "$dump_file" "$work/dump.sql"
@@ -138,6 +164,9 @@ while IFS= read -r newer; do
   index=$((index + 1))
   newer_covered=$(manifest_value "$newer" covered_through)
   [ -n "$newer_covered" ] || fail "$newer has no covered_through timestamp"
+  check_timestamp "$newer_covered" "the covered_through of $newer"
+  check_digest "$(manifest_value "$newer" dump_sha256)" "the dump_sha256 of $newer"
+  check_digest "$(manifest_value "$newer" erasure_sha256)" "the erasure_sha256 of $newer"
   decrypt "$(verify_file "$newer" erasure erasure_sha256)" "$work/sources/newer-$index.tsv"
   inventory="$inventory,$(manifest_value "$newer" dump_sha256)"
   # Fixed-width UTC timestamps, so lexical order is chronological order.
@@ -174,38 +203,79 @@ docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null | grep -qx
 writes_stopped_at=$(docker exec "$container" psql -U "$pg_user" -d postgres -At -c \
   "SELECT pg_catalog.to_char(pg_catalog.now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US+00')")
 [ -n "$writes_stopped_at" ] || fail 'could not read the writes-stopped timestamp'
+check_timestamp "$writes_stopped_at" 'the writes-stopped timestamp'
 
 # ─── 3. collect erasure sources ────────────────────────────────────────────
-# A live export only counts as an erasure source when the current database still
-# carries this deployment's lineage. A freshly initialised, empty database on a
-# replacement host is not a source: treating it as one would silently declare an
-# empty residual window and skip attest-or-erase.
 
+# Account and novel inventory of the restored dump, read from the dump's own
+# COPY headers so a column order change cannot silently shift a field. Read
+# before the live export because the lineage test below compares against it.
+copy_block() {
+  awk -v table="$1" -v want="$2" '
+    $0 ~ "^COPY public\\." table " \\(" {
+      header = $0
+      sub(/^[^(]*\(/, "", header)
+      sub(/\).*$/, "", header)
+      gsub(/,/, " ", header)
+      count = split(header, columns, " ")
+      for (i = 1; i <= count; i++) index_of[columns[i]] = i
+      wanted_count = split(want, wanted, ",")
+      for (i = 1; i <= wanted_count; i++) if (!(wanted[i] in index_of)) exit 3
+      inside = 1
+      next
+    }
+    inside && $0 == "\\." { inside = 0; next }
+    inside {
+      split($0, field, "\t")
+      line = ""
+      for (i = 1; i <= wanted_count; i++) {
+        line = line (i > 1 ? "\t" : "") field[index_of[wanted[i]]]
+      }
+      print line
+    }
+  ' "$work/dump.sql"
+}
+copy_block users id,role >"$work/accounts.tsv" ||
+  fail 'the dump has no id/role columns on users'
+copy_block novels id,user_id >"$work/novels.tsv" ||
+  fail 'the dump has no id/user_id columns on novels'
+cut -f1 "$work/accounts.tsv" | sort >"$work/account-ids.txt"
+
+# The current database is an erasure source only when it is this deployment's
+# lineage: it already holds erasure records, or it holds an account that is also
+# in the artifact. UUID v4 makes that overlap impossible across lineages, so a
+# replacement host that an operator has already seeded with an unrelated account
+# is correctly treated as a disaster restore rather than silently closing the
+# residual window and skipping attest-or-erase.
 live_source=false
-lineage=$(docker exec "$container" psql -U "$pg_user" -d "$pg_db" -At -c \
-  "SELECT (SELECT pg_catalog.count(*) FROM public.users)
-        + (SELECT pg_catalog.count(*) FROM public.erasure_records)" 2>/dev/null || true)
-case "$lineage" in
-'' | 0) : ;;
-*)
+live_records=$(docker exec "$container" psql -U "$pg_user" -d "$pg_db" -At -c \
+  "SELECT pg_catalog.count(*) FROM public.erasure_records" 2>/dev/null || true)
+docker exec "$container" psql -U "$pg_user" -d "$pg_db" -At -c \
+  "COPY (SELECT id FROM public.users) TO STDOUT" 2>/dev/null |
+  sort >"$work/live-user-ids.txt" || true
+case "$live_records" in
+'' | 0)
+  if [ -s "$work/live-user-ids.txt" ] &&
+    [ -n "$(comm -12 "$work/live-user-ids.txt" "$work/account-ids.txt")" ]; then
+    live_source=true
+  fi
+  ;;
+*) live_source=true ;;
+esac
+if [ "$live_source" = true ]; then
   docker exec "$container" psql -U "$pg_user" -d "$pg_db" -At -c \
     "COPY (SELECT subject_type, subject_id, user_id, erased_at, had_source
              FROM public.erasure_records) TO STDOUT" >"$work/sources/live.tsv"
-  live_source=true
   inventory="$inventory,live:$writes_stopped_at"
   newest_covered_through=$writes_stopped_at
-  ;;
-esac
+fi
 
-# Every source carries the same five immutable facts — the sidecar because
-# backup.sh selects them through the dump's COPY header, the live export because
-# it names them — and no source carries the lineage-local re-queue bookkeeping.
-# Sources are compared as text; every source of one deployment renders
-# timestamps identically, and the only failure mode of text comparison is an
-# abort that is not strictly necessary — never a missed disagreement.
-# Disagreement is judged on the deletion facts alone. had_source is monotone
-# bookkeeping that only an authoritative delete can raise, so sources are merged
-# with OR rather than treated as contradicting each other.
+# Disagreement is judged on the deletion facts alone: subject type, subject,
+# owning user and deletion time. had_source is monotone bookkeeping that only an
+# authoritative delete can raise, and a false-then-true succession is a
+# legitimate upgrade — the restore writes a decision record before the delete
+# that can see the key — so sources are merged with OR rather than treated as
+# contradicting each other.
 cat "$work"/sources/*.tsv |
   awk -F'\t' 'NF >= 5 { print $1 "\t" $2 "\t" $3 "\t" $4 }' |
   sort -u >"$work/facts.tsv"
@@ -228,6 +298,11 @@ cat "$work"/sources/*.tsv |
       END { for (key in facts) print facts[key] "\t" had[key] }' |
   sort >"$work/union.tsv"
 
+# Collected records are facts, not proposals: their subjects are already decided
+# and cannot be retained by any decision file.
+awk -F'\t' '$1 == "user" { print $2 }' "$work/union.tsv" | sort -u >"$work/erased-users.txt"
+awk -F'\t' '$1 == "novel" { print $2 }' "$work/union.tsv" | sort -u >"$work/erased-novels.txt"
+
 # ─── 4. residual window and the attest-or-erase gate ───────────────────────
 
 window_start=$newest_covered_through
@@ -238,41 +313,13 @@ else
   window_state="non-empty ($window_start .. $window_end)"
 fi
 
-# Account and novel inventory of the restored dump, read from the dump's own
-# COPY headers so a column order change cannot silently shift a field.
-copy_block() {
-  awk -v table="$1" -v want="$2" '
-    $0 ~ "^COPY public\\." table " \\(" {
-      header = $0
-      sub(/^[^(]*\(/, "", header)
-      sub(/\).*$/, "", header)
-      gsub(/,/, " ", header)
-      count = split(header, columns, " ")
-      for (i = 1; i <= count; i++) index_of[columns[i]] = i
-      wanted_count = split(want, wanted, ",")
-      inside = 1
-      next
-    }
-    inside && $0 == "\\." { inside = 0; next }
-    inside {
-      split($0, field, "\t")
-      line = ""
-      for (i = 1; i <= wanted_count; i++) {
-        if (!(wanted[i] in index_of)) exit 3
-        line = line (i > 1 ? "\t" : "") field[index_of[wanted[i]]]
-      }
-      print line
-    }
-  ' "$work/dump.sql"
-}
-copy_block users id,role >"$work/accounts.tsv" ||
-  fail 'the dump has no id/role columns on users'
-copy_block novels id,user_id >"$work/novels.tsv" ||
-  fail 'the dump has no id/user_id columns on novels'
-
 owns() { # owns FILE KEY VALUE
   awk -F'\t' -v key="$2" -v value="$3" '$1 == key && $2 == value { found = 1 }
                                         END { exit !found }' "$1"
+}
+
+listed() { # listed FILE VALUE
+  grep -qxF "$2" "$1"
 }
 
 operator_identity=""
@@ -287,11 +334,15 @@ if [ -n "$decisions" ]; then
     case "$line" in
     '' | '#'*) continue ;;
     operator=*) operator_identity=${line#operator=} ;;
-    admin=*) designated_admin=${line#admin=} ;;
+    admin=*)
+      designated_admin=${line#admin=}
+      check_uuid "$designated_admin" 'the designated administrator'
+      ;;
     'retain '*)
       rest=${line#retain }
       account=${rest%% *}
       novels=${rest#* }
+      check_uuid "$account" 'a retained account'
       case "$novels" in
       novels=*) : ;;
       *) fail "retain $account must list its retained novels as novels=<uuid,...>" ;;
@@ -307,55 +358,81 @@ if [ -n "$decisions" ]; then
       ;;
     'erase '*)
       account=${line#erase }
-      printf 'erase\t%s\n' "${account%% *}" >>"$work/decided.tsv"
+      account=${account%% *}
+      check_uuid "$account" 'an erased account'
+      printf 'erase\t%s\n' "$account" >>"$work/decided.tsv"
       ;;
     *) fail "unrecognised decision line: '$line'" ;;
     esac
   done <"$decisions"
   [ -n "$operator_identity" ] || fail 'the decision file must carry operator=<identity>'
 
+  while IFS="$tab" read -r decision account; do
+    check_uuid "$account" 'a decided account'
+    if [ "$decision" = retain ] && listed "$work/erased-users.txt" "$account"; then
+      fail "account $account is covered by a collected erasure record and cannot be retained"
+    fi
+  done <"$work/decided.tsv"
   cut -f2 "$work/decided.tsv" | sort >"$work/decided-ids.txt"
   [ "$(sort -u <"$work/decided-ids.txt" | wc -l)" = "$(wc -l <"$work/decided-ids.txt")" ] ||
     fail 'the decision file decides the same account twice'
-  cut -f1 "$work/accounts.tsv" | sort >"$work/account-ids.txt"
-  undecided=$(comm -23 "$work/account-ids.txt" "$work/decided-ids.txt")
+  # Subjects covered by a collected record are already decided facts.
+  comm -23 "$work/account-ids.txt" "$work/erased-users.txt" >"$work/decision-required.txt"
+  undecided=$(comm -23 "$work/decision-required.txt" "$work/decided-ids.txt")
   [ -z "$undecided" ] ||
     fail "every restored account needs a decision; undecided: $(printf '%s' "$undecided" | tr '\n' ' ')"
   unknown=$(comm -13 "$work/account-ids.txt" "$work/decided-ids.txt")
   [ -z "$unknown" ] ||
     fail "decisions name accounts that are not in the artifact: $(printf '%s' "$unknown" | tr '\n' ' ')"
   while IFS="$tab" read -r account novel; do
+    check_uuid "$novel" 'a retained novel'
     owns "$work/novels.tsv" "$novel" "$account" ||
       fail "retained novel $novel does not belong to account $account in this artifact"
+    if listed "$work/erased-novels.txt" "$novel"; then
+      fail "novel $novel is covered by a collected erasure record and cannot be retained"
+    fi
   done <"$work/retained-novels.tsv"
 
+  retained_any=false
   retained_admin=false
   while IFS="$tab" read -r decision account; do
     [ "$decision" = retain ] || continue
+    retained_any=true
     if owns "$work/accounts.tsv" "$account" admin; then
       retained_admin=true
     fi
   done <"$work/decided.tsv"
-  if [ "$retained_admin" = false ]; then
+  if [ "$retained_any" = false ]; then
+    # Erase-all is a sanctioned outcome: replay clears the runtime configuration
+    # and the installation returns to first-run setup, so there is no account
+    # left to administer and nothing to designate.
+    [ -z "$designated_admin" ] ||
+      fail 'these decisions retain no account, so admin= has nothing to designate'
+  elif [ "$retained_admin" = false ]; then
     [ -n "$designated_admin" ] ||
       fail 'these decisions leave no administrator; add admin=<retained account uuid>'
+    if listed "$work/erased-users.txt" "$designated_admin"; then
+      fail "the designated administrator $designated_admin is covered by a collected erasure record"
+    fi
     owns "$work/decided.tsv" retain "$designated_admin" ||
       fail "the designated administrator $designated_admin is not a retained account"
   else
     designated_admin=""
   fi
 elif [ "$live_source" = false ]; then
+  comm -23 "$work/account-ids.txt" "$work/erased-users.txt" >"$work/decision-required.txt"
   printf 'restore: refusing to complete a disaster restore with a non-empty residual window.\n' >&2
   printf 'restore: window %s .. %s; deletions committed inside it cannot be replayed.\n' \
     "$window_start" "$window_end" >&2
   printf 'restore: supply --decisions FILE with one line per account:\n' >&2
   printf '  operator=<identity string>\n  retain <user_uuid> novels=<uuid,uuid>\n  erase <user_uuid>\n' >&2
-  printf 'restore: accounts in this artifact:\n' >&2
-  while IFS="$tab" read -r account role; do
-    printf '  %s role=%s novels=%s\n' "$account" "$role" \
+  printf 'restore: accounts in this artifact that still need a decision:\n' >&2
+  while IFS= read -r account; do
+    printf '  %s role=%s novels=%s\n' "$account" \
+      "$(awk -F'\t' -v id="$account" '$1 == id { print $2 }' "$work/accounts.tsv")" \
       "$(awk -F'\t' -v owner="$account" \
         '$2 == owner { printf "%s%s", separator, $1; separator = "," }' "$work/novels.tsv")" >&2
-  done <"$work/accounts.tsv"
+  done <"$work/decision-required.txt"
   exit 2
 fi
 
@@ -406,11 +483,14 @@ docker compose run --rm postgres-migrate >/dev/null
             fi
           done
       fi
+      designated=FALSE
+      [ "$account" != "$designated_admin" ] || designated=TRUE
       printf "INSERT INTO public.restore_attestations (subject_id, decision,"
-      printf " window_start, window_end, artifact_inventory, operator_identity)"
-      printf " VALUES ('%s', '%s', '%s', '%s', '%s', '%s');\n" \
+      printf " window_start, window_end, artifact_inventory, operator_identity,"
+      printf " designated_admin)"
+      printf " VALUES ('%s', '%s', '%s', '%s', '%s', '%s', %s);\n" \
         "$account" "$decision" "$window_start" "$window_end" "$inventory" \
-        "$(printf '%s' "$operator_identity" | sed "s/'/''/g")"
+        "$(printf '%s' "$operator_identity" | sed "s/'/''/g")" "$designated"
     done <"$work/decided.tsv"
     [ -z "$designated_admin" ] ||
       printf "UPDATE public.users SET role = 'admin' WHERE id = '%s';\n" "$designated_admin"
