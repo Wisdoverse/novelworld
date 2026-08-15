@@ -4,19 +4,21 @@ Changes from `backup-restore-v1`, each decided here ahead of the
 implementation judged against them:
 
 1. **Lineage identity is explicit.** Every database carries a
-   migration-created lineage token; artifacts embed it, and live
-   continuation is established only by token equality — never inferred
-   from row counts or UUID overlap, which cannot distinguish sibling
-   restores of one artifact. A restore regenerates the token and records
-   its parent.
+   create-once, migration-created version-4 lineage token; artifacts
+   embed it with manifest-to-dump binding, and live continuation is
+   established only by token equality — never inferred from row counts
+   or UUID overlap, which cannot distinguish sibling restores of one
+   artifact. A restore regenerates the token atomically with the data
+   becoming reachable and records its parent; token-less legacy
+   artifacts restore through the disaster gate.
 2. **Erasure-record payload scoping.** The identifying payload stays
    limited to subject type and UUIDs; operational bookkeeping fields
    (deletion time, retained-source marker, re-queue stamp) are named and
    remain content-free.
 3. **Collected records pre-decide.** Accounts already covered by a
-   collected erasure record are enforced by replay and are exempt from
-   attest-or-erase decisions; the collected record is the durable
-   decision.
+   collected erasure record are enforced by replay and need no operator
+   decision; the restore writes an automatic `replayed` attestation row
+   for each, preserving restore-level audit provenance.
 4. **Bookkeeping through restore.** Re-queue stamps restored from the
    artifact's own dump are retained (the same-snapshot dump preserves
    stamp/outbox consistency, so zero repeats are correct); records from
@@ -84,7 +86,7 @@ functionality that costs.
 | Target | Value | Evidence that judges it |
 |---|---|---|
 | RPO | ≤ 24 hours | The operator schedules the scripted backup at least daily. Data committed after the newest verified backup may be lost. Drill A proves the mechanism; schedule adherence is an operator duty recorded as such, never proven by a drill. |
-| RTO | ≤ 30 minutes | Applies to restores with an empty residual window. Judged by the **scale rehearsal**: a scripted restore of a synthetic database whose plain dump is at least 5 GB completes within 30 minutes on the reference envelope (2-core / 4 GB / SSD, `DEPLOY.md` minimum), measured from starting the restore procedure to the deployment passing readiness. Recorded once per policy version and re-run after any change to the backup or restore scripts. A disaster restore's duration is dominated by owner attest-or-erase decisions and carries no RTO target in this version. |
+| RTO | ≤ 30 minutes | Applies to restores with an empty residual window. Judged by the **scale rehearsal**: a scripted restore of a synthetic database whose plain dump is at least 5 GB completes within 30 minutes on the reference envelope (2-core / 4 GB / SSD, `DEPLOY.md` minimum), measured from starting the restore procedure to the deployment passing readiness. Recorded once per policy version and re-run after any change to the backup or restore scripts. A disaster restore's duration is dominated by owner attest-or-erase decisions and carries no RTO target in this version; a crash during a routine restore escalates the retry to disaster gating, and that retry likewise carries no RTO target. |
 | Drill bound | ≤ 10 minutes | CI assertion for the drill dataset defined under Drills; keeps every CI run sensitive to procedure regressions without depending on data volume. |
 | Backup retention ceiling | 30 days default; operator override bounded to 7–90 days | Backups older than the ceiling must be destroyed by the operator. Values outside 7–90 days require `backup-restore-v3`. |
 
@@ -193,16 +195,21 @@ Every database carries exactly one lineage token: a version-4 UUID created
 by the standard migration path only when no token exists. Ordinary
 deployments and migration replays preserve it unchanged; only a restore
 regenerates it. The backup script records the token in the manifest, and
-the restore verifies that the manifest token equals the token inside the
-verified dump, aborting on mismatch or when either is absent — an absent
-token never compares equal, so pre-token artifacts always face the
-disaster gate. Live continuation is established only by the reachable
-database's token equalling the artifact's. The restore regenerates the
-token as a fresh version-4 UUID atomically with making the restored data
-reachable, recording the artifact's token as the new token's parent in
-the same table: a crashed or partial restore must never present the
-artifact's token as a live lineage, so a retry after any failure faces
-the same gate the first attempt did.
+the restore compares the manifest token with the token inside the
+verified dump: a mismatch between two present tokens, or one present
+without the other, is tampering and aborts. A wholly token-less artifact
+— every backup made before this feature — restores through the disaster
+gate, because an absent token never establishes continuation. Live
+continuation is established only by the reachable database's token
+equalling the artifact's. The restore regenerates the token as a fresh
+version-4 UUID atomically with making the restored data reachable,
+recording the artifact's token as the new token's parent (recorded
+absent for a token-less artifact) in the same table: a crashed or
+partial restore must never present the artifact's token as a live
+lineage, so a retry after any failure never faces a weaker gate than
+the first attempt did. A database instantiated from a storage copy by
+any means other than the scripted restore is outside this policy's
+continuation contract.
 
 ## Erasure records and replay
 
@@ -251,7 +258,9 @@ MUST be idempotent:
 
 All three drills are release evidence for H1 and run in CI against the
 supported compose topology. The **drill dataset** is the seeded end-to-end reader
-journey extended to cover both deletion paths: at least two accounts and
+journey extended to cover both deletion paths: at least three accounts
+(the third exists to be covered by a collected erasure record from a
+newer artifact during the disaster drill) and
 three imported novels (each novel with at least two durable chapters), at
 least two novels carrying retained-source keys when the drill topology
 enables S3/stub storage, committed chat history, and at least one committed
@@ -295,11 +304,15 @@ pre-restore refresh token remains;
 and the window bounds are computed from covered-through timestamps, not
 wall-clock archive times. The drill also proves the token lifecycle:
 ordinary migration replay preserves the live token; two restores of one
-artifact produce distinct tokens, each recording the artifact's token as
-parent; a manifest whose token disagrees with its dump is refused; an
-artifact without a token faces the disaster gate; and a retry after a
-failure injected between dump load and completion still faces the gate
-rather than appearing lineage-matching.
+token-bearing artifact produce distinct tokens, each recording the
+artifact's token as parent; a manifest whose token disagrees with its
+dump, or where exactly one of the pair is absent, is refused; a wholly
+token-less artifact restores through the disaster gate with an
+absent-parent token recorded; a retry after a failure injected between
+the restored data becoming reachable and the token regeneration
+committing still faces the gate rather than appearing lineage-matching;
+and an account covered by a collected erasure record produces an
+automatic `replayed` attestation row carrying the full field set.
 
 Negative cases: a corrupted artifact and a wrong or missing encryption key
 must fail closed with actionable errors before any data change; erasure

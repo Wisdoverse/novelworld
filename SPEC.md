@@ -1214,12 +1214,14 @@ The authoritative PostgreSQL database is recoverable under the versioned policy 
 3. Every database carries exactly one lineage token: a version-4 UUID created by the standard
    migration path only when none exists; ordinary deployments preserve it, and only a restore
    regenerates it — as a fresh version-4 UUID, atomically with the restored data becoming
-   reachable, recording the artifact's token as parent, so no crashed or partial restore can
-   present the artifact's token as live. Backup artifacts MUST embed an erasure-record export
-   taken from the same database snapshot as the dump, and record that snapshot's
-   covered-through timestamp and the lineage token. The restore procedure MUST verify the
-   manifest token equals the token inside the verified dump and abort on mismatch or absence
-   (an absent token never compares equal), MUST stop application writes before exporting
+   reachable, recording the artifact's token as parent (recorded absent for a token-less
+   artifact), so no crashed or partial restore can present the artifact's token as live.
+   Backup artifacts MUST embed an erasure-record export taken from the same database snapshot
+   as the dump, and record that snapshot's covered-through timestamp and the lineage token.
+   The restore procedure MUST abort when the manifest token and the token inside the verified
+   dump mismatch or exactly one of them is absent; a wholly token-less artifact MUST restore
+   through the disaster gate, because an absent token never establishes continuation. It
+   MUST stop application writes before exporting
    erasure records, MUST treat a reachable database as live continuation only when its
    lineage token equals the artifact's, MUST replay the union of every available erasure
    source, MUST abort when sources disagree on a deletion fact of the same subject (the
