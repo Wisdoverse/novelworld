@@ -1193,6 +1193,28 @@ Implementations MUST create the following indexes:
 Implementations MUST apply schema changes through versioned migration files. Migrations MUST be
 idempotent where possible. The initial migration MUST be applied before the first service start.
 
+### 12.4 Backup, Restore, and Erasure Replay
+
+The authoritative PostgreSQL database is recoverable under the versioned policy in
+[`docs/BACKUP_RESTORE.md`](docs/BACKUP_RESTORE.md). Implementations MUST satisfy:
+
+1. Deleting a user or a novel MUST write a durable erasure record in the same database
+   transaction as the authoritative delete. The record carries only subject type and UUIDs
+   (including the owning user UUID for novels) and MUST survive account and novel cascades.
+2. Erasure replay MUST run in the standard migration path before services start, MUST be
+   idempotent across deployments, MUST remove any subject row matching an erasure record, and
+   MUST re-queue the deterministic retained-source object key for erased novels at most once per
+   record so a restore cannot resurrect retained source bytes.
+3. A restored deployment MUST NOT serve a deleted subject — login, reads, export, provider work,
+   or derived projections — after the documented restore procedure runs. Where every preserved
+   erasure record predates the backup, the declared backup retention ceiling bounds the
+   resurrection window.
+4. Backup artifacts MUST be produced by the scripted procedure, encrypted at rest, and verified
+   against their integrity manifest before any restore changes data; corrupt or unverifiable
+   artifacts MUST fail closed without side effects.
+5. Erasure records are internal operational state: they MUST NOT appear in account export and
+   MUST NOT contain source text, message content, profile data, or credentials.
+
 ---
 
 ## 13. Frontend Specification

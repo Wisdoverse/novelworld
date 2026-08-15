@@ -68,9 +68,9 @@ state in two places.
 | §4.1.6 — chat-turn status, lease, failure, and completion fields agree | Verified | H3, H5 | E1, E3 |
 | §4.2 — UUID v4, UTC `TIMESTAMPTZ`, case-insensitive character deduplication | Verified | H1, H2 | E1, E2 |
 | §5.1 — accepted formats, byte limits, validation, optional retention, and pending record | Verified | H1 | E0, E2 |
-| §5.1 — retained bytes do not imply restart-safe ingestion | Verified | H1 | E0 records the limitation; restart-safe claim/resume remains an H1 gate |
+| §5.1 — accepted imports recoverable after process death from committed stages; retained bytes still do not imply retained-object replay | Verified | H1 | E1, E2; durable jobs, leases, and startup recovery landed in PR #116, retained-object reprocessing remains an H1 gap |
 | §5.2 — current parsing stages reach `ready` or store a terminal parse error | Verified | H1 | E2 |
-| §5.2 — interruption recovery across persisted stages | Intended gap | H1 | E0; the current task is process-local |
+| §5.2 — interruption recovery, fenced attempts, and reclaim of pending or expired jobs | Verified | H1 | E1, E2; attempt-fenced claims, lease reclaim, and replay-safe backfill landed in PR #116 |
 | §5.3 — non-empty, sequential chapters | Verified | H1 | E2 |
 | §5.4 — structured character output validation and case-insensitive merge | Verified | H1 | E2 |
 | §5.4 — complete repeated-character coverage and 50-character cost bound | Intended gap | H1 | E2 shows heuristic/model extraction without a release corpus or enforced final cap |
@@ -109,6 +109,11 @@ state in two places.
 | §12.1 — required PostgreSQL extensions | Verified | H1 | E1 |
 | §12.2 — required indexes | Verified | H1 | E1 |
 | §12.3 — versioned migrations, replay safety, and initial application | Verified | H1, H5 | E1 |
+| §12.4 — durable erasure records written atomically with deletion | Intended gap | H1 | [`BACKUP_RESTORE.md`](./BACKUP_RESTORE.md) approved; no `erasure_records` journal exists yet |
+| §12.4 — idempotent erasure replay in the migration path with bounded source-key re-queue | Intended gap | H1 | Policy approved; replay is unimplemented |
+| §12.4 — restored deployments never serve a deleted subject within the retention ceiling | Intended gap | H1 | Policy approved; awaits the drill change judged by `backup-restore-v1` |
+| §12.4 — encrypted, integrity-verified backup artifacts and fail-closed restore | Intended gap | H1 | Policy approved; no backup or restore script exists yet |
+| §12.4 — erasure records excluded from export and free of content | Intended gap | H1 | Contract defined with the journal it governs |
 | §13.1 — FSD import direction | Verified | H4 | E7 and frontend CI |
 | §13.2–§13.3 — standalone import route/wizard and named progress component | Obsolete/corrected | H0 | Removed implementation prescriptions; the shelf and reader own those user outcomes directly |
 | §13.3 — chat preserves reading context and branch choice blocks advancement | Verified | H4 | E7 |
