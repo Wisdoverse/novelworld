@@ -33,7 +33,7 @@ None of these weakens a recovery target, a drill bound, or the
 resurrection guardrail; 1 and 6 strengthen v1, and 2–5 replace
 inference-hostile v1 wording with the decided contract. Two consequences
 are declared rather than hidden: a crash during a routine restore
-escalates the retry to disaster gating with no RTO target, and a
+can escalate the retry to disaster gating with no RTO target, and a
 token-less legacy artifact's restore cannot collect the reachable
 database's export, leaving post-artifact deletions to the disaster
 gate's compensating controls (undecided-erase and owner confirmation).

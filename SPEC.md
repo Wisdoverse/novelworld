@@ -1231,7 +1231,7 @@ The authoritative PostgreSQL database is recoverable under the versioned policy 
    sanctioned continuation is attest-or-erase: every restored account not already covered by
    a collected erasure record receives a retain-with-listed-novels or erase decision before
    completion; an account covered by a collected record is the pre-decided fact replay
-   enforces — no decision may retain or designate it, and the restore records an automatic
+   enforces — no decision may name it, and the restore records an automatic
    `replayed` attestation row for it. Erasure records are written and replayed for every
    erase-decided account and every unlisted novel before services start, and each decision or
    `replayed` row is durably recorded in the restored database with subject identity,
