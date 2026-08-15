@@ -604,8 +604,8 @@ async fn complete_import_rejects_gapped_chapters_with_matching_count() {
         "parsing"
     );
 
-    // Contiguous again, but tabs and newlines survive BTRIM(): a chapter that
-    // carries no readable character must still block publication.
+    // Contiguous again, but tabs and newlines survive a default BTRIM(): a
+    // chapter that carries no readable character must still block publication.
     sqlx::query(
         "UPDATE chapters SET chapter_number = 2, content = $2 \
          WHERE novel_id = $1 AND chapter_number = 3",
@@ -615,6 +615,17 @@ async fn complete_import_rejects_gapped_chapters_with_matching_count() {
     .execute(&pool)
     .await
     .unwrap();
+    assert!(repo.complete_import(novel_id, 1).await.is_err());
+
+    // Non-ASCII whitespace survives a POSIX [:space:] test under LC_CTYPE=C,
+    // while Rust str::trim() strips it: publication must agree with Rust
+    // regardless of the database locale.
+    sqlx::query("UPDATE chapters SET content = $2 WHERE novel_id = $1 AND chapter_number = 2")
+        .bind(novel_id)
+        .bind("\u{00a0}\u{3000}")
+        .execute(&pool)
+        .await
+        .unwrap();
     assert!(repo.complete_import(novel_id, 1).await.is_err());
 
     sqlx::query(

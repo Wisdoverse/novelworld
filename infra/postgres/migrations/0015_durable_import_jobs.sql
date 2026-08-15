@@ -57,15 +57,20 @@ CREATE INDEX IF NOT EXISTS idx_novel_import_jobs_recoverable
 -- content; UNIQUE(novel_id, chapter_number) makes count/min/max sufficient.
 -- They are additionally authoritative when the novel's advertised
 -- total_chapters agrees, which is what enrichment and publication require.
--- Readable means "contains a non-whitespace character": btrim() strips only
--- spaces, so it would accept tab/newline-only text the runtime rejects.
+-- Readable means "carries a character outside Unicode White_Space". The
+-- explicit character set below mirrors exactly what Rust str::trim() strips,
+-- and unlike POSIX [:space:] it is locale-independent: under LC_CTYPE=C the
+-- regex class matches no non-ASCII character, so NBSP-only content would
+-- diverge from the runtime's own blank check.
 WITH chapter_shape AS (
     SELECT chapter.novel_id,
            pg_catalog.count(*)::pg_catalog.int4 AS chapter_count,
            pg_catalog.min(chapter.chapter_number) AS lowest_chapter,
            pg_catalog.max(chapter.chapter_number) AS highest_chapter,
-           pg_catalog.bool_and(chapter.content ~ '[^[:space:]]')
-               AS every_chapter_readable
+           pg_catalog.bool_and(pg_catalog.btrim(
+               chapter.content,
+               U&' \0009\000A\000B\000C\000D\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000'
+           ) <> '') AS every_chapter_readable
     FROM public.chapters AS chapter
     GROUP BY chapter.novel_id
 ),
@@ -88,8 +93,14 @@ classified AS (
                AND n.total_chapters = shape.chapter_count,
                FALSE
            ) AS chapters_authoritative,
-           COALESCE(n.world_summary ~ '[^[:space:]]', FALSE)
-               AND COALESCE(n.genre ~ '[^[:space:]]', FALSE)
+           COALESCE(pg_catalog.btrim(
+               n.world_summary,
+               U&' \0009\000A\000B\000C\000D\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000'
+           ) <> '', FALSE)
+               AND COALESCE(pg_catalog.btrim(
+                   n.genre,
+                   U&' \0009\000A\000B\000C\000D\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000'
+               ) <> '', FALSE)
                AND EXISTS (
                    SELECT 1 FROM public.characters AS extracted
                    WHERE extracted.novel_id = n.id
@@ -141,13 +152,17 @@ ON CONFLICT (novel_id) DO NOTHING;
 -- novels with gapped or blank chapters as completed imports. ON CONFLICT above
 -- leaves those rows untouched, so re-classify the ones that never satisfied
 -- import completeness. Downgraded rows are 'failed' and cannot re-fire.
+-- The readable set mirrors Rust str::trim() and is locale-independent; see the
+-- backfill above.
 WITH chapter_shape AS (
     SELECT chapter.novel_id,
            pg_catalog.count(*)::pg_catalog.int4 AS chapter_count,
            pg_catalog.min(chapter.chapter_number) AS lowest_chapter,
            pg_catalog.max(chapter.chapter_number) AS highest_chapter,
-           pg_catalog.bool_and(chapter.content ~ '[^[:space:]]')
-               AS every_chapter_readable
+           pg_catalog.bool_and(pg_catalog.btrim(
+               chapter.content,
+               U&' \0009\000A\000B\000C\000D\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000'
+           ) <> '') AS every_chapter_readable
     FROM public.chapters AS chapter
     GROUP BY chapter.novel_id
 ),
@@ -168,8 +183,14 @@ classified AS (
                AND n.total_chapters = shape.chapter_count,
                FALSE
            ) AS chapters_authoritative,
-           COALESCE(n.world_summary ~ '[^[:space:]]', FALSE)
-               AND COALESCE(n.genre ~ '[^[:space:]]', FALSE)
+           COALESCE(pg_catalog.btrim(
+               n.world_summary,
+               U&' \0009\000A\000B\000C\000D\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000'
+           ) <> '', FALSE)
+               AND COALESCE(pg_catalog.btrim(
+                   n.genre,
+                   U&' \0009\000A\000B\000C\000D\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000'
+               ) <> '', FALSE)
                AND EXISTS (
                    SELECT 1 FROM public.characters AS extracted
                    WHERE extracted.novel_id = n.id

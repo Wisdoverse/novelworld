@@ -63,13 +63,32 @@ impl ReadinessProbe for PgReadinessProbe {
                              AND pg_catalog.pg_get_constraintdef(oid) =
                                  'CHECK (((((status)::text = ''pending''::text) AND (attempt = 0) AND (lease_expires_at IS NULL) AND (failure_code IS NULL) AND ((stage)::text <> ''completed''::text)) OR (((status)::text = ''in_progress''::text) AND (attempt >= 1) AND (lease_expires_at IS NOT NULL) AND (failure_code IS NULL) AND ((stage)::text <> ''completed''::text)) OR (((status)::text = ''failed''::text) AND (lease_expires_at IS NULL) AND (failure_code IS NOT NULL) AND ((stage)::text <> ''completed''::text)) OR (((status)::text = ''completed''::text) AND (lease_expires_at IS NULL) AND (failure_code IS NULL) AND ((stage)::text = ''completed''::text))))'
                        )
+                       -- Catalog columns only: pg_get_constraintdef() deparses
+                       -- the parent table name relative to search_path, so a
+                       -- cascading key onto a decoy schema's novels table reads
+                       -- identically while the real one fails to match.
                        AND EXISTS (
-                           SELECT 1 FROM pg_catalog.pg_constraint
-                           WHERE conrelid =
+                           SELECT 1
+                           FROM pg_catalog.pg_constraint AS import_fk
+                           WHERE import_fk.conrelid =
                                      'public.novel_import_jobs'::pg_catalog.regclass
-                             AND contype::pg_catalog.text = 'f'
-                             AND pg_catalog.pg_get_constraintdef(oid) =
-                                 'FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE'
+                             AND import_fk.confrelid =
+                                     'public.novels'::pg_catalog.regclass
+                             AND import_fk.contype::pg_catalog.text = 'f'
+                             AND import_fk.confdeltype::pg_catalog.text = 'c'
+                             AND import_fk.convalidated
+                             AND import_fk.conkey = ARRAY[(
+                                     SELECT child.attnum
+                                     FROM pg_catalog.pg_attribute AS child
+                                     WHERE child.attrelid = import_fk.conrelid
+                                       AND child.attname = 'novel_id'
+                                 )]
+                             AND import_fk.confkey = ARRAY[(
+                                     SELECT parent.attnum
+                                     FROM pg_catalog.pg_attribute AS parent
+                                     WHERE parent.attrelid = import_fk.confrelid
+                                       AND parent.attname = 'id'
+                                 )]
                        )
                        AND EXISTS (
                            SELECT 1

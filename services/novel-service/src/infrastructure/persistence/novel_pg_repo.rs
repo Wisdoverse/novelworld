@@ -258,14 +258,17 @@ impl NovelRepository for NovelPgRepository {
             stage == ImportStage::Enriched,
             "import completion is invalid for the current stage"
         );
-        // Blank means "carries no non-whitespace character": BTRIM() strips
-        // only spaces and would accept tab/newline-only text that the domain
-        // predicate chapters_are_importable rejects.
+        // Blank means "carries no character outside Unicode White_Space". The
+        // explicit BTRIM() set mirrors exactly what Rust str::trim() strips, so
+        // it agrees with the domain predicate chapters_are_importable. Unlike
+        // POSIX [:space:] it is locale-independent: under LC_CTYPE=C the regex
+        // class matches no non-ASCII character, so NBSP-only text would pass
+        // here while the domain rejects it.
         let complete = sqlx::query_scalar::<_, bool>(
             r#"
             SELECT novel.total_chapters > 0
-               AND COALESCE(novel.world_summary ~ '[^[:space:]]', FALSE)
-               AND COALESCE(novel.genre ~ '[^[:space:]]', FALSE)
+               AND COALESCE(BTRIM(novel.world_summary, U&' \0009\000A\000B\000C\000D\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000') <> '', FALSE)
+               AND COALESCE(BTRIM(novel.genre, U&' \0009\000A\000B\000C\000D\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000') <> '', FALSE)
                AND novel.total_chapters = (
                    SELECT COUNT(*)::INTEGER FROM chapters WHERE novel_id = novel.id
                )
@@ -274,7 +277,7 @@ impl NovelRepository for NovelPgRepository {
                    WHERE c.novel_id = novel.id
                      AND (c.chapter_number < 1
                           OR c.chapter_number > novel.total_chapters
-                          OR c.content !~ '[^[:space:]]')
+                          OR BTRIM(c.content, U&' \0009\000A\000B\000C\000D\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000') = '')
                )
                AND EXISTS (
                    SELECT 1 FROM characters WHERE novel_id = novel.id

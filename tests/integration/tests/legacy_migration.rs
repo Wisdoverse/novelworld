@@ -169,11 +169,29 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
     .execute(&fresh)
     .await
     .unwrap();
-    // Tabs and newlines survive BTRIM(): only a whitespace-class test agrees
-    // with the runtime's blank-chapter rule.
+    // Tabs and newlines survive a default BTRIM(), which strips only spaces.
     sqlx::query("INSERT INTO chapters (novel_id, chapter_number, content) VALUES ($1, 1, $2)")
         .bind(blank_novel)
         .bind("\t\n \t")
+        .execute(&fresh)
+        .await
+        .unwrap();
+    // Non-ASCII whitespace survives a POSIX [:space:] test under LC_CTYPE=C,
+    // while Rust str::trim() strips it: the backfill must agree with Rust
+    // regardless of the database locale.
+    let non_ascii_blank_novel = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO novels (id, user_id, title, world_summary, genre, total_chapters, status) \
+         VALUES ($1, $2, 'Non-ASCII blank ready', 'world', 'fantasy', 1, 'ready')",
+    )
+    .bind(non_ascii_blank_novel)
+    .bind(incomplete_user)
+    .execute(&fresh)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO chapters (novel_id, chapter_number, content) VALUES ($1, 1, $2)")
+        .bind(non_ascii_blank_novel)
+        .bind("\u{00a0}\u{3000}")
         .execute(&fresh)
         .await
         .unwrap();
@@ -284,7 +302,7 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
             Some("legacy_incomplete".into()),
         )
     );
-    for invalid_novel in [gapped_novel, blank_novel] {
+    for invalid_novel in [gapped_novel, blank_novel, non_ascii_blank_novel] {
         assert_eq!(
             sqlx::query_as::<_, (String, String, Option<String>, Option<String>)>(
                 "SELECT job.stage, job.status, job.failure_code, novel.parse_error \
@@ -620,6 +638,29 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
         .execute(&fresh)
         .await
         .unwrap();
+    // A validated cascading key onto a clone of novels deparses identically to
+    // the real one, so readiness has to compare catalog identity instead.
+    sqlx::raw_sql(
+        "CREATE TABLE public.novels_clone (id UUID PRIMARY KEY); \
+         INSERT INTO public.novels_clone (id) \
+             SELECT novel_id FROM public.novel_import_jobs; \
+         ALTER TABLE public.novel_import_jobs \
+         ADD CONSTRAINT novel_import_jobs_novel_id_fkey \
+             FOREIGN KEY (novel_id) REFERENCES public.novels_clone(id) \
+             ON DELETE CASCADE",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    assert!(!novel_readiness.is_ready().await);
+    sqlx::raw_sql(
+        "ALTER TABLE public.novel_import_jobs \
+         DROP CONSTRAINT novel_import_jobs_novel_id_fkey; \
+         DROP TABLE public.novels_clone",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
     sqlx::query(
         "ALTER TABLE public.novel_import_jobs \
          ADD CONSTRAINT novel_import_jobs_novel_id_fkey \
