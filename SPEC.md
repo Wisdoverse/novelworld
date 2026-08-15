@@ -1213,12 +1213,16 @@ The authoritative PostgreSQL database is recoverable under the versioned policy 
    as the dump, and record that snapshot's covered-through timestamp. The restore procedure
    MUST stop application writes before exporting erasure records, MUST replay the union of
    every available erasure source, MUST abort when sources disagree on the same subject, and
-   MUST refuse to complete a restore whose residual window — deletions newer than the newest
-   source's covered-through timestamp — is non-empty. The only sanctioned continuation is
-   per-account attestation durably recorded in the restored database with the window bounds,
-   source inventory, and operator identity; the deployment MUST NOT serve an account without a
-   recorded attestation, and MUST NOT serve any subject covered by a collected erasure record.
-   Silent resurrection is prohibited in every case.
+   MUST refuse to complete a restore whose residual window — from the newest source's
+   covered-through timestamp to the writes-stopped or declared-failure time — is non-empty.
+   The only sanctioned continuation is attest-or-erase: every restored account receives a
+   retain-with-listed-novels or erase decision before completion; erasure records are written
+   and replayed for every erase-decided account and every unlisted novel before services
+   start; and each decision is durably recorded in the restored database with subject
+   identity, decision, both residual-window bounds, the artifact digest inventory, an
+   operator identity string, and a timestamp. The deployment MUST NOT contain an undecided
+   subject and MUST NOT serve any subject covered by a collected or decision-written erasure
+   record. Silent resurrection is prohibited in every case.
 4. Backup artifacts MUST be produced by the scripted procedure, encrypted at rest, and verified
    against their integrity manifest before any restore changes data; corrupt or unverifiable
    artifacts MUST fail closed without side effects.

@@ -104,21 +104,29 @@ The scripted restore procedure, in order:
 6. **Gate on the residual window.** When the current database was reachable
    in step 4, the residual window is empty and the restore proceeds. When
    it is not — a disaster restore — the script **refuses to complete by
-   default**. The only sanctioned continuation is **per-account
-   attestation**: for every account present in the restored data, the
-   operator confirms with that account's owner (or as the owner, for their
-   own account) that the account was not deleted inside the residual
-   window, and the script records each attestation durably in the restored
-   database — subject identity, residual-window bounds, the artifact digest
-   inventory used as erasure sources, an operator-supplied identity string,
-   and a timestamp. The deployment may serve only accounts with a recorded
-   attestation. A novel deleted inside the window but resurrected under a
-   retained, attested account is visible only to its owner, who is informed
-   by the attestation contact and re-deletes it in the product; that
-   re-deletion writes a fresh erasure record. A false attestation is an
-   operator action outside the application boundary, equivalent to editing
-   the database by hand. Silent resurrection is prohibited in every case;
-   there is no accept-and-continue path that skips per-account attestation.
+   default**. The only sanctioned continuation is **attest-or-erase**: the
+   script lists every account in the restored data with its novels, and
+   for each account the operator, confirming with that account's owner (or
+   as the owner, for their own account), supplies one decision — retain
+   the account together with the explicit list of its retained novels, or
+   erase it. The script then, before any service starts, writes erasure
+   records for every erase-decided account and for every novel not on a
+   retained account's retained list, and replays them, so **no subject is
+   ever served ahead of its decision and nothing deleted is served at
+   all**. The restore does not complete while any account lacks a
+   decision. Each decision is recorded durably in the restored database —
+   subject identity, decision, residual-window bounds (covered-through
+   start and writes-stopped or declared-failure end), the artifact digest
+   inventory used as erasure sources, an operator-supplied identity
+   string, and a timestamp. This requires no runtime enforcement point:
+   an unretained subject does not exist in the served deployment, and a
+   stale JWT for an erased account fails downstream exactly as it does
+   after ordinary deletion. The procedure's guarantee is conditional on
+   truthful decisions, as any recovery procedure is conditional on its
+   inputs; a factually false retention is undetectable by construction
+   and equivalent to restoring a hand-edited dump. Silent resurrection is
+   prohibited in every case; there is no continuation that skips
+   attest-or-erase.
 7. **Deploy normally.** The standard migration path replays idempotent
    erasure before any service starts, so a restored deployment can never
    serve a subject covered by any collected erasure record.
@@ -185,12 +193,14 @@ no new re-queue, no row changes, no new provider work.
 
 **Drill C — disaster gate.** Invoke the restore with no reachable current
 database and a non-empty residual window: the script must refuse to
-complete. Re-run with per-account attestation input: the restore completes,
-the attestation rows exist in the restored database with the
-residual-window bounds and artifact digest inventory, and an account
-without an attestation is not served. The drill also verifies the window
-bounds are computed from covered-through timestamps, not wall-clock
-archive times.
+complete, including when decisions cover only some accounts. Re-run with a
+complete attest-or-erase input that retains one account (with a partial
+novel list) and erases the other: the restore completes; the decision rows
+exist in the restored database with the residual-window bounds and
+artifact digest inventory; the erased account and the unlisted novel are
+absent from the served deployment with erasure records written; and the
+window bounds are computed from covered-through timestamps, not
+wall-clock archive times.
 
 Negative cases: a corrupted artifact and a wrong or missing encryption key
 must fail closed with actionable errors before any data change; erasure

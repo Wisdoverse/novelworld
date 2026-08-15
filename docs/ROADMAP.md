@@ -321,8 +321,10 @@ Exit evidence:
   the expected bounded, actionable error. The accepted canon is non-empty where
   the labeled source contains expected facts, and meets coverage, precision,
   hallucination, chronology/causality, and provenance policies.
-- A clean-host backup → erase → restore drill meets the pre-registered RPO/RTO,
-  verifies sampled authoritative data, and continues the same journey.
+- A clean-host backup → erase → restore drill verifies sampled authoritative
+  data, continues the same journey, and meets its pre-registered drill bound;
+  the pre-registered scale rehearsal meets the RTO target, and the backup
+  mechanism plus the operator schedule duty satisfy the RPO policy.
 - A backup → user/novel deletion → older-backup restore drill proves the deleted
   subject remains unavailable to login, reads, export, provider work, and
   derived projections after the documented erasure procedure runs.
