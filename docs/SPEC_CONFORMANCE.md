@@ -109,11 +109,11 @@ state in two places.
 | §12.1 — required PostgreSQL extensions | Verified | H1 | E1 |
 | §12.2 — required indexes | Verified | H1 | E1 |
 | §12.3 — versioned migrations, replay safety, and initial application | Verified | H1, H5 | E1 |
-| §12.4 — durable erasure records written atomically with deletion | Intended gap | H1 | [`BACKUP_RESTORE.md`](./BACKUP_RESTORE.md) approved; no `erasure_records` journal exists yet |
-| §12.4 — idempotent erasure replay in the migration path with bounded source-key re-queue | Intended gap | H1 | Policy approved; replay is unimplemented |
-| §12.4 — restored deployments never serve a deleted subject within the retention ceiling | Intended gap | H1 | Policy approved; awaits the drill change judged by `backup-restore-v1` |
-| §12.4 — encrypted, integrity-verified backup artifacts and fail-closed restore | Intended gap | H1 | Policy approved; no backup or restore script exists yet |
-| §12.4 — erasure records excluded from export and free of content | Intended gap | H1 | Contract defined with the journal it governs |
+| §12.4.1 — erasure records atomic with every deletion path, minimal UUID-only fields, per-novel records under account cascade, cascade-surviving | Intended gap | H1 | [`BACKUP_RESTORE.md`](./BACKUP_RESTORE.md) approved; no `erasure_records` journal exists yet |
+| §12.4.2 — migration-path replay before services start, idempotent, removes matching subject rows, exactly-once source-key re-queue with durable per-record bookkeeping | Intended gap | H1 | Policy approved; replay is unimplemented |
+| §12.4.3 — artifacts embed erasure exports; restore stops writes, replays the union of erasure sources, gates non-empty residual windows on recorded operator acceptance, and never serves a subject covered by a preserved record | Intended gap | H1 | Policy approved; awaits the drill change judged by `backup-restore-v1` |
+| §12.4.4 — scripted, encrypted, integrity-verified artifacts and fail-closed restore on corrupt or unverifiable input | Intended gap | H1 | Policy approved; no backup or restore script exists yet |
+| §12.4.5 — erasure records excluded from account export and free of source text, messages, profile data, and credentials | Intended gap | H1 | Contract defined with the journal it governs |
 | §13.1 — FSD import direction | Verified | H4 | E7 and frontend CI |
 | §13.2–§13.3 — standalone import route/wizard and named progress component | Obsolete/corrected | H0 | Removed implementation prescriptions; the shelf and reader own those user outcomes directly |
 | §13.3 — chat preserves reading context and branch choice blocks advancement | Verified | H4 | E7 |

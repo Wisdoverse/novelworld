@@ -1200,15 +1200,22 @@ The authoritative PostgreSQL database is recoverable under the versioned policy 
 
 1. Deleting a user or a novel MUST write a durable erasure record in the same database
    transaction as the authoritative delete. The record carries only subject type and UUIDs
-   (including the owning user UUID for novels) and MUST survive account and novel cascades.
+   (including the owning user UUID for novels), MUST be written for every deletion path
+   including per-novel records under an account cascade, and MUST survive account and novel
+   cascades.
 2. Erasure replay MUST run in the standard migration path before services start, MUST be
    idempotent across deployments, MUST remove any subject row matching an erasure record, and
-   MUST re-queue the deterministic retained-source object key for erased novels at most once per
-   record so a restore cannot resurrect retained source bytes.
-3. A restored deployment MUST NOT serve a deleted subject — login, reads, export, provider work,
-   or derived projections — after the documented restore procedure runs. Where every preserved
-   erasure record predates the backup, the declared backup retention ceiling bounds the
-   resurrection window.
+   MUST re-queue the deterministic retained-source object key for an erased novel whose subject
+   row no longer exists exactly once per record across all deployments, tracked by durable
+   per-record bookkeeping, so a restore cannot resurrect retained source bytes and repeated
+   deployments issue no repeated provider deletes.
+3. Backup artifacts MUST embed an export of the erasure records as of backup time. The restore
+   procedure MUST stop application writes before exporting erasure records, MUST replay the
+   union of every available erasure source, and MUST NOT complete a restore whose residual
+   window — deletions newer than the newest available erasure source — is non-empty unless the
+   operator explicitly accepts and durably records that window. A restored deployment MUST NOT
+   serve a subject covered by any preserved erasure record; silent resurrection is prohibited in
+   every case.
 4. Backup artifacts MUST be produced by the scripted procedure, encrypted at rest, and verified
    against their integrity manifest before any restore changes data; corrupt or unverifiable
    artifacts MUST fail closed without side effects.
