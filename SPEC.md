@@ -1206,16 +1206,19 @@ The authoritative PostgreSQL database is recoverable under the versioned policy 
 2. Erasure replay MUST run in the standard migration path before services start, MUST be
    idempotent across deployments, MUST remove any subject row matching an erasure record, and
    MUST re-queue the deterministic retained-source object key for an erased novel whose subject
-   row no longer exists exactly once per record across all deployments, tracked by durable
-   per-record bookkeeping, so a restore cannot resurrect retained source bytes and repeated
-   deployments issue no repeated provider deletes.
-3. Backup artifacts MUST embed an export of the erasure records as of backup time. The restore
-   procedure MUST stop application writes before exporting erasure records, MUST replay the
-   union of every available erasure source, and MUST NOT complete a restore whose residual
-   window — deletions newer than the newest available erasure source — is non-empty unless the
-   operator explicitly accepts and durably records that window. A restored deployment MUST NOT
-   serve a subject covered by any preserved erasure record; silent resurrection is prohibited in
-   every case.
+   row no longer exists exactly once per record within a database lineage, tracked by durable
+   per-record bookkeeping; a restore starts a new lineage, so it MAY cause at most one
+   additional re-queue per record.
+3. Backup artifacts MUST embed an erasure-record export taken from the same database snapshot
+   as the dump, and record that snapshot's covered-through timestamp. The restore procedure
+   MUST stop application writes before exporting erasure records, MUST replay the union of
+   every available erasure source, MUST abort when sources disagree on the same subject, and
+   MUST refuse to complete a restore whose residual window — deletions newer than the newest
+   source's covered-through timestamp — is non-empty. The only sanctioned continuation is
+   per-account attestation durably recorded in the restored database with the window bounds,
+   source inventory, and operator identity; the deployment MUST NOT serve an account without a
+   recorded attestation, and MUST NOT serve any subject covered by a collected erasure record.
+   Silent resurrection is prohibited in every case.
 4. Backup artifacts MUST be produced by the scripted procedure, encrypted at rest, and verified
    against their integrity manifest before any restore changes data; corrupt or unverifiable
    artifacts MUST fail closed without side effects.

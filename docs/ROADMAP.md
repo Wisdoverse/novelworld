@@ -302,10 +302,11 @@ Scope:
   fresh-host restore, and backup-aware deletion behavior for authoritative data.
   Restoration of a backup predating an account/novel deletion must replay a
   durable erasure record; it cannot silently resurrect visible user data. A
-  disaster restore whose newest durable erasure source predates the failure may
-  complete only after the operator explicitly accepts and durably records the
-  bounded residual window; the declared backup retention ceiling bounds how
-  stale a restorable backup and its embedded erasure source can be.
+  disaster restore whose newest durable erasure source predates the failure
+  refuses to complete by default and may continue only through per-account
+  attestation durably recorded with the residual-window bounds; the declared
+  backup retention ceiling bounds how stale a restorable backup and its
+  embedded erasure source can be.
 - Prove forward-compatible migrations and repair/rollback behavior for the
   supported release window.
 

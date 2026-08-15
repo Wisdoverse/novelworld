@@ -45,11 +45,11 @@ functionality that costs.
 
 ## Recovery targets
 
-| Target | Value | Meaning |
+| Target | Value | Evidence that judges it |
 |---|---|---|
-| RPO | ≤ 24 hours | The operator schedules the scripted backup at least daily. Data committed after the newest verified backup may be lost. The drill validates the mechanism; adherence to the schedule is an operator duty recorded as such, not proven by the drill. |
-| RTO | ≤ 30 minutes | Operator-executed scripted restore on the reference envelope (2-core / 4 GB / SSD, `DEPLOY.md` minimum) from a verified backup at supported preview scale (a database within the `DEPLOY.md` 20–50 GB disk sizing), measured from starting the restore procedure to the deployment passing readiness. |
-| Drill bound | ≤ 10 minutes | CI assertion for the drill dataset defined under Drills; keeps the drill sensitive to procedure regressions without depending on production data volume. |
+| RPO | ≤ 24 hours | The operator schedules the scripted backup at least daily. Data committed after the newest verified backup may be lost. Drill A proves the mechanism; schedule adherence is an operator duty recorded as such, never proven by a drill. |
+| RTO | ≤ 30 minutes | Judged by the **scale rehearsal**: a scripted restore of a synthetic database whose plain dump is at least 5 GB completes within 30 minutes on the reference envelope (2-core / 4 GB / SSD, `DEPLOY.md` minimum), measured from starting the restore procedure to the deployment passing readiness. Recorded once per policy version and re-run after any change to the backup or restore scripts. |
+| Drill bound | ≤ 10 minutes | CI assertion for the drill dataset defined under Drills; keeps every CI run sensitive to procedure regressions without depending on data volume. |
 | Backup retention ceiling | 30 days default; operator override bounded to 7–90 days | Backups older than the ceiling must be destroyed by the operator. Values outside 7–90 days require `backup-restore-v2`. |
 
 The RPO and RTO values are policy for the private preview profile. Public or
@@ -60,16 +60,19 @@ multi-node profiles require a new reviewed version of this document.
 1. Produced by the scripted procedure using `pg_dump` executed inside the
    pinned PostgreSQL container image, so client and server versions never
    skew.
-2. **Embeds the erasure-record export**: every artifact carries a separate
-   dump of `erasure_records` as of backup time. The newest artifact is
-   thereby a durable, off-database erasure source that survives loss of the
-   live database.
+2. **Embeds the erasure-record export taken from the same database snapshot
+   as the dump itself** (the same `pg_dump` invocation or an export inside
+   the same `REPEATABLE READ` snapshot), so the export's coverage and the
+   dump's contents cannot diverge. The artifact's **covered-through
+   timestamp is the snapshot time**, not the archive-write time, and is
+   recorded in the manifest. The newest artifact is thereby a durable,
+   off-database erasure source that survives loss of the live database.
 3. Compressed, then encrypted at rest with AES-256-CBC using
    PBKDF2 (`openssl enc -aes-256-cbc -pbkdf2` with at least 200 000
    iterations) and an operator-provided `BACKUP_ENCRYPTION_KEY` of at least
    32 characters. An unencrypted backup artifact is non-conformant.
-4. Accompanied by a SHA-256 checksum manifest and a timestamp, written at
-   backup time.
+4. Accompanied by a SHA-256 checksum manifest and the covered-through
+   timestamp, written at backup time.
 5. Stored and rotated by the operator within the declared retention ceiling.
    NovelWorld does not schedule, upload, or prune backup artifacts.
 
@@ -89,23 +92,36 @@ The scripted restore procedure, in order:
    embedded in the artifact being restored, (b) a fresh export from the
    current database when it is still reachable after writes stopped, and
    (c) the embedded erasure records of every newer artifact the operator
-   holds. The newest source's timestamp defines the **residual window**:
-   deletions committed after it cannot be replayed.
+   holds. Records are immutable facts keyed by subject; if two sources
+   disagree on any field of the same key, the restore aborts with an
+   actionable error rather than guessing. The newest source's
+   covered-through timestamp defines the start of the **residual window**;
+   its end is the moment writes stopped (or the declared failure time for a
+   lost database). Deletions committed inside the window cannot be
+   replayed.
 5. **Load** the decrypted dump into a clean database and re-insert the
-   union of erasure sources (idempotent by primary key).
-6. **Gate on the residual window**: when the current database was reachable
-   in step 4, the residual window is empty and the restore proceeds. In a
-   disaster restore it is not: the script must state the window's start
-   time and refuse to complete unless the operator explicitly accepts it
-   with a recorded flag. The acceptance — window bounds and timestamp — is
-   written to the deployment log. Silent resurrection is prohibited;
-   explicitly recorded acceptance of a residual window no longer than the
-   RPO interval is the documented disaster fallback for this profile. The
-   retention ceiling bounds how old a restorable backup — and therefore how
-   stale its embedded erasure source — can be.
+   union of erasure sources (idempotent for identical rows).
+6. **Gate on the residual window.** When the current database was reachable
+   in step 4, the residual window is empty and the restore proceeds. When
+   it is not — a disaster restore — the script **refuses to complete by
+   default**. The only sanctioned continuation is **per-account
+   attestation**: for every account present in the restored data, the
+   operator confirms with that account's owner (or as the owner, for their
+   own account) that the account was not deleted inside the residual
+   window, and the script records each attestation durably in the restored
+   database — subject identity, residual-window bounds, the artifact digest
+   inventory used as erasure sources, an operator-supplied identity string,
+   and a timestamp. The deployment may serve only accounts with a recorded
+   attestation. A novel deleted inside the window but resurrected under a
+   retained, attested account is visible only to its owner, who is informed
+   by the attestation contact and re-deletes it in the product; that
+   re-deletion writes a fresh erasure record. A false attestation is an
+   operator action outside the application boundary, equivalent to editing
+   the database by hand. Silent resurrection is prohibited in every case;
+   there is no accept-and-continue path that skips per-account attestation.
 7. **Deploy normally.** The standard migration path replays idempotent
    erasure before any service starts, so a restored deployment can never
-   serve a subject with a preserved erasure record.
+   serve a subject covered by any collected erasure record.
 
 ## Erasure records and replay
 
@@ -128,11 +144,12 @@ MUST be idempotent:
   existing deletion triggers then re-apply downstream cleanup, including
   re-queuing the retained-source object key into `source_file_deletions`);
 - re-queue the deterministic retained-source key for a novel erasure record
-  whose subject row no longer exists **exactly once per record across all
-  deployments**, tracked by durable per-record bookkeeping (the
-  self-consuming cleanup outbox is not that bookkeeping), so a restore
-  cannot silently resurrect source bytes in S3 and repeated deployments do
-  not re-issue provider deletes;
+  whose subject row no longer exists **exactly once per record within a
+  database lineage**, tracked by durable per-record bookkeeping (the
+  self-consuming cleanup outbox is not that bookkeeping). Restoring an
+  artifact starts a new lineage and discards bookkeeping with it, so a
+  restore may cause at most one additional re-queue per record; S3 object
+  deletion is idempotent, so the repeat is safe as well as bounded;
 - never produce unbounded per-deployment work: replay against an
   already-clean database is a no-op apart from bounded bookkeeping.
 
@@ -140,11 +157,14 @@ MUST be idempotent:
 
 Both drills are release evidence for H1 and run in CI against the supported
 compose topology. The **drill dataset** is the seeded end-to-end reader
-journey: at least one account, one imported novel with at least two durable
-chapters and a retained-source key when S3/stub storage is enabled in the
-drill topology, committed chat history, and at least one committed world
-turn. Drill assertions reference this dataset; they do not claim
-production-scale RTO, which remains the operator-procedure target above.
+journey extended to cover both deletion paths: at least two accounts and
+three imported novels (each novel with at least two durable chapters), at
+least two novels carrying retained-source keys when the drill topology
+enables S3/stub storage, committed chat history, and at least one committed
+world turn. One novel is deleted directly; one account owning a
+retained-source novel is deleted entirely. Drill assertions reference this
+dataset; production-scale RTO is judged by the scale rehearsal defined
+under Recovery targets, not by these drills.
 
 **Drill A — backup → erase → fresh-host restore.** Seed the drill dataset,
 take a scripted backup, destroy the deployment including volumes while
@@ -154,7 +174,7 @@ journey continues with the existing end-to-end reader loop. The scripted
 restore completes within the drill bound.
 
 **Drill B — backup → deletion → older-backup restore.** Take a backup, then
-delete **both** drill subjects — one direct novel deletion and one account
+delete both drill subjects — the direct novel deletion and the account
 deletion whose cascade removes a novel with a retained-source key — then
 restore the older backup and deploy with the preserved erasure records. The
 deleted subjects must remain unavailable to login, reads, export, provider
@@ -163,16 +183,24 @@ work, and derived projections — the zero-tolerance guardrail in
 keys are re-queued exactly once, and a second deployment replays cleanly:
 no new re-queue, no row changes, no new provider work.
 
-**Disaster gate check.** A restore invoked without any reachable current
-database and without the acceptance flag must refuse to complete; with the
-flag, it must record the residual window in the deployment log.
+**Drill C — disaster gate.** Invoke the restore with no reachable current
+database and a non-empty residual window: the script must refuse to
+complete. Re-run with per-account attestation input: the restore completes,
+the attestation rows exist in the restored database with the
+residual-window bounds and artifact digest inventory, and an account
+without an attestation is not served. The drill also verifies the window
+bounds are computed from covered-through timestamps, not wall-clock
+archive times.
 
 Negative cases: a corrupted artifact and a wrong or missing encryption key
-must fail closed with actionable errors before any data change.
+must fail closed with actionable errors before any data change; erasure
+sources that disagree on the same subject abort the restore.
 
 ## Versioning
 
 Changes to targets, artifact requirements, the restore contract, the
 retention-ceiling bounds, or drill definitions require a new version of this
 document approved in its own reviewed change, as `backup-restore-v2` and
-onward.
+onward. Possible v2 hardening, deliberately out of v1: an off-database
+deletion-receipt append log that narrows the disaster residual window
+toward zero.
