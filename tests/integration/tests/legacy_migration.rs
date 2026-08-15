@@ -491,6 +491,91 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
     .unwrap();
     assert!(narrative_readiness.is_ready().await);
 
+    // Constraint text renders the parent relative to search_path: once a
+    // same-named clone leads the path, the healthy key deparses as
+    // 'public.narrative_nodes(...)' while a key onto the clone deparses
+    // exactly like the expected text. Readiness has to compare catalog
+    // identity in both directions.
+    sqlx::raw_sql(
+        "CREATE SCHEMA decoy; \
+         CREATE TABLE decoy.narrative_nodes ( \
+             id UUID NOT NULL, novel_id UUID NOT NULL, chapter_number INTEGER NOT NULL, \
+             UNIQUE (id, novel_id, chapter_number)); \
+         INSERT INTO decoy.narrative_nodes (id, novel_id, chapter_number) \
+             SELECT node_id, novel_id, chapter_number FROM public.user_choices",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    let shadowed = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            PgConnectOptions::from_str(&db_url())
+                .unwrap()
+                .database("novelworld_fresh_contract")
+                .options([("search_path", "decoy,public")]),
+        )
+        .await
+        .unwrap();
+    let shadowed_readiness = NarrativePgReadinessProbe::new(shadowed.clone());
+    assert!(shadowed_readiness.is_ready().await);
+    sqlx::raw_sql(
+        "ALTER TABLE public.user_choices \
+         DROP CONSTRAINT user_choices_node_scope_fkey, \
+         ADD CONSTRAINT user_choices_node_scope_fkey \
+             FOREIGN KEY (node_id, novel_id, chapter_number) \
+             REFERENCES decoy.narrative_nodes(id, novel_id, chapter_number) \
+             ON DELETE CASCADE",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    assert!(!shadowed_readiness.is_ready().await);
+    sqlx::raw_sql(
+        "ALTER TABLE public.user_choices \
+         DROP CONSTRAINT user_choices_node_scope_fkey, \
+         ADD CONSTRAINT user_choices_node_scope_fkey \
+             FOREIGN KEY (node_id, novel_id, chapter_number) \
+             REFERENCES public.narrative_nodes(id, novel_id, chapter_number) \
+             ON DELETE CASCADE",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    assert!(shadowed_readiness.is_ready().await);
+    sqlx::raw_sql(
+        "CREATE TABLE decoy.world_states ( \
+             user_id UUID NOT NULL, novel_id UUID NOT NULL, UNIQUE (user_id, novel_id)); \
+         INSERT INTO decoy.world_states (user_id, novel_id) \
+             SELECT user_id, novel_id FROM public.world_turns; \
+         ALTER TABLE public.world_turns \
+         DROP CONSTRAINT world_turns_world_state_fkey, \
+         ADD CONSTRAINT world_turns_world_state_fkey \
+             FOREIGN KEY (user_id, novel_id) \
+             REFERENCES decoy.world_states(user_id, novel_id) ON DELETE CASCADE",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    assert!(!shadowed_readiness.is_ready().await);
+    sqlx::raw_sql(
+        "ALTER TABLE public.world_turns \
+         DROP CONSTRAINT world_turns_world_state_fkey, \
+         ADD CONSTRAINT world_turns_world_state_fkey \
+             FOREIGN KEY (user_id, novel_id) \
+             REFERENCES public.world_states(user_id, novel_id) ON DELETE CASCADE",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    assert!(shadowed_readiness.is_ready().await);
+    shadowed.close().await;
+    sqlx::query("DROP SCHEMA decoy CASCADE")
+        .execute(&fresh)
+        .await
+        .unwrap();
+    assert!(narrative_readiness.is_ready().await);
+
     sqlx::raw_sql(
         "DROP INDEX public.idx_chat_turns_one_in_progress; \
          CREATE UNIQUE INDEX idx_chat_turns_one_in_progress \
