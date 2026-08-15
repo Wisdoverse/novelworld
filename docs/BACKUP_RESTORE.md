@@ -29,9 +29,14 @@ implementation judged against them:
 6. **Verified inventory.** The attestation inventory lists only verified
    digests, including the primary artifact's erasure export.
 
-None of these weakens a recovery target, a drill, or the resurrection
-guardrail; 1 and 6 strengthen v1, and 2–5 replace inference-hostile v1
-wording with the decided contract.
+None of these weakens a recovery target, a drill bound, or the
+resurrection guardrail; 1 and 6 strengthen v1, and 2–5 replace
+inference-hostile v1 wording with the decided contract. Two consequences
+are declared rather than hidden: a crash during a routine restore
+escalates the retry to disaster gating with no RTO target, and a
+token-less legacy artifact's restore cannot collect the reachable
+database's export, leaving post-artifact deletions to the disaster
+gate's compensating controls (undecided-erase and owner confirmation).
 
 Status: **approved policy; implementation pending.** This document is the
 versioned recovery policy required by H1 in [`ROADMAP.md`](./ROADMAP.md). It
@@ -122,8 +127,10 @@ The scripted restore procedure, in order:
 1. **Install preserved secrets** (`.env`, `BACKUP_ENCRYPTION_KEY`) per the
    custody prerequisite.
 2. **Verify** the artifact against its checksum manifest and refuse to
-   proceed on any mismatch or on a missing/invalid encryption key. No data
-   is changed before verification passes.
+   proceed on any mismatch or on a missing/invalid encryption key, and
+   compare the manifest's lineage token with the token inside the
+   verified dump — a mismatch between present tokens or asymmetric
+   absence aborts here. No data is changed before verification passes.
 3. **Stop writes**: stop application services (or confirm they are not
    running) before any erasure-record export, so no deletion can commit
    between export and replacement.
@@ -166,7 +173,10 @@ The scripted restore procedure, in order:
    designate it. The restore records an automatic attestation row for it
    with decision `replayed`, carrying the same window bounds, inventory,
    operator identity, and timestamp, so restore-level audit provenance is
-   preserved without operator burden. The script then, before any service
+   preserved without operator burden — the attestation rows, not the
+   parent marker, are what distinguish a token-less restore from a
+   genesis database. A decision naming such an account is rejected, and
+   the drill asserts the rejection alongside the row. The script then, before any service
    starts,
    writes erasure records for every erase-decided account and for every
    novel not on a retained account's retained list, and replays them, so
@@ -194,12 +204,16 @@ The scripted restore procedure, in order:
 Every database carries exactly one lineage token: a version-4 UUID created
 by the standard migration path only when no token exists. Ordinary
 deployments and migration replays preserve it unchanged; only a restore
-regenerates it. The backup script records the token in the manifest, and
+regenerates it. The backup script records the token in the manifest from the same
+snapshot as the dump, and
 the restore compares the manifest token with the token inside the
 verified dump: a mismatch between two present tokens, or one present
-without the other, is tampering and aborts. A wholly token-less artifact
-— every backup made before this feature — restores through the disaster
-gate, because an absent token never establishes continuation. Live
+without the other, is tampering and aborts. A wholly token-less artifact — one produced by the scripted backup
+before the lineage token existed, a set that is empty unless the script
+ships ahead of the token migration — restores through the disaster gate,
+because an absent token never establishes continuation; pre-policy raw
+dumps without manifests remain non-conformant and fail verification
+regardless. Live
 continuation is established only by the reachable database's token
 equalling the artifact's. The restore regenerates the token as a fresh
 version-4 UUID atomically with making the restored data reachable,
@@ -308,11 +322,14 @@ token-bearing artifact produce distinct tokens, each recording the
 artifact's token as parent; a manifest whose token disagrees with its
 dump, or where exactly one of the pair is absent, is refused; a wholly
 token-less artifact restores through the disaster gate with an
-absent-parent token recorded; a retry after a failure injected between
-the restored data becoming reachable and the token regeneration
-committing still faces the gate rather than appearing lineage-matching;
-and an account covered by a collected erasure record produces an
-automatic `replayed` attestation row carrying the full field set.
+absent-parent token recorded; a retry after a failure injected after the dump load and before the
+atomic commit that makes the restored data reachable with its
+regenerated token — and again after that commit — still faces the gate
+rather than appearing lineage-matching;
+and, after deleting the third account post-artifact and taking a newer
+artifact held as an erasure source, the collected record covering that
+account produces an automatic `replayed` attestation row carrying the
+full field set, with no operator decision accepted for it.
 
 Negative cases: a corrupted artifact and a wrong or missing encryption key
 must fail closed with actionable errors before any data change; erasure

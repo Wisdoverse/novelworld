@@ -1220,8 +1220,8 @@ The authoritative PostgreSQL database is recoverable under the versioned policy 
    as the dump, and record that snapshot's covered-through timestamp and the lineage token.
    The restore procedure MUST abort when the manifest token and the token inside the verified
    dump mismatch or exactly one of them is absent; a wholly token-less artifact MUST restore
-   through the disaster gate, because an absent token never establishes continuation. It
-   MUST stop application writes before exporting
+   through the disaster gate, because an absent token never establishes continuation. The
+   restore procedure MUST stop application writes before exporting
    erasure records, MUST treat a reachable database as live continuation only when its
    lineage token equals the artifact's, MUST replay the union of every available erasure
    source, MUST abort when sources disagree on a deletion fact of the same subject (the
