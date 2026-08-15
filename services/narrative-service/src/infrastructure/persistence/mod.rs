@@ -26,7 +26,7 @@ impl ReadinessProbe for PgReadinessProbe {
                 Duration::from_secs(2),
                 sqlx::query_scalar::<_, bool>(
                     r#"
-                    SELECT pg_catalog.count(*) = 20
+                    SELECT pg_catalog.count(*) = 18
                        AND (
                            SELECT pg_catalog.count(*) = 2
                            FROM pg_catalog.pg_index AS index_definition
@@ -40,11 +40,92 @@ impl ReadinessProbe for PgReadinessProbe {
                             AND index_relation.relname = expected_index.name
                            WHERE index_definition.indrelid = 'public.world_turns'::pg_catalog.regclass
                        )
+                       -- Catalog columns only: pg_get_constraintdef() deparses
+                       -- the parent table name relative to search_path, so a
+                       -- cascading key onto a decoy schema's clone reads
+                       -- identically while the real one fails to match.
+                       AND EXISTS (
+                           SELECT 1
+                           FROM pg_catalog.pg_constraint AS node_scope_fk
+                           WHERE node_scope_fk.conrelid =
+                                     'public.user_choices'::pg_catalog.regclass
+                             AND node_scope_fk.confrelid =
+                                     'public.narrative_nodes'::pg_catalog.regclass
+                             AND node_scope_fk.conname = 'user_choices_node_scope_fkey'
+                             AND node_scope_fk.contype::pg_catalog.text = 'f'
+                             AND node_scope_fk.confdeltype::pg_catalog.text = 'c'
+                             AND node_scope_fk.convalidated
+                             AND node_scope_fk.conkey = ARRAY[(
+                                     SELECT child.attnum
+                                     FROM pg_catalog.pg_attribute AS child
+                                     WHERE child.attrelid = node_scope_fk.conrelid
+                                       AND child.attname = 'node_id'
+                                 ), (
+                                     SELECT child.attnum
+                                     FROM pg_catalog.pg_attribute AS child
+                                     WHERE child.attrelid = node_scope_fk.conrelid
+                                       AND child.attname = 'novel_id'
+                                 ), (
+                                     SELECT child.attnum
+                                     FROM pg_catalog.pg_attribute AS child
+                                     WHERE child.attrelid = node_scope_fk.conrelid
+                                       AND child.attname = 'chapter_number'
+                                 )]
+                             AND node_scope_fk.confkey = ARRAY[(
+                                     SELECT parent.attnum
+                                     FROM pg_catalog.pg_attribute AS parent
+                                     WHERE parent.attrelid = node_scope_fk.confrelid
+                                       AND parent.attname = 'id'
+                                 ), (
+                                     SELECT parent.attnum
+                                     FROM pg_catalog.pg_attribute AS parent
+                                     WHERE parent.attrelid = node_scope_fk.confrelid
+                                       AND parent.attname = 'novel_id'
+                                 ), (
+                                     SELECT parent.attnum
+                                     FROM pg_catalog.pg_attribute AS parent
+                                     WHERE parent.attrelid = node_scope_fk.confrelid
+                                       AND parent.attname = 'chapter_number'
+                                 )]
+                       )
+                       AND EXISTS (
+                           SELECT 1
+                           FROM pg_catalog.pg_constraint AS world_state_fk
+                           WHERE world_state_fk.conrelid =
+                                     'public.world_turns'::pg_catalog.regclass
+                             AND world_state_fk.confrelid =
+                                     'public.world_states'::pg_catalog.regclass
+                             AND world_state_fk.conname = 'world_turns_world_state_fkey'
+                             AND world_state_fk.contype::pg_catalog.text = 'f'
+                             AND world_state_fk.confdeltype::pg_catalog.text = 'c'
+                             AND world_state_fk.convalidated
+                             AND world_state_fk.conkey = ARRAY[(
+                                     SELECT child.attnum
+                                     FROM pg_catalog.pg_attribute AS child
+                                     WHERE child.attrelid = world_state_fk.conrelid
+                                       AND child.attname = 'user_id'
+                                 ), (
+                                     SELECT child.attnum
+                                     FROM pg_catalog.pg_attribute AS child
+                                     WHERE child.attrelid = world_state_fk.conrelid
+                                       AND child.attname = 'novel_id'
+                                 )]
+                             AND world_state_fk.confkey = ARRAY[(
+                                     SELECT parent.attnum
+                                     FROM pg_catalog.pg_attribute AS parent
+                                     WHERE parent.attrelid = world_state_fk.confrelid
+                                       AND parent.attname = 'user_id'
+                                 ), (
+                                     SELECT parent.attnum
+                                     FROM pg_catalog.pg_attribute AS parent
+                                     WHERE parent.attrelid = world_state_fk.confrelid
+                                       AND parent.attname = 'novel_id'
+                                 )]
+                       )
                     FROM pg_catalog.pg_constraint AS actual
                     JOIN (VALUES
                         ('public.narrative_nodes'::pg_catalog.regclass, 'narrative_nodes_identity_key', 'u', 'UNIQUE (id, novel_id, chapter_number)'),
                         ('public.user_choices'::pg_catalog.regclass, 'user_choices_user_node_key', 'u', 'UNIQUE (user_id, node_id)'),
-                        ('public.user_choices'::pg_catalog.regclass, 'user_choices_node_scope_fkey', 'f', 'FOREIGN KEY (node_id, novel_id, chapter_number) REFERENCES narrative_nodes(id, novel_id, chapter_number) ON DELETE CASCADE'),
                         ('public.user_choices'::pg_catalog.regclass, 'user_choices_chapter_check', 'c', 'CHECK ((chapter_number >= 1))'),
                         ('public.user_choices'::pg_catalog.regclass, 'user_choices_index_check', 'c', 'CHECK ((choice_index >= 0))'),
                         ('public.user_choices'::pg_catalog.regclass, 'user_choices_text_check', 'c', 'CHECK ((choice_text <> ''''::text))'),
@@ -55,7 +136,6 @@ impl ReadinessProbe for PgReadinessProbe {
                         ('public.user_choices'::pg_catalog.regclass, 'user_choices_transition_not_null', 'n', 'NOT NULL transition'),
                         ('public.player_chapters'::pg_catalog.regclass, 'player_chapters_user_id_novel_id_chapter_number_key', 'u', 'UNIQUE (user_id, novel_id, chapter_number)'),
                         ('public.world_turns'::pg_catalog.regclass, 'world_turns_pkey', 'p', 'PRIMARY KEY (id)'),
-                        ('public.world_turns'::pg_catalog.regclass, 'world_turns_world_state_fkey', 'f', 'FOREIGN KEY (user_id, novel_id) REFERENCES world_states(user_id, novel_id) ON DELETE CASCADE'),
                         ('public.world_turns'::pg_catalog.regclass, 'world_turns_request_fingerprint_check', 'c', 'CHECK ((octet_length(request_fingerprint) = 32))'),
                         ('public.world_turns'::pg_catalog.regclass, 'world_turns_action_check', 'c', 'CHECK ((jsonb_typeof(action) = ''object''::text))'),
                         ('public.world_turns'::pg_catalog.regclass, 'world_turns_expected_turn_check', 'c', 'CHECK ((expected_turn_number >= 0))'),
