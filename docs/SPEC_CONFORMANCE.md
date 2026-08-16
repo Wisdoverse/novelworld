@@ -75,7 +75,8 @@ state in two places.
 | §5.3 — non-empty, sequential chapters | Verified | H1 | E2 |
 | §5.4 — structured character output validation and case-insensitive merge | Verified | H1 | E2 |
 | §5.4 — complete repeated-character coverage and 50-character cost bound | Intended gap | H1 | E2 shows heuristic/model extraction without a release corpus or enforced final cap |
-| §5.5 — requested world-summary fields and persistence | Verified | H1 | E2 |
+| §5.5 — world-summary persistence and non-empty validation | Verified | H1 | E2; enrichment commits the summary atomically with the chapter count |
+| §5.5 — faction and unique-world-rule summary dimensions | Intended gap | H1, H3 | E2's extraction prompt requests background/era/location/core-conflict only; SPEC §5.5 also lists major factions and unique world rules |
 | §5.5 — 2,000-character world-summary maximum | Intended gap | H1 | E2 validates non-empty output but does not enforce this maximum |
 | §5.6 — bounded, schema-valid node candidates, persistence, and 2–3 choices | Verified | H1, H4 | E2, E4; only Simplified Chinese is in the current generated path |
 | §5.7 — avatar failure cannot block import readiness | Verified | H1 | E0, E2 |
@@ -115,7 +116,7 @@ state in two places.
 | §12.4.3 — artifacts embed same-snapshot erasure exports with covered-through timestamps; restore stops writes, replays the union of sources, aborts on conflicting deletion facts with the retained-source marker merging monotonically, establishes live continuation only by equality of the create-once version-4 lineage token (manifest and dump tokens must agree with asymmetric absence aborting; wholly token-less artifacts restore through the disaster gate; restores regenerate the token atomically with reachability, recording the artifact token — or its recorded absence — as parent), refuses non-empty residual windows except through attest-or-erase (every account not covered by a collected record decided retain-with-listed-novels or erase; collected-record accounts get automatic `replayed` attestation rows; erasure records written and replayed for erased accounts and unlisted novels before services start; all rows durably recorded with subject, decision, both window bounds, the verified artifact digest inventory, operator identity, and timestamp), never contains an undecided subject or serves one covered by any erasure record, rotates the JWT secret and deletes all persisted refresh tokens after verification and before services start, clears runtime configuration on final-account removal, and requires designating a retained administrator when decisions would leave none | Verified | H1 | E9; the sidecar export and the manifest's lineage token are both cut out of the single `pg_dump` stream, so manifest and dump agree by construction and the export cannot diverge from the dump; the covered-through timestamp is read immediately before that snapshot opens — never the archive-write time, and conservatively early, so a derived window is a superset. Drill C proves the token lifecycle end to end: migration replay preserves the token, two restores of one artifact produce distinct tokens each recording the artifact's as parent, a manifest disagreeing with its dump and an asymmetric absence are refused, a wholly token-less artifact restores only through the gate with an absent parent, and a failure injected before the atomic load/regenerate commit leaves no reachable data while one injected after it leaves the regenerated token — both retries face the gate. Continuation is token equality alone, so an unrelated or sibling database is gated. Collected-record accounts are excluded from the decisions the operator supplies and from the prompt's novel inventory, are rejected if named, and receive automatic `replayed` attestation rows with the full field set. Manifest and decision UUIDs, digests and timestamps are shape-checked whole-value, with timestamps additionally calendar-checked by the server that stores them, and the free-form operator identity is quote-doubled, an inverted window aborts, and the recorded inventory names only digests this run verified, labelled by what they cover |
 | §12.4.4 — scripted, encrypted, integrity-verified artifacts and fail-closed restore on corrupt or unverifiable input | Verified | H1 | E9; AES-256-CBC with PBKDF2 at 200 000 iterations, a SHA-256 manifest verified before any data change, artifacts written under temporary names and renamed only once all three outputs exist, and drill negatives for a corrupted artifact, a wrong key, and tampered manifest metadata. The ≤ 30 minute RTO scale rehearsal is not part of this evidence: [`scale_rehearsal.sh`](../infra/backup/scale_rehearsal.sh) is tooling only, never runs in CI, and its recorded run remains separate release evidence |
 | §12.4.5 — erasure records excluded from account export and free of source text, messages, profile data, and credentials | Verified | H1 | E9; the journal's column set is asserted directly, and both the production export port and the end-to-end export exclude erased subjects and the journal itself |
-| §13.1 — FSD import direction | Verified | H4 | E7 and frontend CI |
+| §13.1 — FSD import direction | Intended gap | H4 | E7; the slice structure exists but no import-direction lint or test enforces it — frontend CI builds but does not verify boundaries |
 | §13.2–§13.3 — standalone import route/wizard and named progress component | Obsolete/corrected | H0 | Removed implementation prescriptions; the shelf and reader own those user outcomes directly |
 | §13.3 — chat preserves reading context and branch choice blocks advancement | Verified | H4 | E7 |
 | §13.4 — declared visual tokens and reading typography | Verified | H4 | E7; this is not WCAG qualification |
@@ -158,6 +159,12 @@ state in two places.
    Roadmap gates.
 
 The candidate [`qualification policy`](./QUALIFICATION_POLICY.md) owns the
-journey/evaluation slices and threshold process. Open H0 work after these
-candidates remains independent adversarial overclaim approval and the
-clean-checkout verification entry point.
+journey/evaluation slices and threshold process. Remaining H0 gates after
+these candidates are: the current-truth and contract reviews, the independent
+adversarial overclaim review (agent-supplied evidence recorded in
+[#123](https://github.com/schorsch888/novelworld/issues/123); it is not human
+sign-off), qualification-policy approval, the verified-dispatch `make verify`
+record, and required CI on the final commit. This matches the ROADMAP H0 exit
+evidence list and [`PRODUCT_CONTRACT.md`](./PRODUCT_CONTRACT.md), which names
+the independent maintainer, product, security, accessibility, and legal
+reviews that remain human gates.
