@@ -28,6 +28,8 @@ def verify(record):
     require("job completed", record["job_status"] == "completed")
     require("no failure code", record["failure_code"] is None)
     require("novel ready", record["novel_status"] == "ready")
+    require("attempts inside import-provider-budget-v1",
+            1 <= record["attempt"] <= 3)
     require("chapters exactly committed total",
             record["chapter_count"] == record["total_chapters"] == 2)
     require("exactly one character", record["character_count"] == 1)
@@ -56,6 +58,7 @@ base = {
     "calls_before": 0,
     "calls_after": 0,
     "retry_status": 409,
+    "attempt": 2,
 }
 
 tampered = [
@@ -66,6 +69,7 @@ tampered = [
     ("provider call for completed work must fail",
      dict(base, phase="completed", calls_after=1)),
     ("ready import retry must fail", dict(base, phase="completed", retry_status=200)),
+    ("attempt beyond the budget ceiling must fail", dict(base, attempt=4)),
 ]
 for label, record in tampered:
     if not verify(record):
@@ -157,6 +161,7 @@ wait_ready() {
 phase_record() {
   local novel_id=$1 phase=$2 character_md5_before=$3 calls_before=$4 calls_after=$5 retry_status=$6 state
   state=$(db "SELECT \
+        job.attempt || ':' || \
         job.stage || ':' || job.status || ':' || COALESCE(job.failure_code, '-') || ':' || \
         novel.status::text || ':' || \
         (SELECT COUNT(*) FROM chapters WHERE novel_id = novel.id) || ':' || \
@@ -173,10 +178,11 @@ import sys
 
 state, phase, character_md5_before = sys.argv[1], sys.argv[2], sys.argv[3]
 calls_before, calls_after, retry_status = sys.argv[4], sys.argv[5], sys.argv[6]
-job_stage, job_status, failure_code, novel_status, chapter_count, total_chapters, \
-    character_count, canon_count, character_md5 = state.split(":")
+attempt, job_stage, job_status, failure_code, novel_status, chapter_count, \
+    total_chapters, character_count, canon_count, character_md5 = state.split(":")
 print(json.dumps({
     "phase": phase,
+    "attempt": int(attempt),
     "job_stage": job_stage,
     "job_status": job_status,
     "failure_code": None if failure_code == "-" else failure_code,
@@ -211,6 +217,8 @@ def require(name, condition):
 require("job completed", record["job_status"] == "completed")
 require("no failure code", record["failure_code"] is None)
 require("novel ready", record["novel_status"] == "ready")
+require("attempts inside import-provider-budget-v1",
+        1 <= record["attempt"] <= 3)
 require("chapters exactly committed total",
         record["chapter_count"] == record["total_chapters"] == 2)
 require("exactly one character", record["character_count"] == 1)
