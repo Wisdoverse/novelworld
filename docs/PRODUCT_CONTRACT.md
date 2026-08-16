@@ -76,7 +76,7 @@ provider-hosted image bytes, operator logs, or backups.
 | Branching and open-world action | Structurally verified for one player timeline | Deterministic commit/replay evidence does not prove live causal coherence or usability | H4 |
 | Assume a canonical character identity | Accepted legacy/experimental path, unsupported as a product promise | The primary open-world contract is an original `PlayerEntity`; the alternate agency model is unresolved | H4 |
 | No spoilers | Structurally bounded, not guaranteed | Server-owned progress filters lore and committed memory, but an untrusted model can still produce incorrect text | H3, H4 |
-| Retry/restart without duplicate committed chat, world, or import authority | Structurally verified at persisted boundaries | Import attempts fence source-stage chapter replacement, chapter-node, character/relationship, enrichment, and canon commits; live dependency and long-window recovery evidence remain incomplete | H1, H5 |
+| Retry/restart without duplicate committed chat, world, or import authority | Structurally verified at persisted boundaries | Import attempts fence source-stage chapter replacement, chapter-node, character/relationship, enrichment, and canon commits; live kill drills at the `chapters` and `enriched` boundaries pass in CI; live dependency and long-window recovery evidence remains a H1/H5 gate | H1, H5 |
 | Complete export and deletion | Structurally verified within the documented application boundary | Provider/operator data and non-atomic backups remain outside the portable export and application erasure boundary | H2, H5 |
 
 ## Resolved documentation conflicts
