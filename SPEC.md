@@ -635,6 +635,24 @@ Characters beyond the cap remain available without generated avatars. The
 provider owns image-byte retention and deletion unless a future reviewed change
 adds a NovelWorld-owned media lifecycle.
 
+### 5.8 Extraction Quality Gates
+
+Each supported positive extraction slice MUST meet the versioned
+`extraction-quality` policy (`docs/EXTRACTION_QUALITY.md`) before it can claim
+qualification:
+
+1. Every positive case MUST produce a non-empty, structurally valid accepted
+   canon; malformed and unsupported inputs MUST reach their expected bounded,
+   actionable errors and are labeled separately.
+2. Accepted canon facts MUST meet the approved per-category coverage,
+   precision/hallucination, chronology, and provenance thresholds on the
+   versioned corpus.
+3. Rejecting every input or producing an empty accepted canon MUST NOT pass
+   any gate.
+4. Recorded evaluation MUST be deterministic and required in CI; live
+   evaluation MUST record provider, model, corpus/rubric versions, and the
+   exact commit, and MUST fail closed on malformed judge output.
+
 ---
 
 ## 6. Character Agent System
