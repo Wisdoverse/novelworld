@@ -23,7 +23,7 @@ use crate::domain::ports::{
 use crate::domain::repositories::{
     CanonStoryModelRepository, ChapterRepository, CharacterRelationshipRecord, CharacterRepository,
     ImportClaim, LoreExcerpt, NovelRepository, ReadingProgressRecord, ReadingProgressRepository,
-    SourceFileDeletionRepository,
+    SourceFileDeletionRepository, IMPORT_BUDGET_EXHAUSTED_MESSAGE,
 };
 use crate::domain::services::{canon_story_extractor, node_detector};
 use crate::domain::services::{
@@ -380,11 +380,22 @@ impl NovelCommandHandler {
         // import budget is enforced again after the replayed split.
 
         let admission = self.try_admit_import(user_id)?;
-        let claim = self
-            .novel_repo
-            .claim_import(novel_id, user_id)
-            .await?
-            .ok_or(ImportRetryConflict("Import cannot be retried"))?;
+        let claim = match self.novel_repo.claim_import(novel_id, user_id).await? {
+            Some(claim) => claim,
+            None => {
+                // A claim at the import-provider budget ceiling terminates the
+                // job; surface its guidance without any provider call.
+                let novel = self.novel_repo.find_by_id(novel_id).await?;
+                if novel
+                    .as_ref()
+                    .and_then(|novel| novel.parse_error.as_deref())
+                    == Some(IMPORT_BUDGET_EXHAUSTED_MESSAGE)
+                {
+                    return Err(ImportRetryConflict(IMPORT_BUDGET_EXHAUSTED_MESSAGE).into());
+                }
+                return Err(ImportRetryConflict("Import cannot be retried").into());
+            }
+        };
         self.spawn_claimed_import(claim, admission);
         Ok(())
     }

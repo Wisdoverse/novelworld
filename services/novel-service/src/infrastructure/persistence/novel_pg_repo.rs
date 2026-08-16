@@ -7,7 +7,10 @@ use crate::domain::entities::{
     chapter::{chapters_are_importable, Chapter},
     novel::Novel,
 };
-use crate::domain::repositories::{ImportClaim, NovelRepository, RecoverableImport};
+use crate::domain::repositories::{
+    ImportClaim, NovelRepository, RecoverableImport, IMPORT_BUDGET_EXHAUSTED_MESSAGE,
+    MAX_IMPORT_ATTEMPTS,
+};
 use crate::domain::value_objects::{DeviationMode, ImportStage, NovelStatus};
 use crate::infrastructure::persistence::chapter_pg_repo::save_batch_in_transaction;
 
@@ -18,6 +21,45 @@ pub struct NovelPgRepository {
 impl NovelPgRepository {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// `import-provider-budget-v1`: a claimable job at the attempt ceiling is
+    /// terminally failed with `budget_exhausted`; recovery and retry must
+    /// never reclaim it.
+    async fn mark_import_budget_exhausted(&self, novel_id: Uuid, user_id: Uuid) -> Result<()> {
+        let mut transaction = self.pool.begin().await?;
+        let job = sqlx::query(
+            r#"
+            UPDATE novel_import_jobs AS job
+            SET status = 'failed', failure_code = 'budget_exhausted',
+                lease_expires_at = NULL, updated_at = NOW()
+            FROM novels AS owned
+            WHERE job.novel_id = owned.id
+              AND job.novel_id = $1
+              AND owned.user_id = $2
+              AND job.attempt >= $3
+              AND job.status <> 'completed'
+              AND (job.status <> 'failed' OR job.failure_code IS DISTINCT FROM 'budget_exhausted')
+            "#,
+        )
+        .bind(novel_id)
+        .bind(user_id)
+        .bind(MAX_IMPORT_ATTEMPTS)
+        .execute(&mut *transaction)
+        .await?;
+        if job.rows_affected() == 1 {
+            sqlx::query(
+                "UPDATE novels \
+                 SET status = 'error'::novel_status, parse_error = $2, updated_at = NOW() \
+                 WHERE id = $1 AND status <> 'ready'::novel_status",
+            )
+            .bind(novel_id)
+            .bind(IMPORT_BUDGET_EXHAUSTED_MESSAGE)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
     }
 }
 
@@ -131,6 +173,7 @@ impl NovelRepository for NovelPgRepository {
                     failure_code = NULL, updated_at = NOW()
                 WHERE job.novel_id = $1
                   AND job.stage IN ('source', 'chapters', 'enriched')
+                  AND job.attempt < $3
                   AND EXISTS (
                       SELECT 1 FROM novels AS owned
                       WHERE owned.id = job.novel_id AND owned.user_id = $2
@@ -150,8 +193,12 @@ impl NovelRepository for NovelPgRepository {
         )
         .bind(novel_id)
         .bind(user_id)
+        .bind(MAX_IMPORT_ATTEMPTS)
         .fetch_optional(&self.pool)
         .await?;
+        if row.is_none() {
+            self.mark_import_budget_exhausted(novel_id, user_id).await?;
+        }
         row.map(ImportClaimRow::into_domain).transpose()
     }
 
