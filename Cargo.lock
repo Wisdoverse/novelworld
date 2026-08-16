@@ -1858,6 +1858,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "h1-eval"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "encoding_rs",
+ "llm-client",
+ "novel-service",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "h2"
 version = "0.3.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"

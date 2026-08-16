@@ -1,0 +1,141 @@
+{
+  "schema_version": 1,
+  "corpus_version": "h1-extraction-v1",
+  "rubric_version": "h1-extraction-rubric-v1",
+  "thresholds": {
+    "import_success_basis_points": 10000,
+    "recall_basis_points": 800,
+    "precision_basis_points": 800,
+    "max_hallucination_basis_points": 200,
+    "max_chronology_violations": 0,
+    "provenance_basis_points": 10000
+  },
+  "positive_cases": [
+    {
+      "id": "zh-txt-utf8-01",
+      "language": "zh",
+      "encodings": ["utf8", "gbk"],
+      "file_name": "story.txt",
+      "content_type": "text/plain",
+      "chapters": [
+        "第一章 风暴前夜\n林岚握紧手中的旧地图，望向被风暴笼罩的北塔，决定在天黑前寻找失踪的守门人。边城的钟声连续响了三次，街道上的人们纷纷关紧门窗。林岚仍站在石桥中央，逐一核对地图上的暗号，并请你留意河岸新出现的足迹。远处的塔灯忽明忽暗，仿佛有人正用最后的力气发出求救信号。你们约定不替彼此作决定，却要共同承担进入风暴的后果。",
+        "第二章 北塔回声\n北塔的石门布满潮湿苔痕，林岚在门边发现守门人留下的铜铃。铃身刻着通往地下回廊的路线，也写明只有彼此信任的同行者才能安全通过。风暴压低了天空，城墙上的火把依次熄灭。你与林岚交换各自找到的线索，确认失踪并非意外。塔内传来沉重脚步，旧地图上从未标注的房间正在缓缓开启，而边城的命运也随这一刻发生变化。"
+      ],
+      "anchors_first_chapter": ["林岚", "守门人"],
+      "anchors_anywhere": ["北塔", "铜铃"],
+      "expected": {
+        "characters": ["林岚", "守门人"],
+        "relationships": ["林岚寻找守门人"],
+        "events": ["风暴逼近边城", "进入北塔调查"],
+        "world_rules": ["铜铃刻有地下回廊路线"],
+        "chronology_pairs": [["风暴逼近边城", "进入北塔调查"]],
+        "provenance_required": true
+      }
+    },
+    {
+      "id": "en-txt-utf8-01",
+      "language": "en",
+      "encodings": ["utf8", "utf16le"],
+      "file_name": "story.txt",
+      "content_type": "text/plain",
+      "chapters": [
+        "Chapter 1 The Storm\nLinlan gripped the faded map and watched the storm swallow the northern tower. She decided to find the missing gatekeeper before nightfall. The city bells rang three times while the streets emptied, and she checked each mark on the map against the fresh footprints along the riverbank. The distant lamp flickered as if someone were signaling with the last of their strength. You agreed not to decide for each other, yet to face the storm together.",
+        "Chapter 2 The Echo\nBehind the mossy gate Linlan found the brass bell the gatekeeper had left. Its surface carried the route to the undercroft and a warning that only travelers who trusted each other could pass safely. The storm lowered the sky as the wall torches died one by one. You exchanged clues and confirmed the disappearance was no accident. Heavy footsteps echoed inside the tower while a room absent from the old map began to open, and the fate of the border city turned with it."
+      ],
+      "anchors_first_chapter": ["Linlan", "gatekeeper"],
+      "anchors_anywhere": ["tower", "brass bell"],
+      "expected": {
+        "characters": ["Linlan", "Gatekeeper"],
+        "relationships": ["Linlan searches for the Gatekeeper"],
+        "events": ["Storm approaches the city", "Enter the tower to investigate"],
+        "world_rules": ["The brass bell carries the undercroft route"],
+        "chronology_pairs": [["Storm approaches the city", "Enter the tower to investigate"]],
+        "provenance_required": true
+      }
+    }
+  ],
+  "negative_cases": [
+    {
+      "id": "neg-invalid-utf16",
+      "kind": "invalid_utf16_text",
+      "expected_error": "invalid_text_encoding"
+    },
+    {
+      "id": "neg-empty",
+      "kind": "empty_text",
+      "expected_error": "empty_document"
+    },
+    {
+      "id": "neg-unsupported",
+      "kind": "unsupported_extension",
+      "expected_error": "unsupported_type"
+    },
+    {
+      "id": "neg-oversized",
+      "kind": "oversized_text",
+      "expected_error": "upload_too_large"
+    }
+  ],
+  "calibration_cases": [
+    {
+      "id": "cal-full-pass",
+      "expected": {
+        "characters": ["林岚", "守门人"],
+        "relationships": ["林岚寻找守门人"],
+        "events": ["风暴逼近边城"],
+        "world_rules": ["铜铃刻有地下回廊路线"],
+        "chronology_pairs": [["风暴逼近边城", "进入北塔调查"]],
+        "provenance_required": true
+      },
+      "accepted": {
+        "characters": ["林岚", "守门人"],
+        "relationships": ["林岚寻找守门人"],
+        "events": ["风暴逼近边城"],
+        "world_rules": ["铜铃刻有地下回廊路线"]
+      },
+      "chronology_violations": 0,
+      "provenance_missing": 0,
+      "expected_pass": true
+    },
+    {
+      "id": "cal-hallucinated-fact",
+      "expected": {
+        "characters": ["林岚"],
+        "relationships": ["林岚寻找守门人"],
+        "events": ["风暴逼近边城"],
+        "world_rules": ["铜铃刻有地下回廊路线"],
+        "chronology_pairs": [["风暴逼近边城", "进入北塔调查"]],
+        "provenance_required": true
+      },
+      "accepted": {
+        "characters": ["林岚", "凭空出现的陌生人"],
+        "relationships": ["林岚寻找守门人"],
+        "events": ["风暴逼近边城"],
+        "world_rules": ["铜铃刻有地下回廊路线"]
+      },
+      "chronology_violations": 0,
+      "provenance_missing": 0,
+      "expected_pass": false
+    },
+    {
+      "id": "cal-chronology-violation",
+      "expected": {
+        "characters": ["林岚"],
+        "relationships": ["林岚寻找守门人"],
+        "events": ["风暴逼近边城", "进入北塔调查"],
+        "world_rules": ["铜铃刻有地下回廊路线"],
+        "chronology_pairs": [["风暴逼近边城", "进入北塔调查"]],
+        "provenance_required": true
+      },
+      "accepted": {
+        "characters": ["林岚"],
+        "relationships": ["林岚寻找守门人"],
+        "events": ["风暴逼近边城", "进入北塔调查"],
+        "world_rules": ["铜铃刻有地下回廊路线"]
+      },
+      "chronology_violations": 1,
+      "provenance_missing": 0,
+      "expected_pass": false
+    }
+  ]
+}

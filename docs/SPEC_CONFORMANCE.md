@@ -81,7 +81,7 @@ state in two places.
 | §5.5 — 2,000-character world-summary maximum | Intended gap | H1 | E2 validates non-empty output but does not enforce this maximum |
 | §5.6 — bounded, schema-valid node candidates, persistence, and 2–3 choices | Verified | H1, H4 | E2, E4; only Simplified Chinese is in the current generated path |
 | §5.7 — avatar failure cannot block import readiness | Verified | H1 | E0, E2 |
-| §5.8 — extraction quality gates per supported positive slice (coverage, precision/hallucination, chronology, provenance, anti-vacuity, deterministic recorded evaluation) | Intended gap | H1 | E0, E2; the [`extraction-quality-v1`](./EXTRACTION_QUALITY.md) policy is approved in this change and the corpus/evaluator it judges lands in the follow-up |
+| §5.8 — extraction quality gates per supported positive slice (coverage, precision/hallucination, chronology, provenance, anti-vacuity, deterministic recorded evaluation) | Verified | H1 | E0, E2; `tools/h1-eval` runs the production extractor/splitter on the versioned `h1-extraction-v1` corpus in deterministic recorded CI mode with mutation-checked self-tests and threshold-enforcing rubric calibration; live provider scoring remains a separate unqualified slice |
 | §6.1 — complete persona, world, progress, identity, and deviation prompt | Intended gap | H3 | E0, E3; the current Agent boundary consumes essentially the name plus other context |
 | §6.1 — voice, identity, memory, and anti-spoiler prompt instructions | Intended gap | H3, H4 | E0, E3; prompt wording is not a behavioral guarantee |
 | §6.2.3 — embedded long-term records and semantic retrieval | Intended gap | H3 | E0, E3 |

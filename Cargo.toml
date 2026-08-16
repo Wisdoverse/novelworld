@@ -10,6 +10,7 @@ members = [
     "crates/llm-client",
     "tests/integration",
     "tools/h3-eval",
+    "tools/h1-eval",
 ]
 
 [workspace.dependencies]
