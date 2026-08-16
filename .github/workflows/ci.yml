@@ -265,6 +265,10 @@ jobs:
             sleep 2
           done
           test "$(docker exec novel-gateway curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8080/ready)" = 200
+      - name: Self-check ingestion recovery verifier
+        run: tests/e2e/ingestion_recovery.sh --self-test
+      - name: Verify restart-safe ingestion recovery boundaries
+        run: tests/e2e/ingestion_recovery.sh
       - name: Verify restart-safe core reader loop
         run: tests/e2e/core_reader_loop.sh
       - name: Run the backup-restore-v1 drills
