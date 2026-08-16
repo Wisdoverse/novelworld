@@ -7,6 +7,15 @@ use crate::domain::entities::{
 };
 use crate::domain::value_objects::ImportStage;
 
+/// `import-provider-budget-v1` (docs/IMPORT_BUDGET.md): a job must not be
+/// claimed more than three times. Enforced by the persistence adapter at the
+/// claim boundary.
+pub const MAX_IMPORT_ATTEMPTS: i64 = 3;
+/// Public, actionable guidance stored on the Novel when the attempt ceiling
+/// is reached; the retry endpoint surfaces it without a provider call.
+pub const IMPORT_BUDGET_EXHAUSTED_MESSAGE: &str =
+    "Import provider budget exhausted; re-upload the source";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportClaim {
     pub novel_id: Uuid,

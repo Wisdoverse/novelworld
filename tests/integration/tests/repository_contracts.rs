@@ -42,7 +42,7 @@ use novel_service::domain::{
     repositories::{
         CanonStoryModelRepository, ChapterRepository, CharacterRelationshipRecord,
         CharacterRepository, NovelRepository, ReadingProgressRepository,
-        SourceFileDeletionRepository,
+        SourceFileDeletionRepository, IMPORT_BUDGET_EXHAUSTED_MESSAGE, MAX_IMPORT_ATTEMPTS,
     },
     value_objects::{CharacterRole, ImportStage},
 };
@@ -966,6 +966,90 @@ async fn failed_source_import_retries_from_the_retained_object() {
             None,
             2
         )
+    );
+}
+
+#[tokio::test]
+async fn import_claims_are_capped_and_terminate_with_budget_exhausted() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let user_id = insert_test_user(&pool, "import-budget").await;
+    let novel = Novel::create(user_id, "Budget ceiling".into(), None);
+    let chapter = Chapter::new(
+        novel.id,
+        1,
+        None,
+        "A durable source chapter for the budget ceiling.".repeat(4),
+    );
+    let repo = NovelPgRepository::new(pool.clone());
+    repo.create_import(&novel, &[chapter]).await.unwrap();
+
+    for expected_attempt in 1..=MAX_IMPORT_ATTEMPTS {
+        let claim = repo.claim_import(novel.id, user_id).await.unwrap().unwrap();
+        assert_eq!(claim.attempt, expected_attempt);
+        assert!(repo
+            .fail_import(novel.id, expected_attempt, "seeded_failure", "seeded")
+            .await
+            .unwrap());
+    }
+
+    // The (ceiling+1)-th claim terminates the job instead of issuing work.
+    assert!(repo
+        .claim_import(novel.id, user_id)
+        .await
+        .unwrap()
+        .is_none());
+    let state: (String, Option<String>, String, Option<String>) = sqlx::query_as(
+        "SELECT job.status, job.failure_code, novel.status::text, novel.parse_error \
+         FROM novel_import_jobs AS job JOIN novels AS novel ON novel.id = job.novel_id \
+         WHERE novel.id = $1",
+    )
+    .bind(novel.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        state,
+        (
+            "failed".into(),
+            Some("budget_exhausted".into()),
+            "error".into(),
+            Some(IMPORT_BUDGET_EXHAUSTED_MESSAGE.into()),
+        )
+    );
+
+    // Recovery never reclaims a budget-exhausted job, and the terminal state
+    // is idempotent.
+    let candidates = repo.recoverable_imports(100).await.unwrap();
+    assert!(!candidates.iter().any(|c| c.novel_id == novel.id));
+    assert!(repo
+        .claim_import(novel.id, user_id)
+        .await
+        .unwrap()
+        .is_none());
+    let unchanged: (String, Option<String>, String, Option<String>) = sqlx::query_as(
+        "SELECT job.status, job.failure_code, novel.status::text, novel.parse_error \
+         FROM novel_import_jobs AS job JOIN novels AS novel ON novel.id = job.novel_id \
+         WHERE novel.id = $1",
+    )
+    .bind(novel.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(state, unchanged);
+
+    // The retry endpoint surfaces the guidance without any provider call.
+    let handler = blocking_import_handler(&pool, None);
+    assert_eq!(
+        handler
+            .retry_import(user_id, novel.id)
+            .await
+            .unwrap_err()
+            .to_string(),
+        IMPORT_BUDGET_EXHAUSTED_MESSAGE
     );
 }
 
