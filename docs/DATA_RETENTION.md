@@ -8,7 +8,7 @@ exists, then the owning delete workflow removes it.
 
 | Data | Storage and retention | Erasure |
 |---|---|---|
-| Uploaded TXT, EPUB, or PDF bytes | With `S3_ENABLED=true`, stored privately under a server-generated key for the lifetime of the novel. With S3 disabled, held only while the request extracts text. | Novel/account deletion atomically queues the object key in PostgreSQL; novel-service deletes it asynchronously and retries with bounded backoff until S3 acknowledges deletion. |
+| Uploaded TXT, EPUB, or PDF bytes | With `S3_ENABLED=true`, stored privately under a server-generated key for the lifetime of the novel and read back during import recovery to replay chapter splitting before any provider work. With S3 disabled, held only while the request extracts text. | Novel/account deletion atomically queues the object key in PostgreSQL; novel-service deletes it asynchronously and retries with bounded backoff until S3 acknowledges deletion. |
 | Extracted source text and lore chunks | PostgreSQL `chapters` and `chapter_chunks`, for the lifetime of the novel. | `DELETE /api/novels/{id}` or account deletion. |
 | Import job metadata | PostgreSQL `novel_import_jobs` stores only stage, status, attempt, lease, and failure code for the lifetime of the novel; it contains no source or model output. | Novel or account deletion cascades the row. It is internal operational state and is excluded from account export. |
 | Characters, relationships, and canonical models | PostgreSQL, for the lifetime of the novel. Avatar bytes are not copied into NovelWorld; only provider-returned URL metadata is stored. | Novel or account deletion removes the rows and URL metadata. |

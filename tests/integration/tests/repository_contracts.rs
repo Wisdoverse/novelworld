@@ -38,7 +38,7 @@ use novel_service::domain::{
     entities::chapter::Chapter,
     entities::character::Character,
     entities::novel::Novel,
-    ports::{ImagePort, LlmPort, NovelLlmTask, PrivacyCleanupPort},
+    ports::{ImagePort, LlmPort, NovelLlmTask, PrivacyCleanupPort, SourceFileStorage},
     repositories::{
         CanonStoryModelRepository, ChapterRepository, CharacterRelationshipRecord,
         CharacterRepository, NovelRepository, ReadingProgressRepository,
@@ -46,6 +46,7 @@ use novel_service::domain::{
     },
     value_objects::{CharacterRole, ImportStage},
 };
+use novel_service::infrastructure::document::EbookTextExtractor;
 use novel_service::infrastructure::persistence::{
     canon_story_model_pg_repo::PgCanonStoryModelRepository, chapter_pg_repo::ChapterPgRepository,
     character_pg_repo::CharacterPgRepository, novel_pg_repo::NovelPgRepository,
@@ -96,7 +97,10 @@ impl PrivacyCleanupPort for NoopNovelPrivacy {
     }
 }
 
-fn blocking_import_handler(pool: &PgPool) -> Arc<NovelCommandHandler> {
+fn blocking_import_handler(
+    pool: &PgPool,
+    source_storage: Option<Arc<dyn SourceFileStorage>>,
+) -> Arc<NovelCommandHandler> {
     Arc::new(NovelCommandHandler {
         novel_repo: Arc::new(NovelPgRepository::new(pool.clone())),
         chapter_repo: Arc::new(ChapterPgRepository::new(pool.clone())),
@@ -105,8 +109,9 @@ fn blocking_import_handler(pool: &PgPool) -> Arc<NovelCommandHandler> {
         llm: Arc::new(BlockingImportLlm),
         image_client: Arc::new(UnusedImage),
         privacy_cleanup: Arc::new(NoopNovelPrivacy),
-        source_storage: None,
+        source_storage,
         source_deletions: Arc::new(PgSourceFileDeletionRepository::new(pool.clone())),
+        document_extractor: Arc::new(EbookTextExtractor),
         import_permits: Arc::new(Semaphore::new(1)),
         active_import_users: Arc::new(Mutex::new(HashSet::new())),
     })
@@ -146,7 +151,7 @@ async fn accepted_import_already_has_durable_chapters_and_claim() {
         .await
         .unwrap();
 
-    let handler = blocking_import_handler(&pool);
+    let handler = blocking_import_handler(&pool, None);
     let novel_id = handler
         .handle_import(ImportNovelCommand {
             user_id,
@@ -221,7 +226,7 @@ async fn startup_recovery_claims_a_pending_import() {
     .await
     .unwrap();
 
-    let recovery = blocking_import_handler(&pool).spawn_import_recovery();
+    let recovery = blocking_import_handler(&pool, None).spawn_import_recovery();
     let state = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             let state = sqlx::query_as::<_, (String, i64, bool)>(
@@ -526,7 +531,7 @@ async fn resumed_import_with_gapped_chapters_fails_with_reupload_guidance() {
     let (user_id, novel_id) =
         seed_gapped_novel(&pool, "error", Some(("chapters", "pending"))).await;
 
-    let handler = blocking_import_handler(&pool);
+    let handler = blocking_import_handler(&pool, None);
     assert_eq!(
         handler
             .retry_import(user_id, novel_id)
@@ -565,6 +570,400 @@ async fn resumed_import_with_gapped_chapters_fails_with_reupload_guidance() {
             Some("source_unavailable".into()),
             "error".into(),
             Some("No parsed chapters are available; re-upload the source".into()),
+        )
+    );
+}
+
+fn retained_novel_text() -> String {
+    format!(
+        "第一章 山门\n{}\n第二章 远行\n{}\n",
+        "风雨欲来，少年站在山门之前，望着云雾深处的石阶。".repeat(8),
+        "他背起行囊，踏上了通往北方冰原的漫漫长路。".repeat(8),
+    )
+}
+
+struct FakeSourceStorage {
+    bytes: Mutex<Option<bytes::Bytes>>,
+    fail: bool,
+    gate: Option<Arc<tokio::sync::Semaphore>>,
+}
+
+impl FakeSourceStorage {
+    fn with_bytes(bytes: Option<bytes::Bytes>) -> Self {
+        Self {
+            bytes: Mutex::new(bytes),
+            fail: false,
+            gate: None,
+        }
+    }
+
+    /// The `get` call parks until the test adds a permit; permits persist even
+    /// when granted before the worker arrives, so this is race-free.
+    fn gated(bytes: bytes::Bytes) -> (Arc<Self>, Arc<tokio::sync::Semaphore>) {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        (
+            Arc::new(Self {
+                bytes: Mutex::new(Some(bytes)),
+                fail: false,
+                gate: Some(gate.clone()),
+            }),
+            gate,
+        )
+    }
+
+    fn failing() -> Self {
+        Self {
+            bytes: Mutex::new(None),
+            fail: true,
+            gate: None,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl SourceFileStorage for FakeSourceStorage {
+    async fn put(&self, _key: &str, _data: bytes::Bytes) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn get(&self, _key: &str) -> anyhow::Result<Option<bytes::Bytes>> {
+        if self.fail {
+            anyhow::bail!("simulated object storage read failure");
+        }
+        if let Some(gate) = &self.gate {
+            gate.acquire().await.unwrap().forget();
+        }
+        Ok(self.bytes.lock().unwrap().clone())
+    }
+
+    async fn delete(&self, _key: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+async fn insert_test_user(pool: &PgPool, label: &str) -> Uuid {
+    let user_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO users (id, email, password_hash) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(format!("{label}-{user_id}@test.invalid"))
+        .bind("not-a-real-password-hash")
+        .execute(pool)
+        .await
+        .unwrap();
+    user_id
+}
+
+async fn poll_import_state(
+    pool: &PgPool,
+    novel_id: Uuid,
+    predicate: impl Fn(&(String, String, String, Option<String>, i64)) -> bool,
+) -> (String, String, String, Option<String>, i64) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let state = sqlx::query_as::<_, (String, String, String, Option<String>, i64)>(
+                "SELECT novel.status::text, job.stage, job.status, job.failure_code, \
+                        (SELECT COUNT(*) FROM chapters WHERE novel_id = novel.id) \
+                 FROM novels AS novel \
+                 JOIN novel_import_jobs AS job ON job.novel_id = novel.id \
+                 WHERE novel.id = $1",
+            )
+            .bind(novel_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if predicate(&state) {
+                break state;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("import state did not reach the expected condition")
+}
+
+#[tokio::test]
+async fn retained_import_accepts_at_source_stage_and_replays_chapters() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let user_id = insert_test_user(&pool, "retained-replay").await;
+    let text = retained_novel_text();
+    let (storage, gate) = FakeSourceStorage::gated(bytes::Bytes::from(text.clone()));
+    let handler = blocking_import_handler(&pool, Some(storage));
+    let novel_id = handler
+        .handle_import(ImportNovelCommand {
+            user_id,
+            title: "Retained replay".into(),
+            author: None,
+            raw_content: Some(text),
+            source_bytes: Some(bytes::Bytes::from(retained_novel_text())),
+            deviation_mode: None,
+        })
+        .await
+        .unwrap();
+
+    // Acceptance committed the source-stage boundary; the worker is parked on
+    // the gated read, so no chapters exist yet and the stage is still `source`.
+    let state = poll_import_state(&pool, novel_id, |state| state.1 == "source").await;
+    assert_eq!(
+        state,
+        (
+            "parsing".into(),
+            "source".into(),
+            "in_progress".into(),
+            None,
+            0
+        )
+    );
+
+    gate.add_permits(1);
+    let state = poll_import_state(&pool, novel_id, |state| state.1 == "chapters").await;
+    assert_eq!(
+        state,
+        (
+            "parsing".into(),
+            "chapters".into(),
+            "in_progress".into(),
+            None,
+            2
+        )
+    );
+    let chapters: Vec<(i32, String)> = sqlx::query_as(
+        "SELECT chapter_number, content FROM chapters \
+         WHERE novel_id = $1 ORDER BY chapter_number",
+    )
+    .bind(novel_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(chapters.len(), 2);
+    assert_eq!(chapters[0].0, 1);
+    assert!(chapters[0].1.contains("山门之前"));
+    assert_eq!(chapters[1].0, 2);
+    assert!(chapters[1].1.contains("北方冰原"));
+}
+
+#[tokio::test]
+async fn source_stage_jobs_are_claimable_at_the_source_boundary() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let user_id = insert_test_user(&pool, "source-claim").await;
+    let mut novel = Novel::create(user_id, "Source claim".into(), None);
+    novel.retain_source_file(format!("source-files/{user_id}/{}", novel.id));
+    let repo = NovelPgRepository::new(pool.clone());
+    repo.create_source_import(&novel).await.unwrap();
+
+    let candidates = repo.recoverable_imports(100).await.unwrap();
+    assert!(
+        candidates.iter().any(|candidate| candidate.novel_id == novel.id),
+        "a pending source-stage job must be a recovery candidate"
+    );
+    // The claim is fenced by (novel_id, attempt) and treats `source` like any
+    // other resumable stage; the claimed worker then replays the object.
+    let claim = repo.claim_import(novel.id, user_id).await.unwrap().unwrap();
+    assert_eq!(claim.stage, ImportStage::Source);
+    assert!(claim.attempt >= 1);
+}
+
+/// Seed a source-stage import that already failed once, so the retry endpoint
+/// (not a recovery scan) is the only actor that can resume it. This keeps the
+/// test deterministic while other tests' recovery loops run concurrently.
+async fn seed_failed_source_import(pool: &PgPool, user_id: Uuid, novel: &Novel) {
+    let repo = NovelPgRepository::new(pool.clone());
+    repo.create_source_import(novel).await.unwrap();
+    let claim = repo.claim_import(novel.id, user_id).await.unwrap().unwrap();
+    assert_eq!(claim.stage, ImportStage::Source);
+    assert!(
+        repo.fail_import(novel.id, claim.attempt, "seeded_failure", "seeded")
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn source_stage_missing_object_fails_with_reupload_guidance() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let user_id = insert_test_user(&pool, "source-missing").await;
+    let mut novel = Novel::create(user_id, "Missing source".into(), None);
+    novel.retain_source_file(format!("source-files/{user_id}/{}", novel.id));
+    seed_failed_source_import(&pool, user_id, &novel).await;
+
+    let storage = Arc::new(FakeSourceStorage::with_bytes(None));
+    let handler = blocking_import_handler(&pool, Some(storage));
+    handler.retry_import(user_id, novel.id).await.unwrap();
+    let state = poll_import_state(&pool, novel.id, |state| state.2 == "failed").await;
+    assert_eq!(
+        state,
+        (
+            "error".into(),
+            "source".into(),
+            "failed".into(),
+            Some("source_missing".into()),
+            0,
+        )
+    );
+    let parse_error: Option<String> =
+        sqlx::query_scalar("SELECT parse_error FROM novels WHERE id = $1")
+            .bind(novel.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        parse_error.as_deref(),
+        Some("The retained source file is missing; re-upload the source")
+    );
+}
+
+#[tokio::test]
+async fn source_stage_storage_failure_marks_a_retryable_error() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let user_id = insert_test_user(&pool, "source-storage-down").await;
+    let mut novel = Novel::create(user_id, "Storage down".into(), None);
+    novel.retain_source_file(format!("source-files/{user_id}/{}", novel.id));
+    seed_failed_source_import(&pool, user_id, &novel).await;
+
+    let storage = Arc::new(FakeSourceStorage::failing());
+    let handler = blocking_import_handler(&pool, Some(storage));
+    handler.retry_import(user_id, novel.id).await.unwrap();
+    let state = poll_import_state(&pool, novel.id, |state| state.2 == "failed").await;
+    assert_eq!(
+        state,
+        (
+            "error".into(),
+            "source".into(),
+            "failed".into(),
+            Some("source_storage_unavailable".into()),
+            0,
+        )
+    );
+    let parse_error: Option<String> =
+        sqlx::query_scalar("SELECT parse_error FROM novels WHERE id = $1")
+            .bind(novel.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        parse_error.as_deref(),
+        Some("Source storage is unavailable; retry the import")
+    );
+}
+
+#[tokio::test]
+async fn replayed_chapter_replacement_is_fenced_and_replaces_legacy_rows() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let user_id = insert_test_user(&pool, "replay-fence").await;
+    let mut novel = Novel::create(user_id, "Fenced replay".into(), None);
+    novel.retain_source_file(format!("source-files/{user_id}/{}", novel.id));
+    let repo = NovelPgRepository::new(pool.clone());
+    repo.create_source_import(&novel).await.unwrap();
+    let claim = repo.claim_import(novel.id, user_id).await.unwrap().unwrap();
+    assert_eq!(claim.stage, ImportStage::Source);
+
+    // Legacy partial/gapped chapters that the replay must replace.
+    sqlx::query(
+        "INSERT INTO chapters (id, novel_id, chapter_number, content) \
+         VALUES ($1, $2, 1, 'Legacy first chapter'), ($3, $2, 3, 'Legacy gapped chapter')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(novel.id)
+    .bind(Uuid::new_v4())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let replayed = vec![
+        Chapter::new(novel.id, 1, None, "Replayed first chapter".repeat(4)),
+        Chapter::new(novel.id, 2, None, "Replayed second chapter".repeat(4)),
+    ];
+    // A stale attempt cannot replace chapters or advance the stage.
+    assert!(!repo
+        .replace_import_chapters(novel.id, claim.attempt + 1, &replayed)
+        .await
+        .unwrap());
+    let stage: String =
+        sqlx::query_scalar("SELECT stage FROM novel_import_jobs WHERE novel_id = $1")
+            .bind(novel.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stage, "source");
+    let legacy_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chapters WHERE novel_id = $1")
+        .bind(novel.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(legacy_count, 2);
+
+    assert!(repo
+        .replace_import_chapters(novel.id, claim.attempt, &replayed)
+        .await
+        .unwrap());
+    let state: (String, i64) = sqlx::query_as(
+        "SELECT job.stage, (SELECT COUNT(*) FROM chapters WHERE novel_id = novel.id) \
+         FROM novels AS novel JOIN novel_import_jobs AS job ON job.novel_id = novel.id \
+         WHERE novel.id = $1",
+    )
+    .bind(novel.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(state, ("chapters".into(), 2));
+    let contents: Vec<String> = sqlx::query_scalar(
+        "SELECT content FROM chapters WHERE novel_id = $1 ORDER BY chapter_number",
+    )
+    .bind(novel.id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(contents[0].starts_with("Replayed first chapter"));
+    assert!(contents[1].starts_with("Replayed second chapter"));
+}
+
+#[tokio::test]
+async fn failed_source_import_retries_from_the_retained_object() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let user_id = insert_test_user(&pool, "source-retry").await;
+    let mut novel = Novel::create(user_id, "Retried source".into(), None);
+    novel.retain_source_file(format!("source-files/{user_id}/{}", novel.id));
+    seed_failed_source_import(&pool, user_id, &novel).await;
+
+    // The retained object becomes readable; the retry endpoint resumes the
+    // import without a new upload.
+    let storage = Arc::new(FakeSourceStorage::with_bytes(Some(bytes::Bytes::from(
+        retained_novel_text(),
+    ))));
+    let handler = blocking_import_handler(&pool, Some(storage));
+    handler.retry_import(user_id, novel.id).await.unwrap();
+    let state = poll_import_state(&pool, novel.id, |state| state.1 == "chapters").await;
+    assert_eq!(
+        state,
+        (
+            "parsing".into(),
+            "chapters".into(),
+            "in_progress".into(),
+            None,
+            2
         )
     );
 }
