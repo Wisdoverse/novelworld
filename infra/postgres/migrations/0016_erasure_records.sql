@@ -34,8 +34,32 @@ CREATE TABLE IF NOT EXISTS public.erasure_records (
         CHECK (subject_type IN ('user', 'novel'))
 );
 
--- Attest-or-erase decisions recorded by the scripted disaster restore. No
--- foreign keys: an erase decision deletes the subject it describes.
+-- ─── Lineage identity ──────────────────────────────────────────────────────
+--
+-- Exactly one create-once version-4 token per database. Ordinary deployments
+-- and migration replays preserve it — the insert only fires into an empty
+-- table — and only a scripted restore regenerates it, recording the artifact's
+-- token as parent. Token equality is the only evidence of live continuation:
+-- row counts and shared UUIDs cannot tell a sibling restore of one artifact
+-- from the lineage that produced it.
+CREATE TABLE IF NOT EXISTS public.database_lineage (
+    token      UUID PRIMARY KEY,
+    parent     UUID,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.now()
+);
+
+-- "Exactly one" as a database invariant rather than a convention.
+CREATE UNIQUE INDEX IF NOT EXISTS database_lineage_singleton
+    ON public.database_lineage ((TRUE));
+
+INSERT INTO public.database_lineage (token)
+SELECT pg_catalog.gen_random_uuid()
+ WHERE NOT EXISTS (SELECT 1 FROM public.database_lineage);
+
+-- Attest-or-erase decisions recorded by the scripted disaster restore, plus the
+-- automatic `replayed` rows that record collected erasure records as the
+-- pre-decided facts they are. No foreign keys: an erase decision deletes the
+-- subject it describes.
 CREATE TABLE IF NOT EXISTS public.restore_attestations (
     id                 UUID PRIMARY KEY DEFAULT pg_catalog.gen_random_uuid(),
     subject_id         UUID NOT NULL,
@@ -49,7 +73,7 @@ CREATE TABLE IF NOT EXISTS public.restore_attestations (
     designated_admin   BOOLEAN NOT NULL DEFAULT FALSE,
     recorded_at        TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.now(),
     CONSTRAINT restore_attestations_decision_check
-        CHECK (decision IN ('retain', 'erase')),
+        CHECK (decision IN ('retain', 'erase', 'replayed')),
     CONSTRAINT restore_attestations_window_check
         CHECK (window_start <= window_end)
 );
@@ -58,6 +82,11 @@ CREATE TABLE IF NOT EXISTS public.restore_attestations (
 -- CREATE TABLE IF NOT EXISTS above leaves such a table untouched.
 ALTER TABLE public.restore_attestations
     ADD COLUMN IF NOT EXISTS designated_admin BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE public.restore_attestations
+    DROP CONSTRAINT IF EXISTS restore_attestations_decision_check;
+ALTER TABLE public.restore_attestations
+    ADD CONSTRAINT restore_attestations_decision_check
+    CHECK (decision IN ('retain', 'erase', 'replayed'));
 ALTER TABLE public.restore_attestations
     DROP CONSTRAINT IF EXISTS restore_attestations_window_check;
 ALTER TABLE public.restore_attestations

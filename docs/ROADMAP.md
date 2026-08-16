@@ -305,8 +305,9 @@ Scope:
   disaster restore whose newest durable erasure source predates the failure
   refuses to complete by default and may continue only through
   attest-or-erase: every restored account receives a durably recorded
-  retain-with-listed-novels or erase decision, and undecided or unretained
-  subjects are erased before any service starts. The declared backup
+  retain-with-listed-novels or erase decision — or an automatic replayed
+  record when a collected erasure record pre-decides it — and undecided or
+  unretained subjects are erased before any service starts. The declared backup
   retention ceiling bounds how stale a restorable backup and its embedded
   erasure source can be.
 - Prove forward-compatible migrations and repair/rollback behavior for the

@@ -144,6 +144,26 @@ verify_file() {
   printf '%s' "$dir/$file"
 }
 
+# First value of one column of one COPY block, selected through the block's own
+# header so column order cannot shift a field.
+copy_column() {
+  awk -v table="$2" -v want="$3" '
+    $0 ~ "^COPY public\\." table " \\(" {
+      header = $0
+      sub(/^[^(]*\(/, "", header)
+      sub(/\).*$/, "", header)
+      gsub(/,/, " ", header)
+      count = split(header, columns, " ")
+      for (i = 1; i <= count; i++) index_of[columns[i]] = i
+      if (!(want in index_of)) exit 3
+      inside = 1
+      next
+    }
+    inside && $0 == "\\." { inside = 0; next }
+    inside { print $index_of[want]; exit }
+  ' "$1"
+}
+
 decrypt() {
   openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:BACKUP_ENCRYPTION_KEY \
     -in "$1" 2>/dev/null | gzip -dc >"$2" ||
@@ -169,9 +189,27 @@ grep -q '^COPY public\.users (' "$work/dump.sql" ||
 # newer artifact that contributed records. A newer artifact's dump is never
 # verified here — it is not restored — so its digest is not claimed.
 inventory="dump:$(manifest_value "$manifest" dump_sha256)"
+inventory="$inventory,erasure:$(manifest_value "$manifest" erasure_sha256)"
 newest_covered_through=$covered_through
 
+# The manifest token must agree with the token inside the verified dump. A
+# disagreement between two present tokens, or one present without the other, is
+# tampering. A wholly token-less artifact is legal — it predates the token
+# migration — but can never establish continuation, so it always faces the
+# disaster gate.
+dump_token=$(copy_column "$work/dump.sql" database_lineage token)
+manifest_token=$(manifest_value "$manifest" lineage_token)
+[ -z "$manifest_token" ] || check_uuid "$manifest_token" "the lineage_token of $manifest"
+if [ -n "$manifest_token" ] && [ -n "$dump_token" ]; then
+  [ "$manifest_token" = "$dump_token" ] ||
+    fail "the manifest lineage token ($manifest_token) disagrees with the dump's ($dump_token)"
+elif [ -n "$manifest_token$dump_token" ]; then
+  fail 'the artifact carries a lineage token in only one of its manifest and dump'
+fi
+artifact_token=$dump_token
+
 index=0
+newer_covered_list=""
 while IFS= read -r newer; do
   [ -n "$newer" ] || continue
   [ -f "$newer" ] || fail "no manifest at $newer"
@@ -181,6 +219,8 @@ while IFS= read -r newer; do
   newer_covered=$(manifest_value "$newer" covered_through)
   [ -n "$newer_covered" ] || fail "$newer has no covered_through timestamp"
   check_timestamp "$newer_covered" "the covered_through of $newer"
+  newer_covered_list="$newer_covered_list$newer_covered
+"
   check_digest "$(manifest_value "$newer" dump_sha256)" "the dump_sha256 of $newer"
   check_digest "$(manifest_value "$newer" erasure_sha256)" "the erasure_sha256 of $newer"
   decrypt "$(verify_file "$newer" erasure erasure_sha256)" "$work/sources/newer-$index.tsv"
@@ -217,8 +257,11 @@ docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null | grep -qx
   fail "postgres container '$container' is not running; start it with: docker compose up -d postgres"
 
 check_calendar "$covered_through" "the covered_through of $manifest"
-[ "$newest_covered_through" = "$covered_through" ] ||
-  check_calendar "$newest_covered_through" 'the newest covered_through'
+while IFS= read -r newer_covered; do
+  [ -z "$newer_covered" ] || check_calendar "$newer_covered" 'a newer artifact covered_through'
+done <<EOF
+$newer_covered_list
+EOF
 [ -z "$declared_failure_time" ] ||
   check_calendar "$declared_failure_time" '--declared-failure-time'
 
@@ -263,33 +306,18 @@ copy_block novels id,user_id >"$work/novels.tsv" ||
   fail 'the dump has no id/user_id columns on novels'
 cut -f1 "$work/accounts.tsv" | sort >"$work/account-ids.txt"
 
-# The current database is an erasure source only when it is this deployment's
-# lineage, and lineage means shared identity with the artifact: a live account
-# the artifact also holds, or a live erasure record whose subject the artifact
-# holds as an account, a novel, or an already-erased subject. UUID v4 makes that
-# impossible across lineages, so a replacement host the operator has already
-# used — even to create and delete an account of its own — is correctly treated
-# as a disaster restore instead of silently closing the residual window.
-# Conservative edge: an artifact taken before first-run setup holds no subject at
-# all, so nothing can intersect it and the disaster gate always applies.
-{
-  cut -f1 "$work/accounts.tsv"
-  cut -f1 "$work/novels.tsv"
-  cut -f2 "$work/sources/artifact.tsv"
-} | sort -u >"$work/artifact-subjects.txt"
-docker exec "$container" psql -U "$pg_user" -d "$pg_db" -At -c \
-  "COPY (SELECT id FROM public.users) TO STDOUT" 2>/dev/null |
-  sort >"$work/live-user-ids.txt" || true
-docker exec "$container" psql -U "$pg_user" -d "$pg_db" -At -c \
-  "COPY (SELECT subject_type, subject_id, user_id, erased_at, had_source
-           FROM public.erasure_records) TO STDOUT" 2>/dev/null >"$work/live.tsv" || true
-cut -f2 "$work/live.tsv" | sort -u >"$work/live-subjects.txt"
-
+# Live continuation is established only by token equality. Row counts and shared
+# UUIDs prove nothing: two restores of one artifact are siblings that share every
+# UUID by construction, and a token-less artifact can never match, so it always
+# faces the disaster gate.
+live_token=$(docker exec "$container" psql -U "$pg_user" -d "$pg_db" -At -c \
+  "SELECT token FROM public.database_lineage" 2>/dev/null || true)
 live_source=false
-if [ -n "$(comm -12 "$work/live-user-ids.txt" "$work/account-ids.txt")" ] ||
-  [ -n "$(comm -12 "$work/live-subjects.txt" "$work/artifact-subjects.txt")" ]; then
+if [ -n "$artifact_token" ] && [ "$live_token" = "$artifact_token" ]; then
   live_source=true
-  mv "$work/live.tsv" "$work/sources/live.tsv"
+  docker exec "$container" psql -U "$pg_user" -d "$pg_db" -At -c \
+    "COPY (SELECT subject_type, subject_id, user_id, erased_at, had_source
+             FROM public.erasure_records) TO STDOUT" >"$work/sources/live.tsv"
   inventory="$inventory,live:$writes_stopped_at"
   newest_covered_through=$writes_stopped_at
 fi
@@ -398,8 +426,8 @@ if [ -n "$decisions" ]; then
 
   while IFS="$tab" read -r decision account; do
     check_uuid "$account" 'a decided account'
-    if [ "$decision" = retain ] && listed "$work/erased-users.txt" "$account"; then
-      fail "account $account is covered by a collected erasure record and cannot be retained"
+    if listed "$work/erased-users.txt" "$account"; then
+      fail "account $account is covered by a collected erasure record; replay enforces it and no decision may name it"
     fi
   done <"$work/decided.tsv"
   cut -f2 "$work/decided.tsv" | sort >"$work/decided-ids.txt"
@@ -476,8 +504,31 @@ printf 'restore: verification passed; loading %s into a clean %s\n' "$dump_file"
 docker exec "$container" psql -U "$pg_user" -d postgres -q \
   -c "DROP DATABASE IF EXISTS $pg_db WITH (FORCE)"
 docker exec "$container" psql -U "$pg_user" -d postgres -q -c "CREATE DATABASE $pg_db"
-docker exec -i "$container" psql -U "$pg_user" -d "$pg_db" -q -v ON_ERROR_STOP=1 \
-  <"$work/dump.sql" >/dev/null
+
+# One transaction: the restored data and its regenerated lineage token become
+# reachable together. A crash before this commits leaves an empty database, and
+# after it the live token is already the new one, so neither a partial nor a
+# completed attempt can ever present the artifact's token as a live lineage —
+# a retry always faces at least the gate the first attempt faced.
+{
+  cat "$work/dump.sql"
+  printf 'CREATE TABLE IF NOT EXISTS public.database_lineage ('
+  printf 'token UUID PRIMARY KEY, parent UUID,'
+  printf ' created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.now());\n'
+  printf 'CREATE UNIQUE INDEX IF NOT EXISTS database_lineage_singleton'
+  printf ' ON public.database_lineage ((TRUE));\n'
+  printf 'DELETE FROM public.database_lineage;\n'
+  printf 'INSERT INTO public.database_lineage (token, parent) VALUES'
+  printf " (pg_catalog.gen_random_uuid(), %s);\n" \
+    "$([ -n "$artifact_token" ] && printf "'%s'" "$artifact_token" || printf NULL)"
+  # Test-only injection point for the drill's crash cases; never set in
+  # operation. Aborting here rolls back the load with the token regeneration.
+  [ "${RESTORE_FAIL_BEFORE_COMMIT:-}" != 1 ] ||
+    printf "DO \$injected\$ BEGIN RAISE EXCEPTION 'injected pre-commit failure'; END \$injected\$;\n"
+} | docker exec -i "$container" psql -U "$pg_user" -d "$pg_db" -q \
+  --single-transaction -v ON_ERROR_STOP=1 >/dev/null
+[ "${RESTORE_FAIL_AFTER_COMMIT:-}" != 1 ] ||
+  fail 'injected post-commit failure'
 
 # The artifact may predate any migration, including the erasure journal itself,
 # so bring the schema forward before writing erasure state into it.
@@ -526,6 +577,18 @@ docker compose run --rm postgres-migrate >/dev/null
         "$account" "$decision" "$window_start" "$window_end" "$inventory" \
         "$(printf '%s' "$operator_identity" | sed "s/'/''/g")" "$designated"
     done <"$work/decided.tsv"
+    # A collected record is the pre-decided fact replay enforces. The operator
+    # never decides it, but the restore still records the provenance, so the
+    # audit trail distinguishes a restore that carried erasures forward from a
+    # genesis database.
+    comm -12 "$work/account-ids.txt" "$work/erased-users.txt" | while read -r covered; do
+      printf "INSERT INTO public.restore_attestations (subject_id, decision,"
+      printf " window_start, window_end, artifact_inventory, operator_identity,"
+      printf " designated_admin)"
+      printf " VALUES ('%s', 'replayed', '%s', '%s', '%s', '%s', FALSE);\n" \
+        "$covered" "$window_start" "$window_end" "$inventory" \
+        "$(printf '%s' "$operator_identity" | sed "s/'/''/g")"
+    done
     [ -z "$designated_admin" ] ||
       printf "UPDATE public.users SET role = 'admin' WHERE id = '%s';\n" "$designated_admin"
   fi
@@ -555,8 +618,12 @@ done
 # erasure record before any service starts.
 docker compose run --rm postgres-migrate >/dev/null
 
+new_token=$(docker exec "$container" psql -U "$pg_user" -d "$pg_db" -At -c \
+  "SELECT token || ' parent=' || COALESCE(parent::pg_catalog.text, 'absent')
+     FROM public.database_lineage")
 printf 'restore: complete.\n'
 printf 'restore:   artifact          %s\n' "$dump_file"
+printf 'restore:   lineage           %s\n' "$new_token"
 printf 'restore:   covered through   %s\n' "$covered_through"
 printf 'restore:   residual window   %s\n' "$window_state"
 printf 'restore:   erasure sources   %s record(s) from %s\n' \

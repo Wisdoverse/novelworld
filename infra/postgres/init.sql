@@ -157,6 +157,23 @@ CREATE TABLE erasure_records (
         CHECK (subject_type IN ('user', 'novel'))
 );
 
+-- ─── 数据库血统标识 ────────────────────────────────────────────────────────
+-- 每个数据库恰有一个版本 4 血统令牌：迁移路径仅在表为空时创建，普通部署与迁移重放
+-- 保持不变，只有脚本化恢复会重新生成并记录父令牌。令牌相等是判断「同一血统」的
+-- 唯一证据：行数或共享 UUID 无法区分同一份存档的两次兄弟恢复。
+
+CREATE TABLE database_lineage (
+    token      UUID PRIMARY KEY,
+    parent     UUID,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.now()
+);
+
+CREATE UNIQUE INDEX database_lineage_singleton ON database_lineage ((TRUE));
+
+INSERT INTO database_lineage (token)
+SELECT pg_catalog.gen_random_uuid()
+ WHERE NOT EXISTS (SELECT 1 FROM database_lineage);
+
 CREATE TABLE restore_attestations (
     id                 UUID PRIMARY KEY DEFAULT pg_catalog.gen_random_uuid(),
     subject_id         UUID NOT NULL,
@@ -169,7 +186,7 @@ CREATE TABLE restore_attestations (
     designated_admin   BOOLEAN NOT NULL DEFAULT FALSE,
     recorded_at        TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.now(),
     CONSTRAINT restore_attestations_decision_check
-        CHECK (decision IN ('retain', 'erase')),
+        CHECK (decision IN ('retain', 'erase', 'replayed')),
     CONSTRAINT restore_attestations_window_check
         CHECK (window_start <= window_end)
 );

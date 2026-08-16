@@ -64,6 +64,8 @@ docker exec "$container" pg_dump -U "$pg_user" -d "$pg_db" \
 # artifact, or the object was already deleted.
 grep -q '^COPY public\.erasure_records (' "$work/dump.sql" ||
   fail 'this database has no erasure_records journal; apply the migrations before backing it up'
+grep -q '^COPY public\.database_lineage (' "$work/dump.sql" ||
+  fail 'this database has no lineage token; apply the migrations before backing it up'
 awk '
   /^COPY public\.erasure_records \(/ {
     header = $0
@@ -97,12 +99,33 @@ encrypt() {
     openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:BACKUP_ENCRYPTION_KEY \
       -out "$2"
 }
+# The manifest token is read out of the dump itself, so manifest and dump agree
+# by construction; the restore still compares them, because an artifact can be
+# edited after it is written.
+lineage_token=$(awk '
+  /^COPY public\.database_lineage \(/ {
+    header = $0
+    sub(/^[^(]*\(/, "", header)
+    sub(/\).*$/, "", header)
+    gsub(/,/, " ", header)
+    count = split(header, columns, " ")
+    for (i = 1; i <= count; i++) index_of[columns[i]] = i
+    if (!("token" in index_of)) exit 3
+    inside = 1
+    next
+  }
+  inside && $0 == "\\." { inside = 0; next }
+  inside { print $index_of["token"]; exit }
+' "$work/dump.sql") || fail 'the lineage table in this dump has no token column'
+[ -n "$lineage_token" ] || fail 'this database has no lineage token row; apply the migrations before backing it up'
+
 encrypt "$work/dump.sql" "$base.dump.gz.enc.partial"
 encrypt "$work/erasure.tsv" "$base.erasure.tsv.gz.enc.partial"
 
 {
   printf 'schema=backup-artifact-v1\n'
   printf 'covered_through=%s\n' "$covered_through"
+  printf 'lineage_token=%s\n' "$lineage_token"
   printf 'database=%s\n' "$pg_db"
   printf 'dump=%s\n' "$(basename "$base.dump.gz.enc")"
   printf 'dump_sha256=%s\n' "$(sha256sum "$base.dump.gz.enc.partial" | cut -d' ' -f1)"
@@ -114,5 +137,5 @@ mv "$base.dump.gz.enc.partial" "$base.dump.gz.enc"
 mv "$base.erasure.tsv.gz.enc.partial" "$base.erasure.tsv.gz.enc"
 mv "$base.manifest.partial" "$base.manifest"
 
-printf 'backup: wrote %s.manifest (covered through %s, %s erasure records)\n' \
-  "$base" "$covered_through" "$(wc -l <"$work/erasure.tsv" | tr -d ' ')"
+printf 'backup: wrote %s.manifest (lineage %s, covered through %s, %s erasure records)\n' \
+  "$base" "$lineage_token" "$covered_through" "$(wc -l <"$work/erasure.tsv" | tr -d ' ')"

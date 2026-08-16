@@ -43,6 +43,15 @@ impl ReadinessProbe for PgReadinessProbe {
                     )
                     SELECT (SELECT pg_catalog.count(*) >= 0 FROM contract_columns)
                        AND (SELECT pg_catalog.count(*) >= 0 FROM erasure_columns)
+                       -- Exactly one lineage token. Without it a restore cannot
+                       -- tell a continuation from a sibling of the same
+                       -- artifact, so a database that lost the row must not
+                       -- serve.
+                       AND (
+                           SELECT pg_catalog.count(*) = 1
+                           FROM public.database_lineage
+                           WHERE token IS NOT NULL
+                       )
                        -- Erasure records are the deletion-enforcement journal
                        -- replayed by the migration path; a database that lost
                        -- the primary key or either AFTER DELETE row trigger can

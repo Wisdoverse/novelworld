@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
-# Drills A, B and C plus the negative cases of backup-restore-v1
+# Drills A, B and C plus the negative cases of backup-restore-v2
 # (docs/BACKUP_RESTORE.md, "Drills"), against the supported compose topology.
 #
 # Runs after tests/e2e/core_reader_loop.sh, which leaves the deployment in
 # first-run state, and seeds its own drill dataset through the real import path:
-# two accounts, four novels with two durable chapters each, three
-# retained-source keys, committed chat history and a committed world turn.
+# three accounts — the third exists to be deleted after the artifact and covered
+# by a collected erasure record — five novels with two durable chapters each,
+# three retained-source keys, committed chat history and a committed world turn.
+#
+# Under v2 every restore regenerates the database's lineage token, so an
+# artifact can establish continuation only against the lineage that produced it:
+# drill A restores onto a destroyed host and therefore always goes through the
+# disaster gate, and drill B restores an artifact taken from the lineage drill A
+# created.
 #
 # Retained-source coverage limit: the end-to-end topology has no S3 stub and
 # runs with S3_ENABLED=false, where novel-service refuses to start while the
@@ -21,6 +28,7 @@ stub=${E2E_LLM_STUB_URL:-http://127.0.0.1:18080}
 password='RuntimeSmokeOnly123!'
 admin_email=drill-admin@test.invalid
 reader_email=drill-reader@test.invalid
+third_email=drill-third@test.invalid
 
 export COMPOSE_FILE=${COMPOSE_FILE:-docker-compose.yml:docker-compose.e2e.yml}
 export BACKUP_ENCRYPTION_KEY=${BACKUP_ENCRYPTION_KEY:-drill-backup-key-at-least-32-characters-long}
@@ -99,6 +107,10 @@ stub_calls() {
     python3 -c 'import json,sys; print(sum(json.load(sys.stdin)["calls"].values()))'
 }
 
+lineage_token() { psql -c "SELECT token FROM database_lineage"; }
+lineage_parent() { psql -c "SELECT COALESCE(parent::text, 'absent') FROM database_lineage"; }
+manifest_field() { awk -F= -v key="$2" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$1"; }
+
 # The S3 cleanup worker owns the outbox in a deployment that enables S3; with S3
 # disabled the drill drains it so novel-service can start (see the header note).
 drain_outbox() {
@@ -169,10 +181,18 @@ reader_id=$(json_get "value['user']['id']" <<<"$reader")
 reader_token=$(json_get "value['access_token']" <<<"$reader")
 reader_refresh=$(json_get "value['refresh_token']" <<<"$reader")
 
+pause
+third=$("${curl_cmd[@]}" -H 'Content-Type: application/json' \
+  --data "{\"email\":\"$third_email\",\"password\":\"$password\",\"name\":\"Drill Third\"}" \
+  "$api/auth/register")
+third_id=$(json_get "value['user']['id']" <<<"$third")
+third_token=$(json_get "value['access_token']" <<<"$third")
+
 novel_a1=$(import_novel "$admin_token" '风暴之塔')
 novel_a2=$(import_novel "$admin_token" '风暴之塔 II')
 novel_b1=$(import_novel "$reader_token" '边城旧事')
 novel_b2=$(import_novel "$reader_token" '边城旧事 II')
+novel_c1=$(import_novel "$third_token" '第三账户的书')
 
 pause
 "${curl_cmd[@]}" --output /dev/null "${admin_auth[@]}" -X PUT \
@@ -216,11 +236,13 @@ grep -Fq 'event: done' <<<"$chat"
 psql -c "INSERT INTO world_states (user_id, novel_id)
          VALUES ('$reader_id', '$novel_b1')" >/dev/null
 
-check 'dataset accounts' 2 "$(psql -c "SELECT COUNT(*) FROM users")"
-check 'dataset novels' 4 "$(psql -c "SELECT COUNT(*) FROM novels")"
-check 'dataset chapters' 8 "$(psql -c "SELECT COUNT(*) FROM chapters")"
-check 'dataset imports are complete' 4 \
+check 'dataset accounts' 3 "$(psql -c "SELECT COUNT(*) FROM users")"
+check 'dataset novels' 5 "$(psql -c "SELECT COUNT(*) FROM novels")"
+check 'dataset chapters' 10 "$(psql -c "SELECT COUNT(*) FROM chapters")"
+check 'dataset imports are complete' 5 \
   "$(psql -c "SELECT COUNT(*) FROM novel_import_jobs WHERE status = 'completed'")"
+check 'dataset has one lineage token' 1 \
+  "$(psql -c "SELECT COUNT(*) FROM database_lineage WHERE parent IS NULL")"
 check 'dataset chat messages' 2 "$(psql -c "SELECT COUNT(*) FROM chat_messages")"
 check 'dataset world turns' 1 \
   "$(psql -c "SELECT COUNT(*) FROM world_turns WHERE status = 'completed'")"
@@ -235,6 +257,8 @@ check 'retained source keys' 3 \
 
 infra/backup/backup.sh
 manifest_one=$(ls -t "$BACKUP_DIR"/*.manifest | head -1)
+check 'artifact records the live lineage token' "$(lineage_token)" \
+  "$(manifest_field "$manifest_one" lineage_token)"
 artifact_one=$(dirname "$manifest_one")/$(awk -F= '$1 == "dump" {print $2}' "$manifest_one")
 covered_one=$(awk -F= '$1 == "covered_through" { sub(/^[^=]*=/, ""); print }' "$manifest_one")
 [ -n "$covered_one" ]
@@ -268,6 +292,16 @@ awk -F= "\$1 == \"covered_through\" { print \"covered_through=2026-01-01 00:00:0
 refuses 'tampered covered-through metadata' infra/backup/restore.sh \
   --manifest "$tampered_manifest" --env-file "$env_file"
 refusal_says 'is not a'
+# Manifest-to-dump token binding: the manifest is the editable half.
+awk -F= '$1 == "lineage_token" { print "lineage_token=00000000-0000-4000-8000-000000000000"; next } { print }' \
+  "$manifest_one" >"$work/tampered/token.manifest"
+refuses 'manifest token disagreeing with the dump' infra/backup/restore.sh \
+  --manifest "$work/tampered/token.manifest" --env-file "$env_file"
+refusal_says 'disagrees with'
+grep -v '^lineage_token=' "$manifest_one" >"$work/tampered/half-token.manifest"
+refuses 'artifact with a token on only one side' infra/backup/restore.sh \
+  --manifest "$work/tampered/half-token.manifest" --env-file "$env_file"
+refusal_says 'in only one of its manifest and dump'
 check 'metadata negatives changed nothing' "$before_negatives" \
   "$(psql -c "SELECT (SELECT COUNT(*) FROM users) || ':' || (SELECT COUNT(*) FROM novels)")"
 check 'negatives changed nothing' "$before_negatives" \
@@ -290,10 +324,13 @@ for _ in $(seq 1 60); do
   sleep 2
 done
 
+# Destroying the volumes leaves no lineage to match, so drill A is a disaster
+# restore under v2 and must carry a complete decision set.
 cat >"$work/decisions-retain-all" <<EOF
-operator=backup-restore-v1 drill A
+operator=backup-restore-v2 drill A
 retain $admin_id novels=$novel_a1,$novel_a2
 retain $reader_id novels=$novel_b1,$novel_b2
+retain $third_id novels=$novel_c1
 EOF
 restore_started=$(date +%s)
 infra/backup/restore.sh --manifest "$manifest_one" --decisions "$work/decisions-retain-all" \
@@ -313,8 +350,12 @@ check 'A sampled rows survived' "$sampled_before" "$(psql -c "
 check 'A retained sources survived' \
   "source-files/$admin_id/$novel_a2" \
   "$(psql -c "SELECT original_file_key FROM novels WHERE id = '$novel_a2'")"
-check 'A attestations' 'retain:2' \
+check 'A attestations' 'retain:3' \
   "$(psql -c "SELECT decision || ':' || COUNT(*) FROM restore_attestations GROUP BY decision")"
+check 'A regenerated the lineage token' "$(manifest_field "$manifest_one" lineage_token)" \
+  "$(lineage_parent)"
+[ "$(lineage_token)" != "$(manifest_field "$manifest_one" lineage_token)" ]
+artifact_one_lineage=$(lineage_token)
 check 'A refresh tokens cleared' 0 "$(psql -c "SELECT COUNT(*) FROM refresh_tokens")"
 
 JWT_SECRET=$(awk -F= '$1 == "JWT_SECRET" { print $2 }' "$env_file")
@@ -352,9 +393,31 @@ resumed_chat=$("${curl_cmd[@]}" --no-buffer "${admin_auth[@]}" \
 grep -Fq 'event: done' <<<"$resumed_chat"
 printf 'drill: A — passed\n'
 
-# ─── Drill B: backup → deletion → older-backup restore ─────────────────────
+# ─── Post-A: the third account's deletion and the newer artifact ───────────
+# Deleted after artifact one, so a newer artifact carries its erasure record as
+# a collected source for drill C. The same artifact is drill B's older backup:
+# it belongs to the lineage drill A's restore created, which is what lets drill
+# B establish continuation at all.
 
 set_source_keys
+pause
+third_login=$("${curl_cmd[@]}" -H 'Content-Type: application/json' \
+  --data "{\"email\":\"$third_email\",\"password\":\"$password\"}" "$api/auth/login")
+check 'third account deleted after the artifact' 204 \
+  "$(http_status -H "Authorization: Bearer $(json_get "value['access_token']" <<<"$third_login")" \
+    -X DELETE "$api/auth/me")"
+check 'third account erasure records' 'novel:1|user:1' \
+  "$(psql -c "SELECT subject_type || ':' || COUNT(*) FROM erasure_records
+                WHERE subject_id IN ('$third_id', '$novel_c1')
+                GROUP BY subject_type ORDER BY 1" | paste -sd'|')"
+infra/backup/backup.sh
+manifest_newer=$(ls -t "$BACKUP_DIR"/*.manifest | head -1)
+check 'newer artifact belongs to the restored lineage' "$(lineage_token)" \
+  "$(manifest_field "$manifest_newer" lineage_token)"
+
+# ─── Drill B: backup → deletion → older-backup restore ─────────────────────
+
+
 novel_a3=$(python3 -c 'import uuid; print(uuid.uuid4())')
 # A novel created and deleted after the artifact was taken: its subject row is
 # in no dump, so replay can only reconstruct its object key from the record.
@@ -379,14 +442,17 @@ check 'B erasure records written' 'novel:4|user:1' \
 
 infra/backup/backup.sh
 manifest_two=$(ls -t "$BACKUP_DIR"/*.manifest | head -1)
-[ "$manifest_two" != "$manifest_one" ]
+[ "$manifest_two" != "$manifest_newer" ]
 
 calls_before_restore=$(stub_calls)
 printf 'drill: B — restoring the older artifact over the live database\n'
 docker compose stop gateway user-service novel-service agent-service narrative-service >/dev/null 2>&1
-# The current database is reachable, so its erasure export closes the residual
-# window and no attest-or-erase decision is required.
-infra/backup/restore.sh --manifest "$manifest_one" --env-file "$env_file" --i-stopped-writes
+# The current database is reachable and carries this artifact's lineage token,
+# so its erasure export closes the residual window and no attest-or-erase
+# decision is required.
+infra/backup/restore.sh --manifest "$manifest_newer" --env-file "$env_file" --i-stopped-writes
+check 'B recorded the restored artifact as parent' \
+  "$(manifest_field "$manifest_newer" lineage_token)" "$(lineage_parent)"
 
 check 'B erased subjects stay deleted' '0:0:0:0:0' \
   "$(psql -c "SELECT (SELECT COUNT(*) FROM users WHERE id = '$reader_id') || ':' ||
@@ -396,6 +462,8 @@ check 'B erased subjects stay deleted' '0:0:0:0:0' \
                      (SELECT COUNT(*) FROM world_states WHERE user_id = '$reader_id')")"
 check 'B surviving journey intact' "1:$novel_a1" \
   "$(psql -c "SELECT COUNT(*) || ':' || MIN(id::text) FROM novels")"
+check 'B third account stays erased across the restore' 0 \
+  "$(psql -c "SELECT COUNT(*) FROM users WHERE id = '$third_id'")"
 check 'B retained sources re-queued' '4' \
   "$(psql -c "SELECT COUNT(*) FROM source_file_deletions WHERE object_key IN
                 ('source-files/$admin_id/$novel_a2',
@@ -483,13 +551,16 @@ refusal_says 'conflicting erasure records'
 
 # ─── Drill C: disaster gate ────────────────────────────────────────────────
 
-printf 'drill: C — restoring with no reachable current database\n'
-docker compose down -v >/dev/null 2>&1
-docker compose up -d postgres >/dev/null 2>&1
-for _ in $(seq 1 60); do
-  docker exec novel-postgres pg_isready -U "${POSTGRES_USER:-novel}" >/dev/null 2>&1 && break
-  sleep 2
-done
+printf 'drill: C — restoring with no lineage-matching reachable database\n'
+fresh_postgres() {
+  docker compose down -v >/dev/null 2>&1
+  docker compose up -d postgres >/dev/null 2>&1
+  for _ in $(seq 1 60); do
+    docker exec novel-postgres pg_isready -U "${POSTGRES_USER:-novel}" >/dev/null 2>&1 && break
+    sleep 2
+  done
+}
+fresh_postgres
 
 refuses 'C undecided restore' infra/backup/restore.sh --manifest "$manifest_one" \
   --env-file "$env_file"
@@ -499,9 +570,9 @@ check 'C refusal changed nothing' '0:0' \
   "$(psql -c "SELECT (SELECT COUNT(*) FROM users) || ':' ||
                      (SELECT COUNT(*) FROM restore_attestations)")"
 
-# A replacement host that the operator already seeded with an unrelated account
-# shares no UUID with the artifact, so it is not this deployment's lineage and
-# the disaster gate must still hold.
+# A populated replacement database with its own deletion history is not this
+# lineage: only token equality is continuation, and a genesis token never
+# equals an artifact's.
 psql -c "INSERT INTO users (email, password_hash) VALUES ('unrelated@test.invalid', 'x');
          DELETE FROM users WHERE email = 'unrelated@test.invalid'" >/dev/null
 check 'C unrelated database has its own journal row' 1 \
@@ -509,10 +580,9 @@ check 'C unrelated database has its own journal row' 1 \
 refuses 'C unrelated live lineage is not this lineage' infra/backup/restore.sh \
   --manifest "$manifest_one" --env-file "$env_file"
 refusal_says 'refusing to complete a disaster restore'
-psql -c "DELETE FROM erasure_records" >/dev/null
 
 cat >"$work/decisions-partial" <<EOF
-operator=backup-restore-v1 drill C
+operator=backup-restore-v2 drill C
 retain $admin_id novels=$novel_a1
 EOF
 refuses 'C partial decisions' infra/backup/restore.sh --manifest "$manifest_one" \
@@ -521,52 +591,91 @@ refusal_says 'every restored account needs a decision'
 refusal_says "$reader_id"
 
 cat >"$work/decisions-no-admin" <<EOF
-operator=backup-restore-v1 drill C
+operator=backup-restore-v2 drill C
 erase $admin_id
 retain $reader_id novels=$novel_b1
+retain $third_id novels=$novel_c1
 EOF
 refuses 'C decisions leaving no administrator' infra/backup/restore.sh \
   --manifest "$manifest_one" --decisions "$work/decisions-no-admin" --env-file "$env_file"
 refusal_says 'leave no administrator'
 
-# A subject covered by a collected erasure record is an already-decided fact:
-# the newer artifact's export erased the reader, so the reader neither needs nor
-# accepts a decision.
+# The third account is covered by the newer artifact's collected record: replay
+# enforces it, so it neither needs nor accepts a decision.
 refuses 'C undecided restore with a newer erasure source' infra/backup/restore.sh \
-  --manifest "$manifest_one" --newer-artifact "$manifest_two" --env-file "$env_file"
+  --manifest "$manifest_one" --newer-artifact "$manifest_newer" --env-file "$env_file"
 refusal_says "$admin_id"
-if grep -Fq "  $reader_id role=" "$work/refusal.txt"; then
+if grep -Fq "  $third_id role=" "$work/refusal.txt"; then
   printf 'drill: FAIL a collected-erasure account was still listed as undecided\n' >&2
   exit 1
 fi
+if grep -Fq "$novel_c1" "$work/refusal.txt"; then
+  printf 'drill: FAIL a collected-erasure novel was advertised as retainable\n' >&2
+  exit 1
+fi
 cat >"$work/decisions-override" <<EOF
-operator=backup-restore-v1 drill C
-retain $admin_id novels=$novel_a1
+operator=backup-restore-v2 drill C
+erase $admin_id
 retain $reader_id novels=$novel_b1
+admin=$reader_id
+erase $third_id
 EOF
-refuses 'C retaining a collected-erasure account' infra/backup/restore.sh \
-  --manifest "$manifest_one" --newer-artifact "$manifest_two" \
+refuses 'C deciding a collected-erasure account' infra/backup/restore.sh \
+  --manifest "$manifest_one" --newer-artifact "$manifest_newer" \
   --decisions "$work/decisions-override" --env-file "$env_file"
-refusal_says 'covered by a collected erasure record'
+refusal_says 'no decision may name it'
 check 'C refusals changed nothing' '0:0' \
   "$(psql -c "SELECT (SELECT COUNT(*) FROM users) || ':' ||
                      (SELECT COUNT(*) FROM restore_attestations)")"
 
+# A wholly token-less artifact — one written before the lineage migration —
+# restores only through the disaster gate and records an absent parent.
+mkdir -p "$work/tokenless"
+cp "$manifest_one" "$work/tokenless/"
+tokenless_manifest=$work/tokenless/$(basename "$manifest_one")
+tokenless_dump=tokenless.dump.gz.enc
+cp "$(dirname "$manifest_one")/$(manifest_field "$manifest_one" erasure)" "$work/tokenless/"
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:BACKUP_ENCRYPTION_KEY \
+  -in "$(dirname "$manifest_one")/$(manifest_field "$manifest_one" dump)" | gzip -dc |
+  awk '/^COPY public\.database_lineage \(/ { inside = 1 }
+       inside && $0 == "\\." { inside = 0; print; next }
+       inside && !/^COPY/ { next }
+       { print }' |
+  gzip -9 -c |
+  openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:BACKUP_ENCRYPTION_KEY \
+    -out "$work/tokenless/$tokenless_dump"
+awk -F= -v dump="$tokenless_dump" \
+  -v digest="$(sha256sum "$work/tokenless/$tokenless_dump" | cut -d' ' -f1)" '
+  $1 == "lineage_token" { next }
+  $1 == "dump" { print "dump=" dump; next }
+  $1 == "dump_sha256" { print "dump_sha256=" digest; next }
+  { print }' "$manifest_one" >"$tokenless_manifest"
+refuses 'C token-less artifact faces the gate' infra/backup/restore.sh \
+  --manifest "$tokenless_manifest" --env-file "$env_file"
+refusal_says 'refusing to complete a disaster restore'
+
 # The sanctioned continuation: erase the administrator's account, retain the
-# reader with a partial novel list, and designate the retained account as the
-# administrator the installation would otherwise lack.
+# reader with a partial novel list, designate the retained account as the
+# administrator the installation would otherwise lack, and let replay enforce
+# the collected record covering the third account.
 cat >"$work/decisions-complete" <<EOF
-# One account retained with a partial novel list, the other erased.
-operator=backup-restore-v1 drill C
+# One account retained with a partial novel list, one erased, one pre-decided.
+operator=backup-restore-v2 drill C
 erase $admin_id
 retain $reader_id novels=$novel_b1
 admin=$reader_id
 EOF
 failure_time=$(date -u +'%Y-%m-%d %H:%M:%S+00')
-infra/backup/restore.sh --manifest "$manifest_one" --decisions "$work/decisions-complete" \
-  --declared-failure-time "$failure_time" --env-file "$env_file"
+infra/backup/restore.sh --manifest "$manifest_one" --newer-artifact "$manifest_newer" \
+  --decisions "$work/decisions-complete" --declared-failure-time "$failure_time" \
+  --env-file "$env_file"
+first_restore_token=$(lineage_token)
 
 check 'C erased account is gone' 0 "$(psql -c "SELECT COUNT(*) FROM users WHERE id = '$admin_id'")"
+check 'C collected-record account is gone' 0 \
+  "$(psql -c "SELECT COUNT(*) FROM users WHERE id = '$third_id'")"
+check 'C collected-record novel is gone' 0 \
+  "$(psql -c "SELECT COUNT(*) FROM novels WHERE id = '$novel_c1'")"
 check 'C unlisted novel is gone' 0 "$(psql -c "SELECT COUNT(*) FROM novels WHERE id = '$novel_b2'")"
 check 'C retained novel survived' 1 "$(psql -c "SELECT COUNT(*) FROM novels WHERE id = '$novel_b1'")"
 check 'C designated administrator promoted' 'admin' \
@@ -583,8 +692,11 @@ check 'C cascade removed dependent rows' '0:0:0:0' \
                      (SELECT COUNT(*) FROM chapters WHERE novel_id = '$novel_b2') || ':' ||
                      (SELECT COUNT(*) FROM world_states WHERE user_id = '$admin_id') || ':' ||
                      (SELECT COUNT(*) FROM refresh_tokens)")"
+# The window starts at the NEWEST source's covered-through — here the newer
+# artifact's, not the restored artifact's — and ends at the declared failure.
+newest_covered=$(manifest_field "$manifest_newer" covered_through)
 check 'C attestation fields' \
-  "$reader_id|retain|$covered_one|$failure_time|backup-restore-v1 drill C|true|true|true" \
+  "$reader_id|retain|$newest_covered|$failure_time|backup-restore-v2 drill C|true|true|true" \
   "$(psql -c "SELECT subject_id || '|' || decision || '|' ||
                      to_char(window_start AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US+00') || '|' ||
                      to_char(window_end AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS+00') || '|' ||
@@ -594,11 +706,25 @@ check 'C attestation fields' \
 check 'C erase decision recorded' "$admin_id|false" \
   "$(psql -c "SELECT subject_id || '|' || designated_admin FROM restore_attestations
                 WHERE decision = 'erase'")"
-check 'C attestation names the verified artifact digest' 1 \
-  "$(psql -c "SELECT COUNT(*) FROM restore_attestations
-                WHERE artifact_inventory =
-                      'dump:$(awk -F= '$1 == "dump_sha256" {print $2}' "$manifest_one")'
-                  AND decision = 'retain'")"
+# The collected record is audited as a restore-level fact with the full field
+# set, without an operator decision.
+check 'C replayed attestation recorded' \
+  "$third_id|$newest_covered|$failure_time|backup-restore-v2 drill C|false|true|true" \
+  "$(psql -c "SELECT subject_id || '|' ||
+                     to_char(window_start AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US+00') || '|' ||
+                     to_char(window_end AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS+00') || '|' ||
+                     operator_identity || '|' || designated_admin || '|' ||
+                     (artifact_inventory <> '') || '|' || (recorded_at IS NOT NULL)
+                FROM restore_attestations WHERE decision = 'replayed'")"
+check 'C inventory lists only verified digests' \
+  "dump:$(manifest_field "$manifest_one" dump_sha256),erasure:$(manifest_field "$manifest_one" erasure_sha256),erasure:$(manifest_field "$manifest_newer" erasure_sha256)" \
+  "$(psql -c "SELECT DISTINCT artifact_inventory FROM restore_attestations")"
+check 'C recorded the artifact token as parent' \
+  "$(manifest_field "$manifest_one" lineage_token)" "$(lineage_parent)"
+
+# Ordinary migration replay preserves the lineage; only a restore replaces it.
+docker compose run --rm postgres-migrate >/dev/null
+check 'C migration replay preserves the lineage token' "$first_restore_token" "$(lineage_token)"
 
 JWT_SECRET=$(awk -F= '$1 == "JWT_SECRET" { print $2 }' "$env_file")
 export JWT_SECRET
@@ -611,6 +737,9 @@ check 'C pre-restore access token rejected' 401 \
 check 'C erased account cannot log in' 401 \
   "$(http_status -H 'Content-Type: application/json' \
     --data "{\"email\":\"$admin_email\",\"password\":\"$password\"}" "$api/auth/login")"
+check 'C collected-record account cannot log in' 401 \
+  "$(http_status -H 'Content-Type: application/json' \
+    --data "{\"email\":\"$third_email\",\"password\":\"$password\"}" "$api/auth/login")"
 pause
 login=$("${curl_cmd[@]}" -H 'Content-Type: application/json' \
   --data "{\"email\":\"$reader_email\",\"password\":\"$password\"}" "$api/auth/login")
@@ -621,18 +750,52 @@ check 'C unlisted novel is not served' 404 \
 check 'C retained novel is served' 200 \
   "$(http_status "${reader_auth[@]}" "$api/novels/$novel_b1/chapters")"
 
+# A second restore of the same artifact is a sibling of the first, not its
+# continuation: it faces the gate, and its token is distinct with the same
+# recorded parent.
+docker compose stop gateway user-service novel-service agent-service narrative-service >/dev/null 2>&1
+refuses 'C sibling restore of one artifact is not continuation' infra/backup/restore.sh \
+  --manifest "$manifest_one" --newer-artifact "$manifest_newer" --env-file "$env_file"
+refusal_says 'refusing to complete a disaster restore'
+infra/backup/restore.sh --manifest "$manifest_one" --newer-artifact "$manifest_newer" \
+  --decisions "$work/decisions-complete" --declared-failure-time "$failure_time" \
+  --env-file "$env_file" >/dev/null
+check 'C two restores of one artifact differ' true \
+  "$([ "$(lineage_token)" != "$first_restore_token" ] && echo true || echo false)"
+check 'C both restores record the artifact as parent' \
+  "$(manifest_field "$manifest_one" lineage_token)" "$(lineage_parent)"
+
+# A crash before the atomic commit leaves no reachable data and no token, and a
+# crash after it leaves the regenerated token: either way the retry faces the
+# gate rather than presenting the artifact's token as live.
+refuses 'C failure injected before the atomic commit' \
+  env RESTORE_FAIL_BEFORE_COMMIT=1 infra/backup/restore.sh --manifest "$manifest_one" \
+  --newer-artifact "$manifest_newer" --decisions "$work/decisions-complete" \
+  --declared-failure-time "$failure_time" --env-file "$env_file"
+check 'C aborted load left no reachable data' 0 \
+  "$(psql -c "SELECT COUNT(*) FROM pg_tables WHERE schemaname = 'public'")"
+refuses 'C retry after the pre-commit failure faces the gate' infra/backup/restore.sh \
+  --manifest "$manifest_one" --newer-artifact "$manifest_newer" --env-file "$env_file"
+refusal_says 'refusing to complete a disaster restore'
+
+refuses 'C failure injected after the atomic commit' \
+  env RESTORE_FAIL_AFTER_COMMIT=1 infra/backup/restore.sh --manifest "$manifest_one" \
+  --newer-artifact "$manifest_newer" --decisions "$work/decisions-complete" \
+  --declared-failure-time "$failure_time" --env-file "$env_file"
+check 'C committed load already carries a regenerated token' false \
+  "$([ "$(lineage_token)" = "$(manifest_field "$manifest_one" lineage_token)" ] && echo true || echo false)"
+refuses 'C retry after the post-commit failure faces the gate' infra/backup/restore.sh \
+  --manifest "$manifest_one" --newer-artifact "$manifest_newer" --env-file "$env_file"
+refusal_says 'refusing to complete a disaster restore'
+
 # Erasing every account is a sanctioned outcome, not a stuck restore: no
 # administrator is designated and the installation returns to first-run setup.
-docker compose down -v >/dev/null 2>&1
-docker compose up -d postgres >/dev/null 2>&1
-for _ in $(seq 1 60); do
-  docker exec novel-postgres pg_isready -U "${POSTGRES_USER:-novel}" >/dev/null 2>&1 && break
-  sleep 2
-done
+fresh_postgres
 cat >"$work/decisions-erase-all" <<EOF
-operator=backup-restore-v1 drill C erase-all
+operator=backup-restore-v2 drill C erase-all
 erase $admin_id
 erase $reader_id
+erase $third_id
 EOF
 infra/backup/restore.sh --manifest "$manifest_one" --decisions "$work/decisions-erase-all" \
   --env-file "$env_file" >/dev/null
@@ -640,10 +803,10 @@ check 'C erase-all leaves no account' '0:0:0' \
   "$(psql -c "SELECT (SELECT COUNT(*) FROM users) || ':' ||
                      (SELECT COUNT(*) FROM novels) || ':' ||
                      (SELECT COUNT(*) FROM runtime_llm_config)")"
-check 'C erase-all recorded both decisions' 2 \
+check 'C erase-all recorded every decision' 3 \
   "$(psql -c "SELECT COUNT(*) FROM restore_attestations WHERE decision = 'erase'")"
 check 'C erase-all designated nobody' 0 \
   "$(psql -c "SELECT COUNT(*) FROM restore_attestations WHERE designated_admin")"
 printf 'drill: C — passed\n'
 
-printf 'drill: backup-restore-v1 drills A, B, C and the negative cases passed\n'
+printf 'drill: backup-restore-v2 drills A, B, C and the negative cases passed\n'

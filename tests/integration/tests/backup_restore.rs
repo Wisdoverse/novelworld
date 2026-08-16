@@ -412,6 +412,10 @@ async fn erasure_journal_drift_fails_novel_service_readiness() {
             "ALTER TABLE public.erasure_records ADD COLUMN source_requeued_at TIMESTAMPTZ",
         ),
         (
+            "DELETE FROM public.database_lineage",
+            "INSERT INTO public.database_lineage (token) VALUES (pg_catalog.gen_random_uuid())",
+        ),
+        (
             "ALTER TABLE public.erasure_records DROP COLUMN had_source",
             "ALTER TABLE public.erasure_records ADD COLUMN had_source BOOLEAN NOT NULL DEFAULT FALSE",
         ),
@@ -542,6 +546,18 @@ async fn restore_attestations_record_every_required_decision_field() {
     assert!(row.get::<bool, _>("designated_admin"));
     let _: chrono::DateTime<chrono::Utc> = row.get("recorded_at");
 
+    // The restore records collected erasure records as pre-decided facts.
+    sqlx::query(
+        "INSERT INTO restore_attestations \
+         (subject_id, decision, window_start, window_end, artifact_inventory, operator_identity) \
+         VALUES ($1, 'replayed', '2026-08-01 00:00:00+00', '2026-08-02 00:00:00+00', \
+                 'dump:aaa,erasure:bbb', 'operator@example.invalid')",
+    )
+    .bind(Uuid::new_v4())
+    .execute(&pool)
+    .await
+    .unwrap();
+
     // A window that ends before it starts is not a residual window.
     let inverted = sqlx::query(
         "INSERT INTO restore_attestations \
@@ -640,4 +656,59 @@ async fn restored_constraint_spelling_still_migrates_and_reaches_readiness() {
     .await
     .unwrap();
     assert!(!NarrativeReadinessPort::is_ready(&narrative_readiness).await);
+}
+
+/// Lineage identity: created once by the migration path, preserved by every
+/// ordinary replay, and never more than one row. Only the scripted restore
+/// regenerates it, which is what lets a restore tell its own continuation from
+/// a sibling restore of the same artifact.
+#[tokio::test]
+async fn lineage_token_is_created_once_and_survives_migration_replay() {
+    let pool = scratch_database("novelworld_lineage").await;
+    let (token, parent): (Uuid, Option<Uuid>) =
+        sqlx::query_as("SELECT token, parent FROM database_lineage")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(parent.is_none(), "a genesis database has no parent lineage");
+
+    for _ in 0..2 {
+        sqlx::raw_sql(ERASURE_MIGRATION)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let replayed: Vec<(Uuid, Option<Uuid>)> =
+        sqlx::query_as("SELECT token, parent FROM database_lineage")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(replayed, vec![(token, None)]);
+
+    // A second token would make "the database's lineage" ambiguous, so the
+    // single row is a database invariant rather than a convention.
+    let second = sqlx::query("INSERT INTO database_lineage (token) VALUES (gen_random_uuid())")
+        .execute(&pool)
+        .await;
+    assert!(second.is_err());
+
+    // A database that lost its token cannot prove continuation, so it must not
+    // serve; the restore is the only writer that replaces one.
+    let readiness = PgReadinessProbe::new(pool.clone());
+    assert!(readiness.is_ready().await);
+    sqlx::raw_sql("DROP TABLE public.database_lineage")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(!readiness.is_ready().await);
+    sqlx::raw_sql(ERASURE_MIGRATION)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(readiness.is_ready().await);
+    let recreated: Uuid = sqlx::query_scalar("SELECT token FROM database_lineage")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_ne!(recreated, token, "a rebuilt journal is a new lineage");
 }
