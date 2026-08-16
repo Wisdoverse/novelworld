@@ -507,6 +507,9 @@ On an unrecoverable current-attempt error, the pipeline MUST atomically set the 
 the Novel to `error`, store an actionable public message in `parse_error`, and keep detailed
 provider/internal errors in logs rather than exposing them to readers. Pending or expired
 in-progress jobs MUST be reclaimed after restart; completed jobs MUST NOT call a provider again.
+Provider calls across attempts MUST stay inside the approved import-provider budget policy
+(`docs/IMPORT_BUDGET.md`): a job at the attempt ceiling MUST be marked terminally `failed` with
+`budget_exhausted` and actionable re-upload guidance, and MUST NOT be reclaimed or retried.
 
 ### 5.3 Chapter Splitter
 

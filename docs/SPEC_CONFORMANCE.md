@@ -72,6 +72,7 @@ state in two places.
 | §5.1 — accepted imports recoverable after process death from committed `source`, `chapters`, or `enriched` stages; a `source`-stage job replays its retained object to rebuild chapters | Verified | H1 | E1, E2; durable jobs, leases, and startup recovery landed in PR #116, and the retained-object replay slice (#125) reads the object through the `SourceFileStorage` port before any provider call |
 | §5.2 — current parsing stages reach `ready` or store a terminal parse error | Verified | H1 | E2 |
 | §5.2 — interruption recovery, fenced attempts, and reclaim of pending or expired jobs | Verified | H1 | E1, E2; attempt-fenced claims, lease reclaim, and replay-safe backfill landed in PR #116; the source-stage chapter replacement follows the same `(novel_id, attempt)` fence (#125) |
+| §5.2 — provider calls across attempts stay inside the approved `import-provider-budget-v1` policy; ceiling jobs terminate with `budget_exhausted` and are never reclaimed | Intended gap | H1 | E2; the policy ([`IMPORT_BUDGET.md`](./IMPORT_BUDGET.md)) is approved in this change and the enforcement it judges lands in the follow-up |
 | §5.3 — non-empty, sequential chapters | Verified | H1 | E2 |
 | §5.4 — structured character output validation and case-insensitive merge | Verified | H1 | E2 |
 | §5.4 — complete repeated-character coverage and 50-character cost bound | Intended gap | H1 | E2 shows heuristic/model extraction without a release corpus or enforced final cap |
