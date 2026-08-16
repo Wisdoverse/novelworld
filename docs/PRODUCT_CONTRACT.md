@@ -68,7 +68,7 @@ provider-hosted image bytes, operator logs, or backups.
 | Product claim | State now | Evidence or gap | Owner |
 |---|---|---|---|
 | First-run administrator and model setup | Structurally verified | The first administrator is a single durable winner; web-supplied provider keys are encrypted before PostgreSQL storage and environment configuration takes precedence | H2 |
-| One-click import | Accepted and structurally verified inside the input limits | Acceptance atomically commits chapters plus a pending durable job; immediate and restart claims use fenced leases to resume `chapters`/`enriched` work, while retained-object replay and live semantic quality remain missing | H1 |
+| One-click import | Accepted and structurally verified inside the input limits | Acceptance atomically commits chapters plus a pending durable job, or — with source retention enabled — the retained object plus a `source`-stage job whose claim rebuilds deterministic chapters from the retained bytes; fenced leases resume `source`/`chapters`/`enriched` work; live semantic quality remains unqualified | H1 |
 | Canonical world model and relationship graph | Structurally verified | Source coverage exists in deterministic tests; representative live quality is not qualified | H1, H3 |
 | Character personality and authentic voice | Intended gap | Novel stores persona fields, but chat currently consumes essentially the character name plus lore/memory/world context | H3 |
 | Generated portrait for every character | Obsolete claim | Avatar generation is a non-authoritative projection, capped at 30 characters per import, and stores provider-returned URL metadata | H0 decision recorded here; any quality slice belongs to H3 |
@@ -76,7 +76,7 @@ provider-hosted image bytes, operator logs, or backups.
 | Branching and open-world action | Structurally verified for one player timeline | Deterministic commit/replay evidence does not prove live causal coherence or usability | H4 |
 | Assume a canonical character identity | Accepted legacy/experimental path, unsupported as a product promise | The primary open-world contract is an original `PlayerEntity`; the alternate agency model is unresolved | H4 |
 | No spoilers | Structurally bounded, not guaranteed | Server-owned progress filters lore and committed memory, but an untrusted model can still produce incorrect text | H3, H4 |
-| Retry/restart without duplicate committed chat, world, or import authority | Structurally verified at persisted boundaries | Import attempts fence chapter-node, character/relationship, enrichment, and canon commits; retained-source replay plus live dependency and long-window recovery evidence remain incomplete | H1, H5 |
+| Retry/restart without duplicate committed chat, world, or import authority | Structurally verified at persisted boundaries | Import attempts fence source-stage chapter replacement, chapter-node, character/relationship, enrichment, and canon commits; live dependency and long-window recovery evidence remain incomplete | H1, H5 |
 | Complete export and deletion | Structurally verified within the documented application boundary | Provider/operator data and non-atomic backups remain outside the portable export and application erasure boundary | H2, H5 |
 
 ## Resolved documentation conflicts
@@ -93,10 +93,10 @@ runtime outcome exists.
    current Chinese-only narrative validator prevents an any-language journey
    claim.
 4. **Source retention and reprocessing:** original uploaded bytes are retained
-   only when S3 is enabled. Accepted imports resume from atomically committed
-   chapters without requiring those bytes. The runtime does not yet read a
-   retained object for full replay; before the durable chapter boundary,
-   request retry or re-upload remains necessary.
+   only when S3 is enabled. With retention, imports accept at the `source`
+   stage and the claimed job replays the retained object to rebuild chapters
+   before any provider work; without retention, chapter splitting stays
+   request-local and re-upload remains necessary before the chapter boundary.
 5. **Avatars:** NovelWorld stores provider-returned URL metadata and does not
    own or export the provider's image bytes. Avatar failure or the 30-character
    cap does not block import readiness.

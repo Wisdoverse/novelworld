@@ -468,19 +468,28 @@ On receipt, the service MUST:
 1. Validate the declared type, size, and extractable content before accepting the import.
 2. If source retention is enabled, store uploaded bytes under a server-generated managed key with
    durable cleanup intent. With retention disabled, extraction is request-local.
-3. Split and validate deterministic chapters before acceptance.
-4. Atomically commit the `pending` Novel, chapters/chunks, and a `novel_import_jobs` row. Attempt an
-   immediate claim with a renewable lease; startup recovery claims any job left pending. Return
-   `202` and the Novel ID only after the durable boundary commits.
+3. With retention disabled, split and validate deterministic chapters before acceptance. With
+   retention enabled, the claimed import job rebuilds deterministic chapters from the retained
+   object before any provider-backed enrichment.
+4. Atomically commit the `pending` Novel and a `novel_import_jobs` row — with chapters/chunks when
+   splitting preceded acceptance, otherwise at the `source` stage — and cancel the retained
+   object's cleanup intent in the same transaction. Attempt an immediate claim with a renewable
+   lease; startup recovery claims any job left pending. Return `202` and the Novel ID only after
+   the durable boundary commits.
 
-An accepted import MUST be recoverable after process death from its committed `chapters` or
-`enriched` stage. Source retention alone is not evidence of replay: retained-object reprocessing is
-an H1 gap until the runtime reads that object during recovery.
+An accepted import MUST be recoverable after process death from its committed `source`,
+`chapters`, or `enriched` stage. A job committed at `source` MUST replay the retained object to
+rebuild chapters; a missing or unreadable retained object fails the job with actionable re-upload
+guidance and never advances the stage.
 
 ### 5.2 Parsing Pipeline
 
 Provider-backed enrichment runs asynchronously after file acceptance. It MUST:
 
+0. When the committed stage is `source`, read the retained object for the Novel's managed key,
+   re-extract and re-split deterministic chapters within the acceptance bounds, and atomically
+   commit the chapters and the `chapters` stage advance behind the `(novel_id, attempt)` fence
+   before any provider call.
 1. Set `status = parsing`.
 2. Claim exactly one current attempt; renew its lease during external work and fence every
    authoritative write by `(novel_id, attempt)`.
