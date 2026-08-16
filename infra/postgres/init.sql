@@ -135,6 +135,101 @@ CREATE TRIGGER queue_source_file_deletion
     AFTER DELETE ON novels
     FOR EACH ROW EXECUTE FUNCTION queue_source_file_deletion();
 
+-- ─── 删除凭证（backup-restore-v1）────────────────────────────────────────────
+-- 用户或小说删除时，在同一事务内写入只含 UUID 的删除凭证；不使用外键，
+-- 因此账户级联无法删掉自己的删除证据。迁移路径上的重放依赖这两张表。
+
+CREATE TABLE erasure_records (
+    subject_type       VARCHAR(8) NOT NULL,
+    subject_id         UUID NOT NULL,
+    -- 保留归属用户，使 source-files/{user_id}/{novel_id} 在小说行消失后仍可重建。
+    user_id            UUID NOT NULL,
+    erased_at          TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.now(),
+    -- 删除时由触发器观察 OLD.original_file_key：只有权威删除能看到对象是否存在，
+    -- 该事实随记录一起流转，重放无需依赖部署状态推测。
+    had_source         BOOLEAN NOT NULL DEFAULT FALSE,
+    -- 每条记录一次的来源对象重新入队记账（自消费的 outbox 不能充当记账）。
+    -- 记账与 outbox 行同事务写入，转储又是同一快照，因此恢复后保留记账不会漏删对象，
+    -- 重复次数为零，仍在策略允许的「每次恢复至多重复一次」范围内。
+    source_requeued_at TIMESTAMPTZ,
+    CONSTRAINT erasure_records_pkey PRIMARY KEY (subject_type, subject_id),
+    CONSTRAINT erasure_records_subject_type_check
+        CHECK (subject_type IN ('user', 'novel'))
+);
+
+-- ─── 数据库血统标识 ────────────────────────────────────────────────────────
+-- 每个数据库恰有一个版本 4 血统令牌：迁移路径仅在表为空时创建，普通部署与迁移重放
+-- 保持不变，只有脚本化恢复会重新生成并记录父令牌。令牌相等是判断「同一血统」的
+-- 唯一证据：行数或共享 UUID 无法区分同一份存档的两次兄弟恢复。
+
+CREATE TABLE database_lineage (
+    token      UUID PRIMARY KEY,
+    parent     UUID,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.now()
+);
+
+CREATE UNIQUE INDEX database_lineage_singleton ON database_lineage ((TRUE));
+
+INSERT INTO database_lineage (token)
+SELECT pg_catalog.gen_random_uuid()
+ WHERE NOT EXISTS (SELECT 1 FROM database_lineage);
+
+CREATE TABLE restore_attestations (
+    id                 UUID PRIMARY KEY DEFAULT pg_catalog.gen_random_uuid(),
+    subject_id         UUID NOT NULL,
+    decision           VARCHAR(8) NOT NULL,
+    window_start       TIMESTAMPTZ NOT NULL,
+    window_end         TIMESTAMPTZ NOT NULL,
+    artifact_inventory TEXT NOT NULL,
+    operator_identity  TEXT NOT NULL,
+    -- 决定会使安装失去管理员时，操作者显式指定的留存账户在此标记为 true。
+    designated_admin   BOOLEAN NOT NULL DEFAULT FALSE,
+    recorded_at        TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.now(),
+    CONSTRAINT restore_attestations_decision_check
+        CHECK (decision IN ('retain', 'erase', 'replayed')),
+    CONSTRAINT restore_attestations_window_check
+        CHECK (window_start <= window_end)
+);
+
+CREATE OR REPLACE FUNCTION record_user_erasure()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $function$
+BEGIN
+    INSERT INTO public.erasure_records (subject_type, subject_id, user_id)
+    VALUES ('user', OLD.id, OLD.id)
+    ON CONFLICT (subject_type, subject_id) DO NOTHING;
+    RETURN OLD;
+END
+$function$;
+
+-- had_source 只能从 false 升为 true：记录可能先于主体行被写入（恢复流程先写决定），
+-- 而只有删除本身能看到来源对象是否存在。
+CREATE OR REPLACE FUNCTION record_novel_erasure()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $function$
+BEGIN
+    INSERT INTO public.erasure_records (subject_type, subject_id, user_id, had_source)
+    VALUES ('novel', OLD.id, OLD.user_id,
+            -- COALESCE is core grammar, not a schema-resolved function.
+            COALESCE(OLD.original_file_key LIKE 'source-files/%', FALSE))
+    ON CONFLICT (subject_type, subject_id) DO UPDATE
+    SET had_source = public.erasure_records.had_source OR EXCLUDED.had_source;
+    RETURN OLD;
+END
+$function$;
+
+CREATE TRIGGER record_user_erasure
+    AFTER DELETE ON users
+    FOR EACH ROW EXECUTE FUNCTION record_user_erasure();
+
+CREATE TRIGGER record_novel_erasure
+    AFTER DELETE ON novels
+    FOR EACH ROW EXECUTE FUNCTION record_novel_erasure();
+
 -- ─── 章节表 ────────────────────────────────────────────────────────────────
 
 CREATE TABLE chapters (

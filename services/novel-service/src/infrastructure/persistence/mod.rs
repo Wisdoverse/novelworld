@@ -34,16 +34,102 @@ impl ReadinessProbe for PgReadinessProbe {
                                failure_code, created_at, updated_at
                         FROM public.novel_import_jobs
                         LIMIT 1
+                    ),
+                    erasure_columns AS MATERIALIZED (
+                        SELECT subject_type, subject_id, user_id, erased_at,
+                               had_source, source_requeued_at
+                        FROM public.erasure_records
+                        LIMIT 1
                     )
                     SELECT (SELECT pg_catalog.count(*) >= 0 FROM contract_columns)
+                       AND (SELECT pg_catalog.count(*) >= 0 FROM erasure_columns)
+                       -- Exactly one lineage token. Without it a restore cannot
+                       -- tell a continuation from a sibling of the same
+                       -- artifact, so a database that lost the row must not
+                       -- serve.
+                       AND (
+                           SELECT pg_catalog.count(*) = 1
+                           FROM public.database_lineage
+                           WHERE token IS NOT NULL
+                       )
+                       -- Erasure records are the deletion-enforcement journal
+                       -- replayed by the migration path; a database that lost
+                       -- the primary key or either AFTER DELETE row trigger can
+                       -- silently stop recording deletions, so readiness fails
+                       -- closed on both. Catalog identity again, not deparsed
+                       -- text: tgfoid resolves through search_path.
+                       AND EXISTS (
+                           SELECT 1
+                           FROM pg_catalog.pg_constraint AS erasure_pk
+                           WHERE erasure_pk.conrelid =
+                                     'public.erasure_records'::pg_catalog.regclass
+                             AND erasure_pk.contype::pg_catalog.text = 'p'
+                             AND erasure_pk.conkey = ARRAY[
+                                     (SELECT subject.attnum
+                                      FROM pg_catalog.pg_attribute AS subject
+                                      WHERE subject.attrelid = erasure_pk.conrelid
+                                        AND subject.attname = 'subject_type'),
+                                     (SELECT subject.attnum
+                                      FROM pg_catalog.pg_attribute AS subject
+                                      WHERE subject.attrelid = erasure_pk.conrelid
+                                        AND subject.attname = 'subject_id')
+                                 ]
+                       )
+                       AND EXISTS (
+                           SELECT 1
+                           FROM pg_catalog.pg_constraint AS subject_type_check
+                           WHERE subject_type_check.conrelid =
+                                     'public.erasure_records'::pg_catalog.regclass
+                             AND subject_type_check.conname =
+                                     'erasure_records_subject_type_check'
+                             AND subject_type_check.contype::pg_catalog.text = 'c'
+                             AND pg_catalog.pg_get_constraintdef(subject_type_check.oid) IN (
+                                 'CHECK (((subject_type)::text = ANY ((ARRAY[''user''::character varying, ''novel''::character varying])::text[])))',
+                                 'CHECK (((subject_type)::text = ANY (ARRAY[(''user''::character varying)::text, (''novel''::character varying)::text])))'
+                             )
+                       )
+                       AND EXISTS (
+                           SELECT 1
+                           FROM pg_catalog.pg_trigger AS erasure_trigger
+                           WHERE erasure_trigger.tgrelid =
+                                     'public.users'::pg_catalog.regclass
+                             AND erasure_trigger.tgname = 'record_user_erasure'
+                             AND NOT erasure_trigger.tgisinternal
+                             AND erasure_trigger.tgenabled::pg_catalog.text <> 'D'
+                             AND erasure_trigger.tgtype = 9
+                             AND erasure_trigger.tgfoid =
+                                 'public.record_user_erasure()'::pg_catalog.regprocedure
+                       )
+                       AND EXISTS (
+                           SELECT 1
+                           FROM pg_catalog.pg_trigger AS erasure_trigger
+                           WHERE erasure_trigger.tgrelid =
+                                     'public.novels'::pg_catalog.regclass
+                             AND erasure_trigger.tgname = 'record_novel_erasure'
+                             AND NOT erasure_trigger.tgisinternal
+                             AND erasure_trigger.tgenabled::pg_catalog.text <> 'D'
+                             AND erasure_trigger.tgtype = 9
+                             AND erasure_trigger.tgfoid =
+                                 'public.record_novel_erasure()'::pg_catalog.regprocedure
+                       )
                        AND EXISTS (
                            SELECT 1 FROM pg_catalog.pg_constraint
                            WHERE conrelid =
                                      'public.novel_import_jobs'::pg_catalog.regclass
                              AND conname = 'novel_import_jobs_stage_check'
                              AND contype::pg_catalog.text = 'c'
-                             AND pg_catalog.pg_get_constraintdef(oid) =
-                                 'CHECK (((stage)::text = ANY ((ARRAY[''source''::character varying, ''chapters''::character varying, ''enriched''::character varying, ''completed''::character varying])::text[])))'
+                             -- Two spellings of one constraint: PostgreSQL
+                             -- deparses CHECK (stage IN (...)) over a varchar
+                             -- column as the first form and re-parses that text
+                             -- into the second, which is what restoring a
+                             -- pg_dump artifact produces. Only one of them can
+                             -- match, so accepting both keeps a restored
+                             -- deployment able to reach readiness without
+                             -- loosening drift detection.
+                             AND pg_catalog.pg_get_constraintdef(oid) IN (
+                                 'CHECK (((stage)::text = ANY ((ARRAY[''source''::character varying, ''chapters''::character varying, ''enriched''::character varying, ''completed''::character varying])::text[])))',
+                                 'CHECK (((stage)::text = ANY (ARRAY[(''source''::character varying)::text, (''chapters''::character varying)::text, (''enriched''::character varying)::text, (''completed''::character varying)::text])))'
+                             )
                        )
                        AND EXISTS (
                            SELECT 1 FROM pg_catalog.pg_constraint
@@ -99,8 +185,10 @@ impl ReadinessProbe for PgReadinessProbe {
                                      'public.novel_import_jobs'::pg_catalog.regclass
                              AND index_definition.indisvalid
                              AND index_definition.indisready
-                             AND pg_catalog.pg_get_indexdef(index_definition.indexrelid) =
-                                 'CREATE INDEX idx_novel_import_jobs_recoverable ON public.novel_import_jobs USING btree (status, lease_expires_at, created_at) WHERE ((status)::text = ANY ((ARRAY[''pending''::character varying, ''in_progress''::character varying])::text[]))'
+                             AND pg_catalog.pg_get_indexdef(index_definition.indexrelid) IN (
+                                 'CREATE INDEX idx_novel_import_jobs_recoverable ON public.novel_import_jobs USING btree (status, lease_expires_at, created_at) WHERE ((status)::text = ANY ((ARRAY[''pending''::character varying, ''in_progress''::character varying])::text[]))',
+                                 'CREATE INDEX idx_novel_import_jobs_recoverable ON public.novel_import_jobs USING btree (status, lease_expires_at, created_at) WHERE ((status)::text = ANY (ARRAY[(''pending''::character varying)::text, (''in_progress''::character varying)::text]))'
+                             )
                        )
                     "#,
                 )
