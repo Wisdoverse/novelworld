@@ -52,7 +52,10 @@ abspath() {
 # awk anchors match the whole string; grep -E would match any single line and
 # let a multiline payload through with a well-formed first line.
 matches() {
-  awk -v value="$1" -v pattern="$2" 'BEGIN { exit !(value ~ ("^" pattern "$")) }'
+  # Through the environment, not -v: awk processes escape sequences in a -v
+  # assignment, so the copy being validated would not be the value being used.
+  match_value=$1 match_pattern=$2 awk \
+    'BEGIN { exit !(ENVIRON["match_value"] ~ ("^" ENVIRON["match_pattern"] "$")) }'
 }
 
 check_timestamp() {

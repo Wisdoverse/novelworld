@@ -653,6 +653,16 @@ awk -F= -v dump="$tokenless_dump" \
 refuses 'C token-less artifact faces the gate' infra/backup/restore.sh \
   --manifest "$tokenless_manifest" --env-file "$env_file"
 refusal_says 'refusing to complete a disaster restore'
+cat >"$work/decisions-tokenless" <<EOF
+operator=backup-restore-v2 drill C token-less
+erase $admin_id
+erase $reader_id
+erase $third_id
+EOF
+infra/backup/restore.sh --manifest "$tokenless_manifest" \
+  --decisions "$work/decisions-tokenless" --env-file "$env_file" >/dev/null
+check 'C token-less restore records an absent parent' absent "$(lineage_parent)"
+[ -n "$(lineage_token)" ]
 
 # The sanctioned continuation: erase the administrator's account, retain the
 # reader with a partial novel list, designate the retained account as the
@@ -772,16 +782,23 @@ refuses 'C failure injected before the atomic commit' \
   env RESTORE_FAIL_BEFORE_COMMIT=1 infra/backup/restore.sh --manifest "$manifest_one" \
   --newer-artifact "$manifest_newer" --decisions "$work/decisions-complete" \
   --declared-failure-time "$failure_time" --env-file "$env_file"
+refusal_says 'injected pre-commit failure'
 check 'C aborted load left no reachable data' 0 \
   "$(psql -c "SELECT COUNT(*) FROM pg_tables WHERE schemaname = 'public'")"
 refuses 'C retry after the pre-commit failure faces the gate' infra/backup/restore.sh \
   --manifest "$manifest_one" --newer-artifact "$manifest_newer" --env-file "$env_file"
+refusal_says 'refusing to complete a disaster restore'
+# Absence is not equality: a database with no token and an artifact with no
+# token are not one lineage.
+refuses 'C token-less artifact over a token-less database' infra/backup/restore.sh \
+  --manifest "$tokenless_manifest" --env-file "$env_file"
 refusal_says 'refusing to complete a disaster restore'
 
 refuses 'C failure injected after the atomic commit' \
   env RESTORE_FAIL_AFTER_COMMIT=1 infra/backup/restore.sh --manifest "$manifest_one" \
   --newer-artifact "$manifest_newer" --decisions "$work/decisions-complete" \
   --declared-failure-time "$failure_time" --env-file "$env_file"
+refusal_says 'injected post-commit failure'
 check 'C committed load already carries a regenerated token' false \
   "$([ "$(lineage_token)" = "$(manifest_field "$manifest_one" lineage_token)" ] && echo true || echo false)"
 refuses 'C retry after the post-commit failure faces the gate' infra/backup/restore.sh \
