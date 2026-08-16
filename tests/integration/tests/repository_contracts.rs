@@ -760,7 +760,9 @@ async fn source_stage_jobs_are_claimable_at_the_source_boundary() {
 
     let candidates = repo.recoverable_imports(100).await.unwrap();
     assert!(
-        candidates.iter().any(|candidate| candidate.novel_id == novel.id),
+        candidates
+            .iter()
+            .any(|candidate| candidate.novel_id == novel.id),
         "a pending source-stage job must be a recovery candidate"
     );
     // The claim is fenced by (novel_id, attempt) and treats `source` like any
@@ -778,11 +780,10 @@ async fn seed_failed_source_import(pool: &PgPool, user_id: Uuid, novel: &Novel) 
     repo.create_source_import(novel).await.unwrap();
     let claim = repo.claim_import(novel.id, user_id).await.unwrap().unwrap();
     assert_eq!(claim.stage, ImportStage::Source);
-    assert!(
-        repo.fail_import(novel.id, claim.attempt, "seeded_failure", "seeded")
-            .await
-            .unwrap()
-    );
+    assert!(repo
+        .fail_import(novel.id, claim.attempt, "seeded_failure", "seeded")
+        .await
+        .unwrap());
 }
 
 #[tokio::test]
