@@ -103,6 +103,24 @@ impl NovelRepository for NovelPgRepository {
         Ok(())
     }
 
+    async fn create_source_import(&self, novel: &Novel) -> Result<()> {
+        ensure!(
+            novel.file_key.is_some(),
+            "source-stage import requires a retained source key"
+        );
+        let mut transaction = self.pool.begin().await?;
+        insert_novel(&mut transaction, novel).await?;
+        sqlx::query(
+            "INSERT INTO novel_import_jobs (novel_id, stage, status) \
+             VALUES ($1, 'source', 'pending')",
+        )
+        .bind(novel.id)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
     async fn claim_import(&self, novel_id: Uuid, user_id: Uuid) -> Result<Option<ImportClaim>> {
         let row = sqlx::query_as::<_, ImportClaimRow>(
             r#"
@@ -178,6 +196,51 @@ impl NovelRepository for NovelPgRepository {
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() == 1)
+    }
+
+    async fn replace_import_chapters(
+        &self,
+        novel_id: Uuid,
+        attempt: i64,
+        chapters: &[Chapter],
+    ) -> Result<bool> {
+        ensure!(!chapters.is_empty(), "replayed import requires chapters");
+        ensure!(
+            chapters.iter().all(|chapter| chapter.novel_id == novel_id),
+            "replayed import chapters belong to another novel"
+        );
+        ensure!(
+            chapters_are_importable(chapters),
+            "replayed import chapters must be contiguous and non-empty"
+        );
+        let mut transaction = self.pool.begin().await?;
+        let Some(stage) = lock_import(&mut transaction, novel_id, attempt).await? else {
+            return Ok(false);
+        };
+        if stage != ImportStage::Source {
+            return Ok(false);
+        }
+        // Legacy rows at stage `source` may carry partial or gapped chapters;
+        // replacing them is the point of the replay. Chunks cascade.
+        sqlx::query("DELETE FROM chapters WHERE novel_id = $1")
+            .bind(novel_id)
+            .execute(&mut *transaction)
+            .await?;
+        save_batch_in_transaction(&mut transaction, chapters).await?;
+        let job = sqlx::query(
+            "UPDATE novel_import_jobs SET stage = 'chapters', updated_at = NOW() \
+             WHERE novel_id = $1 AND attempt = $2 AND status = 'in_progress' AND stage = 'source'",
+        )
+        .bind(novel_id)
+        .bind(attempt)
+        .execute(&mut *transaction)
+        .await?;
+        ensure!(
+            job.rows_affected() == 1,
+            "replayed import stage advance failed"
+        );
+        transaction.commit().await?;
+        Ok(true)
     }
 
     async fn record_import_enrichment(

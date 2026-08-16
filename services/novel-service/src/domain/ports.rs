@@ -48,6 +48,9 @@ pub trait PrivacyCleanupPort: Send + Sync {
 #[async_trait]
 pub trait SourceFileStorage: Send + Sync {
     async fn put(&self, key: &str, data: bytes::Bytes) -> Result<()>;
+    /// Returns `Ok(None)` when the object does not exist. Any read or size
+    /// failure is an `Err`; callers treat absence and failure differently.
+    async fn get(&self, key: &str) -> Result<Option<bytes::Bytes>>;
     async fn delete(&self, key: &str) -> Result<()>;
 }
 

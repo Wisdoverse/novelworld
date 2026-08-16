@@ -18,7 +18,7 @@ use crate::domain::entities::{
     novel::Novel,
 };
 use crate::domain::ports::{
-    ImagePort, LlmPort, NovelLlmTask, PrivacyCleanupPort, SourceFileStorage,
+    DocumentTextExtractor, ImagePort, LlmPort, NovelLlmTask, PrivacyCleanupPort, SourceFileStorage,
 };
 use crate::domain::repositories::{
     CanonStoryModelRepository, ChapterRepository, CharacterRelationshipRecord, CharacterRepository,
@@ -47,6 +47,7 @@ pub struct NovelCommandHandler {
     pub privacy_cleanup: Arc<dyn PrivacyCleanupPort>,
     pub source_storage: Option<Arc<dyn SourceFileStorage>>,
     pub source_deletions: Arc<dyn SourceFileDeletionRepository>,
+    pub document_extractor: Arc<dyn DocumentTextExtractor>,
     pub import_permits: Arc<Semaphore>,
     pub active_import_users: Arc<Mutex<HashSet<Uuid>>>,
 }
@@ -105,6 +106,10 @@ pub struct SourceFileStorageUnavailable(#[source] pub anyhow::Error);
 #[derive(Debug, thiserror::Error)]
 #[error("Persisted import chapters cannot be resumed")]
 pub struct ImportChaptersUnusable;
+
+#[derive(Debug, thiserror::Error)]
+#[error("The retained source file is missing")]
+pub struct ImportSourceMissing;
 
 #[derive(Debug, thiserror::Error)]
 pub enum NovelDeletionError {
@@ -309,13 +314,21 @@ impl NovelCommandHandler {
             novel.set_deviation_mode(mode);
         }
         let novel_id = novel.id;
-        let (chapters, admission) = tokio::task::spawn_blocking(move || {
-            let chapters = NovelParserService::parse_chapters(novel_id, &raw_text)?;
-            ensure_import_budget(&chapters)?;
-            Ok::<_, anyhow::Error>((chapters, admission))
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("chapter parser task failed: {error}"))??;
+        // With source retention, acceptance commits at the `source` stage and
+        // the claimed worker rebuilds deterministic chapters from the retained
+        // object; the request-time extraction above only validates the input.
+        let source_stage = cmd.source_bytes.is_some() && self.source_storage.is_some();
+        let (chapters, admission) = if source_stage {
+            (Vec::new(), admission)
+        } else {
+            tokio::task::spawn_blocking(move || {
+                let chapters = NovelParserService::parse_chapters(novel_id, &raw_text)?;
+                ensure_import_budget(&chapters)?;
+                Ok::<_, anyhow::Error>((chapters, admission))
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!("chapter parser task failed: {error}"))??
+        };
         retain_source_file(
             &mut novel,
             cmd.source_bytes,
@@ -323,7 +336,11 @@ impl NovelCommandHandler {
             self.source_deletions.as_ref(),
         )
         .await?;
-        self.novel_repo.create_import(&novel, &chapters).await?;
+        if source_stage {
+            self.novel_repo.create_source_import(&novel).await?;
+        } else {
+            self.novel_repo.create_import(&novel, &chapters).await?;
+        }
         match self.novel_repo.claim_import(novel_id, cmd.user_id).await {
             Ok(Some(claim)) => self.spawn_claimed_import(claim, admission),
             Ok(None) => {
@@ -351,13 +368,16 @@ impl NovelCommandHandler {
         }
 
         let chapters = self.chapter_repo.find_by_novel(novel_id).await?;
-        if !chapters_are_importable(&chapters) {
+        if chapters_are_importable(&chapters) {
+            ensure_import_budget(&chapters)?;
+        } else if novel.file_key.is_none() || self.source_storage.is_none() {
             return Err(ImportRetryConflict(
                 "No parsed chapters are available; re-upload the source",
             )
             .into());
         }
-        ensure_import_budget(&chapters)?;
+        // A stage-`source` job with a retained key replays the object; the
+        // import budget is enforced again after the replayed split.
 
         let admission = self.try_admit_import(user_id)?;
         let claim = self
@@ -400,12 +420,29 @@ impl NovelCommandHandler {
                     attempt = claim.attempt,
                     "novel import processing failed"
                 );
-                let (code, public_error) = if claim.stage == ImportStage::Source
-                    || error.downcast_ref::<ImportChaptersUnusable>().is_some()
+                let (code, public_error) = if error.downcast_ref::<ImportSourceMissing>().is_some()
                 {
+                    (
+                        "source_missing",
+                        "The retained source file is missing; re-upload the source",
+                    )
+                } else if error
+                    .downcast_ref::<SourceFileStorageUnavailable>()
+                    .is_some()
+                {
+                    (
+                        "source_storage_unavailable",
+                        "Source storage is unavailable; retry the import",
+                    )
+                } else if error.downcast_ref::<ImportChaptersUnusable>().is_some() {
                     (
                         "source_unavailable",
                         "No parsed chapters are available; re-upload the source",
+                    )
+                } else if claim.stage == ImportStage::Source {
+                    (
+                        "source_invalid",
+                        "The retained source file cannot be parsed; re-upload the source",
                     )
                 } else {
                     (
@@ -440,14 +477,20 @@ impl NovelCommandHandler {
             .await?
             .filter(|novel| novel.user_id == claim.user_id)
             .ok_or_else(|| anyhow::anyhow!("Novel not found"))?;
-        let chapters = self.chapter_repo.find_by_novel(claim.novel_id).await?;
-        if !chapters_are_importable(&chapters) {
-            return Err(ImportChaptersUnusable.into());
-        }
+        let chapters = match claim.stage {
+            ImportStage::Source => self.replay_source_chapters(&novel, claim).await?,
+            _ => {
+                let chapters = self.chapter_repo.find_by_novel(claim.novel_id).await?;
+                if !chapters_are_importable(&chapters) {
+                    return Err(ImportChaptersUnusable.into());
+                }
+                chapters
+            }
+        };
         ensure_import_budget(&chapters)?;
 
         let characters = match claim.stage {
-            ImportStage::Chapters => {
+            ImportStage::Chapters | ImportStage::Source => {
                 self.enrich_novel_async(&mut novel, &chapters, claim)
                     .await?
             }
@@ -458,14 +501,67 @@ impl NovelCommandHandler {
                 }
                 characters
             }
-            ImportStage::Source => {
-                return Err(anyhow::anyhow!("durable import source is unavailable"));
-            }
             ImportStage::Completed => return Err(ImportLeaseLost.into()),
         };
         self.complete_canon_async(&novel, &chapters, &characters, claim)
             .await?;
         Ok(characters)
+    }
+
+    /// Rebuild deterministic chapters from the retained source object and
+    /// fenced-commit them, advancing the durable stage from `source` to
+    /// `chapters` before any provider call.
+    async fn replay_source_chapters(
+        &self,
+        novel: &Novel,
+        claim: &ImportClaim,
+    ) -> Result<Vec<Chapter>> {
+        let key = novel.file_key.clone().ok_or(ImportSourceMissing)?;
+        let storage = self.source_storage.as_ref().ok_or(ImportSourceMissing)?;
+        let Some(bytes) = storage
+            .get(&key)
+            .await
+            .map_err(SourceFileStorageUnavailable)?
+        else {
+            return Err(ImportSourceMissing.into());
+        };
+        let object_bytes = bytes.len();
+        let extractor = self.document_extractor.clone();
+        let novel_id = novel.id;
+        let chapters = tokio::task::spawn_blocking(move || {
+            // The bytes were validated at upload under a server-generated,
+            // single-writer key, so magic sniffing is sound for replay: ZIP
+            // containers are EPUB, `%PDF-` is PDF, everything else is the
+            // stored text upload. This never widens the accepted envelope.
+            let mime = if bytes.starts_with(b"PK\x03\x04") {
+                "application/epub+zip"
+            } else if bytes.starts_with(b"%PDF-") {
+                "application/pdf"
+            } else {
+                "text/plain"
+            };
+            let text = extractor.extract_text(None, Some(mime), &bytes)?;
+            let chapters = NovelParserService::parse_chapters(novel_id, &text)?;
+            ensure_import_budget(&chapters)?;
+            Ok::<_, anyhow::Error>(chapters)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("chapter parser task failed: {error}"))??;
+        if !self
+            .novel_repo
+            .replace_import_chapters(claim.novel_id, claim.attempt, &chapters)
+            .await?
+        {
+            return Err(ImportLeaseLost.into());
+        }
+        info!(
+            novel_id = %claim.novel_id,
+            key = %key,
+            bytes = object_bytes,
+            chapters = chapters.len(),
+            "novel import replayed retained source chapters"
+        );
+        Ok(chapters)
     }
 
     #[tracing::instrument(skip_all, fields(novel_id = %novel.id))]
@@ -808,6 +904,11 @@ mod import_budget_tests {
                 anyhow::bail!("simulated S3 failure");
             }
             Ok(())
+        }
+
+        async fn get(&self, _key: &str) -> Result<Option<bytes::Bytes>> {
+            self.events.lock().unwrap().push("get");
+            Ok(None)
         }
 
         async fn delete(&self, _key: &str) -> Result<()> {

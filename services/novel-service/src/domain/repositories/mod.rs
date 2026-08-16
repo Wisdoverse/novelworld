@@ -24,9 +24,22 @@ pub struct RecoverableImport {
 #[async_trait]
 pub trait NovelRepository: Send + Sync {
     async fn create_import(&self, novel: &Novel, chapters: &[Chapter]) -> Result<()>;
+    /// Commit a Novel plus a stage-`source` job without chapters. Only used
+    /// when source retention is enabled; the claimed worker rebuilds chapters
+    /// from the retained object before any provider work.
+    async fn create_source_import(&self, novel: &Novel) -> Result<()>;
     async fn claim_import(&self, novel_id: Uuid, user_id: Uuid) -> Result<Option<ImportClaim>>;
     async fn recoverable_imports(&self, limit: i64) -> Result<Vec<RecoverableImport>>;
     async fn renew_import(&self, novel_id: Uuid, attempt: i64) -> Result<bool>;
+    /// Atomically replace the novel's chapters and advance the job from
+    /// `source` to `chapters`, fenced by `(novel_id, attempt)`. Returns false
+    /// when the fence is stale or the stage is not `source`.
+    async fn replace_import_chapters(
+        &self,
+        novel_id: Uuid,
+        attempt: i64,
+        chapters: &[Chapter],
+    ) -> Result<bool>;
     async fn record_import_enrichment(
         &self,
         novel_id: Uuid,

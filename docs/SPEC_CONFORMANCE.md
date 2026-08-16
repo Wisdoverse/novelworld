@@ -69,9 +69,9 @@ state in two places.
 | §4.1.6 — chat-turn status, lease, failure, and completion fields agree | Verified | H3, H5 | E1, E3 |
 | §4.2 — UUID v4, UTC `TIMESTAMPTZ`, case-insensitive character deduplication | Verified | H1, H2 | E1, E2 |
 | §5.1 — accepted formats, byte limits, validation, optional retention, and pending record | Verified | H1 | E0, E2 |
-| §5.1 — accepted imports recoverable after process death from committed stages; retained bytes still do not imply retained-object replay | Verified | H1 | E1, E2; durable jobs, leases, and startup recovery landed in PR #116, retained-object reprocessing remains an H1 gap |
+| §5.1 — accepted imports recoverable after process death from committed `source`, `chapters`, or `enriched` stages; a `source`-stage job replays its retained object to rebuild chapters | Verified | H1 | E1, E2; durable jobs, leases, and startup recovery landed in PR #116, and the retained-object replay slice (#125) reads the object through the `SourceFileStorage` port before any provider call |
 | §5.2 — current parsing stages reach `ready` or store a terminal parse error | Verified | H1 | E2 |
-| §5.2 — interruption recovery, fenced attempts, and reclaim of pending or expired jobs | Verified | H1 | E1, E2; attempt-fenced claims, lease reclaim, and replay-safe backfill landed in PR #116 |
+| §5.2 — interruption recovery, fenced attempts, and reclaim of pending or expired jobs | Verified | H1 | E1, E2; attempt-fenced claims, lease reclaim, and replay-safe backfill landed in PR #116; the source-stage chapter replacement follows the same `(novel_id, attempt)` fence (#125) |
 | §5.3 — non-empty, sequential chapters | Verified | H1 | E2 |
 | §5.4 — structured character output validation and case-insensitive merge | Verified | H1 | E2 |
 | §5.4 — complete repeated-character coverage and 50-character cost bound | Intended gap | H1 | E2 shows heuristic/model extraction without a release corpus or enforced final cap |
@@ -140,8 +140,11 @@ state in two places.
   a mid-term summary every twenty committed messages, retrieves up to five
   semantic results when embeddings are available, and has no connected
   production promotion path for long/permanent memories.
-- Source bytes are retained only when S3 is enabled. Without retention,
-  extraction is request-local and an interrupted import requires re-upload.
+- Source bytes are retained only when S3 is enabled. With retention, file
+  imports accept at the `source` stage and rebuild deterministic chapters from
+  the retained object (format resolved from validated-bytes magic). Without
+  retention, chapter splitting is request-local and an interrupted import
+  requires re-upload.
 
 ## Change and approval process
 

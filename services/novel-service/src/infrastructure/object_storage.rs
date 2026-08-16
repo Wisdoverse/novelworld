@@ -3,13 +3,20 @@ use async_trait::async_trait;
 use aws_config::{retry::RetryConfig, timeout::TimeoutConfig, BehaviorVersion};
 use aws_sdk_s3::{
     config::{Credentials, Region},
+    error::ProvideErrorMetadata,
     primitives::ByteStream,
     Client,
 };
 use bytes::Bytes;
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
 
 use crate::domain::ports::{ReadinessProbe, SourceFileStorage};
+
+/// Hard ceiling for a retained source object read during import replay. The
+/// upload contract bounds every accepted object at 20 MiB; this fails closed
+/// far above that without ever trusting attacker-influenced metadata.
+const MAX_RETAINED_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct S3StorageConfig {
@@ -116,6 +123,38 @@ impl SourceFileStorage for S3SourceFileStorage {
         Ok(())
     }
 
+    async fn get(&self, key: &str) -> Result<Option<Bytes>> {
+        let output = match self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+        {
+            Ok(output) => output,
+            Err(error) => {
+                if error
+                    .as_service_error()
+                    .is_some_and(|service| service.code() == Some("NoSuchKey"))
+                {
+                    return Ok(None);
+                }
+                return Err(error).with_context(|| format!("failed to read source object {key}"));
+            }
+        };
+        let mut reader = output.body.into_async_read();
+        let mut data = Vec::new();
+        tokio::io::AsyncReadExt::take(&mut reader, (MAX_RETAINED_SOURCE_BYTES + 1) as u64)
+            .read_to_end(&mut data)
+            .await
+            .with_context(|| format!("failed to read source object {key}"))?;
+        if data.len() > MAX_RETAINED_SOURCE_BYTES {
+            bail!("source object {key} exceeds the bounded replay limit");
+        }
+        Ok(Some(Bytes::from(data)))
+    }
+
     async fn delete(&self, key: &str) -> Result<()> {
         self.client
             .delete_object()
@@ -182,7 +221,8 @@ mod tests {
     use axum::{
         body::Bytes as RequestBytes,
         extract::{Path, State},
-        http::StatusCode,
+        http::{header, StatusCode},
+        response::IntoResponse,
         routing::{head, put},
         Router,
     };
@@ -219,6 +259,28 @@ mod tests {
         StatusCode::OK
     }
 
+    async fn get_object(
+        State(state): State<FakeS3>,
+        Path((_bucket, key)): Path<(String, String)>,
+    ) -> impl IntoResponse {
+        match state.objects.lock().await.get(&key).cloned() {
+            Some(bytes) => (StatusCode::OK, bytes).into_response(),
+            None => (
+                StatusCode::NOT_FOUND,
+                [(
+                    header::CONTENT_TYPE,
+                    axum::http::HeaderValue::from_static("application/xml"),
+                )],
+                concat!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+                    "<Error><Code>NoSuchKey</Code>",
+                    "<Message>The specified key does not exist.</Message></Error>"
+                ),
+            )
+                .into_response(),
+        }
+    }
+
     async fn delete_object(
         State(state): State<FakeS3>,
         Path((_bucket, key)): Path<(String, String)>,
@@ -233,7 +295,10 @@ mod tests {
         let app = Router::new()
             .route("/{bucket}", head(|| async { StatusCode::OK }))
             .route("/{bucket}/", head(|| async { StatusCode::OK }))
-            .route("/{bucket}/{*key}", put(put_object).delete(delete_object))
+            .route(
+                "/{bucket}/{*key}",
+                put(put_object).get(get_object).delete(delete_object),
+            )
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -266,6 +331,94 @@ mod tests {
         );
         storage.delete("source-files/user/novel").await.unwrap();
         assert!(state.objects.lock().await.is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn get_replays_stored_bytes_and_maps_missing_keys_to_none() {
+        let state = FakeS3::default();
+        let app = Router::new()
+            .route("/{bucket}", head(|| async { StatusCode::OK }))
+            .route("/{bucket}/", head(|| async { StatusCode::OK }))
+            .route(
+                "/{bucket}/{*key}",
+                put(put_object).get(get_object).delete(delete_object),
+            )
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let storage = S3SourceFileStorage::new(S3StorageConfig {
+            bucket: "source-bucket".into(),
+            region: "us-east-1".into(),
+            endpoint: Some(format!("http://{address}")),
+            force_path_style: true,
+            access_key: Some("test-access".into()),
+            secret_key: Some("test-secret".into()),
+            session_token: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            storage.get("source-files/user/missing").await.unwrap(),
+            None
+        );
+        storage
+            .put(
+                "source-files/user/novel",
+                Bytes::from_static(b"retained upload bytes"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.get("source-files/user/novel").await.unwrap(),
+            Some(Bytes::from_static(b"retained upload bytes"))
+        );
+        storage.delete("source-files/user/novel").await.unwrap();
+        assert_eq!(storage.get("source-files/user/novel").await.unwrap(), None);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn get_fails_closed_when_the_object_exceeds_the_replay_bound() {
+        let state = FakeS3::default();
+        state.objects.lock().await.insert(
+            "source-files/user/oversize".into(),
+            RequestBytes::from(vec![b'x'; MAX_RETAINED_SOURCE_BYTES + 1]),
+        );
+        let app = Router::new()
+            .route("/{bucket}", head(|| async { StatusCode::OK }))
+            .route("/{bucket}/", head(|| async { StatusCode::OK }))
+            .route(
+                "/{bucket}/{*key}",
+                put(put_object).get(get_object).delete(delete_object),
+            )
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let storage = S3SourceFileStorage::new(S3StorageConfig {
+            bucket: "source-bucket".into(),
+            region: "us-east-1".into(),
+            endpoint: Some(format!("http://{address}")),
+            force_path_style: true,
+            access_key: Some("test-access".into()),
+            secret_key: Some("test-secret".into()),
+            session_token: None,
+        })
+        .await
+        .unwrap();
+
+        let error = storage
+            .get("source-files/user/oversize")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("bounded replay limit"),
+            "unexpected error: {error}"
+        );
         server.abort();
     }
 }
