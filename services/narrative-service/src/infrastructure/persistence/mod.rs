@@ -139,7 +139,15 @@ impl ReadinessProbe for PgReadinessProbe {
                         ('public.world_turns'::pg_catalog.regclass, 'world_turns_request_fingerprint_check', 'c', 'CHECK ((octet_length(request_fingerprint) = 32))'),
                         ('public.world_turns'::pg_catalog.regclass, 'world_turns_action_check', 'c', 'CHECK ((jsonb_typeof(action) = ''object''::text))'),
                         ('public.world_turns'::pg_catalog.regclass, 'world_turns_expected_turn_check', 'c', 'CHECK ((expected_turn_number >= 0))'),
+                        -- The next two rows are one constraint in its two
+                        -- spellings: PostgreSQL deparses CHECK (status IN (...))
+                        -- over a varchar column as the first, and re-parses that
+                        -- deparsed text — what restoring a pg_dump artifact
+                        -- does — into the second. Exactly one can match, so the
+                        -- expected match count below is unchanged and a restored
+                        -- deployment can still reach readiness.
                         ('public.world_turns'::pg_catalog.regclass, 'world_turns_status_check', 'c', 'CHECK (((status)::text = ANY ((ARRAY[''in_progress''::character varying, ''completed''::character varying, ''failed''::character varying])::text[])))'),
+                        ('public.world_turns'::pg_catalog.regclass, 'world_turns_status_check', 'c', 'CHECK (((status)::text = ANY (ARRAY[(''in_progress''::character varying)::text, (''completed''::character varying)::text, (''failed''::character varying)::text])))'),
                         ('public.world_turns'::pg_catalog.regclass, 'world_turns_attempt_check', 'c', 'CHECK ((attempt >= 1))'),
                         ('public.world_turns'::pg_catalog.regclass, 'world_turns_state_check', 'c', 'CHECK (((((status)::text = ''in_progress''::text) AND (lease_expires_at IS NOT NULL) AND (transition IS NULL) AND (result IS NULL) AND (failure_code IS NULL) AND (completed_at IS NULL)) OR (((status)::text = ''completed''::text) AND (lease_expires_at IS NULL) AND (jsonb_typeof(transition) = ''object''::text) AND (jsonb_typeof(result) = ''object''::text) AND (failure_code IS NULL) AND (completed_at IS NOT NULL)) OR (((status)::text = ''failed''::text) AND (lease_expires_at IS NULL) AND (transition IS NULL) AND (result IS NULL) AND (failure_code IS NOT NULL) AND ((failure_code)::text <> ''''::text) AND (completed_at IS NULL))))')
                     ) AS expected(relation_id, name, kind, definition)

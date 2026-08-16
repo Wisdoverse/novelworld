@@ -131,7 +131,7 @@ jobs:
   runtime:
     name: Production Compose Smoke
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       LLM_API_KEY: validation-placeholder
       POSTGRES_PASSWORD: runtime-postgres-only
@@ -267,6 +267,10 @@ jobs:
           test "$(docker exec novel-gateway curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8080/ready)" = 200
       - name: Verify restart-safe core reader loop
         run: tests/e2e/core_reader_loop.sh
+      - name: Run the backup-restore-v1 drills
+        env:
+          BACKUP_ENCRYPTION_KEY: runtime-drill-backup-key-at-least-32-characters
+        run: tests/e2e/backup_restore_drill.sh
       - name: Reset production topology for the capacity profile
         env:
           RATE_LIMIT_RPS: 500

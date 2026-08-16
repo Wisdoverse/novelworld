@@ -314,8 +314,16 @@ BEGIN
         WHERE conname = 'chat_turns_status_check'
           AND conrelid = 'public.chat_turns'::pg_catalog.regclass
           AND contype = 'c'
-          AND pg_catalog.pg_get_constraintdef(oid) =
-              'CHECK (((status)::text = ANY ((ARRAY[''in_progress''::character varying, ''completed''::character varying, ''failed''::character varying])::text[])))'
+          -- Two spellings of one constraint. PostgreSQL deparses
+          -- CHECK (status IN (...)) over a varchar column as the first form,
+          -- and re-parses that deparsed text — which is exactly what restoring
+          -- a pg_dump artifact does — into the second. Accepting both keeps a
+          -- restored deployment migratable without loosening drift detection:
+          -- only one of them can ever match a given constraint.
+          AND pg_catalog.pg_get_constraintdef(oid) IN (
+              'CHECK (((status)::text = ANY ((ARRAY[''in_progress''::character varying, ''completed''::character varying, ''failed''::character varying])::text[])))',
+              'CHECK (((status)::text = ANY (ARRAY[(''in_progress''::character varying)::text, (''completed''::character varying)::text, (''failed''::character varying)::text])))'
+          )
     ) THEN
         RAISE EXCEPTION 'chat turns status constraint has an unexpected definition';
     END IF;
