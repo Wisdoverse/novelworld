@@ -65,6 +65,13 @@ jobs:
           cargo run --quiet -p h3-eval -- --recorded --git-sha "$GITHUB_SHA" > /tmp/h3-eval-a.json
           cargo run --quiet -p h3-eval -- --recorded --git-sha "$GITHUB_SHA" > /tmp/h3-eval-b.json
           cmp /tmp/h3-eval-a.json /tmp/h3-eval-b.json
+      - name: Horizon 1 extraction-quality evaluation gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --quiet -p h1-eval -- --recorded --git-sha "$GITHUB_SHA" > /tmp/h1-eval-a.json
+          cargo run --quiet -p h1-eval -- --recorded --git-sha "$GITHUB_SHA" > /tmp/h1-eval-b.json
+          cmp /tmp/h1-eval-a.json /tmp/h1-eval-b.json
       - name: Horizon 3 LLM budget contract
         shell: bash
         run: |

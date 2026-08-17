@@ -43,7 +43,7 @@ pub struct CharacterRelationship {
     pub strength: i32,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractionResult {
     pub characters: Vec<ExtractedCharacter>,
     pub world_summary: String,
