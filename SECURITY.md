@@ -114,6 +114,31 @@ with a reachable registry, and SBOM/provenance/signature generation is a
 release-infrastructure task. CI validates the manifest grammar and lock
 guards; the deployment and SBOM/provenance/signature paths themselves are
 not exercised by a local drill.
+### Dependency Policy
+
+CI runs `rustsec/audit-check` against `Cargo.lock` with the live RustSec
+advisory database: any newly reported vulnerability fails the build.
+`.cargo/audit.toml` records the three currently acknowledged advisories with
+their rationale:
+
+- **RUSTSEC-2026-0098/0099/0104** (rustls-webpki 0.101.7) — transitive
+  through the already-latest AWS SDK TLS chain; no patched release exists in
+  the 0.101 line. The name-constraint findings (0098/0099) require a
+  misissued certificate to exploit, and 0104 is a panic in CRL parsing; the
+  S3 client targets operator-managed endpoints. Re-check whenever the AWS
+  SDK chain updates.
+
+Informational warnings (`ttf-parser` unmaintained, `lru` unsound pop patched
+in 0.18.2) remain non-failing because both are transitive through
+already-latest upstream releases. Each acknowledged entry is re-reviewed
+whenever its dependency chain updates; new advisories are not silently
+ignored. JWT signing and verification use the `aws_lc_rs` backend of
+jsonwebtoken, so the rsa crate is not part of the tree at all.
+
+Still-open H2 supply-chain gates: license inventory, secret scanning,
+container image scanning, and SBOM/provenance/signature generation for
+official release artifacts.
+
 ### LLM Security
 - User input passed to LLM prompts includes behavioral constraints
 - System prompts instruct models to stay in character and refuse harmful content

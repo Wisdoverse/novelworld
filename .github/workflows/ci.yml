@@ -94,6 +94,10 @@ jobs:
         run: cargo test --workspace --exclude integration-tests
       - name: Clippy
         run: cargo clippy --workspace --exclude integration-tests --all-targets -- -D warnings
+      - name: Audit dependencies for known vulnerabilities
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   frontend:
     name: Frontend Build

@@ -40,6 +40,7 @@ and `REQUIRED` statements even when it does not create an unconditional duty.
 | E8 | Runtime and security configuration: [`ci.yml`](../.github/workflows/ci.yml), [`docker-compose.yml`](../docker-compose.yml), [`nginx.conf`](../infra/nginx/nginx.conf), [`THREAT_MODEL.md`](./THREAT_MODEL.md), [`bad_release_drill.sh`](../tests/e2e/bad_release_drill.sh), [`release.sh`](../infra/docker/release.sh), [`release_state_drill.sh`](../tests/e2e/release_state_drill.sh) |
 | E9 | Backup, restore, lineage, and erasure replay: [`BACKUP_RESTORE.md`](./BACKUP_RESTORE.md), [`0016_erasure_records.sql`](../infra/postgres/migrations/0016_erasure_records.sql), [`backup.sh`](../infra/backup/backup.sh), [`restore.sh`](../infra/backup/restore.sh), [`backup_restore.rs`](../tests/integration/tests/backup_restore.rs), [`backup_restore_drill.sh`](../tests/e2e/backup_restore_drill.sh) |
 | E10 | Gateway error normalization: [`proxy.rs`](../gateway/src/proxy.rs) (`NORMALIZED_ERROR_RESPONSES` and the pinned-contract tests) |
+| E11 | Dependency vulnerability gate: [`audit.toml`](../.cargo/audit.toml), [`Cargo.lock`](../Cargo.lock), the `rustsec/audit-check` CI step, and the Dependency Policy in [`SECURITY.md`](../SECURITY.md) |
 
 ## README claim coverage
 
@@ -134,6 +135,7 @@ state in two places.
 | §15 — secret length, bcrypt, upload validation, and managed object keys | Verified | H2 | E2, E5, E8 |
 | §15 — untrusted prompt boundaries and model output cannot authorize commits | Verified | H2, H3, H4 | E2, E3, E4 provide structural evidence; live adversarial qualification remains open |
 | §15 — all SQL remains parameterized | Verified | H2 | Current-source review found bound persistence queries; H2 still owns automated/static and dependency gates |
+| §15 — known-vulnerability dependency gate | Verified | H2 | E11; a local cargo-audit 0.22.2 run against the current `Cargo.lock` is clean under `.cargo/audit.toml`, which records the three acknowledged rustls-webpki 0.101.7 advisories with rationale (transitive through the already-latest AWS SDK TLS chain — no patched 0.101 release; name-constraint findings need a misissued certificate, CRL-parsing panic documented); jsonwebtoken was switched to its `aws_lc_rs` backend so the rsa crate is not in the tree at all; CI adds the live `rustsec/audit-check@v2.0.0` step so any newly reported advisory fails the build (CI run pending); informational warnings (ttf-parser unmaintained, lru unsound pop) remain non-failing and re-reviewed on chain updates; license, secret, container, and SBOM/provenance gates remain open H2 items |
 | §16 and former Appendix A — duplicate implementation, test, and prompt prescriptions | Obsolete/corrected | H0 | Removed stale copies; `AGENTS.md`, runtime validators/prompts, and Roadmap issues own those changing details |
 
 ## Implementation-defined selections
