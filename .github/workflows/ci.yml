@@ -23,6 +23,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Specification conformance ledger
         run: sha256sum --check docs/SPEC_CONFORMANCE.sha256
       - name: Release manifest boundary
@@ -98,6 +100,12 @@ jobs:
         uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Scan for committed secrets
+        uses: gitleaks/gitleaks-action@v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Self-test the secret-scanning gate
+        run: tests/e2e/gitleaks_self_test.sh
 
   frontend:
     name: Frontend Build

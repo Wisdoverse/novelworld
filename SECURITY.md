@@ -117,7 +117,15 @@ not exercised by a local drill.
 ### Dependency Policy
 
 CI runs `rustsec/audit-check` against `Cargo.lock` with the live RustSec
-advisory database: any newly reported vulnerability fails the build.
+advisory database: any newly reported vulnerability fails the build. CI also
+runs `gitleaks` over the full commit history: any committed secret fails the
+build. `.gitleaks.toml` is the full default rule set plus an allowlist of
+two deliberate test fixtures (the CI `RUNTIME_CONFIG_KEY` smoke placeholder
+and two static provider model names). The action scans the push/PR delta
+and the self-test `tests/e2e/gitleaks_self_test.sh` scans the full history:
+it plants a GitHub-shaped token and asserts the scan fails (a config that
+silently lost its rules would pass everything and must not go unnoticed),
+then asserts the repository stays clean.
 `.cargo/audit.toml` records the three currently acknowledged advisories with
 their rationale:
 
@@ -135,9 +143,9 @@ whenever its dependency chain updates; new advisories are not silently
 ignored. JWT signing and verification use the `aws_lc_rs` backend of
 jsonwebtoken, so the rsa crate is not part of the tree at all.
 
-Still-open H2 supply-chain gates: license inventory, secret scanning,
-container image scanning, and SBOM/provenance/signature generation for
-official release artifacts.
+Still-open H2 supply-chain gates: license inventory, container image
+scanning, and SBOM/provenance/signature generation for official release
+artifacts.
 
 ### LLM Security
 - User input passed to LLM prompts includes behavioral constraints
