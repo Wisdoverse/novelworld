@@ -298,6 +298,7 @@ impl AuthHandler {
         };
 
         user.record_sign_in();
+        tracing::info!(user_id = %user.id, "login succeeded");
         self.user_repo
             .update(&user)
             .await

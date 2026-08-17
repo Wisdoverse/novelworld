@@ -1,8 +1,10 @@
 #![allow(dead_code, unused_imports)]
 use anyhow::Result;
+use axum::{extract::Request, middleware, middleware::Next, response::Response};
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
+use tracing::Instrument;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use narrative_service::{
@@ -24,89 +26,126 @@ use narrative_service::{
     interface::http::{router, AppState},
 };
 
+/// SPEC 14.1: wrap every request in a span carrying the service name and the
+/// propagated X-Trace-Id.
+async fn trace_middleware(request: Request, next: Next) -> Response {
+    let trace_id = request
+        .headers()
+        .get("x-trace-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let span = tracing::info_span!("service", service = "narrative-service", trace_id = %trace_id);
+    next.run(request).instrument(span).await
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // The service span must be created after tracing_subscriber::init()
+    // (spans register on the dispatcher current at creation), so init inside
+    // run_body and wrap it here with a span that re-enters on every poll.
+    let service_span = tracing::info_span!("service", service = "narrative-service", trace_id = "");
+    run_body().instrument(service_span).await
+}
+
+#[tracing::instrument(
+    name = "service",
+    skip_all,
+    fields(service = "narrative-service", trace_id = "")
+)]
+async fn run_body() -> Result<()> {
     // Initialize tracing
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
-        ))
+        .with(tracing_subscriber::EnvFilter::new(format!(
+            "{},reqwest=off,hyper=off,h2=off,tower_http=off",
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into())
+        )))
         .with(tracing_subscriber::fmt::layer().json())
         .init();
 
-    dotenvy::dotenv().ok();
-    let metrics = llm_client::install_metrics("narrative-service")?;
-    let internal_service_token =
-        std::env::var("INTERNAL_SERVICE_TOKEN").expect("INTERNAL_SERVICE_TOKEN must be set");
-    if internal_service_token.len() < 32 {
-        anyhow::bail!("INTERNAL_SERVICE_TOKEN must be at least 32 characters");
+    let service_span = tracing::info_span!("service", service = "narrative-service", trace_id = "");
+    async move {
+        // SPEC 14.1: every log entry carries the service name and a trace id
+        // (empty outside a request, the propagated X-Trace-Id while handling one).
+
+        dotenvy::dotenv().ok();
+        let metrics = llm_client::install_metrics("narrative-service")?;
+        let internal_service_token =
+            std::env::var("INTERNAL_SERVICE_TOKEN").expect("INTERNAL_SERVICE_TOKEN must be set");
+        if internal_service_token.len() < 32 {
+            anyhow::bail!("INTERNAL_SERVICE_TOKEN must be at least 32 characters");
+        }
+
+        // Database connection pool
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let pool = PgPoolOptions::new()
+            .max_connections(20)
+            .connect(&database_url)
+            .await?;
+
+        tracing::info!("Connected to PostgreSQL");
+
+        // LLM client (shared workspace crate, behind domain port trait)
+        let llm: Arc<dyn domain::ports::LlmPort> = Arc::new(LlmAdapter::new(Arc::new(
+            llm_client::RuntimeLlmClient::from_env()?,
+        )));
+
+        // Repositories
+        let node_repo = Arc::new(PgNarrativeNodeRepository::new(pool.clone()));
+        let choice_repo = Arc::new(PgUserChoiceRepository::new(pool.clone()));
+        let world_state_repo = Arc::new(PgWorldStateRepository::new(pool.clone()));
+        let world_turn_repo = Arc::new(PgWorldTurnRepository::new(pool.clone()));
+        let player_chapter_repo = Arc::new(PgPlayerChapterRepository::new(pool.clone()));
+        let account_export: Arc<dyn domain::ports::AccountExportPort> =
+            Arc::new(PgAccountExport::new(pool.clone()));
+        let novel_service_url = std::env::var("NOVEL_SERVICE_URL")
+            .unwrap_or_else(|_| "http://novel-service:8002".into());
+        let chapter_repo = Arc::new(NovelServiceClient::new(novel_service_url));
+        let novel_readiness: Arc<dyn domain::ports::ReadinessProbe> = chapter_repo.clone();
+
+        // Application handler
+        let handler = Arc::new(NarrativeCommandHandler {
+            node_repo,
+            choice_repo,
+            world_state_repo,
+            world_turn_repo,
+            player_chapter_repo,
+            chapter_repo,
+            llm,
+        });
+
+        let state = AppState {
+            handler,
+            postgres_readiness: Arc::new(PgReadinessProbe::new(pool)),
+            novel_readiness,
+            account_export,
+            internal_service_token: internal_service_token.into(),
+            metrics,
+        };
+
+        // Router with CORS
+        let app = router(state)
+            .layer(
+                CorsLayer::new()
+                    .allow_origin(Any)
+                    .allow_methods(Any)
+                    .allow_headers(Any),
+            )
+            .layer(middleware::from_fn(trace_middleware));
+
+        let port = std::env::var("PORT").unwrap_or_else(|_| "8004".into());
+        let addr = format!("0.0.0.0:{}", port);
+        tracing::info!("narrative-service listening on {}", addr);
+
+        let listener = tokio::net::TcpListener::bind(&addr).await?;
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await?;
+
+        Ok(())
     }
-
-    // Database connection pool
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let pool = PgPoolOptions::new()
-        .max_connections(20)
-        .connect(&database_url)
-        .await?;
-
-    tracing::info!("Connected to PostgreSQL");
-
-    // LLM client (shared workspace crate, behind domain port trait)
-    let llm: Arc<dyn domain::ports::LlmPort> = Arc::new(LlmAdapter::new(Arc::new(
-        llm_client::RuntimeLlmClient::from_env()?,
-    )));
-
-    // Repositories
-    let node_repo = Arc::new(PgNarrativeNodeRepository::new(pool.clone()));
-    let choice_repo = Arc::new(PgUserChoiceRepository::new(pool.clone()));
-    let world_state_repo = Arc::new(PgWorldStateRepository::new(pool.clone()));
-    let world_turn_repo = Arc::new(PgWorldTurnRepository::new(pool.clone()));
-    let player_chapter_repo = Arc::new(PgPlayerChapterRepository::new(pool.clone()));
-    let account_export: Arc<dyn domain::ports::AccountExportPort> =
-        Arc::new(PgAccountExport::new(pool.clone()));
-    let novel_service_url =
-        std::env::var("NOVEL_SERVICE_URL").unwrap_or_else(|_| "http://novel-service:8002".into());
-    let chapter_repo = Arc::new(NovelServiceClient::new(novel_service_url));
-    let novel_readiness: Arc<dyn domain::ports::ReadinessProbe> = chapter_repo.clone();
-
-    // Application handler
-    let handler = Arc::new(NarrativeCommandHandler {
-        node_repo,
-        choice_repo,
-        world_state_repo,
-        world_turn_repo,
-        player_chapter_repo,
-        chapter_repo,
-        llm,
-    });
-
-    let state = AppState {
-        handler,
-        postgres_readiness: Arc::new(PgReadinessProbe::new(pool)),
-        novel_readiness,
-        account_export,
-        internal_service_token: internal_service_token.into(),
-        metrics,
-    };
-
-    // Router with CORS
-    let app = router(state).layer(
-        CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any),
-    );
-
-    let port = std::env::var("PORT").unwrap_or_else(|_| "8004".into());
-    let addr = format!("0.0.0.0:{}", port);
-    tracing::info!("narrative-service listening on {}", addr);
-
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
-
-    Ok(())
+    .instrument(service_span)
+    .await
 }
 
 async fn shutdown_signal() {
@@ -117,7 +156,7 @@ async fn shutdown_signal() {
     #[cfg(unix)]
     tokio::select! {
         _ = ctrl_c => { tracing::info!("Received SIGINT"); }
-        _ = sigterm.recv() => { tracing::info!("Received SIGTERM"); }
+        _ = sigterm.recv() => { tracing::info!(service = "narrative-service", trace_id = "", "Received SIGTERM"); }
     }
     #[cfg(not(unix))]
     ctrl_c.await.ok();

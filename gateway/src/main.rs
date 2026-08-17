@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
+use tracing::Instrument;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use auth::JwtMiddleware;
@@ -83,80 +84,95 @@ impl ReadinessCache {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // The service span must be created after tracing_subscriber::init()
+    // (spans register on the dispatcher current at creation), so init inside
+    // run_body and wrap it here with a span that re-enters on every poll.
+    let service_span = tracing::info_span!("service", service = "gateway", trace_id = "");
+    run_body().instrument(service_span).await
+}
+
+#[tracing::instrument(name = "service", skip_all, fields(service = "gateway", trace_id = ""))]
+async fn run_body() -> anyhow::Result<()> {
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
-        ))
+        .with(tracing_subscriber::EnvFilter::new(format!(
+            "{},reqwest=off,hyper=off,h2=off,tower_http=off",
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into())
+        )))
         .with(tracing_subscriber::fmt::layer().json())
         .init();
 
-    dotenvy::dotenv().ok();
+    let service_span = tracing::info_span!("service", service = "gateway", trace_id = "");
+    async move {
+        dotenvy::dotenv().ok();
 
-    // --- Prometheus metrics ---
-    let metrics_handle = metrics::init_metrics();
+        // --- Prometheus metrics ---
+        let metrics_handle = metrics::init_metrics();
 
-    let jwt_secret = std::env::var("JWT_SECRET").expect("JWT_SECRET must be set");
-    let jwt = Arc::new(JwtMiddleware::new(&jwt_secret));
-    let internal_service_token =
-        std::env::var("INTERNAL_SERVICE_TOKEN").expect("INTERNAL_SERVICE_TOKEN must be set");
-    if internal_service_token.len() < 32 {
-        anyhow::bail!("INTERNAL_SERVICE_TOKEN must be at least 32 characters");
+        let jwt_secret = std::env::var("JWT_SECRET").expect("JWT_SECRET must be set");
+        let jwt = Arc::new(JwtMiddleware::new(&jwt_secret));
+        let internal_service_token =
+            std::env::var("INTERNAL_SERVICE_TOKEN").expect("INTERNAL_SERVICE_TOKEN must be set");
+        if internal_service_token.len() < 32 {
+            anyhow::bail!("INTERNAL_SERVICE_TOKEN must be at least 32 characters");
+        }
+
+        let proxy = Arc::new(ServiceProxy {
+            novel_service_url: std::env::var("NOVEL_SERVICE_URL")
+                .unwrap_or_else(|_| "http://novel-service:8002".into()),
+            agent_service_url: std::env::var("AGENT_SERVICE_URL")
+                .unwrap_or_else(|_| "http://agent-service:8003".into()),
+            narrative_service_url: std::env::var("NARRATIVE_SERVICE_URL")
+                .unwrap_or_else(|_| "http://narrative-service:8004".into()),
+            user_service_url: std::env::var("USER_SERVICE_URL")
+                .unwrap_or_else(|_| "http://user-service:8001".into()),
+            client: reqwest::Client::new(),
+            internal_service_token: internal_service_token.into(),
+        });
+
+        // --- Global rate limiter: configurable via env, default 500 req/s ---
+        let rps: u32 = match std::env::var("RATE_LIMIT_RPS") {
+            Ok(v) => match v.parse() {
+                Ok(n) => n,
+                Err(_) => {
+                    tracing::warn!("Invalid RATE_LIMIT_RPS value '{}', defaulting to 500", v);
+                    500
+                }
+            },
+            Err(_) => 500,
+        };
+        let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(
+            NonZeroU32::new(rps).expect("RATE_LIMIT_RPS must be > 0"),
+        )));
+
+        let state = AppState {
+            jwt: jwt.clone(),
+            proxy,
+            metrics_handle,
+            rate_limiter,
+            // ponytail: The production topology has one Gateway process. Add
+            // distributed admission only when Gateway replicas actually exist.
+            account_export_permits: Arc::new(Semaphore::new(2)),
+            readiness_cache: Arc::new(ReadinessCache::new()),
+        };
+
+        let app = build_router(state)?;
+
+        let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
+        let addr = format!("0.0.0.0:{}", port);
+        tracing::info!("Gateway listening on {}", addr);
+
+        let listener = tokio::net::TcpListener::bind(&addr).await?;
+
+        // --- Graceful shutdown ---
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await?;
+
+        tracing::info!("Gateway shut down cleanly");
+        Ok(())
     }
-
-    let proxy = Arc::new(ServiceProxy {
-        novel_service_url: std::env::var("NOVEL_SERVICE_URL")
-            .unwrap_or_else(|_| "http://novel-service:8002".into()),
-        agent_service_url: std::env::var("AGENT_SERVICE_URL")
-            .unwrap_or_else(|_| "http://agent-service:8003".into()),
-        narrative_service_url: std::env::var("NARRATIVE_SERVICE_URL")
-            .unwrap_or_else(|_| "http://narrative-service:8004".into()),
-        user_service_url: std::env::var("USER_SERVICE_URL")
-            .unwrap_or_else(|_| "http://user-service:8001".into()),
-        client: reqwest::Client::new(),
-        internal_service_token: internal_service_token.into(),
-    });
-
-    // --- Global rate limiter: configurable via env, default 500 req/s ---
-    let rps: u32 = match std::env::var("RATE_LIMIT_RPS") {
-        Ok(v) => match v.parse() {
-            Ok(n) => n,
-            Err(_) => {
-                tracing::warn!("Invalid RATE_LIMIT_RPS value '{}', defaulting to 500", v);
-                500
-            }
-        },
-        Err(_) => 500,
-    };
-    let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(
-        NonZeroU32::new(rps).expect("RATE_LIMIT_RPS must be > 0"),
-    )));
-
-    let state = AppState {
-        jwt: jwt.clone(),
-        proxy,
-        metrics_handle,
-        rate_limiter,
-        // ponytail: The production topology has one Gateway process. Add
-        // distributed admission only when Gateway replicas actually exist.
-        account_export_permits: Arc::new(Semaphore::new(2)),
-        readiness_cache: Arc::new(ReadinessCache::new()),
-    };
-
-    let app = build_router(state)?;
-
-    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
-    let addr = format!("0.0.0.0:{}", port);
-    tracing::info!("Gateway listening on {}", addr);
-
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-
-    // --- Graceful shutdown ---
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
-
-    tracing::info!("Gateway shut down cleanly");
-    Ok(())
+    .instrument(service_span)
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -240,15 +256,19 @@ async fn check_service(client: &reqwest::Client, base_url: &str) -> bool {
 // Request-ID middleware: propagate or generate X-Request-Id
 // ---------------------------------------------------------------------------
 
+/// SPEC 14.1: every request carries an X-Trace-Id (accepted from the
+/// caller or generated), the response echoes it, the header is forwarded to
+/// downstream services by the proxy, and every log emitted while handling the
+/// request is wrapped in a span carrying the trace id.
 async fn request_id_middleware(mut req: Request, next: Next) -> Response {
-    let request_id = req
+    let trace_id = req
         .headers()
-        .get("x-request-id")
+        .get("x-trace-id")
         .and_then(|v| v.to_str().ok())
         .map(String::from)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    let hv = match request_id.parse::<axum::http::HeaderValue>() {
+    let hv = match trace_id.parse::<axum::http::HeaderValue>() {
         Ok(v) => v,
         Err(_) => {
             let fallback = uuid::Uuid::new_v4().to_string();
@@ -256,10 +276,15 @@ async fn request_id_middleware(mut req: Request, next: Next) -> Response {
         }
     };
 
-    req.headers_mut().insert("x-request-id", hv.clone());
+    req.headers_mut().insert("x-trace-id", hv.clone());
+    let span = tracing::info_span!(
+        "service",
+        service = "gateway",
+        trace_id = %hv.to_str().unwrap_or_default()
+    );
 
-    let mut response = next.run(req).await;
-    response.headers_mut().insert("x-request-id", hv);
+    let mut response = next.run(req).instrument(span).await;
+    response.headers_mut().insert("x-trace-id", hv);
     response
 }
 
@@ -449,7 +474,7 @@ async fn shutdown_signal() {
             .expect("failed to register SIGTERM handler");
         tokio::select! {
             _ = ctrl_c => { tracing::info!("Received SIGINT, starting graceful shutdown"); }
-            _ = sigterm.recv() => { tracing::info!("Received SIGTERM, starting graceful shutdown"); }
+            _ = sigterm.recv() => { tracing::info!(service = "gateway", trace_id = "", "Received SIGTERM, starting graceful shutdown"); }
         }
     }
 

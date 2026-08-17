@@ -369,6 +369,9 @@ impl ServiceProxy {
         match req_builder.body(body).send().await {
             Ok(resp) => {
                 let status = resp.status();
+                if status.is_server_error() {
+                    tracing::warn!(status = %status, upstream = target_base, "upstream returned a server error");
+                }
                 let resp_headers = resp.headers().clone();
 
                 if is_sse_response(original_path, status, &resp_headers) {
