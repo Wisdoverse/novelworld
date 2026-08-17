@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
 
-state_dir="$repo_root/.release"
+state_dir=${RELEASE_STATE_DIR:-"$repo_root/.release"}
 current_manifest="$state_dir/current.env"
 previous_manifest="$state_dir/previous.env"
 candidate_manifest="$state_dir/candidate.env"

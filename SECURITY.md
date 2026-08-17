@@ -84,6 +84,36 @@ Procedure (operator, on the host):
 The e2e secret_rotation_drill.sh verifies this contract: old access and
 refresh tokens are rejected, a new login works, and an account export (which
 crosses internal-token-authenticated service calls) succeeds after rotation.
+
+### Release Rollback
+
+`infra/docker/release.sh` is the release/rollback state machine for the
+compromised-release response. Manifests pin every image to an immutable
+`@sha256` digest plus a release version and git SHA; the state dir holds
+`current.env` and `previous.env` with a flock-guarded lock, and a rollback
+that dies mid-promotion leaves a `rollback.pending` marker that the next
+locked operation recovers before doing anything else. (Upgrades promote
+atomically between two staged manifests and do not use the marker.)
+
+What the release_state_drill.sh proves locally (no registry required):
+
+- Manifest grammar fails closed: non-digest images, malformed git SHAs and
+  versions, unknown, duplicate, empty, or missing keys are all rejected.
+- Every upgrade and rollback guard fires before `deploy_manifest`'s secrets
+  check (and therefore before any network access): a divergent manifest for
+  the current SHA, infrastructure-image changes, malformed rollback targets,
+  a missing or mismatched previous release, and concurrent operations (held
+  lock) all stop with an actionable error.
+- An interrupted rollback recovers its current/previous pair before the next
+  command, and a wedged marker with missing files fails closed: the marker
+  survives and requires explicit operator clearing.
+
+What stays gated: the image-level deployment (`deploy_manifest`: git checkout
+of the release SHA plus `compose pull` of the digest-pinned images) runs only
+with a reachable registry, and SBOM/provenance/signature generation is a
+release-infrastructure task. CI validates the manifest grammar and lock
+guards; the deployment and SBOM/provenance/signature paths themselves are
+not exercised by a local drill.
 ### LLM Security
 - User input passed to LLM prompts includes behavioral constraints
 - System prompts instruct models to stay in character and refuse harmful content

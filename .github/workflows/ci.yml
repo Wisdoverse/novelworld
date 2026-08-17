@@ -52,6 +52,8 @@ jobs:
           exec 9>&-
           rm release-lock.err .release/release.lock
           rmdir .release
+      - name: Verify the release/rollback state machine fails closed
+        run: tests/e2e/release_state_drill.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Format
