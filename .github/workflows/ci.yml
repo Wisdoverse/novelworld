@@ -315,6 +315,8 @@ jobs:
         env:
           COMPOSE_FILES: docker-compose.yml:docker-compose.e2e.yml:docker-compose.s3-e2e.yml
         run: tests/e2e/secret_rotation_drill.sh
+      - name: Verify the bad-release edge envelope drill
+        run: tests/e2e/bad_release_drill.sh
       - name: Show S3 topology logs on failure
         if: failure()
         run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml logs --no-color || true
