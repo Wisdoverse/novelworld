@@ -298,6 +298,9 @@ jobs:
           exit 1
       - name: Verify the S3 source-boundary kill/restart drill
         run: tests/e2e/source_recovery_drill.sh
+      - name: Show S3 topology logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml logs --no-color || true
       - name: Stop the S3 source-retention topology
         if: always()
         run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml down -v
@@ -330,9 +333,7 @@ jobs:
           retention-days: 14
       - name: Show logs on failure
         if: failure()
-        run: |
-          docker compose -f docker-compose.yml -f docker-compose.e2e.yml logs --no-color || true
-          docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml logs --no-color || true
+        run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml logs --no-color || true
       - name: Stop production topology
         if: always()
         run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml down -v

@@ -17,77 +17,10 @@
 #   tests/e2e/source_recovery_drill.sh --self-test     # verifier mutation checks, no topology
 set -euo pipefail
 
+here=$(cd "$(dirname "$0")" && pwd)
+
 if [ "${1:-}" = "--self-test" ]; then
-  python3 - <<'PY'
-import sys
-
-
-def verify(record):
-    problems = []
-
-    def require(name, condition):
-        if not condition:
-            problems.append(name)
-
-    require("job completed", record["job_status"] == "completed")
-    require("no failure code", record["failure_code"] is None)
-    require("novel ready", record["novel_status"] == "ready")
-    require("attempts inside import-provider-budget-v1",
-            1 <= record["attempt"] <= 3)
-    require("chapters exactly committed total",
-            record["chapter_count"] == record["total_chapters"] == 2)
-    require("chapters rebuilt from the retained object",
-            record["chapter_md5s"] == record["expected_md5s"])
-    require("exactly one character", record["character_count"] == 1)
-    require("exactly one canon model", record["canon_count"] == 1)
-    require("kill landed at the source boundary",
-            record["kill_stage"] == "source" and record["chapters_at_kill"] == 0)
-    require("no provider calls for completed work",
-            record["calls_after"] == record["calls_before"] == 0)
-    require("retry on ready rejected", record["retry_status"] == 409)
-    return problems
-
-
-base = {
-    "phase": "source",
-    "job_status": "completed",
-    "failure_code": None,
-    "novel_status": "ready",
-    "chapter_count": 2,
-    "total_chapters": 2,
-    "expected_md5s": "aa,bb",
-    "chapter_md5s": "aa,bb",
-    "character_count": 1,
-    "canon_count": 1,
-    "kill_stage": "source",
-    "chapters_at_kill": 0,
-    "calls_before": 0,
-    "calls_after": 0,
-    "retry_status": 409,
-    "attempt": 2,
-}
-
-tampered = [
-    ("duplicated chapters must fail", dict(base, chapter_count=3)),
-    ("false ready must fail", dict(base, novel_status="parsing")),
-    ("chapters not from the retained object must fail",
-     dict(base, chapter_md5s="cc,dd")),
-    ("kill outside the source boundary must fail",
-     dict(base, kill_stage="chapters")),
-    ("chapters committed at kill must fail", dict(base, chapters_at_kill=2)),
-    ("duplicate canon must fail", dict(base, canon_count=2)),
-    ("provider call for completed work must fail",
-     dict(base, calls_after=1)),
-    ("ready import retry must fail", dict(base, retry_status=200)),
-    ("attempt beyond the budget ceiling must fail", dict(base, attempt=4)),
-]
-for label, record in tampered:
-    if not verify(record):
-        print(f"self-test failed: {label} passed the weakened verifier")
-        sys.exit(1)
-print("source recovery verifier self-test passed")
-PY
-  exit 0
+  exec python3 "$here/source_recovery_verify.py" --self-test
 fi
 
 api=${E2E_API_URL:-http://127.0.0.1/api}
@@ -160,6 +93,19 @@ wait_ready() {
   return 1
 }
 
+# Avatars are generated after the novel becomes ready; wait until every
+# persisted avatar leaves the pending/generating states so the completed-work
+# provider-call measurement cannot race a late image call.
+wait_avatars_settled() {
+  local novel_id=$1
+  for _ in $(seq 1 60); do
+    [ "$(db "SELECT COUNT(*) FROM characters WHERE novel_id = '$novel_id' AND avatar_status::text IN ('pending','generating')")" = 0 ] && return 0
+    sleep 0.5
+  done
+  printf 'avatars did not settle for %s\n' "$novel_id" >&2
+  return 1
+}
+
 # The drill parks the source-stage replay at its fenced chapter commit by
 # holding an EXCLUSIVE lock on chapters: the replay INSERT blocks, the job
 # stays at source:in_progress with zero chapters, and the hard kill lands
@@ -205,7 +151,7 @@ hard_start() {
 }
 
 phase_record() {
-  local novel_id=$1 expected_md5s=$2 kill_stage=$3 chapters_at_kill=$4 calls_before=$5 calls_after=$6 retry_status=$7 state
+  local novel_id=$1 expected_md5s=$2 chapters_at_kill=$3 calls_before=$4 calls_after=$5 retry_status=$6 state
   state=$(db "SELECT \
         job.attempt || ':' || \
         job.status || ':' || COALESCE(job.failure_code, '-') || ':' || \
@@ -217,12 +163,12 @@ phase_record() {
         (SELECT COUNT(*) FROM canon_story_models WHERE novel_id = novel.id) \
       FROM novel_import_jobs AS job JOIN novels AS novel ON novel.id = job.novel_id \
       WHERE novel.id = '$novel_id'")
-  python3 - "$state" "$expected_md5s" "$kill_stage" "$chapters_at_kill" "$calls_before" "$calls_after" "$retry_status" <<'PY'
+  python3 - "$state" "$expected_md5s" "$chapters_at_kill" "$calls_before" "$calls_after" "$retry_status" <<'PY'
 import json
 import sys
 
-state, expected_md5s, kill_stage, chapters_at_kill = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-calls_before, calls_after, retry_status = sys.argv[5], sys.argv[6], sys.argv[7]
+state, expected_md5s, chapters_at_kill = sys.argv[1], sys.argv[2], sys.argv[3]
+calls_before, calls_after, retry_status = sys.argv[4], sys.argv[5], sys.argv[6]
 attempt, job_status, failure_code, novel_status, chapter_count, \
     total_chapters, chapter_md5s, character_count, canon_count = state.split(":")
 print(json.dumps({
@@ -237,7 +183,6 @@ print(json.dumps({
     "chapter_md5s": chapter_md5s,
     "character_count": int(character_count),
     "canon_count": int(canon_count),
-    "kill_stage": kill_stage,
     "chapters_at_kill": int(chapters_at_kill),
     "calls_before": int(calls_before),
     "calls_after": int(calls_after),
@@ -247,41 +192,7 @@ PY
 }
 
 verify_phase() {
-  python3 - "$1" <<'PY'
-import json
-import sys
-
-record = json.loads(sys.argv[1])
-problems = []
-
-
-def require(name, condition):
-    if not condition:
-        problems.append(name)
-
-
-require("job completed", record["job_status"] == "completed")
-require("no failure code", record["failure_code"] is None)
-require("novel ready", record["novel_status"] == "ready")
-require("attempts inside import-provider-budget-v1",
-        1 <= record["attempt"] <= 3)
-require("chapters exactly committed total",
-        record["chapter_count"] == record["total_chapters"] == 2)
-require("chapters rebuilt from the retained object",
-        record["chapter_md5s"] == record["expected_md5s"])
-require("exactly one character", record["character_count"] == 1)
-require("exactly one canon model", record["canon_count"] == 1)
-require("kill landed at the source boundary",
-        record["kill_stage"] == "source" and record["chapters_at_kill"] == 0)
-require("no provider calls for completed work",
-        record["calls_after"] == record["calls_before"] == 0)
-require("retry on ready rejected", record["retry_status"] == 409)
-
-if problems:
-    print("source recovery failed: " + ", ".join(problems))
-    sys.exit(1)
-print("source recovery phase verified: " + record["phase"])
-PY
+  python3 "$here/source_recovery_verify.py" "$1"
 }
 
 # A fresh S3 stack has no first administrator; the drill is self-contained.
@@ -327,6 +238,7 @@ release_lock
 hard_start
 wait_gateway_healthy
 wait_ready "$novel_id" "$(($(date +%s) + 300))"
+wait_avatars_settled "$novel_id"
 
 expected_md5s=$(python3 - "$chapter_one" "$chapter_one_body" "$chapter_two" "$chapter_two_body" <<'PY'
 import hashlib
@@ -352,7 +264,7 @@ retry_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   --output /dev/null --write-out '%{http_code}' "${auth[@]}" \
   -X POST "$api/novels/$novel_id/retry")
 
-verify_phase "$(phase_record "$novel_id" "$expected_md5s" source "$chapters_at_kill" "$calls_before" "$calls_after" "$retry_status")"
+verify_phase "$(phase_record "$novel_id" "$expected_md5s" "$chapters_at_kill" "$calls_before" "$calls_after" "$retry_status")"
 
 printf 'source recovery drill passed: kill at source boundary for %s, chapters rebuilt from S3, completed replay calls=%s->%s retry=%s\n' \
   "$novel_id" "$calls_before" "$calls_after" "$retry_status"
