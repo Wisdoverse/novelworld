@@ -419,7 +419,14 @@ fn validate_registration(
     password: &str,
     name: Option<String>,
 ) -> AuthResult<(String, Option<String>)> {
-    let email = email.trim().to_lowercase();
+    // Gate non-ASCII on the raw input: RFC 5321 mailboxes are ASCII-only, and
+    // lowercasing first would let Unicode case folds (e.g. U+212A -> 'k')
+    // slip through and collide with genuine ASCII addresses.
+    let email = email.trim();
+    if !email.is_ascii() {
+        return Err(AuthError::Validation("Invalid email format".into()));
+    }
+    let email = email.to_lowercase();
     if !is_valid_email(&email) {
         return Err(AuthError::Validation("Invalid email format".into()));
     }
@@ -454,18 +461,191 @@ fn validate_refresh_token(token: &str) -> AuthResult<()> {
     Ok(())
 }
 
+/// RFC 5321 §4.1.2 Mailbox syntax, ASCII-only (SMTPUTF8 is out of scope and
+/// rejected). The 254-octet total cap follows §4.5.3.1.3: the 256-octet path
+/// limit includes the surrounding angle brackets. This is syntactic validation
+/// only — the spec requires no MX or delivery check.
 pub fn is_valid_email(email: &str) -> bool {
-    let parts: Vec<&str> = email.splitn(2, '@').collect();
-    parts.len() == 2
-        && !parts[0].is_empty()
-        && parts[1].contains('.')
-        && !parts[1].starts_with('.')
-        && !parts[1].ends_with('.')
-        && email.len() <= 320
+    if email.len() > 254 || !email.is_ascii() {
+        return false;
+    }
+    let bytes = email.as_bytes();
+    let Some(split) = mailbox_separator(bytes) else {
+        return false;
+    };
+    valid_local_part(&bytes[..split]) && valid_domain(&bytes[split + 1..])
+}
+
+/// Index of the @ separating local part and domain. A quoted local part may
+/// itself contain @ (and escaped quotes), so the separator is the first @
+/// outside the quoted string.
+fn mailbox_separator(bytes: &[u8]) -> Option<usize> {
+    if bytes.first() != Some(&b'"') {
+        return bytes.iter().position(|byte| *byte == b'@');
+    }
+    let mut index = 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'"' => return (bytes.get(index + 1) == Some(&b'@')).then_some(index + 1),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn valid_local_part(local: &[u8]) -> bool {
+    if local.is_empty() || local.len() > 64 {
+        return false;
+    }
+    if local[0] == b'"' {
+        // Quoted-string = DQUOTE *qcontentSMTP DQUOTE; quoted-pairSMTP is
+        // backslash plus one printable ASCII byte.
+        if local.len() < 2 || local[local.len() - 1] != b'"' {
+            return false;
+        }
+        let content = &local[1..local.len() - 1];
+        let mut index = 0;
+        while index < content.len() {
+            match content[index] {
+                b'\\' => {
+                    let escaped = content.get(index + 1);
+                    if !escaped.is_some_and(|byte| (32..=126).contains(byte)) {
+                        return false;
+                    }
+                    index += 2;
+                }
+                b'"' => return false,
+                32..=33 | 35..=91 | 93..=126 => index += 1,
+                _ => return false,
+            }
+        }
+        return true;
+    }
+    // Dot-string = Atom *("." Atom): atoms separated by single dots, no
+    // leading, trailing, or consecutive dots.
+    let mut expect_atom = true;
+    for &byte in local {
+        if byte == b'.' {
+            if expect_atom {
+                return false;
+            }
+            expect_atom = true;
+        } else if is_atext(byte) {
+            expect_atom = false;
+        } else {
+            return false;
+        }
+    }
+    !expect_atom
+}
+
+/// RFC 5322 §3.2.3 atext: ALPHA / DIGIT and the listed printable symbols.
+fn is_atext(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'/'
+                | b'='
+                | b'?'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'{'
+                | b'|'
+                | b'}'
+                | b'~'
+        )
+}
+
+fn valid_domain(domain: &[u8]) -> bool {
+    if domain.is_empty() || domain.len() > 255 {
+        return false;
+    }
+    if domain[0] == b'[' {
+        return valid_address_literal(domain);
+    }
+    // Domain = sub-domain *("." sub-domain); labels are let-dig-hyp, 1–63
+    // octets, no leading or trailing hyphen.
+    let mut label_start = 0;
+    for (index, &byte) in domain.iter().enumerate() {
+        if byte == b'.' {
+            if !valid_label(&domain[label_start..index]) {
+                return false;
+            }
+            label_start = index + 1;
+        }
+    }
+    valid_label(&domain[label_start..])
+}
+
+fn valid_label(label: &[u8]) -> bool {
+    !label.is_empty()
+        && label.len() <= 63
+        && label[0] != b'-'
+        && label[label.len() - 1] != b'-'
+        && label
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+}
+
+/// RFC 5321 §4.1.3: Address-literal = "[" ( IPv4-address-literal /
+/// IPv6-address-literal / General-address-literal ) "]".
+fn valid_address_literal(literal: &[u8]) -> bool {
+    if literal.len() < 3 || literal[literal.len() - 1] != b']' {
+        return false;
+    }
+    let content = &literal[1..literal.len() - 1];
+    if content.is_empty() {
+        return false;
+    }
+    if let Some(ipv6) = content.strip_prefix(b"IPv6:") {
+        return std::str::from_utf8(ipv6)
+            .ok()
+            .and_then(|value| value.parse::<std::net::Ipv6Addr>().ok())
+            .is_some();
+    }
+    // IPv4-address-literal = Snum 3("." Snum); Snum = 1*3DIGIT, value
+    // <= 255 (leading zeros permitted). The RFC 5321 general-address-literal
+    // (unknown standardized tags) is deliberately rejected: ponytail: no
+    // registered tag besides IPv6 is used in practice, so that grammar
+    // branch has no working form to support.
+    let groups: Vec<&[u8]> = content.split(|byte| *byte == b'.').collect();
+    groups.len() == 4
+        && groups.iter().all(|group| {
+            !group.is_empty()
+                && group.len() <= 3
+                && group.iter().all(u8::is_ascii_digit)
+                && std::str::from_utf8(group)
+                    .ok()
+                    .and_then(|group| group.parse::<u16>().ok())
+                    .is_some_and(|value| value <= 255)
+        })
 }
 
 fn generate_refresh_token() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+#[cfg(test)]
+mod email_tests {
+    use super::validate_registration;
+
+    #[test]
+    fn non_ascii_email_is_rejected_before_lowercasing() {
+        // U+212A KELVIN SIGN lowercases to ASCII 'k'; it must be rejected on
+        // the raw input instead of registering as k@example.com.
+        assert!(validate_registration("\u{212a}@example.com", "password123", None).is_err());
+        assert!(validate_registration("user@example.com", "password123", None).is_ok());
+    }
 }
 
 #[cfg(test)]
