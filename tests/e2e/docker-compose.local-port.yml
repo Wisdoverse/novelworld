@@ -1,0 +1,12 @@
+# Local-only overlay for running the e2e drills on hosts where port 80 is
+# already occupied (CI machines have port 80 free and do not use this file).
+#
+#   export COMPOSE_FILE=docker-compose.yml:docker-compose.e2e.yml:tests/e2e/docker-compose.local-port.yml
+#   export E2E_API_URL=http://127.0.0.1:18081/api
+#
+# The drills that restart the deployment internally (backup_restore_drill.sh)
+# inherit COMPOSE_FILE, so every compose invocation stays consistent.
+services:
+  nginx:
+    ports:
+      - "127.0.0.1:18082:80"

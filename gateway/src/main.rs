@@ -459,7 +459,15 @@ fn parse_cors_origins(raw: &str) -> AnyResult<Vec<HeaderValue>> {
             let http_scheme = uri
                 .scheme_str()
                 .is_some_and(|scheme| matches!(scheme, "http" | "https"));
-            if !http_scheme || uri.authority().is_none() || uri.path() != "/" || uri.query().is_some()
+            // A trailing slash or fragment never matches a browser Origin
+            // (origins carry neither); reject it so operator typos fail loudly
+            // instead of silently narrowing the allowlist.
+            if !http_scheme
+                || uri.authority().is_none()
+                || uri.path() != "/"
+                || uri.query().is_some()
+                || origin.contains('#')
+                || origin.ends_with('/')
             {
                 bail!("CORS_ORIGINS origins must be http(s) origins without a path, query, or fragment: {origin}");
             }
@@ -509,6 +517,9 @@ mod cors_tests {
         assert_eq!(origins.len(), 3);
         assert!(parse_cors_origins("not a valid origin value").is_err());
         assert!(parse_cors_origins(" , ").is_err());
+        assert!(parse_cors_origins("http://localhost:5173/").is_err());
+        assert!(parse_cors_origins("http://localhost:5173#fragment").is_err());
+        assert!(parse_cors_origins("http://localhost:5173/api").is_err());
     }
 
     async fn preflight_response(origin: &str) -> Response<Body> {
