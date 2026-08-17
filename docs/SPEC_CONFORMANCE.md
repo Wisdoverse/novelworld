@@ -160,13 +160,20 @@ state in two places.
    recovery, security, accessibility, deployment, and observation retain their
    Roadmap gates.
 
-The candidate [`qualification policy`](./QUALIFICATION_POLICY.md) owns the
-journey/evaluation slices and threshold process. Remaining H0 gates after
-these candidates are: the current-truth and contract reviews, the independent
-adversarial overclaim review (agent-supplied evidence recorded in
-[#123](https://github.com/schorsch888/novelworld/issues/123); it is not human
-sign-off), qualification-policy approval, the verified-dispatch `make verify`
-record, and required CI on the final commit. This matches the ROADMAP H0 exit
-evidence list and [`PRODUCT_CONTRACT.md`](./PRODUCT_CONTRACT.md), which names
-the independent maintainer, product, security, accessibility, and legal
-reviews that remain human gates.
+The approved [`qualification policy`](./QUALIFICATION_POLICY.md) owns the
+journey/evaluation slices and threshold process.
+
+## Recorded H0 reviews
+
+| Perspective | Reviewer | Disposition | Evidence and unresolved risks |
+|---|---|---|---|
+| Current-truth | Fresh-context review agent, non-author | Pass with limitation | Verified the remaining-gate list, scope ownership across all H0 bullets, and that this approval is the correct minimal next outcome; fixed the envelope status-label drift. Agent-supplied, not human sign-off |
+| Contract/design | Fresh-context review agent, non-author | Pass with limitation | Audited slice coverage, anti-gaming, guardrail, and evidence-class rules of the qualification policy; landed fixes — the deterministic test provider and recorded fixtures can never satisfy Baseline/Qualification provider identity, and explicit guardrails now cover non-authoritative projections served as authority and unusable failure states. Agent-supplied, not human sign-off |
+| Adversarial overclaim | Fresh-context review agent | Pass with limitation | Evidence recorded in [#123](https://github.com/schorsch888/novelworld/issues/123) and fixed in [#124](https://github.com/schorsch888/novelworld/pull/124). Agent-supplied, not human sign-off |
+
+Remaining H0 gates: the verified-dispatch `make verify` record with its
+successful run URL, required CI on the final commit, and the independent
+maintainer, product, security, accessibility, and legal reviews named in
+[`PRODUCT_CONTRACT.md`](./PRODUCT_CONTRACT.md). These gates match the ROADMAP
+H0 exit evidence list and [`review protocol`](./ROADMAP.md); the agent records
+above are evidence with a recorded limitation, not human sign-off.

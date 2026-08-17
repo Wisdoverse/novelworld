@@ -1,8 +1,7 @@
 # NovelWorld Product Contract
 
-Status: **H0 candidate `private-preview-v1`**. This contract becomes the
-declared current envelope when its reviewed change is merged. It does not make
-H0 complete or qualify a public release.
+Status: **Current envelope `private-preview-v1`** (declared by the merged
+reviewed change). It does not make H0 complete or qualify a public release.
 
 This document answers one question: what can NovelWorld honestly promise now?
 [`README.md`](../README.md) describes the product, [`SPEC.md`](../SPEC.md)
@@ -122,7 +121,7 @@ product claim, SPEC target, runtime behavior, and evidence together when they
 are affected. Thresholds and supported slices must be approved before the
 change they judge; a candidate cannot weaken its own gate.
 
-The candidate [`qualification policy`](./QUALIFICATION_POLICY.md) defines the
+The approved [`qualification policy`](./QUALIFICATION_POLICY.md) defines the
 initial journey slices, hard guardrails, evidence classes, and threshold
 approval process without claiming that a live slice has passed them.
 
