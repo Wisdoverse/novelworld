@@ -100,6 +100,10 @@ jobs:
         uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Enforce the dependency license and source policy
+        uses: EmbarkStudios/cargo-deny-action@v2.1.1
+        with:
+          command-arguments: licenses sources
       - name: Scan for committed secrets
         uses: gitleaks/gitleaks-action@v3.0.0
         env:

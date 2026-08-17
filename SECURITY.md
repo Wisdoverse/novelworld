@@ -143,9 +143,15 @@ whenever its dependency chain updates; new advisories are not silently
 ignored. JWT signing and verification use the `aws_lc_rs` backend of
 jsonwebtoken, so the rsa crate is not part of the tree at all.
 
-Still-open H2 supply-chain gates: license inventory, container image
-scanning, and SBOM/provenance/signature generation for official release
-artifacts.
+CI also runs `cargo deny check licenses sources` with `deny.toml`: every
+dependency license must be in the explicitly allowed permissive set (a new
+dependency with a license outside the set fails the build and forces a
+deliberate review), unlicensed crates are denied, and unknown registry/git
+sources are denied. Dependency advisories stay owned by cargo-audit to avoid
+maintaining two ignore lists.
+
+Still-open H2 supply-chain gates: container image scanning and
+SBOM/provenance/signature generation for official release artifacts.
 
 ### LLM Security
 - User input passed to LLM prompts includes behavioral constraints

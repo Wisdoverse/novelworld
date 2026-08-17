@@ -2,6 +2,7 @@
 name = "h1-eval"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 publish = false
 
 [dependencies]
