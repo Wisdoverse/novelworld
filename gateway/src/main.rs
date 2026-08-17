@@ -580,6 +580,23 @@ mod authz_matrix_tests {
         response.status()
     }
 
+    fn protected_representatives() -> [(Method, &'static str); 12] {
+        [
+            (Method::GET, "/api/auth/me"),
+            (Method::POST, "/api/auth/logout"),
+            (Method::GET, "/api/account/export"),
+            (Method::GET, "/api/settings/profile"),
+            (Method::GET, "/api/novels"),
+            (Method::GET, "/api/novels/some-id"),
+            (Method::GET, "/api/chat/some-id/history"),
+            (Method::GET, "/api/memories/some-id"),
+            (Method::GET, "/api/narrative/some-id/world"),
+            (Method::GET, "/api/progress/some-id"),
+            (Method::GET, "/api/users/me"),
+            (Method::GET, "/api/characters/some-id"),
+        ]
+    }
+
     fn valid_token() -> String {
         let now = chrono::Utc::now().timestamp();
         encode(
@@ -623,27 +640,24 @@ mod authz_matrix_tests {
                     .any(|path| path.starts_with(family.trim_end_matches('/'))),
                 "no public path may fall under protected family {family}"
             );
+            let covered = protected_representatives().iter().any(|(_, path)| {
+                if family.ends_with('/') {
+                    path.starts_with(family)
+                } else {
+                    *path == *family || path.starts_with(&format!("{family}/"))
+                }
+            });
+            assert!(
+                covered,
+                "protected family {family} lacks a behavioral representative"
+            );
         }
     }
 
     #[tokio::test]
     async fn protected_families_reject_missing_and_garbage_tokens() {
         let router = build_router(test_state()).unwrap();
-        let representatives = [
-            (Method::GET, "/api/auth/me"),
-            (Method::POST, "/api/auth/logout"),
-            (Method::GET, "/api/account/export"),
-            (Method::GET, "/api/settings/profile"),
-            (Method::GET, "/api/novels"),
-            (Method::GET, "/api/novels/some-id"),
-            (Method::GET, "/api/chat/some-id/history"),
-            (Method::GET, "/api/memories/some-id"),
-            (Method::GET, "/api/narrative/some-id/world"),
-            (Method::GET, "/api/progress/some-id"),
-            (Method::GET, "/api/users/me"),
-            (Method::GET, "/api/characters/some-id"),
-        ];
-        for (method, path) in representatives {
+        for (method, path) in protected_representatives() {
             let missing = request(&router, method.clone(), path, None).await;
             assert_eq!(
                 missing,
