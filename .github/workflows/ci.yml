@@ -285,6 +285,8 @@ jobs:
         run: tests/e2e/ingestion_recovery.sh --self-test
       - name: Self-check source recovery verifier
         run: tests/e2e/source_recovery_drill.sh --self-test
+      - name: Self-check secret rotation verifier
+        run: tests/e2e/secret_rotation_drill.sh --self-test
       - name: Verify restart-safe ingestion recovery boundaries
         run: tests/e2e/ingestion_recovery.sh
       - name: Verify restart-safe core reader loop
@@ -309,6 +311,10 @@ jobs:
         run: tests/e2e/source_recovery_drill.sh
       - name: Verify the structured log contract
         run: python3 tests/e2e/log_contract.py
+      - name: Verify the secret rotation drill
+        env:
+          COMPOSE_FILES: docker-compose.yml:docker-compose.e2e.yml:docker-compose.s3-e2e.yml
+        run: tests/e2e/secret_rotation_drill.sh
       - name: Show S3 topology logs on failure
         if: failure()
         run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml logs --no-color || true

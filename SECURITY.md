@@ -54,6 +54,36 @@ We will acknowledge receipt within 48 hours and provide a timeline for resolutio
 - Database credentials auto-generated on first run
 - JWT secret auto-generated (256-bit random)
 
+
+### Secret Rotation
+
+The three deployment secrets have different rotation contracts:
+
+- **JWT_SECRET** — rotating it invalidates every access token (signature
+  check). Persisted refresh tokens are opaque server-side rows, not JWTs:
+  they survive a JWT_SECRET rotation, so the rotation procedure wipes them
+  explicitly (the same two-step contract the restore path applies). All
+  sessions end; users log in again.
+- **INTERNAL_SERVICE_TOKEN** — authenticates service-to-service calls.
+  Rotating it requires recreating every service together in one compose
+  operation; a fleet that mixes old and new tokens breaks internal calls.
+- **RUNTIME_CONFIG_KEY** — encrypts the provider configuration saved by the
+  first-run web setup. It is **not rotatable in place**: rotating it makes the
+  stored configuration undecryptable and the deployment fails hard with no
+  redo path, so treat it as fixed for a deployment's lifetime and
+  re-provision instead.
+
+Procedure (operator, on the host):
+
+1. Update .env with the new JWT_SECRET and INTERNAL_SERVICE_TOKEN.
+2. docker compose up -d --force-recreate (all services together).
+3. Wipe persisted sessions:
+   docker exec novel-postgres psql -U novel -d novel_world -c "DELETE FROM refresh_tokens"
+4. Users log in again.
+
+The e2e secret_rotation_drill.sh verifies this contract: old access and
+refresh tokens are rejected, a new login works, and an account export (which
+crosses internal-token-authenticated service calls) succeeds after rotation.
 ### LLM Security
 - User input passed to LLM prompts includes behavioral constraints
 - System prompts instruct models to stay in character and refuse harmful content
