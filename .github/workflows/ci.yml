@@ -176,6 +176,11 @@ jobs:
             curl --fail --silent --show-error http://127.0.0.1/health
             curl --fail --silent --show-error http://127.0.0.1/ready
           done
+      - name: Verify the nginx security headers
+        run: |
+          curl --silent --show-error --dump-header - --output /dev/null http://127.0.0.1/live             | grep -qi 'x-content-type-options: nosniff'
+          curl --silent --show-error --dump-header - --output /dev/null http://127.0.0.1/live             | grep -qi 'x-frame-options: DENY'
+          curl --silent --show-error --dump-header - --output /dev/null http://127.0.0.1/live             | grep -qi 'referrer-policy: same-origin'
       - name: Verify the gateway CORS posture
         run: |
           curl --silent --show-error --dump-header - --output /dev/null             -X OPTIONS -H 'Origin: http://localhost:5173'             -H 'Access-Control-Request-Method: POST'             http://127.0.0.1/api/auth/login             | grep -qi 'access-control-allow-origin: http://localhost:5173'
