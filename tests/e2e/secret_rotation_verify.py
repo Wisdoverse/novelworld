@@ -14,6 +14,7 @@ def verify(record):
 
     require("old access token rejected", record["old_access_status"] == 401)
     require("old refresh token rejected", record["old_refresh_status"] == 401)
+    require("old internal token rejected", record["old_internal_status"] == 401)
     require("new login works", record["new_login_status"] == 200)
     require("account export crosses internal calls", record["export_status"] == 200)
     return problems
@@ -24,12 +25,14 @@ def main():
         base = {
             "old_access_status": 401,
             "old_refresh_status": 401,
+            "old_internal_status": 401,
             "new_login_status": 200,
             "export_status": 200,
         }
         tampered = [
             ("old access token must fail", dict(base, old_access_status=200)),
             ("old refresh token must fail", dict(base, old_refresh_status=200)),
+            ("old internal token must fail", dict(base, old_internal_status=200)),
             ("new login must succeed", dict(base, new_login_status=401)),
             ("export must succeed", dict(base, export_status=500)),
         ]
@@ -39,14 +42,15 @@ def main():
                 sys.exit(1)
         print("secret rotation verifier self-test passed")
         return
-    if len(sys.argv) != 5:
-        print("usage: secret_rotation_verify.py (--self-test | old_access old_refresh new_login export)")
+    if len(sys.argv) != 6:
+        print("usage: secret_rotation_verify.py (--self-test | old_access old_refresh old_internal new_login export)")
         sys.exit(2)
     record = {
         "old_access_status": int(sys.argv[1]),
         "old_refresh_status": int(sys.argv[2]),
-        "new_login_status": int(sys.argv[3]),
-        "export_status": int(sys.argv[4]),
+        "old_internal_status": int(sys.argv[3]),
+        "new_login_status": int(sys.argv[4]),
+        "export_status": int(sys.argv[5]),
     }
     problems = verify(record)
     if problems:
