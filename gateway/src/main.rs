@@ -142,50 +142,7 @@ async fn main() -> anyhow::Result<()> {
         readiness_cache: Arc::new(ReadinessCache::new()),
     };
 
-    let app = Router::new()
-        // --- Observability endpoints (no auth, no rate-limit) ---
-        .route("/metrics", get(prometheus_metrics))
-        .route("/live", get(liveness_check))
-        .route("/health", get(readiness_check))
-        .route("/ready", get(readiness_check))
-        // Public routes (no auth)
-        .route("/api/auth/register", post(proxy::forward_to_user))
-        .route("/api/auth/login", post(proxy::forward_to_user))
-        .route("/api/auth/refresh", post(proxy::forward_to_user))
-        .route("/api/setup/status", get(proxy::forward_to_user))
-        .route("/api/setup/init", post(proxy::forward_to_user))
-        // Protected routes
-        .route(
-            "/api/auth/me",
-            get(proxy::forward_to_user).delete(proxy::forward_to_user),
-        )
-        .route("/api/auth/logout", post(proxy::forward_to_user))
-        .route("/api/account/export", get(proxy::export_account))
-        .route("/api/settings/{*path}", any(proxy::forward_to_user))
-        .route("/api/novels", post(proxy::forward_to_novel))
-        .route("/api/novels", get(proxy::forward_to_novel))
-        .route("/api/novels/{*path}", any(proxy::forward_to_novel))
-        .route("/api/chat/{*path}", any(proxy::forward_to_agent))
-        .route("/api/memories/{*path}", any(proxy::forward_to_agent))
-        .route("/api/narrative/{*path}", any(proxy::forward_to_narrative))
-        .route("/api/progress/{*path}", any(proxy::forward_to_novel))
-        .route("/api/users/{*path}", any(proxy::forward_to_user))
-        .route("/api/characters/{*path}", any(proxy::forward_to_novel))
-        // Apply the global backstop inside authentication so rejected protected
-        // requests cannot spend shared capacity.
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            rate_limit_middleware,
-        ))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            auth_middleware,
-        ))
-        .layer(middleware::from_fn(request_id_middleware))
-        .layer(middleware::from_fn(metrics::metrics_middleware))
-        .layer(cors_layer(cors_origins()?))
-        .layer(TraceLayer::new_for_http())
-        .with_state(state);
+    let app = build_router(state)?;
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
     let addr = format!("0.0.0.0:{}", port);
@@ -343,6 +300,85 @@ fn is_observability_path(path: &str) -> bool {
 // Auth middleware (unchanged logic)
 // ---------------------------------------------------------------------------
 
+fn build_router(state: AppState) -> AnyResult<Router> {
+    Ok(Router::new()
+        // --- Observability endpoints (no auth, no rate-limit) ---
+        .route("/metrics", get(prometheus_metrics))
+        .route("/live", get(liveness_check))
+        .route("/health", get(readiness_check))
+        .route("/ready", get(readiness_check))
+        // Public routes (no auth)
+        .route("/api/auth/register", post(proxy::forward_to_user))
+        .route("/api/auth/login", post(proxy::forward_to_user))
+        .route("/api/auth/refresh", post(proxy::forward_to_user))
+        .route("/api/setup/status", get(proxy::forward_to_user))
+        .route("/api/setup/init", post(proxy::forward_to_user))
+        // Protected routes
+        .route(
+            "/api/auth/me",
+            get(proxy::forward_to_user).delete(proxy::forward_to_user),
+        )
+        .route("/api/auth/logout", post(proxy::forward_to_user))
+        .route("/api/account/export", get(proxy::export_account))
+        .route("/api/settings/{*path}", any(proxy::forward_to_user))
+        .route("/api/novels", post(proxy::forward_to_novel))
+        .route("/api/novels", get(proxy::forward_to_novel))
+        .route("/api/novels/{*path}", any(proxy::forward_to_novel))
+        .route("/api/chat/{*path}", any(proxy::forward_to_agent))
+        .route("/api/memories/{*path}", any(proxy::forward_to_agent))
+        .route("/api/narrative/{*path}", any(proxy::forward_to_narrative))
+        .route("/api/progress/{*path}", any(proxy::forward_to_novel))
+        .route("/api/users/{*path}", any(proxy::forward_to_user))
+        .route("/api/characters/{*path}", any(proxy::forward_to_novel))
+        // Apply the global backstop inside authentication so rejected protected
+        // requests cannot spend shared capacity.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
+        .layer(middleware::from_fn(request_id_middleware))
+        .layer(middleware::from_fn(metrics::metrics_middleware))
+        .layer(cors_layer(cors_origins()?))
+        .layer(TraceLayer::new_for_http())
+        .with_state(state))
+}
+
+/// Paths that skip authentication. This is the security-critical half of
+/// the route/resource authorization matrix: adding a path here exposes it,
+/// so the authz matrix tests pin this set exactly.
+const PUBLIC_PATHS: &[&str] = &[
+    "/api/auth/register",
+    "/api/auth/login",
+    "/api/auth/refresh",
+    "/api/setup/status",
+    "/api/setup/init",
+    "/live",
+    "/health",
+    "/ready",
+    "/metrics",
+];
+
+/// Route families that must require authentication. The gateway backstop
+/// already 401s anything not in PUBLIC_PATHS; this table pins the intent so
+/// the matrix tests fail loudly if a family becomes public.
+const PROTECTED_ROUTE_FAMILIES: &[&str] = &[
+    "/api/auth/me",
+    "/api/auth/logout",
+    "/api/account/export",
+    "/api/settings/",
+    "/api/novels",
+    "/api/chat/",
+    "/api/memories/",
+    "/api/narrative/",
+    "/api/progress/",
+    "/api/users/",
+    "/api/characters/",
+];
+
 async fn auth_middleware(
     State(state): State<AppState>,
     mut request: Request,
@@ -351,18 +387,7 @@ async fn auth_middleware(
     let path = request.uri().path();
 
     // Public routes skip auth
-    let public_paths = [
-        "/api/auth/register",
-        "/api/auth/login",
-        "/api/auth/refresh",
-        "/api/setup/status",
-        "/api/setup/init",
-        "/live",
-        "/health",
-        "/ready",
-        "/metrics",
-    ];
-    if public_paths.contains(&path) {
+    if PUBLIC_PATHS.contains(&path) {
         return next.run(request).await;
     }
 
@@ -496,6 +521,178 @@ fn cors_layer(origins: Vec<HeaderValue>) -> CorsLayer {
             header::CONTENT_TYPE,
             HeaderName::from_static("idempotency-key"),
         ])
+}
+
+#[cfg(test)]
+mod authz_matrix_tests {
+    use super::*;
+    use auth::Claims;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use jsonwebtoken::{encode, EncodingKey, Header as JwtHeader};
+    use tower::ServiceExt;
+
+    const TEST_SECRET: &str = "test-secret-test-secret-test-secret-test-secret";
+
+    fn test_state() -> AppState {
+        // build_recorder does not install a global recorder, so parallel tests
+        // never race the one-time metrics installation; leaked on purpose so
+        // the handle stays valid for the test's lifetime.
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let metrics_handle = recorder.handle();
+        Box::leak(Box::new(recorder));
+        AppState {
+            jwt: Arc::new(JwtMiddleware::new(TEST_SECRET)),
+            proxy: Arc::new(ServiceProxy {
+                novel_service_url: "http://127.0.0.1:1".into(),
+                agent_service_url: "http://127.0.0.1:1".into(),
+                narrative_service_url: "http://127.0.0.1:1".into(),
+                user_service_url: "http://127.0.0.1:1".into(),
+                client: reqwest::Client::new(),
+                internal_service_token: "x".repeat(32).into(),
+            }),
+            metrics_handle,
+            rate_limiter: Arc::new(RateLimiter::direct(Quota::per_second(
+                NonZeroU32::new(10_000).expect("static quota is non-zero"),
+            ))),
+            account_export_permits: Arc::new(Semaphore::new(2)),
+            readiness_cache: Arc::new(ReadinessCache::new()),
+        }
+    }
+
+    async fn request(
+        router: &Router,
+        method: Method,
+        path: &str,
+        bearer: Option<&str>,
+    ) -> StatusCode {
+        let mut builder = Request::builder().method(method).uri(path);
+        if let Some(token) = bearer {
+            builder = builder.header("Authorization", format!("Bearer {token}"));
+        }
+        let response = router
+            .clone()
+            .oneshot(builder.body(Body::empty()).expect("request builds"))
+            .await
+            .expect("router responds");
+        response.status()
+    }
+
+    fn valid_token() -> String {
+        let now = chrono::Utc::now().timestamp();
+        encode(
+            &JwtHeader::default(),
+            &Claims {
+                sub: "3d2329c2-05d4-48b1-9ab4-42927c3efff5".into(),
+                email: "admin@test.invalid".into(),
+                role: "admin".into(),
+                iat: now,
+                exp: now + 3_600,
+            },
+            &EncodingKey::from_secret(TEST_SECRET.as_bytes()),
+        )
+        .expect("token signs")
+    }
+
+    #[test]
+    fn public_paths_are_pinned_and_families_never_overlap() {
+        assert_eq!(
+            PUBLIC_PATHS,
+            &[
+                "/api/auth/register",
+                "/api/auth/login",
+                "/api/auth/refresh",
+                "/api/setup/status",
+                "/api/setup/init",
+                "/live",
+                "/health",
+                "/ready",
+                "/metrics",
+            ]
+        );
+        for family in PROTECTED_ROUTE_FAMILIES {
+            assert!(
+                !PUBLIC_PATHS.contains(family),
+                "{family} must not be public"
+            );
+            assert!(
+                !PUBLIC_PATHS
+                    .iter()
+                    .any(|path| path.starts_with(family.trim_end_matches('/'))),
+                "no public path may fall under protected family {family}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn protected_families_reject_missing_and_garbage_tokens() {
+        let router = build_router(test_state()).unwrap();
+        let representatives = [
+            (Method::GET, "/api/auth/me"),
+            (Method::POST, "/api/auth/logout"),
+            (Method::GET, "/api/account/export"),
+            (Method::GET, "/api/settings/profile"),
+            (Method::GET, "/api/novels"),
+            (Method::GET, "/api/novels/some-id"),
+            (Method::GET, "/api/chat/some-id/history"),
+            (Method::GET, "/api/memories/some-id"),
+            (Method::GET, "/api/narrative/some-id/world"),
+            (Method::GET, "/api/progress/some-id"),
+            (Method::GET, "/api/users/me"),
+            (Method::GET, "/api/characters/some-id"),
+        ];
+        for (method, path) in representatives {
+            let missing = request(&router, method.clone(), path, None).await;
+            assert_eq!(
+                missing,
+                StatusCode::UNAUTHORIZED,
+                "{path} without a token must be 401"
+            );
+            let garbage = request(&router, method, path, Some("garbage.token.value")).await;
+            assert_eq!(
+                garbage,
+                StatusCode::UNAUTHORIZED,
+                "{path} with a garbage token must be 401"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn public_paths_skip_auth() {
+        let router = build_router(test_state()).unwrap();
+        let cases = [
+            (Method::POST, "/api/auth/register"),
+            (Method::POST, "/api/auth/login"),
+            (Method::POST, "/api/auth/refresh"),
+            (Method::GET, "/api/setup/status"),
+            (Method::POST, "/api/setup/init"),
+            (Method::GET, "/live"),
+            (Method::GET, "/health"),
+            (Method::GET, "/ready"),
+            (Method::GET, "/metrics"),
+        ];
+        for (method, path) in cases {
+            let status = request(&router, method, path, None).await;
+            assert_ne!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "{path} must skip authentication"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn valid_tokens_pass_the_gate() {
+        let router = build_router(test_state()).unwrap();
+        let status = request(&router, Method::GET, "/api/novels", Some(&valid_token())).await;
+        assert_ne!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "a valid token must pass authentication"
+        );
+    }
 }
 
 #[cfg(test)]

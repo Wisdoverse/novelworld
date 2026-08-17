@@ -105,7 +105,7 @@ state in two places.
 | §9.1 — RFC 5321 email-address validation | Intended gap | H2 | E5 shows only a bounded application-level shape check, not RFC conformance |
 | §9.2 — case-insensitive login, bcrypt verification, sign-in time, and tokens | Verified | H2 | E5 |
 | §9.3 — HS256 access token and single-use refresh rotation | Verified | H2 | E5 |
-| §9.4 — authenticated routes, owner isolation, and invalid-token 401 | Verified | H2 | E5; public-profile authorization testing remains an H2 gate |
+| §9.4 — authenticated routes, owner isolation, and invalid-token 401 | Verified | H2 | E5 plus the executable gateway route/resource authorization matrix: the public-path set is pinned exactly and every protected family is checked behaviorally (missing/garbage token 401, valid token passes) against the real router; public-profile authorization testing remains an H2 gate |
 | §9.4 — administrator cross-user resource access | Obsolete/corrected | H2 | Removed: downstream services enforce acting-user ownership and do not consume the injected role as an authorization bypass |
 | §10.8 — scoped, bounded, ordered, secret-free, terminal-record account export | Verified | H2, H5 | E6 |
 | §10.9 — every error uses the common JSON envelope | Intended gap | H2 | Current tests cover named paths but do not prove every service/error branch |
