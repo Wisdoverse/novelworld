@@ -39,6 +39,7 @@ and `REQUIRED` statements even when it does not create an unconditional duty.
 | E7 | Browser contract: [`client.ts`](../frontend/src/shared/api/client.ts), [`client.test.ts`](../frontend/src/shared/api/client.test.ts), [`BranchChoice.test.tsx`](../frontend/src/widgets/branch-choice/ui/BranchChoice.test.tsx), [`globals.css`](../frontend/src/app/styles/globals.css) |
 | E8 | Runtime and security configuration: [`ci.yml`](../.github/workflows/ci.yml), [`docker-compose.yml`](../docker-compose.yml), [`nginx.conf`](../infra/nginx/nginx.conf), [`THREAT_MODEL.md`](./THREAT_MODEL.md) |
 | E9 | Backup, restore, lineage, and erasure replay: [`BACKUP_RESTORE.md`](./BACKUP_RESTORE.md), [`0016_erasure_records.sql`](../infra/postgres/migrations/0016_erasure_records.sql), [`backup.sh`](../infra/backup/backup.sh), [`restore.sh`](../infra/backup/restore.sh), [`backup_restore.rs`](../tests/integration/tests/backup_restore.rs), [`backup_restore_drill.sh`](../tests/e2e/backup_restore_drill.sh) |
+| E10 | Gateway error normalization: [`proxy.rs`](../gateway/src/proxy.rs) (`NORMALIZED_ERROR_RESPONSES` and the pinned-contract tests) |
 
 ## README claim coverage
 
@@ -108,7 +109,7 @@ state in two places.
 | §9.4 — authenticated routes, owner isolation, and invalid-token 401 | Verified | H2 | E5 plus the executable gateway route/resource authorization matrix: the public-path set is pinned exactly and every protected family is checked behaviorally (missing/garbage token 401, valid token passes) against the real router; public-profile authorization testing remains an H2 gate |
 | §9.4 — administrator cross-user resource access | Obsolete/corrected | H2 | Removed: downstream services enforce acting-user ownership and do not consume the injected role as an authorization bypass |
 | §10.8 — scoped, bounded, ordered, secret-free, terminal-record account export | Verified | H2, H5 | E6 |
-| §10.9 — every error uses the common JSON envelope | Intended gap | H2 | Current tests cover named paths but do not prove every service/error branch |
+| §10.9 — every error uses the common JSON envelope | Verified | H2 | E10; the gateway normalization table pins every mapped upstream status to the stable error envelope and is tested exhaustively against an independently pinned contract (drift fails the build), with unmapped fallbacks (server → `internal_error`, client → `request_error`) and Retry-After/WWW-Authenticate forwarding; every client/server upstream response flows through this normalization — already-stable envelopes pass through byte-identical — so the public API never returns a non-envelope error body; gateway-generated errors call the same envelope helper; downstream services' own named error branches remain spot-checked, and their non-envelope bodies are rewritten at the gateway |
 | §11.1 — local `.env` configuration is permitted | Verified | H0 | E0 and the checked-in startup paths |
 | §11.2 — every listed tuning parameter is configurable | Intended gap | H3, H5 | Several memory limits remain fixed constants; defaults are not a current support claim |
 | §12.1 — required PostgreSQL extensions | Verified | H1 | E1 |
