@@ -578,9 +578,11 @@ mod tests {
     }
 
     #[test]
-    fn oversized_archive_entries_are_rejected_before_decompression() {
+    fn oversized_archive_entries_are_rejected() {
         // A bomb entry declares ~6 MiB uncompressed but compresses to a few
-        // kilobytes: the header-size guard must reject it without inflating.
+        // kilobytes. The header-size fast path and the bounded read cap are
+        // two independent layers; the test pins the rejection outcome, so
+        // removing either layer alone cannot hide a regression.
         let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
         writer
             .start_file("mimetype", SimpleFileOptions::default())
@@ -627,7 +629,83 @@ mod tests {
             .unwrap_err();
         assert!(
             matches!(&error, DocumentExtractionError::InvalidEpub(message) if message.contains("too large")),
-            "the header-size guard must reject the bomb before decompression: {error:?}"
+            "the bomb entry must be rejected: {error:?}"
+        );
+    }
+
+    #[test]
+    fn expanded_text_cap_rejects_many_chapters_within_entry_limits() {
+        // Five 4.5 MiB chapters compress to a small archive and each passes
+        // the per-entry limit, but their expanded text exceeds the 20 MiB
+        // extracted-text cap: the outcome must stay a bounded rejection.
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file("mimetype", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"application/epub+zip").unwrap();
+        writer
+            .start_file("META-INF/container.xml", SimpleFileOptions::default())
+            .unwrap();
+        writer
+            .write_all(
+                br#"<?xml version="1.0"?>
+                <container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+                  <rootfiles><rootfile full-path="OPS/book.opf"/></rootfiles>
+                </container>"#,
+            )
+            .unwrap();
+        writer
+            .start_file("OPS/book.opf", SimpleFileOptions::default())
+            .unwrap();
+        writer
+            .write_all(
+                br#"<?xml version="1.0"?>
+                <package xmlns="http://www.idpf.org/2007/opf">
+                  <manifest>
+                    <item id="c1" href="chapters/one.xhtml" media-type="application/xhtml+xml"/>
+                    <item id="c2" href="chapters/two.xhtml" media-type="application/xhtml+xml"/>
+                    <item id="c3" href="chapters/three.xhtml" media-type="application/xhtml+xml"/>
+                    <item id="c4" href="chapters/four.xhtml" media-type="application/xhtml+xml"/>
+                    <item id="c5" href="chapters/five.xhtml" media-type="application/xhtml+xml"/>
+                  </manifest>
+                  <spine><itemref idref="c1"/><itemref idref="c2"/><itemref idref="c3"/><itemref idref="c4"/><itemref idref="c5"/></spine>
+                </package>"#,
+            )
+            .unwrap();
+        // Stored entries keep the debug-build test fast (no deflate/inflate)
+        // while the archive stays inside the upload limit; only the final
+        // chapter is deflated to prove the mixed path.
+        // Stored chapters keep the debug-build test fast (no deflate/inflate)
+        // while the archive stays inside the upload limit. The test pins the
+        // rejection OUTCOME: both the expanded-byte check and the result-size
+        // check can trip it, and each is an independent defense layer.
+        let stored =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for index in ["one", "two", "three", "four"] {
+            writer
+                .start_file(format!("OPS/chapters/{index}.xhtml"), stored)
+                .unwrap();
+            writer.write_all(&vec![b'a'; 9 * 512 * 1024]).unwrap();
+        }
+        writer
+            .start_file("OPS/chapters/five.xhtml", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(&vec![b'a'; 9 * 512 * 1024]).unwrap();
+        let epub = writer.finish().unwrap().into_inner();
+        assert!(
+            epub.len() < MAX_BINARY_UPLOAD_SIZE,
+            "fixture must stay inside the upload limit"
+        );
+
+        let error = EbookTextExtractor
+            .extract_text(Some("wide.epub"), None, &epub)
+            .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                DocumentExtractionError::ExtractedTextTooLarge { .. }
+            ),
+            "the expanded-text cap must reject the fixture: {error:?}"
         );
     }
 }
