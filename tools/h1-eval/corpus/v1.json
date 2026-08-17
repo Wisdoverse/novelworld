@@ -1804,12 +1804,14 @@
       "drop_ids": [
         "wr2"
       ],
+      "expected_failure": "coverage",
       "expected_pass": false
     },
     {
       "id": "zh-hallucinated",
       "base": "zh-utf8",
       "mutation": "add_hallucinated_facts",
+      "expected_failure": "precision_hallucination",
       "expected_pass": false
     },
     {
@@ -1817,6 +1819,7 @@
       "base": "zh-utf8",
       "mutation": "first_appearance_out_of_range",
       "target": "苏晚",
+      "expected_failure": "provenance",
       "expected_pass": false
     },
     {
@@ -1824,6 +1827,7 @@
       "base": "zh-utf8",
       "mutation": "invert_causality",
       "event_id": "ev1",
+      "expected_failure": "chronology",
       "expected_pass": false
     },
     {
@@ -1833,6 +1837,7 @@
       "drop_ids": [
         "wr2"
       ],
+      "expected_failure": "coverage",
       "expected_pass": false
     }
   ],

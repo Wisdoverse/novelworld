@@ -140,12 +140,24 @@ enum AdversarialMutation {
     InvertCausality,
 }
 
+/// The specific threshold each adversarial case must trip, so a structural
+/// failure cannot masquerade as threshold calibration.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum FailureMechanism {
+    Coverage,
+    PrecisionHallucination,
+    Provenance,
+    Chronology,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AdversarialCase {
     id: String,
     base: String,
     mutation: AdversarialMutation,
+    expected_failure: FailureMechanism,
     expected_pass: bool,
     #[serde(default)]
     drop_ids: Vec<String>,
@@ -243,7 +255,10 @@ impl Category {
 
 #[derive(Clone, Debug, Default)]
 struct Scores {
+    /// Expected facts that at least one recorded fact matches (coverage side).
     matched: BTreeMap<Category, usize>,
+    /// Recorded facts that match at least one expected fact (precision side).
+    matched_recorded: BTreeMap<Category, usize>,
     expected: BTreeMap<Category, usize>,
     recorded: BTreeMap<Category, usize>,
     chronology_violations: usize,
@@ -260,13 +275,16 @@ impl Scores {
     }
 
     fn precision_percent(&self) -> u8 {
-        percent(self.matched.values().sum(), self.recorded.values().sum())
+        percent(
+            self.matched_recorded.values().sum(),
+            self.recorded.values().sum(),
+        )
     }
 
     fn hallucination_percent(&self) -> u8 {
         let recorded = self.recorded.values().sum::<usize>();
-        let matched = self.matched.values().sum::<usize>();
-        percent(recorded.saturating_sub(matched), recorded)
+        let matched = self.matched_recorded.values().sum::<usize>();
+        percent_ceil(recorded.saturating_sub(matched), recorded)
     }
 
     fn provenance_percent(&self) -> u8 {
@@ -294,6 +312,13 @@ fn percent(numerator: usize, denominator: usize) -> u8 {
         return 0;
     }
     u8::try_from(numerator * 100 / denominator).expect("bounded corpus score fits u8")
+}
+
+fn percent_ceil(numerator: usize, denominator: usize) -> u8 {
+    if denominator == 0 {
+        return 0;
+    }
+    u8::try_from((numerator * 100).div_ceil(denominator)).expect("bounded corpus score fits u8")
 }
 
 #[derive(Debug, Serialize)]
@@ -620,6 +645,31 @@ fn validate_corpus(corpus: &Corpus) -> Result<()> {
             _ => {}
         }
     }
+
+    // Composition minimums keep the gate non-vacuous: every class and every
+    // failure mechanism must be present, so deleting cases cannot make the
+    // corpus pass trivially.
+    if corpus.positive_cases.len() < 4
+        || corpus.splitter_cases.len() < 1
+        || corpus.adversarial_cases.len() < 4
+        || corpus.malformed_cases.len() < 5
+    {
+        bail!("corpus composition is incomplete");
+    }
+    for mechanism in [
+        FailureMechanism::Coverage,
+        FailureMechanism::PrecisionHallucination,
+        FailureMechanism::Provenance,
+        FailureMechanism::Chronology,
+    ] {
+        if !corpus
+            .adversarial_cases
+            .iter()
+            .any(|case| case.expected_failure == mechanism)
+        {
+            bail!("corpus lacks an adversarial case for failure mechanism {mechanism:?}");
+        }
+    }
     Ok(())
 }
 
@@ -714,7 +764,14 @@ async fn evaluate(corpus: &Corpus, config: &RunConfig, git_sha: String) -> Resul
             report.case_kind = "adversarial".into();
             report.adversarial = true;
             report.expected_pass = case.expected_pass;
-            report.passed = report.observed_pass == case.expected_pass;
+            let mechanism = failure_mechanism_observed(&report, case.expected_failure);
+            report.passed = report.observed_pass == case.expected_pass && mechanism;
+            if !mechanism {
+                report.error = Some(format!(
+                    "expected failure mechanism {:?} not observed",
+                    case.expected_failure
+                ));
+            }
             cases.push(report);
         }
 
@@ -837,6 +894,25 @@ fn score_recorded(case: &PositiveCase) -> Result<CaseReport> {
     })
 }
 
+fn failure_mechanism_observed(report: &CaseReport, mechanism: FailureMechanism) -> bool {
+    match mechanism {
+        FailureMechanism::Coverage => report
+            .coverage
+            .values()
+            .any(|percent| *percent < REQUIRED_THRESHOLDS.coverage_percent),
+        FailureMechanism::PrecisionHallucination => {
+            report.hallucination_percent > REQUIRED_THRESHOLDS.hallucination_max_percent
+        }
+        FailureMechanism::Provenance => {
+            report.provenance_percent < REQUIRED_THRESHOLDS.provenance_percent
+        }
+        FailureMechanism::Chronology => report
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("depend on earlier events")),
+    }
+}
+
 fn score_facts(
     case: &PositiveCase,
     extraction: &ExtractionResult,
@@ -895,6 +971,7 @@ fn score_facts(
         }
     }
     let mut matched_events = 0usize;
+    let mut matched_recorded_events = 0usize;
     let recorded_event_sequences = canon
         .content
         .events
@@ -903,7 +980,10 @@ fn score_facts(
         .collect::<HashMap<_, _>>();
     for expected_event in &case.expected.events {
         match recorded_event_sequences.get(expected_event.id.as_str()) {
-            Some(sequence) if *sequence == expected_event.sequence => matched_events += 1,
+            Some(sequence) if *sequence == expected_event.sequence => {
+                matched_events += 1;
+                matched_recorded_events += 1;
+            }
             Some(_) => scores.chronology_violations += 1,
             None => {}
         }
@@ -920,6 +1000,17 @@ fn score_facts(
                 .any(|recorded| recorded.id == rule.id)
         })
         .count();
+    let matched_recorded_rules = canon
+        .content
+        .world_rules
+        .iter()
+        .filter(|recorded| {
+            case.expected
+                .world_rules
+                .iter()
+                .any(|rule| rule.id == recorded.id)
+        })
+        .count();
 
     scores
         .matched
@@ -929,6 +1020,46 @@ fn score_facts(
         .insert(Category::Relationships, matched_relationships);
     scores.matched.insert(Category::Events, matched_events);
     scores.matched.insert(Category::WorldRules, matched_rules);
+
+    let matched_recorded_characters = extraction
+        .characters
+        .iter()
+        .filter(|recorded| {
+            case.expected.characters.iter().any(|expected| {
+                name_set_matches(
+                    &recorded.name,
+                    &recorded.aliases,
+                    &expected.name,
+                    &expected.aliases,
+                )
+            })
+        })
+        .count();
+    let matched_recorded_relationships = extraction
+        .relationships
+        .iter()
+        .filter(|recorded| {
+            let from = character_names.get(&recorded.from_character);
+            let to = character_names.get(&recorded.to_character);
+            case.expected.relationships.iter().any(|expected| {
+                from == Some(&expected.from)
+                    && to == Some(&expected.to)
+                    && recorded.relationship_type == expected.kind
+            })
+        })
+        .count();
+    scores
+        .matched_recorded
+        .insert(Category::Characters, matched_recorded_characters);
+    scores
+        .matched_recorded
+        .insert(Category::Relationships, matched_recorded_relationships);
+    scores
+        .matched_recorded
+        .insert(Category::Events, matched_recorded_events);
+    scores
+        .matched_recorded
+        .insert(Category::WorldRules, matched_recorded_rules);
 }
 
 fn expected_name_map(characters: &[ExpectedCharacter]) -> HashMap<String, String> {
@@ -959,6 +1090,9 @@ fn provenance_scores(
     chapter_count: usize,
     scores: &mut Scores,
 ) -> bool {
+    // Canon facts carry per-fact citations that canon.validate checks against
+    // the split chapters (existence, in-range, verbatim excerpt), so they count
+    // as proven once validation passes. The +1 is the ending snapshot.
     let canon_facts = canon.content.arcs.len()
         + canon.content.events.len()
         + canon.content.locations.len()
@@ -974,7 +1108,7 @@ fn provenance_scores(
     let mut all_ok = true;
     for character in &extraction.characters {
         let in_range = character.first_appearance_chapter.is_some_and(|chapter| {
-            chapter >= 1 && usize::try_from(chapter).ok() <= Some(chapter_count)
+            chapter >= 1 && usize::try_from(chapter).is_ok_and(|chapter| chapter <= chapter_count)
         });
         if in_range {
             scores.provenance_ok += 1;
@@ -1270,6 +1404,10 @@ async fn run_live(
         .map(|chapter| (chapter.chapter_number, chapter.content.clone()))
         .collect::<BTreeMap<_, _>>();
 
+    // Stage 1 mirrors the production character-extraction handler: sample
+    // prompt, optional chunk scan with merge, then characters whose first
+    // appearance is verifiable in the split chapters (production omits the
+    // rest and fails when none remain).
     let sample = character_extractor::build_representative_sample(&chapters);
     let extraction_prompt =
         character_extractor::build_extraction_prompt(&case.novel_title, &sample);
@@ -1288,26 +1426,73 @@ async fn run_live(
         )
         .await?;
     register_response_model(response_models, &extraction_response.model)?;
-    let extraction: ExtractionResult = serde_json::from_str(
+    let base_extraction: ExtractionResult = serde_json::from_str(
         character_extractor::json_object_payload(&extraction_response.content),
     )
     .context("provider extraction JSON is invalid")?;
-    character_extractor::validate_extraction(&extraction)
+    character_extractor::validate_extraction(&base_extraction)
         .context("provider extraction violates the schema contract")?;
-    if extraction.characters.is_empty() {
-        bail!("provider extraction contains no characters");
+
+    let mut chunk_extractions = Vec::new();
+    if character_extractor::needs_chunk_scan(&chapters) {
+        for (index, chunk) in character_extractor::build_scan_plan(&chapters)
+            .into_iter()
+            .enumerate()
+        {
+            let prompt = character_extractor::build_chunk_extraction_prompt(
+                &case.novel_title,
+                &chunk,
+                index,
+            );
+            let response = client
+                .chat(
+                    ChatRequest::new(LlmOperation::CharacterExtraction, "")
+                        .message(
+                            "system",
+                            "You are a literary analysis extractor. Return exactly one JSON object.",
+                        )
+                        .message("user", &prompt)
+                        .temperature(0.0)
+                        .max_tokens(4_000)
+                        .thinking(false)
+                        .json(),
+                )
+                .await?;
+            register_response_model(response_models, &response.model)?;
+            let chunk_extraction: character_extractor::ChunkExtractionResult =
+                serde_json::from_str(character_extractor::json_object_payload(&response.content))
+                    .context("provider chunk extraction JSON is invalid")?;
+            character_extractor::validate_chunk_extraction(&chunk_extraction)
+                .context("provider chunk extraction violates the schema contract")?;
+            chunk_extractions.push(chunk_extraction);
+        }
     }
+    let extraction = character_extractor::merge_extractions(base_extraction, chunk_extractions);
+    character_extractor::validate_extraction(&extraction)
+        .context("merged provider extraction violates the schema contract")?;
 
     let mut characters = Vec::new();
     for extracted in &extraction.characters {
-        let character = Character::from_extraction(
+        let Some(first_appearance) =
+            character_extractor::find_first_appearance(extracted, &chapters)
+        else {
+            bail!(
+                "provider character {} has no verifiable first appearance",
+                extracted.name
+            );
+        };
+        let mut character = Character::from_extraction(
             case.novel_id,
             extracted,
             &extraction.world_summary,
             &case.novel_title,
         )
         .context("provider extraction contains an unusable character")?;
+        character.first_appearance_chapter = Some(first_appearance);
         characters.push(character);
+    }
+    if characters.is_empty() {
+        bail!("no extracted character has a verifiable first appearance");
     }
     let canonical_ids = characters
         .iter()
@@ -1526,38 +1711,56 @@ fn live_report(
             .filter(|v| matches!(v.verdict, Verdict::Match))
             .count(),
     );
-    let precision_matched = verdicts
-        .extracted_character_verdicts
-        .iter()
-        .filter(|v| matches!(v.verdict, Verdict::Match))
-        .count()
-        + verdicts
+    scores.matched = matched;
+    scores.matched_recorded.insert(
+        Category::Characters,
+        verdicts
+            .extracted_character_verdicts
+            .iter()
+            .filter(|v| matches!(v.verdict, Verdict::Match))
+            .count(),
+    );
+    scores.matched_recorded.insert(
+        Category::Relationships,
+        verdicts
             .extracted_relationship_verdicts
             .iter()
             .filter(|v| matches!(v.verdict, Verdict::Match))
-            .count()
-        + verdicts
+            .count(),
+    );
+    scores.matched_recorded.insert(
+        Category::Events,
+        verdicts
             .extracted_event_verdicts
             .iter()
             .filter(|v| matches!(v.verdict, Verdict::Match))
-            .count()
-        + verdicts
+            .count(),
+    );
+    scores.matched_recorded.insert(
+        Category::WorldRules,
+        verdicts
             .extracted_world_rule_verdicts
             .iter()
             .filter(|v| matches!(v.verdict, Verdict::Match))
-            .count();
-    let per_category_matched = matched.values().sum::<usize>();
-    scores.matched = matched
-        .into_iter()
-        .map(|(category, count)| (category, count))
-        .collect();
-    if per_category_matched > precision_matched {
-        scores.matched = scores
-            .matched
-            .into_iter()
-            .map(|(category, count)| (category, count.min(precision_matched)))
-            .collect();
+            .count(),
+    );
+
+    // Chronology is mechanical, not judged: an extracted event whose id exists
+    // in the expected table but whose sequence contradicts it is a violation.
+    let recorded_event_sequences = canon
+        .content
+        .events
+        .iter()
+        .map(|event| (event.id.as_str(), event.sequence))
+        .collect::<HashMap<_, _>>();
+    for expected_event in &case.expected.events {
+        if let Some(sequence) = recorded_event_sequences.get(expected_event.id.as_str()) {
+            if *sequence != expected_event.sequence {
+                scores.chronology_violations += 1;
+            }
+        }
     }
+
     let provenance_ok = provenance_scores(extraction, canon, chapter_count, &mut scores);
     let mut error = None;
     let observed = provenance_ok && scores.thresholds_met(REQUIRED_THRESHOLDS);
@@ -1603,10 +1806,22 @@ mod tests {
         scores.expected.insert(Category::Characters, 3);
         scores.recorded.insert(Category::Characters, 4);
         scores.matched.insert(Category::Characters, 3);
+        scores.matched_recorded.insert(Category::Characters, 3);
         assert_eq!(scores.coverage_percent(Category::Characters), 100);
         assert_eq!(scores.precision_percent(), 75);
         assert_eq!(scores.hallucination_percent(), 25);
         assert!(!scores.thresholds_met(REQUIRED_THRESHOLDS));
+    }
+
+    #[test]
+    fn hallucination_ceiling_never_fails_open() {
+        // 41/200 = 20.5% true hallucination: the ceiling must round up so the
+        // <=20% policy threshold cannot accept a fraction above it.
+        let mut scores = Scores::default();
+        scores.recorded.insert(Category::Characters, 200);
+        scores.matched_recorded.insert(Category::Characters, 159);
+        assert_eq!(scores.hallucination_percent(), 21);
+        assert!(scores.hallucination_percent() > REQUIRED_THRESHOLDS.hallucination_max_percent);
     }
 
     #[test]
