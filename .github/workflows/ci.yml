@@ -274,6 +274,8 @@ jobs:
           test "$(docker exec novel-gateway curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8080/ready)" = 200
       - name: Self-check ingestion recovery verifier
         run: tests/e2e/ingestion_recovery.sh --self-test
+      - name: Self-check source recovery verifier
+        run: tests/e2e/source_recovery_drill.sh --self-test
       - name: Verify restart-safe ingestion recovery boundaries
         run: tests/e2e/ingestion_recovery.sh
       - name: Verify restart-safe core reader loop
@@ -282,6 +284,23 @@ jobs:
         env:
           BACKUP_ENCRYPTION_KEY: runtime-drill-backup-key-at-least-32-characters
         run: tests/e2e/backup_restore_drill.sh
+      - name: Start the S3 source-retention topology
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.e2e.yml down -v
+          docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml up -d
+          for attempt in $(seq 1 60); do
+            if [ "$(docker inspect --format '{{.State.Health.Status}}' novel-gateway 2>/dev/null)" = healthy ]; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml ps --all
+          exit 1
+      - name: Verify the S3 source-boundary kill/restart drill
+        run: tests/e2e/source_recovery_drill.sh
+      - name: Stop the S3 source-retention topology
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml down -v
       - name: Reset production topology for the capacity profile
         env:
           RATE_LIMIT_RPS: 500
@@ -311,7 +330,9 @@ jobs:
           retention-days: 14
       - name: Show logs on failure
         if: failure()
-        run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml logs --no-color
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.e2e.yml logs --no-color || true
+          docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml logs --no-color || true
       - name: Stop production topology
         if: always()
         run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml down -v
