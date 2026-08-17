@@ -3,9 +3,10 @@ mod auth;
 mod metrics;
 mod proxy;
 
+use anyhow::{bail, Context, Result as AnyResult};
 use axum::{
     extract::{ConnectInfo, Request, State},
-    http::StatusCode,
+    http::{header, HeaderName, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{any, get, post},
@@ -23,7 +24,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -182,12 +183,7 @@ async fn main() -> anyhow::Result<()> {
         ))
         .layer(middleware::from_fn(request_id_middleware))
         .layer(middleware::from_fn(metrics::metrics_middleware))
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        )
+        .layer(cors_layer(cors_origins()?))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
@@ -436,6 +432,125 @@ async fn shutdown_signal() {
     {
         ctrl_c.await.expect("failed to listen for ctrl-c");
         tracing::info!("Received SIGINT, starting graceful shutdown");
+    }
+}
+
+/// The preview CORS allowlist: browsers may reach the gateway cross-origin
+/// only from the documented preview origins. Production requests are
+/// same-origin through Nginx, so this only gates dev-mode and operator-tunnel
+/// origins. A malformed or empty list fails startup: CORS is security-relevant
+/// posture, never silently widened.
+fn cors_origins() -> AnyResult<Vec<HeaderValue>> {
+    let raw = std::env::var("CORS_ORIGINS").unwrap_or_else(|_| {
+        "http://localhost:5173,http://127.0.0.1:5173,http://localhost,http://127.0.0.1".into()
+    });
+    parse_cors_origins(&raw)
+}
+
+fn parse_cors_origins(raw: &str) -> AnyResult<Vec<HeaderValue>> {
+    let origins = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|origin| !origin.is_empty())
+        .map(|origin| {
+            let uri = origin
+                .parse::<axum::http::Uri>()
+                .with_context(|| format!("CORS_ORIGINS contains an invalid origin: {origin}"))?;
+            let http_scheme = uri
+                .scheme_str()
+                .is_some_and(|scheme| matches!(scheme, "http" | "https"));
+            if !http_scheme || uri.authority().is_none() || uri.path() != "/" || uri.query().is_some()
+            {
+                bail!("CORS_ORIGINS origins must be http(s) origins without a path, query, or fragment: {origin}");
+            }
+            HeaderValue::from_str(origin)
+                .with_context(|| format!("CORS_ORIGINS contains an invalid origin: {origin}"))
+        })
+        .collect::<AnyResult<Vec<_>>>()?;
+    if origins.is_empty() {
+        bail!("CORS_ORIGINS must name at least one origin");
+    }
+    Ok(origins)
+}
+
+fn cors_layer(origins: Vec<HeaderValue>) -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            HeaderName::from_static("idempotency-key"),
+        ])
+}
+
+#[cfg(test)]
+mod cors_tests {
+    use super::{cors_layer, parse_cors_origins};
+    use axum::{
+        body::Body,
+        http::{Method, Request, Response, StatusCode},
+    };
+    use std::convert::Infallible;
+    use tower::service_fn;
+    use tower::{ServiceBuilder, ServiceExt};
+
+    #[test]
+    fn parses_the_preview_origin_list() {
+        let origins =
+            parse_cors_origins("http://localhost:5173, http://127.0.0.1:5173,,http://localhost")
+                .unwrap();
+        assert_eq!(origins.len(), 3);
+        assert!(parse_cors_origins("not a valid origin value").is_err());
+        assert!(parse_cors_origins(" , ").is_err());
+    }
+
+    async fn preflight_response(origin: &str) -> Response<Body> {
+        let origins = parse_cors_origins(
+            "http://localhost:5173,http://127.0.0.1:5173,http://localhost,http://127.0.0.1",
+        )
+        .unwrap();
+        let service = ServiceBuilder::new()
+            .layer(cors_layer(origins))
+            .service(service_fn(|_: Request<Body>| async {
+                Ok::<_, Infallible>(axum::response::Response::new(Body::empty()))
+            }));
+        let request = Request::builder()
+            .method(Method::OPTIONS)
+            .header("Origin", origin)
+            .header("Access-Control-Request-Method", "POST")
+            .uri("/api/auth/login")
+            .body(Body::empty())
+            .unwrap();
+        service.oneshot(request).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn preview_origins_pass_preflight_and_foreign_origins_do_not() {
+        let allowed = preflight_response("http://localhost:5173").await;
+        assert_eq!(allowed.status(), StatusCode::OK);
+        assert_eq!(
+            allowed
+                .headers()
+                .get("access-control-allow-origin")
+                .unwrap(),
+            "http://localhost:5173"
+        );
+
+        let denied = preflight_response("http://evil.example").await;
+        assert!(
+            denied
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none(),
+            "a foreign origin must not receive a CORS allowance"
+        );
     }
 }
 

@@ -97,7 +97,9 @@ limit but cannot enforce.
    on protected routes the Gateway authenticates before applying its global
    token-bucket backstop. Gateway observation routes are exempt from that global
    bucket, while Nginx API admission still applies; production Nginx does not
-   expose metrics. CORS is permissive in the Rust routers; it is not an
+   expose metrics. The gateway restricts CORS to the documented preview
+   origins (`CORS_ORIGINS`); downstream routers remain permissive but are not
+   browser-reachable in the supported envelope. CORS is not an
    authorization control.
 
 2. **Browser to authenticated API.** Access and opaque refresh tokens are kept

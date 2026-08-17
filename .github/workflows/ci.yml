@@ -176,6 +176,10 @@ jobs:
             curl --fail --silent --show-error http://127.0.0.1/health
             curl --fail --silent --show-error http://127.0.0.1/ready
           done
+      - name: Verify the gateway CORS posture
+        run: |
+          curl --silent --show-error --dump-header - --output /dev/null             -X OPTIONS -H 'Origin: http://localhost:5173'             -H 'Access-Control-Request-Method: POST'             http://127.0.0.1/api/auth/login             | grep -qi 'access-control-allow-origin: http://localhost:5173'
+          ! curl --silent --show-error --dump-header - --output /dev/null             -X OPTIONS -H 'Origin: http://evil.example'             -H 'Access-Control-Request-Method: POST'             http://127.0.0.1/api/auth/login             | grep -qi 'access-control-allow-origin'
       - name: Verify durable first-admin setup
         run: |
           test "$(curl --silent --output /tmp/setup-status.json --write-out '%{http_code}' http://127.0.0.1/api/setup/status)" = 200
