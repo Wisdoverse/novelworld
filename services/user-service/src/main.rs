@@ -35,22 +35,13 @@ async fn trace_middleware(request: Request, next: Next) -> Response {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // The service span must be created after tracing_subscriber::init()
-    // (spans register on the dispatcher current at creation), so init inside
-    // run_body and wrap it here with a span that re-enters on every poll.
-    let service_span = tracing::info_span!("service", service = "user-service", trace_id = "");
-    run_body().instrument(service_span).await
+    run_body().await
 }
 
-#[tracing::instrument(
-    name = "service",
-    skip_all,
-    fields(service = "user-service", trace_id = "")
-)]
 async fn run_body() -> Result<()> {
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(format!(
-            "{},reqwest=off,hyper=off,h2=off,tower_http=off",
+            "{},reqwest=off,tower_http=off",
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into())
         )))
         .with(tracing_subscriber::fmt::layer().json())

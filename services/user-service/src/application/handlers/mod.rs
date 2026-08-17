@@ -209,6 +209,7 @@ impl AuthHandler {
                 .await
                 .map_err(AuthError::Internal)?
                 .is_some();
+        tracing::info!(admin_configured, llm_configured, "setup status served");
         Ok(SetupStatus {
             admin_configured,
             llm_configured,
