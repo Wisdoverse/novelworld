@@ -51,8 +51,10 @@ decisions for that profile and approves nothing beyond it.
    license/source policy (cargo-deny), container image scanning (trivy), and
    digest-pinned release manifests with a rollback state machine
    (release.sh). See [`SECURITY.md`](../SECURITY.md) 'Dependency Policy' and 'Release Rollback'.
-   SBOM/provenance/signature generation for official release artifacts
-   remains open release-infrastructure work.
+   CycloneDX SBOMs are generated per release (docker.yml) and locally via
+   `infra/security/generate-sboms.sh`, digest-bound; deploy-time SBOM
+   verification, provenance/attestation, and signing remain open
+   release-infrastructure work.
 7. **Incident response — existing procedures.** Secret rotation
    ([`SECURITY.md`](../SECURITY.md) and its e2e drill), the bad-release edge drill, the release/rollback
    state-machine drill, and the provider-outage drill (fail-closed import,

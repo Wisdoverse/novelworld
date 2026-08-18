@@ -110,10 +110,10 @@ What the release_state_drill.sh proves locally (no registry required):
 
 What stays gated: the image-level deployment (`deploy_manifest`: git checkout
 of the release SHA plus `compose pull` of the digest-pinned images) runs only
-with a reachable registry, and SBOM/provenance/signature generation is a
-release-infrastructure task. CI validates the manifest grammar and lock
-guards; the deployment and SBOM/provenance/signature paths themselves are
-not exercised by a local drill.
+with a reachable registry. CI validates the manifest grammar and lock
+guards; the deployment path itself is not exercised by a local drill.
+SBOM generation has since landed (see Dependency Policy); deploy-time SBOM
+verification, provenance/attestation, and signing remain gated.
 ### Dependency Policy
 
 CI runs `rustsec/audit-check` against `Cargo.lock` with the live RustSec
@@ -164,8 +164,14 @@ the pinned image - tracked for the next infrastructure re-pin. gosu runs
 only as the postgres entrypoint's privilege-drop helper, and that path
 does not exercise the affected Go TLS session-resumption code.
 
-Still-open H2 supply-chain gates: SBOM/provenance/signature generation for
-official release artifacts.
+The release pipeline (docker.yml) generates one CycloneDX 1.6 SBOM per
+application image with the pinned trivy release and ships them with the
+release artifact, bound to the recorded image digest via `sboms/digests.txt`;
+`infra/security/generate-sboms.sh` is the local operator form.
+
+Still-open H2 supply-chain gates: deploy-time SBOM verification,
+provenance/attestation, and signature generation for official release
+artifacts.
 
 ### Provider Incidents
 

@@ -145,7 +145,25 @@ jobs:
           record_pinned_image POSTGRES_IMAGE "$postgres_image"
           record_pinned_image REDIS_IMAGE "$(jq -r '.services.redis.image' <<<"$compose_json")"
           record_pinned_image NGINX_IMAGE "$(jq -r '.services.nginx.image' <<<"$compose_json")"
+
+          # SBOM generation: one CycloneDX 1.6 document per application
+          # image, bound to the recorded digest via sboms/digests.txt.
+          mkdir -p sboms
+          : > sboms/digests.txt
+          for service in gateway user-service novel-service agent-service narrative-service frontend; do
+            image="$image_prefix-$service:$RELEASE_GIT_SHA"
+            docker pull "$image" >/dev/null
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+              -v "$PWD/sboms:/out" \
+              aquasec/trivy:0.68.1 image --scanners vuln --format cyclonedx \
+              --skip-version-check --output "/out/$service.cdx.json" "$image" >/dev/null 2>&1
+            digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$image" | sed 's|.*@||')
+            [[ -n "$digest" ]] || { echo "no registry digest for $image" >&2; exit 1; }
+            printf '%s %s\n' "$service" "$digest" >> sboms/digests.txt
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: novel-world-release-${{ github.sha }}
-          path: release.env
+          path: |
+            release.env
+            sboms/
