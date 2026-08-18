@@ -10,6 +10,12 @@ ignore = [
     "RUSTSEC-2026-0098",
     "RUSTSEC-2026-0099",
     "RUSTSEC-2026-0104",
+    # h2 0.3.27 (RUSTSEC-2026-0258, unbounded empty DATA frames): transitive
+    # via the already-latest aws-smithy-http-client 1.3.0; patched only in
+    # h2 0.4.16+, which the AWS SDK does not consume yet. Exploitable only
+    # against a hostile HTTP/2 server; the S3 client targets
+    # operator-managed endpoints. Re-check on AWS chain updates.
+    "RUSTSEC-2026-0258",
 ]
 
 # ttf-parser (unmaintained) and lru 0.16.4 (unsound pop, patched in 0.18.2)

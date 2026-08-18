@@ -126,7 +126,7 @@ and the self-test `tests/e2e/gitleaks_self_test.sh` scans the full history:
 it plants a GitHub-shaped token and asserts the scan fails (a config that
 silently lost its rules would pass everything and must not go unnoticed),
 then asserts the repository stays clean.
-`.cargo/audit.toml` records the three currently acknowledged advisories with
+`.cargo/audit.toml` records the four currently acknowledged advisories with
 their rationale:
 
 - **RUSTSEC-2026-0098/0099/0104** (rustls-webpki 0.101.7) — transitive
@@ -135,6 +135,10 @@ their rationale:
   misissued certificate to exploit, and 0104 is a panic in CRL parsing; the
   S3 client targets operator-managed endpoints. Re-check whenever the AWS
   SDK chain updates.
+- **RUSTSEC-2026-0258** (h2 0.3.27, unbounded empty DATA frames) —
+  transitive through the same already-latest AWS SDK chain; patched only in
+  h2 0.4.16+, which the SDK does not consume yet. Exploitable only against a
+  hostile HTTP/2 server; the S3 client targets operator-managed endpoints.
 
 Informational warnings (`ttf-parser` unmaintained, `lru` unsound pop patched
 in 0.18.2) remain non-failing because both are transitive through

@@ -37,7 +37,15 @@ async fn trace_middleware(request: Request, next: Next) -> Response {
         .map(str::to_owned)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let span = tracing::info_span!("service", service = "agent-service", trace_id = %trace_id);
-    next.run(request).instrument(span).await
+    async {
+        let response = next.run(request).await;
+        // SPEC 14.1: one request-scoped entry per request, so the log contract
+        // holds even when no other service event fires while handling it.
+        tracing::info!("request completed");
+        response
+    }
+    .instrument(span)
+    .await
 }
 
 #[tokio::main]

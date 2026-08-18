@@ -278,7 +278,15 @@ async fn request_id_middleware(mut req: Request, next: Next) -> Response {
         trace_id = %hv.to_str().unwrap_or_default()
     );
 
-    let mut response = next.run(req).instrument(span).await;
+    let mut response = async {
+        let response = next.run(req).await;
+        // SPEC 14.1: one request-scoped entry per request, so the log contract
+        // holds even when no other gateway event fires while handling it.
+        tracing::info!("request completed");
+        response
+    }
+    .instrument(span)
+    .await;
     response.headers_mut().insert("x-trace-id", hv);
     response
 }
