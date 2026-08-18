@@ -45,6 +45,15 @@ jobs:
           tags: ${{ steps.image.outputs.prefix }}-${{ matrix.service }}:${{ github.sha }}
           cache-from: type=gha,scope=rust-${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=rust-${{ matrix.service }}
+      - name: Scan the pushed image for HIGH/CRITICAL vulnerabilities
+        env:
+          IMAGE: ${{ steps.image.outputs.prefix }}-${{ matrix.service }}:${{ github.sha }}
+        run: |
+          docker pull "$IMAGE"
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.68.1 image --scanners vuln \
+            --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
+            --skip-version-check "$IMAGE"
 
   frontend:
     needs: quality
@@ -67,6 +76,15 @@ jobs:
           tags: ${{ steps.image.outputs.prefix }}-frontend:${{ github.sha }}
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
+      - name: Scan the pushed image for HIGH/CRITICAL vulnerabilities
+        env:
+          IMAGE: ${{ steps.image.outputs.prefix }}-frontend:${{ github.sha }}
+        run: |
+          docker pull "$IMAGE"
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.68.1 image --scanners vuln \
+            --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
+            --skip-version-check "$IMAGE"
 
   release-manifest:
     needs: [rust-services, frontend]

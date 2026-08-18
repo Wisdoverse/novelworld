@@ -150,8 +150,22 @@ deliberate review), unlicensed crates are denied, and unknown registry/git
 sources are denied. Dependency advisories stay owned by cargo-audit to avoid
 maintaining two ignore lists.
 
-Still-open H2 supply-chain gates: container image scanning and
-SBOM/provenance/signature generation for official release artifacts.
+Every pushed application image is scanned in the tag pipeline (docker.yml)
+with the pinned `aquasec/trivy:0.68.1` for HIGH/CRITICAL vulnerabilities
+(--ignore-unfixed, vuln scanner); any finding fails the release. The same
+check runs locally via `infra/security/scan-images.sh`. The four base
+images in the Dockerfiles are digest-pinned. The digest-pinned
+infrastructure images are scanned when they are re-pinned through the
+separately approved infrastructure procedure; the current local scan of
+the pinned `pgvector/pgvector@sha256:69167330…` (compose `POSTGRES_IMAGE`)
+reports 22 findings (21 HIGH, 1 CRITICAL, CVE-2025-68121) inside its
+bundled gosu binary, fixed upstream in go 1.24.13 but not yet rebuilt into
+the pinned image - tracked for the next infrastructure re-pin. gosu runs
+only as the postgres entrypoint's privilege-drop helper, and that path
+does not exercise the affected Go TLS session-resumption code.
+
+Still-open H2 supply-chain gates: SBOM/provenance/signature generation for
+official release artifacts.
 
 ### LLM Security
 - User input passed to LLM prompts includes behavioral constraints
