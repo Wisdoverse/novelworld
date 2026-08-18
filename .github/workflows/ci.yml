@@ -108,6 +108,10 @@ jobs:
         uses: gitleaks/gitleaks-action@v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The action auto-detects only a dotless gitleaks.toml; the
+          # committed config is .gitleaks.toml (the CLI's convention), so
+          # point at it explicitly.
+          GITLEAKS_CONFIG: .gitleaks.toml
       - name: Self-test the secret-scanning gate
         run: tests/e2e/gitleaks_self_test.sh
 
