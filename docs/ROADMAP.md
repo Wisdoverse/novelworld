@@ -367,7 +367,11 @@ Scope:
 - For public hosting, decide registration verification/invites, per-principal
   and per-operation quotas, global spend ceilings and kill switches, moderation,
   complaints/takedown, and abuse response. Do not build SaaS governance for a
-  profile that remains explicitly private self-hosted.
+  profile that remains explicitly private self-hosted. The private-profile
+  boundary decisions (TLS, registration verification, content safety, provider,
+  privacy, supply chain, incident response) are recorded in
+  [`DEPLOYMENT_PROFILE.md`](./DEPLOYMENT_PROFILE.md); the public-hosting
+  decisions reopen only if a public profile is selected.
 - Implement the selected public content-safety boundary, including enforceable
   submission/generation handling, user notice, reporting, complaint/takedown or
   appeal flow as applicable, provider failure behavior, and operator response.
