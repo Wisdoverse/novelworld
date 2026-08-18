@@ -42,4 +42,8 @@ uploads_data/
 # Claude
 .claude/
 .tools-bin/
+.tools-npm/
+.tools-npm-cache/
+.tools-pnpm/
+.tools-xdg/
 capacity-report.json
