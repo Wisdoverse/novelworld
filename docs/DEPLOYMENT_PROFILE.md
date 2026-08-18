@@ -55,7 +55,9 @@ decisions for that profile and approves nothing beyond it.
    `infra/security/generate-sboms.sh`, digest-bound; deploy-time SBOM
    verification, provenance/attestation, and signing remain open
    release-infrastructure work.
-7. **Incident response — existing procedures.** Secret rotation
+7. **Incident response — existing procedures.** The operator runbook is
+   [`OPERATIONS.md`](./OPERATIONS.md) (health checks, playbook index, ownership).
+   Secret rotation
    ([`SECURITY.md`](../SECURITY.md) and its e2e drill), the bad-release edge drill, the release/rollback
    state-machine drill, and the provider-outage drill (fail-closed import,
    bounded source-free errors, settings non-disclosure, recovery retry) are
