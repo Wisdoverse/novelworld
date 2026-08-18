@@ -42,3 +42,4 @@ uploads_data/
 # Claude
 .claude/
 .tools-bin/
+capacity-report.json
