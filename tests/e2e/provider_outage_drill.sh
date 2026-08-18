@@ -39,6 +39,10 @@ curl_cmd=(curl --connect-timeout 5 --max-time 120 --fail --silent --show-error)
 
 json_get() { python3 -c "import json,sys; value=json.load(sys.stdin); print($1)"; }
 
+# The CI drills run with RATE_LIMIT_RPS=1; pace standalone API calls like the
+# other e2e drills (the status polls already sleep 2s per attempt).
+pause() { sleep 1.1; }
+
 check() {
   if [ "$2" != "$3" ]; then
     printf 'drill: FAIL %s: expected [%s], got [%s]\n' "$1" "$2" "$3" >&2
@@ -113,9 +117,17 @@ wait_status() {
 # ---- preconditions ---------------------------------------------------------
 wait_gateway_healthy
 
-setup_status=$("${curl_cmd[@]}" "$api/setup/status")
+# The shared gateway rate limiter can be cold right after the previous
+# drill's last request (CI runs with RATE_LIMIT_RPS=1), so retry 429s.
+for _ in $(seq 1 5); do
+  pause
+  setup_status=$("${curl_cmd[@]}" "$api/setup/status") && break
+  setup_status=""
+done
+[ -n "$setup_status" ] || { printf 'drill: setup/status kept returning 429\n' >&2; exit 1; }
 admin_configured=$(json_get "value['admin_configured']" <<<"$setup_status")
 if [ "$admin_configured" != True ]; then
+  pause
   status_code=$(curl --silent --output /dev/null --write-out '%{http_code}' \
     -H 'Content-Type: application/json' \
     --data "{\"email\":\"$email\",\"password\":\"$password\",\"name\":\"Runtime Admin\"}" \
@@ -123,6 +135,7 @@ if [ "$admin_configured" != True ]; then
   [ "$status_code" = 201 ] || { printf 'drill: setup/init returned %s\n' "$status_code" >&2; exit 1; }
   admin_created=1
 fi
+pause
 login=$("${curl_cmd[@]}" \
   -H 'Content-Type: application/json' \
   --data "{\"email\":\"$email\",\"password\":\"$password\"}" \
@@ -135,28 +148,34 @@ container=$(stub_container)
 stub_reset
 
 # ---- baseline: a normal import completes while the provider is up --------
+pause
 source_a="$work/a.txt"
 write_source "$source_a"
 novel_a=$(upload_novel 'outage-baseline' "$source_a")
 wait_status "$novel_a" ready 45 || exit 1
+pause
 check 'baseline import completed' "$(novel_status "$novel_a")" ready
 
 # ---- outage: the provider disappears mid-flight ---------------------------
 printf 'drill: stopping the LLM provider (simulated outage)\n'
 docker stop "$container" >/dev/null
 stub_was_stopped=1
+pause
 source_b="$work/b.txt"
 write_source "$source_b"
 novel_b=$(upload_novel 'outage-under-provider-failure' "$source_b")
 wait_status "$novel_b" error 80 || exit 1
+pause
 check 'outage import reached the terminal error state' "$(novel_status "$novel_b")" error
 check 'outage import failed with the bounded code' \
   "$(db "SELECT failure_code FROM novel_import_jobs WHERE novel_id = '$novel_b'")" processing_failed
 check 'the import service stays healthy during the outage' \
   "$(docker inspect --format '{{.State.Health.Status}}' novel-novel-service)" healthy
+pause
 check 'baseline novel is untouched by the outage' "$(novel_status "$novel_a")" ready
 
 # ---- non-disclosure: the settings API never returns key material ----------
+pause
 settings=$("${curl_cmd[@]}" "${auth[@]}" "$api/settings/llm")
 python3 -c "import json,sys; body=json.load(sys.stdin); assert 'api_key' not in body, body; assert isinstance(body.get('api_key_configured'), bool)" <<<"$settings"
 printf 'drill: ok   settings response carries no key material\n'
@@ -169,18 +188,22 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 stub_reset
+pause
 retry_status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
   "${auth[@]}" -X POST "$api/novels/$novel_b/retry")
 check 'failed import accepts a retry' "$retry_status" 202
 wait_status "$novel_b" ready 45 || exit 1
+pause
 check 'recovered import completed after retry' "$(novel_status "$novel_b")" ready
 
 # ---- cleanup ---------------------------------------------------------------
 for novel_id in "$novel_a" "$novel_b"; do
+  pause
   check "cleanup delete returns 204" \
     "$(curl --silent --output /dev/null --write-out '%{http_code}' "${auth[@]}" -X DELETE "$api/novels/$novel_id")" 204
 done
 # Return the deployment to first-run state (the next drill's precondition).
+pause
 check 'cleanup deletes the drill admin' \
   "$(curl --silent --output /dev/null --write-out '%{http_code}' "${auth[@]}" -X DELETE "$api/auth/me")" 204
 

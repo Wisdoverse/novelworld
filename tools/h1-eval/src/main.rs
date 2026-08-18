@@ -650,7 +650,7 @@ fn validate_corpus(corpus: &Corpus) -> Result<()> {
     // failure mechanism must be present, so deleting cases cannot make the
     // corpus pass trivially.
     if corpus.positive_cases.len() < 4
-        || corpus.splitter_cases.len() < 1
+        || corpus.splitter_cases.is_empty()
         || corpus.adversarial_cases.len() < 4
         || corpus.malformed_cases.len() < 5
     {
@@ -1837,9 +1837,8 @@ mod tests {
             r#"{{"rubric_version":"{RUBRIC_VERSION}","character_verdicts":[],"extracted_character_verdicts":[],"relationship_verdicts":[],"extracted_relationship_verdicts":[],"event_verdicts":[],"extracted_event_verdicts":[],"world_rule_verdicts":[],"extracted_world_rule_verdicts":[],"explanation":"ok","extra":true}}"#
         );
         assert!(parse_judge_verdicts(&missing_category).is_err());
-        let wrong_rubric = format!(
-            r#"{{"rubric_version":"other-v1","character_verdicts":[],"extracted_character_verdicts":[],"relationship_verdicts":[],"extracted_relationship_verdicts":[],"event_verdicts":[],"extracted_event_verdicts":[],"world_rule_verdicts":[],"extracted_world_rule_verdicts":[],"explanation":"ok"}}"#
-        );
+        let wrong_rubric =
+            r#"{{"rubric_version":"other-v1","character_verdicts":[],"extracted_character_verdicts":[],"relationship_verdicts":[],"extracted_relationship_verdicts":[],"event_verdicts":[],"extracted_event_verdicts":[],"world_rule_verdicts":[],"extracted_world_rule_verdicts":[],"explanation":"ok"}}"#.to_string();
         assert!(parse_judge_verdicts(&wrong_rubric).is_err());
         let bad_verdict = format!(
             r#"{{"rubric_version":"{RUBRIC_VERSION}","character_verdicts":[{{"expected":"林舟","verdict":"absent"}}],"extracted_character_verdicts":[],"relationship_verdicts":[],"extracted_relationship_verdicts":[],"event_verdicts":[],"extracted_event_verdicts":[],"world_rule_verdicts":[],"extracted_world_rule_verdicts":[],"explanation":"ok"}}"#
