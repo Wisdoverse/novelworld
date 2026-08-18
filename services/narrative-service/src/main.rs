@@ -91,7 +91,10 @@ async fn run_body() -> Result<()> {
             Arc::new(PgAccountExport::new(pool.clone()));
         let novel_service_url = std::env::var("NOVEL_SERVICE_URL")
             .unwrap_or_else(|_| "http://novel-service:8002".into());
-        let chapter_repo = Arc::new(NovelServiceClient::new(novel_service_url));
+        let chapter_repo = Arc::new(NovelServiceClient::new(
+            novel_service_url,
+            internal_service_token.clone(),
+        ));
         let novel_readiness: Arc<dyn domain::ports::ReadinessProbe> = chapter_repo.clone();
 
         // Application handler

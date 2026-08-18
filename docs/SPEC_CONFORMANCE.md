@@ -185,3 +185,9 @@ maintainer, product, security, accessibility, and legal reviews named in
 [`PRODUCT_CONTRACT.md`](./PRODUCT_CONTRACT.md). These gates match the ROADMAP
 H0 exit evidence list and [`review protocol`](./ROADMAP.md); the agent records
 above are evidence with a recorded limitation, not human sign-off.
+
+## Recorded H2 reviews
+
+| Perspective | Reviewer | Disposition | Evidence and unresolved risks |
+|---|---|---|---|
+| Adversarial threat model | Fresh-context review agent, non-author | NO-CRITICAL-HIGH | Falsified THREAT_MODEL claims against the current code (HS256/aws_lc_rs JWT, auth matrix, identity headers never read downstream, constant-time internal tokens, settings key non-disclosure, provider SSRF allowlist, S3 key construction, nginx posture). Two Low findings fixed: the three `/internal` canon/player/world-entry routes now enforce the internal service token (the narrative client sends it), and THREAT_MODEL now states refresh tokens are stored plaintext (accepted for the self-hosted profile, recorded in SECURITY.md). Agent-supplied, not human sign-off |

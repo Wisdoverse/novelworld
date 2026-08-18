@@ -210,7 +210,10 @@ The public entry points are the explicit Gateway routes in `gateway/src/main.rs`
 `jsonwebtoken`; the auth middleware replaces identity headers. User-service
 hashes passwords with bcrypt cost 12 in a bounded blocking pool, validates
 opaque refresh-token shape, stores refresh tokens server-side with expiry, and
-atomically consumes and replaces them on refresh. The first-admin transaction
+atomically consumes and replaces them on refresh. The stored values are
+plaintext opaque tokens (not hashed) - accepted for the self-hosted profile
+because the database compromise that would read them also holds the data they
+protect, and recorded in SECURITY.md. The first-admin transaction
 prevents a second setup winner after configuration.
 
 Realistic attacker stories include credential stuffing, expensive bcrypt work,
