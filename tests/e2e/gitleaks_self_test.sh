@@ -29,13 +29,16 @@ else
   }
 fi
 
+# The planted token is generated at runtime: a committed ghp_-shaped literal
+# would trip the repository's own delta scan in CI.
+plant_token="ghp_$(python3 -c 'import secrets,string; print("".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(36)))')"
 plant="$GITLEAKS_WORK/plant"
 mkdir -p "$plant"
 (
   cd "$plant"
   git init -q
   git -c user.email=a@b -c user.name=a commit -q --allow-empty -m init
-  printf 'ghp_yLe6KfOpEa3LrYztSpjqGPY4pBvg4UvKCrSg\n' >leak.txt
+  printf '%s\n' "$plant_token" >leak.txt
   git add leak.txt
   git -c user.email=a@b -c user.name=a commit -qm plant
 )
@@ -51,5 +54,9 @@ grep -Fq 'leaks found' "$GITLEAKS_WORK/plant.out" || {
 }
 printf 'self-test: ok   a planted GitHub token fails the gate\n'
 
-scan "$PWD" >"$GITLEAKS_WORK/repo.out" 2>&1
+if ! scan "$PWD" >"$GITLEAKS_WORK/repo.out" 2>&1; then
+  printf 'self-test: FAIL the repository is not clean under the committed config\n' >&2
+  cat "$GITLEAKS_WORK/repo.out" >&2
+  exit 1
+fi
 printf 'self-test: ok   the repository is clean under the committed config\n'

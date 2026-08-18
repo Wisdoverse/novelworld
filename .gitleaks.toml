@@ -18,12 +18,16 @@ description = "global allow lists"
 regexes = [
     # NovelWorld fixtures (see SECURITY.md Dependency Policy):
     # the fixed 64-hex RUNTIME_CONFIG_KEY smoke placeholder used by the
-    # CI/e2e workflows (test-only, not a credential) and two static
+    # CI/e2e workflows (test-only, not a credential); two static
     # provider model identifiers (model names, not credentials) - one in
-    # crates/llm-client/README.md and one in git history only.
+    # crates/llm-client/README.md and one in git history only; and the
+    # retired fake GitHub-PAT literal from the pre-runtime-generation
+    # gitleaks self-test, present only in git history (exact-match,
+    # anchored, never a real credential).
     "0123456789abcdef(0123456789abcdef){3}",
     "^claude-haiku-4-5-20251001$",
     "^claude-3-5-haiku-20241022$",
+    "^ghp_yLe6KfOpEa3LrYztSpjqGPY4pBvg4UvKCrSg$",
 
     '''(?i)^true|false|null$''',
     '''^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\*+|\.+)$''',
