@@ -309,6 +309,8 @@ jobs:
         run: tests/e2e/ingestion_recovery.sh
       - name: Verify restart-safe core reader loop
         run: tests/e2e/core_reader_loop.sh
+      - name: Verify the provider-outage fail-closed drill
+        run: tests/e2e/provider_outage_drill.sh
       - name: Run the backup-restore-v1 drills
         env:
           BACKUP_ENCRYPTION_KEY: runtime-drill-backup-key-at-least-32-characters

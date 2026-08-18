@@ -54,9 +54,11 @@ decisions for that profile and approves nothing beyond it.
    SBOM/provenance/signature generation for official release artifacts
    remains open release-infrastructure work.
 7. **Incident response — existing procedures.** Secret rotation
-   ([`SECURITY.md`](../SECURITY.md) and its e2e drill), the bad-release edge drill, and the release/rollback
-   state-machine drill are implemented and verified locally. Provider
-   exfiltration and the remaining incident scenarios stay open H2 work.
+   ([`SECURITY.md`](../SECURITY.md) and its e2e drill), the bad-release edge drill, the release/rollback
+   state-machine drill, and the provider-outage drill (fail-closed import,
+   bounded source-free errors, settings non-disclosure, recovery retry) are
+   implemented and verified locally. Provider credential rotation against a
+   live provider and the remaining incident scenarios stay open H2 work.
 
 ## Reopening criteria
 
