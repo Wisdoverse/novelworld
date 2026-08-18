@@ -30,6 +30,9 @@ json_get() {
 }
 
 http_status() {
+  # Pace gateway calls: the CI drills run with RATE_LIMIT_RPS=1 (the same
+  # pause the other e2e drills use).
+  sleep 1.1
   curl --connect-timeout 5 --max-time 120 --silent --show-error     --output /dev/null --write-out '%{http_code}' "$@"
 }
 
