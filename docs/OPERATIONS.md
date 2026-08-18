@@ -2,10 +2,10 @@
 
 Version: **`operations-v1`**. This is the minimum production-readiness
 **partial slice** for the private self-hosted profile: health checks, the
-playbook index, and ownership. The remaining H2 subset — dashboards,
-journey SLIs, the initial SLO/error budget, and actionable alerting with
-routing/paging — is explicitly **not yet landed** (ROADMAP H2 scope and H5
-own that work).
+playbook index, ownership, Prometheus collectors, a Grafana dashboard, and
+alert rules. The remaining H2 subset — journey SLIs, the initial
+SLO/error budget, and alert notification routing/paging — is explicitly
+**not yet landed** (ROADMAP H2 scope and H5 own that work).
 
 ## Service map and health checks
 
@@ -56,7 +56,29 @@ vulnerability-reporting channel in [`SECURITY.md`](../SECURITY.md) is for
 security reports, not operational escalation; incidents are the operator's
 to triage against this runbook.
 
+## Monitoring
+
+Optional overlay: `docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d`
+with `GRAFANA_ADMIN_PASSWORD` set. Prometheus scrapes the gateway and the
+four services, evaluates [`alerts.yml`](../infra/monitoring/alerts.yml), and
+Grafana serves the provisioned NovelWorld Overview dashboard on
+`GRAFANA_HTTP_PORT` (default `127.0.0.1:13000`). The alerts:
+
+- **InstanceDown** (critical) — a service stopped being scraped;
+  restart it, then run the health checks.
+- **GatewayRateLimitRejections** (warning) — the gateway's own 429s above
+  5%; check `RATE_LIMIT_RPS` and SLOS.md. **Known gap:** the nginx edge's
+  per-client 429s never reach the gateway, so they are not visible here.
+- **HighErrorRatio** (warning) — gateway 5xx above 2%; go to the
+  bad-release or provider-outage playbook.
+
+`infra/monitoring/drill.sh` verifies the profile: the rules are valid and
+provably fire (promtool unit tests), every target scrapes, the
+instance-down alert fires and resolves against a live service stop/start,
+and Grafana serves the dashboard.
+
 ## Deferred to H5
 
-Dashboards, journey SLIs, the initial SLO/error budget, actionable alerts
-with routing/dedup/paging, and postmortem tooling.
+Journey SLIs, the initial SLO/error budget, alert notification
+routing/dedup/paging (the rules fire; nothing pages yet), and postmortem
+tooling.
