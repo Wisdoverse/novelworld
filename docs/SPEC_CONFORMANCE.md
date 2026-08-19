@@ -88,7 +88,7 @@ state in two places.
 | §6.1 — complete persona, world, progress, identity, and deviation prompt | Intended gap | H3 | E0, E3; the persona slice now flows from the extracted fields (aliases, role, description, personality, background, speaking style) as truncated, JSON-quoted data ([PR #143](https://github.com/Wisdoverse/novelworld/pull/143)). Recorded limits: syntactic-only inertness and whole-novel (non-spoiler-bounded) persona extraction are recorded, not claimed as H3 exit evidence; world/identity/deviation completeness and live quality remain gap |
 | §6.1 — voice, identity, memory, and anti-spoiler prompt instructions | Intended gap | H3, H4 | E0, E3; prompt wording is not a behavioral guarantee |
 | §6.2.3 — embedded long-term records and semantic retrieval | Intended gap | H3 | E0, E3 |
-| §6.2.4 — no maintenance eviction and mandatory embeddings | Intended gap | H3 | E0, E3 |
+| §6.2.4 — no maintenance eviction and mandatory embeddings | Intended gap | H3 | E0, E3; the permanent-memory producer now enforces the mandatory-embedding rule ([PR #147](https://github.com/Wisdoverse/novelworld/pull/147)): no row is written when embedding generation fails or the vector is not 1536-dim; eviction policy remains gap |
 | §6.2.4 — account/novel deletion erases permanent memory | Verified | H2, H5 | E6 |
 | §6.4 — exact four-layer prompt composition and context-window truncation | Intended gap | H3 | E0, E3; current fixed bounds do not implement the full stated policy |
 | §6.5 — idempotency key, fencing, commit-before-done, replay, and failure semantics | Verified | H3, H5 | E1, E3 |

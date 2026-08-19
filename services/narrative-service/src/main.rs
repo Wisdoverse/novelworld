@@ -11,7 +11,7 @@ use narrative_service::{
     application::handlers::NarrativeCommandHandler,
     domain,
     infrastructure::{
-        http::novel_client::NovelServiceClient,
+        http::{agent_client::AgentServiceClient, novel_client::NovelServiceClient},
         llm::LlmAdapter,
         persistence::{
             account_export::PgAccountExport,
@@ -104,6 +104,11 @@ async fn run_body() -> Result<()> {
             internal_service_token.clone(),
         ));
         let novel_readiness: Arc<dyn domain::ports::ReadinessProbe> = chapter_repo.clone();
+        let agent_service_url = std::env::var("AGENT_SERVICE_URL")
+            .unwrap_or_else(|_| "http://agent-service:8003".into());
+        let agent_memory: Arc<dyn domain::ports::AgentMemoryPort> = Arc::new(
+            AgentServiceClient::new(agent_service_url, internal_service_token.clone()),
+        );
 
         // Application handler
         let handler = Arc::new(NarrativeCommandHandler {
@@ -114,6 +119,7 @@ async fn run_body() -> Result<()> {
             player_chapter_repo,
             chapter_repo,
             llm,
+            agent_memory,
         });
 
         let state = AppState {
