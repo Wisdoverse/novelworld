@@ -97,9 +97,14 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --exclude integration-tests --all-targets -- -D warnings
       - name: Audit dependencies for known vulnerabilities
-        uses: rustsec/audit-check@v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+        # rustsec/audit-check publishes a check run the org token cannot
+        # create ("Resource not accessible by integration"), and Node 24
+        # turns that publish failure into a hard step failure; run the
+        # audit binary directly - the same tool and .cargo/audit.toml
+        # the local gate uses.
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
       - name: Enforce the dependency license and source policy
         uses: EmbarkStudios/cargo-deny-action@v2.1.1
         with:
