@@ -175,6 +175,7 @@ impl MemoryRepository for PgMemoryRepository {
               AND chapter_number IS NOT NULL
               AND chapter_number <= $5
               AND embedding IS NOT NULL
+              AND layer IN ('long', 'permanent')
             ORDER BY embedding <=> $4::vector
             LIMIT $6
             "#,
