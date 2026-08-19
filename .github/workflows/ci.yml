@@ -13,7 +13,7 @@ jobs:
     name: Windows Launcher
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Self-check
         shell: powershell
         run: .\start.ps1 -Check
@@ -22,7 +22,7 @@ jobs:
     name: Rust Build & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
       - name: Specification conformance ledger
@@ -97,9 +97,14 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --exclude integration-tests --all-targets -- -D warnings
       - name: Audit dependencies for known vulnerabilities
-        uses: rustsec/audit-check@v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+        # rustsec/audit-check publishes a check run the org token cannot
+        # create ("Resource not accessible by integration"), and Node 24
+        # turns that publish failure into a hard step failure; run the
+        # audit binary directly - the same tool and .cargo/audit.toml
+        # the local gate uses.
+        run: |
+          cargo install cargo-audit --locked --version 0.22.2
+          cargo audit
       - name: Enforce the dependency license and source policy
         uses: EmbarkStudios/cargo-deny-action@v2.1.1
         with:
@@ -123,11 +128,11 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v7.0.1
+      - uses: pnpm/action-setup@v6.0.10
         with:
           version: 9
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7.0.0
         with:
           node-version: 26
           cache: pnpm
@@ -142,7 +147,7 @@ jobs:
     name: PostgreSQL & Redis Integration
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Start test dependencies
@@ -171,7 +176,7 @@ jobs:
       INTERNAL_SERVICE_TOKEN: runtime-smoke-internal-token-at-least-32-characters
       RATE_LIMIT_RPS: 1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Build and start production topology
         run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d --build
       - name: Wait for gateway readiness
@@ -369,7 +374,7 @@ jobs:
             --git-sha "$GITHUB_SHA"
       - name: Upload capacity report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: single-node-v1-${{ github.sha }}
           path: capacity-report.json
