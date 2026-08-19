@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::sync::Arc;
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::domain::entities::memory::{ChatMessage, Memory, MemoryLayer};
@@ -37,6 +38,17 @@ fn build_summary_input(messages: &[ChatMessage]) -> String {
     }
     lines.reverse();
     lines.join("\n")
+}
+
+/// Outcome of a permanent-memory write so the caller can distinguish a
+/// durable save from a SPEC 6.2.4 skip (and whether the skip is retryable).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermanentMemorySave {
+    Saved,
+    /// Embedding generation failed; the caller may retry (transient).
+    SkippedEmbeddingUnavailable,
+    /// Provider vector is not 1536-dim; retrying is futile (policy).
+    SkippedWrongDimensions,
 }
 
 /// 4层记忆金字塔管理器（借鉴 project-lunar Crystal Memory）
@@ -316,16 +328,24 @@ impl MemoryManager {
         chapter_number: i32,
         event: &str,
         importance: i32,
-    ) -> Result<()> {
+    ) -> Result<PermanentMemorySave> {
         if self.memory_repo.exists(memory_id).await? {
-            return Ok(());
+            return Ok(PermanentMemorySave::Saved);
         }
         let embedding = match self.embedding.generate_embedding(event).await {
-            Ok(vector) if vector.len() == EMBEDDING_DIMS => Some(vector),
-            _ => None,
-        };
-        let Some(embedding) = embedding else {
-            return Ok(());
+            Ok(vector) if vector.len() == EMBEDDING_DIMS => vector,
+            Ok(_) => {
+                warn!(
+                    %memory_id,
+                    "permanent memory skipped: provider embedding is not {} dims",
+                    EMBEDDING_DIMS
+                );
+                return Ok(PermanentMemorySave::SkippedWrongDimensions);
+            }
+            Err(error) => {
+                warn!(%error, %memory_id, "permanent memory skipped: embedding unavailable");
+                return Ok(PermanentMemorySave::SkippedEmbeddingUnavailable);
+            }
         };
         let mut memory = Memory::new_permanent(
             character_id,
@@ -338,7 +358,7 @@ impl MemoryManager {
         memory.id = memory_id;
         memory.embedding = Some(embedding);
         self.memory_repo.save(&memory).await?;
-        Ok(())
+        Ok(PermanentMemorySave::Saved)
     }
 }
 
@@ -680,12 +700,16 @@ mod tests {
 
     #[tokio::test]
     async fn permanent_memory_skips_save_when_embedding_fails_or_mis_dimensioned() {
-        for (dims, fail) in [(1536, true), (1024, false)] {
+        let cases = [
+            (1536, true, PermanentMemorySave::SkippedEmbeddingUnavailable),
+            (1024, false, PermanentMemorySave::SkippedWrongDimensions),
+        ];
+        for (dims, fail, expected_outcome) in cases {
             let repo = Arc::new(RecordingMemoryRepo {
                 saved: Mutex::new(vec![]),
             });
             let manager = manager(repo.clone(), Arc::new(FakeEmbedding { dims, fail }));
-            manager
+            let outcome = manager
                 .save_permanent_memory(
                     Uuid::new_v4(),
                     Uuid::new_v4(),
@@ -697,8 +721,10 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            // SPEC 6.2.4: no embedding-less permanent rows.
+            // SPEC 6.2.4: no embedding-less permanent rows, and the caller can
+            // tell a retryable skip from a policy skip.
             assert!(repo.saved.lock().unwrap().is_empty());
+            assert_eq!(outcome, expected_outcome);
         }
     }
 
