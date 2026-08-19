@@ -67,6 +67,15 @@ impl PgMemoryRepository {
 
 #[async_trait]
 impl MemoryRepository for PgMemoryRepository {
+    async fn exists(&self, id: Uuid) -> Result<bool> {
+        let row: (bool,) =
+            sqlx::query_as("SELECT EXISTS(SELECT 1 FROM character_memories WHERE id = $1)")
+                .bind(id)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(row.0)
+    }
+
     async fn save(&self, memory: &Memory) -> Result<()> {
         let chapter_number = memory
             .chapter_number

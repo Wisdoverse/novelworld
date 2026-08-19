@@ -534,6 +534,34 @@ impl NarrativeCommandHandler {
         })
     }
 
+    /// Fire the journey-memory projection without blocking the turn response:
+    /// the committed turn is already durable, and a lost write is healed by the
+    /// idempotent replay path (memory id = turn id), so this is best-effort and
+    /// must never delay or fail the caller.
+    fn fire_journey_memory(
+        &self,
+        turn_id: Uuid,
+        user_id: Uuid,
+        novel_id: Uuid,
+        checkpoint_chapter: i32,
+        event: String,
+    ) {
+        let agent_memory = Arc::clone(&self.agent_memory);
+        let chapter_repo = Arc::clone(&self.chapter_repo);
+        tokio::spawn(async move {
+            record_world_journey_memory(
+                agent_memory.as_ref(),
+                chapter_repo.as_ref(),
+                turn_id,
+                user_id,
+                novel_id,
+                checkpoint_chapter,
+                &event,
+            )
+            .await;
+        });
+    }
+
     #[tracing::instrument(skip(self, action), fields(turn_id = %turn_id))]
     pub async fn submit_world_turn(
         &self,
@@ -578,16 +606,15 @@ impl NarrativeCommandHandler {
                 // Replay path: the committed turn may have missed its memory
                 // projection on the original attempt; the write is idempotent
                 // (memory id = turn id), so firing here heals lost writes.
-                record_world_journey_memory(
-                    self.agent_memory.as_ref(),
-                    self.chapter_repo.as_ref(),
+                // Anchor at the COMMITTED turn's checkpoint: the live session
+                // may have advanced since the original commit.
+                self.fire_journey_memory(
                     result.turn_id,
                     user_id,
                     novel_id,
-                    session.entry_context.checkpoint_chapter,
-                    &result.transition.rendered_narrative,
-                )
-                .await;
+                    result.transition.canonical_checkpoint_chapter,
+                    result.transition.rendered_narrative.clone(),
+                );
                 return Ok(result);
             }
             BeginWorldTurn::InProgress {
@@ -699,17 +726,15 @@ impl NarrativeCommandHandler {
         };
         lease.stop();
         // Fresh-commit path: project the committed turn into the permanent
-        // memory layer (idempotent by turn id, never fails the turn).
-        record_world_journey_memory(
-            self.agent_memory.as_ref(),
-            self.chapter_repo.as_ref(),
+        // memory layer (idempotent by turn id, never fails the turn). The
+        // committed transition's checkpoint is the authoritative anchor.
+        self.fire_journey_memory(
             committed.turn_id,
             user_id,
             novel_id,
-            session.entry_context.checkpoint_chapter,
-            &committed.transition.rendered_narrative,
-        )
-        .await;
+            committed.transition.canonical_checkpoint_chapter,
+            committed.transition.rendered_narrative.clone(),
+        );
         Ok(committed)
     }
 

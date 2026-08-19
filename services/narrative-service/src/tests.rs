@@ -141,9 +141,8 @@ fn protagonist_resolution_is_deterministic_and_fallbacks_to_none() {
             first_appearance_chapter: Some(1),
         },
     ];
-    // Earliest first appearance wins; tie broken by id.
-    let resolved = resolve_protagonist(&characters).unwrap();
-    assert!(resolved == lead || resolved == second);
+    // Earliest first appearance wins: lead (chapter 1) beats second (chapter 5).
+    assert_eq!(resolve_protagonist(&characters), Some(lead));
     assert_eq!(resolve_protagonist(&characters[..1]), None);
     assert_eq!(resolve_protagonist(&[]), None);
     let only_supporting = vec![CharacterBrief {
@@ -152,6 +151,28 @@ fn protagonist_resolution_is_deterministic_and_fallbacks_to_none() {
         first_appearance_chapter: None,
     }];
     assert_eq!(resolve_protagonist(&only_supporting), None);
+}
+
+#[test]
+fn protagonist_tie_breaks_on_stable_id() {
+    let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+    let (lower_id, higher_id) = (a.min(b), a.max(b));
+    let tied = vec![
+        CharacterBrief {
+            id: higher_id,
+            role: "protagonist".into(),
+            first_appearance_chapter: Some(2),
+        },
+        CharacterBrief {
+            id: lower_id,
+            role: "protagonist".into(),
+            first_appearance_chapter: Some(2),
+        },
+    ];
+    // Same earliest chapter: the smaller id wins, regardless of list order.
+    assert_eq!(resolve_protagonist(&tied), Some(lower_id));
+    let reversed = vec![tied[1].clone(), tied[0].clone()];
+    assert_eq!(resolve_protagonist(&reversed), Some(lower_id));
 }
 
 #[tokio::test]

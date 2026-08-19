@@ -1132,6 +1132,10 @@ mod tests {
 
     #[async_trait]
     impl MemoryRepository for RecordingMemoryRepository {
+        async fn exists(&self, _id: Uuid) -> Result<bool> {
+            Ok(false)
+        }
+
         async fn save(&self, _memory: &Memory) -> Result<()> {
             Ok(())
         }

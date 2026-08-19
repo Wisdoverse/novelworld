@@ -67,7 +67,7 @@ state in two places.
 |---|---|---|---|
 | Normative Language — document every implementation-defined selection | Verified | H0 | E0 and the selections below |
 | §4.1.1 — bcrypt cost at least 12 | Verified | H2 | E5 |
-| §4.1.5 — embeddings on long/permanent memories | Intended gap | H3 | E0, E3; production writers are not connected and permanent save may persist without an embedding |
+| §4.1.5 — embeddings on long/permanent memories | Intended gap | H3 | E0, E3; long-term promotion and the permanent-memory producer now write only correctly-dimensioned embeddings ([PR #145](https://github.com/Wisdoverse/novelworld/pull/145), [PR #147](https://github.com/Wisdoverse/novelworld/pull/147)); no row is persisted without an embedding. Live semantic quality and retrieval relevance remain gap |
 | §4.1.6 — chat-turn status, lease, failure, and completion fields agree | Verified | H3, H5 | E1, E3 |
 | §4.2 — UUID v4, UTC `TIMESTAMPTZ`, case-insensitive character deduplication | Verified | H1, H2 | E1, E2 |
 | §5.1 — accepted formats, byte limits, validation, optional retention, and pending record | Verified | H1 | E0, E2 |
