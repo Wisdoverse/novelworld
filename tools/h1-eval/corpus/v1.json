@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_version": "h1-synthetic-v1",
+  "corpus_version": "h1-synthetic-v2",
   "rubric_version": "h1-extraction-v1",
   "thresholds": {
     "coverage_percent": 80,
@@ -128,14 +128,16 @@
               "to_character": "苏晚",
               "relationship_type": "师徒",
               "description": "旧日师徒，如今同守北塔。",
-              "strength": 80
+              "strength": 80,
+              "first_appearance_chapter": 2
             },
             {
               "from_character": "陈屿",
               "to_character": "林舟",
               "relationship_type": "旧友反目",
               "description": "从前的同伴，如今对立。",
-              "strength": 60
+              "strength": 60,
+              "first_appearance_chapter": 3
             }
           ]
         },
@@ -497,14 +499,16 @@
               "to_character": "沈渡",
               "relationship_type": "父女",
               "description": "白鹭寻找父亲的下落。",
-              "strength": 90
+              "strength": 90,
+              "first_appearance_chapter": 3
             },
             {
               "from_character": "顾言",
               "to_character": "白鹭",
               "relationship_type": "同僚",
               "description": "同为港口账房做事。",
-              "strength": 50
+              "strength": 50,
+              "first_appearance_chapter": 1
             }
           ]
         },
@@ -868,14 +872,16 @@
               "to_character": "Eli",
               "relationship_type": "mentor",
               "description": "Mara taught Eli the keepers' ways.",
-              "strength": 80
+              "strength": 80,
+              "first_appearance_chapter": 2
             },
             {
               "from_character": "The Keeper",
               "to_character": "Mara",
               "relationship_type": "former ally",
               "description": "Companions who split over the tower.",
-              "strength": 60
+              "strength": 60,
+              "first_appearance_chapter": 1
             }
           ]
         },
@@ -1237,14 +1243,16 @@
               "to_character": "The Collector",
               "relationship_type": "father_daughter",
               "description": "Ren searches for her father.",
-              "strength": 90
+              "strength": 90,
+              "first_appearance_chapter": 3
             },
             {
               "from_character": "Ada",
               "to_character": "Ren",
               "relationship_type": "colleagues",
               "description": "Both work the harbor ledger.",
-              "strength": 50
+              "strength": 50,
+              "first_appearance_chapter": 1
             }
           ]
         },
@@ -1578,7 +1586,8 @@
               "to_character": "叶宁",
               "relationship_type": "雇佣",
               "description": "掌柜雇叶宁抄书。",
-              "strength": 50
+              "strength": 50,
+              "first_appearance_chapter": 1
             }
           ]
         },
@@ -1845,6 +1854,22 @@
       "base": "zh-utf8",
       "mutation": "empty_accepted_canon",
       "expected_failure": "coverage",
+      "expected_pass": false
+    },
+    {
+      "id": "zh-provenance-relationship",
+      "base": "zh-utf8",
+      "mutation": "relationship_appearance_out_of_range",
+      "target": "陈屿",
+      "expected_failure": "provenance",
+      "expected_pass": false
+    },
+    {
+      "id": "zh-provenance-too-early",
+      "base": "zh-utf8",
+      "mutation": "relationship_appearance_before_endpoints",
+      "target": "林舟",
+      "expected_failure": "provenance",
       "expected_pass": false
     }
   ],

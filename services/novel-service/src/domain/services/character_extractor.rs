@@ -46,6 +46,11 @@ pub struct CharacterRelationship {
     pub relationship_type: String,
     pub description: String,
     pub strength: i32,
+    /// Chapter where the relationship first becomes evident in the source
+    /// (mirrors ExtractedCharacter::first_appearance_chapter; absent when
+    /// the provider omitted it — the extraction-quality gate enforces the
+    /// citation). Not persisted at import; gate-only provenance.
+    pub first_appearance_chapter: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -200,7 +205,8 @@ pub fn build_extraction_prompt(novel_title: &str, sample_text: &str) -> String {
       "to_character": "角色B的名字",
       "relationship_type": "关系类型（如：师徒、恋人、敌对、朋友、亲属、同盟）",
       "description": "关系描述（1句话说明）",
-      "strength": 50
+      "strength": 50,
+      "first_appearance_chapter": 1
     }}
   ],
   "world_summary": "世界观摘要（不超过2000字，覆盖：时代与地理社会背景、主要势力或团体、核心冲突、独特世界规则（如魔法体系、科技设定，如有））",
@@ -213,7 +219,7 @@ pub fn build_extraction_prompt(novel_title: &str, sample_text: &str) -> String {
 3. 说话风格要具体，包含语气词、句式特点
 4. world_summary 必须覆盖时代/地理/社会背景、主要势力或团体、核心冲突，以及独特世界规则（如魔法体系、科技设定，如有），总长不超过 2000 字
 5. relationships 要覆盖主要角色之间的关系，strength 为 0-100 的关系密切度
-6. 文本中的 `Chapter N` 是真实章节号，first_appearance_chapter 必须填写角色在所给文本中首次明确出现的 N
+6. 文本中的 `Chapter N` 是真实章节号，first_appearance_chapter 必须填写角色或关系在所给文本中首次明确出现的 N（关系不能早于其双方角色的首次出现章节）
 7. aliases 只收原文明确使用的姓名或称谓，不要收“他/她/那人”等代词
 8. 只返回 JSON，不要有其他文字"#,
         title = safe_truncate(novel_title, 500),
@@ -248,13 +254,14 @@ pub fn build_chunk_extraction_prompt(
       "to_character": "角色B",
       "relationship_type": "关系类型",
       "description": "关系描述",
-      "strength": 50
+      "strength": 50,
+      "first_appearance_chapter": 1
     }}
   ]
 }}
 
 要求：
-1. 文本中的 `Chapter N` 是真实章节号，first_appearance_chapter 填该角色在本段首次明确出现的最小 N
+1. 文本中的 `Chapter N` 是真实章节号，first_appearance_chapter 填该角色或关系在本段首次明确出现的最小 N（关系不能早于其双方角色的首次出现章节）
 2. aliases 只收原文明确使用的姓名或称谓，不要收“他/她/那人”等代词
 3. role 只能是 protagonist、antagonist、supporting、minor
 4. 最多返回本段最重要的 12 个角色，各描述字段保持在 1 句话内
@@ -333,6 +340,15 @@ fn validate_parts(
         validate_nonempty("relationship description", &relationship.description, None)?;
         if !(0..=100).contains(&relationship.strength) {
             return invalid("relationship strength must be between 0 and 100");
+        }
+        if relationship
+            .first_appearance_chapter
+            .is_some_and(|chapter| chapter < 1)
+        {
+            return invalid(format!(
+                "relationship {} has invalid first_appearance_chapter",
+                relationship.from_character
+            ));
         }
     }
     Ok(())
@@ -744,6 +760,40 @@ mod tests {
         ];
 
         assert_eq!(find_first_appearance(&alice, &chapters), Some(2));
+    }
+
+    #[test]
+    fn validate_rejects_relationship_first_appearance_below_one() {
+        let base = ExtractionResult {
+            characters: vec![character("Alice", &[], "protagonist")],
+            world_summary: "world".into(),
+            genre: "fantasy".into(),
+            relationships: vec![CharacterRelationship {
+                from_character: "Alice".into(),
+                to_character: "Bob".into(),
+                relationship_type: "师徒".into(),
+                description: "旧日师徒".into(),
+                strength: 50,
+                first_appearance_chapter: None,
+            }],
+        };
+        assert!(
+            validate_extraction(&base).is_ok(),
+            "absent citation is allowed"
+        );
+
+        let invalid = ExtractionResult {
+            relationships: vec![CharacterRelationship {
+                from_character: "Alice".into(),
+                to_character: "Bob".into(),
+                relationship_type: "师徒".into(),
+                description: "旧日师徒".into(),
+                strength: 50,
+                first_appearance_chapter: Some(0),
+            }],
+            ..base.clone()
+        };
+        assert!(validate_extraction(&invalid).is_err());
     }
 
     #[test]
