@@ -138,6 +138,7 @@ enum AdversarialMutation {
     AddHallucinatedFacts,
     FirstAppearanceOutOfRange,
     InvertCausality,
+    EmptyAcceptedCanon,
 }
 
 /// The specific threshold each adversarial case must trip, so a structural
@@ -620,6 +621,7 @@ fn validate_corpus(corpus: &Corpus) -> Result<()> {
                 }
             }
             AdversarialMutation::AddHallucinatedFacts => {}
+            AdversarialMutation::EmptyAcceptedCanon => {}
         }
     }
     for case in &corpus.malformed_cases {
@@ -858,14 +860,18 @@ fn score_recorded(case: &PositiveCase) -> Result<CaseReport> {
     let canon = &case.recorded.canon;
     let mut scores = Scores::default();
     score_facts(case, extraction, canon, &mut scores);
-    let provenance_ok = provenance_scores(extraction, canon, chapter_count, &mut scores);
 
     let mut error = None;
     let mut observed = chapters_ok;
+    let mut canon_ok = true;
     if let Err(validation) = canon.validate(&source_chapters, &canonical_ids) {
         observed = false;
+        canon_ok = false;
         error = Some(format!("canon validation: {validation}"));
     }
+    // Provenance is scored after canon validation: a canon that failed
+    // validation must not report its facts as proven.
+    let provenance_ok = provenance_scores(extraction, canon, chapter_count, canon_ok, &mut scores);
     if observed && !provenance_ok {
         observed = false;
         error = Some("provenance out of range".into());
@@ -1088,11 +1094,12 @@ fn provenance_scores(
     extraction: &ExtractionResult,
     canon: &CanonStoryModel,
     chapter_count: usize,
+    canon_ok: bool,
     scores: &mut Scores,
 ) -> bool {
     // Canon facts carry per-fact citations that canon.validate checks against
     // the split chapters (existence, in-range, verbatim excerpt), so they count
-    // as proven once validation passes. The +1 is the ending snapshot.
+    // as proven only when that validation passed. The +1 is the ending snapshot.
     let canon_facts = canon.content.arcs.len()
         + canon.content.events.len()
         + canon.content.locations.len()
@@ -1104,7 +1111,7 @@ fn provenance_scores(
         + canon.content.unresolved_threads.len()
         + 1;
     scores.provenance_total = extraction.characters.len() + canon_facts;
-    scores.provenance_ok = canon_facts;
+    scores.provenance_ok = if canon_ok { canon_facts } else { 0 };
     let mut all_ok = true;
     for character in &extraction.characters {
         let in_range = character.first_appearance_chapter.is_some_and(|chapter| {
@@ -1277,6 +1284,16 @@ fn mutate_case(base: &PositiveCase, adversarial: &AdversarialCase) -> Result<Pos
                 Uuid::parse_str(HALLUCINATED_CHARACTER_ID).expect("static UUID is valid"),
                 "幻觉".into(),
             );
+        }
+        AdversarialMutation::EmptyAcceptedCanon => {
+            // Anti-vacuity: an empty accepted canon (every scored fact table
+            // emptied) must fail the gate — coverage collapses and the canon
+            // model no longer validates.
+            case.recorded.extraction.characters.clear();
+            case.recorded.extraction.relationships.clear();
+            case.recorded.canon.content.arcs.clear();
+            case.recorded.canon.content.events.clear();
+            case.recorded.canon.content.world_rules.clear();
         }
     }
     Ok(case)
@@ -1761,7 +1778,9 @@ fn live_report(
         }
     }
 
-    let provenance_ok = provenance_scores(extraction, canon, chapter_count, &mut scores);
+    // Live canon went through production assembly and validation, so its
+    // facts count as proven here.
+    let provenance_ok = provenance_scores(extraction, canon, chapter_count, true, &mut scores);
     let mut error = None;
     let observed = provenance_ok && scores.thresholds_met(REQUIRED_THRESHOLDS);
     if !observed {

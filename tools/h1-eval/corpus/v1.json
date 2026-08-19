@@ -1839,6 +1839,13 @@
       ],
       "expected_failure": "coverage",
       "expected_pass": false
+    },
+    {
+      "id": "zh-empty-canon",
+      "base": "zh-utf8",
+      "mutation": "empty_accepted_canon",
+      "expected_failure": "coverage",
+      "expected_pass": false
     }
   ],
   "malformed_cases": [
@@ -1856,7 +1863,11 @@
     {
       "id": "invalid-utf8",
       "kind": "invalid_utf8",
-      "bytes": [0, 1, 255],
+      "bytes": [
+        0,
+        1,
+        255
+      ],
       "expected_error": "invalid_encoding"
     },
     {
