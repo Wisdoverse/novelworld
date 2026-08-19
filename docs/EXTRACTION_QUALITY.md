@@ -41,7 +41,11 @@ supported slice:
    violations (an event caused by a later event, a death followed by
    dialogue, or order contradicting the expected sequence).
 5. **Provenance:** **100%** of accepted canon facts must carry a valid source
-   chapter citation within the reader's unlocked range.
+   chapter citation within the reader's unlocked range. The `h1-eval` gate
+   counts every accepted fact in the denominator: extraction-layer characters
+   and relationships (chapter citations verified against the source — a
+   relationship citation must not predate either endpoint's verified first
+   appearance) plus canon facts (verbatim excerpts via `canon.validate`).
 6. **Anti-vacuity:** an empty accepted canon, a run that rejects every input,
    or an accepted fact table emptied to pass coverage all fail the gate
    regardless of other scores.
