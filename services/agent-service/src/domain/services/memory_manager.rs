@@ -304,6 +304,8 @@ impl MemoryManager {
     /// embedding; generation failure or a non-1536 provider vector skips the
     /// save entirely (the caller may retry). The memory id is caller-supplied
     /// (narrative's turn id) so the repository upsert is idempotent on replay.
+    /// A replay of a completed key returns immediately: no second embedding
+    /// call and no re-write (idempotency fast-path, PK existence check).
     #[allow(clippy::too_many_arguments)] // Same shape as MemoryRepository::find_by_layer.
     pub async fn save_permanent_memory(
         &self,
@@ -315,6 +317,9 @@ impl MemoryManager {
         event: &str,
         importance: i32,
     ) -> Result<()> {
+        if self.memory_repo.exists(memory_id).await? {
+            return Ok(());
+        }
         let embedding = match self.embedding.generate_embedding(event).await {
             Ok(vector) if vector.len() == EMBEDDING_DIMS => Some(vector),
             _ => None,
@@ -340,6 +345,7 @@ impl MemoryManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     use crate::domain::repositories::{BeginChatTurn, ChatTurnClaim};
@@ -350,6 +356,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl MemoryRepository for RecordingMemoryRepo {
+        async fn exists(&self, id: Uuid) -> Result<bool> {
+            Ok(self
+                .saved
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|memory| memory.id == id))
+        }
+
         async fn save(&self, memory: &Memory) -> Result<()> {
             self.saved.lock().unwrap().push(memory.clone());
             Ok(())
@@ -469,6 +484,21 @@ mod tests {
             if self.fail {
                 anyhow::bail!("embedding unavailable");
             }
+            Ok(vec![0.1; self.dims])
+        }
+    }
+
+    /// Counts provider calls so tests can prove replay makes no new call.
+    #[derive(Clone)]
+    struct CountingEmbedding {
+        dims: usize,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl EmbeddingGenerator for CountingEmbedding {
+        async fn generate_embedding(&self, _text: &str) -> Result<Vec<f32>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(vec![0.1; self.dims])
         }
     }
@@ -670,6 +700,54 @@ mod tests {
             // SPEC 6.2.4: no embedding-less permanent rows.
             assert!(repo.saved.lock().unwrap().is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn completed_key_replay_makes_no_embedding_call_and_no_re_save() {
+        let repo = Arc::new(RecordingMemoryRepo {
+            saved: Mutex::new(vec![]),
+        });
+        let embedding_calls = Arc::new(AtomicUsize::new(0));
+        let manager = MemoryManager {
+            memory_repo: repo.clone(),
+            chat_repo: Arc::new(CountingChatRepo { count: 0 }),
+            cache: Arc::new(NoopCache),
+            llm: Arc::new(FakeSummarizer("压缩后的摘要".into())),
+            embedding: Arc::new(CountingEmbedding {
+                dims: 1536,
+                calls: embedding_calls.clone(),
+            }),
+        };
+        let memory_id = Uuid::new_v4();
+        let (character_id, user_id, novel_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        // First write: one embedding call, one save.
+        manager
+            .save_permanent_memory(
+                memory_id,
+                character_id,
+                user_id,
+                novel_id,
+                5,
+                "选择了北境之路",
+                8,
+            )
+            .await
+            .unwrap();
+        // Replay of the completed key: exists() fast-path, no embedding, no save.
+        manager
+            .save_permanent_memory(
+                memory_id,
+                character_id,
+                user_id,
+                novel_id,
+                5,
+                "选择了北境之路",
+                8,
+            )
+            .await
+            .unwrap();
+        assert_eq!(embedding_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(repo.saved.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
