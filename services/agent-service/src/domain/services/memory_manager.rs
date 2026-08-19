@@ -11,6 +11,9 @@ const MID_TERM_TRIGGER: usize = 20;
 /// Maximum number of semantically similar memories to inject into context.
 const SEMANTIC_SEARCH_LIMIT: usize = 5;
 const MAX_MEMORY_BLOCK_CHARS: usize = 4_000;
+/// pgvector column width (vector(1536)); promotion tolerates any other
+/// provider dimension by skipping rather than failing the projection.
+const EMBEDDING_DIMS: usize = 1536;
 const MAX_RECENT_MESSAGE_CHARS: usize = 1_000;
 const MAX_SUMMARY_INPUT_CHARS: usize = 24_000;
 
@@ -260,6 +263,38 @@ impl MemoryManager {
         };
 
         self.memory_repo.save(&memory).await?;
+
+        // Long-term producer: promote the committed mid-term summary into the
+        // long-term layer so continuity is semantically retrievable across
+        // sessions. A promotion happens only with a correctly-dimensioned
+        // embedding: generation failure or a non-1536 provider vector skips
+        // the promotion (SPEC 6.2.3 requires an embedding on every long
+        // entry; an embedding-less row would be unreachable). The Mid record
+        // already preserves the summary either way.
+        let embedding = match self
+            .embedding
+            .generate_embedding(memory.content.as_str())
+            .await
+        {
+            Ok(vector) if vector.len() == EMBEDDING_DIMS => Some(vector),
+            _ => None,
+        };
+        let Some(embedding) = embedding else {
+            return Ok(());
+        };
+        let promoted = Memory {
+            id: uuid::Uuid::new_v4(),
+            character_id,
+            user_id,
+            novel_id,
+            layer: MemoryLayer::Long,
+            content: memory.content.clone(),
+            importance: memory.importance,
+            chapter_number: chapter_context,
+            embedding: Some(embedding),
+            created_at: chrono::Utc::now(),
+        };
+        self.memory_repo.save(&promoted).await?;
         Ok(())
     }
 
@@ -293,6 +328,193 @@ impl MemoryManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    use crate::domain::repositories::{BeginChatTurn, ChatTurnClaim};
+
+    struct RecordingMemoryRepo {
+        saved: Mutex<Vec<Memory>>,
+    }
+
+    #[async_trait::async_trait]
+    impl MemoryRepository for RecordingMemoryRepo {
+        async fn save(&self, memory: &Memory) -> Result<()> {
+            self.saved.lock().unwrap().push(memory.clone());
+            Ok(())
+        }
+
+        async fn find_by_layer(
+            &self,
+            _character_id: Uuid,
+            _user_id: Uuid,
+            _novel_id: Uuid,
+            _layer: MemoryLayer,
+            _max_chapter: i32,
+            _limit: i64,
+            _offset: i64,
+        ) -> Result<Vec<Memory>> {
+            Ok(vec![])
+        }
+
+        async fn search_similar(
+            &self,
+            _character_id: Uuid,
+            _user_id: Uuid,
+            _novel_id: Uuid,
+            _embedding: &[f32],
+            _max_chapter: i32,
+            _limit: usize,
+        ) -> Result<Vec<Memory>> {
+            Ok(vec![])
+        }
+    }
+
+    struct CountingChatRepo {
+        count: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl ChatRepository for CountingChatRepo {
+        async fn begin_turn(&self, _claim: &ChatTurnClaim) -> Result<BeginChatTurn> {
+            unreachable!()
+        }
+
+        async fn renew_turn(&self, _turn_id: Uuid, _attempt: i64) -> Result<bool> {
+            unreachable!()
+        }
+
+        async fn complete_turn(
+            &self,
+            _claim: &ChatTurnClaim,
+            _attempt: i64,
+            _user_message: &ChatMessage,
+            _character_message: &ChatMessage,
+        ) -> Result<()> {
+            unreachable!()
+        }
+
+        async fn fail_turn(
+            &self,
+            _turn_id: Uuid,
+            _attempt: i64,
+            _failure_code: &str,
+        ) -> Result<bool> {
+            unreachable!()
+        }
+
+        async fn find_recent(
+            &self,
+            _character_id: Uuid,
+            _user_id: Uuid,
+            _novel_id: Uuid,
+            _max_chapter: i32,
+            _limit: usize,
+        ) -> Result<Vec<ChatMessage>> {
+            Ok(vec![])
+        }
+
+        async fn count(
+            &self,
+            _character_id: Uuid,
+            _user_id: Uuid,
+            _novel_id: Uuid,
+        ) -> Result<usize> {
+            Ok(self.count)
+        }
+
+        async fn find_by_character_user(
+            &self,
+            _character_id: Uuid,
+            _user_id: Uuid,
+            _novel_id: Uuid,
+            _max_chapter: i32,
+            _limit: i64,
+            _offset: i64,
+        ) -> Result<Vec<ChatMessage>> {
+            Ok(vec![])
+        }
+    }
+
+    #[derive(Clone)]
+    struct FakeSummarizer(String);
+
+    #[async_trait::async_trait]
+    impl TextSummarizer for FakeSummarizer {
+        async fn summarize(&self, _system: &str, _text: &str) -> Result<String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[derive(Clone)]
+    struct FakeEmbedding {
+        dims: usize,
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl EmbeddingGenerator for FakeEmbedding {
+        async fn generate_embedding(&self, _text: &str) -> Result<Vec<f32>> {
+            if self.fail {
+                anyhow::bail!("embedding unavailable");
+            }
+            Ok(vec![0.1; self.dims])
+        }
+    }
+
+    struct NoopCache;
+
+    #[async_trait::async_trait]
+    impl MessageCache for NoopCache {
+        async fn get_recent_messages(
+            &self,
+            _character_id: Uuid,
+            _user_id: Uuid,
+            _max_chapter: i32,
+            _limit: usize,
+        ) -> Result<Vec<ChatMessage>> {
+            Ok(vec![])
+        }
+
+        async fn push_turn(
+            &self,
+            _character_id: Uuid,
+            _user_id: Uuid,
+            _user_message: &ChatMessage,
+            _character_message: &ChatMessage,
+        ) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn clear(&self, _character_id: Uuid, _user_id: Uuid) -> Result<()> {
+            Ok(())
+        }
+
+        async fn clear_user(&self, _user_id: Uuid) -> Result<()> {
+            Ok(())
+        }
+
+        async fn clear_novel(&self, _user_id: Uuid, _novel_id: Uuid) -> Result<()> {
+            Ok(())
+        }
+
+        async fn allow_user(&self, _user_id: Uuid) -> Result<()> {
+            Ok(())
+        }
+
+        async fn allow_novel(&self, _user_id: Uuid, _novel_id: Uuid) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn manager(repo: Arc<RecordingMemoryRepo>, embedding: Arc<FakeEmbedding>) -> MemoryManager {
+        MemoryManager {
+            memory_repo: repo,
+            chat_repo: Arc::new(CountingChatRepo { count: 0 }),
+            cache: Arc::new(NoopCache),
+            llm: Arc::new(FakeSummarizer("压缩后的摘要".into())),
+            embedding,
+        }
+    }
 
     #[test]
     fn summary_input_keeps_recent_unicode_within_budget() {
@@ -323,5 +545,86 @@ mod tests {
         let input = build_summary_input(&messages);
         assert!(input.chars().count() <= MAX_SUMMARY_INPUT_CHARS);
         assert!(input.contains("最新内容"));
+    }
+
+    #[tokio::test]
+    async fn mid_consolidation_promotes_a_long_term_memory_with_embedding() {
+        let repo = Arc::new(RecordingMemoryRepo {
+            saved: Mutex::new(vec![]),
+        });
+        let manager = manager(
+            repo.clone(),
+            Arc::new(FakeEmbedding {
+                dims: 1536,
+                fail: false,
+            }),
+        );
+        let (character_id, user_id, novel_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        manager
+            .consolidate_to_mid_term(character_id, user_id, novel_id, Some(3))
+            .await
+            .unwrap();
+        let saved = repo.saved.lock().unwrap().clone();
+        assert_eq!(
+            saved.len(),
+            2,
+            "expected a Mid record and its Long promotion"
+        );
+        let mid = saved.iter().find(|m| m.layer == MemoryLayer::Mid).unwrap();
+        let long = saved.iter().find(|m| m.layer == MemoryLayer::Long).unwrap();
+        assert_eq!(mid.content, long.content);
+        assert_eq!(mid.chapter_number, long.chapter_number);
+        assert_eq!(mid.importance, long.importance);
+        assert_eq!(mid.embedding, None);
+        assert_eq!(long.embedding.as_deref().map(|e| e.len()), Some(1536));
+    }
+
+    #[tokio::test]
+    async fn failed_embedding_skips_the_long_promotion() {
+        let repo = Arc::new(RecordingMemoryRepo {
+            saved: Mutex::new(vec![]),
+        });
+        let manager = manager(
+            repo.clone(),
+            Arc::new(FakeEmbedding {
+                dims: 1536,
+                fail: true,
+            }),
+        );
+        let (character_id, user_id, novel_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        manager
+            .consolidate_to_mid_term(character_id, user_id, novel_id, Some(3))
+            .await
+            .unwrap();
+        let saved = repo.saved.lock().unwrap().clone();
+        // SPEC 6.2.3: no embedding-less long entries; the Mid summary alone
+        // preserves continuity when embedding generation fails.
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].layer, MemoryLayer::Mid);
+        assert_eq!(saved[0].embedding, None);
+    }
+
+    #[tokio::test]
+    async fn wrong_dimension_embedding_skips_the_long_promotion() {
+        let repo = Arc::new(RecordingMemoryRepo {
+            saved: Mutex::new(vec![]),
+        });
+        // A provider returning a non-1536 vector must not poison the
+        // vector(1536) column; promotion is skipped, Mid remains.
+        let manager = manager(
+            repo.clone(),
+            Arc::new(FakeEmbedding {
+                dims: 1024,
+                fail: false,
+            }),
+        );
+        let (character_id, user_id, novel_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        manager
+            .consolidate_to_mid_term(character_id, user_id, novel_id, Some(3))
+            .await
+            .unwrap();
+        let saved = repo.saved.lock().unwrap().clone();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].layer, MemoryLayer::Mid);
     }
 }
