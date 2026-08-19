@@ -7,6 +7,11 @@ use crate::domain::entities::chapter::Chapter;
 const SUMMARY_SAMPLE_BYTES: usize = 8_000;
 const SCAN_CHUNK_BYTES: usize = 24_000;
 const SCAN_OVERLAP_BYTES: usize = 256;
+/// SPEC 5.4: the extractor returns at most 50 characters per novel to bound
+/// provider cost.
+const MAX_EXTRACTED_CHARACTERS: usize = 50;
+/// SPEC 5.5: the stored world summary must not exceed 2000 characters.
+const MAX_WORLD_SUMMARY_CHARS: usize = 2_000;
 
 /// Truncate a string to at most `max_bytes` bytes without splitting a UTF-8
 /// codepoint.  Always returns a valid `&str`.
@@ -43,7 +48,7 @@ pub struct CharacterRelationship {
     pub strength: i32,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractionResult {
     pub characters: Vec<ExtractedCharacter>,
     pub world_summary: String,
@@ -198,7 +203,7 @@ pub fn build_extraction_prompt(novel_title: &str, sample_text: &str) -> String {
       "strength": 50
     }}
   ],
-  "world_summary": "世界观摘要（3-5句话，描述故事背景、时代、地点、核心冲突）",
+  "world_summary": "世界观摘要（不超过2000字，覆盖：时代与地理社会背景、主要势力或团体、核心冲突、独特世界规则（如魔法体系、科技设定，如有））",
   "genre": "小说类型（如：奇幻、科幻、言情、武侠等）"
 }}
 
@@ -206,7 +211,7 @@ pub fn build_extraction_prompt(novel_title: &str, sample_text: &str) -> String {
 1. 提取 5–12 个重要角色（原文不足 5 个则全部提取），主角必须包含
 2. 外貌描述要详细，包含发型、眼睛、服装风格等，用于 AI 生成头像
 3. 说话风格要具体，包含语气词、句式特点
-4. world_summary 要包含时代背景和核心世界观设定
+4. world_summary 必须覆盖时代/地理/社会背景、主要势力或团体、核心冲突，以及独特世界规则（如魔法体系、科技设定，如有），总长不超过 2000 字
 5. relationships 要覆盖主要角色之间的关系，strength 为 0-100 的关系密切度
 6. 文本中的 `Chapter N` 是真实章节号，first_appearance_chapter 必须填写角色在所给文本中首次明确出现的 N
 7. aliases 只收原文明确使用的姓名或称谓，不要收“他/她/那人”等代词
@@ -268,7 +273,11 @@ pub fn build_chunk_extraction_prompt(
 }
 
 pub fn validate_extraction(result: &ExtractionResult) -> Result<(), ExtractionValidationError> {
-    validate_nonempty("world_summary", &result.world_summary, None)?;
+    validate_nonempty(
+        "world_summary",
+        &result.world_summary,
+        Some(MAX_WORLD_SUMMARY_CHARS),
+    )?;
     validate_identifier("genre", &result.genre, 100)?;
     validate_parts(&result.characters, &result.relationships)
 }
@@ -413,6 +422,13 @@ pub fn merge_extractions(
             })
             .then_with(|| left.character.name.cmp(&right.character.name))
     });
+    // SPEC 5.4 cost bound: keep the 50 most prominent characters. The sort
+    // ranks by merge mentions (a proxy for cross-chapter presence), then
+    // role, first appearance, and name, so the cap is deterministic. Canon
+    // enrichment is bounded to these characters; a provider that names an
+    // uncapped character in canon output fails the existing fail-closed
+    // validation with a bounded retryable error.
+    merged.truncate(MAX_EXTRACTED_CHARACTERS);
     base.characters = merged
         .into_iter()
         .map(|candidate| candidate.character)
@@ -640,6 +656,83 @@ mod tests {
         );
 
         assert_eq!(result.characters.len(), 35);
+    }
+
+    #[test]
+    fn merge_caps_characters_at_the_spec_cost_bound() {
+        let characters = (1..=55)
+            .map(|number| character(&format!("Character {number}"), &[], "supporting"))
+            .collect();
+        let result = merge_extractions(
+            ExtractionResult {
+                characters,
+                world_summary: "world".into(),
+                genre: "fantasy".into(),
+                relationships: vec![],
+            },
+            vec![],
+        );
+
+        assert_eq!(result.characters.len(), MAX_EXTRACTED_CHARACTERS);
+    }
+
+    #[test]
+    fn merge_cap_keeps_the_most_prominent_characters() {
+        let mut characters = (1..=51)
+            .map(|number| character(&format!("Character {number}"), &[], "supporting"))
+            .collect::<Vec<_>>();
+        characters.push(character("Hero", &[], "protagonist"));
+        let result = merge_extractions(
+            ExtractionResult {
+                characters,
+                world_summary: "world".into(),
+                genre: "fantasy".into(),
+                relationships: vec![],
+            },
+            vec![],
+        );
+
+        assert_eq!(result.characters.len(), MAX_EXTRACTED_CHARACTERS);
+        assert!(
+            result.characters.iter().any(|kept| kept.name == "Hero"),
+            "the protagonist must survive the prominence cap"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_world_summaries_over_2000_characters() {
+        let base = ExtractionResult {
+            characters: vec![],
+            world_summary: "界".repeat(MAX_WORLD_SUMMARY_CHARS),
+            genre: "fantasy".into(),
+            relationships: vec![],
+        };
+        assert!(validate_extraction(&base).is_ok());
+
+        let oversized = ExtractionResult {
+            characters: vec![],
+            world_summary: "界".repeat(MAX_WORLD_SUMMARY_CHARS + 1),
+            genre: "fantasy".into(),
+            relationships: vec![],
+        };
+        assert!(validate_extraction(&oversized).is_err());
+    }
+
+    #[test]
+    fn extraction_prompt_requests_all_world_summary_dimensions() {
+        let prompt = build_extraction_prompt("北塔旧事", "第一章 文本。");
+        for dimension in [
+            "时代与地理社会背景",
+            "主要势力或团体",
+            "核心冲突",
+            "独特世界规则",
+            "2000",
+        ] {
+            assert!(
+                prompt.contains(dimension),
+                "extraction prompt must request {dimension}"
+            );
+        }
     }
 
     #[test]

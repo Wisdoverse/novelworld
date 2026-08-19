@@ -23,6 +23,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Specification conformance ledger
         run: sha256sum --check docs/SPEC_CONFORMANCE.sha256
       - name: Release manifest boundary
@@ -52,6 +54,8 @@ jobs:
           exec 9>&-
           rm release-lock.err .release/release.lock
           rmdir .release
+      - name: Verify the release/rollback state machine fails closed
+        run: tests/e2e/release_state_drill.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Format
@@ -65,6 +69,13 @@ jobs:
           cargo run --quiet -p h3-eval -- --recorded --git-sha "$GITHUB_SHA" > /tmp/h3-eval-a.json
           cargo run --quiet -p h3-eval -- --recorded --git-sha "$GITHUB_SHA" > /tmp/h3-eval-b.json
           cmp /tmp/h3-eval-a.json /tmp/h3-eval-b.json
+      - name: Horizon 1 extraction-quality evaluation gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --quiet -p h1-eval -- --recorded --git-sha "$GITHUB_SHA" > /tmp/h1-eval-a.json
+          cargo run --quiet -p h1-eval -- --recorded --git-sha "$GITHUB_SHA" > /tmp/h1-eval-b.json
+          cmp /tmp/h1-eval-a.json /tmp/h1-eval-b.json
       - name: Horizon 3 LLM budget contract
         shell: bash
         run: |
@@ -85,6 +96,25 @@ jobs:
         run: cargo test --workspace --exclude integration-tests
       - name: Clippy
         run: cargo clippy --workspace --exclude integration-tests --all-targets -- -D warnings
+      - name: Audit dependencies for known vulnerabilities
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Enforce the dependency license and source policy
+        uses: EmbarkStudios/cargo-deny-action@v2.1.1
+        with:
+          command-arguments: licenses sources
+      - name: Scan for committed secrets
+        # gitleaks-action requires a paid GITLEAKS_LICENSE for
+        # organization repositories, so run the open-source gitleaks
+        # binary directly with the committed config (same image + config
+        # the local self-test uses).
+        run: |
+          docker run --rm -v "$PWD:/repo" \
+            ghcr.io/gitleaks/gitleaks:v8.24.3 \
+            detect --no-banner --config /repo/.gitleaks.toml --exit-code 2 --source /repo
+      - name: Self-test the secret-scanning gate
+        run: tests/e2e/gitleaks_self_test.sh
 
   frontend:
     name: Frontend Build
@@ -99,7 +129,7 @@ jobs:
           version: 9
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 26
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
@@ -169,6 +199,15 @@ jobs:
             curl --fail --silent --show-error http://127.0.0.1/health
             curl --fail --silent --show-error http://127.0.0.1/ready
           done
+      - name: Verify the nginx security headers
+        run: |
+          curl --silent --show-error --dump-header - --output /dev/null http://127.0.0.1/live             | grep -qi 'x-content-type-options: nosniff'
+          curl --silent --show-error --dump-header - --output /dev/null http://127.0.0.1/live             | grep -qi 'x-frame-options: DENY'
+          curl --silent --show-error --dump-header - --output /dev/null http://127.0.0.1/live             | grep -qi 'referrer-policy: same-origin'
+      - name: Verify the gateway CORS posture
+        run: |
+          curl --silent --show-error --dump-header - --output /dev/null             -X OPTIONS -H 'Origin: http://localhost:5173'             -H 'Access-Control-Request-Method: POST'             http://127.0.0.1/api/auth/login             | grep -qi 'access-control-allow-origin: http://localhost:5173'
+          ! curl --silent --show-error --dump-header - --output /dev/null             -X OPTIONS -H 'Origin: http://evil.example'             -H 'Access-Control-Request-Method: POST'             http://127.0.0.1/api/auth/login             | grep -qi 'access-control-allow-origin'
       - name: Verify durable first-admin setup
         run: |
           test "$(curl --silent --output /tmp/setup-status.json --write-out '%{http_code}' http://127.0.0.1/api/setup/status)" = 200
@@ -267,14 +306,48 @@ jobs:
           test "$(docker exec novel-gateway curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8080/ready)" = 200
       - name: Self-check ingestion recovery verifier
         run: tests/e2e/ingestion_recovery.sh --self-test
+      - name: Self-check source recovery verifier
+        run: tests/e2e/source_recovery_drill.sh --self-test
+      - name: Self-check secret rotation verifier
+        run: tests/e2e/secret_rotation_drill.sh --self-test
       - name: Verify restart-safe ingestion recovery boundaries
         run: tests/e2e/ingestion_recovery.sh
       - name: Verify restart-safe core reader loop
         run: tests/e2e/core_reader_loop.sh
+      - name: Verify the provider-outage fail-closed drill
+        run: tests/e2e/provider_outage_drill.sh
       - name: Run the backup-restore-v1 drills
         env:
           BACKUP_ENCRYPTION_KEY: runtime-drill-backup-key-at-least-32-characters
         run: tests/e2e/backup_restore_drill.sh
+      - name: Start the S3 source-retention topology
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.e2e.yml down -v
+          docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml up -d
+          for attempt in $(seq 1 60); do
+            if [ "$(docker inspect --format '{{.State.Health.Status}}' novel-gateway 2>/dev/null)" = healthy ]; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml ps --all
+          exit 1
+      - name: Verify the S3 source-boundary kill/restart drill
+        run: tests/e2e/source_recovery_drill.sh
+      - name: Verify the structured log contract
+        run: python3 tests/e2e/log_contract.py
+      - name: Verify the secret rotation drill
+        env:
+          COMPOSE_FILES: docker-compose.yml:docker-compose.e2e.yml:docker-compose.s3-e2e.yml
+        run: tests/e2e/secret_rotation_drill.sh
+      - name: Verify the bad-release edge envelope drill
+        run: tests/e2e/bad_release_drill.sh
+      - name: Show S3 topology logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml logs --no-color || true
+      - name: Stop the S3 source-retention topology
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml down -v
       - name: Reset production topology for the capacity profile
         env:
           RATE_LIMIT_RPS: 500
@@ -304,7 +377,7 @@ jobs:
           retention-days: 14
       - name: Show logs on failure
         if: failure()
-        run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml logs --no-color
+        run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml logs --no-color || true
       - name: Stop production topology
         if: always()
         run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml down -v

@@ -38,7 +38,7 @@ token-less legacy artifact's restore cannot collect the reachable
 database's export, leaving post-artifact deletions to the disaster
 gate's compensating controls (undecided-erase and owner confirmation).
 
-Status: **approved policy; implementation pending.** This document is the
+Status: **approved policy; implementation merged ([PR #120](https://github.com/Wisdoverse/novelworld/pull/120)) and judged against the v2 policy; backup-restore drills pass in required CI ([PR #135](https://github.com/Wisdoverse/novelworld/pull/135)).** This document is the
 versioned recovery policy required by H1 in [`ROADMAP.md`](./ROADMAP.md). It
 defines the targets, procedures, and drills that the implementation change is
 judged against. It is not evidence that any target is currently met; the

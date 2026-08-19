@@ -141,6 +141,12 @@ async fn get_canon_context(
     headers: HeaderMap,
     Path((novel_id, requested_chapter)): Path<(Uuid, i32)>,
 ) -> Response {
+    if !internal_request_authorized(&state, &headers) {
+        return api_error(
+            StatusCode::UNAUTHORIZED,
+            "Invalid internal service identity",
+        );
+    }
     let user_id = match extract_user_id(&headers) {
         Some(id) => id,
         None => {
@@ -237,6 +243,12 @@ async fn get_player_entry_context(
     Path(novel_id): Path<Uuid>,
     Json(req): Json<PlayerEntryContextRequest>,
 ) -> Response {
+    if !internal_request_authorized(&state, &headers) {
+        return api_error(
+            StatusCode::UNAUTHORIZED,
+            "Invalid internal service identity",
+        );
+    }
     let user_id = match extract_user_id(&headers) {
         Some(id) => id,
         None => return api_error(StatusCode::UNAUTHORIZED, "Missing user ID"),
@@ -305,6 +317,12 @@ async fn get_world_entry_context(
     headers: HeaderMap,
     Path((novel_id, checkpoint)): Path<(Uuid, i32)>,
 ) -> Response {
+    if !internal_request_authorized(&state, &headers) {
+        return api_error(
+            StatusCode::UNAUTHORIZED,
+            "Invalid internal service identity",
+        );
+    }
     let user_id = match extract_user_id(&headers) {
         Some(id) => id,
         None => return api_error(StatusCode::UNAUTHORIZED, "Missing user ID"),

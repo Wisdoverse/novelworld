@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{oneshot, watch, OwnedSemaphorePermit, Semaphore};
-use tracing::{error, info};
+use tracing::{error, info, Instrument};
 use uuid::Uuid;
 
 use crate::application::commands::ImportNovelCommand;
@@ -140,8 +140,10 @@ impl ImportLease {
     fn start(repo: Arc<dyn NovelRepository>, novel_id: Uuid, attempt: i64) -> Self {
         let (stop, mut stopped) = oneshot::channel();
         let (lost, receiver) = watch::channel(false);
-        tokio::spawn(async move {
-            let mut heartbeat = tokio::time::interval(IMPORT_LEASE_HEARTBEAT);
+        let current_span = tracing::Span::current();
+        tokio::spawn(
+            async move {
+                let mut heartbeat = tokio::time::interval(IMPORT_LEASE_HEARTBEAT);
             heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             heartbeat.tick().await;
             loop {
@@ -164,7 +166,9 @@ impl ImportLease {
                     }
                 }
             }
-        });
+            }
+            .instrument(current_span),
+        );
         Self {
             stop: Some(stop),
             lost: receiver,
@@ -259,16 +263,20 @@ impl NovelCommandHandler {
 
     pub fn spawn_import_recovery(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let handler = self.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(IMPORT_RECOVERY_INTERVAL);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                interval.tick().await;
-                if let Err(error) = handler.recover_imports_once().await {
-                    error!(error = ?error, "novel import recovery scan failed");
+        let current_span = tracing::Span::current();
+        tokio::spawn(
+            async move {
+                let mut interval = tokio::time::interval(IMPORT_RECOVERY_INTERVAL);
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    interval.tick().await;
+                    if let Err(error) = handler.recover_imports_once().await {
+                        error!(error = ?error, "novel import recovery scan failed");
+                    }
                 }
             }
-        })
+            .instrument(current_span),
+        )
     }
 
     async fn recover_imports_once(self: &Arc<Self>) -> Result<()> {
@@ -402,9 +410,13 @@ impl NovelCommandHandler {
 
     fn spawn_claimed_import(self: &Arc<Self>, claim: ImportClaim, admission: ImportAdmission) {
         let handler = self.clone();
-        tokio::spawn(async move {
-            handler.run_claimed_import(claim, admission).await;
-        });
+        let current_span = tracing::Span::current();
+        tokio::spawn(
+            async move {
+                handler.run_claimed_import(claim, admission).await;
+            }
+            .instrument(current_span),
+        );
     }
 
     async fn run_claimed_import(&self, claim: ImportClaim, admission: ImportAdmission) {

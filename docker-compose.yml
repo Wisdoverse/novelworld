@@ -251,7 +251,7 @@ services:
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN is required}
       PORT: 8080
       RATE_LIMIT_RPS: ${RATE_LIMIT_RPS:-500}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost:80}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost,http://127.0.0.1}
       RUST_LOG: info
     # ports:
     #   - "8080:8080"  # uncomment for local dev

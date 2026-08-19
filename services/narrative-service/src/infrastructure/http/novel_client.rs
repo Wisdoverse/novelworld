@@ -13,18 +13,20 @@ use crate::domain::ports::ReadinessProbe;
 pub struct NovelServiceClient {
     client: Client,
     base_url: String,
+    internal_service_token: String,
 }
 
 const NOVEL_SERVICE_TIMEOUT: Duration = Duration::from_secs(2);
 
 impl NovelServiceClient {
-    pub fn new(base_url: String) -> Self {
+    pub fn new(base_url: String, internal_service_token: String) -> Self {
         Self {
             client: Client::builder()
                 .timeout(NOVEL_SERVICE_TIMEOUT)
                 .build()
                 .expect("valid novel-service HTTP client configuration"),
             base_url,
+            internal_service_token,
         }
     }
 }
@@ -131,6 +133,7 @@ impl ChapterReadRepository for NovelServiceClient {
             .client
             .get(&url)
             .header("X-User-Id", user_id.to_string())
+            .header("X-Internal-Service-Token", &self.internal_service_token)
             .send()
             .await?;
         if resp.status().as_u16() == 404 {
@@ -161,6 +164,7 @@ impl ChapterReadRepository for NovelServiceClient {
             .client
             .post(&url)
             .header("X-User-Id", user_id.to_string())
+            .header("X-Internal-Service-Token", &self.internal_service_token)
             .json(&serde_json::json!({
                 "checkpoint_chapter": checkpoint_chapter,
                 "proposed_name": proposed_name,
@@ -230,6 +234,7 @@ impl ChapterReadRepository for NovelServiceClient {
             .client
             .get(&url)
             .header("X-User-Id", user_id.to_string())
+            .header("X-Internal-Service-Token", &self.internal_service_token)
             .send()
             .await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {

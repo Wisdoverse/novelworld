@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{future::Future, sync::Arc, time::Duration};
 use tokio::sync::{oneshot, watch};
-use tracing::{info, warn};
+use tracing::{info, warn, Instrument};
 use uuid::Uuid;
 
 use crate::domain::entities::narrative_node::{NarrativeChoice, NarrativeNode, WorldState};
@@ -124,8 +124,10 @@ impl WorldTurnLease {
     fn start(repo: Arc<dyn WorldTurnRepository>, turn_id: Uuid, attempt: i64) -> Self {
         let (stop, mut stopped) = oneshot::channel();
         let (lost, receiver) = watch::channel(false);
-        tokio::spawn(async move {
-            let mut heartbeat = tokio::time::interval(WORLD_TURN_LEASE_HEARTBEAT);
+        let current_span = tracing::Span::current();
+        tokio::spawn(
+            async move {
+                let mut heartbeat = tokio::time::interval(WORLD_TURN_LEASE_HEARTBEAT);
             heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             heartbeat.tick().await;
             loop {
@@ -148,7 +150,9 @@ impl WorldTurnLease {
                     }
                 }
             }
-        });
+            }
+            .instrument(current_span),
+        );
         Self {
             stop: Some(stop),
             lost: receiver,

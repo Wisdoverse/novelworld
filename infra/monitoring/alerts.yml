@@ -1,0 +1,30 @@
+groups:
+  - name: novelworld
+    rules:
+      - alert: InstanceDown
+        expr: up == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Instance {{ $labels.instance }} is down"
+          runbook: "docs/OPERATIONS.md - health checks; restart the named service"
+      # The gateway's own rate limiter (RATE_LIMIT_RPS). The nginx edge's
+      # per-client limiter returns 429 without touching the gateway, so it is
+      # not visible here - recorded in OPERATIONS.md as a monitoring gap.
+      - alert: GatewayRateLimitRejections
+        expr: sum(rate(http_requests_total{path=~"/api/.*"}[5m])) > 0 and sum(rate(http_requests_total{status="429"}[5m])) / sum(rate(http_requests_total{path=~"/api/.*"}[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Gateway rate-limit rejections above 5% over 5 minutes"
+          runbook: "docs/SLOS.md - overload admission; check RATE_LIMIT_RPS"
+      - alert: HighErrorRatio
+        expr: sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m])) > 0.02
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Gateway 5xx ratio above 2% over 5 minutes"
+          runbook: "docs/OPERATIONS.md - bad-release / provider outage playbooks"

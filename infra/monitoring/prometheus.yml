@@ -1,0 +1,24 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: gateway
+    static_configs:
+      - targets: ["gateway:8080"]
+    metrics_path: /metrics
+  - job_name: user-service
+    static_configs:
+      - targets: ["user-service:8001"]
+  - job_name: novel-service
+    static_configs:
+      - targets: ["novel-service:8002"]
+  - job_name: agent-service
+    static_configs:
+      - targets: ["agent-service:8003"]
+  - job_name: narrative-service
+    static_configs:
+      - targets: ["narrative-service:8004"]
