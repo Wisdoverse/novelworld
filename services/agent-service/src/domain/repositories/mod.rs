@@ -38,6 +38,9 @@ pub enum BeginChatTurn {
 #[async_trait]
 pub trait MemoryRepository: Send + Sync {
     async fn save(&self, memory: &Memory) -> Result<()>;
+    /// True when a memory with this id is already durable. Idempotency
+    /// fast-path: a completed-key replay must not re-embed or re-write.
+    async fn exists(&self, id: Uuid) -> Result<bool>;
     #[allow(clippy::too_many_arguments)]
     async fn find_by_layer(
         &self,

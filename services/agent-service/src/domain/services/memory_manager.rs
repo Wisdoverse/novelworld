@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::sync::Arc;
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::domain::entities::memory::{ChatMessage, Memory, MemoryLayer};
@@ -37,6 +38,17 @@ fn build_summary_input(messages: &[ChatMessage]) -> String {
     }
     lines.reverse();
     lines.join("\n")
+}
+
+/// Outcome of a permanent-memory write so the caller can distinguish a
+/// durable save from a SPEC 6.2.4 skip (and whether the skip is retryable).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermanentMemorySave {
+    Saved,
+    /// Embedding generation failed; the caller may retry (transient).
+    SkippedEmbeddingUnavailable,
+    /// Provider vector is not 1536-dim; retrying is futile (policy).
+    SkippedWrongDimensions,
 }
 
 /// 4层记忆金字塔管理器（借鉴 project-lunar Crystal Memory）
@@ -304,6 +316,8 @@ impl MemoryManager {
     /// embedding; generation failure or a non-1536 provider vector skips the
     /// save entirely (the caller may retry). The memory id is caller-supplied
     /// (narrative's turn id) so the repository upsert is idempotent on replay.
+    /// A replay of a completed key returns immediately: no second embedding
+    /// call and no re-write (idempotency fast-path, PK existence check).
     #[allow(clippy::too_many_arguments)] // Same shape as MemoryRepository::find_by_layer.
     pub async fn save_permanent_memory(
         &self,
@@ -314,13 +328,24 @@ impl MemoryManager {
         chapter_number: i32,
         event: &str,
         importance: i32,
-    ) -> Result<()> {
+    ) -> Result<PermanentMemorySave> {
+        if self.memory_repo.exists(memory_id).await? {
+            return Ok(PermanentMemorySave::Saved);
+        }
         let embedding = match self.embedding.generate_embedding(event).await {
-            Ok(vector) if vector.len() == EMBEDDING_DIMS => Some(vector),
-            _ => None,
-        };
-        let Some(embedding) = embedding else {
-            return Ok(());
+            Ok(vector) if vector.len() == EMBEDDING_DIMS => vector,
+            Ok(_) => {
+                warn!(
+                    %memory_id,
+                    "permanent memory skipped: provider embedding is not {} dims",
+                    EMBEDDING_DIMS
+                );
+                return Ok(PermanentMemorySave::SkippedWrongDimensions);
+            }
+            Err(error) => {
+                warn!(%error, %memory_id, "permanent memory skipped: embedding unavailable");
+                return Ok(PermanentMemorySave::SkippedEmbeddingUnavailable);
+            }
         };
         let mut memory = Memory::new_permanent(
             character_id,
@@ -333,13 +358,14 @@ impl MemoryManager {
         memory.id = memory_id;
         memory.embedding = Some(embedding);
         self.memory_repo.save(&memory).await?;
-        Ok(())
+        Ok(PermanentMemorySave::Saved)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     use crate::domain::repositories::{BeginChatTurn, ChatTurnClaim};
@@ -350,6 +376,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl MemoryRepository for RecordingMemoryRepo {
+        async fn exists(&self, id: Uuid) -> Result<bool> {
+            Ok(self
+                .saved
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|memory| memory.id == id))
+        }
+
         async fn save(&self, memory: &Memory) -> Result<()> {
             self.saved.lock().unwrap().push(memory.clone());
             Ok(())
@@ -469,6 +504,21 @@ mod tests {
             if self.fail {
                 anyhow::bail!("embedding unavailable");
             }
+            Ok(vec![0.1; self.dims])
+        }
+    }
+
+    /// Counts provider calls so tests can prove replay makes no new call.
+    #[derive(Clone)]
+    struct CountingEmbedding {
+        dims: usize,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl EmbeddingGenerator for CountingEmbedding {
+        async fn generate_embedding(&self, _text: &str) -> Result<Vec<f32>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(vec![0.1; self.dims])
         }
     }
@@ -650,12 +700,16 @@ mod tests {
 
     #[tokio::test]
     async fn permanent_memory_skips_save_when_embedding_fails_or_mis_dimensioned() {
-        for (dims, fail) in [(1536, true), (1024, false)] {
+        let cases = [
+            (1536, true, PermanentMemorySave::SkippedEmbeddingUnavailable),
+            (1024, false, PermanentMemorySave::SkippedWrongDimensions),
+        ];
+        for (dims, fail, expected_outcome) in cases {
             let repo = Arc::new(RecordingMemoryRepo {
                 saved: Mutex::new(vec![]),
             });
             let manager = manager(repo.clone(), Arc::new(FakeEmbedding { dims, fail }));
-            manager
+            let outcome = manager
                 .save_permanent_memory(
                     Uuid::new_v4(),
                     Uuid::new_v4(),
@@ -667,9 +721,59 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            // SPEC 6.2.4: no embedding-less permanent rows.
+            // SPEC 6.2.4: no embedding-less permanent rows, and the caller can
+            // tell a retryable skip from a policy skip.
             assert!(repo.saved.lock().unwrap().is_empty());
+            assert_eq!(outcome, expected_outcome);
         }
+    }
+
+    #[tokio::test]
+    async fn completed_key_replay_makes_no_embedding_call_and_no_re_save() {
+        let repo = Arc::new(RecordingMemoryRepo {
+            saved: Mutex::new(vec![]),
+        });
+        let embedding_calls = Arc::new(AtomicUsize::new(0));
+        let manager = MemoryManager {
+            memory_repo: repo.clone(),
+            chat_repo: Arc::new(CountingChatRepo { count: 0 }),
+            cache: Arc::new(NoopCache),
+            llm: Arc::new(FakeSummarizer("压缩后的摘要".into())),
+            embedding: Arc::new(CountingEmbedding {
+                dims: 1536,
+                calls: embedding_calls.clone(),
+            }),
+        };
+        let memory_id = Uuid::new_v4();
+        let (character_id, user_id, novel_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        // First write: one embedding call, one save.
+        manager
+            .save_permanent_memory(
+                memory_id,
+                character_id,
+                user_id,
+                novel_id,
+                5,
+                "选择了北境之路",
+                8,
+            )
+            .await
+            .unwrap();
+        // Replay of the completed key: exists() fast-path, no embedding, no save.
+        manager
+            .save_permanent_memory(
+                memory_id,
+                character_id,
+                user_id,
+                novel_id,
+                5,
+                "选择了北境之路",
+                8,
+            )
+            .await
+            .unwrap();
+        assert_eq!(embedding_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(repo.saved.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

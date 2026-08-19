@@ -17,6 +17,7 @@ use uuid::{Uuid, Variant, Version};
 use crate::application::handlers::{AgentCommandHandler, AgentRequestError, AgentStreamEvent};
 use crate::domain::entities::memory::MemoryLayer;
 use crate::domain::ports::{AccountExportPort, ReadinessProbe};
+use crate::domain::services::memory_manager::PermanentMemorySave;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -177,7 +178,34 @@ async fn save_permanent_memory(
         )
         .await
     {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"saved": true}))).into_response(),
+        Ok(PermanentMemorySave::Saved) => {
+            (StatusCode::OK, Json(serde_json::json!({"saved": true}))).into_response()
+        }
+        Ok(PermanentMemorySave::SkippedWrongDimensions) => {
+            // Non-retryable policy skip (SPEC 6.2.4): honest 200 so the caller
+            // does not burn its retry budget on a config issue.
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "saved": false,
+                    "reason": "embedding dimension policy"
+                })),
+            )
+                .into_response()
+        }
+        Ok(PermanentMemorySave::SkippedEmbeddingUnavailable) => {
+            // Retryable: surface as an error so the caller's bounded retry
+            // loop covers transient embedding-provider outages.
+            tracing::warn!("permanent memory skipped: embedding unavailable");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "saved": false,
+                    "reason": "embedding unavailable"
+                })),
+            )
+                .into_response()
+        }
         Err(error) => {
             tracing::error!(%error, "permanent memory save failed");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
