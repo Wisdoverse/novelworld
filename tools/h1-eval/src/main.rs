@@ -12,7 +12,7 @@ use novel_service::domain::{
     },
     services::{
         canon_story_extractor,
-        character_extractor::{self, ExtractionResult},
+        character_extractor::{self, CharacterRelationship, ExtractedCharacter, ExtractionResult},
         novel_parser::NovelParserService,
     },
 };
@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 const CORPUS: &str = include_str!("../corpus/v1.json");
-const CORPUS_VERSION: &str = "h1-synthetic-v1";
+const CORPUS_VERSION: &str = "h1-synthetic-v2";
 const RUBRIC_VERSION: &str = "h1-extraction-v1";
 const MAX_CORPUS_BYTES: usize = 256 * 1024;
 const MAX_JUDGE_RESPONSE_BYTES: usize = 32 * 1024;
@@ -139,6 +139,7 @@ enum AdversarialMutation {
     FirstAppearanceOutOfRange,
     InvertCausality,
     EmptyAcceptedCanon,
+    RelationshipAppearanceOutOfRange,
 }
 
 /// The specific threshold each adversarial case must trip, so a structural
@@ -622,6 +623,20 @@ fn validate_corpus(corpus: &Corpus) -> Result<()> {
             }
             AdversarialMutation::AddHallucinatedFacts => {}
             AdversarialMutation::EmptyAcceptedCanon => {}
+            AdversarialMutation::RelationshipAppearanceOutOfRange => {
+                if !base
+                    .recorded
+                    .extraction
+                    .relationships
+                    .iter()
+                    .any(|relationship| relationship.from_character == case.target)
+                {
+                    bail!(
+                        "adversarial case {} targets an unknown relationship source",
+                        case.id
+                    );
+                }
+            }
         }
     }
     for case in &corpus.malformed_cases {
@@ -1110,20 +1125,63 @@ fn provenance_scores(
         + canon.content.deaths.len()
         + canon.content.unresolved_threads.len()
         + 1;
-    scores.provenance_total = extraction.characters.len() + canon_facts;
+    scores.provenance_total =
+        extraction.characters.len() + extraction.relationships.len() + canon_facts;
     scores.provenance_ok = if canon_ok { canon_facts } else { 0 };
     let mut all_ok = true;
     for character in &extraction.characters {
-        let in_range = character.first_appearance_chapter.is_some_and(|chapter| {
-            chapter >= 1 && usize::try_from(chapter).is_ok_and(|chapter| chapter <= chapter_count)
-        });
-        if in_range {
+        if character_chapter_in_range(character, chapter_count) {
+            scores.provenance_ok += 1;
+        } else {
+            all_ok = false;
+        }
+    }
+    for relationship in &extraction.relationships {
+        if relationship_chapter_proven(relationship, &extraction.characters, chapter_count) {
             scores.provenance_ok += 1;
         } else {
             all_ok = false;
         }
     }
     all_ok
+}
+
+fn character_chapter_in_range(character: &ExtractedCharacter, chapter_count: usize) -> bool {
+    character.first_appearance_chapter.is_some_and(|chapter| {
+        chapter >= 1 && usize::try_from(chapter).is_ok_and(|chapter| chapter <= chapter_count)
+    })
+}
+
+/// A relationship is provenance-proven only when it cites an in-range chapter
+/// that is not earlier than both endpoints' first appearances (endpoint
+/// chapters are source-verified in live mode via find_first_appearance and
+/// curated in recorded fixtures). This grounds the citation in the source
+/// instead of trusting the provider's self-report.
+fn relationship_chapter_proven(
+    relationship: &CharacterRelationship,
+    characters: &[ExtractedCharacter],
+    chapter_count: usize,
+) -> bool {
+    if !relationship
+        .first_appearance_chapter
+        .is_some_and(|chapter| {
+            chapter >= 1 && usize::try_from(chapter).is_ok_and(|chapter| chapter <= chapter_count)
+        })
+    {
+        return false;
+    }
+    let latest_endpoint = characters
+        .iter()
+        .filter(|character| {
+            character.name == relationship.from_character
+                || character.name == relationship.to_character
+        })
+        .filter_map(|character| character.first_appearance_chapter)
+        .max()
+        .unwrap_or(0);
+    relationship
+        .first_appearance_chapter
+        .is_some_and(|chapter| chapter >= latest_endpoint)
 }
 
 fn coverage_map(scores: &Scores) -> BTreeMap<String, u8> {
@@ -1252,6 +1310,10 @@ fn mutate_case(base: &PositiveCase, adversarial: &AdversarialCase) -> Result<Pos
                     relationship_type: "路人".into(),
                     description: "不应被提取的关系。".into(),
                     strength: 10,
+                    // In-range and endpoint-consistent (both endpoints appear
+                    // in chapter 1) so the mechanism stays precision_hallucination
+                    // and is not muddied by a provenance trip.
+                    first_appearance_chapter: Some(1),
                 },
             );
             let new_sequence = case.recorded.canon.content.events.len() as i32 + 1;
@@ -1294,6 +1356,13 @@ fn mutate_case(base: &PositiveCase, adversarial: &AdversarialCase) -> Result<Pos
             case.recorded.canon.content.arcs.clear();
             case.recorded.canon.content.events.clear();
             case.recorded.canon.content.world_rules.clear();
+        }
+        AdversarialMutation::RelationshipAppearanceOutOfRange => {
+            for relationship in &mut case.recorded.extraction.relationships {
+                if relationship.from_character == adversarial.target {
+                    relationship.first_appearance_chapter = Some(99);
+                }
+            }
         }
     }
     Ok(case)
