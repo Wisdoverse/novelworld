@@ -103,6 +103,14 @@ pub trait WorldTurnRepository: Send + Sync {
     ) -> Result<Vec<WorldTurnJournalEntry>>;
 }
 
+/// Minimal character identity for journey-memory anchoring.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CharacterBrief {
+    pub id: Uuid,
+    pub role: String,
+    pub first_appearance_chapter: Option<i32>,
+}
+
 /// Read-only access to novel-service data through its HTTP API.
 #[async_trait]
 pub trait ChapterReadRepository: Send + Sync {
@@ -119,6 +127,7 @@ pub trait ChapterReadRepository: Send + Sync {
         checkpoint_chapter: i32,
         user_id: Uuid,
     ) -> Result<Option<CanonContext>>;
+    async fn list_characters(&self, novel_id: Uuid, user_id: Uuid) -> Result<Vec<CharacterBrief>>;
     async fn get_player_entry_context(
         &self,
         novel_id: Uuid,

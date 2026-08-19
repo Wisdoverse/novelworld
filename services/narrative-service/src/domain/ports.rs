@@ -32,3 +32,20 @@ pub enum NarrativeLlmTask {
 pub trait ReadinessProbe: Send + Sync {
     async fn is_ready(&self) -> bool;
 }
+
+/// Producer port for permanent memories on agent-service (the journey layer:
+/// committed world turns become durable, semantically retrievable memories).
+#[async_trait]
+pub trait AgentMemoryPort: Send + Sync {
+    #[allow(clippy::too_many_arguments)]
+    async fn save_permanent_memory(
+        &self,
+        memory_id: Uuid,
+        character_id: Uuid,
+        user_id: Uuid,
+        novel_id: Uuid,
+        chapter_number: i32,
+        event: &str,
+        importance: i32,
+    ) -> Result<()>;
+}

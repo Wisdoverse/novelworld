@@ -217,6 +217,7 @@ services:
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN is required}
       PORT: 8004
       NOVEL_SERVICE_URL: http://novel-service:8002
+      AGENT_SERVICE_URL: http://agent-service:8003
       RUST_LOG: info
     depends_on:
       postgres-migrate:

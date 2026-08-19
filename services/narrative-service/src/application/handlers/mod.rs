@@ -12,12 +12,12 @@ use crate::domain::entities::world_session::{
     build_world_turn_prompt, parse_world_turn_transition, CharacterWorldContext, WorldAction,
     WorldSession,
 };
-use crate::domain::ports::{LlmPort, NarrativeLlmTask};
+use crate::domain::ports::{AgentMemoryPort, LlmPort, NarrativeLlmTask};
 use crate::domain::repositories::{
-    BeginWorldTurn, ChapterInfo, ChapterReadRepository, ChoiceCommit, NarrativeNodeRepository,
-    NovelInfo, PlayerChapter, PlayerChapterOrigin, PlayerChapterRepository, UserChoiceRecord,
-    UserChoiceRepository, WorldStateRepository, WorldTurnClaim, WorldTurnJournalEntry,
-    WorldTurnRepository, WorldTurnResult,
+    BeginWorldTurn, ChapterInfo, ChapterReadRepository, CharacterBrief, ChoiceCommit,
+    NarrativeNodeRepository, NovelInfo, PlayerChapter, PlayerChapterOrigin,
+    PlayerChapterRepository, UserChoiceRecord, UserChoiceRepository, WorldStateRepository,
+    WorldTurnClaim, WorldTurnJournalEntry, WorldTurnRepository, WorldTurnResult,
 };
 use crate::domain::services::narrative_engine::{
     build_branch_prompt, build_player_chapter_prompt, is_chinese_narrative, parse_generated_branch,
@@ -37,6 +37,71 @@ const MAX_WORLD_TURN_PROMPT_BYTES: usize = 64 * 1024;
 const MAX_WORLD_TURN_PROMPT_CHARS: usize = 32_000;
 const MAX_WORLD_TRANSITION_BYTES: usize = 128 * 1024;
 const WORLD_TURN_LEASE_HEARTBEAT: Duration = Duration::from_secs(30);
+/// Journey memories: bounded event text, fixed importance for committed world
+/// turns, and bounded best-effort retries (a memory loss never fails a turn).
+const MAX_JOURNEY_MEMORY_EVENT_CHARS: usize = 2_000;
+const WORLD_TURN_MEMORY_IMPORTANCE: i32 = 7;
+const JOURNEY_MEMORY_RETRIES: usize = 2;
+
+/// Deterministic protagonist pick: role 'protagonist', earliest first
+/// appearance, stable id tiebreak. Zero protagonists => None (caller skips).
+pub(crate) fn resolve_protagonist(characters: &[CharacterBrief]) -> Option<Uuid> {
+    characters
+        .iter()
+        .filter(|character| character.role == "protagonist")
+        .min_by_key(|character| {
+            (
+                character.first_appearance_chapter.unwrap_or(0),
+                character.id,
+            )
+        })
+        .map(|character| character.id)
+}
+
+/// Best-effort projection of a committed world turn into the permanent memory
+/// layer: idempotent (memory id = turn id), fire-and-forget with bounded
+/// retries, and it never fails or delays the caller's turn result.
+pub(crate) async fn record_world_journey_memory(
+    agent_memory: &dyn AgentMemoryPort,
+    chapter_repo: &dyn ChapterReadRepository,
+    turn_id: Uuid,
+    user_id: Uuid,
+    novel_id: Uuid,
+    checkpoint_chapter: i32,
+    event: &str,
+) {
+    let characters = match chapter_repo.list_characters(novel_id, user_id).await {
+        Ok(characters) => characters,
+        Err(error) => {
+            tracing::debug!(%error, %novel_id, "character list unavailable; skipping journey memory");
+            return;
+        }
+    };
+    let Some(character_id) = resolve_protagonist(&characters) else {
+        tracing::debug!(%novel_id, "no protagonist found; skipping journey memory");
+        return;
+    };
+    let event: String = event.chars().take(MAX_JOURNEY_MEMORY_EVENT_CHARS).collect();
+    for attempt in 0..=JOURNEY_MEMORY_RETRIES {
+        match agent_memory
+            .save_permanent_memory(
+                turn_id,
+                character_id,
+                user_id,
+                novel_id,
+                checkpoint_chapter,
+                &event,
+                WORLD_TURN_MEMORY_IMPORTANCE,
+            )
+            .await
+        {
+            Ok(()) => return,
+            Err(error) => {
+                warn!(%error, attempt, %turn_id, "journey memory save failed");
+            }
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum NarrativeError {
@@ -113,6 +178,7 @@ pub struct NarrativeCommandHandler {
     pub chapter_repo: Arc<dyn ChapterReadRepository>,
     pub world_turn_repo: Arc<dyn WorldTurnRepository>,
     pub llm: Arc<dyn LlmPort>,
+    pub agent_memory: Arc<dyn AgentMemoryPort>,
 }
 
 struct WorldTurnLease {
@@ -507,7 +573,23 @@ impl NarrativeCommandHandler {
             .map_err(NarrativeError::Internal)?
         {
             BeginWorldTurn::Acquired { claim, attempt } => (claim, attempt),
-            BeginWorldTurn::Completed(result) => return Ok(*result),
+            BeginWorldTurn::Completed(result) => {
+                let result = *result;
+                // Replay path: the committed turn may have missed its memory
+                // projection on the original attempt; the write is idempotent
+                // (memory id = turn id), so firing here heals lost writes.
+                record_world_journey_memory(
+                    self.agent_memory.as_ref(),
+                    self.chapter_repo.as_ref(),
+                    result.turn_id,
+                    user_id,
+                    novel_id,
+                    session.entry_context.checkpoint_chapter,
+                    &result.transition.rendered_narrative,
+                )
+                .await;
+                return Ok(result);
+            }
             BeginWorldTurn::InProgress {
                 retry_after_seconds,
             } => {
@@ -616,6 +698,18 @@ impl NarrativeCommandHandler {
             }
         };
         lease.stop();
+        // Fresh-commit path: project the committed turn into the permanent
+        // memory layer (idempotent by turn id, never fails the turn).
+        record_world_journey_memory(
+            self.agent_memory.as_ref(),
+            self.chapter_repo.as_ref(),
+            committed.turn_id,
+            user_id,
+            novel_id,
+            session.entry_context.checkpoint_chapter,
+            &committed.transition.rendered_narrative,
+        )
+        .await;
         Ok(committed)
     }
 
