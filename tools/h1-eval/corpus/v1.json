@@ -1863,6 +1863,14 @@
       "target": "陈屿",
       "expected_failure": "provenance",
       "expected_pass": false
+    },
+    {
+      "id": "zh-provenance-too-early",
+      "base": "zh-utf8",
+      "mutation": "relationship_appearance_before_endpoints",
+      "target": "林舟",
+      "expected_failure": "provenance",
+      "expected_pass": false
     }
   ],
   "malformed_cases": [

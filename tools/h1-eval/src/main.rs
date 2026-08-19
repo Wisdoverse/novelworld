@@ -140,6 +140,7 @@ enum AdversarialMutation {
     InvertCausality,
     EmptyAcceptedCanon,
     RelationshipAppearanceOutOfRange,
+    RelationshipAppearanceBeforeEndpoints,
 }
 
 /// The specific threshold each adversarial case must trip, so a structural
@@ -556,6 +557,24 @@ fn validate_corpus(corpus: &Corpus) -> Result<()> {
                 case.id
             );
         }
+        for relationship in &case.recorded.extraction.relationships {
+            let from = resolve_character_chapter(
+                &relationship.from_character,
+                &case.recorded.extraction.characters,
+            );
+            let to = resolve_character_chapter(
+                &relationship.to_character,
+                &case.recorded.extraction.characters,
+            );
+            if from.is_none() || to.is_none() {
+                bail!(
+                    "case {} relationship {} -> {} has an unresolvable endpoint",
+                    case.id,
+                    relationship.from_character,
+                    relationship.to_character
+                );
+            }
+        }
         if case.recorded.canon.content.events.is_empty() {
             bail!(
                 "case {} recorded canon must contain at least one event",
@@ -623,7 +642,8 @@ fn validate_corpus(corpus: &Corpus) -> Result<()> {
             }
             AdversarialMutation::AddHallucinatedFacts => {}
             AdversarialMutation::EmptyAcceptedCanon => {}
-            AdversarialMutation::RelationshipAppearanceOutOfRange => {
+            AdversarialMutation::RelationshipAppearanceOutOfRange
+            | AdversarialMutation::RelationshipAppearanceBeforeEndpoints => {
                 if !base
                     .recorded
                     .extraction
@@ -1156,32 +1176,37 @@ fn character_chapter_in_range(character: &ExtractedCharacter, chapter_count: usi
 /// that is not earlier than both endpoints' first appearances (endpoint
 /// chapters are source-verified in live mode via find_first_appearance and
 /// curated in recorded fixtures). This grounds the citation in the source
-/// instead of trusting the provider's self-report.
+/// instead of trusting the provider's self-report. If either endpoint does
+/// not resolve to a known character (name or alias), the citation cannot be
+/// grounded and the relationship fails closed.
 fn relationship_chapter_proven(
     relationship: &CharacterRelationship,
     characters: &[ExtractedCharacter],
     chapter_count: usize,
 ) -> bool {
-    if !relationship
-        .first_appearance_chapter
-        .is_some_and(|chapter| {
-            chapter >= 1 && usize::try_from(chapter).is_ok_and(|chapter| chapter <= chapter_count)
-        })
-    {
+    let Some(chapter) = relationship.first_appearance_chapter else {
+        return false;
+    };
+    if chapter < 1 || usize::try_from(chapter).is_ok_and(|chapter| chapter > chapter_count) {
         return false;
     }
-    let latest_endpoint = characters
+    let from = resolve_character_chapter(&relationship.from_character, characters);
+    let to = resolve_character_chapter(&relationship.to_character, characters);
+    match (from, to) {
+        (Some(from), Some(to)) => chapter >= from.max(to),
+        _ => false,
+    }
+}
+
+/// The verified first-appearance chapter of the character matching the given
+/// name or alias, if any (production canonicalizes relationship endpoints
+/// against the merged characters; the gate matches name-or-alias and fails
+/// closed on any mismatch).
+fn resolve_character_chapter(name: &str, characters: &[ExtractedCharacter]) -> Option<i32> {
+    characters
         .iter()
-        .filter(|character| {
-            character.name == relationship.from_character
-                || character.name == relationship.to_character
-        })
-        .filter_map(|character| character.first_appearance_chapter)
-        .max()
-        .unwrap_or(0);
-    relationship
-        .first_appearance_chapter
-        .is_some_and(|chapter| chapter >= latest_endpoint)
+        .find(|character| name_set_matches(&character.name, &character.aliases, name, &[]))
+        .and_then(|character| character.first_appearance_chapter)
 }
 
 fn coverage_map(scores: &Scores) -> BTreeMap<String, u8> {
@@ -1361,6 +1386,16 @@ fn mutate_case(base: &PositiveCase, adversarial: &AdversarialCase) -> Result<Pos
             for relationship in &mut case.recorded.extraction.relationships {
                 if relationship.from_character == adversarial.target {
                     relationship.first_appearance_chapter = Some(99);
+                }
+            }
+        }
+        AdversarialMutation::RelationshipAppearanceBeforeEndpoints => {
+            // Keeps the citation in-range but earlier than an endpoint's
+            // first appearance: exercises the endpoint-consistency leg of
+            // relationship_chapter_proven, not just the range guard.
+            for relationship in &mut case.recorded.extraction.relationships {
+                if relationship.from_character == adversarial.target {
+                    relationship.first_appearance_chapter = Some(1);
                 }
             }
         }
@@ -1553,12 +1588,17 @@ async fn run_live(
             chunk_extractions.push(chunk_extraction);
         }
     }
-    let extraction = character_extractor::merge_extractions(base_extraction, chunk_extractions);
+    let mut extraction = character_extractor::merge_extractions(base_extraction, chunk_extractions);
     character_extractor::validate_extraction(&extraction)
         .context("merged provider extraction violates the schema contract")?;
 
     let mut characters = Vec::new();
-    for extracted in &extraction.characters {
+    // Iterate by index so the source-verified first appearances can be
+    // written back into the extraction; provenance_scores must compare
+    // relationship citations against verified chapters, not the provider's
+    // self-reported ones.
+    for index in 0..extraction.characters.len() {
+        let extracted = &extraction.characters[index];
         let Some(first_appearance) =
             character_extractor::find_first_appearance(extracted, &chapters)
         else {
@@ -1576,6 +1616,9 @@ async fn run_live(
         .context("provider extraction contains an unusable character")?;
         character.first_appearance_chapter = Some(first_appearance);
         characters.push(character);
+        // Write the SOURCE-VERIFIED chapter back into the extraction so the
+        // relationship endpoint constraint compares against verified facts.
+        extraction.characters[index].first_appearance_chapter = Some(first_appearance);
     }
     if characters.is_empty() {
         bail!("no extracted character has a verifiable first appearance");
