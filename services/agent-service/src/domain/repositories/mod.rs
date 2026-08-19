@@ -100,6 +100,12 @@ pub struct CharacterInfo {
     pub id: Uuid,
     pub name: String,
     pub novel_id: Uuid,
+    pub aliases: Vec<String>,
+    pub role: Option<String>,
+    pub description: Option<String>,
+    pub personality: Option<String>,
+    pub background: Option<String>,
+    pub speaking_style: Option<String>,
     pub first_appearance_chapter: Option<i32>,
 }
 

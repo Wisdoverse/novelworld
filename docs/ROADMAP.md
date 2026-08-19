@@ -147,7 +147,7 @@ list:
 
 | Promise or contract | Current evidence | Owning horizon |
 |---|---|---|
-| Character personality and voice drive chat | Novel service stores persona fields, but Agent's `CharacterInfo` and system prompt currently consume essentially the character name | H3 |
+| Character personality and voice drive chat | Novel service stores persona fields; the Agent boundary now carries source-backed persona (aliases, role, description, personality, background, speaking style) into the system prompt as truncated, JSON-quoted data ([PR #143](https://github.com/Wisdoverse/novelworld/pull/143)). Recorded limits: quoting is syntactic-only inertness (not a semantic injection guarantee), and persona is whole-novel extraction not spoiler-bounded by reading progress; goals/relationships still deferred; live quality remains unqualified | H3 |
 | Four-layer memory provides cross-session continuity | Mid-term summaries exist; no demonstrated production path populates long-term memory, and permanent-memory writing is not connected to the journey | H0 decides the contract; H3 proves the outcome |
 | “Any language” interactive world | Ingestion accepts multiple document types, while narrative-node and generated-world paths require Simplified Chinese | H0 defines support; H4 verifies it |
 | Reader may assume a canonical character's identity | README and SPEC §8 retain an optional `character` perspective while SPEC §7.6 makes an original `PlayerEntity` the primary open-world actor | H0 resolves the contract; H4 verifies any retained mode |
