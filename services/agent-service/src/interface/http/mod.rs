@@ -69,6 +69,7 @@ fn routes() -> Router<AppState> {
             "/internal/privacy/users/{user_id}/export",
             get(export_account),
         )
+        .route("/internal/memories", post(save_permanent_memory))
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/metrics", get(metrics))
@@ -103,6 +104,85 @@ async fn export_account(
         .header(CACHE_CONTROL, "no-store")
         .body(Body::from_stream(stream))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// Bound for world-journey event text recorded as a permanent memory.
+const MAX_PERMANENT_EVENT_CHARS: usize = 2_000;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SavePermanentMemoryRequest {
+    /// Caller-supplied idempotency key (narrative's committed turn id); the
+    /// repository upsert makes a replay idempotent.
+    memory_id: Uuid,
+    character_id: Uuid,
+    user_id: Uuid,
+    novel_id: Uuid,
+    chapter_number: i32,
+    event: String,
+    importance: i32,
+}
+
+/// Validation for a permanent-memory write; separate from the handler so
+/// the contract is unit-testable without a full router stack.
+fn validate_permanent_memory_request(
+    event: &str,
+    chapter_number: i32,
+    importance: i32,
+) -> Result<(), &'static str> {
+    let event = event.trim();
+    if event.is_empty() || event.chars().count() > MAX_PERMANENT_EVENT_CHARS {
+        return Err("event must be 1..=2000 chars");
+    }
+    if chapter_number < 1 {
+        return Err("chapter_number must be >= 1");
+    }
+    if !(1..=10).contains(&importance) {
+        return Err("importance must be 1..=10");
+    }
+    Ok(())
+}
+
+/// POST /internal/memories — internal-token-protected producer for permanent
+/// memories, called by narrative-service after a committed world turn.
+async fn save_permanent_memory(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<SavePermanentMemoryRequest>,
+) -> Response {
+    if !internal_request_authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let event = request.event.trim();
+    if let Err(message) =
+        validate_permanent_memory_request(event, request.chapter_number, request.importance)
+    {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error": message})),
+        )
+            .into_response();
+    }
+    match state
+        .handler
+        .memory_manager
+        .save_permanent_memory(
+            request.memory_id,
+            request.character_id,
+            request.user_id,
+            request.novel_id,
+            request.chapter_number,
+            event,
+            request.importance,
+        )
+        .await
+    {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"saved": true}))).into_response(),
+        Err(error) => {
+            tracing::error!(%error, "permanent memory save failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
@@ -848,6 +928,35 @@ mod principal_contract_tests {
         );
         assert_eq!(response.status(), StatusCode::CONFLICT);
         assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "117");
+    }
+
+    #[test]
+    fn permanent_memory_request_validation_is_strict() {
+        assert_eq!(
+            validate_permanent_memory_request("", 1, 5),
+            Err("event must be 1..=2000 chars")
+        );
+        assert_eq!(
+            validate_permanent_memory_request(
+                "x".repeat(MAX_PERMANENT_EVENT_CHARS + 1).as_str(),
+                1,
+                5
+            ),
+            Err("event must be 1..=2000 chars")
+        );
+        assert_eq!(
+            validate_permanent_memory_request("ok", 0, 5),
+            Err("chapter_number must be >= 1")
+        );
+        assert_eq!(
+            validate_permanent_memory_request("ok", 1, 0),
+            Err("importance must be 1..=10")
+        );
+        assert_eq!(
+            validate_permanent_memory_request("ok", 1, 11),
+            Err("importance must be 1..=10")
+        );
+        assert!(validate_permanent_memory_request("ok", 1, 5).is_ok());
     }
 
     #[test]

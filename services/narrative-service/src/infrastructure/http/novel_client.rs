@@ -1,6 +1,6 @@
 use crate::domain::entities::world_session::WorldEntryContext;
 use crate::domain::repositories::{
-    ChapterInfo, ChapterReadRepository, NovelInfo, PlayerEntryContext,
+    ChapterInfo, ChapterReadRepository, CharacterBrief, NovelInfo, PlayerEntryContext,
 };
 use crate::domain::services::narrative_transition::CanonContext;
 use anyhow::{anyhow, Result};
@@ -64,6 +64,15 @@ struct ReadingProgressResponse {
     reader_identity_type: String,
 }
 
+#[derive(serde::Deserialize)]
+struct CharacterListRow {
+    id: Uuid,
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    first_appearance_chapter: Option<i32>,
+}
+
 #[async_trait]
 impl ChapterReadRepository for NovelServiceClient {
     async fn get_chapter(
@@ -94,6 +103,28 @@ impl ChapterReadRepository for NovelServiceClient {
             is_key_node: ch.is_key_node,
             key_node_description: ch.key_node_description,
         }))
+    }
+
+    async fn list_characters(&self, novel_id: Uuid, user_id: Uuid) -> Result<Vec<CharacterBrief>> {
+        let url = format!("{}/novels/{}/characters", self.base_url, novel_id);
+        let resp = self
+            .client
+            .get(&url)
+            .header("X-User-Id", user_id.to_string())
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(anyhow!("Novel service returned {}", resp.status()));
+        }
+        let rows: Vec<CharacterListRow> = resp.json().await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| CharacterBrief {
+                id: row.id,
+                role: row.role,
+                first_appearance_chapter: row.first_appearance_chapter,
+            })
+            .collect())
     }
 
     async fn get_novel_info(&self, novel_id: Uuid, user_id: Uuid) -> Result<Option<NovelInfo>> {

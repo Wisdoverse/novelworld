@@ -300,8 +300,14 @@ impl MemoryManager {
 
     /// 保存永久记忆（重大选择、关系变化）
     /// Generates an embedding for the event text so it can be found via semantic search.
+    /// SPEC 6.2.4: an entry is written only with a correctly-dimensioned
+    /// embedding; generation failure or a non-1536 provider vector skips the
+    /// save entirely (the caller may retry). The memory id is caller-supplied
+    /// (narrative's turn id) so the repository upsert is idempotent on replay.
+    #[allow(clippy::too_many_arguments)] // Same shape as MemoryRepository::find_by_layer.
     pub async fn save_permanent_memory(
         &self,
+        memory_id: Uuid,
         character_id: Uuid,
         user_id: Uuid,
         novel_id: Uuid,
@@ -309,8 +315,13 @@ impl MemoryManager {
         event: &str,
         importance: i32,
     ) -> Result<()> {
-        // Attempt to generate an embedding; if it fails, save without one.
-        let embedding = self.embedding.generate_embedding(event).await.ok();
+        let embedding = match self.embedding.generate_embedding(event).await {
+            Ok(vector) if vector.len() == EMBEDDING_DIMS => Some(vector),
+            _ => None,
+        };
+        let Some(embedding) = embedding else {
+            return Ok(());
+        };
         let mut memory = Memory::new_permanent(
             character_id,
             user_id,
@@ -319,7 +330,8 @@ impl MemoryManager {
             importance,
             chapter_number,
         );
-        memory.embedding = embedding;
+        memory.id = memory_id;
+        memory.embedding = Some(embedding);
         self.memory_repo.save(&memory).await?;
         Ok(())
     }
@@ -602,6 +614,62 @@ mod tests {
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].layer, MemoryLayer::Mid);
         assert_eq!(saved[0].embedding, None);
+    }
+
+    #[tokio::test]
+    async fn permanent_memory_uses_the_caller_memory_id_and_embeds() {
+        let repo = Arc::new(RecordingMemoryRepo {
+            saved: Mutex::new(vec![]),
+        });
+        let manager = manager(
+            repo.clone(),
+            Arc::new(FakeEmbedding {
+                dims: 1536,
+                fail: false,
+            }),
+        );
+        let memory_id = Uuid::new_v4();
+        manager
+            .save_permanent_memory(
+                memory_id,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                5,
+                "选择了北境之路",
+                8,
+            )
+            .await
+            .unwrap();
+        let saved = repo.saved.lock().unwrap().clone();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].id, memory_id);
+        assert_eq!(saved[0].layer, MemoryLayer::Permanent);
+        assert_eq!(saved[0].embedding.as_deref().map(|e| e.len()), Some(1536));
+    }
+
+    #[tokio::test]
+    async fn permanent_memory_skips_save_when_embedding_fails_or_mis_dimensioned() {
+        for (dims, fail) in [(1536, true), (1024, false)] {
+            let repo = Arc::new(RecordingMemoryRepo {
+                saved: Mutex::new(vec![]),
+            });
+            let manager = manager(repo.clone(), Arc::new(FakeEmbedding { dims, fail }));
+            manager
+                .save_permanent_memory(
+                    Uuid::new_v4(),
+                    Uuid::new_v4(),
+                    Uuid::new_v4(),
+                    Uuid::new_v4(),
+                    5,
+                    "选择了北境之路",
+                    8,
+                )
+                .await
+                .unwrap();
+            // SPEC 6.2.4: no embedding-less permanent rows.
+            assert!(repo.saved.lock().unwrap().is_empty());
+        }
     }
 
     #[tokio::test]
