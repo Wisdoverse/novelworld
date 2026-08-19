@@ -20,11 +20,24 @@ pub struct NovelServiceClient {
 }
 
 /// Minimal deserialization type for the character data used at chat time.
+/// Persona fields mirror the novel-service Character entity's public shape.
 #[derive(Debug, Deserialize)]
 struct CharacterResponse {
     id: Uuid,
     name: String,
     novel_id: Uuid,
+    #[serde(default)]
+    aliases: Vec<String>,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    personality: Option<String>,
+    #[serde(default)]
+    background: Option<String>,
+    #[serde(default)]
+    speaking_style: Option<String>,
     #[serde(default)]
     first_appearance_chapter: Option<i32>,
 }
@@ -95,6 +108,12 @@ impl CharacterInfoRepository for NovelServiceClient {
             id: ch.id,
             name: ch.name,
             novel_id: ch.novel_id,
+            aliases: ch.aliases,
+            role: ch.role,
+            description: ch.description,
+            personality: ch.personality,
+            background: ch.background,
+            speaking_style: ch.speaking_style,
             first_appearance_chapter: ch.first_appearance_chapter,
         }))
     }
