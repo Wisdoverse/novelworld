@@ -1,8 +1,9 @@
 # Private-preview-v1 Qualification Policy
 
-Status: **H0 candidate `private-preview-qualification-v1`**. This policy
-defines evidence and approval rules; it does not claim that any live product
-slice is release-qualified.
+Version: **`private-preview-qualification-v1`**. This reviewed change approves
+the policy; the baselines, thresholds, live runs, and H1–H5 gates it defines
+remain open. It does not claim that any live product slice is
+release-qualified.
 
 ## Decision contract
 
@@ -35,7 +36,10 @@ and provider-call bounds hold.
 | Observation | Immutable deployed artifact/configuration plus the approved observation window | The deployed slice met its SLO/quality/cost policy for that window |
 
 Branch output, a synthetic fixture, a provider connection test, or a green
-capacity run cannot substitute for a live qualification report.
+capacity run cannot substitute for a live qualification report. The
+deterministic test provider and recorded fixtures never satisfy the
+`configured provider/model` identity that Baseline and Qualification evidence
+require.
 
 ## Existing evidence packages
 
@@ -112,10 +116,14 @@ Qualification requires zero accepted violations in the release corpus for:
   qualified compatibility slice;
 - duplicate authoritative commit or provider call on completed-key replay;
 - completion emitted before the authoritative transaction commits;
+- a non-authoritative projection (cache, search index, derived media, or
+  generated prose) served as authoritative state;
 - a deleted subject becoming available to login, reads, export, provider work,
   or derived projections after the approved restore/erasure procedure;
 - secrets, novel text, prompts, conversations, user identities, or linkable
   production resource IDs in reports and product telemetry;
+- an inaccessible, misleading, or unrecoverable failure state on the critical
+  journey;
 - unbounded provider fan-out, retry amplification, or work after rejection.
 
 Any unresolved Critical or High security finding blocks qualification. Lower

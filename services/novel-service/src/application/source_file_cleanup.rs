@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::{Duration as ChronoDuration, Utc};
 use std::{sync::Arc, time::Duration};
+use tracing::Instrument;
 
 use crate::domain::{ports::SourceFileStorage, repositories::SourceFileDeletionRepository};
 
@@ -18,14 +19,18 @@ impl SourceFileCleanupWorker {
     }
 
     pub fn spawn(self) {
-        tokio::spawn(async move {
-            loop {
-                if let Err(error) = self.drain_once().await {
-                    tracing::error!(error = ?error, "source file cleanup pass failed");
+        let current_span = tracing::Span::current();
+        tokio::spawn(
+            async move {
+                loop {
+                    if let Err(error) = self.drain_once().await {
+                        tracing::error!(error = ?error, "source file cleanup pass failed");
+                    }
+                    tokio::time::sleep(Duration::from_secs(5)).await;
                 }
-                tokio::time::sleep(Duration::from_secs(5)).await;
             }
-        });
+            .instrument(current_span),
+        );
     }
 
     pub async fn drain_once(&self) -> Result<usize> {

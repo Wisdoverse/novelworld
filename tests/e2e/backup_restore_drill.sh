@@ -2,8 +2,9 @@
 # Drills A, B and C plus the negative cases of backup-restore-v2
 # (docs/BACKUP_RESTORE.md, "Drills"), against the supported compose topology.
 #
-# Runs after tests/e2e/core_reader_loop.sh, which leaves the deployment in
-# first-run state, and seeds its own drill dataset through the real import path:
+# Runs after the provider-outage drill (which follows core_reader_loop.sh),
+# with the deployment left in first-run state, and seeds its own drill dataset
+# through the real import path:
 # three accounts — the third exists to be deleted after the artifact and covered
 # by a collected erasure record — five novels with two durable chapters each,
 # three retained-source keys, committed chat history and a committed world turn.

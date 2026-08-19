@@ -9,6 +9,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{oneshot, watch, OwnedSemaphorePermit, Semaphore};
+use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::domain::entities::memory::{ChatMessage, Memory};
@@ -113,8 +114,10 @@ impl TurnLease {
     fn start(repo: Arc<dyn ChatRepository>, turn_id: Uuid, attempt: i64) -> Self {
         let (stop, mut stopped) = oneshot::channel();
         let (lost, receiver) = watch::channel(false);
-        tokio::spawn(async move {
-            let mut heartbeat = tokio::time::interval(LEASE_HEARTBEAT_INTERVAL);
+        let current_span = tracing::Span::current();
+        tokio::spawn(
+            async move {
+                let mut heartbeat = tokio::time::interval(LEASE_HEARTBEAT_INTERVAL);
             heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             heartbeat.tick().await;
             loop {
@@ -137,7 +140,9 @@ impl TurnLease {
                     }
                 }
             }
-        });
+            }
+            .instrument(current_span),
+        );
         Self {
             stop: Some(stop),
             lost: receiver,
@@ -633,11 +638,14 @@ impl AgentCommandHandler {
 
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let memory_manager = self.memory_manager.clone();
-        tokio::spawn(async move {
-            let admission = admission;
-            let mut upstream = upstream;
-            let mut response = String::new();
-            let mut response_chars = 0usize;
+        let current_span = tracing::Span::current();
+        let projection_span = current_span.clone();
+        tokio::spawn(
+            async move {
+                let admission = admission;
+                let mut upstream = upstream;
+                let mut response = String::new();
+                let mut response_chars = 0usize;
 
             loop {
                 tokio::select! {
@@ -721,7 +729,9 @@ impl AgentCommandHandler {
                 ))
                 .await
             {
-                Some(Ok(())) => {}
+                Some(Ok(())) => {
+                    tracing::info!(turn_id = %turn.claim.id, "chat turn committed");
+                }
                 Some(Err(error)) => {
                     tracing::error!(turn_id = %turn.claim.id, attempt = turn.attempt, error = ?error, "atomic chat turn commit failed");
                     let _ = memory_manager
@@ -743,22 +753,27 @@ impl AgentCommandHandler {
 
             lease.stop();
             let _ = sender.send(Ok(AgentStreamEvent::Done { replayed: false }));
-            tokio::spawn(async move {
-                let _admission = admission;
-                if let Err(error) = memory_manager
-                    .project_completed_turn(
-                        user_message,
-                        character_message,
-                        turn.claim.character_id,
-                        turn.claim.user_id,
-                        turn.claim.novel_id,
-                    )
-                    .await
-                {
-                    tracing::error!(turn_id = %turn.claim.id, error = ?error, "chat turn projection failed");
+            tokio::spawn(
+                async move {
+                    let _admission = admission;
+                    if let Err(error) = memory_manager
+                        .project_completed_turn(
+                            user_message,
+                            character_message,
+                            turn.claim.character_id,
+                            turn.claim.user_id,
+                            turn.claim.novel_id,
+                        )
+                        .await
+                    {
+                        tracing::error!(turn_id = %turn.claim.id, error = ?error, "chat turn projection failed");
+                    }
                 }
-            });
-        });
+                .instrument(projection_span),
+            );
+            }
+            .instrument(current_span),
+        );
 
         Ok(Box::pin(
             tokio_stream::wrappers::UnboundedReceiverStream::new(receiver),
@@ -875,7 +890,9 @@ impl AgentCommandHandler {
             ))
             .await
         {
-            Some(Ok(())) => {}
+            Some(Ok(())) => {
+                tracing::info!(turn_id = %turn.claim.id, "chat turn committed");
+            }
             Some(Err(error)) => {
                 self.fail_claim(&turn, "commit_error").await;
                 return Err(AgentRequestError::Unavailable(error).into());
@@ -891,21 +908,25 @@ impl AgentCommandHandler {
         lease.stop();
 
         let memory_manager = self.memory_manager.clone();
-        tokio::spawn(async move {
-            let _admission = admission;
-            if let Err(error) = memory_manager
-                .project_completed_turn(
-                    user_message,
-                    character_message,
-                    turn.claim.character_id,
-                    turn.claim.user_id,
-                    turn.claim.novel_id,
-                )
-                .await
-            {
-                tracing::error!(turn_id = %turn.claim.id, error = ?error, "chat turn projection failed");
+        let current_span = tracing::Span::current();
+        tokio::spawn(
+            async move {
+                let _admission = admission;
+                if let Err(error) = memory_manager
+                    .project_completed_turn(
+                        user_message,
+                        character_message,
+                        turn.claim.character_id,
+                        turn.claim.user_id,
+                        turn.claim.novel_id,
+                    )
+                    .await
+                {
+                    tracing::error!(turn_id = %turn.claim.id, error = ?error, "chat turn projection failed");
+                }
             }
-        });
+            .instrument(current_span),
+        );
 
         Ok(ChatResult {
             message: response,

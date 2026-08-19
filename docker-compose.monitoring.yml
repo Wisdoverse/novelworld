@@ -1,0 +1,35 @@
+# Monitoring profile (H2 production-readiness): Prometheus collectors +
+# Grafana dashboard + alert rules for the private self-hosted deployment.
+# Optional overlay: docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
+# Requires GRAFANA_ADMIN_PASSWORD in the environment. Notification routing
+# (Alertmanager) is deferred to H5; see docs/OPERATIONS.md.
+services:
+  prometheus:
+    image: prom/prometheus@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996
+    container_name: novel-prometheus
+    volumes:
+      - ./infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+    networks:
+      - novel-net
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, wget, -q, --spider, http://127.0.0.1:9090/-/healthy]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  grafana:
+    image: grafana/grafana@sha256:62d2b9d20a19714ebfe48d1bb405086081bc602aa053e28cf6d73c7537640dfb
+    container_name: novel-grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set for the monitoring profile}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    ports:
+      - "${GRAFANA_HTTP_PORT:-127.0.0.1:13000}:3000"
+    volumes:
+      - ./infra/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      - novel-net
+    restart: unless-stopped

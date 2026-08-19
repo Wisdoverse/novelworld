@@ -31,22 +31,90 @@ pub fn api_error_response(status: StatusCode, code: &str, message: &str) -> Resp
         .into_response()
 }
 
+/// The exhaustive mapping from upstream HTTP status to the stable public error
+/// envelope. Every upstream client/server error the gateway normalizes is pinned
+/// here, and the test module holds an independent copy of this contract, so a
+/// row added, removed, or altered without updating the expectation fails the
+/// build. Direct gateway-generated responses call api_error_response with an
+/// explicit code and are not constrained to this table.
+const NORMALIZED_ERROR_RESPONSES: &[(StatusCode, &str, &str)] = &[
+    (
+        StatusCode::BAD_REQUEST,
+        "validation_error",
+        "Request validation failed",
+    ),
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "validation_error",
+        "Request validation failed",
+    ),
+    (
+        StatusCode::UNAUTHORIZED,
+        "unauthorized",
+        "Authentication is required",
+    ),
+    (StatusCode::FORBIDDEN, "forbidden", "Access is forbidden"),
+    (StatusCode::NOT_FOUND, "not_found", "Resource not found"),
+    (
+        StatusCode::CONFLICT,
+        "conflict",
+        "Request conflicts with existing state",
+    ),
+    (
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "payload_too_large",
+        "Request body is too large",
+    ),
+    (
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "unsupported_media_type",
+        "Unsupported media type",
+    ),
+    (
+        StatusCode::UPGRADE_REQUIRED,
+        "client_upgrade_required",
+        "Client upgrade required",
+    ),
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        "rate_limited",
+        "Rate limit exceeded",
+    ),
+    (
+        StatusCode::BAD_GATEWAY,
+        "bad_gateway",
+        "Upstream service returned an invalid response",
+    ),
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "service_unavailable",
+        "Service is temporarily unavailable",
+    ),
+    (
+        StatusCode::GATEWAY_TIMEOUT,
+        "service_unavailable",
+        "Service is temporarily unavailable",
+    ),
+];
+
 fn error_code(status: StatusCode) -> &'static str {
-    match status {
-        StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY => "validation_error",
-        StatusCode::UNAUTHORIZED => "unauthorized",
-        StatusCode::FORBIDDEN => "forbidden",
-        StatusCode::NOT_FOUND => "not_found",
-        StatusCode::CONFLICT => "conflict",
-        StatusCode::PAYLOAD_TOO_LARGE => "payload_too_large",
-        StatusCode::UNSUPPORTED_MEDIA_TYPE => "unsupported_media_type",
-        StatusCode::UPGRADE_REQUIRED => "client_upgrade_required",
-        StatusCode::TOO_MANY_REQUESTS => "rate_limited",
-        StatusCode::BAD_GATEWAY => "bad_gateway",
-        StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT => "service_unavailable",
-        _ if status.is_server_error() => "internal_error",
-        _ => "request_error",
-    }
+    NORMALIZED_ERROR_RESPONSES
+        .iter()
+        .find(|(mapped, _, _)| *mapped == status)
+        .map(|(_, code, _)| *code)
+        .unwrap_or(if status.is_server_error() {
+            "internal_error"
+        } else {
+            "request_error"
+        })
+}
+
+fn fallback_error_message(status: StatusCode) -> &'static str {
+    NORMALIZED_ERROR_RESPONSES
+        .iter()
+        .find(|(mapped, _, _)| *mapped == status)
+        .map(|(_, _, message)| *message)
+        .unwrap_or("Request failed")
 }
 
 fn public_error_message(status: StatusCode, body: &[u8]) -> String {
@@ -62,23 +130,7 @@ fn public_error_message(status: StatusCode, body: &[u8]) -> String {
         }
     }
 
-    match status {
-        StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY => "Request validation failed",
-        StatusCode::UNAUTHORIZED => "Authentication is required",
-        StatusCode::FORBIDDEN => "Access is forbidden",
-        StatusCode::NOT_FOUND => "Resource not found",
-        StatusCode::CONFLICT => "Request conflicts with existing state",
-        StatusCode::PAYLOAD_TOO_LARGE => "Request body is too large",
-        StatusCode::UNSUPPORTED_MEDIA_TYPE => "Unsupported media type",
-        StatusCode::UPGRADE_REQUIRED => "Client upgrade required",
-        StatusCode::TOO_MANY_REQUESTS => "Rate limit exceeded",
-        StatusCode::BAD_GATEWAY => "Upstream service returned an invalid response",
-        StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT => {
-            "Service is temporarily unavailable"
-        }
-        _ => "Request failed",
-    }
-    .into()
+    fallback_error_message(status).into()
 }
 
 fn has_stable_error_envelope(body: &[u8]) -> bool {
@@ -369,6 +421,9 @@ impl ServiceProxy {
         match req_builder.body(body).send().await {
             Ok(resp) => {
                 let status = resp.status();
+                if status.is_server_error() {
+                    tracing::warn!(status = %status, upstream = target_base, "upstream returned a server error");
+                }
                 let resp_headers = resp.headers().clone();
 
                 if is_sse_response(original_path, status, &resp_headers) {
@@ -535,11 +590,15 @@ mod tests {
     use super::{
         has_stable_error_envelope, is_internal_service_path, is_sse_response,
         normalized_error_response, ServiceProxy, ACCOUNT_EXPORT_CONTENT_TYPE,
+        MAX_PUBLIC_ERROR_CHARS, NORMALIZED_ERROR_RESPONSES,
     };
     use axum::{
         body::{to_bytes, Body},
         extract::{Path, State},
-        http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
+        http::{
+            header::{CONTENT_TYPE, RETRY_AFTER, WWW_AUTHENTICATE},
+            HeaderMap, HeaderValue, StatusCode,
+        },
         response::{IntoResponse, Response},
         routing::get,
         Router,
@@ -689,6 +748,151 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["error"]["code"], "validation_error");
         assert_eq!(body["error"]["message"], "title is required");
+    }
+    /// The independently pinned normalization contract. NORMALIZED_ERROR_RESPONSES
+    /// must equal this list exactly (same rows, same order), so adding, removing,
+    /// or altering a mapping without updating the contract fails the build.
+    const EXPECTED_NORMALIZED_ERROR_RESPONSES: &[(StatusCode, &str, &str)] = &[
+        (
+            StatusCode::BAD_REQUEST,
+            "validation_error",
+            "Request validation failed",
+        ),
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "validation_error",
+            "Request validation failed",
+        ),
+        (
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "Authentication is required",
+        ),
+        (StatusCode::FORBIDDEN, "forbidden", "Access is forbidden"),
+        (StatusCode::NOT_FOUND, "not_found", "Resource not found"),
+        (
+            StatusCode::CONFLICT,
+            "conflict",
+            "Request conflicts with existing state",
+        ),
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
+            "Request body is too large",
+        ),
+        (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_media_type",
+            "Unsupported media type",
+        ),
+        (
+            StatusCode::UPGRADE_REQUIRED,
+            "client_upgrade_required",
+            "Client upgrade required",
+        ),
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            "Rate limit exceeded",
+        ),
+        (
+            StatusCode::BAD_GATEWAY,
+            "bad_gateway",
+            "Upstream service returned an invalid response",
+        ),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "service_unavailable",
+            "Service is temporarily unavailable",
+        ),
+        (
+            StatusCode::GATEWAY_TIMEOUT,
+            "service_unavailable",
+            "Service is temporarily unavailable",
+        ),
+    ];
+
+    #[tokio::test]
+    async fn normalization_table_matches_the_pinned_contract_exactly() {
+        assert_eq!(
+            NORMALIZED_ERROR_RESPONSES,
+            EXPECTED_NORMALIZED_ERROR_RESPONSES
+        );
+        for &(status, code, message) in EXPECTED_NORMALIZED_ERROR_RESPONSES {
+            let response =
+                normalized_error_response(status, &HeaderMap::new(), b"not a json envelope");
+            assert_eq!(response.status(), status, "status for {code}");
+            let body = to_bytes(response.into_body(), 4096).await.unwrap();
+            assert!(has_stable_error_envelope(&body), "envelope for {code}");
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"]["code"], code, "code for {status}");
+            assert_eq!(body["error"]["message"], message, "message for {status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unmapped_statuses_fall_back_to_request_or_internal_error() {
+        let response = normalized_error_response(
+            StatusCode::IM_A_TEAPOT,
+            &HeaderMap::new(),
+            b"<html>not json</html>",
+        );
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["code"], "request_error");
+        assert_eq!(body["error"]["message"], "Request failed");
+
+        let response = normalized_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &HeaderMap::new(),
+            br#"{"error":"database password leaked"}"#,
+        );
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["code"], "internal_error");
+        assert_eq!(body["error"]["message"], "Request failed");
+    }
+
+    #[tokio::test]
+    async fn stable_envelopes_pass_through_with_error_headers_intact() {
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("30"));
+        headers.insert(
+            WWW_AUTHENTICATE,
+            HeaderValue::from_static("Bearer realm=\"novelworld\""),
+        );
+        let body = br#"{"error":{"code":"unauthorized","message":"Invalid token"}}"#;
+        let response = normalized_error_response(StatusCode::UNAUTHORIZED, &headers, body);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "30");
+        assert_eq!(
+            response.headers().get(WWW_AUTHENTICATE).unwrap(),
+            "Bearer realm=\"novelworld\""
+        );
+        let out_body = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert_eq!(out_body.as_ref(), body);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("1"));
+        let response = normalized_error_response(StatusCode::TOO_MANY_REQUESTS, &headers, b"boom");
+        assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "1");
+    }
+
+    #[tokio::test]
+    async fn extracted_client_error_messages_are_truncated_to_the_public_limit() {
+        let long_message = "x".repeat(MAX_PUBLIC_ERROR_CHARS + 100);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "error": {"message": long_message.clone()}
+        }))
+        .unwrap();
+        let response =
+            normalized_error_response(StatusCode::UNPROCESSABLE_ENTITY, &HeaderMap::new(), &body);
+        let out_body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let out_body: serde_json::Value = serde_json::from_slice(&out_body).unwrap();
+        assert_eq!(out_body["error"]["code"], "validation_error");
+        let message = out_body["error"]["message"].as_str().unwrap();
+        assert_eq!(message.chars().count(), MAX_PUBLIC_ERROR_CHARS);
+        assert!(long_message.starts_with(message));
     }
 
     #[tokio::test]

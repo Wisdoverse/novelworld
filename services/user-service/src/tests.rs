@@ -4,15 +4,108 @@ use crate::infrastructure::auth::jwt::JwtService;
 fn test_email_validation() {
     use crate::application::handlers::is_valid_email;
 
-    assert!(is_valid_email("user@example.com"));
-    assert!(is_valid_email("test.name@sub.domain.co"));
-    assert!(is_valid_email("a@b.c"));
-    assert!(!is_valid_email(""));
-    assert!(!is_valid_email("missing-at-sign"));
-    assert!(!is_valid_email("@no-local.com"));
-    assert!(!is_valid_email("no-domain@"));
-    assert!(!is_valid_email("bad@.start"));
-    assert!(!is_valid_email("bad@end."));
+    for valid in [
+        "user@example.com",
+        "test.name@sub.domain.co",
+        "a@b.c",
+        "a@b",
+        "user@localhost",
+        "user+tag@example.com",
+        "!#$%&'*+-/=?^_`{|}~@example.com",
+        "\"john doe\"@example.com",
+        "\"a@b\"@example.com",
+        "\"a\\\"b@c\"@example.com",
+        "\"quoted\\\\pair\"@example.com",
+        "user@[192.168.1.1]",
+        "user@[001.002.003.004]",
+        "user@[IPv6:2001:db8::1]",
+        &format!("{}@example.com", "a".repeat(64)),
+        &format!("user@{}.com", "x".repeat(63)),
+        &format!(
+            "a@{}.{}.{}.{}",
+            "x".repeat(63),
+            "x".repeat(63),
+            "x".repeat(63),
+            "x".repeat(60),
+        ),
+    ] {
+        assert!(is_valid_email(valid), "should accept {valid:?}");
+    }
+
+    for invalid in [
+        "",
+        "missing-at-sign",
+        "@no-local.com",
+        "no-domain@",
+        "bad@.start",
+        "bad@end.",
+        "user..name@example.com",
+        ".leading@example.com",
+        "trailing.@example.com",
+        "sp ace@example.com",
+        "user@exa mple.com",
+        "user@-leading.com",
+        "user@trailing-.com",
+        "user@exa_mple.com",
+        "user@exa..mple.com",
+        "com,ment@example.com",
+        "user(name)@example.com",
+        "user@example.com\n",
+        "user@[1.2.3]",
+        "user@[1.2.3.4.5]",
+        "user@[.1.2.3]",
+        "user@[1..2.3]",
+        "user@[256.1.1.1]",
+        "user@[IPv6:::g]",
+        "user@[IPv6:1:2:3:4:5:6:7:8:9]",
+        "user@[2001:db8::1]",
+        "user@[tag:some-value]",
+        "user@[IPv6:]",
+        "user@[IPv6:2001:db8::1",
+        "user@[tag:]",
+        "user@[tag:[]",
+        "user@[tag:]]",
+        "user@[:x]",
+        "\"unterminated@example.com",
+        "\"bad\\@example.com",
+        "\"a\"x@example.com",
+        "用户@例子.公司",
+        "user@münchen.de",
+        "\u{212a}@example.com",
+        &format!("{}@example.com", "a".repeat(65)),
+        &format!("user@{}.com", "x".repeat(64)),
+        &format!(
+            "a@{}.{}.{}.{}",
+            "x".repeat(63),
+            "x".repeat(63),
+            "x".repeat(63),
+            "x".repeat(61),
+        ),
+    ] {
+        assert!(!is_valid_email(invalid), "should reject {invalid:?}");
+    }
+}
+
+#[test]
+fn atext_membership_matches_the_rfc_5322_list() {
+    use crate::application::handlers::is_valid_email;
+
+    // RFC 5322 §3.2.3 atext: ALPHA / DIGIT and these symbols, independently
+    // restated so drift from the validator fails this check.
+    const ATEXT_SYMBOLS: &str = "!#$%&'*+-/=?^_`{|}~";
+    for byte in 0..=127u8 {
+        let character = byte as char;
+        if character == '.' {
+            continue; // dot-string separator, covered by the table above
+        }
+        let expected = character.is_ascii_alphanumeric() || ATEXT_SYMBOLS.contains(character);
+        let email = format!("u{character}x@example.com");
+        assert_eq!(
+            is_valid_email(&email),
+            expected,
+            "byte {byte} ({character:?}) must match the atext list"
+        );
+    }
 }
 
 #[test]

@@ -1,8 +1,7 @@
 # NovelWorld Product Contract
 
-Status: **H0 candidate `private-preview-v1`**. This contract becomes the
-declared current envelope when its reviewed change is merged. It does not make
-H0 complete or qualify a public release.
+Status: **Current envelope `private-preview-v1`** (declared by the merged
+reviewed change). It does not make H0 complete or qualify a public release.
 
 This document answers one question: what can NovelWorld honestly promise now?
 [`README.md`](../README.md) describes the product, [`SPEC.md`](../SPEC.md)
@@ -28,7 +27,7 @@ accessibility slice is currently release-qualified.
 
 | Dimension | Current contract | Evidence boundary |
 |---|---|---|
-| Deployment | Operator-controlled, private, single-node Docker Compose preview on localhost, or behind an operator-managed encrypted private-network/TLS boundary | Production Compose and CI exercise one instance of each service. Internet exposure is unsupported; default Nginx has no TLS termination and service CORS remains permissive. |
+| Deployment | Operator-controlled, private, single-node Docker Compose preview on localhost, or behind an operator-managed encrypted private-network/TLS boundary | Production Compose and CI exercise one instance of each service. Internet exposure is unsupported; default Nginx has no TLS termination (the headers below are not a substitute for it); it serves baseline security headers (nosniff, clickjacking denial, same-origin referrer policy); gateway CORS is restricted to the documented preview origins (`CORS_ORIGINS`), and downstream routers stay permissive but are not browser-reachable in this envelope. |
 | Platforms | Linux shell and Windows 10/11 launchers with Docker Compose | Linux paths run in CI; `start.ps1 -Check` runs on Windows CI. This is launcher evidence, not a qualified OS/browser matrix. |
 | Input | Direct UTF-8 text paste up to 5 MiB; UTF-8, BOM-marked UTF-16, or GBK TXT up to 10 MiB; EPUB or text-extractable PDF up to 20 MiB; extracted text up to 20 MiB | Parsers and limits are tested. Scanned/image-only PDFs, DRM, malformed archives, and successful semantic extraction are not promised. |
 | Language | Simplified Chinese and English have deterministic chapter-splitting and lore-retrieval fixtures; generated narrative transitions currently require Chinese text | “Any language” is unsupported. No language has passed a representative live-provider end-to-end quality gate. |
@@ -68,7 +67,7 @@ provider-hosted image bytes, operator logs, or backups.
 | Product claim | State now | Evidence or gap | Owner |
 |---|---|---|---|
 | First-run administrator and model setup | Structurally verified | The first administrator is a single durable winner; web-supplied provider keys are encrypted before PostgreSQL storage and environment configuration takes precedence | H2 |
-| One-click import | Accepted and structurally verified inside the input limits | Acceptance atomically commits chapters plus a pending durable job, or — with source retention enabled — the retained object plus a `source`-stage job whose claim rebuilds deterministic chapters from the retained bytes; fenced leases resume `source`/`chapters`/`enriched` work; cross-attempt provider calls stay inside `import-provider-budget-v1` (3-claim ceiling, terminal `budget_exhausted`); live semantic quality remains unqualified | H1 |
+| One-click import | Accepted and structurally verified inside the input limits | Acceptance atomically commits chapters plus a pending durable job, or — with source retention enabled — the retained object plus a `source`-stage job whose claim rebuilds deterministic chapters from the retained bytes; fenced leases resume `source`/`chapters`/`enriched` work; live kill drills at the `chapters` and `enriched` boundaries pass in CI, and the S3 `source`-boundary drill passes in required CI ([PR #135](https://github.com/Wisdoverse/novelworld/pull/135)); cross-attempt provider calls stay inside `import-provider-budget-v1` (3-claim ceiling, terminal `budget_exhausted`); live semantic quality remains unqualified | H1 |
 | Canonical world model and relationship graph | Structurally verified | Source coverage exists in deterministic tests; representative live quality is not qualified | H1, H3 |
 | Character personality and authentic voice | Intended gap | Novel stores persona fields, but chat currently consumes essentially the character name plus lore/memory/world context | H3 |
 | Generated portrait for every character | Obsolete claim | Avatar generation is a non-authoritative projection, capped at 30 characters per import, and stores provider-returned URL metadata | H0 decision recorded here; any quality slice belongs to H3 |
@@ -122,7 +121,7 @@ product claim, SPEC target, runtime behavior, and evidence together when they
 are affected. Thresholds and supported slices must be approved before the
 change they judge; a candidate cannot weaken its own gate.
 
-The candidate [`qualification policy`](./QUALIFICATION_POLICY.md) defines the
+The approved [`qualification policy`](./QUALIFICATION_POLICY.md) defines the
 initial journey slices, hard guardrails, evidence classes, and threshold
 approval process without claiming that a live slice has passed them.
 

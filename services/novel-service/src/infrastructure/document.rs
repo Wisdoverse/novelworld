@@ -482,4 +482,230 @@ mod tests {
         ));
         assert!(safe_archive_path(None, "../outside.xhtml").is_err());
     }
+
+    /// Deterministic xorshift64*: every malformed-input run below is
+    /// reproducible and CI-cheap, so a failure is a stable regression signal.
+    fn next(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        *state = x;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    #[test]
+    fn malformed_text_bytes_decode_bounded_or_fail_cleanly() {
+        // Property: a successful decode never grows the character count beyond
+        // the input byte count (every supported encoding uses >= 1 byte per
+        // character), and failures carry a non-empty, bounded error.
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..2_000 {
+            let len = (next(&mut state) % 64) as usize;
+            let data = (0..len).map(|_| next(&mut state) as u8).collect::<Vec<_>>();
+            match decode_text(&data) {
+                Ok(text) => assert!(
+                    text.chars().count() <= data.len(),
+                    "decoded characters must not exceed input bytes"
+                ),
+                Err(error) => assert!(!error.to_string().is_empty()),
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_epub_bytes_extract_bounded_or_fail_cleanly() {
+        // Property: prefix truncations, byte flips, and PK-prefixed garbage
+        // never panic; successes stay inside the extracted-text cap and
+        // failures are non-empty.
+        let sample = sample_epub();
+        for cut in 0..sample.len() {
+            let data = &sample[..cut];
+            match EbookTextExtractor.extract_text(Some("fuzz.epub"), None, data) {
+                Ok(text) => assert!(
+                    !text.is_empty() && text.len() <= MAX_EXTRACTED_TEXT_SIZE,
+                    "truncated epub produced unbounded text"
+                ),
+                Err(error) => assert!(!error.to_string().is_empty()),
+            }
+        }
+        let mut state = 0xDEAD_BEEF_CAFE_BABEu64;
+        for _ in 0..300 {
+            let mut data = sample.clone();
+            let flip = (next(&mut state) as usize) % data.len();
+            data[flip] ^= (next(&mut state) as u8) | 1;
+            match EbookTextExtractor.extract_text(Some("fuzz.epub"), None, &data) {
+                Ok(text) => assert!(
+                    !text.is_empty() && text.len() <= MAX_EXTRACTED_TEXT_SIZE,
+                    "flipped epub produced unbounded text"
+                ),
+                Err(error) => assert!(!error.to_string().is_empty()),
+            }
+        }
+        for _ in 0..300 {
+            let len = 8 + (next(&mut state) % 512) as usize;
+            let mut data = Vec::with_capacity(len);
+            data.extend_from_slice(b"PK\x03\x04");
+            data.extend((0..len - 4).map(|_| next(&mut state) as u8));
+            match EbookTextExtractor.extract_text(Some("fuzz.epub"), None, &data) {
+                Ok(text) => assert!(
+                    !text.is_empty() && text.len() <= MAX_EXTRACTED_TEXT_SIZE,
+                    "garbage epub produced unbounded text"
+                ),
+                Err(error) => assert!(!error.to_string().is_empty()),
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_pdf_bytes_extract_bounded_or_fail_cleanly() {
+        // Property: PDF-magic-prefixed garbage never panics the third-party
+        // extractor; failures stay bounded and non-empty.
+        let mut state = 0x1234_5678_9ABC_DEF0u64;
+        for _ in 0..300 {
+            let len = 8 + (next(&mut state) % 512) as usize;
+            let mut data = Vec::with_capacity(len);
+            data.extend_from_slice(b"%PDF-");
+            data.extend((0..len - 5).map(|_| next(&mut state) as u8));
+            match EbookTextExtractor.extract_text(Some("fuzz.pdf"), None, &data) {
+                Ok(text) => assert!(
+                    !text.is_empty() && text.len() <= MAX_EXTRACTED_TEXT_SIZE,
+                    "garbage pdf produced unbounded text"
+                ),
+                Err(error) => assert!(!error.to_string().is_empty()),
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_archive_entries_are_rejected() {
+        // A bomb entry declares ~6 MiB uncompressed but compresses to a few
+        // kilobytes. The header-size fast path and the bounded read cap are
+        // two independent layers; the test pins the rejection outcome, so
+        // removing either layer alone cannot hide a regression.
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file("mimetype", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"application/epub+zip").unwrap();
+        writer
+            .start_file("META-INF/container.xml", SimpleFileOptions::default())
+            .unwrap();
+        writer
+            .write_all(
+                br#"<?xml version="1.0"?>
+                <container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+                  <rootfiles><rootfile full-path="OPS/book.opf"/></rootfiles>
+                </container>"#,
+            )
+            .unwrap();
+        writer
+            .start_file("OPS/book.opf", SimpleFileOptions::default())
+            .unwrap();
+        writer
+            .write_all(
+                br#"<?xml version="1.0"?>
+                <package xmlns="http://www.idpf.org/2007/opf">
+                  <manifest>
+                    <item id="bomb" href="chapters/bomb.xhtml" media-type="application/xhtml+xml"/>
+                  </manifest>
+                  <spine><itemref idref="bomb"/></spine>
+                </package>"#,
+            )
+            .unwrap();
+        writer
+            .start_file("OPS/chapters/bomb.xhtml", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(&vec![0u8; 6 * 1024 * 1024]).unwrap();
+        let epub = writer.finish().unwrap().into_inner();
+        assert!(
+            epub.len() < 64 * 1024,
+            "the bomb fixture must compress: {} bytes",
+            epub.len()
+        );
+
+        let error = EbookTextExtractor
+            .extract_text(Some("bomb.epub"), None, &epub)
+            .unwrap_err();
+        assert!(
+            matches!(&error, DocumentExtractionError::InvalidEpub(message) if message.contains("too large")),
+            "the bomb entry must be rejected: {error:?}"
+        );
+    }
+
+    #[test]
+    fn expanded_text_cap_rejects_many_chapters_within_entry_limits() {
+        // Five 4.5 MiB chapters compress to a small archive and each passes
+        // the per-entry limit, but their expanded text exceeds the 20 MiB
+        // extracted-text cap: the outcome must stay a bounded rejection.
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file("mimetype", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"application/epub+zip").unwrap();
+        writer
+            .start_file("META-INF/container.xml", SimpleFileOptions::default())
+            .unwrap();
+        writer
+            .write_all(
+                br#"<?xml version="1.0"?>
+                <container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+                  <rootfiles><rootfile full-path="OPS/book.opf"/></rootfiles>
+                </container>"#,
+            )
+            .unwrap();
+        writer
+            .start_file("OPS/book.opf", SimpleFileOptions::default())
+            .unwrap();
+        writer
+            .write_all(
+                br#"<?xml version="1.0"?>
+                <package xmlns="http://www.idpf.org/2007/opf">
+                  <manifest>
+                    <item id="c1" href="chapters/one.xhtml" media-type="application/xhtml+xml"/>
+                    <item id="c2" href="chapters/two.xhtml" media-type="application/xhtml+xml"/>
+                    <item id="c3" href="chapters/three.xhtml" media-type="application/xhtml+xml"/>
+                    <item id="c4" href="chapters/four.xhtml" media-type="application/xhtml+xml"/>
+                    <item id="c5" href="chapters/five.xhtml" media-type="application/xhtml+xml"/>
+                  </manifest>
+                  <spine><itemref idref="c1"/><itemref idref="c2"/><itemref idref="c3"/><itemref idref="c4"/><itemref idref="c5"/></spine>
+                </package>"#,
+            )
+            .unwrap();
+        // Stored entries keep the debug-build test fast (no deflate/inflate)
+        // while the archive stays inside the upload limit; only the final
+        // chapter is deflated to prove the mixed path.
+        // Stored chapters keep the debug-build test fast (no deflate/inflate)
+        // while the archive stays inside the upload limit. The test pins the
+        // rejection OUTCOME: both the expanded-byte check and the result-size
+        // check can trip it, and each is an independent defense layer.
+        let stored =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for index in ["one", "two", "three", "four"] {
+            writer
+                .start_file(format!("OPS/chapters/{index}.xhtml"), stored)
+                .unwrap();
+            writer.write_all(&vec![b'a'; 9 * 512 * 1024]).unwrap();
+        }
+        writer
+            .start_file("OPS/chapters/five.xhtml", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(&vec![b'a'; 9 * 512 * 1024]).unwrap();
+        let epub = writer.finish().unwrap().into_inner();
+        assert!(
+            epub.len() < MAX_BINARY_UPLOAD_SIZE,
+            "fixture must stay inside the upload limit"
+        );
+
+        let error = EbookTextExtractor
+            .extract_text(Some("wide.epub"), None, &epub)
+            .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                DocumentExtractionError::ExtractedTextTooLarge { .. }
+            ),
+            "the expanded-text cap must reject the fixture: {error:?}"
+        );
+    }
 }

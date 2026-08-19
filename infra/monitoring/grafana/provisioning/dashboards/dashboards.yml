@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: novelworld
+    folder: NovelWorld
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards

@@ -1,0 +1,47 @@
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      # up == 0 for one instance: InstanceDown fires after 30s (for: 30s).
+      - series: 'up{job="gateway",instance="gateway:8080"}'
+        values: '0x6'
+      # Incrementing counters: 6% 429 ratio on /api sustained for 10m fires
+      # the rate-limit alert (rate of a flat counter is always zero).
+      - series: 'http_requests_total{job="gateway",path="/api/chat/:id/stream",status="200"}'
+        values: '94+94x11'
+      - series: 'http_requests_total{job="gateway",path="/api/chat/:id/stream",status="429"}'
+        values: '6+6x11'
+      # 3% 5xx ratio overall sustained for 10m fires the error-ratio alert.
+      - series: 'http_requests_total{job="gateway",path="/api/chat/:id/stream",status="500"}'
+        values: '3+3x11'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: InstanceDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: gateway:8080
+              job: gateway
+            exp_annotations:
+              summary: Instance gateway:8080 is down
+              runbook: docs/OPERATIONS.md - health checks; restart the named service
+      - eval_time: 10m
+        alertname: GatewayRateLimitRejections
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Gateway rate-limit rejections above 5% over 5 minutes
+              runbook: docs/SLOS.md - overload admission; check RATE_LIMIT_RPS
+      - eval_time: 10m
+        alertname: HighErrorRatio
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Gateway 5xx ratio above 2% over 5 minutes
+              runbook: docs/OPERATIONS.md - bad-release / provider outage playbooks
