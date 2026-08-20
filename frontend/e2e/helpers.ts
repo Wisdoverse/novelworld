@@ -141,13 +141,17 @@ export async function horizontalOverflow(page: Page): Promise<OverflowItem[]> {
     for (const el of Array.from(document.querySelectorAll('body *'))) {
       const rect = el.getBoundingClientRect();
       if (rect.width === 0 && rect.height === 0) continue;
-      // Skip purely decorative elements: no text, no interactive or named
-      // content (background blobs bleeding off-screen are clipped by the
-      // body overflow-x:hidden and never cause scrolling).
+      // Skip purely decorative background blobs: textless, non-interactive,
+      // unnamed, alt-less, absolutely/fixed-positioned elements bleeding off
+      // the edge are clipped by body overflow-x:hidden and never cause
+      // scrolling. In-flow content (including wide images) is never skipped.
       const text = (el.textContent ?? '').trim();
       const interactive = el.querySelector('input, button, select, textarea, a, [tabindex]');
-      const named = el.getAttribute('aria-label') || el.getAttribute('role');
-      if (!text && !interactive && !named) continue;
+      const named = el.getAttribute('aria-label') || el.getAttribute('role') || el.getAttribute('alt');
+      const position = getComputedStyle(el).position;
+      const decorative = !text && !interactive && !named
+        && (position === 'absolute' || position === 'fixed');
+      if (decorative) continue;
       // Only right-edge overflow can cause horizontal scrolling; decorative
       // elements bleeding off the LEFT edge never do.
       if (rect.right > width + 1) {
