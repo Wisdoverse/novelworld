@@ -103,7 +103,12 @@ WITH owned_novels AS (
                'id', m.id, 'novel_id', m.novel_id,
                'model_version', m.model_version, 'schema_version', m.schema_version,
                'prompt_version', m.prompt_version, 'content', m.content,
-               'created_at', m.created_at
+               'created_at', m.created_at,
+               'source', CASE WHEN jsonb_path_exists(
+                   m.content, '$.** ? (exists(@.confidence) && @.confidence < 1.0)'
+               ) OR NOT jsonb_path_exists(
+                   m.content, '$.** ? (exists(@.confidence))'
+               ) THEN 'uncertain' ELSE 'canon' END
            )
     FROM canon_story_models m
     JOIN owned_novels n ON n.id = m.novel_id

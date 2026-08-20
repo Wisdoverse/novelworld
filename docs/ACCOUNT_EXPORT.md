@@ -54,6 +54,14 @@ consequences were model-written), generated (LLM-authored player branches and
 continuation chapters), and mixed (completed world turns and open-world states
 that combine reader actions with generated prose).
 
+Canon-story-model records (the novel fragment) carry source = canon only
+when every extracted fact self-reports a numeric confidence >= 1.0; a model
+with any fact below 1.0 — or with no confidence data at all (legacy/partial
+rows, or string/null confidence values, which are never treated as a
+self-reported 1.0) — is uncertain. The full union of source labels across
+fragments is {canon, reader, generated, mixed, uncertain}; uncertain applies
+only to canon-story-model records.
+
 World-turn records include the portable action, status, committed transition
 and exact replay result when present. Explicitly excluded data includes password hashes, access and refresh tokens,
 runtime LLM keys, internal service tokens, source object keys, chat-turn
