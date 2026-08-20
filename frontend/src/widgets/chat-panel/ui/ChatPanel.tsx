@@ -135,14 +135,16 @@ export function ChatPanel({
               <div className="flex items-center gap-1">
                 <button
                   onClick={(e) => { e.stopPropagation(); setIsMinimized(!isMinimized); }}
-                  className="p-1.5 rounded-lg transition-colors hover:bg-white/10"
+                  aria-label={isMinimized ? '展开聊天窗口' : '收起聊天窗口'}
+                  className="p-1.5 min-h-6 min-w-6 rounded-lg transition-colors hover:bg-white/10"
                   style={{ color: '#94a3b8' }}
                 >
                   {isMinimized ? <Maximize2 size={14} /> : <Minimize2 size={14} />}
                 </button>
                 <button
                   onClick={(e) => { e.stopPropagation(); onClose(); }}
-                  className="p-1.5 rounded-lg transition-colors hover:bg-white/10"
+                  aria-label="关闭聊天"
+                  className="p-1.5 min-h-6 min-w-6 rounded-lg transition-colors hover:bg-white/10"
                   style={{ color: '#94a3b8' }}
                 >
                   <X size={14} />
@@ -160,10 +162,10 @@ export function ChatPanel({
                   {charMessages.length === 0 && (
                     <div className="text-center py-8">
                       <Brain size={32} className="mx-auto mb-3 opacity-30" style={{ color: '#6d28d9' }} />
-                      <p className="text-sm" style={{ color: '#475569' }}>
+                      <p className="text-sm" style={{ color: '#94a3b8' }}>
                         与 {character.name} 开始对话
                       </p>
-                      <p className="text-xs mt-1" style={{ color: '#334155' }}>
+                      <p className="text-xs mt-1" style={{ color: '#94a3b8' }}>
                         TA 记得你们之前的所有互动
                       </p>
                     </div>
@@ -266,6 +268,7 @@ export function ChatPanel({
                     <button
                       type="button"
                       onClick={handleSend}
+                      aria-label="发送消息"
                       disabled={!canChat || !input.trim() || isCurrentlyStreaming}
                       className="flex-shrink-0 p-2.5 rounded-xl transition-all"
                       style={{
