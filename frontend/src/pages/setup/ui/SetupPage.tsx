@@ -66,7 +66,7 @@ export function SetupPage({
               key={number}
               className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold"
               style={{
-                background: step >= number ? 'var(--color-nova)' : 'rgba(15, 21, 53, 0.8)',
+                background: step >= number ? '#0e7490' : 'rgba(15, 21, 53, 0.8)',
                 color: step >= number ? 'white' : 'var(--color-comet)',
                 border: '1px solid rgba(109, 40, 217, 0.4)',
               }}
