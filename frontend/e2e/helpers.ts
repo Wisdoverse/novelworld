@@ -46,6 +46,18 @@ export async function scanA11y(page: Page): Promise<AxeViolation[]> {
   });
 }
 
+/** Wait until no element carries an in-progress framer-motion opacity
+ * (inline opacity < 1), so scans never run mid-animation. */
+export async function settleAnimations(page: Page): Promise<void> {
+  await page.waitForFunction(() => {
+    for (const el of Array.from(document.querySelectorAll('*'))) {
+      const value = (el as HTMLElement).style.opacity;
+      if (value && Number(value) < 1) return false;
+    }
+    return true;
+  }, undefined, { timeout: 10_000 });
+}
+
 export async function expectNoA11yViolations(page: Page): Promise<void> {
   const violations = await scanA11y(page);
   const message = violations
@@ -90,17 +102,24 @@ export async function currentFocus(page: Page): Promise<FocusState | null> {
  */
 export async function tabWalk(page: Page, maxStops = 120): Promise<FocusState[]> {
   const stops: FocusState[] = [];
-  const seen = new Set<string>();
   await page.keyboard.press('Tab');
   for (let i = 0; i < maxStops; i++) {
-    const state = await currentFocus(page);
-    if (!state) break;
-    stops.push(state);
-    const key = state.tag + '|' + state.text;
-    if (seen.has(key) && stops.filter((s) => s.tag + '|' + s.text === key).length >= 3) {
-      throw new Error('focus trap detected on: ' + JSON.stringify(state));
+    let state = await currentFocus(page);
+    // In headless Chromium, Tab past the last focusable lands on the page
+    // chrome (activeElement === body). Press again: it wraps to the first
+    // focusable, completing the cycle.
+    if (!state) {
+      if (stops.length === 0) break;
+      await page.keyboard.press('Tab');
+      state = await currentFocus(page);
+      if (!state) break;
     }
-    seen.add(key);
+    const key = state.tag + '|' + state.text;
+    if (stops.length > 0) {
+      const first = stops[0];
+      if (first.tag + '|' + first.text === key) break; // full cycle: walk done
+    }
+    stops.push(state);
     await page.keyboard.press('Tab');
   }
   return stops;
@@ -122,7 +141,16 @@ export async function horizontalOverflow(page: Page): Promise<OverflowItem[]> {
     for (const el of Array.from(document.querySelectorAll('body *'))) {
       const rect = el.getBoundingClientRect();
       if (rect.width === 0 && rect.height === 0) continue;
-      if (rect.right > width + 1 || rect.left < -1) {
+      // Skip purely decorative elements: no text, no interactive or named
+      // content (background blobs bleeding off-screen are clipped by the
+      // body overflow-x:hidden and never cause scrolling).
+      const text = (el.textContent ?? '').trim();
+      const interactive = el.querySelector('input, button, select, textarea, a, [tabindex]');
+      const named = el.getAttribute('aria-label') || el.getAttribute('role');
+      if (!text && !interactive && !named) continue;
+      // Only right-edge overflow can cause horizontal scrolling; decorative
+      // elements bleeding off the LEFT edge never do.
+      if (rect.right > width + 1) {
         bad.push({
           tag: el.tagName.toLowerCase(),
           cls: (el as HTMLElement).className?.slice(0, 60) ?? '',

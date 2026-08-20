@@ -82,9 +82,20 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, retrying }: {
 
       {/* 信息区域 */}
       <div className="p-4">
-        <h3 className="font-semibold text-sm mb-1 truncate" style={{ color: '#e2e8f0' }}>
-          {novel.title}
-        </h3>
+        {novel.status === 'ready' ? (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onOpen(); }}
+            className="font-semibold text-sm mb-1 truncate text-left max-w-full"
+            style={{ color: '#e2e8f0' }}
+          >
+            {novel.title}
+          </button>
+        ) : (
+          <h3 className="font-semibold text-sm mb-1 truncate" style={{ color: '#e2e8f0' }}>
+            {novel.title}
+          </h3>
+        )}
         {novel.author && (
           <p className="text-xs mb-2 truncate" style={{ color: '#94a3b8' }}>
             {novel.author}

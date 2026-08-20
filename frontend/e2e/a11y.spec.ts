@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { installStubs } from './stubs';
-import { expectNoA11yViolations } from './helpers';
+import { expectNoA11yViolations, settleAnimations } from './helpers';
 
 // The critical journey (issue #165 list) scanned in a real Chromium with the
 // FULL WCAG 2.2 AA rule set — color-contrast from real styles, page-level
@@ -42,6 +42,7 @@ test.describe('critical journey — full axe rule set', () => {
     await page.getByRole('button', { name: /角色/ }).first().click();
     await page.getByRole('button', { name: /林晚/ }).first().click();
     await expect(page.getByRole('textbox', { name: /对 林晚 说/ })).toBeVisible();
+    await settleAnimations(page);
     await expectNoA11yViolations(page);
   });
 

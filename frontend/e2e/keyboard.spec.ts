@@ -29,7 +29,7 @@ test.describe('critical journey — keyboard operability', () => {
     await installStubs(page);
     await page.goto('/shelf');
     await expect(page.getByText('星海拾遗').first()).toBeVisible();
-    const card = page.getByRole('button', { name: /星海拾遗/ }).first();
+    const card = page.getByRole('button', { name: /^星海拾遗/ }).first();
     await card.focus();
     await page.keyboard.press('Enter');
     await expect(page).toHaveURL(/\/reader\/novel-1\/1/);
@@ -82,10 +82,13 @@ test.describe('critical journey — keyboard operability', () => {
     await page.goto('/reader/novel-1/1');
     const name = page.getByRole('textbox', { name: /名字|姓名|角色名/i }).first();
     await name.fill('测试旅人');
+    await page.getByRole('textbox', { name: /背景/i }).fill('一个测试角色');
+    await page.getByRole('textbox', { name: /能力/i }).fill('阅读');
     const submit = page.getByRole('button', { name: /创建|进入/ }).first();
     await submit.focus();
     await page.keyboard.press('Enter');
-    await expect(page.getByText('无名旅人').first()).toBeVisible();
+    // The form disappears and the world-enter gate appears once the entry is saved.
+    await expect(page.getByRole('button', { name: /进入开放世界/ })).toBeVisible();
   });
 
   test('setup: tab walk and keyboard completion of the first-run form', async ({ page }) => {
