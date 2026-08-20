@@ -256,9 +256,46 @@ async fn production_account_exports_are_complete_scoped_deterministic_and_secret
     .execute(&pool)
     .await
     .unwrap();
+    // A completed turn carries generated prose: source must be 'mixed'.
+    sqlx::query(
+        "INSERT INTO world_turns \
+         (id, user_id, novel_id, request_fingerprint, action, expected_turn_number, \
+          status, transition, result, completed_at) \
+         VALUES ($1, $2, $3, $4, $5, 1, 'completed', $6, $7, NOW())",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(novel_id)
+    .bind(vec![0x13_u8; 32])
+    .bind(json!({"kind": "investigate", "target_id": "thread", "intent": "Portable completed action"}))
+    .bind(json!({"rendered_narrative": "Portable generated consequence", "events": []}))
+    .bind(json!({"turn_id": Uuid::new_v4()}))
+    .execute(&pool)
+    .await
+    .unwrap();
+    // An open-world state combines reader actions with generated prose:
+    // source must be 'mixed'. world_states is unique per (user, novel), so
+    // the open-world state lives under a second novel of the same user.
+    let open_world_novel_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO novels (id, user_id, title, total_chapters, status)          VALUES ($1, $2, 'Open world novel', 1, 'ready')",
+    )
+    .bind(open_world_novel_id)
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO world_states (user_id, novel_id, state) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(open_world_novel_id)
+        .bind(json!({"open_world": {"turn_number": 1}}))
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query(
         "INSERT INTO player_chapters (user_id, novel_id, chapter_number, content, origin) \
          VALUES ($1, $2, 2, 'Portable generated chapter', 'continuation'), \
+                ($1, $2, 3, 'Portable choice chapter', 'choice'), \
                 ($3, $4, 2, 'other-user-marker generated chapter', 'continuation')",
     )
     .bind(user_id)
@@ -348,6 +385,78 @@ async fn production_account_exports_are_complete_scoped_deterministic_and_secret
         ])
     );
 
+    // H4: every narrative record carries a uniform source label so canonical
+    // history, reader-created history, and generated prose are programmatically
+    // separable in the export (H4 exit evidence: export preserves the
+    // canon/player distinction).
+    let record_sources: BTreeSet<String> = narrative_records
+        .iter()
+        .map(|record| {
+            record["data"]["source"]
+                .as_str()
+                .expect("every narrative record must carry a source")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        record_sources,
+        BTreeSet::from([
+            "canon".to_string(),
+            "generated".to_string(),
+            "reader".to_string(),
+            "mixed".to_string(),
+        ]),
+        "the export must distinguish canon, reader-created, generated, and mixed records"
+    );
+    for record in &narrative_records {
+        let kind = record["kind"].as_str().unwrap();
+        let source = record["data"]["source"].as_str().unwrap();
+        let description = record["data"]["description"]
+            .as_str()
+            .or_else(|| record["data"]["content"].as_str())
+            .or_else(|| record["data"]["choice_text"].as_str())
+            .or_else(|| record["data"]["action"]["intent"].as_str())
+            .unwrap_or("");
+        match (kind, source) {
+            // Canon nodes are source-anchored; player-owned nodes are
+            // LLM-generated branches.
+            ("narrative_node", "canon") => assert_eq!(description, "Portable canonical branch"),
+            ("narrative_node", "generated") => {
+                assert_eq!(description, "Portable player branch")
+            }
+            ("user_choice", "reader") => {
+                assert!(
+                    matches!(description, "Portable choice" | "Legacy scoped choice"),
+                    "reader choices must carry their text"
+                )
+            }
+            // The seeded failed turns have no transition: reader-only.
+            ("world_turn", "reader") => assert!(description.contains("Portable world action")),
+            // The seeded completed turn carries generated prose: mixed.
+            ("world_turn", "mixed") => {
+                assert_eq!(description, "Portable completed action");
+                assert_eq!(
+                    record["data"]["transition"]["rendered_narrative"]
+                        .as_str()
+                        .unwrap(),
+                    "Portable generated consequence"
+                );
+            }
+            ("player_chapter", "generated") => {
+                assert_eq!(description, "Portable generated chapter")
+            }
+            ("player_chapter", "reader") => assert_eq!(description, "Portable choice chapter"),
+            // The seeded plain world state never opened a world: reader-only.
+            ("world_state", "reader") => {}
+            // The seeded open-world state combines reader actions with
+            // generated prose: mixed.
+            ("world_state", "mixed") => {
+                assert!(record["data"]["state"]["open_world"].is_object())
+            }
+            (kind, source) => panic!("unexpected kind/source pair {kind}/{source}"),
+        }
+    }
+
     let serialized = serde_json::to_string(&json!({
         "novel": novel_records,
         "agent": agent_records,
@@ -362,7 +471,10 @@ async fn production_account_exports_are_complete_scoped_deterministic_and_secret
         "Portable player branch",
         "Portable choice",
         "Portable generated chapter",
+        "Portable choice chapter",
         "Portable world action",
+        "Portable completed action",
+        "Portable generated consequence",
         "https://assets.invalid/cover",
         "https://assets.invalid/avatar",
     ] {

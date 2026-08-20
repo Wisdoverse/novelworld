@@ -44,6 +44,16 @@ provider-returned asset URLs, not provider-hosted bytes. Narrative nodes include
 the user's own nodes and shared/canonical nodes referenced by that user's
 choices.
 
+Every narrative record's data carries a uniform source label so clients can
+programmatically separate canonical history, reader-created history, and
+generated prose (H4): canon (source-anchored narrative nodes), reader (reader
+choices, reader-triggered chapters, world turns without a committed transition,
+and world states that never opened an open world — their content is the
+reader's own decisions and the choice consequences, whether or not those
+consequences were model-written), generated (LLM-authored player branches and
+continuation chapters), and mixed (completed world turns and open-world states
+that combine reader actions with generated prose).
+
 World-turn records include the portable action, status, committed transition
 and exact replay result when present. Explicitly excluded data includes password hashes, access and refresh tokens,
 runtime LLM keys, internal service tokens, source object keys, chat-turn
