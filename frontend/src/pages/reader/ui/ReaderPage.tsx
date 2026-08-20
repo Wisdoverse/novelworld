@@ -447,7 +447,7 @@ export function ReaderPage() {
             ) : null}
             <button
               className="mt-4 px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50"
-              style={{ background: '#0891b2', color: 'white' }}
+              style={{ background: '#0e7490', color: 'white' }}
               disabled={startOpenWorld.isPending}
               onClick={() => startOpenWorld.mutate()}
             >
@@ -524,7 +524,7 @@ export function ReaderPage() {
               borderLeft: '1px solid rgba(109, 40, 217, 0.2)',
             }}
           >
-            <div className="text-xs font-semibold uppercase tracking-widest mb-4" style={{ color: '#6d28d9' }}>
+            <div className="text-xs font-semibold uppercase tracking-widest mb-4" style={{ color: '#a78bfa' }}>
               故事角色
             </div>
             {characters?.map((char) => {

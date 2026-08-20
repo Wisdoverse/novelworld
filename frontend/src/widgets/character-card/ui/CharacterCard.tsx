@@ -10,7 +10,7 @@ interface Props {
 const roleBadgeColors: Record<string, string> = {
   protagonist: '#6d28d9',
   antagonist: '#dc2626',
-  supporting: '#0891b2',
+  supporting: '#0e7490',
   minor: '#475569',
 };
 

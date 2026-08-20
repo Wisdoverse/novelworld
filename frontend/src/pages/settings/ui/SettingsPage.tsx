@@ -152,7 +152,7 @@ export function SettingsPage() {
 
             <label className="block text-sm font-semibold" style={{ color: '#cbd5e1' }}>
               模型
-              <select value={settings.model} onChange={event => setSettings({ ...settings, model: event.target.value })} className="mt-2 w-full rounded-lg px-4 py-3 outline-none" style={{ background: 'rgba(15,21,53,0.8)', border: '1px solid rgba(109,40,217,0.3)', color: '#e2e8f0' }}>
+              <select value={settings.model} onChange={event => setSettings({ ...settings, model: event.target.value })} className="mt-2 w-full rounded-lg px-4 py-3 outline-none min-h-6" style={{ background: 'rgba(15,21,53,0.8)', border: '1px solid rgba(109,40,217,0.3)', color: '#e2e8f0' }}>
                 {models.map(model => <option key={model.id} value={model.id}>{model.label} — {model.hint}</option>)}
               </select>
             </label>
@@ -166,13 +166,13 @@ export function SettingsPage() {
                     <span className="mt-1 block text-xs leading-relaxed" style={{ color: '#94a3b8' }}>启用时通过 DeepSeek Responses API 处理推理与输出；小说 JSON 解析始终使用非思考模式，避免推理耗尽输出预算。</span>
                   </span>
                 </span>
-                <input type="checkbox" checked={settings.thinking_enabled} onChange={event => setSettings({ ...settings, thinking_enabled: event.target.checked })} className="mt-1 h-4 w-4" />
+                <input type="checkbox" checked={settings.thinking_enabled} onChange={event => setSettings({ ...settings, thinking_enabled: event.target.checked })} className="mt-1 h-6 w-6" />
               </label>
             )}
 
             <label className="block text-sm font-semibold" style={{ color: '#cbd5e1' }}>
               <span className="flex items-center gap-2"><Key size={15} /> API Key（留空则保持现有 Key）</span>
-              <input type="password" value={apiKey} onChange={event => setApiKey(event.target.value)} autoComplete="off" placeholder={settings.api_key_configured ? '已配置' : '请输入 API Key'} className="mt-2 w-full rounded-lg px-4 py-3 outline-none" style={{ background: 'rgba(15,21,53,0.8)', border: '1px solid rgba(109,40,217,0.3)', color: '#e2e8f0' }} />
+              <input type="password" value={apiKey} onChange={event => setApiKey(event.target.value)} autoComplete="off" placeholder={settings.api_key_configured ? '已配置' : '请输入 API Key'} className="mt-2 w-full rounded-lg px-4 py-3 outline-none min-h-6" style={{ background: 'rgba(15,21,53,0.8)', border: '1px solid rgba(109,40,217,0.3)', color: '#e2e8f0' }} />
             </label>
 
             <button type="submit" disabled={saving} className="flex w-full items-center justify-center gap-2 rounded-lg py-3 font-semibold" style={{ background: 'linear-gradient(135deg, #0891b2, #6d28d9)', color: 'white', opacity: saving ? 0.65 : 1 }}>
