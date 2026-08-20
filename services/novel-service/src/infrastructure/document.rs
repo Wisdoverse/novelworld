@@ -135,12 +135,13 @@ fn decode_utf16(data: &[u8], little_endian: bool) -> Result<String, DocumentExtr
     if !data.len().is_multiple_of(2) {
         return Err(DocumentExtractionError::InvalidTextEncoding);
     }
-    let units = data.chunks_exact(2).map(|chunk| {
-        let bytes = [chunk[0], chunk[1]];
+    // The length check above guarantees an exact multiple of 2, so the
+    // as_chunks remainder is always empty.
+    let units = data.as_chunks::<2>().0.iter().map(|bytes| {
         if little_endian {
-            u16::from_le_bytes(bytes)
+            u16::from_le_bytes(*bytes)
         } else {
-            u16::from_be_bytes(bytes)
+            u16::from_be_bytes(*bytes)
         }
     });
     std::char::decode_utf16(units)
