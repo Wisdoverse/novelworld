@@ -100,10 +100,17 @@ test.describe('critical journey — keyboard operability', () => {
     for (const stop of stops) {
       expect(stop.visibleIndicator, 'no visible focus indicator on ' + stop.tag + ' ' + stop.cls).toBe(true);
     }
-    const input = page.getByRole('textbox').first();
+    const input = page.getByRole('textbox', { name: /API Key/ }).first();
     await input.fill('sk-test-key');
     await page.getByRole('button', { name: /下一步/ }).first().click();
-    await page.getByRole('button', { name: /完成|开始使用/ }).first().click();
-    await expect(page.getByText('欢迎使用 NovelWorld').first()).toBeVisible();
+    // Step 2 requires an email and an 8+ char password (native form
+    // validation blocks submission otherwise — the earlier version of this
+    // test passed vacuously by asserting the setup page was still visible).
+    await page.getByRole('textbox', { name: /邮箱/ }).fill('admin@example.com');
+    await page.getByRole('textbox', { name: /密码/ }).fill('password123');
+    await page.getByRole('button', { name: /完成设置/ }).click();
+    // Completion is real: the setup page unmounts and the app boots to home.
+    await expect(page.getByText('欢迎使用 NovelWorld')).toBeHidden();
+    await expect(page.getByText('开始你的旅程').first()).toBeVisible();
   });
 });

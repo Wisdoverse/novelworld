@@ -58,6 +58,9 @@ test.describe('critical journey — full axe rule set', () => {
     await installStubs(page, { entryRequired: true });
     await page.goto('/reader/novel-1/1');
     await expect(page.getByText('第一章 北塔来信').first()).toBeVisible();
+    // Gate the scan on the form itself, not just the chapter: the scan must
+    // never run on the pre-data frame.
+    await expect(page.getByText('创建你的原创角色').first()).toBeVisible();
     await page.waitForLoadState('networkidle');
     await expectNoA11yViolations(page);
   });
