@@ -20,7 +20,7 @@ export default {
         },
         starlight: '#e2e8f0',
         moonbeam: '#94a3b8',
-        comet: '#475569',
+        comet: '#94a3b8',
       },
       fontFamily: {
         display: ['Cinzel', 'serif'],

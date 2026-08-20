@@ -125,7 +125,7 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
         type="submit"
         disabled={isPending || isLocked || !intent.trim() || (targetRequired && !selectedTarget)}
         className="px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50"
-        style={{ background: '#0891b2', color: 'white' }}
+        style={{ background: '#0e7490', color: 'white' }}
       >
         {isPending ? '世界正在回应…' : '执行行动'}
       </button>

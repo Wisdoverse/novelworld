@@ -15,7 +15,7 @@
   --color-nova-glow: #22d3ee;     /* 发光青 */
   --color-starlight: #e2e8f0;     /* 星光白 */
   --color-moonbeam: #94a3b8;      /* 月光灰 */
-  --color-comet: #475569;         /* 彗星灰 */
+  --color-comet: #94a3b8;         /* 彗星灰 (brightened for WCAG 2.2 AA text contrast) */
 
   /* 发光效果 */
   --glow-nova: 0 0 20px rgba(6, 182, 212, 0.4), 0 0 40px rgba(6, 182, 212, 0.2);

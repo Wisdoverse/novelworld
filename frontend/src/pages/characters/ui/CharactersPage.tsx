@@ -43,6 +43,7 @@ export function CharactersPage() {
           <button
             onClick={() => navigate(-1)}
             className="p-2 rounded-lg transition-all"
+            aria-label="返回"
             style={{
               background: 'rgba(15, 21, 53, 0.6)',
               border: '1px solid rgba(109, 40, 217, 0.2)',

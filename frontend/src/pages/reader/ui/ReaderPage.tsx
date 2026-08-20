@@ -270,7 +270,7 @@ export function ReaderPage() {
             <div className="text-sm font-medium" style={{ color: '#e2e8f0' }}>
               {novel?.title}
             </div>
-            <div className="text-xs" style={{ color: '#475569' }}>
+            <div className="text-xs" style={{ color: '#94a3b8' }}>
               {chapter?.title || `第 ${currentChapter} 章`}
             </div>
           </div>
@@ -278,7 +278,7 @@ export function ReaderPage() {
 
         <div className="flex items-center gap-2">
           {/* 进度 */}
-          <div className="hidden md:flex items-center gap-2 text-xs" style={{ color: '#475569' }}>
+          <div className="hidden md:flex items-center gap-2 text-xs" style={{ color: '#94a3b8' }}>
             <BookOpen size={12} />
             {currentChapter} / {novel?.total_chapters || '?'}
           </div>
@@ -351,7 +351,7 @@ export function ReaderPage() {
           >
             {/* 章节标题 */}
             <div className="text-center mb-12 pt-8">
-              <div className="text-xs font-semibold uppercase tracking-widest mb-2" style={{ color: '#6d28d9' }}>
+              <div className="text-xs font-semibold uppercase tracking-widest mb-2" style={{ color: '#a78bfa' }}>
                 第 {currentChapter} 章
               </div>
               {effectiveChapter.generated && (
@@ -557,7 +557,7 @@ export function ReaderPage() {
                   )}
                   <div className="min-w-0">
                     <div className="text-sm font-medium truncate" style={{ color: '#e2e8f0' }}>{char.name}</div>
-                    <div className="text-xs truncate" style={{ color: '#475569' }}>
+                    <div className="text-xs truncate" style={{ color: '#94a3b8' }}>
                       {isDead ? '当前时间线已死亡' : char.role === 'protagonist' ? '主角' : char.role === 'antagonist' ? '反派' : '配角'}
                     </div>
                   </div>

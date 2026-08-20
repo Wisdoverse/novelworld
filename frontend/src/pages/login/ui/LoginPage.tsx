@@ -108,7 +108,7 @@ export function LoginPage({ initialRegister = false }: { initialRegister?: boole
               disabled={loading}
               className="w-full py-3 rounded-lg font-semibold transition-all"
               style={{
-                background: 'linear-gradient(135deg, var(--color-aurora), var(--color-nova))',
+                background: 'linear-gradient(135deg, var(--color-aurora), #0e7490)',
                 color: 'white',
                 opacity: loading ? 0.7 : 1,
               }}

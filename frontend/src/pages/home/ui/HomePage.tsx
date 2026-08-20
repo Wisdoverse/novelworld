@@ -264,7 +264,7 @@ export function HomePage() {
               <h3 className="font-semibold mb-2" style={{ color: '#e2e8f0' }}>
                 {feature.title}
               </h3>
-              <p className="text-sm leading-relaxed" style={{ color: '#64748b' }}>
+              <p className="text-sm leading-relaxed" style={{ color: '#94a3b8' }}>
                 {feature.desc}
               </p>
             </motion.div>
@@ -273,7 +273,7 @@ export function HomePage() {
       </div>
 
       {/* 底部 */}
-      <footer className="relative z-10 text-center py-8 border-t" style={{ borderColor: 'rgba(109,40,217,0.1)', color: '#334155' }}>
+      <footer className="relative z-10 text-center py-8 border-t" style={{ borderColor: 'rgba(109,40,217,0.1)', color: '#94a3b8' }}>
         <p className="text-xs">© 2025 NovelWorld · 让每本书都成为你的世界</p>
       </footer>
     </div>

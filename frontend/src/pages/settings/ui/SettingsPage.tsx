@@ -134,7 +134,7 @@ export function SettingsPage() {
             </div>
             <div>
               <h1 className="text-xl font-semibold" style={{ color: '#e2e8f0' }}>模型设置</h1>
-              <p className="text-sm" style={{ color: '#64748b' }}>更改后续解析与角色对话使用的模型</p>
+              <p className="text-sm" style={{ color: '#94a3b8' }}>更改后续解析与角色对话使用的模型</p>
             </div>
           </div>
 
@@ -163,7 +163,7 @@ export function SettingsPage() {
                   <Brain size={20} style={{ color: '#22d3ee' }} />
                   <span>
                     <span className="block text-sm font-semibold" style={{ color: '#e2e8f0' }}>角色对话启用思考模式</span>
-                    <span className="mt-1 block text-xs leading-relaxed" style={{ color: '#64748b' }}>启用时通过 DeepSeek Responses API 处理推理与输出；小说 JSON 解析始终使用非思考模式，避免推理耗尽输出预算。</span>
+                    <span className="mt-1 block text-xs leading-relaxed" style={{ color: '#94a3b8' }}>启用时通过 DeepSeek Responses API 处理推理与输出；小说 JSON 解析始终使用非思考模式，避免推理耗尽输出预算。</span>
                   </span>
                 </span>
                 <input type="checkbox" checked={settings.thinking_enabled} onChange={event => setSettings({ ...settings, thinking_enabled: event.target.checked })} className="mt-1 h-4 w-4" />
@@ -189,7 +189,7 @@ export function SettingsPage() {
             </div>
             <div>
               <h1 id="account-settings-heading" className="text-xl font-semibold" style={{ color: '#e2e8f0' }}>账号设置</h1>
-              <p className="text-sm" style={{ color: '#64748b' }}>{user?.email}</p>
+              <p className="text-sm" style={{ color: '#94a3b8' }}>{user?.email}</p>
             </div>
           </div>
           <p className="mb-5 text-sm leading-relaxed" style={{ color: '#94a3b8' }}>

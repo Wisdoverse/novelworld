@@ -78,10 +78,10 @@ export function WorldDashboard({ novelId, view }: WorldDashboardProps) {
           {activeThreads.length ? (
             <ul className="mt-3 space-y-2 text-sm" style={{ color: '#cbd5e1' }}>
               {activeThreads.map(([id, thread]) => (
-                <li key={id}>{thread.description} <span className="text-xs" style={{ color: '#64748b' }}>· {thread.origin === 'player' ? '玩家创造' : '原著主线'}</span></li>
+                <li key={id}>{thread.description} <span className="text-xs" style={{ color: '#94a3b8' }}>· {thread.origin === 'player' ? '玩家创造' : '原著主线'}</span></li>
               ))}
             </ul>
-          ) : <p className="mt-3 text-sm" style={{ color: '#64748b' }}>暂无活跃事件线</p>}
+          ) : <p className="mt-3 text-sm" style={{ color: '#94a3b8' }}>暂无活跃事件线</p>}
         </div>
         <div className="p-4 rounded-xl" style={{ background: 'rgba(109, 40, 217, 0.08)' }}>
           <h3 className="flex items-center gap-2 text-sm font-semibold" style={{ color: '#c4b5fd' }}>
@@ -95,7 +95,7 @@ export function WorldDashboard({ novelId, view }: WorldDashboardProps) {
                 </li>
               ))}
             </ul>
-          ) : <p className="mt-3 text-sm" style={{ color: '#64748b' }}>尚未建立关系</p>}
+          ) : <p className="mt-3 text-sm" style={{ color: '#94a3b8' }}>尚未建立关系</p>}
         </div>
       </div>
 
@@ -109,13 +109,13 @@ export function WorldDashboard({ novelId, view }: WorldDashboardProps) {
               <li key={event.id} className="p-3 rounded-lg text-sm" style={{ background: 'rgba(255,255,255,0.04)', color: '#cbd5e1' }}>
                 <span className="mr-2 text-xs font-semibold" style={{ color: '#a78bfa' }}>原著主线</span>
                 {event.summary}
-                <div className="mt-1 text-xs" style={{ color: '#64748b' }}>
+                <div className="mt-1 text-xs" style={{ color: '#94a3b8' }}>
                   {eventStatus[event.status]} · 来源章节 {event.source_chapters.join('、')}{event.reason ? ` · ${event.reason}` : ''}
                 </div>
               </li>
             ))}
           </ol>
-        ) : <p className="mt-3 text-sm" style={{ color: '#64748b' }}>当前解锁范围内没有待运行的原著事件。</p>}
+        ) : <p className="mt-3 text-sm" style={{ color: '#94a3b8' }}>当前解锁范围内没有待运行的原著事件。</p>}
       </div>
 
       <div>
@@ -133,13 +133,13 @@ export function WorldDashboard({ novelId, view }: WorldDashboardProps) {
                   <span className="mr-2 font-semibold" style={{ color: '#c084fc' }}>生成叙事</span>
                   {entry.transition.rendered_narrative}
                 </div>
-                <time dateTime={entry.completed_at} className="mt-1 block text-xs" style={{ color: '#64748b' }}>
+                <time dateTime={entry.completed_at} className="mt-1 block text-xs" style={{ color: '#94a3b8' }}>
                   {entry.completed_at}
                 </time>
               </li>
             ))}
           </ol>
-        ) : <p className="mt-3 text-sm" style={{ color: '#64748b' }}>你的第一个行动将记录在这里。</p>}
+        ) : <p className="mt-3 text-sm" style={{ color: '#94a3b8' }}>你的第一个行动将记录在这里。</p>}
       </div>
 
       <div className="pt-6" style={{ borderTop: '1px solid rgba(255,255,255,0.08)' }}>
