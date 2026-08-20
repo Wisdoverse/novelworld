@@ -70,6 +70,7 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, retrying }: {
         {/* 删除按钮 */}
         <button
           onClick={(e) => { e.stopPropagation(); onDelete(); }}
+          aria-label={`删除 ${novel.title}`}
           className={`absolute top-3 left-3 p-1.5 rounded-lg transition-opacity ${
             novel.status === 'error' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
           }`}
@@ -85,11 +86,11 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, retrying }: {
           {novel.title}
         </h3>
         {novel.author && (
-          <p className="text-xs mb-2 truncate" style={{ color: '#475569' }}>
+          <p className="text-xs mb-2 truncate" style={{ color: '#94a3b8' }}>
             {novel.author}
           </p>
         )}
-        <div className="flex items-center justify-between text-xs" style={{ color: '#334155' }}>
+        <div className="flex items-center justify-between text-xs" style={{ color: '#64748b' }}>
           <span>{novel.total_chapters > 0 ? `${novel.total_chapters} 章` : '—'}</span>
           <span className="flex items-center gap-1">
             <Clock size={10} />
