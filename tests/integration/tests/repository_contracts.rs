@@ -2725,3 +2725,400 @@ async fn production_repositories_match_fresh_schema() {
         .await
         .unwrap();
 }
+
+// ─── H4: world-turn idempotency and race contracts on real PostgreSQL ───
+//
+// These tests prove zero duplicate commit across retry/reordering races and
+// completed-key replay semantics at the persistence layer (H4 exit evidence).
+
+async fn seed_world_turn(pool: &PgPool) -> (Uuid, Uuid, WorldEntryContext) {
+    let user_id = Uuid::new_v4();
+    let novel_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO users (id, email, password_hash) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(format!("world-turn-{user_id}@test.invalid"))
+        .bind("not-a-real-password-hash")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO novels (id, user_id, title, total_chapters, status) \
+         VALUES ($1, $2, $3, 1, 'ready')",
+    )
+    .bind(novel_id)
+    .bind(user_id)
+    .bind("World turn contract")
+    .execute(pool)
+    .await
+    .unwrap();
+    let world_state_repo = PgWorldStateRepository::new(pool.clone());
+    world_state_repo
+        .get_or_create(user_id, novel_id)
+        .await
+        .unwrap();
+    let player = PlayerEntity::new(
+        user_id,
+        novel_id,
+        1,
+        "云舟".into(),
+        "来自边城的地图学徒。".into(),
+        vec!["辨认古地图".into()],
+        "north-tower".into(),
+        vec!["旧地图".into()],
+    )
+    .unwrap();
+    world_state_repo
+        .create_player_entity(&player)
+        .await
+        .unwrap();
+    let context = WorldEntryContext {
+        model_version: 1,
+        checkpoint_chapter: 1,
+        unlocked_through_chapter: 2,
+        characters: vec![],
+        locations: vec![WorldEntityRef {
+            id: "north-tower".into(),
+            name: "North Tower".into(),
+        }],
+        factions: vec![],
+        hard_rules: vec![],
+        dead_character_ids: vec![],
+        threads: vec![],
+        scheduled_events: vec![],
+        character_goals: vec![],
+    };
+    world_state_repo
+        .start_open_world(user_id, novel_id, &context)
+        .await
+        .unwrap();
+    (user_id, novel_id, context)
+}
+
+fn world_turn_transition() -> WorldTurnTransition {
+    WorldTurnTransition {
+        schema_version: WORLD_TURN_SCHEMA_VERSION,
+        prompt_version: WORLD_TURN_PROMPT_VERSION.into(),
+        canon_model_version: 1,
+        canonical_checkpoint_chapter: 1,
+        rendered_narrative: "你在北塔找到一条隐秘道路。".into(),
+        events: vec![TransitionEvent {
+            summary: "玩家找到隐秘道路".into(),
+            actor_character_ids: vec![],
+            location_id: Some("north-tower".into()),
+        }],
+        relationship_changes: vec![],
+        location_changes: vec![],
+        thread_changes: vec![],
+        player_location_id: Some("north-tower".into()),
+        inventory_additions: vec![],
+        inventory_removals: vec![],
+        knowledge_discoveries: vec![],
+        faction_changes: vec![],
+        canonical_event_change: None,
+    }
+}
+
+fn world_turn_action() -> WorldAction {
+    WorldAction {
+        kind: WorldActionKind::Travel,
+        target_id: Some("north-tower".into()),
+        intent: "前往北塔".into(),
+    }
+}
+
+fn world_turn_claim(user_id: Uuid, novel_id: Uuid) -> WorldTurnClaim {
+    WorldTurnClaim {
+        id: Uuid::new_v4(),
+        user_id,
+        novel_id,
+        request_fingerprint: vec![7; 32],
+        action: world_turn_action(),
+        expected_turn_number: 0,
+    }
+}
+
+#[tokio::test]
+async fn world_turn_concurrent_same_key_acquires_exactly_once() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (user_id, novel_id, _context) = seed_world_turn(&pool).await;
+    let repo = PgWorldTurnRepository::new(pool.clone());
+    let claim = world_turn_claim(user_id, novel_id);
+    // Real concurrent race on the same key: the loser's INSERT blocks on the
+    // partial unique index and then observes the committed in_progress row.
+    let (first, second) = tokio::join!(repo.begin_turn(&claim), repo.begin_turn(&claim));
+    let results = [first.unwrap(), second.unwrap()];
+    let acquired = results
+        .iter()
+        .filter(|result| matches!(result, BeginWorldTurn::Acquired { .. }))
+        .count();
+    let in_progress = results
+        .iter()
+        .filter(|result| matches!(result, BeginWorldTurn::InProgress { .. }))
+        .count();
+    assert_eq!(acquired, 1, "exactly one begin must acquire the key");
+    assert_eq!(in_progress, 1, "the loser must observe InProgress");
+    let status: String = sqlx::query_scalar("SELECT status FROM world_turns WHERE id = $1")
+        .bind(claim.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "in_progress");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM world_turns WHERE id = $1")
+            .bind(claim.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1,
+        "a key race must never insert two rows"
+    );
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn world_turn_completed_key_replays_and_cannot_commit_twice() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (user_id, novel_id, context) = seed_world_turn(&pool).await;
+    let repo = PgWorldTurnRepository::new(pool.clone());
+    let claim = world_turn_claim(user_id, novel_id);
+    let transition = world_turn_transition();
+    let attempt = match repo.begin_turn(&claim).await.unwrap() {
+        BeginWorldTurn::Acquired { attempt, .. } => attempt,
+        result => panic!("unexpected reservation: {result:?}"),
+    };
+    let completed = repo
+        .complete_turn(&claim, attempt, &transition, &context)
+        .await
+        .unwrap();
+    // Completed-key replay returns the stored result, entity-equal.
+    let replayed = match repo.begin_turn(&claim).await.unwrap() {
+        BeginWorldTurn::Completed(replayed) => *replayed,
+        result => panic!("unexpected replay: {result:?}"),
+    };
+    assert_eq!(replayed, completed);
+    // A second commit on the completed key is fenced — with the same attempt
+    // and with a bumped attempt: no duplicate commit either way.
+    assert!(repo
+        .complete_turn(&claim, attempt, &transition, &context)
+        .await
+        .is_err());
+    assert!(repo
+        .complete_turn(&claim, attempt + 1, &transition, &context)
+        .await
+        .is_err());
+    let (status, turn_number): (String, i64) = sqlx::query_as(
+        "SELECT status, (state #>> '{open_world,turn_number}')::BIGINT FROM world_turns w \
+         JOIN world_states s ON s.user_id = w.user_id AND s.novel_id = w.novel_id \
+         WHERE w.id = $1",
+    )
+    .bind(claim.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(status, "completed");
+    assert_eq!(turn_number, 1, "the world state must advance exactly once");
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn world_turn_renew_fences_stale_attempts() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (user_id, novel_id, _context) = seed_world_turn(&pool).await;
+    let repo = PgWorldTurnRepository::new(pool.clone());
+    let claim = world_turn_claim(user_id, novel_id);
+    let attempt = match repo.begin_turn(&claim).await.unwrap() {
+        BeginWorldTurn::Acquired { attempt, .. } => attempt,
+        result => panic!("unexpected reservation: {result:?}"),
+    };
+    assert!(repo.renew_turn(claim.id, attempt).await.unwrap());
+    // A valid renew must actually extend the lease deadline.
+    let deadline: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT lease_expires_at FROM world_turns WHERE id = $1")
+            .bind(claim.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        deadline > chrono::Utc::now() + chrono::Duration::minutes(1),
+        "a valid renew must extend the lease"
+    );
+    assert!(
+        !repo.renew_turn(claim.id, attempt + 1).await.unwrap(),
+        "a stale attempt must not renew the lease"
+    );
+    assert!(repo.renew_turn(claim.id, attempt).await.unwrap());
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn world_turn_expired_lease_is_reclaimed_or_superseded() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (user_id, novel_id, _context) = seed_world_turn(&pool).await;
+    let repo = PgWorldTurnRepository::new(pool.clone());
+    let claim = world_turn_claim(user_id, novel_id);
+    let attempt = match repo.begin_turn(&claim).await.unwrap() {
+        BeginWorldTurn::Acquired { attempt, .. } => attempt,
+        result => panic!("unexpected reservation: {result:?}"),
+    };
+    // Force lease expiry instead of waiting out the 2-minute lease.
+    sqlx::query(
+        "UPDATE world_turns SET lease_expires_at = NOW() - INTERVAL '1 minute' WHERE id = $1",
+    )
+    .bind(claim.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Same-key reclaim bumps the attempt atomically.
+    let reclaimed = match repo.begin_turn(&claim).await.unwrap() {
+        BeginWorldTurn::Acquired { attempt, .. } => attempt,
+        result => panic!("unexpected reclaim: {result:?}"),
+    };
+    assert_eq!(reclaimed, attempt + 1);
+    // A fresh key while an expired active row exists supersedes it.
+    sqlx::query(
+        "UPDATE world_turns SET lease_expires_at = NOW() - INTERVAL '1 minute' WHERE id = $1",
+    )
+    .bind(claim.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let fresh = WorldTurnClaim {
+        id: Uuid::new_v4(),
+        ..claim.clone()
+    };
+    assert!(matches!(
+        repo.begin_turn(&fresh).await.unwrap(),
+        BeginWorldTurn::Acquired { .. }
+    ));
+    let (status, failure_code): (String, Option<String>) =
+        sqlx::query_as("SELECT status, failure_code FROM world_turns WHERE id = $1")
+            .bind(claim.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "failed");
+    assert_eq!(failure_code.as_deref(), Some("superseded"));
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn world_turn_replay_does_not_advance_state() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (user_id, novel_id, context) = seed_world_turn(&pool).await;
+    let repo = PgWorldTurnRepository::new(pool.clone());
+    let claim = world_turn_claim(user_id, novel_id);
+    let transition = world_turn_transition();
+    let attempt = match repo.begin_turn(&claim).await.unwrap() {
+        BeginWorldTurn::Acquired { attempt, .. } => attempt,
+        result => panic!("unexpected reservation: {result:?}"),
+    };
+    let completed = repo
+        .complete_turn(&claim, attempt, &transition, &context)
+        .await
+        .unwrap();
+    let state_after = completed.world_state.state.clone();
+    // Replay the completed key: zero writes, no state advance.
+    let replayed = match repo.begin_turn(&claim).await.unwrap() {
+        BeginWorldTurn::Completed(replayed) => *replayed,
+        result => panic!("unexpected replay: {result:?}"),
+    };
+    assert_eq!(replayed.world_state.state, state_after);
+    let (turn_number, attempt_now): (i64, i64) = sqlx::query_as(
+        "SELECT (state #>> '{open_world,turn_number}')::BIGINT, \
+         (SELECT attempt FROM world_turns WHERE id = $1) \
+         FROM world_states WHERE user_id = $2 AND novel_id = $3",
+    )
+    .bind(claim.id)
+    .bind(user_id)
+    .bind(novel_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(turn_number, 1);
+    assert_eq!(attempt_now, 1, "replay must not bump the attempt");
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn world_turn_journal_rebuilds_equivalent_state() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (user_id, novel_id, context) = seed_world_turn(&pool).await;
+    let world_state_repo = PgWorldStateRepository::new(pool.clone());
+    let pre_state = world_state_repo
+        .get_or_create(user_id, novel_id)
+        .await
+        .unwrap();
+    let repo = PgWorldTurnRepository::new(pool.clone());
+    let claim = world_turn_claim(user_id, novel_id);
+    let transition = world_turn_transition();
+    let attempt = match repo.begin_turn(&claim).await.unwrap() {
+        BeginWorldTurn::Acquired { attempt, .. } => attempt,
+        result => panic!("unexpected reservation: {result:?}"),
+    };
+    let completed = repo
+        .complete_turn(&claim, attempt, &transition, &context)
+        .await
+        .unwrap();
+    // Rebuilding from the committed journal must reproduce equivalent
+    // authoritative state (H4 exit evidence: checkpoint + journal replay).
+    let journal = repo.journal(user_id, novel_id, 100).await.unwrap();
+    assert_eq!(journal.len(), 1);
+    let entry = &journal[0];
+    assert_eq!(entry.turn_id, claim.id);
+    assert_eq!(entry.action, claim.action);
+    assert_eq!(entry.transition, transition);
+    let mut rebuilt = pre_state;
+    rebuilt
+        .apply_world_turn(entry.turn_id, &entry.action, &entry.transition, &context)
+        .unwrap();
+    assert_eq!(rebuilt.state, completed.world_state.state);
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
