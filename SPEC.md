@@ -68,7 +68,7 @@ Important boundary:
 - Present branch choice nodes at key chapters and persist the reader's selections in a world state
   document.
 - Use an original `PlayerEntity` as the primary identity; retain character identity only as a
-  compatibility path until its agency boundary is qualified.
+  compatibility path for conversation and branch choices, with the agency boundary in §8.2.
 - Generate character avatar images from appearance descriptions using an image generation API.
 - Enforce per-reader memory isolation so no reader can observe another reader's conversation
   history or world state.
@@ -918,8 +918,11 @@ existing wire name is retained for compatibility:
   Agents address the player in second person and canonical characters perceive
   the player as another person in their world.
 - `character`: A legacy compatibility mode in which the reader adopts a character identity for
-  conversation and branch paths. It is not a supported open-world agency promise until H4 defines
-  and qualifies its control boundary.
+  conversation and branch paths. Its agency boundary is defined in §8.2 and MUST NOT exceed it:
+  a character-identity reader MAY chat in-character and take branch choices, but MUST NOT create
+  a `PlayerEntity`, enter the open world, submit world turns, read or mutate the world journal,
+  or hold relationship/faction/location mutation authority. The open world and all its turns,
+  journal, and mutation paths remain exclusive to `self` mode with a durable `PlayerEntity`.
 
 ### 8.2 Identity Constraints
 
@@ -928,6 +931,12 @@ existing wire name is retained for compatibility:
 - A reader MUST NOT adopt the identity of the character they are currently conversing with.
 - Identity changes take effect immediately for new conversation turns; they do not retroactively
   alter existing `ChatMessage` records.
+- Character-identity readers MUST be refused open-world entry and world-turn submission when they
+  hold no `PlayerEntity`; the refusal MUST be a conflict/not-found error, never a silent no-op.
+- Switching identity from `character` to `self` (or back) MUST NOT create or destroy a
+  `PlayerEntity`; the `self`-mode open world only exists once the reader explicitly creates one.
+- Character-identity data (identity type, name, character id) is portable account data: it MUST
+  be included in account export and MUST NOT enter the canonical story model.
 - In `self` mode, narrative choices MUST be actions performed by the
   `PlayerEntity`; they MUST NOT transfer control of a canonical character to the
   player.

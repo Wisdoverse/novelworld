@@ -106,8 +106,10 @@ runtime outcome exists.
    promotion while its account and novel exist. Account or novel deletion still
    erases it.
 8. **Character identity:** `self` with a durable original `PlayerEntity` is the
-   primary open-world mode. Character identity remains compatibility behavior
-   until H4 defines and qualifies its agency boundary.
+   primary open-world mode. Character identity is a compatibility mode for
+   conversation and branch choices only: it MUST NOT create a `PlayerEntity`,
+   enter the open world, submit world turns, or hold world-journal or
+   relationship/faction/location mutation authority (boundary in SPEC §8.2).
 9. **Prompt injection:** prompts delimit untrusted source/user content and model
    output is validated before authoritative transitions. Prompt text cannot
    guarantee model behavior or authorize an operation.
