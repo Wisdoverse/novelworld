@@ -8,7 +8,7 @@ interface WorldActionFormProps {
   onSubmit: (action: WorldAction) => Promise<unknown>;
 }
 
-const actionLabels: Record<WorldActionKind, string> = {
+export const actionLabels: Record<WorldActionKind, string> = {
   travel: '前往地点',
   investigate: '调查线索',
   converse: '与角色交谈',
