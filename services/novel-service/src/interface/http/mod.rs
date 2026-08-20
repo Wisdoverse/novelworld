@@ -800,7 +800,7 @@ async fn get_novel(
 ) -> impl IntoResponse {
     match owned_novel(&state, &headers, id).await {
         Ok(novel) => (StatusCode::OK, Json(novel)).into_response(),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -857,7 +857,7 @@ async fn retry_novel(
         None => return StatusCode::UNAUTHORIZED.into_response(),
     };
     if let Err(response) = owned_novel(&state, &headers, id).await {
-        return response;
+        return *response;
     }
     match state.handler.retry_import(user_id, id).await {
         Ok(()) => (
@@ -879,7 +879,7 @@ async fn list_chapters(
     Path(novel_id): Path<Uuid>,
 ) -> impl IntoResponse {
     if let Err(response) = owned_novel(&state, &headers, novel_id).await {
-        return response;
+        return *response;
     }
     match state.chapter_repo.find_by_novel(novel_id).await {
         Ok(chapters) => (StatusCode::OK, Json(chapters)).into_response(),
@@ -899,7 +899,7 @@ async fn get_chapter(
     Path((novel_id, num)): Path<(Uuid, i32)>,
 ) -> impl IntoResponse {
     if let Err(response) = owned_novel(&state, &headers, novel_id).await {
-        return response;
+        return *response;
     }
     match state.chapter_repo.find_by_number(novel_id, num).await {
         Ok(Some(ch)) => (StatusCode::OK, Json(ch)).into_response(),
@@ -964,7 +964,7 @@ async fn list_relationships(
     Path(novel_id): Path<Uuid>,
 ) -> impl IntoResponse {
     if let Err(response) = owned_novel(&state, &headers, novel_id).await {
-        return response;
+        return *response;
     }
     match state.character_repo.find_relationships(novel_id).await {
         Ok(rels) => (StatusCode::OK, Json(rels)).into_response(),
@@ -994,7 +994,7 @@ async fn get_parse_status(
             })),
         )
             .into_response(),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -1047,32 +1047,36 @@ async fn owned_novel(
     state: &AppState,
     headers: &HeaderMap,
     novel_id: Uuid,
-) -> Result<Novel, Response> {
+) -> Result<Novel, Box<Response>> {
     let user_id = extract_user_id(headers).ok_or_else(|| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ApiError {
-                error: "Missing or invalid X-User-Id header".into(),
-            }),
+        Box::new(
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiError {
+                    error: "Missing or invalid X-User-Id header".into(),
+                }),
+            )
+                .into_response(),
         )
-            .into_response()
     })?;
 
     match state.novel_repo.find_by_id(novel_id).await {
         Ok(Some(novel)) if is_novel_owner(&novel, user_id) => Ok(novel),
-        Ok(_) => Err((
-            StatusCode::NOT_FOUND,
-            Json(ApiError {
-                error: "Novel not found".into(),
-            }),
-        )
-            .into_response()),
+        Ok(_) => Err(Box::new(
+            (
+                StatusCode::NOT_FOUND,
+                Json(ApiError {
+                    error: "Novel not found".into(),
+                }),
+            )
+                .into_response(),
+        )),
         Err(error) => {
             tracing::error!(%error, %novel_id, "owned novel lookup failed");
-            Err(api_error(
+            Err(Box::new(api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal server error",
-            ))
+            )))
         }
     }
 }
