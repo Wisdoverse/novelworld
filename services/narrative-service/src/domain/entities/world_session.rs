@@ -631,7 +631,11 @@ impl WorldTurnTransition {
             {
                 return invalid("travel must move the player to the requested location");
             }
-            _ if self.player_location_id.is_some() => {
+            // A travel transition must name the destination (the guard above
+            // rejects a mismatch); any OTHER action must not carry one.
+            _ if !matches!(action.kind, WorldActionKind::Travel)
+                && self.player_location_id.is_some() =>
+            {
                 return invalid("only travel may change the player location")
             }
             _ => {}
@@ -1030,6 +1034,63 @@ mod tests {
         }
         .validate(&dead)
         .is_err());
+    }
+
+    #[test]
+    fn travel_transition_carries_the_destination_and_others_carry_none() {
+        let character_id = Uuid::new_v4();
+        let context = context(character_id);
+        let session = state(&context).open_world().unwrap().unwrap();
+        let travel = WorldAction {
+            kind: WorldActionKind::Travel,
+            target_id: Some("gate".into()),
+            intent: "赶到城门".into(),
+        };
+        let mut transition = WorldTurnTransition {
+            schema_version: WORLD_TURN_SCHEMA_VERSION,
+            prompt_version: WORLD_TURN_PROMPT_VERSION.into(),
+            canon_model_version: context.model_version,
+            canonical_checkpoint_chapter: context.checkpoint_chapter,
+            rendered_narrative: "你赶到城门。".into(),
+            events: vec![TransitionEvent {
+                summary: "你赶到城门".into(),
+                actor_character_ids: vec![],
+                location_id: Some("gate".into()),
+            }],
+            relationship_changes: vec![],
+            location_changes: vec![],
+            thread_changes: vec![],
+            player_location_id: None,
+            inventory_additions: vec![],
+            inventory_removals: vec![],
+            knowledge_discoveries: vec![],
+            faction_changes: vec![],
+            canonical_event_change: None,
+        };
+        // Travel without the destination is rejected.
+        assert!(transition
+            .validate_against(&travel, &context, &session)
+            .is_err());
+        // Regression (H4 contract tests): a travel transition naming the
+        // destination must pass — the location guard used to reject it.
+        transition.player_location_id = Some("gate".into());
+        assert!(transition
+            .validate_against(&travel, &context, &session)
+            .is_ok());
+        // A non-travel action must not carry a destination.
+        transition.player_location_id = None;
+        let investigate = WorldAction {
+            kind: WorldActionKind::Investigate,
+            target_id: Some("spy".into()),
+            intent: "调查内应".into(),
+        };
+        assert!(transition
+            .validate_against(&investigate, &context, &session)
+            .is_ok());
+        transition.player_location_id = Some("gate".into());
+        assert!(transition
+            .validate_against(&investigate, &context, &session)
+            .is_err());
     }
 
     #[test]
