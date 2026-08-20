@@ -1,0 +1,12 @@
+fix(h4): close two vacuous-pass holes found in the in-session adversarial pass
+
+1. The setup keyboard test passed without completing setup: step 2's native
+   form validation (required email + 8-char password) blocked submission,
+   and the old final assertion merely re-checked the setup page heading.
+   Now it fills step 2, submits, and asserts the setup page unmounts and
+   home renders (real completion).
+2. The player-entry axe scan could run before the entry form rendered: it
+   now gates on the form heading.
+
+SPEC 13.4 row test count updated to 27 (incl. gate-integrity fail-closed
+checks).

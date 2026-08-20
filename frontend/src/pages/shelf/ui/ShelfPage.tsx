@@ -82,15 +82,26 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, retrying }: {
 
       {/* 信息区域 */}
       <div className="p-4">
-        <h3 className="font-semibold text-sm mb-1 truncate" style={{ color: '#e2e8f0' }}>
-          {novel.title}
-        </h3>
+        {novel.status === 'ready' ? (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onOpen(); }}
+            className="font-semibold text-sm mb-1 truncate text-left max-w-full"
+            style={{ color: '#e2e8f0' }}
+          >
+            {novel.title}
+          </button>
+        ) : (
+          <h3 className="font-semibold text-sm mb-1 truncate" style={{ color: '#e2e8f0' }}>
+            {novel.title}
+          </h3>
+        )}
         {novel.author && (
           <p className="text-xs mb-2 truncate" style={{ color: '#94a3b8' }}>
             {novel.author}
           </p>
         )}
-        <div className="flex items-center justify-between text-xs" style={{ color: '#64748b' }}>
+        <div className="flex items-center justify-between text-xs" style={{ color: '#94a3b8' }}>
           <span>{novel.total_chapters > 0 ? `${novel.total_chapters} 章` : '—'}</span>
           <span className="flex items-center gap-1">
             <Clock size={10} />
@@ -102,7 +113,7 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, retrying }: {
         {novel.genre && (
           <div
             className="mt-2 inline-block px-2 py-0.5 rounded text-xs"
-            style={{ background: 'rgba(109,40,217,0.15)', color: '#8b5cf6' }}
+            style={{ background: 'rgba(109,40,217,0.15)', color: '#c4b5fd' }}
           >
             {novel.genre}
           </div>

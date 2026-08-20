@@ -2,6 +2,14 @@
 @import 'tailwindcss';
 @config '../../../tailwind.config.js';
 
+/* WCAG 2.4.7 / 2.4.11: visible keyboard focus indicator. Unlayered author
+   CSS wins over the tailwind utilities layer, so this also overrides
+   outline-none utility usage — the browser gate asserts it (issue #167). */
+:focus-visible {
+  outline: 2px solid var(--color-nova-glow);
+  outline-offset: 2px;
+}
+
 /* ─── 宇宙美学设计令牌 ─────────────────────────────────────────── */
 :root {
   /* 色彩系统：午夜蓝 × 紫罗兰 × 青色 */

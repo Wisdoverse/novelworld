@@ -1,0 +1,5 @@
+.browsers/
+.pnpm-store/
+.npmrc
+test-results/
+playwright-report/

@@ -54,7 +54,7 @@ export function BranchChoice({
           <GitBranch size={18} style={{ color: '#22d3ee' }} />
         </div>
         <div>
-          <div className="text-xs font-semibold uppercase tracking-widest mb-1" style={{ color: '#6d28d9' }}>
+          <div className="text-xs font-semibold uppercase tracking-widest mb-1" style={{ color: '#a78bfa' }}>
             命运交叉点
           </div>
           <p className="text-sm leading-relaxed" style={{ color: '#94a3b8' }}>
@@ -106,7 +106,7 @@ export function BranchChoice({
                   {choice.text}
                 </p>
                 {choice.hint && (
-                  <p className="text-xs mt-1.5 flex items-center gap-1" style={{ color: '#6d28d9' }}>
+                  <p className="text-xs mt-1.5 flex items-center gap-1" style={{ color: '#a78bfa' }}>
                     <Sparkles size={10} />
                     {choice.hint}
                   </p>

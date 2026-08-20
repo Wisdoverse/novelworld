@@ -144,6 +144,29 @@ jobs:
       - run: pnpm test
       - run: pnpm build
 
+  frontend-a11y-browser:
+    name: Frontend Browser A11y
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: pnpm/action-setup@v6.0.10
+        with:
+          version: 9
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 26
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: VITE_API_URL=/api pnpm build
+      - name: Install Playwright chromium
+        run: npx playwright install --with-deps chromium
+      - name: Run the browser accessibility gate
+        run: pnpm exec playwright test
+
   integration:
     name: PostgreSQL & Redis Integration
     runs-on: ubuntu-latest
