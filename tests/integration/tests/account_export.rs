@@ -99,10 +99,19 @@ async fn production_account_exports_are_complete_scoped_deterministic_and_secret
     sqlx::query(
         "INSERT INTO canon_story_models \
          (novel_id, model_version, schema_version, prompt_version, content) \
-         VALUES ($1, 1, 1, 'account-export-test', $2)",
+         VALUES ($1, 1, 1, 'account-export-test', $2), \
+                ($1, 2, 1, 'account-export-test', $3), \
+                ($1, 3, 1, 'account-export-test', $4), \
+                ($1, 4, 1, 'account-export-test', $5)",
     )
     .bind(novel_id)
     .bind(json!({"world": "portable canon"}))
+    .bind(json!({"events": [{"evidence": {"confidence": 1.0}}]}))
+    .bind(json!({"events": [{"evidence": {"confidence": 0.7}}]}))
+    .bind(json!({"events": [
+        {"evidence": {"confidence": 1.0}},
+        {"evidence": {"confidence": 0.7}},
+    ]}))
     .execute(&pool)
     .await
     .unwrap();
@@ -370,6 +379,30 @@ async fn production_account_exports_are_complete_scoped_deterministic_and_secret
             "reading_progress",
         ])
     );
+    // H4: the canon-story-model records distinguish confident extraction
+    // (all facts confidence 1.0 -> canon) from uncertain extraction (missing
+    // or below-1.0 confidence -> uncertain). The roadmap forbids silently
+    // promoting uncertainty to canon, so confidence-less content is
+    // uncertain, not canon.
+    for record in &novel_records {
+        if record["kind"] != "canon_story_model" {
+            continue;
+        }
+        let source = record["data"]["source"].as_str().unwrap();
+        match record["data"]["model_version"].as_i64().unwrap() {
+            1 => assert_eq!(
+                source, "uncertain",
+                "confidence-less content must stay uncertain"
+            ),
+            4 => assert_eq!(
+                source, "uncertain",
+                "any sub-1.0 fact makes a mixed-confidence model uncertain"
+            ),
+            2 => assert_eq!(source, "canon", "all-confident facts are canon"),
+            3 => assert_eq!(source, "uncertain", "a sub-1.0 fact is uncertain"),
+            version => panic!("unexpected canon model version {version}"),
+        }
+    }
     assert_eq!(
         kinds(&agent_records),
         BTreeSet::from(["character_memory", "chat_message"])
