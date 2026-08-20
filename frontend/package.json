@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "lint": "eslint src --ext ts,tsx",
     "type-check": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "lint:fsd": "node scripts/check-fsd.mjs --self-test"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.2.6",
