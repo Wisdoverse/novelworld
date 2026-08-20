@@ -78,6 +78,16 @@ export const PROGRESS = {
   last_read_at: '2025-01-01T00:00:00Z',
 };
 
+// H4 identity boundary: character-identity readers keep conversation and
+// branch choices; they must never see open-world or player-entry agency.
+export const CHARACTER_PROGRESS = {
+  ...PROGRESS,
+  id: 'p-char-1',
+  reader_identity_type: 'character',
+  reader_identity: '林晚',
+  reader_character_id: 'char-1',
+};
+
 export const EFFECTIVE_CHAPTER = {
   chapter_number: 1,
   content: CHAPTER_TEXT,

@@ -115,13 +115,27 @@ async fn production_account_exports_are_complete_scoped_deterministic_and_secret
     .execute(&pool)
     .await
     .unwrap();
+    // H4 identity boundary: one progress row adopts character identity so the
+    // export must prove identity data is portable (and stays out of canon).
+    let identity_character_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO reading_progress (user_id, novel_id, current_chapter) \
-         VALUES ($1, $2, 1), ($1, $3, 1)",
+        "INSERT INTO characters (id, novel_id, name, first_appearance_chapter) \
+         VALUES ($1, $2, 'Portable identity', 1)",
+    )
+    .bind(identity_character_id)
+    .bind(novel_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO reading_progress (user_id, novel_id, current_chapter, reader_identity_type, \
+         reader_identity, reader_character_id) \
+         VALUES ($1, $2, 1, 'character', 'Portable identity', $4), ($1, $3, 1, 'self', NULL, NULL)",
     )
     .bind(user_id)
     .bind(novel_id)
     .bind(other_novel_id)
+    .bind(identity_character_id)
     .execute(&pool)
     .await
     .unwrap();
@@ -335,6 +349,24 @@ async fn production_account_exports_are_complete_scoped_deterministic_and_secret
             .filter(|record| record["kind"] == "reading_progress")
             .count(),
         2
+    );
+    // H4 identity boundary: character identity (type, name, character id) is
+    // portable account data carried by the export; it never becomes canon.
+    let identity_progress: Vec<_> = novel_records
+        .iter()
+        .filter(|record| {
+            record["kind"] == "reading_progress"
+                && record["data"]["reader_identity_type"] == "character"
+        })
+        .collect();
+    assert_eq!(identity_progress.len(), 1);
+    assert_eq!(
+        identity_progress[0]["data"]["reader_identity"],
+        "Portable identity"
+    );
+    assert_eq!(
+        identity_progress[0]["data"]["reader_character_id"],
+        identity_character_id.to_string()
     );
 
     let agent_export = AgentAccountExport::new(pool.clone());

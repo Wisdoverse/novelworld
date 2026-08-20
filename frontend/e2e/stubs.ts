@@ -1,8 +1,8 @@
 import type { Page, Request } from '@playwright/test';
 import {
-  AUTH_TOKENS, CHAPTER, CHARACTERS, CHOICE_RESULT, EFFECTIVE_CHAPTER, JOURNAL_ENTRY,
-  LLM_SETTINGS, NODE, NOVEL, NOVELS, OPEN_WORLD, PLAYER_ENTRY, PLAYER_ENTRY_NO_PLAYER,
-  PROGRESS, SETUP_STATUS, WORLD_STATE, WORLD_TURN_RESULT, USER,
+  AUTH_TOKENS, CHAPTER, CHARACTERS, CHARACTER_PROGRESS, CHOICE_RESULT, EFFECTIVE_CHAPTER,
+  JOURNAL_ENTRY, LLM_SETTINGS, NODE, NOVEL, NOVELS, OPEN_WORLD, PLAYER_ENTRY,
+  PLAYER_ENTRY_NO_PLAYER, PROGRESS, SETUP_STATUS, WORLD_STATE, WORLD_TURN_RESULT, USER,
 } from './fixtures';
 
 export interface StubOptions {
@@ -12,6 +12,8 @@ export interface StubOptions {
   openWorld?: boolean;
   /** Player-entry has no player yet (PlayerEntryForm renders). */
   entryRequired?: boolean;
+  /** Progress adopts a canonical character identity (boundary mode). */
+  characterIdentity?: boolean;
 }
 
 const json = (status: number, body: unknown) => ({
@@ -38,6 +40,7 @@ const CHAT_DELTA_STREAM = (turnId: string) => sse(
 export async function installStubs(page: Page, opts: StubOptions = {}): Promise<void> {
   const openWorld = opts.openWorld ?? false;
   const entry = opts.entryRequired ? PLAYER_ENTRY_NO_PLAYER : PLAYER_ENTRY;
+  const progress = opts.characterIdentity ? CHARACTER_PROGRESS : PROGRESS;
 
   type ResponseSpec = ReturnType<typeof json> | ReturnType<typeof sse> | { status: number };
   const table: Array<[string, RegExp, (req: Request) => ResponseSpec]> = [
@@ -53,8 +56,8 @@ export async function installStubs(page: Page, opts: StubOptions = {}): Promise<
     ['GET', /^\/novels\/[^/]+\/chapters$/, () => json(200, [CHAPTER])],
     ['GET', /^\/novels\/[^/]+\/chapters\/[^/]+$/, () => json(200, CHAPTER)],
     ['GET', /^\/novels\/[^/]+\/characters$/, () => json(200, CHARACTERS)],
-    ['GET', /^\/progress\/[^/]+$/, () => json(200, PROGRESS)],
-    ['PUT', /^\/progress\/[^/]+$/, () => json(200, PROGRESS)],
+    ['GET', /^\/progress\/[^/]+$/, () => json(200, progress)],
+    ['PUT', /^\/progress\/[^/]+$/, () => json(200, progress)],
     ['GET', /^\/narrative\/[^/]+\/player-entry$/, () => json(200, entry)],
     ['PUT', /^\/narrative\/[^/]+\/player-entry$/, () => json(200, PLAYER_ENTRY)],
     ['GET', /^\/narrative\/[^/]+\/chapters\/[^/]+$/, () => json(200, EFFECTIVE_CHAPTER)],

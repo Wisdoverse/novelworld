@@ -70,7 +70,9 @@ At key story moments, you're presented with 2–3 choices. Each decision:
 
 The primary mode creates an original `PlayerEntity` so canonical characters
 retain their own agency. A legacy character-identity path remains available for
-compatibility, but its agency model is not a supported product promise.
+compatibility: it supports in-character conversation and branch choices only,
+with no open-world agency (no `PlayerEntity`, world turns, or journal) — the
+boundary is defined in SPEC §8.2.
 
 ### 🧭 Living Open World
 
