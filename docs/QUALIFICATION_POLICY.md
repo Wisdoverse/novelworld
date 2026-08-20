@@ -45,7 +45,7 @@ require.
 
 | Package | Current use | Explicit limit |
 |---|---|---|
-| Required [CI](../.github/workflows/ci.yml) | Structural build, unit, frontend, PostgreSQL/Redis, Windows launcher, and production Compose evidence | Not a live provider, browser, accessibility, recovery, or user-quality report |
+| Required [CI](../.github/workflows/ci.yml) | PRs run structural build, unit, frontend, browser accessibility, PostgreSQL/Redis, Windows launcher, and a production Compose smoke; `main`, manual verification, and release calls additionally run the deterministic recovery, outage, backup/restore, secret-rotation, and capacity drills | Not a live provider, target-environment, manual accessibility, or user-quality report |
 | [`single-node-v1`](./SLOS.md) | Deterministic admission, latency, replay, persistence, and Redis bounds on recorded CI hardware | Not a public-traffic or sustained availability SLO |
 | [`h3-synthetic-v1`](../tools/h3-eval/README.md) | Positive/adversarial calibration for extraction coverage, chronology, causality, character consistency, spoilers, memory, coherence, and replay | Recorded judgments do not qualify a provider/model or representative novel corpus |
 | [`h3-llm-budget-v1`](../tools/llm-budget/policy-v1.json) | Metrics-schema, token-ceiling, retry/error, latency, and missing-usage contract | Checked-in metrics are synthetic; provider price and live unit cost are not qualified |
