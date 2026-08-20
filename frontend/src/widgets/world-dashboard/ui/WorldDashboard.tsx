@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { BookOpen, Compass, GitBranch, History, Users } from 'lucide-react';
 import { useSubmitWorldTurn } from '@/entities/narrative/api';
-import { WorldActionForm } from '@/features/world-action/ui/WorldActionForm';
+import { WorldActionForm, actionLabels } from '@/features/world-action/ui/WorldActionForm';
 import { getApiErrorMessage } from '@/shared/api/client';
 import type { OpenWorldView, WorldAction } from '@/shared/types';
 
@@ -34,9 +34,6 @@ export function WorldDashboard({ novelId, view }: WorldDashboardProps) {
   const location = context.locations.find(item => item.id === view.player.location_id);
   const activeThreads = Object.entries(view.world_state.state.threads ?? {})
     .filter(([, thread]) => thread.status === 'open');
-  const playerEvents = view.world_state.state.world_events.filter(event => (
-    typeof event !== 'string' && event.origin === 'player'
-  ));
 
   const run = async (request: PendingRequest) => {
     setPendingRequest(request);
@@ -129,17 +126,19 @@ export function WorldDashboard({ novelId, view }: WorldDashboardProps) {
           <ol className="mt-3 space-y-3">
             {view.journal.map(entry => (
               <li key={entry.turn_id} className="p-3 rounded-lg text-sm" style={{ background: 'rgba(6, 182, 212, 0.06)', color: '#cbd5e1' }}>
-                <span className="mr-2 text-xs font-semibold" style={{ color: '#22d3ee' }}>玩家创造 · 回合 {entry.turn_number}</span>
-                {entry.transition.rendered_narrative}
+                <span className="mr-2 text-xs font-semibold" style={{ color: '#22d3ee' }}>回合 {entry.turn_number}</span>
+                <span className="mr-2 text-xs font-semibold" style={{ color: '#34d399' }}>读者行动</span>
+                {actionLabels[entry.action.kind]}：{entry.action.intent}
+                <div className="mt-1 text-xs" style={{ color: '#94a3b8' }}>
+                  <span className="mr-2 font-semibold" style={{ color: '#c084fc' }}>生成叙事</span>
+                  {entry.transition.rendered_narrative}
+                </div>
+                <time dateTime={entry.completed_at} className="mt-1 block text-xs" style={{ color: '#64748b' }}>
+                  {entry.completed_at}
+                </time>
               </li>
             ))}
           </ol>
-        ) : playerEvents.length ? (
-          <ul className="mt-3 space-y-2 text-sm" style={{ color: '#cbd5e1' }}>
-            {playerEvents.map(event => typeof event === 'string' ? null : (
-              <li key={event.id}><span style={{ color: '#22d3ee' }}>玩家创造</span> · {event.summary}</li>
-            ))}
-          </ul>
         ) : <p className="mt-3 text-sm" style={{ color: '#64748b' }}>你的第一个行动将记录在这里。</p>}
       </div>
 

@@ -55,7 +55,13 @@ describe('WorldDashboard', () => {
 
     expect(screen.getAllByText(/原著主线/).length).toBeGreaterThan(0);
     expect(screen.getByText(/来源章节 2/)).toBeTruthy();
-    expect(screen.getByText(/玩家创造 · 回合 1/)).toBeTruthy();
+    // The journal distinguishes the reader action from the generated prose.
+    expect(screen.getByText(/回合 1/)).toBeTruthy();
+    expect(screen.getByText(/读者行动/)).toBeTruthy();
+    expect(screen.getByText(/调查线索：探查城门/)).toBeTruthy();
+    expect(screen.getByText(/生成叙事/)).toBeTruthy();
+    expect(screen.getByText(/云舟发现守军换防。/)).toBeTruthy();
+    expect(screen.getByText(/2026-08-13T00:00:01Z/)).toBeTruthy();
 
     fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '前往城门' } });
     fireEvent.click(screen.getByRole('button', { name: '执行行动' }));
