@@ -140,6 +140,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm type-check
       - run: pnpm lint
+      - run: pnpm lint:fsd
       - run: pnpm test
       - run: pnpm build
 
