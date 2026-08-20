@@ -100,7 +100,7 @@ state in two places.
 | §7.5 — atomic per-reader world-state mutation with character UUID keys | Verified | H4 | E1, E4 |
 | §7.6 — immutable canon plus append-only player timeline and provenance | Verified | H1, H4 | E1, E4 |
 | §7.6 — durable original player, validated world turns, commit-before-prose, shared timeline | Verified | H4 | E4; live causal quality remains unqualified |
-| §8.1 — optional character identity mode | Aspirational | H4 | E0; compatibility behavior is not a supported agency promise |
+| §8.1/§8.2 — character-identity agency boundary defined and qualified | Verified | H4 | issue #170: SPEC §8.1/§8.2 + PRODUCT_CONTRACT 8 + README define the boundary (in-character chat and branch choices allowed; no PlayerEntity/open world/world turns/journal/relationship-faction-location mutation authority). Qualified by: the reading-progress identity transition contract test (character requires same-novel character_id, rewinds to self, atomicity — repository_contracts.rs), the structural open-world refusals (open_world_view requires a player entity; branch entry conflicts for self mode without player), the export test proving identity is portable and separate from canon, and the browser character-mode slice (full axe rules + negative assertions that no open-world/player-entry agency renders, even when an open-world view is behind the stub) |
 | §8.2 — same-novel character identity and no same-character conversation | Verified | H4 | E1, E3 |
 | §8.2 — self-mode choices preserve canonical-character agency | Verified | H4 | E4 |
 | §9.1 — setup-gated registration, password validation, bcrypt, and token issuance | Verified | H2 | E5 |
