@@ -56,7 +56,8 @@ WITH relevant_nodes AS (
                'id', n.id, 'user_id', n.user_id, 'novel_id', n.novel_id,
                'chapter_number', n.chapter_number, 'description', n.description,
                'anchor_quote', n.anchor_quote, 'choices', n.choices,
-               'created_at', n.created_at
+               'created_at', n.created_at,
+               'source', CASE WHEN n.user_id IS NULL THEN 'canon' ELSE 'generated' END
            ) AS data
     FROM relevant_nodes n
 
@@ -67,7 +68,8 @@ WITH relevant_nodes AS (
                'node_id', c.node_id, 'chapter_number', c.chapter_number,
                'choice_index', c.choice_index, 'choice_text', c.choice_text,
                'consequence', c.consequence, 'transition', c.transition,
-               'created_at', c.created_at
+               'created_at', c.created_at,
+               'source', 'reader'
            )
     FROM user_choices c
     WHERE c.user_id = $1
@@ -76,7 +78,8 @@ WITH relevant_nodes AS (
     SELECT 30, w.novel_id::text, 0::bigint, w.id::text, 'world_state',
            jsonb_build_object(
                'id', w.id, 'user_id', w.user_id, 'novel_id', w.novel_id,
-               'state', w.state, 'updated_at', w.updated_at
+               'state', w.state, 'updated_at', w.updated_at,
+               'source', CASE WHEN w.state ? 'open_world' THEN 'mixed' ELSE 'reader' END
            )
     FROM world_states w
     WHERE w.user_id = $1
@@ -86,7 +89,8 @@ WITH relevant_nodes AS (
            jsonb_build_object(
                'id', p.id, 'user_id', p.user_id, 'novel_id', p.novel_id,
                'chapter_number', p.chapter_number, 'content', p.content,
-               'origin', p.origin, 'created_at', p.created_at, 'updated_at', p.updated_at
+               'origin', p.origin, 'created_at', p.created_at, 'updated_at', p.updated_at,
+               'source', CASE WHEN p.origin = 'choice' THEN 'reader' ELSE 'generated' END
            )
     FROM player_chapters p
     WHERE p.user_id = $1
@@ -98,7 +102,8 @@ WITH relevant_nodes AS (
                'action', t.action, 'expected_turn_number', t.expected_turn_number,
                'status', t.status, 'transition', t.transition, 'result', t.result,
                'created_at', t.created_at, 'updated_at', t.updated_at,
-               'completed_at', t.completed_at
+               'completed_at', t.completed_at,
+               'source', CASE WHEN t.transition IS NOT NULL THEN 'mixed' ELSE 'reader' END
            )
     FROM world_turns t
     WHERE t.user_id = $1
