@@ -360,7 +360,10 @@ async fn production_account_exports_are_complete_scoped_deterministic_and_secret
         })
         .collect();
     assert_eq!(identity_progress.len(), 1);
-    assert_eq!(identity_progress[0]["data"]["reader_identity"], "Portable identity");
+    assert_eq!(
+        identity_progress[0]["data"]["reader_identity"],
+        "Portable identity"
+    );
     assert_eq!(
         identity_progress[0]["data"]["reader_character_id"],
         identity_character_id.to_string()
