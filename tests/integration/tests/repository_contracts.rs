@@ -10,9 +10,10 @@ use narrative_service::domain::{
         narrative_node::{NarrativeChoice, NarrativeNode},
         player_entity::PlayerEntity,
         world_session::{
-            CharacterGoalRef, FactionStandingChange, ScheduledCanonEvent, WorldAction,
-            WorldActionKind, WorldCharacterRef, WorldEntityRef, WorldEntryContext, WorldRuleRef,
-            WorldTurnTransition, WORLD_TURN_PROMPT_VERSION, WORLD_TURN_SCHEMA_VERSION,
+            CanonicalEventChange, CanonicalEventStatus, CharacterGoalRef, FactionStandingChange,
+            ScheduledCanonEvent, WorldAction, WorldActionKind, WorldCharacterRef, WorldEntityRef,
+            WorldEntryContext, WorldRuleRef, WorldTurnTransition, WORLD_TURN_PROMPT_VERSION,
+            WORLD_TURN_SCHEMA_VERSION,
         },
     },
     repositories::{
@@ -2776,15 +2777,30 @@ async fn seed_world_turn(pool: &PgPool) -> (Uuid, Uuid, WorldEntryContext) {
         checkpoint_chapter: 1,
         unlocked_through_chapter: 2,
         characters: vec![],
-        locations: vec![WorldEntityRef {
-            id: "north-tower".into(),
-            name: "North Tower".into(),
-        }],
+        locations: vec![
+            WorldEntityRef {
+                id: "north-tower".into(),
+                name: "North Tower".into(),
+            },
+            WorldEntityRef {
+                id: "harbor".into(),
+                name: "Harbor".into(),
+            },
+        ],
         factions: vec![],
         hard_rules: vec![],
         dead_character_ids: vec![],
         threads: vec![],
-        scheduled_events: vec![],
+        scheduled_events: vec![ScheduledCanonEvent {
+            id: "siege-event".into(),
+            sequence: 1,
+            summary: "围城开始".into(),
+            character_ids: vec![],
+            location_ids: vec!["north-tower".into()],
+            faction_ids: vec![],
+            death_character_ids: vec![],
+            source_chapters: vec![2],
+        }],
         character_goals: vec![],
     };
     world_state_repo
@@ -2827,13 +2843,32 @@ fn world_turn_action() -> WorldAction {
 }
 
 fn world_turn_claim(user_id: Uuid, novel_id: Uuid) -> WorldTurnClaim {
+    world_turn_claim_at(user_id, novel_id, 0)
+}
+
+fn world_turn_claim_at(user_id: Uuid, novel_id: Uuid, expected_turn_number: i64) -> WorldTurnClaim {
     WorldTurnClaim {
         id: Uuid::new_v4(),
         user_id,
         novel_id,
         request_fingerprint: vec![7; 32],
         action: world_turn_action(),
-        expected_turn_number: 0,
+        expected_turn_number,
+    }
+}
+
+fn world_turn_action_to(location_id: &str, intent: &str) -> WorldAction {
+    WorldAction {
+        kind: WorldActionKind::Travel,
+        target_id: Some(location_id.into()),
+        intent: intent.into(),
+    }
+}
+
+async fn world_turn_acquire(repo: &PgWorldTurnRepository, claim: &WorldTurnClaim) -> i64 {
+    match repo.begin_turn(claim).await.unwrap() {
+        BeginWorldTurn::Acquired { attempt, .. } => attempt,
+        result => panic!("unexpected reservation: {result:?}"),
     }
 }
 
@@ -3116,6 +3151,117 @@ async fn world_turn_journal_rebuilds_equivalent_state() {
         .apply_world_turn(entry.turn_id, &entry.action, &entry.transition, &context)
         .unwrap();
     assert_eq!(rebuilt.state, completed.world_state.state);
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn world_turn_multi_turn_journal_rebuilds_equivalent_state() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (user_id, novel_id, context) = seed_world_turn(&pool).await;
+    let world_state_repo = PgWorldStateRepository::new(pool.clone());
+    // The turn-0 checkpoint the journal must rebuild from.
+    let checkpoint = world_state_repo
+        .get_or_create(user_id, novel_id)
+        .await
+        .unwrap();
+    let repo = PgWorldTurnRepository::new(pool.clone());
+
+    // Turn 1: travel to the tower, witness the siege event, gain a map.
+    let claim1 = world_turn_claim(user_id, novel_id);
+    let attempt1 = world_turn_acquire(&repo, &claim1).await;
+    let transition1 = WorldTurnTransition {
+        schema_version: WORLD_TURN_SCHEMA_VERSION,
+        prompt_version: WORLD_TURN_PROMPT_VERSION.into(),
+        canon_model_version: 1,
+        canonical_checkpoint_chapter: 1,
+        rendered_narrative: "你赶到北塔,目睹围城开始。".into(),
+        events: vec![TransitionEvent {
+            summary: "玩家目睹围城".into(),
+            actor_character_ids: vec![],
+            location_id: Some("north-tower".into()),
+        }],
+        relationship_changes: vec![],
+        location_changes: vec![],
+        thread_changes: vec![],
+        player_location_id: Some("north-tower".into()),
+        inventory_additions: vec!["隐秘地图".into()],
+        inventory_removals: vec![],
+        knowledge_discoveries: vec![],
+        faction_changes: vec![],
+        canonical_event_change: Some(CanonicalEventChange {
+            event_id: "siege-event".into(),
+            status: CanonicalEventStatus::Witnessed,
+            reason: "玩家目睹围城".into(),
+        }),
+    };
+    repo.complete_turn(&claim1, attempt1, &transition1, &context)
+        .await
+        .unwrap();
+
+    // Turn 2: travel to the harbor, learn its secret.
+    let claim2 = WorldTurnClaim {
+        id: Uuid::new_v4(),
+        user_id,
+        novel_id,
+        request_fingerprint: vec![8; 32],
+        action: world_turn_action_to("harbor", "前往港湾"),
+        expected_turn_number: 1,
+    };
+    let attempt2 = world_turn_acquire(&repo, &claim2).await;
+    let transition2 = WorldTurnTransition {
+        schema_version: WORLD_TURN_SCHEMA_VERSION,
+        prompt_version: WORLD_TURN_PROMPT_VERSION.into(),
+        canon_model_version: 1,
+        canonical_checkpoint_chapter: 1,
+        rendered_narrative: "你在港湾发现走私船的暗号。".into(),
+        events: vec![TransitionEvent {
+            summary: "玩家发现暗号".into(),
+            actor_character_ids: vec![],
+            location_id: Some("harbor".into()),
+        }],
+        relationship_changes: vec![],
+        location_changes: vec![],
+        thread_changes: vec![],
+        player_location_id: Some("harbor".into()),
+        inventory_additions: vec![],
+        inventory_removals: vec![],
+        knowledge_discoveries: vec!["港湾有走私暗号".into()],
+        faction_changes: vec![],
+        canonical_event_change: None,
+    };
+    let completed = repo
+        .complete_turn(&claim2, attempt2, &transition2, &context)
+        .await
+        .unwrap();
+
+    // Rebuilding from the turn-0 checkpoint through the committed journal
+    // must reproduce the final world state exactly (H4 exit evidence).
+    let journal = repo.journal(user_id, novel_id, 100).await.unwrap();
+    assert_eq!(journal.len(), 2);
+    assert_eq!(journal[0].turn_number, 1);
+    assert_eq!(journal[1].turn_number, 2);
+    let mut rebuilt = checkpoint;
+    for entry in &journal {
+        rebuilt
+            .apply_world_turn(entry.turn_id, &entry.action, &entry.transition, &context)
+            .unwrap();
+    }
+    assert_eq!(rebuilt.state, completed.world_state.state);
+    assert_eq!(rebuilt.open_world().unwrap().unwrap().turn_number, 2);
+    let player = rebuilt.player_entity().unwrap().unwrap();
+    assert_eq!(player.location_id, "harbor");
+    assert!(player.inventory.contains(&"隐秘地图".to_string()));
+    assert!(player
+        .discovered_knowledge
+        .contains(&"港湾有走私暗号".to_string()));
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
         .execute(&pool)
