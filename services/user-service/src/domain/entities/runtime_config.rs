@@ -37,12 +37,8 @@ impl RuntimeLlmConfig {
         let (provider, api_url) = match (provider.trim().to_lowercase().as_str(), model) {
             (
                 "deepseek",
-                "deepseek-v4-flash"
-                | "deepseek-v4-flash-vision-exp"
-                | "deepseek-v4-pro",
-            ) => {
-                ("deepseek", "https://api.deepseek.com")
-            }
+                "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp" | "deepseek-v4-pro",
+            ) => ("deepseek", "https://api.deepseek.com"),
             ("openai", "gpt-4o-mini") => ("openai", "https://api.openai.com"),
             ("deepseek", _) | ("openai", _) => {
                 return Err("Choose a model supported by the selected provider".into())
