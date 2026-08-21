@@ -15,6 +15,7 @@ type LlmSettings = {
 const MODELS = {
   deepseek: [
     { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash', hint: '速度与成本优先' },
+    { id: 'deepseek-v4-flash-vision-exp', label: 'DeepSeek V4 Flash Vision', hint: '实验模型 · 兼容接口' },
     { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro', hint: '质量与复杂推理优先' },
   ],
   openai: [

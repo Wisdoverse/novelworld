@@ -35,9 +35,10 @@ impl RuntimeLlmConfig {
 
         let model = model.trim();
         let (provider, api_url) = match (provider.trim().to_lowercase().as_str(), model) {
-            ("deepseek", "deepseek-v4-flash" | "deepseek-v4-pro") => {
-                ("deepseek", "https://api.deepseek.com")
-            }
+            (
+                "deepseek",
+                "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp" | "deepseek-v4-pro",
+            ) => ("deepseek", "https://api.deepseek.com"),
             ("openai", "gpt-4o-mini") => ("openai", "https://api.openai.com"),
             ("deepseek", _) | ("openai", _) => {
                 return Err("Choose a model supported by the selected provider".into())
@@ -85,5 +86,19 @@ mod tests {
                 .thinking_enabled
         );
         assert!(RuntimeLlmConfig::for_provider("http://127.0.0.1", "secret").is_err());
+    }
+
+    #[test]
+    fn experimental_vision_model_uses_the_fixed_deepseek_endpoint() {
+        let config = RuntimeLlmConfig::for_settings(
+            "deepseek",
+            "deepseek-v4-flash-vision-exp",
+            "secret",
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(config.api_url, "https://api.deepseek.com");
+        assert_eq!(config.model, "deepseek-v4-flash-vision-exp");
     }
 }
