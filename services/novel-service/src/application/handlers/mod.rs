@@ -822,7 +822,7 @@ impl NovelCommandHandler {
                         }
                         let extraction = extraction.ok_or_else(|| {
                             anyhow::anyhow!(
-                                "canonical extraction failed the verbatim gate after 3 attempts: {:?}",
+                                "canonical extraction failed validation after 3 attempts: {:?}",
                                 last_error
                             )
                         })?;
