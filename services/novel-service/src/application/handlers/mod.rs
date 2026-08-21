@@ -791,10 +791,41 @@ impl NovelCommandHandler {
                     async move {
                         let prompt =
                             canon_story_extractor::build_prompt(&title, &chunk, characters)?;
-                        let raw = llm
-                            .chat_json(NovelLlmTask::CanonExtraction, &prompt)
-                            .await?;
-                        let extraction = canon_story_extractor::parse_chunk(&raw, &chunk)?;
+                        // Live-provider robustness: the extraction LLM is
+                        // stochastic and can produce evidence excerpts that
+                        // violate the strict source-verbatim gate (contiguity,
+                        // truncation, punctuation normalization). The mock is
+                        // deterministic (never exercises this), so the strict
+                        // gate stays intact; a bounded retry lets a valid
+                        // stochastic pass land instead of failing a valid source.
+                        let mut last_error = None;
+                        let mut extraction = None;
+                        for attempt in 0..3 {
+                            let raw = llm
+                                .chat_json(NovelLlmTask::CanonExtraction, &prompt)
+                                .await?;
+                            match canon_story_extractor::parse_chunk(&raw, &chunk) {
+                                Ok(parsed) => {
+                                    extraction = Some(parsed);
+                                    break;
+                                }
+                                Err(error) => {
+                                    if attempt < 2 {
+                                        tracing::debug!(
+                                            %error, attempt,
+                                            "canonical extraction failed the verbatim gate; retrying"
+                                        );
+                                    }
+                                    last_error = Some(error);
+                                }
+                            }
+                        }
+                        let extraction = extraction.ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "canonical extraction failed the verbatim gate after 3 attempts: {:?}",
+                                last_error
+                            )
+                        })?;
                         Ok::<_, anyhow::Error>((position, chunk, extraction))
                     }
                 })
