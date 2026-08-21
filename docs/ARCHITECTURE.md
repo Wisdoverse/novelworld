@@ -23,6 +23,28 @@ The default Compose stack is a private single-node preview. It does not provide
 the TLS, CORS, abuse, policy, recovery, or operational qualification required
 for public Internet hosting.
 
+## Quality attributes
+
+The architecture is optimized for correctness and recoverability inside the
+private single-node profile:
+
+- **Consistency:** PostgreSQL commits are the success boundary for user-visible
+  turns; caches and generated assets cannot make an uncommitted turn complete.
+- **Replay safety:** accepted asynchronous work and model-backed turns use
+  durable jobs or idempotency keys so retries do not duplicate committed work.
+- **Privacy:** identity is derived at the gateway, data ownership remains
+  service-local, and deletion/export behavior is explicit in lifecycle
+  contracts.
+- **Availability:** liveness is process-local, readiness includes required
+  dependencies, and overload fails with bounded retryable responses instead of
+  accepting unbounded work.
+- **Operability:** structured logs, health/readiness probes, Prometheus metrics,
+  release manifests, and recovery drills are the supported diagnostic surface.
+
+The measured objectives and topology decision live in [`SLOS.md`](./SLOS.md).
+These attributes do not imply multi-region availability, zero data loss, or
+public-service qualification.
+
 ## Ownership
 
 - **Gateway** authenticates external requests, injects `X-User-Id` and
@@ -57,6 +79,23 @@ authoritative transaction commits. Completed keys replay without another model
 call. Source canon remains immutable; player actions commit to a user-owned
 timeline overlay.
 
+## Failure semantics
+
+- A required dependency failure makes the affected service not ready while its
+  liveness endpoint remains available for diagnosis.
+- Provider failures are bounded by timeout and retry policy; incomplete work
+  must not be reported as committed success.
+- Redis loss may reduce short-term recall until reconstruction but cannot erase
+  committed PostgreSQL chat history.
+- A failed release keeps the last promoted release manifest authoritative.
+  Database migrations are forward-compatible; rollback never runs a down
+  migration.
+- Backup/restore is the recovery boundary for authoritative database loss. Its
+  evidence and targets are defined in [`BACKUP_RESTORE.md`](./BACKUP_RESTORE.md).
+
+Detailed operator actions belong in [`OPERATIONS.md`](./OPERATIONS.md) and must
+change in the same pull request as the failure behavior they describe.
+
 ## Code boundaries
 
 Rust services use `domain -> application -> infrastructure/interface` ports and
@@ -79,3 +118,9 @@ commit-before-completion, idempotent replay, and data lifecycle unless a
 reviewed contract change explicitly replaces them. Do not add a queue, service,
 database, cache, or orchestrator without a measured constraint that the current
 design cannot meet.
+
+A change to service boundaries, data ownership, trust boundaries, public
+contracts, consistency semantics, or availability targets requires an
+[architecture decision record](./adr/0000-template.md). The record must include
+alternatives, rollout and rollback, and linked evidence; ordinary local design
+choices remain in the pull request.
