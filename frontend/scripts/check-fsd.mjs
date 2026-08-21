@@ -4,6 +4,7 @@
 // shared. Run: node scripts/check-fsd.mjs [--self-test]
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -142,7 +143,7 @@ function scan(src) {
 }
 
 function selfTest() {
-  const root = mkdtempSync(join(process.env.TMPDIR ?? '/tmp', 'fsd-check-'));
+  const root = mkdtempSync(join(tmpdir(), 'fsd-check-'));
   const write = (rel, content) => {
     const path = join(root, rel);
     mkdirSync(path.slice(0, path.lastIndexOf(sep)), { recursive: true });
