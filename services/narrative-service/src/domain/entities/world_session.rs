@@ -465,7 +465,7 @@ pub fn parse_world_turn_transition(
 ) -> Result<WorldTurnTransition, WorldSessionError> {
     let payload = serde_json::from_str::<WorldTurnPayload>(raw.trim())
         .map_err(|error| WorldSessionError(format!("world transition JSON is invalid: {error}")))?;
-    let transition = WorldTurnTransition {
+    let mut transition = WorldTurnTransition {
         schema_version: payload.schema_version,
         prompt_version: WORLD_TURN_PROMPT_VERSION.into(),
         canon_model_version: context.model_version,
@@ -482,8 +482,19 @@ pub fn parse_world_turn_transition(
         faction_changes: payload.faction_changes,
         canonical_event_change: payload.canonical_event_change,
     };
+    normalize_transition(&mut transition, action);
     transition.validate_against(action, context, session)?;
     Ok(transition)
+}
+
+/// Live-provider resilience: only travel may change the player's location, but
+/// a drifting LLM can set player_location_id on a non-travel action. Enforce
+/// the existing world-session rule deterministically (a correction, not a
+/// relaxation of integrity) so a valid source can still complete its turn.
+fn normalize_transition(transition: &mut WorldTurnTransition, action: &WorldAction) {
+    if action.kind != WorldActionKind::Travel {
+        transition.player_location_id = None;
+    }
 }
 
 pub fn build_world_turn_prompt(
@@ -1034,6 +1045,51 @@ mod tests {
         }
         .validate(&dead)
         .is_err());
+    }
+
+    #[test]
+    fn normalization_strips_a_drifting_location_from_non_travel_actions() {
+        let mut transition = WorldTurnTransition {
+            schema_version: WORLD_TURN_SCHEMA_VERSION,
+            prompt_version: WORLD_TURN_PROMPT_VERSION.into(),
+            canon_model_version: 1,
+            canonical_checkpoint_chapter: 1,
+            rendered_narrative: "你按下决心，沿着旧地图继续前行。".into(),
+            events: vec![],
+            relationship_changes: vec![],
+            location_changes: vec![],
+            thread_changes: vec![],
+            player_location_id: Some("north-tower".into()),
+            inventory_additions: vec![],
+            inventory_removals: vec![],
+            knowledge_discoveries: vec![],
+            faction_changes: vec![],
+            canonical_event_change: None,
+        };
+        // A drifting non-travel action that set the player location is corrected.
+        normalize_transition(
+            &mut transition,
+            &WorldAction {
+                kind: WorldActionKind::PursueGoal,
+                target_id: None,
+                intent: "绘制地下回廊".into(),
+            },
+        );
+        assert!(transition.player_location_id.is_none());
+        // A travel action keeps its destination (reset the drift first).
+        transition.player_location_id = Some("north-tower".into());
+        normalize_transition(
+            &mut transition,
+            &WorldAction {
+                kind: WorldActionKind::Travel,
+                target_id: Some("north-tower".into()),
+                intent: "前往北塔".into(),
+            },
+        );
+        assert_eq!(
+            transition.player_location_id.as_deref(),
+            Some("north-tower")
+        );
     }
 
     #[test]
