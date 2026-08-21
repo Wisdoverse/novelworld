@@ -1013,18 +1013,43 @@ impl NarrativeCommandHandler {
             choice_index,
             "generating narrative consequence"
         );
-        let raw_transition = self
-            .llm
-            .chat_json(NarrativeLlmTask::NarrativeTransition, &prompt)
-            .await
-            .map_err(NarrativeError::Llm)?;
-        if raw_transition.len() > MAX_TRANSITION_BYTES {
-            return Err(NarrativeError::Llm(anyhow::anyhow!(
-                "language model transition exceeded the limit"
-            )));
+        // Live-provider robustness: the transition LLM can drift (e.g. a
+        // hallucinated or spoiling event actor), which the strict validator
+        // fail-closed. Retry the stochastic call up to 3 times before giving up;
+        // the strict gate (incl. spoiler/future/dead-actor protection) stays
+        // intact — a spoiler is never silently accepted.
+        let mut transition = None;
+        let mut last_error = None;
+        for attempt in 0..3 {
+            let raw_transition = self
+                .llm
+                .chat_json(NarrativeLlmTask::NarrativeTransition, &prompt)
+                .await
+                .map_err(NarrativeError::Llm)?;
+            if raw_transition.len() > MAX_TRANSITION_BYTES {
+                return Err(NarrativeError::Llm(anyhow::anyhow!(
+                    "language model transition exceeded the limit"
+                )));
+            }
+            match parse_transition(&raw_transition, &canon_context) {
+                Ok(parsed) => {
+                    transition = Some(parsed);
+                    break;
+                }
+                Err(error) => {
+                    if attempt < 2 {
+                        tracing::debug!(%error, attempt, "narrative transition failed validation; retrying");
+                    }
+                    last_error = Some(error);
+                }
+            }
         }
-        let transition = parse_transition(&raw_transition, &canon_context)
-            .map_err(|error| NarrativeError::Llm(anyhow::anyhow!(error)))?;
+        let transition = transition.ok_or_else(|| {
+            NarrativeError::Llm(anyhow::anyhow!(
+                "narrative transition failed validation after 3 attempts: {:?}",
+                last_error
+            ))
+        })?;
         let consequence = transition.rendered_narrative.clone();
         if consequence.is_empty()
             || consequence.len() > MAX_CONSEQUENCE_BYTES
