@@ -216,6 +216,7 @@ novelworld/
 
 | Document | Description |
 |----------|-------------|
+| [Documentation index](./docs/README.md) | Source-of-truth map, complete catalog, and maintenance standard |
 | [SPEC.md](./SPEC.md) | Candidate normative specification (RFC 2119) |
 | [SPEC_CONFORMANCE.md](./docs/SPEC_CONFORMANCE.md) | Clause dispositions, owners, and evidence boundaries |
 | [PRODUCT_CONTRACT.md](./docs/PRODUCT_CONTRACT.md) | Current supported envelope, responsibility boundary, and claim ledger |
