@@ -87,12 +87,11 @@ export function AppRoutes() {
 
   if (setupStatus === 'loading' || (setupStatus === 'done' && !authReady)) {
     return (
-      <div className="min-h-screen flex items-center justify-center"
-           style={{ background: 'linear-gradient(135deg, var(--color-void) 0%, var(--color-cosmos) 100%)' }}>
+      <div className="app-surface flex min-h-screen items-center justify-center">
         <div className="text-center">
           <div className="w-8 h-8 border-2 border-t-transparent rounded-full animate-spin mx-auto mb-4"
-               style={{ borderColor: 'var(--color-nova-glow)', borderTopColor: 'transparent' }} />
-          <p style={{ color: 'var(--color-moonbeam)' }}>Loading...</p>
+               style={{ borderColor: '#0b57d0', borderTopColor: 'transparent' }} />
+          <p className="text-sm text-[#5f6368]">正在加载…</p>
         </div>
       </div>
     );
@@ -109,20 +108,17 @@ export function AppRoutes() {
 
   if (setupStatus === 'error') {
     return (
-      <div className="min-h-screen flex items-center justify-center px-4"
-           style={{ background: 'linear-gradient(135deg, var(--color-void) 0%, var(--color-cosmos) 100%)' }}>
-        <div role="alert" className="max-w-md text-center rounded-xl p-8"
-             style={{ background: 'rgba(15, 21, 53, 0.8)', color: 'var(--color-moonbeam)' }}>
-          <h1 className="text-lg font-semibold mb-2" style={{ color: 'var(--color-starlight)' }}>
-            Setup status unavailable
+      <div className="app-surface flex min-h-screen items-center justify-center px-4">
+        <div role="alert" className="surface-card max-w-md p-8 text-center text-[#5f6368]">
+          <h1 className="mb-2 text-lg font-semibold text-[#1f1f1f]">
+            无法检查服务配置
           </h1>
-          <p className="mb-4">NovelWorld could not verify its server configuration.</p>
+          <p className="mb-5 text-sm leading-6">NovelWorld 暂时无法连接到配置服务，请检查服务状态后重试。</p>
           <button
             onClick={loadSetupStatus}
-            className="px-5 py-2.5 rounded-lg font-semibold"
-            style={{ background: 'var(--color-nova)', color: 'white' }}
+            className="primary-action"
           >
-            Retry
+            重试
           </button>
         </div>
       </div>
@@ -154,9 +150,10 @@ export function App() {
         position="bottom-right"
         toastOptions={{
           style: {
-            background: 'rgba(15, 21, 53, 0.95)',
-            border: '1px solid rgba(109, 40, 217, 0.3)',
-            color: '#e2e8f0',
+            background: '#fff',
+            border: '1px solid #e1e3e8',
+            color: '#1f1f1f',
+            boxShadow: '0 8px 28px rgba(60,64,67,0.14)',
           },
         }}
       />

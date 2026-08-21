@@ -45,8 +45,8 @@ describe('setup status', () => {
       .mockImplementationOnce(() => new Promise(() => undefined));
     render(React.createElement(MemoryRouter, null, React.createElement(AppRoutes)));
 
-    expect((await screen.findByRole('alert')).textContent).toContain('Setup status unavailable');
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect((await screen.findByRole('alert')).textContent).toContain('无法检查服务配置');
+    fireEvent.click(screen.getByRole('button', { name: '重试' }));
     await waitFor(() => expect(request).toHaveBeenCalledTimes(2));
     request.mockRestore();
   });
@@ -57,7 +57,7 @@ describe('setup status', () => {
     });
     render(React.createElement(MemoryRouter, null, React.createElement(AppRoutes)));
 
-    expect((await screen.findByRole('alert')).textContent).toContain('Setup status unavailable');
+    expect((await screen.findByRole('alert')).textContent).toContain('无法检查服务配置');
     request.mockRestore();
   });
 

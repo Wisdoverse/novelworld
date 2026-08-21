@@ -8,10 +8,10 @@ interface Props {
 }
 
 const roleBadgeColors: Record<string, string> = {
-  protagonist: '#6d28d9',
-  antagonist: '#dc2626',
-  supporting: '#0e7490',
-  minor: '#475569',
+  protagonist: '#0b57d0',
+  antagonist: '#b3261e',
+  supporting: '#188038',
+  minor: '#5f6368',
 };
 
 const roleLabels: Record<string, string> = {
@@ -24,14 +24,9 @@ const roleLabels: Record<string, string> = {
 export function CharacterCard({ character, onTalk }: Props) {
   return (
     <div
-      className="rounded-xl overflow-hidden transition-all hover:scale-[1.02]"
-      style={{
-        background: 'rgba(15, 21, 53, 0.6)',
-        border: '1px solid rgba(109, 40, 217, 0.2)',
-      }}
+      className="surface-card overflow-hidden transition-transform hover:-translate-y-1"
     >
-      <div className="aspect-square relative overflow-hidden"
-           style={{ background: 'rgba(3, 4, 10, 0.4)' }}>
+      <div className="relative aspect-square overflow-hidden bg-[#eef3ff]">
         {character.avatar_url ? (
           <img
             src={character.avatar_url}
@@ -40,7 +35,7 @@ export function CharacterCard({ character, onTalk }: Props) {
           />
         ) : (
           <div className="w-full h-full flex items-center justify-center">
-            <User size={48} style={{ color: 'var(--color-comet)' }} />
+            <User size={48} style={{ color: '#7b8db7' }} />
           </div>
         )}
         <span
@@ -52,26 +47,21 @@ export function CharacterCard({ character, onTalk }: Props) {
       </div>
 
       <div className="p-4">
-        <h3 className="font-semibold text-lg mb-1" style={{ color: 'var(--color-starlight)' }}>
+        <h3 className="font-semibold text-lg mb-1 text-[#1f1f1f]">
           {character.name}
         </h3>
         {character.aliases.length > 0 && (
-          <p className="text-xs mb-2" style={{ color: 'var(--color-comet)' }}>
+          <p className="text-xs mb-2 text-[#5f6368]">
             别名：{character.aliases.join('、')}
           </p>
         )}
-        <p className="text-sm line-clamp-2 mb-3" style={{ color: 'var(--color-moonbeam)' }}>
+        <p className="text-sm line-clamp-2 mb-3 text-[#5f6368]">
           {character.description || '暂无描述'}
         </p>
 
         <button
           onClick={() => onTalk(character)}
-          className="w-full flex items-center justify-center gap-2 py-2 rounded-lg transition-all"
-          style={{
-            background: 'rgba(109, 40, 217, 0.2)',
-            border: '1px solid rgba(109, 40, 217, 0.3)',
-            color: 'var(--color-aurora-light)',
-          }}
+          className="tonal-action w-full text-sm"
         >
           <MessageCircle size={16} />
           对话

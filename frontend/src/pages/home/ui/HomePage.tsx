@@ -241,18 +241,12 @@ export function HomePage() {
         </motion.div>
 
         {/* 功能特性网格 */}
-        <motion.div
-          initial={{ opacity: 0, y: 40 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.4, duration: 0.6 }}
-          className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 max-w-5xl mx-auto mt-24"
-        >
-          {features.map((feature, i) => (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 max-w-5xl mx-auto mt-24">
+          {features.map((feature) => (
             <motion.div
               key={feature.title}
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.5 + i * 0.08, duration: 0.4 }}
+              whileHover={{ y: -4 }}
+              transition={{ duration: 0.2 }}
               className="glass-card p-6 text-left"
             >
               <div
@@ -269,7 +263,7 @@ export function HomePage() {
               </p>
             </motion.div>
           ))}
-        </motion.div>
+        </div>
       </div>
 
       {/* 底部 */}

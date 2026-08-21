@@ -16,6 +16,16 @@ describe('SetupPage', () => {
     localStorage.clear();
   });
 
+  it('presents setup as a clear two-step guided flow', () => {
+    render(<SetupPage onComplete={vi.fn()} llmConfigured={false} />);
+
+    expect(screen.getByRole('heading', { name: '欢迎使用 NovelWorld' })).toBeTruthy();
+    expect(screen.getByRole('navigation', { name: '设置进度：第 1 步，共 2 步' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: '连接你的 AI 模型' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /DeepSeek/ }).getAttribute('aria-pressed')).toBe('true');
+    expect((screen.getByRole('button', { name: /下一步/ }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it('creates only the first administrator and stores returned tokens', async () => {
     mocks.post.mockResolvedValue({
       data: { access_token: 'access', refresh_token: 'refresh' },
