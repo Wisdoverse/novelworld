@@ -294,7 +294,7 @@ describe('ReaderPage progress gate', () => {
     expect(screen.getByRole('heading', { name: '以 云舟 之名，踏入这个世界' })).toBeTruthy();
     expect(screen.getByText('入场 · 第 2 章')).toBeTruthy();
     expect(screen.getByText('北塔')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: '开启我的时间线' }));
+    fireEvent.click(screen.getByRole('button', { name: '进入开放世界' }));
     expect(mocks.startWorld).toHaveBeenCalledTimes(1);
   });
 

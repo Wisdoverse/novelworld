@@ -489,7 +489,7 @@ export function ReaderPage() {
                 disabled={startOpenWorld.isPending}
                 onClick={() => startOpenWorld.mutate()}
               >
-                {startOpenWorld.isPending ? '正在创建时间线…' : '开启我的时间线'}
+                {startOpenWorld.isPending ? '正在创建时间线…' : '进入开放世界'}
                 {!startOpenWorld.isPending ? <ChevronRight size={16} aria-hidden="true" /> : null}
               </button>
             </div>
