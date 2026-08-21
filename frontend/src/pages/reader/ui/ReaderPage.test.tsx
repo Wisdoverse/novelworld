@@ -280,6 +280,24 @@ describe('ReaderPage progress gate', () => {
     expect(screen.queryByRole('heading', { name: '创建你的原创角色' })).toBeNull();
   });
 
+  it('presents open-world entry as the player\'s story rather than a generic notice', () => {
+    mocks.progressError = false;
+    mocks.player = {
+      id: 'player',
+      name: '云舟',
+      canonical_checkpoint_chapter: 2,
+      location_id: 'tower',
+    };
+
+    render(<ReaderPage />);
+
+    expect(screen.getByRole('heading', { name: '以 云舟 之名，踏入这个世界' })).toBeTruthy();
+    expect(screen.getByText('入场 · 第 2 章')).toBeTruthy();
+    expect(screen.getByText('北塔')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '开启我的时间线' }));
+    expect(mocks.startWorld).toHaveBeenCalledTimes(1);
+  });
+
   it('does not require an uncommitted legacy choice after open-world entry', () => {
     mocks.progressChapter = 2;
     mocks.progressError = false;

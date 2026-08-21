@@ -2,8 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  ChevronLeft, ChevronRight, MessageCircle, Users,
-  BookOpen, Sparkles
+  AlertCircle, ChevronLeft, ChevronRight, MessageCircle, Users,
+  BookOpen, MapPin, Sparkles
 } from 'lucide-react';
 import { useChapter, useCharacters, useNovel } from '@/entities/novel/api';
 import {
@@ -100,6 +100,9 @@ export function ReaderPage() {
     refetch: refetchOpenWorld,
   } = useOpenWorld(novelId || '', openWorldEnabled);
   const startOpenWorld = useStartOpenWorld(novelId || '');
+  const entryLocation = playerEntry?.locations.find(
+    location => location.id === playerEntry.player?.location_id,
+  );
 
   const [activeChatCharacter, setActiveChatCharacter] = useState<Character | null>(null);
   const [showCharacterList, setShowCharacterList] = useState(false);
@@ -221,24 +224,26 @@ export function ReaderPage() {
 
   if (isProgressError) {
     return (
-      <div className="min-h-screen flex flex-col gap-4 items-center justify-center" style={{ background: 'var(--color-void)', color: '#94a3b8' }}>
-        <p role="alert">阅读进度加载失败，无法安全恢复阅读上下文。</p>
-        <div className="flex gap-3">
-          <button className="px-4 py-2 rounded-lg" style={{ background: '#6d28d9', color: 'white' }} onClick={() => refetchProgress()}>
-            重试
-          </button>
-          <button className="px-4 py-2 rounded-lg" style={{ background: 'rgba(255,255,255,0.08)' }} onClick={() => navigate('/shelf')}>
-            返回书架
-          </button>
+      <main className="app-surface flex min-h-screen items-center justify-center px-4 py-10">
+        <div className="surface-card w-full max-w-lg px-7 py-12 text-center sm:px-10">
+          <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-[#fce8e6] text-[#b3261e]">
+            <AlertCircle size={24} aria-hidden="true" />
+          </span>
+          <h1 className="mt-5 text-2xl font-medium text-[#1f1f1f]">暂时无法打开本章</h1>
+          <p className="mt-3 text-sm leading-6 text-[#5f6368]" role="alert">阅读进度没有成功恢复。你的阅读记录不会丢失，可以重新加载或返回书架。</p>
+          <div className="mt-7 flex flex-col-reverse justify-center gap-3 sm:flex-row">
+            <button className="tonal-action" onClick={() => navigate('/shelf')}>返回书架</button>
+            <button className="primary-action" onClick={() => refetchProgress()}>重新加载</button>
+          </div>
         </div>
-      </div>
+      </main>
     );
   }
 
   if (routeChapter === undefined || currentChapter < 1 || isProgressLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center" style={{ background: 'var(--color-void)' }}>
-        <div className="w-8 h-8 border-2 rounded-full animate-spin" style={{ borderColor: '#6d28d9', borderTopColor: 'transparent' }} />
+      <div className="app-surface flex min-h-screen items-center justify-center">
+        <div className="h-8 w-8 animate-spin rounded-full border-2 border-[#0b57d0] border-t-transparent" aria-label="正在恢复阅读进度" />
       </div>
     );
   }
@@ -435,24 +440,59 @@ export function ReaderPage() {
           </div>
         ) : null}
         {openWorldEnabled && !isOpenWorldLoading && !isOpenWorldError && !openWorld ? (
-          <section className="mt-12 p-6 rounded-2xl" style={{ background: 'rgba(6, 182, 212, 0.07)', border: '1px solid rgba(6, 182, 212, 0.25)' }} aria-labelledby="enter-world-title">
-            <h2 id="enter-world-title" className="text-xl font-semibold" style={{ color: '#e2e8f0' }}>进入小说的开放世界</h2>
-            <p className="mt-2 text-sm leading-6" style={{ color: '#94a3b8' }}>
-              从角色创建时的第 {playerEntry?.player?.canonical_checkpoint_chapter} 章进入；原著角色保有自己的目标，你只决定自己的行动。
-            </p>
-            {startOpenWorld.isError ? (
-              <p role="alert" className="mt-3 text-sm" style={{ color: '#fca5a5' }}>
-                {getApiErrorMessage(startOpenWorld.error, '进入开放世界失败')}
+          <section
+            className="relative mt-14 overflow-hidden rounded-3xl px-6 py-8 md:px-10 md:py-10"
+            style={{
+              background: 'radial-gradient(circle at 85% 0%, rgba(6,182,212,0.2), transparent 34%), linear-gradient(145deg, rgba(19,14,45,0.98), rgba(6,17,35,0.98))',
+              border: '1px solid rgba(167, 139, 250, 0.28)',
+              boxShadow: '0 24px 70px rgba(0,0,0,0.32)',
+            }}
+            aria-labelledby="enter-world-title"
+          >
+            <div
+              className="pointer-events-none absolute -right-16 -top-20 h-52 w-52 rounded-full"
+              style={{ border: '1px solid rgba(34,211,238,0.18)', boxShadow: '0 0 80px rgba(6,182,212,0.12)' }}
+              aria-hidden="true"
+            />
+            <div className="relative">
+              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.24em]" style={{ color: '#67e8f9' }}>
+                <Sparkles size={14} aria-hidden="true" /> 新的故事线
+              </div>
+              <h2
+                id="enter-world-title"
+                className="mt-4 max-w-xl text-2xl font-semibold leading-tight md:text-3xl"
+                style={{ color: '#f8fafc', fontFamily: 'var(--font-display)' }}
+              >
+                以 {playerEntry?.player?.name} 之名，踏入这个世界
+              </h2>
+              <p className="mt-4 max-w-xl text-sm leading-7" style={{ color: '#aebbd0' }}>
+                从这一刻起，原著不再是唯一答案。故事角色仍会追逐各自的目标，而你的每次行动，都将写进这条只属于你的时间线。
               </p>
-            ) : null}
-            <button
-              className="mt-4 px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50"
-              style={{ background: '#0e7490', color: 'white' }}
-              disabled={startOpenWorld.isPending}
-              onClick={() => startOpenWorld.mutate()}
-            >
-              {startOpenWorld.isPending ? '正在创建时间线…' : '进入开放世界'}
-            </button>
+              <div className="mt-6 flex flex-wrap gap-2 text-xs" style={{ color: '#cbd5e1' }}>
+                <span className="rounded-full px-3 py-1.5" style={{ background: 'rgba(167,139,250,0.12)', border: '1px solid rgba(167,139,250,0.22)' }}>
+                  入场 · 第 {playerEntry?.player?.canonical_checkpoint_chapter} 章
+                </span>
+                {entryLocation ? (
+                  <span className="flex items-center gap-1.5 rounded-full px-3 py-1.5" style={{ background: 'rgba(34,211,238,0.09)', border: '1px solid rgba(34,211,238,0.2)' }}>
+                    <MapPin size={12} aria-hidden="true" /> {entryLocation.name}
+                  </span>
+                ) : null}
+              </div>
+              {startOpenWorld.isError ? (
+                <p role="alert" className="mt-4 text-sm" style={{ color: '#fca5a5' }}>
+                  {getApiErrorMessage(startOpenWorld.error, '进入开放世界失败')}
+                </p>
+              ) : null}
+              <button
+                className="mt-7 flex w-full items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-semibold transition-transform hover:-translate-y-0.5 disabled:translate-y-0 disabled:opacity-50 md:w-auto"
+                style={{ background: 'linear-gradient(135deg, #7c3aed, #0891b2)', color: 'white', boxShadow: '0 12px 30px rgba(8,145,178,0.2)' }}
+                disabled={startOpenWorld.isPending}
+                onClick={() => startOpenWorld.mutate()}
+              >
+                {startOpenWorld.isPending ? '正在创建时间线…' : '开启我的时间线'}
+                {!startOpenWorld.isPending ? <ChevronRight size={16} aria-hidden="true" /> : null}
+              </button>
+            </div>
           </section>
         ) : null}
         {openWorld ? <WorldDashboard novelId={novelId || ''} view={openWorld} /> : null}

@@ -22,10 +22,10 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, retrying }: {
   retrying: boolean;
 }) {
   const statusConfig = {
-    pending: { icon: Loader2, color: '#94a3b8', label: '等待解析', spin: true },
-    parsing: { icon: Loader2, color: '#22d3ee', label: '解析中...', spin: true },
-    ready: { icon: CheckCircle, color: '#22c55e', label: '已就绪', spin: false },
-    error: { icon: AlertCircle, color: '#ef4444', label: '解析失败', spin: false },
+    pending: { icon: Loader2, color: '#5f6368', label: '等待解析', spin: true },
+    parsing: { icon: Loader2, color: '#0b57d0', label: '解析中…', spin: true },
+    ready: { icon: CheckCircle, color: '#188038', label: '已就绪', spin: false },
+    error: { icon: AlertCircle, color: '#b3261e', label: '解析失败', spin: false },
   };
   const status = statusConfig[novel.status] ?? {
     icon: AlertCircle,
@@ -42,24 +42,21 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, retrying }: {
       exit={{ opacity: 0, scale: 0.95 }}
       whileHover={{ y: -4 }}
       transition={{ duration: 0.2 }}
-      className="glass-card overflow-hidden cursor-pointer group"
+      className="surface-card group cursor-pointer overflow-hidden"
       onClick={novel.status === 'ready' ? onOpen : undefined}
     >
       {/* 封面区域 */}
       <div
-        className="relative h-40 flex items-center justify-center"
-        style={{
-          background: `linear-gradient(135deg, rgba(109,40,217,0.3), rgba(6,182,212,0.2))`,
-        }}
+        className="relative flex h-44 items-center justify-center bg-[#eef3ff]"
       >
-        <BookOpen size={40} style={{ color: 'rgba(255,255,255,0.3)' }} />
+        <BookOpen size={42} style={{ color: '#7b8db7' }} />
 
         {/* 状态徽章 */}
         <div
           className="absolute top-3 right-3 flex items-center gap-1.5 px-2 py-1 rounded-full text-xs"
           style={{
-            background: 'rgba(0,0,0,0.6)',
-            border: `1px solid ${status.color}40`,
+            background: 'rgba(255,255,255,0.92)',
+            border: `1px solid ${status.color}35`,
             color: status.color,
           }}
         >
@@ -74,7 +71,7 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, retrying }: {
           className={`absolute top-3 left-3 p-1.5 rounded-lg transition-opacity ${
             novel.status === 'error' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
           }`}
-          style={{ background: 'rgba(239,68,68,0.2)', color: '#ef4444' }}
+          style={{ background: '#fce8e6', color: '#b3261e' }}
         >
           <Trash2 size={12} />
         </button>
@@ -87,21 +84,21 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, retrying }: {
             type="button"
             onClick={(e) => { e.stopPropagation(); onOpen(); }}
             className="font-semibold text-sm mb-1 truncate text-left max-w-full"
-            style={{ color: '#e2e8f0' }}
+            style={{ color: '#1f1f1f' }}
           >
             {novel.title}
           </button>
         ) : (
-          <h3 className="font-semibold text-sm mb-1 truncate" style={{ color: '#e2e8f0' }}>
+          <h3 className="font-semibold text-sm mb-1 truncate" style={{ color: '#1f1f1f' }}>
             {novel.title}
           </h3>
         )}
         {novel.author && (
-          <p className="text-xs mb-2 truncate" style={{ color: '#94a3b8' }}>
+          <p className="text-xs mb-2 truncate" style={{ color: '#5f6368' }}>
             {novel.author}
           </p>
         )}
-        <div className="flex items-center justify-between text-xs" style={{ color: '#94a3b8' }}>
+        <div className="flex items-center justify-between text-xs" style={{ color: '#5f6368' }}>
           <span>{novel.total_chapters > 0 ? `${novel.total_chapters} 章` : '—'}</span>
           <span className="flex items-center gap-1">
             <Clock size={10} />
@@ -113,7 +110,7 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, retrying }: {
         {novel.genre && (
           <div
             className="mt-2 inline-block px-2 py-0.5 rounded text-xs"
-            style={{ background: 'rgba(109,40,217,0.15)', color: '#c4b5fd' }}
+            style={{ background: '#e8f0fe', color: '#174ea6' }}
           >
             {novel.genre}
           </div>
@@ -123,7 +120,7 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, retrying }: {
             <p
               className="mt-3 text-xs leading-relaxed"
               role="alert"
-              style={{ color: '#f87171' }}
+              style={{ color: '#b3261e' }}
             >
               解析失败：{novel.parse_error.includes('EOF while parsing') || novel.parse_error.includes('empty response')
                 ? 'AI 服务返回了空内容，可以直接重试'
@@ -138,9 +135,9 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, retrying }: {
               }}
               className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold"
               style={{
-                background: 'rgba(6,182,212,0.12)',
-                border: '1px solid rgba(6,182,212,0.3)',
-                color: '#67e8f9',
+                background: '#e8f0fe',
+                border: '1px solid #a8c7fa',
+                color: '#0b57d0',
                 opacity: retrying ? 0.6 : 1,
               }}
             >
@@ -207,24 +204,27 @@ function ImportModal({ onClose }: { onClose: () => void }) {
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(8px)' }}
+      style={{ background: 'rgba(32,33,36,0.42)', backdropFilter: 'blur(8px)' }}
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
       <motion.div
         initial={{ opacity: 0, scale: 0.95, y: 20 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.95, y: 20 }}
-        className="glass-card w-full max-w-2xl max-h-[90vh] overflow-y-auto"
+        className="surface-card flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden"
       >
-        <div className="p-6">
-          <h2 className="text-xl font-bold mb-6" style={{ fontFamily: 'var(--font-display)', color: '#e2e8f0' }}>
+        <div className="shrink-0 px-6 pt-6 sm:px-8 sm:pt-8">
+          <h2 className="mb-2 text-2xl font-medium text-[#1f1f1f]">
             导入小说
           </h2>
+          <p className="text-sm text-[#5f6368]">上传文件或粘贴正文，系统会自动拆分章节并提取角色。</p>
+        </div>
 
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
+        <form onSubmit={handleSubmit} className="flex min-h-0 flex-col">
+          <div className="space-y-5 overflow-y-auto px-6 py-6 sm:px-8">
+            <div className="grid gap-4 sm:grid-cols-2">
               <div>
-                <label className="block text-xs font-semibold mb-1.5 uppercase tracking-wider" style={{ color: '#6d28d9' }}>
+                <label className="mb-1.5 block text-sm font-medium text-[#3c4043]">
                   书名 *
                 </label>
                 <input
@@ -232,37 +232,27 @@ function ImportModal({ onClose }: { onClose: () => void }) {
                   onChange={(e) => setTitle(e.target.value)}
                   placeholder="输入小说名称"
                   required
-                  className="w-full px-3 py-2 rounded-lg text-sm outline-none"
-                  style={{
-                    background: 'rgba(15,21,53,0.8)',
-                    border: '1px solid rgba(109,40,217,0.3)',
-                    color: '#e2e8f0',
-                  }}
+                  className="field-control text-sm"
                 />
               </div>
               <div>
-                <label className="block text-xs font-semibold mb-1.5 uppercase tracking-wider" style={{ color: '#6d28d9' }}>
+                <label className="mb-1.5 block text-sm font-medium text-[#3c4043]">
                   作者
                 </label>
                 <input
                   value={author}
                   onChange={(e) => setAuthor(e.target.value)}
                   placeholder="可选"
-                  className="w-full px-3 py-2 rounded-lg text-sm outline-none"
-                  style={{
-                    background: 'rgba(15,21,53,0.8)',
-                    border: '1px solid rgba(109,40,217,0.3)',
-                    color: '#e2e8f0',
-                  }}
+                  className="field-control text-sm"
                 />
               </div>
             </div>
 
             <div>
-              <label className="block text-xs font-semibold mb-1.5 uppercase tracking-wider" style={{ color: '#6d28d9' }}>
+              <label className="mb-2 block text-sm font-medium text-[#3c4043]">
                 故事偏离度
               </label>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid gap-2 sm:grid-cols-3">
                 {[
                   { value: 'canon', label: '忠实原著', desc: '严格遵循原著' },
                   { value: 'creative', label: '创意扩展', desc: '在原著基础上发挥' },
@@ -272,29 +262,29 @@ function ImportModal({ onClose }: { onClose: () => void }) {
                     key={opt.value}
                     type="button"
                     onClick={() => setDeviationMode(opt.value)}
-                    className="p-3 rounded-lg text-left transition-all"
+                    className="rounded-xl p-3 text-left transition-colors"
                     style={{
-                      background: deviationMode === opt.value ? 'rgba(109,40,217,0.2)' : 'rgba(15,21,53,0.6)',
-                      border: `1px solid ${deviationMode === opt.value ? 'rgba(109,40,217,0.6)' : 'rgba(109,40,217,0.2)'}`,
+                      background: deviationMode === opt.value ? '#e8f0fe' : '#fff',
+                      border: `1px solid ${deviationMode === opt.value ? '#0b57d0' : '#dadce0'}`,
                     }}
                   >
-                    <div className="text-xs font-semibold" style={{ color: '#e2e8f0' }}>{opt.label}</div>
-                    <div className="text-xs mt-0.5" style={{ color: '#475569' }}>{opt.desc}</div>
+                    <div className="text-xs font-semibold text-[#1f1f1f]">{opt.label}</div>
+                    <div className="mt-1 text-xs text-[#5f6368]">{opt.desc}</div>
                   </button>
                 ))}
               </div>
             </div>
 
             <div>
-              <label className="block text-xs font-semibold mb-1.5 uppercase tracking-wider" style={{ color: '#6d28d9' }}>
+              <label className="mb-2 block text-sm font-medium text-[#3c4043]">
                 小说文件
               </label>
               <label
-                className="flex items-center justify-center gap-2 w-full px-4 py-5 rounded-lg text-sm cursor-pointer transition-all"
+                className="flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl px-4 py-6 text-sm transition-colors"
                 style={{
-                  background: file ? 'rgba(6,182,212,0.12)' : 'rgba(15,21,53,0.8)',
-                  border: `1px dashed ${file ? 'rgba(6,182,212,0.6)' : 'rgba(109,40,217,0.35)'}`,
-                  color: file ? '#22d3ee' : '#94a3b8',
+                  background: file ? '#e6f4ea' : '#f8fafd',
+                  border: `1px dashed ${file ? '#188038' : '#9aa0a6'}`,
+                  color: file ? '#188038' : '#5f6368',
                 }}
               >
                 <Upload size={16} />
@@ -306,19 +296,19 @@ function ImportModal({ onClose }: { onClose: () => void }) {
                   onChange={(event) => selectFile(event.target.files?.[0])}
                 />
               </label>
-              <p className="text-xs mt-1" style={{ color: '#334155' }}>
+              <p className="mt-1.5 text-xs text-[#5f6368]">
                 TXT 最大 10 MiB；EPUB/PDF 最大 20 MiB
               </p>
             </div>
 
             <div className="flex items-center gap-3" aria-hidden="true">
-              <div className="h-px flex-1" style={{ background: 'rgba(109,40,217,0.2)' }} />
-              <span className="text-xs" style={{ color: '#475569' }}>或粘贴正文</span>
-              <div className="h-px flex-1" style={{ background: 'rgba(109,40,217,0.2)' }} />
+              <div className="h-px flex-1 bg-[#dadce0]" />
+              <span className="text-xs text-[#5f6368]">或粘贴正文</span>
+              <div className="h-px flex-1 bg-[#dadce0]" />
             </div>
 
             <div>
-              <label className="block text-xs font-semibold mb-1.5 uppercase tracking-wider" style={{ color: '#6d28d9' }}>
+              <label className="mb-1.5 block text-sm font-medium text-[#3c4043]">
                 小说内容 {!file && '*'}
               </label>
               <textarea
@@ -328,41 +318,32 @@ function ImportModal({ onClose }: { onClose: () => void }) {
                   if (e.target.value) setFile(null);
                 }}
                 placeholder="粘贴小说全文内容（支持中英文，建议至少粘贴前3章用于角色提取）"
-                rows={10}
+                rows={6}
                 required={!file}
-                className="w-full px-3 py-2 rounded-lg text-sm outline-none resize-none"
+                className="field-control resize-none text-sm"
                 style={{
-                  background: 'rgba(15,21,53,0.8)',
-                  border: '1px solid rgba(109,40,217,0.3)',
-                  color: '#e2e8f0',
                   fontFamily: 'var(--font-reading)',
                   lineHeight: '1.8',
                 }}
               />
-              <p className="text-xs mt-1" style={{ color: '#334155' }}>
+              <p className="mt-1 text-xs text-[#5f6368]">
                 字数：{content.length.toLocaleString()} 字
               </p>
             </div>
+          </div>
 
-            <div className="flex justify-end gap-3 pt-2">
+          <div className="flex shrink-0 justify-end gap-3 border-t border-[#e8eaed] px-6 py-4 sm:px-8">
               <button
                 type="button"
                 onClick={onClose}
-                className="px-5 py-2.5 rounded-lg text-sm transition-colors"
-                style={{ color: '#94a3b8', background: 'rgba(255,255,255,0.05)' }}
+                className="tonal-action text-sm"
               >
                 取消
               </button>
               <button
                 type="submit"
                 disabled={isPending || !title.trim() || (!file && !content.trim())}
-                className="flex items-center gap-2 px-6 py-2.5 rounded-lg text-sm font-semibold transition-all"
-                style={{
-                  background: 'linear-gradient(135deg, #0891b2, #6d28d9)',
-                  color: 'white',
-                  opacity: isPending ? 0.7 : 1,
-                  cursor: isPending ? 'not-allowed' : 'pointer',
-                }}
+                className="primary-action text-sm"
               >
                 {isPending ? (
                   <><Loader2 size={14} className="animate-spin" /> 导入中...</>
@@ -370,9 +351,8 @@ function ImportModal({ onClose }: { onClose: () => void }) {
                   <><Upload size={14} /> 开始导入</>
                 )}
               </button>
-            </div>
-          </form>
-        </div>
+          </div>
+        </form>
       </motion.div>
     </div>
   );
@@ -389,38 +369,30 @@ export function ShelfPage() {
   const [showImport, setShowImport] = useState(false);
 
   return (
-    <div className="min-h-screen" style={{ background: 'var(--color-void)' }}>
+    <div className="app-surface min-h-screen">
       {/* 导航 */}
       <header
-        className="sticky top-0 z-40 flex items-center justify-between px-6 py-4"
+        className="sticky top-0 z-40 flex items-center justify-between border-b border-[#e1e3e8] bg-white/95 px-4 py-3 backdrop-blur-xl sm:px-6"
         style={{
-          background: 'rgba(3,4,10,0.9)',
           backdropFilter: 'blur(20px)',
-          borderBottom: '1px solid rgba(109,40,217,0.15)',
         }}
       >
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg flex items-center justify-center"
-            style={{ background: 'linear-gradient(135deg, #6d28d9, #06b6d4)' }}>
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#0b57d0]">
             <BookOpen size={16} color="white" />
           </div>
-          <span className="font-bold" style={{ fontFamily: 'var(--font-display)', color: '#e2e8f0' }}>
-            我的书架
+          <span className="font-semibold text-[#174ea6]">
+            NovelWorld
           </span>
         </div>
 
         <div className="flex items-center gap-2">
-          <button type="button" aria-label="设置" onClick={() => navigate('/settings')} className="flex h-9 w-9 items-center justify-center rounded-lg transition-all" style={{ background: 'rgba(109,40,217,0.15)', border: '1px solid rgba(109,40,217,0.3)', color: '#a78bfa' }}>
+          <button type="button" aria-label="设置" onClick={() => navigate('/settings')} className="flex h-10 w-10 items-center justify-center rounded-full text-[#0b57d0] transition-colors hover:bg-[#e8f0fe]">
             <Settings size={16} />
           </button>
           <button
             onClick={() => setShowImport(true)}
-            className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all"
-            style={{
-              background: 'linear-gradient(135deg, rgba(8,145,178,0.3), rgba(109,40,217,0.3))',
-              border: '1px solid rgba(6,182,212,0.3)',
-              color: '#22d3ee',
-            }}
+            className="primary-action px-4 text-sm sm:px-5"
           >
             <Plus size={14} />
             导入小说
@@ -428,15 +400,20 @@ export function ShelfPage() {
         </div>
       </header>
 
-      <div className="p-6 max-w-6xl mx-auto">
+      <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
+        <div className="mb-7">
+          <p className="text-sm font-medium text-[#0b57d0]">个人书库</p>
+          <h1 className="mt-2 text-3xl font-medium tracking-[-0.02em] text-[#1f1f1f]">我的书架</h1>
+          <p className="mt-2 text-sm text-[#5f6368]">管理已导入的小说，并从上次的位置继续探索。</p>
+        </div>
         {processingCount > 0 && (
           <div
             role="status"
             className="mb-5 flex items-center gap-3 rounded-xl px-4 py-3 text-sm"
             style={{
-              background: 'rgba(6,182,212,0.1)',
-              border: '1px solid rgba(6,182,212,0.25)',
-              color: '#67e8f9',
+              background: '#e8f0fe',
+              border: '1px solid #a8c7fa',
+              color: '#174ea6',
             }}
           >
             <Loader2 size={16} className="animate-spin" />
@@ -445,23 +422,22 @@ export function ShelfPage() {
         )}
         {isLoading ? (
           <div className="flex items-center justify-center h-64">
-            <div className="w-8 h-8 border-2 rounded-full animate-spin" style={{ borderColor: '#6d28d9', borderTopColor: 'transparent' }} />
+            <div className="w-8 h-8 border-2 rounded-full animate-spin" style={{ borderColor: '#0b57d0', borderTopColor: 'transparent' }} />
           </div>
         ) : novels?.length === 0 ? (
-          <div className="text-center py-24">
-            <BookOpen size={48} className="mx-auto mb-4 opacity-20" style={{ color: '#6d28d9' }} />
-            <h3 className="text-lg font-semibold mb-2" style={{ color: '#e2e8f0' }}>书架还是空的</h3>
-            <p className="text-sm mb-6" style={{ color: '#475569' }}>导入你的第一本小说，开始沉浸式体验</p>
+          <div className="surface-card py-20 text-center">
+            <BookOpen size={48} className="mx-auto mb-4" style={{ color: '#7b8db7' }} />
+            <h3 className="text-lg font-semibold mb-2" style={{ color: '#1f1f1f' }}>书架还是空的</h3>
+            <p className="text-sm mb-6" style={{ color: '#5f6368' }}>导入你的第一本小说，开始沉浸式体验</p>
             <button
               onClick={() => setShowImport(true)}
-              className="btn-cosmic-filled px-6 py-3 rounded-xl text-sm font-semibold"
-              style={{ background: 'linear-gradient(135deg, #0891b2, #6d28d9)', color: 'white', border: 'none', cursor: 'pointer' }}
+              className="primary-action text-sm"
             >
               导入小说
             </button>
           </div>
         ) : (
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+          <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
             <AnimatePresence>
               {novels?.map((novel) => (
                 <NovelCard
@@ -479,7 +455,7 @@ export function ShelfPage() {
             </AnimatePresence>
           </div>
         )}
-      </div>
+      </main>
 
       <AnimatePresence>
         {showImport && <ImportModal onClose={() => setShowImport(false)} />}

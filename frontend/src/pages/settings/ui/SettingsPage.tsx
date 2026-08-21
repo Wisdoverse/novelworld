@@ -119,90 +119,105 @@ export function SettingsPage() {
   };
 
   return (
-    <main className="min-h-screen px-4 py-8" style={{ background: 'var(--color-void)' }}>
-      <div className="mx-auto max-w-2xl">
-        <button type="button" onClick={() => navigate('/shelf')} className="mb-6 flex items-center gap-2 text-sm" style={{ color: '#94a3b8' }}>
+    <main className="app-surface min-h-screen px-4 py-8 sm:px-6 sm:py-10">
+      <div className="mx-auto max-w-3xl">
+        <button type="button" onClick={() => navigate('/shelf')} className="mb-6 flex items-center gap-2 text-sm font-medium text-[#0b57d0] hover:underline">
           <ArrowLeft size={16} /> 返回书架
         </button>
-        {isAdmin && !settings && <div className="glass-card flex items-center justify-center p-8">
-          <Loader2 className="animate-spin" style={{ color: '#22d3ee' }} aria-label="正在加载模型设置" />
+
+        <header className="mb-8">
+          <p className="text-sm font-medium text-[#0b57d0]">偏好与账号</p>
+          <h1 className="mt-2 text-3xl font-medium tracking-[-0.02em] text-[#1f1f1f]">设置</h1>
+          <p className="mt-2 text-sm text-[#5f6368]">管理模型、API Key 与账号数据。</p>
+        </header>
+
+        {isAdmin && !settings && <div className="surface-card flex items-center justify-center p-10">
+          <Loader2 className="animate-spin text-[#0b57d0]" aria-label="正在加载模型设置" />
         </div>}
-        {isAdmin && settings && <div className="glass-card p-6 md:p-8">
+
+        {isAdmin && settings && <section className="surface-card p-6 sm:p-8" aria-labelledby="model-settings-heading">
           <div className="mb-7 flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl" style={{ background: 'rgba(109,40,217,0.25)', color: '#a78bfa' }}>
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#e8f0fe] text-[#0b57d0]">
               <Settings size={20} />
             </div>
             <div>
-              <h1 className="text-xl font-semibold" style={{ color: '#e2e8f0' }}>模型设置</h1>
-              <p className="text-sm" style={{ color: '#94a3b8' }}>更改后续解析与角色对话使用的模型</p>
+              <h2 id="model-settings-heading" className="text-xl font-semibold text-[#1f1f1f]">模型设置</h2>
+              <p className="text-sm text-[#5f6368]">更改后续解析与角色对话使用的模型</p>
             </div>
           </div>
 
           <form onSubmit={submit} className="space-y-6">
             <fieldset>
-              <legend className="mb-2 text-sm font-semibold" style={{ color: '#cbd5e1' }}>服务商</legend>
+              <legend className="mb-2 text-sm font-medium text-[#3c4043]">服务商</legend>
               <div className="grid grid-cols-2 gap-3">
-                {(['deepseek', 'openai'] as const).map(provider => (
-                  <button key={provider} type="button" aria-pressed={settings.provider === provider} onClick={() => selectProvider(provider)} className="rounded-lg px-4 py-3 text-left text-sm font-semibold" style={{ background: settings.provider === provider ? 'rgba(109,40,217,0.3)' : 'rgba(15,21,53,0.7)', border: `1px solid ${settings.provider === provider ? '#8b5cf6' : 'rgba(109,40,217,0.25)'}`, color: '#e2e8f0' }}>
-                    {provider === 'deepseek' ? 'DeepSeek' : 'OpenAI'}
-                  </button>
-                ))}
+                {(['deepseek', 'openai'] as const).map(provider => {
+                  const selected = settings.provider === provider;
+                  return (
+                    <button key={provider} type="button" aria-pressed={selected} onClick={() => selectProvider(provider)} className={`rounded-xl border px-4 py-3 text-left text-sm font-semibold transition-colors ${selected ? 'border-[#0b57d0] bg-[#e8f0fe] text-[#174ea6]' : 'border-[#dadce0] bg-white text-[#3c4043] hover:bg-[#f8fafd]'}`}>
+                      {provider === 'deepseek' ? 'DeepSeek' : 'OpenAI'}
+                    </button>
+                  );
+                })}
               </div>
             </fieldset>
 
-            <label className="block text-sm font-semibold" style={{ color: '#cbd5e1' }}>
+            <label className="block text-sm font-medium text-[#3c4043]">
               模型
-              <select value={settings.model} onChange={event => setSettings({ ...settings, model: event.target.value })} className="mt-2 w-full rounded-lg px-4 py-3 outline-none min-h-6" style={{ background: 'rgba(15,21,53,0.8)', border: '1px solid rgba(109,40,217,0.3)', color: '#e2e8f0' }}>
+              <select value={settings.model} onChange={event => setSettings({ ...settings, model: event.target.value })} className="field-control mt-2">
                 {models.map(model => <option key={model.id} value={model.id}>{model.label} — {model.hint}</option>)}
               </select>
             </label>
 
             {settings.provider === 'deepseek' && (
-              <label className="flex cursor-pointer items-start justify-between gap-4 rounded-xl p-4" style={{ background: 'rgba(6,182,212,0.08)', border: '1px solid rgba(6,182,212,0.2)' }}>
+              <label className="flex cursor-pointer items-start justify-between gap-4 rounded-2xl border border-[#a8c7fa] bg-[#eef4ff] p-4">
                 <span className="flex gap-3">
-                  <Brain size={20} style={{ color: '#22d3ee' }} />
+                  <Brain size={20} className="shrink-0 text-[#0b57d0]" />
                   <span>
-                    <span className="block text-sm font-semibold" style={{ color: '#e2e8f0' }}>角色对话启用思考模式</span>
-                    <span className="mt-1 block text-xs leading-relaxed" style={{ color: '#94a3b8' }}>启用时通过 DeepSeek Responses API 处理推理与输出；小说 JSON 解析始终使用非思考模式，避免推理耗尽输出预算。</span>
+                    <span className="block text-sm font-semibold text-[#1f1f1f]">角色对话启用思考模式</span>
+                    <span className="mt-1 block text-xs leading-5 text-[#5f6368]">通过 DeepSeek Responses API 处理推理与输出；小说结构化解析继续使用非思考模式。</span>
                   </span>
                 </span>
-                <input type="checkbox" checked={settings.thinking_enabled} onChange={event => setSettings({ ...settings, thinking_enabled: event.target.checked })} className="mt-1 h-6 w-6" />
+                <input type="checkbox" checked={settings.thinking_enabled} onChange={event => setSettings({ ...settings, thinking_enabled: event.target.checked })} className="mt-1 h-5 w-5 accent-[#0b57d0]" />
               </label>
             )}
 
-            <label className="block text-sm font-semibold" style={{ color: '#cbd5e1' }}>
+            <label className="block text-sm font-medium text-[#3c4043]">
               <span className="flex items-center gap-2"><Key size={15} /> API Key（留空则保持现有 Key）</span>
-              <input type="password" value={apiKey} onChange={event => setApiKey(event.target.value)} autoComplete="off" placeholder={settings.api_key_configured ? '已配置' : '请输入 API Key'} className="mt-2 w-full rounded-lg px-4 py-3 outline-none min-h-6" style={{ background: 'rgba(15,21,53,0.8)', border: '1px solid rgba(109,40,217,0.3)', color: '#e2e8f0' }} />
+              <input type="password" value={apiKey} onChange={event => setApiKey(event.target.value)} autoComplete="off" placeholder={settings.api_key_configured ? '已配置' : '请输入 API Key'} className="field-control mt-2" />
             </label>
 
-            <button type="submit" disabled={saving} className="flex w-full items-center justify-center gap-2 rounded-lg py-3 font-semibold" style={{ background: 'linear-gradient(135deg, #0891b2, #6d28d9)', color: 'white', opacity: saving ? 0.65 : 1 }}>
-              {saving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
-              {saving ? '正在验证并保存…' : '保存模型设置'}
-            </button>
+            <div className="flex justify-end">
+              <button type="submit" disabled={saving} className="primary-action">
+                {saving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
+                {saving ? '正在验证并保存…' : '保存模型设置'}
+              </button>
+            </div>
           </form>
-        </div>}
+        </section>}
 
-        <section className="glass-card mt-6 p-6 md:p-8" aria-labelledby="account-settings-heading">
+        <section className="surface-card mt-6 p-6 sm:p-8" aria-labelledby="account-settings-heading">
           <div className="mb-5 flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl" style={{ background: 'rgba(239,68,68,0.12)', color: '#f87171' }}>
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#fce8e6] text-[#b3261e]">
               <Trash2 size={20} />
             </div>
             <div>
-              <h1 id="account-settings-heading" className="text-xl font-semibold" style={{ color: '#e2e8f0' }}>账号设置</h1>
-              <p className="text-sm" style={{ color: '#94a3b8' }}>{user?.email}</p>
+              <h2 id="account-settings-heading" className="text-xl font-semibold text-[#1f1f1f]">账号数据</h2>
+              <p className="text-sm text-[#5f6368]">{user?.email}</p>
             </div>
           </div>
-          <p className="mb-5 text-sm leading-relaxed" style={{ color: '#94a3b8' }}>
-            删除后，NovelWorld 保存的小说正文、对话、记忆、世界模型与个人时间线将永久移除。模型服务商可能保留的数据受其政策约束。
+          <p className="mb-6 text-sm leading-6 text-[#5f6368]">
+            你可以先导出完整数据。删除账号后，小说正文、对话、记忆、世界模型与个人时间线将永久移除。
           </p>
-          <button type="button" disabled={exporting || deleting} onClick={exportAccount} className="mb-3 flex w-full items-center justify-center gap-2 rounded-lg py-3 font-semibold" style={{ background: 'rgba(8,145,178,0.18)', border: '1px solid rgba(34,211,238,0.4)', color: '#a5f3fc', opacity: exporting || deleting ? 0.65 : 1 }}>
-            {exporting ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
-            {exporting ? '正在导出…' : '导出账号数据'}
-          </button>
-          <button type="button" disabled={deleting || exporting} onClick={eraseAccount} className="flex w-full items-center justify-center gap-2 rounded-lg py-3 font-semibold" style={{ background: 'rgba(127,29,29,0.5)', border: '1px solid rgba(248,113,113,0.5)', color: '#fecaca', opacity: deleting || exporting ? 0.65 : 1 }}>
-            {deleting ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
-            {deleting ? '正在删除…' : '删除账号'}
-          </button>
+          <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
+            <button type="button" disabled={exporting || deleting} onClick={exportAccount} className="tonal-action">
+              {exporting ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
+              {exporting ? '正在导出…' : '导出账号数据'}
+            </button>
+            <button type="button" disabled={deleting || exporting} onClick={eraseAccount} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-full border border-[#b3261e] px-5 font-semibold text-[#b3261e] hover:bg-[#fce8e6] disabled:opacity-50">
+              {deleting ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
+              {deleting ? '正在删除…' : '删除账号'}
+            </button>
+          </div>
         </section>
       </div>
     </main>
