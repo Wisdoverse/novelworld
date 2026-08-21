@@ -15,17 +15,25 @@ export GITLEAKS_WORK
 
 if [ -x .tools-bin/gitleaks ]; then
   scan() {
-    .tools-bin/gitleaks detect --no-banner --config .gitleaks.toml --source "$1"
+    .tools-bin/gitleaks detect --no-banner --exit-code 42 \
+      --config .gitleaks.toml --source "$1"
   }
 else
+  repo_mount=$PWD
+  work_mount=$GITLEAKS_WORK
+  if command -v cygpath >/dev/null 2>&1; then
+    repo_mount=$(cygpath -m "$PWD")
+    work_mount=$(cygpath -m "$GITLEAKS_WORK")
+    export MSYS_NO_PATHCONV=1
+  fi
   scan() {
     case "$1" in
       "$GITLEAKS_WORK"/*) src="/plant/${1#"$GITLEAKS_WORK"/}" ;;
       *) src="/repo" ;;
     esac
-    docker run --rm -v "$PWD:/repo" -v "$GITLEAKS_WORK:/plant" \
+    docker run --rm -v "$repo_mount:/repo" -v "$work_mount:/plant" \
       ghcr.io/gitleaks/gitleaks:v8.24.3 detect --no-banner \
-      --config /repo/.gitleaks.toml --source "$src"
+      --exit-code 42 --config /repo/.gitleaks.toml --source "$src"
   }
 fi
 
@@ -43,15 +51,21 @@ mkdir -p "$plant"
   git -c user.email=a@b -c user.name=a commit -qm plant
 )
 
-if scan "$plant" >"$GITLEAKS_WORK/plant.out" 2>&1; then
+set +e
+scan "$plant" >"$GITLEAKS_WORK/plant.out" 2>&1
+plant_status=$?
+set -e
+if [ "$plant_status" -eq 0 ]; then
   printf 'self-test: FAIL a planted GitHub token was not detected\n' >&2
   cat "$GITLEAKS_WORK/plant.out" >&2
   exit 1
 fi
-grep -Fq 'leaks found' "$GITLEAKS_WORK/plant.out" || {
-  printf 'self-test: FAIL the scan reported no leak line\n' >&2
+if [ "$plant_status" -ne 42 ]; then
+  printf 'self-test: FAIL the planted-token scan failed operationally (exit %s)\n' \
+    "$plant_status" >&2
+  cat "$GITLEAKS_WORK/plant.out" >&2
   exit 1
-}
+fi
 printf 'self-test: ok   a planted GitHub token fails the gate\n'
 
 if ! scan "$PWD" >"$GITLEAKS_WORK/repo.out" 2>&1; then
