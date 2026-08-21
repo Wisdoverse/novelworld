@@ -73,6 +73,31 @@ describe('SettingsPage', () => {
     }));
   });
 
+  it('offers and saves the DeepSeek V4 Flash Vision experimental model', async () => {
+    mocks.put.mockResolvedValue({
+      data: {
+        provider: 'deepseek',
+        model: 'deepseek-v4-flash-vision-exp',
+        thinking_enabled: false,
+        api_key_configured: true,
+      },
+    });
+    render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+
+    await screen.findByRole('heading', { name: '模型设置' });
+    fireEvent.change(screen.getByLabelText('模型'), {
+      target: { value: 'deepseek-v4-flash-vision-exp' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '保存模型设置' }));
+
+    await waitFor(() => expect(mocks.put).toHaveBeenCalledWith('/settings/llm', {
+      provider: 'deepseek',
+      model: 'deepseek-v4-flash-vision-exp',
+      thinking_enabled: false,
+      api_key: undefined,
+    }));
+  });
+
   it('lets every signed-in user explicitly confirm account erasure', async () => {
     useAuthStore.setState({
       user: { id: 'reader', email: 'reader@example.com', role: 'user' },
