@@ -848,7 +848,7 @@ fn resolve_names(
             // Live-provider drift: a reference may be a fragment (e.g. "塔" for
             // the defined location "北塔"). Resolve deterministically to the
             // unique known name that contains the reference, if any.
-            let mut matches = known
+            let matches = known
                 .iter()
                 .filter(|(known_name, _)| known_name.contains(&key))
                 .collect::<Vec<_>>();
