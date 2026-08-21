@@ -352,7 +352,7 @@ pub fn parse_transition(
 ) -> Result<NarrativeTransition, TransitionError> {
     let payload = serde_json::from_str::<TransitionPayload>(raw.trim())
         .map_err(|error| TransitionError(format!("transition JSON is invalid: {error}")))?;
-    let mut transition = NarrativeTransition {
+    let transition = NarrativeTransition {
         schema_version: payload.schema_version,
         prompt_version: TRANSITION_PROMPT_VERSION.into(),
         canon_model_version: context.model_version,
@@ -363,25 +363,6 @@ pub fn parse_transition(
         location_changes: payload.location_changes,
         thread_changes: payload.thread_changes,
     };
-    // Live-provider resilience: the transition LLM can hallucinate an event
-    // actor id outside CANON_CONTEXT. Enforce the existing rule
-    // deterministically (drop unknown/dead actors) so a valid choice still
-    // completes rather than failing the whole turn.
-    let valid_characters = context
-        .characters
-        .iter()
-        .map(|character| character.id)
-        .collect::<HashSet<_>>();
-    let dead = context
-        .dead_character_ids
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
-    for event in transition.events.iter_mut() {
-        event
-            .actor_character_ids
-            .retain(|id| valid_characters.contains(id) && !dead.contains(id));
-    }
     transition.validate_against(context)?;
     Ok(transition)
 }
@@ -522,38 +503,5 @@ mod tests {
         dead_context.dead_character_ids.push(character_id);
         assert!(parse_transition(&raw, &dead_context).is_err());
         assert!(parse_transition(&format!("```json\n{raw}\n```"), &dead_context).is_err());
-    }
-
-    #[test]
-    fn parse_transition_drops_hallucinated_event_actors() {
-        let character_id = Uuid::new_v4();
-        let hallucinated = Uuid::new_v4();
-        let context = CanonContext {
-            model_version: 1,
-            checkpoint_chapter: 1,
-            characters: vec![CanonCharacterRef {
-                id: character_id,
-                name: "阿宁".into(),
-            }],
-            locations: vec![],
-            hard_rules: vec![],
-            dead_character_ids: vec![],
-            threads: vec![],
-        };
-        let raw = serde_json::json!({
-            "schema_version": 1,
-            "rendered_narrative": "你与阿宁并肩前行。",
-            "events": [{
-                "summary": "同行",
-                "actor_character_ids": [character_id, hallucinated],
-                "location_id": null
-            }],
-            "relationship_changes": [],
-            "location_changes": [],
-            "thread_changes": [],
-        })
-        .to_string();
-        let transition = parse_transition(&raw, &context).unwrap();
-        assert_eq!(transition.events[0].actor_character_ids, vec![character_id]);
     }
 }
