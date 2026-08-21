@@ -50,8 +50,9 @@ Then you can:
 
 Paste up to 5 MiB of text; upload UTF-8, BOM-marked UTF-16, or GBK TXT up to
 10 MiB; or upload EPUB or text-extractable PDF up to 20 MiB. Simplified Chinese
-and English have deterministic structural coverage; no language/model pair is
-release-qualified.
+and English have deterministic structural coverage; generated narrative
+transitions require Chinese text, and the UI locale is Simplified Chinese
+(`lang=zh-CN`); no language/model pair is release-qualified.
 
 ### 🧠 Durable Conversations
 
