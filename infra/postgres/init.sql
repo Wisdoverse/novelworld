@@ -43,7 +43,7 @@ CREATE INDEX idx_users_email ON users(email);
 
 CREATE TABLE novels (
     id               UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    user_id          UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    user_id          UUID NOT NULL,              -- immutable uploader attribution
     title            VARCHAR(500) NOT NULL,
     author           VARCHAR(200),
     cover_url        TEXT,
@@ -62,6 +62,16 @@ CREATE TABLE novels (
 CREATE INDEX idx_novels_user_id ON novels(user_id);
 CREATE INDEX idx_novels_status ON novels(status);
 CREATE INDEX idx_novels_title_trgm ON novels USING gin(title gin_trgm_ops);
+
+-- Canonical novel content is shared; this association owns each user's shelf.
+CREATE TABLE user_novels (
+    user_id          UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    novel_id         UUID NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
+    added_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (user_id, novel_id)
+);
+
+CREATE INDEX idx_user_novels_novel ON user_novels(novel_id);
 
 CREATE TABLE novel_import_jobs (
     novel_id         UUID PRIMARY KEY REFERENCES novels(id) ON DELETE CASCADE,
@@ -96,7 +106,7 @@ CREATE INDEX idx_novel_import_jobs_recoverable
     ON novel_import_jobs(status, lease_expires_at, created_at)
     WHERE status IN ('pending', 'in_progress');
 
--- S3 删除 outbox 不使用外键，确保账户级联删除小说后仍保留清理证据。
+-- S3 删除 outbox 不使用外键，确保小说删除后仍保留清理证据。
 CREATE TABLE source_file_deletions (
     object_key      TEXT PRIMARY KEY CHECK (
         object_key LIKE 'source-files/%'
@@ -137,7 +147,7 @@ CREATE TRIGGER queue_source_file_deletion
 
 -- ─── 删除凭证（backup-restore-v1）────────────────────────────────────────────
 -- 用户或小说删除时，在同一事务内写入只含 UUID 的删除凭证；不使用外键，
--- 因此账户级联无法删掉自己的删除证据。迁移路径上的重放依赖这两张表。
+-- 因此下游级联无法删掉自己的删除证据。迁移路径上的重放依赖这两张表。
 
 CREATE TABLE erasure_records (
     subject_type       VARCHAR(8) NOT NULL,
@@ -704,14 +714,14 @@ CREATE TRIGGER trg_characters_updated_at
 CREATE VIEW user_shelf AS
 SELECT
     n.id,
-    n.user_id,
+    shelf.user_id,
     n.title,
     n.author,
     n.cover_url,
     n.genre,
     n.total_chapters,
     n.status,
-    n.deviation_mode,
+    COALESCE(rp.deviation_mode, n.deviation_mode) AS deviation_mode,
     n.created_at,
     n.updated_at,
     rp.current_chapter,
@@ -722,8 +732,9 @@ SELECT
          THEN ROUND((rp.current_chapter::NUMERIC / n.total_chapters) * 100, 1)
          ELSE 0
     END AS progress_pct
-FROM novels n
-LEFT JOIN reading_progress rp ON rp.novel_id = n.id AND rp.user_id = n.user_id;
+FROM user_novels shelf
+JOIN novels n ON n.id = shelf.novel_id
+LEFT JOIN reading_progress rp ON rp.novel_id = n.id AND rp.user_id = shelf.user_id;
 
 -- ─── 函数：语义记忆搜索 ───────────────────────────────────────────────────
 

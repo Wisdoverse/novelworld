@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::domain::entities::{
     canon_story_model::CanonStoryModel, chapter::Chapter, character::Character, novel::Novel,
 };
-use crate::domain::value_objects::ImportStage;
+use crate::domain::value_objects::{DeviationMode, ImportStage};
 
 /// `import-provider-budget-v1` (docs/IMPORT_BUDGET.md): a job must not be
 /// claimed more than three times. Enforced by the persistence adapter at the
@@ -66,8 +66,16 @@ pub trait NovelRepository: Send + Sync {
         public_error: &str,
     ) -> Result<bool>;
     async fn find_by_id(&self, id: Uuid) -> Result<Option<Novel>>;
+    async fn find_for_user(&self, user_id: Uuid, novel_id: Uuid) -> Result<Option<Novel>>;
     async fn find_by_user(&self, user_id: Uuid) -> Result<Vec<Novel>>;
-    async fn delete(&self, id: Uuid) -> Result<()>;
+    async fn find_available_to_user(&self, user_id: Uuid) -> Result<Vec<Novel>>;
+    async fn attach_to_user(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        deviation_mode: DeviationMode,
+    ) -> Result<bool>;
+    async fn detach_from_user(&self, user_id: Uuid, novel_id: Uuid) -> Result<bool>;
 }
 
 #[derive(Debug, Clone)]

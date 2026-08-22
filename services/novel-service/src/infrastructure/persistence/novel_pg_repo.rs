@@ -97,6 +97,28 @@ async fn insert_novel(tx: &mut Transaction<'_, Postgres>, novel: &Novel) -> Resu
     Ok(())
 }
 
+async fn insert_initial_shelf(tx: &mut Transaction<'_, Postgres>, novel: &Novel) -> Result<()> {
+    sqlx::query("INSERT INTO user_novels (user_id, novel_id, added_at) VALUES ($1, $2, $3)")
+        .bind(novel.user_id)
+        .bind(novel.id)
+        .bind(novel.created_at)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO reading_progress \
+         (id, user_id, novel_id, current_chapter, reader_identity_type, deviation_mode, last_read_at, created_at) \
+         VALUES ($1, $2, $3, 1, 'self', $4::deviation_mode, $5, $5)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(novel.user_id)
+    .bind(novel.id)
+    .bind(novel.deviation_mode.to_str())
+    .bind(novel.created_at)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 async fn lock_import(
     tx: &mut Transaction<'_, Postgres>,
     novel_id: Uuid,
@@ -133,6 +155,7 @@ impl NovelRepository for NovelPgRepository {
         );
         let mut transaction = self.pool.begin().await?;
         insert_novel(&mut transaction, novel).await?;
+        insert_initial_shelf(&mut transaction, novel).await?;
         save_batch_in_transaction(&mut transaction, chapters).await?;
         sqlx::query(
             "INSERT INTO novel_import_jobs (novel_id, stage, status) \
@@ -152,6 +175,7 @@ impl NovelRepository for NovelPgRepository {
         );
         let mut transaction = self.pool.begin().await?;
         insert_novel(&mut transaction, novel).await?;
+        insert_initial_shelf(&mut transaction, novel).await?;
         sqlx::query(
             "INSERT INTO novel_import_jobs (novel_id, stage, status) \
              VALUES ($1, 'source', 'pending')",
@@ -491,7 +515,13 @@ impl NovelRepository for NovelPgRepository {
 
     async fn find_by_user(&self, user_id: Uuid) -> Result<Vec<Novel>> {
         let rows = sqlx::query_as::<_, NovelRow>(
-            "SELECT id, user_id, title, author, cover_url, description, world_summary, genre, original_file_key, total_chapters, status::text, parse_error, deviation_mode::text, created_at, updated_at FROM novels WHERE user_id = $1 ORDER BY updated_at DESC"
+            "SELECT n.id, n.user_id, n.title, n.author, n.cover_url, n.description, n.world_summary, n.genre, \
+                    n.original_file_key, n.total_chapters, n.status::text, n.parse_error, \
+                    COALESCE(p.deviation_mode, n.deviation_mode)::text AS deviation_mode, n.created_at, n.updated_at \
+             FROM user_novels AS shelf \
+             JOIN novels AS n ON n.id = shelf.novel_id \
+             LEFT JOIN reading_progress AS p ON p.user_id = shelf.user_id AND p.novel_id = shelf.novel_id \
+             WHERE shelf.user_id = $1 ORDER BY n.updated_at DESC"
         )
         .bind(user_id)
         .fetch_all(&self.pool)
@@ -500,12 +530,88 @@ impl NovelRepository for NovelPgRepository {
         Ok(rows.into_iter().map(|r| r.into()).collect())
     }
 
-    async fn delete(&self, id: Uuid) -> Result<()> {
-        sqlx::query("DELETE FROM novels WHERE id = $1")
-            .bind(id)
+    async fn find_for_user(&self, user_id: Uuid, novel_id: Uuid) -> Result<Option<Novel>> {
+        let row = sqlx::query_as::<_, NovelRow>(
+            "SELECT n.id, n.user_id, n.title, n.author, n.cover_url, n.description, n.world_summary, n.genre, \
+                    n.original_file_key, n.total_chapters, n.status::text, n.parse_error, \
+                    COALESCE(p.deviation_mode, n.deviation_mode)::text AS deviation_mode, n.created_at, n.updated_at \
+             FROM user_novels AS shelf \
+             JOIN novels AS n ON n.id = shelf.novel_id \
+             LEFT JOIN reading_progress AS p ON p.user_id = shelf.user_id AND p.novel_id = shelf.novel_id \
+             WHERE shelf.user_id = $1 AND shelf.novel_id = $2",
+        )
+        .bind(user_id)
+        .bind(novel_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(Into::into))
+    }
+
+    async fn find_available_to_user(&self, user_id: Uuid) -> Result<Vec<Novel>> {
+        let rows = sqlx::query_as::<_, NovelRow>(
+            "SELECT n.id, n.user_id, n.title, n.author, n.cover_url, n.description, n.world_summary, n.genre, \
+                    n.original_file_key, n.total_chapters, n.status::text, n.parse_error, n.deviation_mode::text, \
+                    n.created_at, n.updated_at \
+             FROM novels AS n \
+             WHERE n.status = 'ready'::novel_status \
+               AND NOT EXISTS (SELECT 1 FROM user_novels AS shelf WHERE shelf.user_id = $1 AND shelf.novel_id = n.id) \
+             ORDER BY n.updated_at DESC",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn attach_to_user(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        deviation_mode: DeviationMode,
+    ) -> Result<bool> {
+        let mut transaction = self.pool.begin().await?;
+        let ready = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM novels WHERE id = $1 AND status = 'ready'::novel_status)",
+        )
+        .bind(novel_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if !ready {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        sqlx::query(
+            "INSERT INTO user_novels (user_id, novel_id) VALUES ($1, $2) \
+             ON CONFLICT (user_id, novel_id) DO NOTHING",
+        )
+        .bind(user_id)
+        .bind(novel_id)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO reading_progress \
+             (id, user_id, novel_id, current_chapter, reader_identity_type, deviation_mode) \
+             VALUES ($1, $2, $3, 1, 'self', $4::deviation_mode) \
+             ON CONFLICT (user_id, novel_id) DO UPDATE \
+             SET deviation_mode = EXCLUDED.deviation_mode",
+        )
+        .bind(Uuid::new_v4())
+        .bind(user_id)
+        .bind(novel_id)
+        .bind(deviation_mode.to_str())
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(true)
+    }
+
+    async fn detach_from_user(&self, user_id: Uuid, novel_id: Uuid) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM user_novels WHERE user_id = $1 AND novel_id = $2")
+            .bind(user_id)
+            .bind(novel_id)
             .execute(&self.pool)
             .await?;
-        Ok(())
+        Ok(result.rows_affected() == 1)
     }
 }
 
