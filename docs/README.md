@@ -48,7 +48,6 @@ roadmap status only when its required evidence exists.
 | [Contributing guide](../CONTRIBUTING.md) | Development workflow, verification, and review bar | CI, architecture rules, or review requirements change |
 | [Security policy](../SECURITY.md) | Vulnerability reporting and implemented controls | The reporting process or security posture changes |
 | [Code of conduct](../CODE_OF_CONDUCT.md) | Community behavior and enforcement | The community policy changes |
-| [Changelog](../CHANGELOG.md) | Release-level user-visible history | A release is published |
 
 ### Product and engineering contracts
 

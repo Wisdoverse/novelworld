@@ -155,80 +155,10 @@ UUID v4 `Idempotency-Key` 后，输入脚本
 
 ---
 
-## API 接口总览
+## API 契约
 
-所有请求通过 Gateway（`/api/`）路由：
-
-### 用户认证
-```
-GET    /api/setup/status     — 管理员与模型设置是否完成
-POST   /api/setup/init       — 验证模型并原子创建首次设置（仅空库）
-POST   /api/auth/register     — 注册
-POST   /api/auth/login        — 登录，返回 JWT
-POST   /api/auth/refresh      — 原子轮换并返回新的 access/refresh Token
-GET    /api/auth/me           — 当前用户信息
-DELETE /api/auth/me           — 永久删除当前账号及应用内数据
-GET    /api/account/export    — 流式导出当前账号的 account-export-v1 NDJSON
-```
-
-账号导出由 Gateway 依次读取四个内部服务，要求所有容器使用同一个至少 32 字符的
-`INTERNAL_SERVICE_TOKEN`。响应不落盘、不进入队列，最多同时运行两个导出并在 15
-分钟后终止；只有文件末尾存在 `complete` 记录才表示完整。该文件是服务级快照组成的
-可移植数据，不替代 PostgreSQL 备份。完整契约见
-[docs/ACCOUNT_EXPORT.md](./docs/ACCOUNT_EXPORT.md)。
-
-### 小说管理
-```
-GET    /api/novels            — 书架列表
-POST   /api/novels            — 导入小说（粘贴文本）
-POST   /api/novels/upload     — 上传单个文件（TXT/EPUB/PDF）
-GET    /api/novels/:id        — 小说详情
-GET    /api/novels/:id/status — 解析状态（轮询）
-DELETE /api/novels/:id        — 删除小说
-```
-
-### 章节
-```
-GET    /api/novels/:id/chapters          — 章节列表
-GET    /api/novels/:id/chapters/:num     — 章节内容
-```
-
-### 角色
-```
-GET    /api/novels/:id/characters        — 角色列表
-GET    /api/characters/:id              — 角色详情
-POST   /api/characters/:id/generate-avatar — 触发头像生成
-```
-
-### 角色对话（SSE 流式）
-```
-POST   /api/chat/:characterId/stream    — 流式对话（SSE）
-GET    /api/chat/:characterId/history   — 对话历史
-DELETE /api/chat/:characterId/history   — 清除对话历史
-```
-
-### 分支叙事
-```
-GET    /api/narrative/:novelId/:chapter — 获取分支节点
-POST   /api/narrative/choose            — 提交选择
-GET    /api/narrative/:novelId/world-state — 世界状态
-```
-
-### 阅读进度
-```
-GET    /api/progress/:novelId           — 阅读进度
-PUT    /api/progress/:novelId           — 更新进度
-PUT    /api/progress/:novelId/identity  — 设置读者身份
-```
-
----
-
-## 当前记忆行为
-
-PostgreSQL 保存已提交对话，Redis 仅保存最多 50 条消息的可重建投影；每 20 条
-已提交消息生成一次中期摘要。读取路径能够检索已有的长期和永久记忆，但生产路径
-尚未写入这两层，因此完整四层连续性仍是 H3 缺口。小说或账号删除会清除所有层；
-“永久”只表示账号和小说存续期间不被普通压缩或淘汰。
+部署文档不重复维护接口清单。当前规范见 [SPEC §10](./SPEC.md#10-api-contract)，
+当前支持范围见 [PRODUCT_CONTRACT.md](./docs/PRODUCT_CONTRACT.md)。
 
 ---
 

@@ -274,9 +274,8 @@ novelworld/
 
 ## 🧪 Testing
 
-```bash
-cargo test --workspace    # unit and contract tests across all services
-```
+Use the commands and affected-gate matrix in
+[CONTRIBUTING.md](./CONTRIBUTING.md#verification).
 
 ---
 
