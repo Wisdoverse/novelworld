@@ -79,10 +79,11 @@ docker compose logs -f gateway
 
 ## 生产升级与回滚
 
-Tag workflow 会先运行完整 CI，只发布以 Git SHA 标记的应用镜像，并生成
-`novel-world-release-<git-sha>` artifact。`release.env` 只允许版本、代码 SHA、
-六个应用镜像和三个经源码审批的基础镜像 digest；不要部署单个镜像或使用
-`latest`。
+`v*` Tag workflow 会先运行完整 CI，只发布以 Git SHA 标记的应用镜像。
+全部镜像和 Windows/Linux/macOS 客户端构建成功后，同一 GitHub Release
+会附加 `release.env`、SBOM、客户端压缩包和 `desktop-SHA256SUMS`。
+`release.env` 只允许版本、代码 SHA、六个应用镜像和三个经源码审批的
+基础镜像 digest；不要部署单个镜像或使用 `latest`。
 
 PostgreSQL、Redis、Nginx 的 digest 固定在 `docker-compose.yml`。普通应用发布
 要求候选与当前 release 的三个 digest 完全一致，只检查 PostgreSQL/Redis 健康，

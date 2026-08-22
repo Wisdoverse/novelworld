@@ -122,15 +122,16 @@ services, and a local PostgreSQL 18 + pgvector runtime. Redis is not
 shipped because it is only a reconstructable cache; the desktop adapter reads
 authoritative conversation state from PostgreSQL.
 
-Trigger the **Desktop Portable Builds** GitHub Actions workflow, then download
-and extract the artifact and its contained platform archive:
+Official `v*` tags publish the server manifest, SBOMs, checksums, and every
+desktop archive together on [GitHub Releases](https://github.com/Wisdoverse/novelworld/releases).
+The workflow can also be run manually to produce temporary Actions artifacts.
 
 | Platform | Portable artifact | Launch |
 |----------|-------------------|--------|
-| Windows 10/11 x64 | `novelworld-windows-x64-portable` | Double-click `NovelWorld.exe` |
-| Linux x64 | `novelworld-linux-x64-appimage` | Extract the `.tar.gz`, then double-click the AppImage |
-| macOS Apple Silicon | `novelworld-macos-arm64-app` | Double-click `NovelWorld.app` |
-| macOS Intel | `novelworld-macos-x64-app` | Double-click `NovelWorld.app` |
+| Windows 10/11 x64 | `novelworld-windows-x64-portable.zip` | Extract, then double-click `NovelWorld.exe` |
+| Linux x64 | `novelworld-linux-x64-appimage.tar.gz` | Extract, then double-click the AppImage |
+| macOS Apple Silicon | `novelworld-macos-arm64-app.zip` | Extract, then double-click `NovelWorld.app` |
+| macOS Intel | `novelworld-macos-x64-app.zip` | Extract, then double-click `NovelWorld.app` |
 
 The player does not install Docker, PostgreSQL, Redis, Node.js, or Rust, and the
 app never connects to an external NovelWorld server. All application services,

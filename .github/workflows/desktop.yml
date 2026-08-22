@@ -1,9 +1,8 @@
 name: Desktop Portable Builds
 
 on:
+  workflow_call:
   workflow_dispatch:
-  push:
-    tags: ['desktop-v*']
 
 permissions:
   contents: read
@@ -72,6 +71,15 @@ jobs:
         working-directory: frontend
         run: pnpm install --frozen-lockfile
 
+      - name: Set desktop version from release tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=${GITHUB_REF_NAME#v}
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]
+          node -e "const fs=require('node:fs');const p='frontend/src-tauri/tauri.conf.json';const c=JSON.parse(fs.readFileSync(p));c.version=process.argv[1];fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n')" "$version"
+
       - name: Build local microservices
         run: >-
           cargo build --release --target ${{ matrix.target }}
@@ -96,6 +104,7 @@ jobs:
           New-Item -ItemType Directory -Force desktop-portable/resources | Out-Null
           Copy-Item frontend/src-tauri/target/${{ matrix.target }}/release/novelworld-desktop.exe desktop-portable/NovelWorld.exe
           Copy-Item frontend/src-tauri/resources/bin desktop-portable/resources/bin -Recurse
+          Compress-Archive -Path desktop-portable/* -DestinationPath ${{ matrix.artifact }}.zip
 
       - name: Build Linux/macOS portable bundle
         if: runner.os != 'Windows'
@@ -119,7 +128,7 @@ jobs:
         if: runner.os == 'Windows'
         with:
           name: ${{ matrix.artifact }}
-          path: desktop-portable
+          path: ${{ matrix.artifact }}.zip
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v7.0.1
