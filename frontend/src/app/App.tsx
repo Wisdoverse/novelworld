@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
 import './styles/globals.css';
@@ -14,6 +14,7 @@ import { SettingsPage } from '@/pages/settings/ui/SettingsPage';
 import { useAuthStore } from '@/features/auth/model/useAuthStore';
 import { useChatStore } from '@/features/character-chat/model/useChatStore';
 import { apiClient } from '@/shared/api/client';
+import { isDesktopClient } from '@/shared/config/runtime';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -141,11 +142,12 @@ export function AppRoutes() {
 }
 
 export function App() {
+  const Router = isDesktopClient ? HashRouter : BrowserRouter;
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
+      <Router>
         <AppRoutes />
-      </BrowserRouter>
+      </Router>
       <Toaster
         position="bottom-right"
         toastOptions={{
