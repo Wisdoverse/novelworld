@@ -164,11 +164,12 @@ The scripted restore procedure, in order:
    and the restore proceeds. When
    it is not — a disaster restore — the script **refuses to complete by
    default**. The only sanctioned continuation is **attest-or-erase**: the
-   script lists every account in the restored data with its novels, and
+   script lists every account in the restored data, and
    for each account the operator, confirming with that account's owner (or
    as the owner, for their own account), supplies one decision — retain
-   the account together with the explicit list of its retained novels, or
-   erase it. An account already covered by a collected erasure record is
+   the account together with all of its shelf and private-world state, or erase
+   it. Shared canonical novels are independent subjects and are never inferred
+   deleted from an account decision. An account already covered by a collected erasure record is
    a pre-decided fact: replay enforces it, and no decision may retain or
    designate it. The restore records an automatic attestation row for it
    with decision `replayed`, carrying the same window bounds, inventory,
@@ -229,8 +230,9 @@ continuation contract.
 
 Deletion of a user or a novel writes a durable erasure record in the same
 database transaction as the authoritative delete, via `AFTER DELETE`
-triggers, so every deletion path — including per-novel records under an
-account cascade — is covered without service coordination. A record's
+triggers. Canonical novels are shared, so account deletion removes that user's
+shelf and private world without deleting the canonical asset; canonical-novel
+deletion is a separate explicit operation. A record's
 identifying payload is limited to the subject type and UUIDs (for novels,
 the owning user UUID as well, so the deterministic retained-source object
 key `source-files/{user_id}/{novel_id}` can be reconstructed); its
@@ -278,8 +280,9 @@ newer artifact during the disaster drill) and
 three imported novels (each novel with at least two durable chapters), at
 least two novels carrying retained-source keys when the drill topology
 enables S3/stub storage, committed chat history, and at least one committed
-world turn. One novel is deleted directly; one account owning a
-retained-source novel is deleted entirely. Drill assertions reference this
+world turn. One novel is deleted directly and one account is deleted entirely;
+the latter's canonical novels must survive while its shelf and private state do
+not. Drill assertions reference this
 dataset; production-scale RTO is judged by the scale rehearsal defined
 under Recovery targets, not by these drills.
 
@@ -291,13 +294,13 @@ journey continues with the existing end-to-end reader loop. The scripted
 restore completes within the drill bound.
 
 **Drill B — backup → deletion → older-backup restore.** Take a backup, then
-delete both drill subjects — the direct novel deletion and the account
-deletion whose cascade removes a novel with a retained-source key — then
+delete both drill subjects — one canonical novel directly and one account — then
 restore the older backup and deploy with the preserved erasure records. The
 deleted subjects must remain unavailable to login, reads, export, provider
 work, and derived projections — the zero-tolerance guardrail in
 [`QUALIFICATION_POLICY.md`](./QUALIFICATION_POLICY.md). The retained-source
-keys are re-queued exactly once, and a second deployment replays cleanly:
+keys for explicitly deleted novels are re-queued exactly once; the deleted
+account's shared canonical sources are not queued. A second deployment replays cleanly:
 no new re-queue, no row changes, no new provider work.
 
 **Drill C — disaster gate.** Invoke the restore with no lineage-matching
@@ -306,14 +309,14 @@ to complete, including when decisions cover only some undecided accounts
 and when the reachable database is unrelated or a sibling lineage
 (populated, even carrying its own deletion history, but with a different
 lineage token). Re-run with a
-complete attest-or-erase input that retains one account (with a partial
-novel list) and erases the other: the restore completes; the decision
+complete attest-or-erase input that retains one account and erases the other:
+the restore completes; the decision
 rows exist in the restored database with every required field — subject,
 decision, both residual-window bounds, the verified artifact digest
-inventory (dump and erasure digests), operator identity, and timestamp; the erased account and the unlisted
-novel are absent from the served deployment with erasure records written
-and their dependent rows (refresh tokens, world state, chat) removed by
-cascade; a JWT issued before the restore is rejected after the rotation and no
+inventory (dump and erasure digests), operator identity, and timestamp; the
+erased account is absent while its shared canonical novels remain, with shelf
+and dependent rows (refresh tokens, world state, chat) removed by cascade; a
+JWT issued before the restore is rejected after the rotation and no
 pre-restore refresh token remains;
 and the window bounds are computed from covered-through timestamps, not
 wall-clock archive times. The drill also proves the token lifecycle:

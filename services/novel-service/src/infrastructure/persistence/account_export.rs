@@ -37,16 +37,19 @@ impl AccountExportPort for PgAccountExport {
 // One read-only statement gives this service one PostgreSQL statement snapshot
 // while retaining backpressure instead of collecting rows in application memory.
 const EXPORT_SQL: &str = r#"
-WITH owned_novels AS (
+WITH shelf_novels AS (
     SELECT id, user_id, title, author, cover_url, description, world_summary, genre,
            total_chapters, status, parse_error, deviation_mode, created_at, updated_at
-    FROM novels
-    WHERE user_id = $1
+    FROM novels AS n
+    WHERE EXISTS (
+        SELECT 1 FROM user_novels AS shelf
+        WHERE shelf.user_id = $1 AND shelf.novel_id = n.id
+    )
 ), export_records AS (
     SELECT 10 AS section_order, n.id::text AS sort_group, 0::bigint AS sort_number,
            n.id::text AS sort_id, 'novel'::text AS kind,
            jsonb_build_object(
-               'id', n.id, 'user_id', n.user_id, 'title', n.title, 'author', n.author,
+               'id', n.id, 'user_id', $1, 'title', n.title, 'author', n.author,
                'cover_url', n.cover_url, 'description', n.description,
                'world_summary', n.world_summary, 'genre', n.genre,
                'total_chapters', n.total_chapters, 'status', n.status::text,
@@ -54,7 +57,7 @@ WITH owned_novels AS (
                'deviation_mode', n.deviation_mode::text,
                'created_at', n.created_at, 'updated_at', n.updated_at
            ) AS data
-    FROM owned_novels n
+    FROM shelf_novels n
 
     UNION ALL
     SELECT 20, c.novel_id::text, c.chapter_number::bigint, c.id::text, 'chapter',
@@ -66,7 +69,7 @@ WITH owned_novels AS (
                'word_count', c.word_count, 'created_at', c.created_at
            )
     FROM chapters c
-    JOIN owned_novels n ON n.id = c.novel_id
+    JOIN shelf_novels n ON n.id = c.novel_id
 
     UNION ALL
     SELECT 30, c.novel_id::text, 0::bigint, c.id::text, 'character',
@@ -81,7 +84,7 @@ WITH owned_novels AS (
                'traits', c.traits, 'created_at', c.created_at, 'updated_at', c.updated_at
            )
     FROM characters c
-    JOIN owned_novels n ON n.id = c.novel_id
+    JOIN shelf_novels n ON n.id = c.novel_id
 
     UNION ALL
     SELECT 40, r.novel_id::text, 0::bigint, r.id::text, 'character_relationship',
@@ -94,7 +97,7 @@ WITH owned_novels AS (
                'created_at', r.created_at
            )
     FROM character_relationships r
-    JOIN owned_novels n ON n.id = r.novel_id
+    JOIN shelf_novels n ON n.id = r.novel_id
 
     UNION ALL
     SELECT 50, m.novel_id::text, m.model_version::bigint, m.id::text,
@@ -111,7 +114,7 @@ WITH owned_novels AS (
                ) THEN 'uncertain' ELSE 'canon' END
            )
     FROM canon_story_models m
-    JOIN owned_novels n ON n.id = m.novel_id
+    JOIN shelf_novels n ON n.id = m.novel_id
 
     UNION ALL
     SELECT 60, p.novel_id::text, 0::bigint, p.id::text, 'reading_progress',

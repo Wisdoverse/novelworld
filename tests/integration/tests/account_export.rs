@@ -61,6 +61,14 @@ async fn production_account_exports_are_complete_scoped_deterministic_and_secret
     .execute(&pool)
     .await
     .unwrap();
+    sqlx::query("INSERT INTO user_novels (user_id, novel_id) VALUES ($1, $2), ($3, $4)")
+        .bind(user_id)
+        .bind(novel_id)
+        .bind(other_user_id)
+        .bind(other_novel_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query(
         "INSERT INTO chapters (id, novel_id, chapter_number, title, content) \
          VALUES ($1, $2, 1, 'Beginning', 'Portable source chapter'), \
@@ -308,6 +316,12 @@ async fn production_account_exports_are_complete_scoped_deterministic_and_secret
     .execute(&pool)
     .await
     .unwrap();
+    sqlx::query("INSERT INTO user_novels (user_id, novel_id) VALUES ($1, $2)")
+        .bind(user_id)
+        .bind(open_world_novel_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("INSERT INTO world_states (user_id, novel_id, state) VALUES ($1, $2, $3)")
         .bind(user_id)
         .bind(open_world_novel_id)

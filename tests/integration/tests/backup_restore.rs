@@ -80,6 +80,12 @@ async fn seed_account(pool: &PgPool, user_id: Uuid, novels: &[(Uuid, Option<Stri
         .execute(pool)
         .await
         .unwrap();
+        sqlx::query("INSERT INTO user_novels (user_id, novel_id) VALUES ($1, $2)")
+            .bind(user_id)
+            .bind(novel_id)
+            .execute(pool)
+            .await
+            .unwrap();
         sqlx::query(
             "INSERT INTO chapters (novel_id, chapter_number, content) \
              VALUES ($1, 1, 'First durable chapter'), ($1, 2, 'Second durable chapter')",
@@ -136,17 +142,29 @@ async fn every_deletion_path_writes_a_minimal_erasure_record() {
         .execute(&pool)
         .await
         .unwrap();
-    // The account cascade must produce a per-novel record as well as the
-    // account record, and must not remove the record it just wrote.
+    // Removing the uploader only removes that user's shelf. Shared canonical
+    // content remains available until the novel itself is deleted.
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(owner)
         .execute(&pool)
         .await
         .unwrap();
+    assert!(
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM novels WHERE id = $1)",)
+            .bind(cascaded_novel)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    );
+    sqlx::query("DELETE FROM novels WHERE id = $1")
+        .bind(cascaded_novel)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let mut expected = vec![
-        // The cascaded novel held a retained source, the directly deleted one
-        // did not: only the delete itself can see that, so the record carries it.
+        // The retained-source novel and the ordinary novel were deleted
+        // explicitly; uploader deletion itself records only the account.
         ("novel".to_string(), cascaded_novel, owner, true, false),
         ("novel".to_string(), direct_novel, owner, false, false),
         ("user".to_string(), owner, owner, false, false),
