@@ -55,6 +55,27 @@ After many months the hero finally returned home. He was stronger and wiser. The
 }
 
 #[test]
+fn test_chapter_split_mixed_english_number_styles_and_indentation() {
+    let body =
+        "The students crossed the old castle and continued their journey together. ".repeat(3);
+    let text = format!(
+        "\u{3000}\u{3000}CHAPTER ONE\n{body}\n\
+         - CHAPTER T W o -\n{body}\n\
+         Chapter sixteen, this is ordinary prose and not a heading.\n{body}\n\
+         Chapter 3: The Third Trial\n{body}\n\
+         CHAPTER FOUR - THE RETURN\n{body}"
+    );
+
+    let chapters = NovelParserService::parse_chapters(Uuid::new_v4(), &text).unwrap();
+
+    assert_eq!(chapters.len(), 4);
+    assert!(chapters[0].title.as_ref().unwrap().contains("CHAPTER ONE"));
+    assert!(chapters[1].title.as_ref().unwrap().contains("T W o"));
+    assert!(chapters[1].content.contains("ordinary prose"));
+    assert!(chapters[2].title.as_ref().unwrap().contains("Chapter 3"));
+}
+
+#[test]
 fn test_chapter_split_renumbers_after_dropping_short_chapters() {
     let body = "The hero walked on through the quiet valley for a very long while, \
                 thinking about everything that had happened along the way.";

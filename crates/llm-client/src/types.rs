@@ -173,8 +173,8 @@ impl LlmOperation {
             Self::MemorySummary => 256,
             Self::OfflineEvaluation => 800,
             Self::CharacterChat => 5_120,
+            Self::CanonExtraction => 8_192,
             Self::CharacterExtraction
-            | Self::CanonExtraction
             | Self::NarrativeNodeDetection
             | Self::BranchGeneration
             | Self::NarrativeTransition => 4_096,

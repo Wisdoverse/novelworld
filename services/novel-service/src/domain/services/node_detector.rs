@@ -47,8 +47,8 @@ pub fn validate_detection(
     chapter_numbers: impl IntoIterator<Item = i32>,
 ) -> Result<(), NodeDetectionValidationError> {
     let chapter_numbers = chapter_numbers.into_iter().collect::<HashSet<_>>();
-    if result.nodes.len() > 5 {
-        return Err(NodeDetectionValidationError("too many nodes".into()));
+    if !(2..=5).contains(&result.nodes.len()) {
+        return Err(NodeDetectionValidationError("expected 2-5 nodes".into()));
     }
     for node in &result.nodes {
         if !chapter_numbers.contains(&node.chapter_number) {
@@ -143,40 +143,44 @@ mod tests {
 
     #[test]
     fn reader_facing_node_text_must_be_chinese_and_reference_real_chapters() {
-        let valid = NodeDetectionResult {
-            nodes: vec![DetectedNode {
-                chapter_number: 1,
-                description: "主角必须作出决定。".into(),
-                choices: vec![
-                    DetectedChoice {
-                        text: "继续前进".into(),
-                        hint: "前路未卜……".into(),
-                    },
-                    DetectedChoice {
-                        text: "暂时离开".into(),
-                        hint: "退让也有代价……".into(),
-                    },
-                ],
-            }],
+        let chinese_node = |chapter_number| DetectedNode {
+            chapter_number,
+            description: "主角必须作出决定。".into(),
+            choices: vec![
+                DetectedChoice {
+                    text: "继续前进".into(),
+                    hint: "前路未卜……".into(),
+                },
+                DetectedChoice {
+                    text: "暂时离开".into(),
+                    hint: "退让也有代价……".into(),
+                },
+            ],
         };
-        assert!(validate_detection(&valid, [1]).is_ok());
+        let valid = NodeDetectionResult {
+            nodes: vec![chinese_node(1), chinese_node(2)],
+        };
+        assert!(validate_detection(&valid, [1, 2]).is_ok());
 
         let english = NodeDetectionResult {
-            nodes: vec![DetectedNode {
-                chapter_number: 1,
-                description: "Choose a path.".into(),
-                choices: vec![
-                    DetectedChoice {
-                        text: "Continue".into(),
-                        hint: "Unknown".into(),
-                    },
-                    DetectedChoice {
-                        text: "Leave".into(),
-                        hint: "Danger".into(),
-                    },
-                ],
-            }],
+            nodes: (1..=2)
+                .map(|chapter_number| DetectedNode {
+                    chapter_number,
+                    description: "Choose a path.".into(),
+                    choices: vec![
+                        DetectedChoice {
+                            text: "Continue".into(),
+                            hint: "Unknown".into(),
+                        },
+                        DetectedChoice {
+                            text: "Leave".into(),
+                            hint: "Danger".into(),
+                        },
+                    ],
+                })
+                .collect(),
         };
-        assert!(validate_detection(&english, [1]).is_err());
+        assert!(validate_detection(&english, [1, 2]).is_err());
+        assert!(validate_detection(&NodeDetectionResult { nodes: vec![] }, [1, 2]).is_err());
     }
 }

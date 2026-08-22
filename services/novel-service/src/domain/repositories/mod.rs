@@ -84,8 +84,33 @@ pub trait SourceFileDeletionRepository: Send + Sync {
     async fn retry(&self, object_key: &str, error: &str, not_before: DateTime<Utc>) -> Result<()>;
 }
 
+pub struct CanonExtractionCheckpoint<'a> {
+    pub novel_id: Uuid,
+    pub model_version: i32,
+    pub prompt_version: &'a str,
+    pub chapter_number: i32,
+    pub chunk_index: i32,
+    pub is_final: bool,
+    pub source_content: &'a str,
+    pub extraction_json: &'a str,
+}
+
 #[async_trait]
 pub trait CanonStoryModelRepository: Send + Sync {
+    async fn find_import_checkpoint(
+        &self,
+        novel_id: Uuid,
+        model_version: i32,
+        prompt_version: &str,
+        chapter_number: i32,
+        chunk_index: i32,
+        source_content: &str,
+    ) -> Result<Option<String>>;
+    async fn save_import_checkpoint(
+        &self,
+        checkpoint: CanonExtractionCheckpoint<'_>,
+        attempt: i64,
+    ) -> Result<bool>;
     async fn insert_import(&self, model: &CanonStoryModel, attempt: i64) -> Result<bool>;
     async fn find_version(
         &self,
