@@ -45,7 +45,6 @@ roadmap status only when its required evidence exists.
 |---|---|---|
 | [README](../README.md) | Product overview, quick start, and top-level navigation | The supported first-run journey or primary documentation entry points change |
 | [Deployment guide](../DEPLOY.md) | Private-preview setup, upgrade, rollback, and operator configuration | A deployment command, release contract, port, or configuration requirement changes |
-| [Implementation entry point](../IMPLEMENTATION.md) | Routes readers away from stale blueprints to current sources | The canonical implementation or architecture entry points change |
 | [Contributing guide](../CONTRIBUTING.md) | Development workflow, verification, and review bar | CI, architecture rules, or review requirements change |
 | [Security policy](../SECURITY.md) | Vulnerability reporting and implemented controls | The reporting process or security posture changes |
 | [Code of conduct](../CODE_OF_CONDUCT.md) | Community behavior and enforcement | The community policy changes |

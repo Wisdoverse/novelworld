@@ -261,7 +261,6 @@ novelworld/
 | [SPEC.md](./SPEC.md) | Candidate normative specification (RFC 2119) |
 | [SPEC_CONFORMANCE.md](./docs/SPEC_CONFORMANCE.md) | Clause dispositions, owners, and evidence boundaries |
 | [PRODUCT_CONTRACT.md](./docs/PRODUCT_CONTRACT.md) | Current supported envelope, responsibility boundary, and claim ledger |
-| [IMPLEMENTATION.md](./IMPLEMENTATION.md) | Entry point to current implementation sources |
 | [AGENTS.md](./AGENTS.md) | Instructions for AI coding assistants |
 | [DEPLOY.md](./DEPLOY.md) | Deployment guide |
 | [ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Architecture decisions |
