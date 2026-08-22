@@ -191,7 +191,8 @@ async fn run_body() -> Result<()> {
             .layer(middleware::from_fn(trace_middleware));
 
         let port = std::env::var("PORT").unwrap_or_else(|_| "8002".into());
-        let addr = format!("0.0.0.0:{}", port);
+        let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0".into());
+        let addr = format!("{}:{}", bind_addr, port);
         tracing::info!("novel-service listening on {}", addr);
 
         let listener = tokio::net::TcpListener::bind(&addr).await?;

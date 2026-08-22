@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The desktop client exposes no native commands to web content.",
+  "windows": ["main"],
+  "permissions": []
+}

@@ -1,0 +1,137 @@
+name: Desktop Portable Builds
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['desktop-v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            pg0_asset: pg0-windows-x86_64.exe
+            pg0_sha256: 25da2436bb9865e7dde348b2e47436a59f128067e76e16a3f4ac1b05591f0562
+            bundle: none
+            artifact: novelworld-windows-x64-portable
+          - name: Linux x64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            pg0_asset: pg0-linux-x86_64-gnu
+            pg0_sha256: 3b2a129c761ed371dfb0908e227bc90e652a7d60d8bcc1be037c3767f855b91f
+            bundle: appimage
+            artifact: novelworld-linux-x64-appimage
+          - name: macOS Apple Silicon
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            pg0_asset: pg0-darwin-aarch64
+            pg0_sha256: f1e051f2fb5c8aaa9c25452b33f10abd8bed9c8cd55c1fca6d1e880514dc3acd
+            bundle: app
+            artifact: novelworld-macos-arm64-app
+          - name: macOS Intel
+            runner: macos-latest
+            target: x86_64-apple-darwin
+            pg0_asset: pg0-darwin-x86_64
+            pg0_sha256: c7acee1d18f3afa112160c5e4ff2b7533c7d5c4c2dc7a1818a9df02498c06d35
+            bundle: app
+            artifact: novelworld-macos-x64-app
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: pnpm/action-setup@v6.0.10
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 26
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: desktop-${{ matrix.target }}
+
+      - name: Install Linux desktop build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Build local microservices
+        run: >-
+          cargo build --release --target ${{ matrix.target }}
+          -p gateway -p user-service -p novel-service -p agent-service -p narrative-service
+
+      - name: Prepare pinned local runtime
+        run: >-
+          node tools/desktop/prepare.mjs
+          ${{ matrix.target }}
+          ${{ matrix.pg0_asset }}
+          ${{ matrix.pg0_sha256 }}
+
+      - name: Build portable Windows executable
+        if: runner.os == 'Windows'
+        working-directory: frontend
+        run: pnpm exec tauri build --target ${{ matrix.target }} --no-bundle
+
+      - name: Assemble Windows portable directory
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force desktop-portable/resources | Out-Null
+          Copy-Item frontend/src-tauri/target/${{ matrix.target }}/release/novelworld-desktop.exe desktop-portable/NovelWorld.exe
+          Copy-Item frontend/src-tauri/resources/bin desktop-portable/resources/bin -Recurse
+
+      - name: Build Linux/macOS portable bundle
+        if: runner.os != 'Windows'
+        working-directory: frontend
+        run: pnpm exec tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
+
+      - name: Preserve Linux executable permissions
+        if: runner.os == 'Linux'
+        run: >-
+          tar -czf ${{ matrix.artifact }}.tar.gz
+          -C frontend/src-tauri/target/${{ matrix.target }}/release/bundle/appimage .
+
+      - name: Preserve macOS app metadata
+        if: runner.os == 'macOS'
+        run: >-
+          ditto -c -k --sequesterRsrc --keepParent
+          frontend/src-tauri/target/${{ matrix.target }}/release/bundle/macos/NovelWorld.app
+          ${{ matrix.artifact }}.zip
+
+      - uses: actions/upload-artifact@v7.0.1
+        if: runner.os == 'Windows'
+        with:
+          name: ${{ matrix.artifact }}
+          path: desktop-portable
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7.0.1
+        if: runner.os == 'Linux'
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.tar.gz
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7.0.1
+        if: runner.os == 'macOS'
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.zip
+          if-no-files-found: error

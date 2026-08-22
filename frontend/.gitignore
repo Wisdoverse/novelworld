@@ -3,3 +3,5 @@
 .npmrc
 test-results/
 playwright-report/
+src-tauri/resources/bin/*
+!src-tauri/resources/bin/.gitkeep
