@@ -62,9 +62,6 @@ describe('setup status', () => {
   });
 
   it('routes the journey registration destination to registration mode', async () => {
-    const canvasContext = vi
-      .spyOn(HTMLCanvasElement.prototype, 'getContext')
-      .mockReturnValue(null);
     const request = vi.spyOn(apiClient, 'get').mockResolvedValue({
       data: { contract: 3, configured: true, llm_configured: true },
     });
@@ -76,9 +73,9 @@ describe('setup status', () => {
       ),
     );
 
+    expect(await screen.findByRole('heading', { name: /进入故事.*成为其中的玩家/ })).toBeTruthy();
     fireEvent.click(await screen.findByRole('button', { name: /开始你的旅程/ }));
     expect(await screen.findByRole('heading', { name: '创建账号' })).toBeTruthy();
-    canvasContext.mockRestore();
     request.mockRestore();
   });
 
