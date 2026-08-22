@@ -249,33 +249,30 @@ export function ReaderPage() {
   }
 
   return (
-    <div className="min-h-screen" style={{ background: 'var(--color-void)' }}>
+    <div className="app-surface min-h-screen">
       {/* 顶部导航栏 */}
       <motion.header
         initial={{ y: -60 }}
         animate={{ y: 0 }}
-        className="fixed top-0 left-0 right-0 z-40 flex items-center justify-between px-6 py-3"
+        className="fixed top-0 left-0 right-0 z-40 flex items-center justify-between gap-3 border-b border-[#e1e3e8] bg-white/95 px-3 py-3 shadow-[0_1px_3px_rgba(60,64,67,0.08)] backdrop-blur-xl sm:px-6"
         style={{
-          background: 'rgba(3, 4, 10, 0.9)',
           backdropFilter: 'blur(20px)',
-          borderBottom: '1px solid rgba(109, 40, 217, 0.15)',
         }}
       >
-        <div className="flex items-center gap-4">
+        <div className="flex min-w-0 items-center gap-3 sm:gap-4">
           <button
             onClick={() => navigate('/shelf')}
-            className="flex items-center gap-2 text-sm transition-colors"
-            style={{ color: '#94a3b8' }}
+            className="flex shrink-0 items-center gap-1 text-sm font-medium text-[#0b57d0] transition-colors hover:text-[#0842a0] sm:gap-2"
           >
             <ChevronLeft size={16} />
             书架
           </button>
-          <div className="w-px h-4" style={{ background: 'rgba(255,255,255,0.1)' }} />
-          <div>
-            <div className="text-sm font-medium" style={{ color: '#e2e8f0' }}>
+          <div className="h-4 w-px shrink-0 bg-[#e1e3e8]" />
+          <div className="min-w-0">
+            <div className="truncate text-sm font-medium text-[#1f1f1f]">
               {novel?.title}
             </div>
-            <div className="text-xs" style={{ color: '#94a3b8' }}>
+            <div className="truncate text-xs text-[#5f6368]">
               {chapter?.title || `第 ${currentChapter} 章`}
             </div>
           </div>
@@ -283,7 +280,7 @@ export function ReaderPage() {
 
         <div className="flex items-center gap-2">
           {/* 进度 */}
-          <div className="hidden md:flex items-center gap-2 text-xs" style={{ color: '#94a3b8' }}>
+          <div className="hidden items-center gap-2 text-xs text-[#5f6368] md:flex">
             <BookOpen size={12} />
             {currentChapter} / {novel?.total_chapters || '?'}
           </div>
@@ -291,12 +288,7 @@ export function ReaderPage() {
           {/* 角色列表按钮 */}
           <button
             onClick={() => setShowCharacterList(!showCharacterList)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs transition-all"
-            style={{
-              background: showCharacterList ? 'rgba(6, 182, 212, 0.15)' : 'rgba(255,255,255,0.05)',
-              border: '1px solid rgba(6, 182, 212, 0.2)',
-              color: '#22d3ee',
-            }}
+            className={`flex shrink-0 items-center gap-1.5 rounded-full px-3 py-2 text-xs font-semibold transition-colors ${showCharacterList ? 'bg-[#d2e3fc] text-[#0842a0]' : 'bg-[#e8f0fe] text-[#0b57d0] hover:bg-[#d2e3fc]'}`}
           >
             <Users size={12} />
             角色
@@ -305,18 +297,18 @@ export function ReaderPage() {
       </motion.header>
 
       {/* 主内容区 */}
-      <div className="pt-16 pb-24 px-4 md:px-8 max-w-3xl mx-auto">
+      <div className="mx-auto max-w-4xl px-4 pb-28 pt-16 md:px-8">
         {isProgressSaveError && (
-          <div className="mt-4 p-3 rounded-lg flex items-center justify-between gap-3" role="alert" style={{ background: 'rgba(220, 38, 38, 0.12)', color: '#fca5a5' }}>
+          <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-[#f2b8b5] bg-[#fce8e6] p-3 text-[#b3261e]" role="alert">
             <span className="text-sm">阅读进度保存失败，聊天已暂停。</span>
             <button className="text-sm underline" onClick={retryProgressUpdate}>重试</button>
           </div>
         )}
         {isSelfMode && isPlayerEntryLoading ? (
-          <p className="mt-8 text-sm" style={{ color: '#94a3b8' }}>正在恢复你的原创角色…</p>
+          <p className="mt-8 text-sm text-[#5f6368]">正在恢复你的原创角色…</p>
         ) : null}
         {isSelfMode && isPlayerEntryError ? (
-          <div className="mt-8 p-4 rounded-xl flex items-center justify-between gap-4" role="alert" style={{ background: 'rgba(220, 38, 38, 0.1)', color: '#fca5a5' }}>
+          <div className="mt-8 flex items-center justify-between gap-4 rounded-xl border border-[#f2b8b5] bg-[#fce8e6] p-4 text-[#b3261e]" role="alert">
             <span className="text-sm">原创角色加载失败，命运分支已暂停。</span>
             <button className="text-sm underline" onClick={() => refetchPlayerEntry()}>重试</button>
           </div>
@@ -336,13 +328,12 @@ export function ReaderPage() {
         ) : null}
         {isLoading || isEffectiveChapterLoading ? (
           <div className="flex items-center justify-center h-64">
-            <div className="w-8 h-8 border-2 rounded-full animate-spin" style={{ borderColor: '#6d28d9', borderTopColor: 'transparent' }} />
+            <div className="h-8 w-8 animate-spin rounded-full border-2 border-[#0b57d0] border-t-transparent" />
           </div>
         ) : isEffectiveChapterError ? (
           <div
             role="alert"
-            className="mt-16 p-5 rounded-xl flex items-center justify-between gap-4"
-            style={{ background: 'rgba(220, 38, 38, 0.1)', border: '1px solid rgba(248, 113, 113, 0.25)', color: '#fca5a5' }}
+            className="mt-16 flex items-center justify-between gap-4 rounded-xl border border-[#f2b8b5] bg-[#fce8e6] p-5 text-[#b3261e]"
           >
             <span className="text-sm">玩家时间线生成失败。为避免回退到已经失效的原著因果，本章暂不显示。</span>
             <button className="text-sm underline" onClick={() => refetchEffectiveChapter()}>重新生成</button>
@@ -353,32 +344,33 @@ export function ReaderPage() {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.4 }}
+            className="surface-card mt-6 px-6 py-8 sm:px-10 md:px-14"
           >
             {/* 章节标题 */}
             <div className="text-center mb-12 pt-8">
-              <div className="text-xs font-semibold uppercase tracking-widest mb-2" style={{ color: '#a78bfa' }}>
+              <div className="mb-2 text-xs font-semibold uppercase tracking-widest text-[#0b57d0]">
                 第 {currentChapter} 章
               </div>
               {effectiveChapter.generated && (
-                <div className="mb-3 text-xs font-semibold tracking-wider" style={{ color: '#22d3ee' }}>
+                <div className="mb-3 text-xs font-semibold tracking-wider text-[#0b57d0]">
                   玩家时间线 · 本章已因你的选择完全改写
                 </div>
               )}
               {chapter.title && (
                 <h1
                   className="text-2xl md:text-3xl font-bold"
-                  style={{ fontFamily: 'var(--font-display)', color: '#e2e8f0' }}
+                  style={{ color: '#1f1f1f' }}
                 >
                   {chapter.title}
                 </h1>
               )}
-              <div className="mt-4 mx-auto w-16 h-px" style={{ background: 'linear-gradient(90deg, transparent, #6d28d9, transparent)' }} />
+              <div className="mx-auto mt-4 h-px w-16 bg-[#0b57d0]" />
             </div>
 
             {/* 正文中的分支节点：原文在锚点处暂停，选择后由生成内容接续。 */}
             {hasBranch && isBranchLoading && (
-              <div className="my-16 flex items-center justify-center gap-2 p-5 text-sm" style={{ color: '#22d3ee' }}>
-                <div className="w-4 h-4 border-2 rounded-full animate-spin" style={{ borderColor: '#22d3ee', borderTopColor: 'transparent' }} />
+              <div className="my-16 flex items-center justify-center gap-2 p-5 text-sm text-[#0b57d0]">
+                <div className="h-4 w-4 animate-spin rounded-full border-2 border-[#0b57d0] border-t-transparent" />
                 正在定位章节中的命运交叉点...
               </div>
             )}
@@ -392,8 +384,7 @@ export function ReaderPage() {
             {hasBranch && isBranchError && (
               <div
                 role="alert"
-                className="my-8 p-4 rounded-xl flex items-center justify-between gap-4"
-                style={{ background: 'rgba(220, 38, 38, 0.1)', border: '1px solid rgba(248, 113, 113, 0.25)', color: '#fca5a5' }}
+                className="my-8 flex items-center justify-between gap-4 rounded-xl border border-[#f2b8b5] bg-[#fce8e6] p-4 text-[#b3261e]"
               >
                 <span className="text-sm">命运交叉点加载失败。</span>
                 <button className="text-sm underline" onClick={() => refetchBranch()}>重试</button>
@@ -412,18 +403,12 @@ export function ReaderPage() {
 
             {/* 章节摘要 */}
             {chapter.summary && !hasBranch && (
-              <div
-                className="mt-12 p-4 rounded-xl"
-                style={{
-                  background: 'rgba(109, 40, 217, 0.08)',
-                  border: '1px solid rgba(109, 40, 217, 0.2)',
-                }}
-              >
-                <div className="flex items-center gap-2 mb-2 text-xs font-semibold uppercase tracking-wider" style={{ color: '#8b5cf6' }}>
+              <div className="mt-12 rounded-xl border border-[#d2e3fc] bg-[#f8faff] p-4">
+                <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-[#0b57d0]">
                   <Sparkles size={12} />
                   章节摘要
                 </div>
-                <p className="text-sm leading-relaxed" style={{ color: '#94a3b8' }}>
+                <p className="text-sm leading-relaxed text-[#5f6368]">
                   {chapter.summary}
                 </p>
               </div>
@@ -431,61 +416,50 @@ export function ReaderPage() {
           </motion.div>
         ) : null}
         {openWorldEnabled && isOpenWorldLoading ? (
-          <p className="mt-12 text-sm" style={{ color: '#94a3b8' }}>正在恢复开放世界…</p>
+          <p className="mt-12 text-sm text-[#5f6368]">正在恢复开放世界…</p>
         ) : null}
         {openWorldEnabled && isOpenWorldError ? (
-          <div className="mt-12 p-4 rounded-xl flex items-center justify-between gap-4" role="alert" style={{ background: 'rgba(220, 38, 38, 0.1)', color: '#fca5a5' }}>
+          <div className="mt-12 flex items-center justify-between gap-4 rounded-xl border border-[#f2b8b5] bg-[#fce8e6] p-4 text-[#b3261e]" role="alert">
             <span className="text-sm">开放世界加载失败，已暂停新的行动。</span>
             <button className="text-sm underline" onClick={() => refetchOpenWorld()}>重试</button>
           </div>
         ) : null}
         {openWorldEnabled && !isOpenWorldLoading && !isOpenWorldError && !openWorld ? (
           <section
-            className="relative mt-14 overflow-hidden rounded-3xl px-6 py-8 md:px-10 md:py-10"
-            style={{
-              background: 'radial-gradient(circle at 85% 0%, rgba(6,182,212,0.2), transparent 34%), linear-gradient(145deg, rgba(19,14,45,0.98), rgba(6,17,35,0.98))',
-              border: '1px solid rgba(167, 139, 250, 0.28)',
-              boxShadow: '0 24px 70px rgba(0,0,0,0.32)',
-            }}
+            className="surface-card relative mt-14 overflow-hidden bg-[#f8faff] px-6 py-8 md:px-10 md:py-10"
             aria-labelledby="enter-world-title"
           >
-            <div
-              className="pointer-events-none absolute -right-16 -top-20 h-52 w-52 rounded-full"
-              style={{ border: '1px solid rgba(34,211,238,0.18)', boxShadow: '0 0 80px rgba(6,182,212,0.12)' }}
-              aria-hidden="true"
-            />
             <div className="relative">
-              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.24em]" style={{ color: '#67e8f9' }}>
+              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.24em] text-[#0b57d0]">
                 <Sparkles size={14} aria-hidden="true" /> 新的故事线
               </div>
               <h2
                 id="enter-world-title"
                 className="mt-4 max-w-xl text-2xl font-semibold leading-tight md:text-3xl"
-                style={{ color: '#f8fafc', fontFamily: 'var(--font-display)' }}
+                style={{ color: '#1f1f1f' }}
               >
                 以 {playerEntry?.player?.name} 之名，踏入这个世界
               </h2>
-              <p className="mt-4 max-w-xl text-sm leading-7" style={{ color: '#aebbd0' }}>
+              <p className="mt-4 max-w-xl text-sm leading-7 text-[#5f6368]">
                 从这一刻起，原著不再是唯一答案。故事角色仍会追逐各自的目标，而你的每次行动，都将写进这条只属于你的时间线。
               </p>
-              <div className="mt-6 flex flex-wrap gap-2 text-xs" style={{ color: '#cbd5e1' }}>
-                <span className="rounded-full px-3 py-1.5" style={{ background: 'rgba(167,139,250,0.12)', border: '1px solid rgba(167,139,250,0.22)' }}>
+              <div className="mt-6 flex flex-wrap gap-2 text-xs text-[#3c4043]">
+                <span className="rounded-full border border-[#d2e3fc] bg-[#e8f0fe] px-3 py-1.5">
                   入场 · 第 {playerEntry?.player?.canonical_checkpoint_chapter} 章
                 </span>
                 {entryLocation ? (
-                  <span className="flex items-center gap-1.5 rounded-full px-3 py-1.5" style={{ background: 'rgba(34,211,238,0.09)', border: '1px solid rgba(34,211,238,0.2)' }}>
+                  <span className="flex items-center gap-1.5 rounded-full border border-[#d2e3fc] bg-white px-3 py-1.5">
                     <MapPin size={12} aria-hidden="true" /> {entryLocation.name}
                   </span>
                 ) : null}
               </div>
               {startOpenWorld.isError ? (
-                <p role="alert" className="mt-4 text-sm" style={{ color: '#fca5a5' }}>
+                <p role="alert" className="mt-4 text-sm text-[#b3261e]">
                   {getApiErrorMessage(startOpenWorld.error, '进入开放世界失败')}
                 </p>
               ) : null}
               <button
-                className="mt-7 flex w-full items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-semibold transition-transform hover:-translate-y-0.5 disabled:translate-y-0 disabled:opacity-50 md:w-auto"
-                style={{ background: 'linear-gradient(135deg, #7c3aed, #0891b2)', color: 'white', boxShadow: '0 12px 30px rgba(8,145,178,0.2)' }}
+                className="primary-action mt-7 w-full md:w-auto"
                 disabled={startOpenWorld.isPending}
                 onClick={() => startOpenWorld.mutate()}
               >
@@ -499,34 +473,21 @@ export function ReaderPage() {
       </div>
 
       {/* 底部翻页导航 */}
-      <div
-        className="fixed bottom-0 left-0 right-0 flex items-center justify-between px-6 py-4"
-        style={{
-          background: 'rgba(3, 4, 10, 0.95)',
-          backdropFilter: 'blur(20px)',
-          borderTop: '1px solid rgba(109, 40, 217, 0.15)',
-        }}
-      >
+      <div className="fixed bottom-0 left-0 right-0 z-20 flex items-center justify-between gap-2 border-t border-[#e1e3e8] bg-white/95 px-3 py-3 shadow-[0_-1px_3px_rgba(60,64,67,0.08)] backdrop-blur-xl sm:px-6 sm:py-4">
         <button
           onClick={() => goToChapter(currentChapter - 1)}
           disabled={isProgressSaving || currentChapter <= 1}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm transition-all"
-          style={{
-            background: 'rgba(255,255,255,0.05)',
-            border: '1px solid rgba(255,255,255,0.1)',
-            color: isProgressSaving || currentChapter <= 1 ? '#334155' : '#94a3b8',
-            cursor: isProgressSaving || currentChapter <= 1 ? 'not-allowed' : 'pointer',
-          }}
+          className="tonal-action shrink-0 px-3 text-sm sm:px-5"
         >
           <ChevronLeft size={14} />
           上一章
         </button>
 
         {/* 进度条 */}
-        <div className="flex-1 mx-6">
-          <div className="progress-cosmic">
+        <div className="mx-4 hidden flex-1 sm:block">
+          <div className="reader-progress">
             <div
-              className="progress-cosmic-fill"
+              className="reader-progress-fill"
               style={{ width: `${novel ? (currentChapter / novel.total_chapters) * 100 : 0}%` }}
             />
           </div>
@@ -535,13 +496,7 @@ export function ReaderPage() {
         <button
           onClick={() => goToChapter(currentChapter + 1)}
           disabled={isProgressSaving || playerEntityRequired || branchChoiceRequired || !novel || currentChapter >= novel.total_chapters}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm transition-all"
-          style={{
-            background: 'rgba(255,255,255,0.05)',
-            border: '1px solid rgba(255,255,255,0.1)',
-            color: (isProgressSaving || playerEntityRequired || branchChoiceRequired || !novel || currentChapter >= novel.total_chapters) ? '#334155' : '#94a3b8',
-            cursor: (isProgressSaving || playerEntityRequired || branchChoiceRequired || !novel || currentChapter >= novel.total_chapters) ? 'not-allowed' : 'pointer',
-          }}
+          className="tonal-action min-w-0 px-3 text-sm sm:px-5"
         >
           {playerEntityRequired ? '请先创建角色' : branchChoiceRequired ? '请先选择' : '下一章'}
           <ChevronRight size={14} />
@@ -556,15 +511,12 @@ export function ReaderPage() {
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: 300 }}
             transition={{ duration: 0.25, ease: [0.23, 1, 0.32, 1] }}
-            className="fixed right-0 top-14 bottom-0 z-30 overflow-y-auto p-4 space-y-3"
+            className="fixed bottom-0 right-0 top-14 z-30 w-[min(280px,100vw)] space-y-3 overflow-y-auto border-l border-[#e1e3e8] bg-white/95 p-4 shadow-[-8px_0_28px_rgba(60,64,67,0.1)] backdrop-blur-xl"
             style={{
-              width: '280px',
-              background: 'rgba(8, 13, 31, 0.95)',
               backdropFilter: 'blur(20px)',
-              borderLeft: '1px solid rgba(109, 40, 217, 0.2)',
             }}
           >
-            <div className="text-xs font-semibold uppercase tracking-widest mb-4" style={{ color: '#a78bfa' }}>
+            <div className="mb-4 text-xs font-semibold uppercase tracking-widest text-[#0b57d0]">
               故事角色
             </div>
             {characters?.map((char) => {
@@ -578,30 +530,26 @@ export function ReaderPage() {
                     setActiveChatCharacter(char);
                     setShowCharacterList(false);
                   }}
-                  className="w-full flex items-center gap-3 p-3 rounded-xl text-left transition-all disabled:opacity-50"
-                  style={{
-                    background: 'rgba(15, 21, 53, 0.6)',
-                    border: '1px solid rgba(109, 40, 217, 0.2)',
-                  }}
+                  className="flex w-full items-center gap-3 rounded-xl border border-[#e1e3e8] bg-white p-3 text-left transition-colors hover:bg-[#f8faff] disabled:opacity-50"
                 >
                   {char.avatar_url ? (
                     <img src={char.avatar_url} alt={char.name}
                       className="w-10 h-10 rounded-full object-cover flex-shrink-0"
-                      style={{ border: '2px solid rgba(6, 182, 212, 0.3)' }}
+                      style={{ border: '2px solid #d2e3fc' }}
                     />
                   ) : (
                     <div className="w-10 h-10 rounded-full flex-shrink-0 flex items-center justify-center font-bold"
-                      style={{ background: 'linear-gradient(135deg, #6d28d9, #06b6d4)', color: 'white' }}>
+                      style={{ background: '#0b57d0', color: 'white' }}>
                       {char.name[0]}
                     </div>
                   )}
                   <div className="min-w-0">
-                    <div className="text-sm font-medium truncate" style={{ color: '#e2e8f0' }}>{char.name}</div>
-                    <div className="text-xs truncate" style={{ color: '#94a3b8' }}>
+                    <div className="truncate text-sm font-medium text-[#1f1f1f]">{char.name}</div>
+                    <div className="truncate text-xs text-[#5f6368]">
                       {isDead ? '当前时间线已死亡' : char.role === 'protagonist' ? '主角' : char.role === 'antagonist' ? '反派' : '配角'}
                     </div>
                   </div>
-                  <MessageCircle size={14} className="flex-shrink-0 ml-auto" style={{ color: '#22d3ee' }} />
+                  <MessageCircle size={14} className="ml-auto flex-shrink-0 text-[#0b57d0]" />
                 </button>
               );
             })}

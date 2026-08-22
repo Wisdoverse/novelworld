@@ -80,16 +80,15 @@ export function ChatPanel({
           transition={{ duration: 0.25, ease: [0.23, 1, 0.32, 1] }}
           className="fixed right-4 bottom-4 z-50 flex flex-col"
           style={{
-            width: '380px',
+            width: 'min(380px, calc(100vw - 2rem))',
             height: isMinimized ? '64px' : '560px',
             transition: 'height 250ms cubic-bezier(0.23, 1, 0.32, 1)',
           }}
         >
-          <div className="glass-card flex flex-col h-full overflow-hidden">
+          <div className="surface-card flex h-full flex-col overflow-hidden">
             {/* Header */}
             <div
-              className="flex items-center gap-3 p-4 border-b cursor-pointer"
-              style={{ borderColor: 'rgba(109, 40, 217, 0.2)' }}
+              className="flex cursor-pointer items-center gap-3 border-b border-[#e1e3e8] p-4"
               onClick={() => setIsMinimized(!isMinimized)}
             >
               {/* 角色头像 */}
@@ -99,14 +98,15 @@ export function ChatPanel({
                     src={character.avatar_url}
                     alt={character.name}
                     className="w-10 h-10 rounded-full object-cover"
-                    style={{ border: '2px solid rgba(6, 182, 212, 0.4)' }}
+                    style={{ border: '2px solid #d2e3fc' }}
                   />
                 ) : (
                   <div
                     className="w-10 h-10 rounded-full flex items-center justify-center text-lg font-bold"
                     style={{
-                      background: 'linear-gradient(135deg, #6d28d9, #06b6d4)',
-                      border: '2px solid rgba(6, 182, 212, 0.4)',
+                      background: '#0b57d0',
+                      border: '2px solid #d2e3fc',
+                      color: 'white',
                     }}
                   >
                     {character.name[0]}
@@ -114,18 +114,18 @@ export function ChatPanel({
                 )}
                 {/* 在线指示器 */}
                 <div
-                  className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full animate-pulse-glow"
-                  style={{ background: '#22d3ee' }}
+                  className="absolute -bottom-0.5 -right-0.5 h-3 w-3 animate-pulse rounded-full"
+                  style={{ background: '#1e8e3e' }}
                 />
               </div>
 
               <div className="flex-1 min-w-0">
-                <div className="font-semibold text-sm truncate" style={{ color: '#e2e8f0' }}>
+                <div className="truncate text-sm font-semibold text-[#1f1f1f]">
                   {character.name}
                 </div>
-                <div className="text-xs truncate" style={{ color: '#94a3b8' }}>
+                <div className="truncate text-xs text-[#5f6368]">
                   {isCurrentlyStreaming ? (
-                    <span className="text-glow" style={{ fontSize: '11px' }}>正在思考...</span>
+                    <span className="text-[#0b57d0]" style={{ fontSize: '11px' }}>正在思考...</span>
                   ) : (
                     <span>{character.role === 'protagonist' ? '主角' : '角色'}</span>
                   )}
@@ -136,16 +136,14 @@ export function ChatPanel({
                 <button
                   onClick={(e) => { e.stopPropagation(); setIsMinimized(!isMinimized); }}
                   aria-label={isMinimized ? '展开聊天窗口' : '收起聊天窗口'}
-                  className="p-1.5 min-h-6 min-w-6 rounded-lg transition-colors hover:bg-white/10"
-                  style={{ color: '#94a3b8' }}
+                  className="min-h-8 min-w-8 rounded-full p-1.5 text-[#5f6368] transition-colors hover:bg-[#f1f3f4]"
                 >
                   {isMinimized ? <Maximize2 size={14} /> : <Minimize2 size={14} />}
                 </button>
                 <button
                   onClick={(e) => { e.stopPropagation(); onClose(); }}
                   aria-label="关闭聊天"
-                  className="p-1.5 min-h-6 min-w-6 rounded-lg transition-colors hover:bg-white/10"
-                  style={{ color: '#94a3b8' }}
+                  className="min-h-8 min-w-8 rounded-full p-1.5 text-[#5f6368] transition-colors hover:bg-[#f1f3f4]"
                 >
                   <X size={14} />
                 </button>
@@ -161,11 +159,11 @@ export function ChatPanel({
                 >
                   {charMessages.length === 0 && (
                     <div className="text-center py-8">
-                      <Brain size={32} className="mx-auto mb-3 opacity-30" style={{ color: '#6d28d9' }} />
-                      <p className="text-sm" style={{ color: '#94a3b8' }}>
+                      <Brain size={32} className="mx-auto mb-3 text-[#0b57d0] opacity-40" />
+                      <p className="text-sm text-[#5f6368]">
                         与 {character.name} 开始对话
                       </p>
-                      <p className="text-xs mt-1" style={{ color: '#94a3b8' }}>
+                      <p className="mt-1 text-xs text-[#5f6368]">
                         TA 记得你们之前的所有互动
                       </p>
                     </div>
@@ -179,7 +177,7 @@ export function ChatPanel({
                       {msg.role === 'character' && (
                         <div
                           className="w-7 h-7 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-bold mt-1"
-                          style={{ background: 'linear-gradient(135deg, #6d28d9, #06b6d4)' }}
+                          style={{ background: '#0b57d0', color: 'white' }}
                         >
                           {character.name[0]}
                         </div>
@@ -199,13 +197,13 @@ export function ChatPanel({
                     <div className="flex justify-start gap-2">
                       <div
                         className="w-7 h-7 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-bold mt-1 animate-pulse"
-                        style={{ background: 'linear-gradient(135deg, #6d28d9, #06b6d4)' }}
+                        style={{ background: '#0b57d0', color: 'white' }}
                       >
                         {character.name[0]}
                       </div>
                       <div className="chat-bubble-character max-w-[80%] text-sm leading-relaxed">
                         <ChatMarkdown>{currentStreamText}</ChatMarkdown>
-                        <span className="inline-block w-1 h-4 ml-0.5 animate-pulse" style={{ background: '#22d3ee' }} />
+                        <span className="ml-0.5 inline-block h-4 w-1 animate-pulse bg-[#0b57d0]" />
                       </div>
                     </div>
                   )}
@@ -214,16 +212,15 @@ export function ChatPanel({
                 </div>
 
                 {/* Input */}
-                <div className="p-3 border-t" style={{ borderColor: 'rgba(109, 40, 217, 0.2)' }}>
+                <div className="border-t border-[#e1e3e8] p-3">
                   {readerIdentity && (
-                    <div className="mb-2 px-2 py-1 rounded text-xs" style={{ background: 'rgba(6, 182, 212, 0.1)', color: '#22d3ee' }}>
+                    <div className="mb-2 rounded bg-[#e8f0fe] px-2 py-1 text-xs text-[#0b57d0]">
                       以「{readerIdentity}」身份对话
                     </div>
                   )}
                   {failedTurn && !isCurrentlyStreaming && (
                     <div
-                      className="mb-2 flex items-center justify-between gap-2 rounded px-2 py-1.5 text-xs"
-                      style={{ background: 'rgba(220, 38, 38, 0.12)', color: '#fca5a5' }}
+                      className="mb-2 flex items-center justify-between gap-2 rounded bg-[#fce8e6] px-2 py-1.5 text-xs text-[#b3261e]"
                       role="alert"
                     >
                       <span>{failedTurn.error.message}</span>
@@ -246,21 +243,15 @@ export function ChatPanel({
                       placeholder={`对 ${character.name} 说...`}
                       rows={2}
                       maxLength={4000}
-                      className="flex-1 resize-none rounded-xl px-3 py-2 text-sm outline-none"
-                      style={{
-                        background: 'rgba(15, 21, 53, 0.8)',
-                        border: '1px solid rgba(109, 40, 217, 0.3)',
-                        color: '#e2e8f0',
-                        fontFamily: 'var(--font-body)',
-                      }}
+                      className="field-control flex-1 resize-none text-sm"
+                      style={{ fontFamily: 'var(--font-body)' }}
                       disabled={!canChat || isCurrentlyStreaming}
                     />
                     {isCurrentlyStreaming && (
                       <button
                         type="button"
                         onClick={() => cancelMessage(character.id)}
-                        className="flex-shrink-0 rounded-xl px-3 py-2.5 text-xs transition-all"
-                        style={{ background: 'rgba(220, 38, 38, 0.18)', color: '#fca5a5' }}
+                        className="flex-shrink-0 rounded-full bg-[#fce8e6] px-3 py-2.5 text-xs font-semibold text-[#b3261e] transition-colors hover:bg-[#f9dedc]"
                       >
                         停止
                       </button>
@@ -270,14 +261,7 @@ export function ChatPanel({
                       onClick={handleSend}
                       aria-label="发送消息"
                       disabled={!canChat || !input.trim() || isCurrentlyStreaming}
-                      className="flex-shrink-0 p-2.5 rounded-xl transition-all"
-                      style={{
-                        background: canChat && input.trim() && !isCurrentlyStreaming
-                          ? 'linear-gradient(135deg, #0891b2, #6d28d9)'
-                          : 'rgba(71, 85, 105, 0.3)',
-                        color: canChat && input.trim() && !isCurrentlyStreaming ? 'white' : '#475569',
-                        cursor: canChat && input.trim() && !isCurrentlyStreaming ? 'pointer' : 'not-allowed',
-                      }}
+                      className="flex-shrink-0 rounded-full bg-[#0b57d0] p-2.5 text-white transition-colors hover:bg-[#0842a0] disabled:cursor-not-allowed disabled:bg-[#c4c7c5] disabled:text-[#747775]"
                     >
                       <Send size={16} />
                     </button>

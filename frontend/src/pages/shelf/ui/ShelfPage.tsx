@@ -471,7 +471,7 @@ export function ShelfPage() {
           <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#0b57d0]">
             <BookOpen size={16} color="white" />
           </div>
-          <span className="font-semibold text-[#174ea6]">
+          <span className="hidden font-semibold text-[#174ea6] sm:inline">
             NovelWorld
           </span>
         </div>
@@ -481,18 +481,22 @@ export function ShelfPage() {
             <Settings size={16} />
           </button>
           <button
+            type="button"
+            aria-label="打开共享书库"
             onClick={() => setShowSharedLibrary(true)}
             className="tonal-action px-3 text-sm sm:px-4"
           >
             <Library size={14} />
-            共享书库
+            <span className="hidden sm:inline">共享书库</span>
           </button>
           <button
+            type="button"
+            aria-label="导入小说"
             onClick={() => setShowImport(true)}
-            className="primary-action px-4 text-sm sm:px-5"
+            className="primary-action px-3 text-sm sm:px-5"
           >
             <Plus size={14} />
-            导入小说
+            <span className="hidden sm:inline">导入小说</span>
           </button>
         </div>
       </header>

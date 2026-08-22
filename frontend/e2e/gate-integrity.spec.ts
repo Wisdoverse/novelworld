@@ -15,8 +15,9 @@ test('gate integrity: axe detects injected violations (fail-closed)', async ({ p
     document.body.appendChild(button); // button-name violation: no text/aria-label
     const dim = document.createElement('p');
     dim.textContent = 'dim text';
-    dim.style.color = '#334155';
-    document.body.appendChild(dim); // color-contrast violation on the dark bg
+    dim.style.color = '#f1f3f4';
+    dim.style.backgroundColor = '#fff';
+    document.body.appendChild(dim); // color-contrast violation independent of the app theme
   });
   const violations = await scanA11y(page);
   const ids = violations.map((v) => v.id);
