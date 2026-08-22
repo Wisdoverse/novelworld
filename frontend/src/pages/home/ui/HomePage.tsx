@@ -1,275 +1,181 @@
-import React, { useEffect, useRef } from 'react';
+import {
+  ArrowRight,
+  BookOpen,
+  CheckCircle2,
+  GitBranch,
+  MessageCircle,
+  Sparkles,
+  Upload,
+  UserRound,
+} from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { motion } from 'framer-motion';
-import { BookOpen, Users, GitBranch, Brain, Sparkles, ArrowRight, Star } from 'lucide-react';
 import { useAuthStore } from '@/features/auth/model/useAuthStore';
 
-// 星点组件
-function StarField() {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
-
-    const stars = Array.from({ length: 200 }, () => ({
-      x: Math.random() * canvas.width,
-      y: Math.random() * canvas.height,
-      r: Math.random() * 1.5 + 0.3,
-      opacity: Math.random() * 0.8 + 0.2,
-      speed: Math.random() * 0.5 + 0.1,
-    }));
-
-    let animId: number;
-    const animate = () => {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      stars.forEach((star) => {
-        ctx.beginPath();
-        ctx.arc(star.x, star.y, star.r, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(255, 255, 255, ${star.opacity})`;
-        ctx.fill();
-        star.opacity += (Math.random() - 0.5) * 0.02;
-        star.opacity = Math.max(0.1, Math.min(1, star.opacity));
-      });
-      animId = requestAnimationFrame(animate);
-    };
-    animate();
-
-    const handleResize = () => {
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
-    };
-    window.addEventListener('resize', handleResize);
-
-    return () => {
-      cancelAnimationFrame(animId);
-      window.removeEventListener('resize', handleResize);
-    };
-  }, []);
-
-  return (
-    <canvas
-      ref={canvasRef}
-      className="fixed inset-0 z-0 pointer-events-none"
-      style={{ opacity: 0.6 }}
-    />
-  );
-}
-
-const features = [
+const capabilities = [
   {
-    icon: BookOpen,
-    title: '任意小说导入',
-    desc: '上传 TXT/EPUB/PDF 或粘贴文本，AI 自动解析章节、提取角色、构建世界观',
-    color: '#22d3ee',
+    icon: Upload,
+    title: '导入你的小说',
+    description: '支持 TXT、EPUB 和 PDF，自动整理章节、角色与世界设定。',
   },
   {
-    icon: Users,
-    title: '角色 Agent 系统',
-    desc: '每个角色拥有独立 AI 人格，性格、背景、说话风格完全还原原著',
-    color: '#8b5cf6',
-  },
-  {
-    icon: Brain,
-    title: '4层记忆金字塔',
-    desc: '角色记住你们的每次对话，关系随时间真实演进，永不遗忘',
-    color: '#22d3ee',
+    icon: UserRound,
+    title: '以玩家身份进入',
+    description: '你不是旁观者，而是带着自己的身份加入小说世界。',
   },
   {
     icon: GitBranch,
-    title: '分支叙事引擎',
-    desc: '在关键节点做出选择，AI 动态生成专属于你的故事走向',
-    color: '#8b5cf6',
-  },
-  {
-    icon: Sparkles,
-    title: '身份代入系统',
-    desc: '以自己身份进入，或扮演书中角色，深度参与故事世界',
-    color: '#22d3ee',
-  },
-  {
-    icon: Star,
-    title: '角色头像生成',
-    desc: '根据原著外貌描述，AI 自动生成每个角色的专属插图头像',
-    color: '#8b5cf6',
+    title: '让故事回应选择',
+    description: '每次决定都会改变世界状态，并重新生成之后的章节。',
   },
 ];
 
 export function HomePage() {
   const navigate = useNavigate();
   const user = useAuthStore(state => state.user);
+  const startDestination = user ? '/shelf' : '/register';
 
   return (
-    <div className="relative min-h-screen overflow-hidden" style={{ background: 'var(--color-void)' }}>
-      <StarField />
-
-      {/* 星云背景 */}
-      <div className="fixed inset-0 z-0 pointer-events-none">
-        <div
-          className="absolute animate-nebula"
-          style={{
-            top: '-20%', left: '-10%', width: '60%', height: '60%',
-            background: 'radial-gradient(ellipse, rgba(109,40,217,0.12) 0%, transparent 70%)',
-          }}
-        />
-        <div
-          className="absolute animate-nebula"
-          style={{
-            bottom: '-20%', right: '-10%', width: '50%', height: '50%',
-            background: 'radial-gradient(ellipse, rgba(6,182,212,0.08) 0%, transparent 70%)',
-            animationDelay: '-10s',
-          }}
-        />
-      </div>
-
-      {/* 导航栏 */}
-      <nav className="relative z-10 flex items-center justify-between px-8 py-6">
-        <motion.div
-          initial={{ opacity: 0, x: -20 }}
-          animate={{ opacity: 1, x: 0 }}
-          className="flex items-center gap-3"
-        >
-          <div
-            className="w-9 h-9 rounded-xl flex items-center justify-center"
-            style={{ background: 'linear-gradient(135deg, #6d28d9, #06b6d4)' }}
+    <main className="app-surface min-h-screen">
+      <header className="border-b border-[#e8eaed] bg-white/90 backdrop-blur-xl">
+        <div className="mx-auto flex min-h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
+          <button
+            type="button"
+            onClick={() => navigate('/')}
+            className="flex items-center gap-3 rounded-full pr-3 text-left"
+            aria-label="NovelWorld 首页"
           >
-            <BookOpen size={18} color="white" />
+            <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#0b57d0] text-white">
+              <BookOpen size={18} aria-hidden="true" />
+            </span>
+            <span className="font-semibold tracking-[-0.01em] text-[#174ea6]">NovelWorld</span>
+          </button>
+
+          <div className="flex items-center gap-2">
+            {!user && (
+              <button
+                type="button"
+                onClick={() => navigate('/login')}
+                className="flex min-h-11 items-center rounded-full px-4 text-sm font-semibold text-[#0b57d0] transition-colors hover:bg-[#f0f4ff]"
+              >
+                登录
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => navigate(startDestination)}
+              className="primary-action px-5 text-sm"
+            >
+              {user ? '进入书架' : '免费开始'}
+            </button>
           </div>
-          <span
-            className="text-xl font-bold"
-            style={{ fontFamily: 'var(--font-display)', color: '#e2e8f0' }}
-          >
-            NovelWorld
-          </span>
-        </motion.div>
+        </div>
+      </header>
 
-        <motion.div
-          initial={{ opacity: 0, x: 20 }}
-          animate={{ opacity: 1, x: 0 }}
-          className="flex items-center gap-3"
-        >
-          <button
-            onClick={() => navigate('/login')}
-            className="px-4 py-2 text-sm rounded-lg transition-colors"
-            style={{ color: '#94a3b8' }}
-          >
-            登录
-          </button>
-          <button
-            onClick={() => navigate('/register')}
-            className="btn-cosmic-filled px-5 py-2 rounded-lg text-sm font-semibold"
-            style={{ background: 'linear-gradient(135deg, #0891b2, #6d28d9)', color: 'white', border: 'none', cursor: 'pointer' }}
-          >
-            免费开始
-          </button>
-        </motion.div>
-      </nav>
-
-      {/* Hero 区域 */}
-      <div className="relative z-10 text-center px-6 pt-16 pb-24">
-        <motion.div
-          initial={{ opacity: 0, y: 30 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.1, duration: 0.6, ease: [0.23, 1, 0.32, 1] }}
-        >
-          <div
-            className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-xs font-semibold mb-8"
-            style={{
-              background: 'rgba(109, 40, 217, 0.15)',
-              border: '1px solid rgba(109, 40, 217, 0.3)',
-              color: '#8b5cf6',
-            }}
-          >
-            <Sparkles size={12} />
-            AI 驱动的沉浸式小说体验
+      <section className="mx-auto grid max-w-7xl items-center gap-12 px-4 py-14 sm:px-6 sm:py-20 lg:grid-cols-[1.04fr_0.96fr] lg:px-8 lg:py-24">
+        <div className="max-w-2xl">
+          <div className="mb-6 inline-flex items-center gap-2 rounded-full bg-[#e8f0fe] px-4 py-2 text-sm font-semibold text-[#174ea6]">
+            <Sparkles size={15} aria-hidden="true" />
+            小说，从阅读变成亲历
           </div>
 
-          <h1
-            className="text-5xl md:text-7xl font-black mb-6 leading-tight"
-            style={{ fontFamily: 'var(--font-display)' }}
-          >
-            <span style={{ color: '#e2e8f0' }}>进入</span>
-            <br />
-            <span className="text-glow">小说的世界</span>
+          <h1 className="text-balance text-5xl font-medium leading-[1.08] tracking-[-0.045em] text-[#1f1f1f] sm:text-6xl lg:text-7xl">
+            进入故事，
+            <span className="text-[#0b57d0]">成为其中的玩家。</span>
           </h1>
-
-          <p
-            className="text-lg md:text-xl max-w-2xl mx-auto mb-10 leading-relaxed"
-            style={{ color: '#94a3b8' }}
-          >
-            导入任意小说，与书中角色实时对话，在关键时刻做出影响故事走向的选择。
-            <br />
-            你不再是旁观者——你是故事的参与者。
+          <p className="mt-7 max-w-xl text-lg leading-8 text-[#5f6368] sm:text-xl">
+            导入一本小说，NovelWorld 会理解角色、关系和世界规则。你做出选择，故事从这一刻开始为你继续书写。
           </p>
 
-          <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
+          <div className="mt-9 flex flex-col gap-3 sm:flex-row">
             <button
-              onClick={() => navigate(user ? '/shelf' : '/register')}
-              className="flex items-center gap-2 px-8 py-4 rounded-xl text-base font-semibold transition-all"
-              style={{
-                background: 'linear-gradient(135deg, #0891b2, #6d28d9)',
-                color: 'white',
-                boxShadow: '0 4px 30px rgba(6, 182, 212, 0.3)',
-                border: 'none',
-                cursor: 'pointer',
-              }}
-              onMouseEnter={(e) => {
-                (e.currentTarget as HTMLElement).style.transform = 'translateY(-2px)';
-                (e.currentTarget as HTMLElement).style.boxShadow = '0 8px 40px rgba(6, 182, 212, 0.5)';
-              }}
-              onMouseLeave={(e) => {
-                (e.currentTarget as HTMLElement).style.transform = '';
-                (e.currentTarget as HTMLElement).style.boxShadow = '0 4px 30px rgba(6, 182, 212, 0.3)';
-              }}
+              type="button"
+              onClick={() => navigate(startDestination)}
+              className="primary-action min-h-12 px-7 text-base"
             >
               开始你的旅程
-              <ArrowRight size={18} />
+              <ArrowRight size={18} aria-hidden="true" />
             </button>
             <button
-              onClick={() => navigate('/shelf')}
-              className="btn-cosmic px-8 py-4 rounded-xl text-base"
-              style={{ cursor: 'pointer' }}
+              type="button"
+              onClick={() => navigate(user ? '/shelf' : '/login')}
+              className="tonal-action min-h-12 px-7 text-base"
             >
-              浏览书架
+              {user ? '打开我的书架' : '我已有账号'}
             </button>
           </div>
-        </motion.div>
 
-        {/* 功能特性网格 */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 max-w-5xl mx-auto mt-24">
-          {features.map((feature) => (
-            <motion.div
-              key={feature.title}
-              whileHover={{ y: -4 }}
-              transition={{ duration: 0.2 }}
-              className="glass-card p-6 text-left"
-            >
-              <div
-                className="w-10 h-10 rounded-xl flex items-center justify-center mb-4"
-                style={{ background: `${feature.color}20`, border: `1px solid ${feature.color}40` }}
-              >
-                <feature.icon size={20} style={{ color: feature.color }} />
-              </div>
-              <h3 className="font-semibold mb-2" style={{ color: '#e2e8f0' }}>
-                {feature.title}
-              </h3>
-              <p className="text-sm leading-relaxed" style={{ color: '#94a3b8' }}>
-                {feature.desc}
-              </p>
-            </motion.div>
-          ))}
+          <p className="mt-5 text-sm text-[#5f6368]">支持中文与英文小说 · 保留原著设定 · 每位玩家拥有独立世界线</p>
         </div>
-      </div>
 
-      {/* 底部 */}
-      <footer className="relative z-10 text-center py-8 border-t" style={{ borderColor: 'rgba(109,40,217,0.1)', color: '#94a3b8' }}>
-        <p className="text-xs">© 2025 NovelWorld · 让每本书都成为你的世界</p>
+        <div className="rounded-[32px] bg-[#e8f0fe] p-3 sm:p-6" aria-label="交互式章节示例">
+          <div className="overflow-hidden rounded-[24px] border border-[#d2e3fc] bg-white shadow-[0_18px_50px_rgba(60,64,67,0.14)]">
+            <div className="flex items-center justify-between border-b border-[#e8eaed] px-5 py-4 sm:px-6">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[#5f6368]">第六章</p>
+                <h2 className="mt-1 font-semibold text-[#1f1f1f]">雨夜来客</h2>
+              </div>
+              <span className="rounded-full bg-[#e6f4ea] px-3 py-1 text-xs font-semibold text-[#137333]">你的世界线</span>
+            </div>
+
+            <div className="px-5 py-6 sm:px-7 sm:py-8">
+              <p className="font-[var(--font-reading)] text-base leading-8 text-[#3c4043]">
+                门外传来第三次敲门声。原著中的主角此刻应该离开，但你知道，门后的人握着改变整座城命运的线索。
+              </p>
+
+              <div className="mt-7 rounded-2xl bg-[#f8fafd] p-4 sm:p-5">
+                <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-[#1f1f1f]">
+                  <MessageCircle size={17} className="text-[#0b57d0]" aria-hidden="true" />
+                  你准备怎么做？
+                </div>
+                <div className="space-y-2.5">
+                  <div className="flex items-center gap-3 rounded-xl border border-[#0b57d0] bg-[#e8f0fe] px-4 py-3 text-sm font-medium text-[#174ea6]">
+                    <CheckCircle2 size={17} className="shrink-0" aria-hidden="true" />
+                    打开门，先听听来客想说什么
+                  </div>
+                  <div className="rounded-xl border border-[#dadce0] bg-white px-4 py-3 text-sm text-[#5f6368]">
+                    按照原著路线，从后门离开
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 border-t border-[#e8eaed] bg-[#f8fafd] px-5 py-4 text-sm text-[#5f6368] sm:px-7">
+              <Sparkles size={15} className="shrink-0 text-[#0b57d0]" aria-hidden="true" />
+              选择后，后续章节会基于你的世界线重新生成
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="border-y border-[#e8eaed] bg-white" aria-labelledby="capabilities-heading">
+        <div className="mx-auto max-w-7xl px-4 py-14 sm:px-6 lg:px-8 lg:py-18">
+          <div className="max-w-2xl">
+            <p className="text-sm font-semibold text-[#0b57d0]">从一本书开始</p>
+            <h2 id="capabilities-heading" className="mt-2 text-3xl font-medium tracking-[-0.03em] text-[#1f1f1f] sm:text-4xl">
+              阅读、选择与生成，发生在同一个世界里。
+            </h2>
+          </div>
+
+          <div className="mt-10 grid gap-4 md:grid-cols-3">
+            {capabilities.map(({ icon: Icon, title, description }) => (
+              <article key={title} className="rounded-3xl border border-[#e1e3e8] bg-[#f8fafd] p-6 sm:p-7">
+                <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[#e8f0fe] text-[#0b57d0]">
+                  <Icon size={20} aria-hidden="true" />
+                </span>
+                <h3 className="mt-6 text-lg font-semibold text-[#1f1f1f]">{title}</h3>
+                <p className="mt-2 text-sm leading-6 text-[#5f6368]">{description}</p>
+              </article>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <footer className="bg-white">
+        <div className="mx-auto flex max-w-7xl flex-col gap-2 px-4 py-7 text-sm text-[#747775] sm:flex-row sm:items-center sm:justify-between sm:px-6 lg:px-8">
+          <span className="font-semibold text-[#3c4043]">NovelWorld</span>
+          <span>让每一本读完的书，都拥有新的开始。</span>
+        </div>
       </footer>
-    </div>
+    </main>
   );
 }
