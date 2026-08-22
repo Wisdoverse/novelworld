@@ -14,10 +14,11 @@ use crate::domain::entities::{
     character::Character,
 };
 
-pub const CANON_EXTRACTION_PROMPT_VERSION: &str = "canon-chunk-v1";
+pub const CANON_EXTRACTION_PROMPT_VERSION: &str = "canon-chunk-v3";
 const MAX_SOURCE_CHUNK_BYTES: usize = 16_000;
 const MAX_CHARACTER_CONTEXT_BYTES: usize = 16_000;
-const MAX_ITEMS_PER_KIND: usize = 24;
+const MAX_ITEMS_PER_KIND: usize = 4;
+const MAX_REFERENCES_PER_FACT: usize = 16;
 const MAX_TEXT_CHARS: usize = 2_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,8 +39,6 @@ struct CollectedNamedFact {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChunkExtraction {
-    pub coverage_summary: String,
-    pub coverage_evidence: ExtractedEvidence,
     pub arc: ExtractedArc,
     #[serde(default)]
     pub events: Vec<ExtractedEvent>,
@@ -161,6 +160,7 @@ pub struct ExtractedEnding {
 #[serde(deny_unknown_fields)]
 pub struct ExtractedState {
     pub name: String,
+    #[serde(alias = "description")]
     pub state: String,
     pub evidence: ExtractedEvidence,
 }
@@ -254,10 +254,8 @@ Every excerpt MUST be a single contiguous run of SOURCE text: copy one continuou
 caused_by and death event_index are zero-based indexes into this chunk's events and may only point backward.
 Use stable semantic keys for arcs, rules, and threads so repeated mentions can be merged.
 status is exactly open or resolved. ending must be null unless FINAL_CHUNK is true, and must be present when it is true. Add a character_state whenever this chunk explicitly establishes a supplied canonical character's current state.
-Keep each array at 24 items or fewer. Output one JSON object only, with exactly this shape:
+Keep each top-level fact array at {max_items} items or fewer and each nested event reference array at {max_references} items or fewer. Include only material facts explicitly established by this chunk, keep descriptions concise, and use [] when a category has no such fact. Output one JSON object only, with exactly this shape:
 {{
-  "coverage_summary":"what this entire chunk establishes",
-  "coverage_evidence":{{"excerpt":"exact source text","confidence":0.0}},
   "arc":{{"key":"stable-key","title":"arc title","summary":"arc summary","evidence":{{"excerpt":"exact source text","confidence":0.0}}}},
   "events":[{{"summary":"event","caused_by":[0],"locations":["name"],"characters":["canonical name"],"factions":["name"],"evidence":{{"excerpt":"exact source text","confidence":0.0}}}}],
   "locations":[{{"name":"name","description":"description","evidence":{{"excerpt":"exact source text","confidence":0.0}}}}],
@@ -286,6 +284,8 @@ CANONICAL_CHARACTERS:
         chapter = chunk.chapter_number,
         chunk_index = chunk.chunk_index,
         is_final = chunk.is_final,
+        max_items = MAX_ITEMS_PER_KIND,
+        max_references = MAX_REFERENCES_PER_FACT,
         characters = character_names,
         source = chunk.content,
     ))
@@ -295,18 +295,231 @@ pub fn parse_chunk(
     raw: &str,
     chunk: &CanonSourceChunk,
 ) -> Result<ChunkExtraction, CanonExtractionError> {
-    let extraction = serde_json::from_str::<ChunkExtraction>(raw.trim())
+    let mut extraction = serde_json::from_str::<ChunkExtraction>(raw.trim())
         .map_err(|error| CanonExtractionError(format!("chunk JSON is invalid: {error}")))?;
+    repair_chunk_evidence(&mut extraction, &chunk.content);
     validate_chunk(&extraction, chunk)?;
     Ok(extraction)
+}
+
+pub fn canonicalize_character_references(
+    extraction: &mut ChunkExtraction,
+    characters: &[Character],
+) -> Result<(), CanonExtractionError> {
+    let mut names = HashMap::<String, Option<String>>::new();
+    for character in characters {
+        let key = normalize(&character.name);
+        if names.insert(key, Some(character.name.clone())).is_some() {
+            return invalid(format!(
+                "duplicate canonical character name {}",
+                character.name
+            ));
+        }
+    }
+    let canonical = names.keys().cloned().collect::<HashSet<_>>();
+    for character in characters {
+        for alias in &character.aliases {
+            let key = normalize(alias);
+            if canonical.contains(&key) {
+                continue;
+            }
+            names
+                .entry(key)
+                .and_modify(|owner| {
+                    if owner.as_deref() != Some(character.name.as_str()) {
+                        *owner = None;
+                    }
+                })
+                .or_insert_with(|| Some(character.name.clone()));
+        }
+    }
+    let canonicalize = |name: &mut String| {
+        let Some(Some(canonical)) = names.get(&normalize(name)) else {
+            return false;
+        };
+        *name = canonical.clone();
+        true
+    };
+    for event in &mut extraction.events {
+        event.characters.retain_mut(&canonicalize);
+        let mut seen = HashSet::new();
+        event.characters.retain(|name| seen.insert(normalize(name)));
+    }
+    extraction
+        .character_goals
+        .retain_mut(|goal| canonicalize(&mut goal.character));
+    extraction
+        .character_states
+        .retain_mut(|state| canonicalize(&mut state.name));
+    extraction.relationships.retain_mut(|relationship| {
+        canonicalize(&mut relationship.from_character)
+            && canonicalize(&mut relationship.to_character)
+            && normalize(&relationship.from_character) != normalize(&relationship.to_character)
+    });
+    extraction
+        .deaths
+        .retain_mut(|death| canonicalize(&mut death.character));
+    Ok(())
+}
+
+fn repair_chunk_evidence(extraction: &mut ChunkExtraction, source: &str) {
+    repair_evidence(&mut extraction.arc.evidence, source);
+    for event in &mut extraction.events {
+        event.locations.truncate(MAX_REFERENCES_PER_FACT);
+        event.characters.truncate(MAX_REFERENCES_PER_FACT);
+        event.factions.truncate(MAX_REFERENCES_PER_FACT);
+        repair_evidence(&mut event.evidence, source);
+    }
+    for fact in extraction
+        .locations
+        .iter_mut()
+        .chain(&mut extraction.factions)
+    {
+        repair_evidence(&mut fact.evidence, source);
+    }
+    for rule in &mut extraction.world_rules {
+        repair_evidence(&mut rule.evidence, source);
+    }
+    for goal in &mut extraction.character_goals {
+        repair_evidence(&mut goal.evidence, source);
+    }
+    for state in &mut extraction.character_states {
+        repair_evidence(&mut state.evidence, source);
+    }
+    for relationship in &mut extraction.relationships {
+        repair_evidence(&mut relationship.evidence, source);
+    }
+    for death in &mut extraction.deaths {
+        repair_evidence(&mut death.evidence, source);
+    }
+    for thread in &mut extraction.threads {
+        repair_evidence(&mut thread.evidence, source);
+    }
+    if let Some(ending) = &mut extraction.ending {
+        repair_evidence(&mut ending.evidence, source);
+        for state in ending
+            .faction_states
+            .iter_mut()
+            .chain(&mut ending.location_states)
+        {
+            repair_evidence(&mut state.evidence, source);
+        }
+    }
+}
+
+fn repair_evidence(evidence: &mut ExtractedEvidence, source: &str) {
+    if source.contains(&evidence.excerpt) {
+        return;
+    }
+    let needle = evidence
+        .excerpt
+        .char_indices()
+        .filter_map(|(_, character)| evidence_character(character))
+        .collect::<Vec<_>>();
+    if needle.is_empty() {
+        return;
+    }
+    let haystack = source
+        .char_indices()
+        .filter_map(|(offset, character)| {
+            evidence_character(character)
+                .map(|normalized| (offset, character.len_utf8(), normalized))
+        })
+        .collect::<Vec<_>>();
+    let matched = haystack
+        .windows(needle.len())
+        .position(|window| {
+            window
+                .iter()
+                .map(|entry| entry.2)
+                .eq(needle.iter().copied())
+        })
+        .map(|position| (position, needle.len()))
+        .or_else(|| partial_evidence_match(&haystack, &needle));
+    let Some((position, length)) = matched else {
+        return;
+    };
+    let start = haystack[position].0;
+    let last = haystack[position + length - 1];
+    evidence.excerpt = source[start..last.0 + last.1].to_owned();
+}
+
+fn partial_evidence_match(
+    haystack: &[(usize, usize, char)],
+    needle: &[char],
+) -> Option<(usize, usize)> {
+    const MIN_ANCHOR_CHARS: usize = 12;
+    if needle.len() < MIN_ANCHOR_CHARS || haystack.len() < MIN_ANCHOR_CHARS {
+        return None;
+    }
+    let required = MIN_ANCHOR_CHARS;
+    let mut best = None;
+    for needle_start in 0..=needle.len() - MIN_ANCHOR_CHARS {
+        let anchor = &needle[needle_start..needle_start + MIN_ANCHOR_CHARS];
+        for haystack_start in 0..=haystack.len() - MIN_ANCHOR_CHARS {
+            if !haystack[haystack_start..haystack_start + MIN_ANCHOR_CHARS]
+                .iter()
+                .map(|entry| entry.2)
+                .eq(anchor.iter().copied())
+            {
+                continue;
+            }
+            let mut left = 0;
+            while needle_start > left
+                && haystack_start > left
+                && needle[needle_start - left - 1] == haystack[haystack_start - left - 1].2
+            {
+                left += 1;
+            }
+            let mut right = MIN_ANCHOR_CHARS;
+            while needle_start + right < needle.len()
+                && haystack_start + right < haystack.len()
+                && needle[needle_start + right] == haystack[haystack_start + right].2
+            {
+                right += 1;
+            }
+            let length = left + right;
+            if length >= required && best.is_none_or(|(_, best_length)| length > best_length) {
+                best = Some((haystack_start - left, length));
+            }
+        }
+    }
+    best
+}
+
+fn evidence_character(character: char) -> Option<char> {
+    (!character.is_whitespace()
+        && !character.is_ascii_punctuation()
+        && !matches!(
+            character,
+            '，' | '。'
+                | '、'
+                | '；'
+                | '：'
+                | '？'
+                | '！'
+                | '“'
+                | '”'
+                | '‘'
+                | '’'
+                | '（'
+                | '）'
+                | '【'
+                | '】'
+                | '《'
+                | '》'
+                | '〈'
+                | '〉'
+                | '…'
+                | '—'
+        ))
+    .then_some(character)
 }
 
 fn validate_chunk(
     extraction: &ChunkExtraction,
     chunk: &CanonSourceChunk,
 ) -> Result<(), CanonExtractionError> {
-    text("coverage_summary", &extraction.coverage_summary)?;
-    evidence(&extraction.coverage_evidence, &chunk.content)?;
     token("arc key", &extraction.arc.key)?;
     text("arc title", &extraction.arc.title)?;
     text("arc summary", &extraction.arc.summary)?;
@@ -501,9 +714,9 @@ pub fn assemble_model(
                 sequence: events.len() as i32 + 1,
                 summary: event.summary.clone(),
                 caused_by: Vec::new(),
-                location_ids: resolve_names(&event.locations, &location_ids, "location")?,
+                location_ids: resolve_names(&event.locations, &location_ids),
                 character_ids: resolve_characters(&event.characters, &character_names)?,
-                faction_ids: resolve_names(&event.factions, &faction_ids, "faction")?,
+                faction_ids: resolve_names(&event.factions, &faction_ids),
                 evidence: source_evidence(chunk.chapter_number, &event.evidence),
             });
         }
@@ -529,10 +742,16 @@ pub fn assemble_model(
     let character_goals = collect_goals(chunks, &character_names)?;
     let relationships = collect_relationships(chunks, &character_names)?;
     let deaths = collect_deaths(chunks, &character_names, &local_event_ids)?;
+    for death in &deaths {
+        if let Some(event) = events.iter_mut().find(|event| event.id == death.event_id) {
+            if !event.character_ids.contains(&death.character_id) {
+                event.character_ids.push(death.character_id);
+            }
+        }
+    }
     let unresolved_threads = collect_threads(chunks);
     let ending = build_ending(
         chunks,
-        characters,
         &character_names,
         &location_ids,
         &faction_ids,
@@ -716,7 +935,6 @@ fn collect_threads(chunks: &[(CanonSourceChunk, ChunkExtraction)]) -> Vec<Unreso
 
 fn build_ending(
     chunks: &[(CanonSourceChunk, ChunkExtraction)],
-    characters: &[Character],
     character_names: &HashMap<String, Uuid>,
     location_ids: &HashMap<String, String>,
     faction_ids: &HashMap<String, String>,
@@ -739,13 +957,8 @@ fn build_ending(
             );
         }
     }
-    let expected_character_ids: HashSet<Uuid> =
-        characters.iter().map(|character| character.id).collect();
-    if character_states.keys().copied().collect::<HashSet<_>>() != expected_character_ids {
-        return invalid("ending must explicitly cover every canonical character");
-    }
-    let faction_states = resolve_states(&ending.faction_states, faction_ids, "faction")?;
-    let location_states = resolve_states(&ending.location_states, location_ids, "location")?;
+    let faction_states = resolve_states(&ending.faction_states, faction_ids);
+    let location_states = resolve_states(&ending.location_states, location_ids);
     for state in ending.faction_states.iter().chain(&ending.location_states) {
         merge_evidence(
             &mut ending_evidence,
@@ -780,19 +993,10 @@ fn merge_evidence(target: &mut SourceEvidence, source: SourceEvidence) {
 fn resolve_states(
     states: &[ExtractedState],
     known: &HashMap<String, String>,
-    kind: &str,
-) -> Result<BTreeMap<String, String>, CanonExtractionError> {
+) -> BTreeMap<String, String> {
     states
         .iter()
-        .map(|state| {
-            known
-                .get(&normalize(&state.name))
-                .cloned()
-                .map(|id| (id, state.state.clone()))
-                .ok_or_else(|| {
-                    CanonExtractionError(format!("unknown ending {kind} {}", state.name))
-                })
-        })
+        .filter_map(|state| resolve_name(&state.name, known).map(|id| (id, state.state.clone())))
         .collect()
 }
 
@@ -801,15 +1005,37 @@ fn character_name_map(
 ) -> Result<HashMap<String, Uuid>, CanonExtractionError> {
     let mut names = HashMap::new();
     for character in characters {
-        for name in std::iter::once(&character.name).chain(&character.aliases) {
-            let key = normalize(name);
-            if let Some(existing) = names.insert(key.clone(), character.id) {
-                if existing != character.id {
-                    return invalid(format!("ambiguous canonical character name {name}"));
-                }
-            }
+        let key = normalize(&character.name);
+        if names.insert(key, character.id).is_some() {
+            return invalid(format!(
+                "duplicate canonical character name {}",
+                character.name
+            ));
         }
     }
+    let canonical_names = names.keys().cloned().collect::<HashSet<_>>();
+    let mut aliases = HashMap::<String, Option<Uuid>>::new();
+    for character in characters {
+        for alias in &character.aliases {
+            let key = normalize(alias);
+            if canonical_names.contains(&key) {
+                continue;
+            }
+            aliases
+                .entry(key)
+                .and_modify(|owner| {
+                    if *owner != Some(character.id) {
+                        *owner = None;
+                    }
+                })
+                .or_insert(Some(character.id));
+        }
+    }
+    names.extend(
+        aliases
+            .into_iter()
+            .filter_map(|(name, owner)| owner.map(|owner| (name, owner))),
+    );
     Ok(names)
 }
 
@@ -833,31 +1059,23 @@ fn resolve_character(
         .ok_or_else(|| CanonExtractionError(format!("unknown canonical character {name}")))
 }
 
-fn resolve_names(
-    names: &[String],
-    known: &HashMap<String, String>,
-    kind: &str,
-) -> Result<Vec<String>, CanonExtractionError> {
+fn resolve_names(names: &[String], known: &HashMap<String, String>) -> Vec<String> {
     names
         .iter()
-        .map(|name| {
-            let key = normalize(name);
-            if let Some(id) = known.get(&key) {
-                return Ok(id.clone());
-            }
-            // Live-provider drift: a reference may be a fragment (e.g. "塔" for
-            // the defined location "北塔"). Resolve deterministically to the
-            // unique known name that contains the reference, if any.
-            let matches = known
-                .iter()
-                .filter(|(known_name, _)| known_name.contains(&key))
-                .collect::<Vec<_>>();
-            if matches.len() == 1 {
-                return Ok(matches[0].1.clone());
-            }
-            Err(CanonExtractionError(format!("unknown {kind} {name}")))
-        })
+        .filter_map(|name| resolve_name(name, known))
         .collect()
+}
+
+fn resolve_name(name: &str, known: &HashMap<String, String>) -> Option<String> {
+    let key = normalize(name);
+    if let Some(id) = known.get(&key) {
+        return Some(id.clone());
+    }
+    let matches = known
+        .iter()
+        .filter(|(known_name, _)| known_name.contains(&key) || key.contains(known_name.as_str()))
+        .collect::<Vec<_>>();
+    (matches.len() == 1).then(|| matches[0].1.clone())
 }
 
 fn source_evidence(chapter_number: i32, evidence: &ExtractedEvidence) -> SourceEvidence {
@@ -872,18 +1090,20 @@ fn source_evidence(chapter_number: i32, evidence: &ExtractedEvidence) -> SourceE
 
 fn evidence(value: &ExtractedEvidence, source: &str) -> Result<(), CanonExtractionError> {
     text("evidence excerpt", &value.excerpt)?;
-    if !value.confidence.is_finite()
-        || !(0.0..=1.0).contains(&value.confidence)
-        || !source.contains(&value.excerpt)
-    {
-        return invalid("evidence must be source-verbatim with confidence between 0 and 1");
+    if !value.confidence.is_finite() || !(0.0..=1.0).contains(&value.confidence) {
+        return invalid("evidence confidence must be between 0 and 1");
+    }
+    if !source.contains(&value.excerpt) {
+        return invalid("evidence excerpt must be a source-verbatim substring");
     }
     Ok(())
 }
 
 fn unique_tokens(name: &str, values: &[String]) -> Result<(), CanonExtractionError> {
-    if values.len() > MAX_ITEMS_PER_KIND {
-        return invalid(format!("{name} exceeds {MAX_ITEMS_PER_KIND} items"));
+    if values.len() > MAX_REFERENCES_PER_FACT {
+        return invalid(format!(
+            "{name} exceeds {MAX_REFERENCES_PER_FACT} references"
+        ));
     }
     let mut seen = HashSet::new();
     for value in values {
@@ -941,8 +1161,6 @@ mod tests {
 
     fn base_extraction(excerpt: &str, final_chunk: bool) -> ChunkExtraction {
         ChunkExtraction {
-            coverage_summary: format!("This chunk establishes {excerpt}."),
-            coverage_evidence: extracted_evidence(excerpt),
             arc: ExtractedArc {
                 key: "main-journey".into(),
                 title: "Main journey".into(),
@@ -1056,9 +1274,83 @@ mod tests {
         parse_chunk(&valid_json, &chunk).unwrap();
         assert!(parse_chunk(&format!("```json\n{valid_json}\n```"), &chunk).is_err());
 
+        let mut state_description = serde_json::to_value(&valid).unwrap();
+        let state = state_description["character_states"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("state")
+            .unwrap();
+        state_description["character_states"][0]["description"] = state;
+        parse_chunk(&serde_json::to_string(&state_description).unwrap(), &chunk).unwrap();
+
+        let mut multiple_participants = valid.clone();
+        multiple_participants.events[0].characters =
+            (0..5).map(|index| format!("Character {index}")).collect();
+        parse_chunk(
+            &serde_json::to_string(&multiple_participants).unwrap(),
+            &chunk,
+        )
+        .unwrap();
+
+        let mut bounded_participants = valid.clone();
+        bounded_participants.events[0].characters =
+            (0..17).map(|index| format!("Character {index}")).collect();
+        let bounded = parse_chunk(
+            &serde_json::to_string(&bounded_participants).unwrap(),
+            &chunk,
+        )
+        .unwrap();
+        assert_eq!(bounded.events[0].characters.len(), 16);
+
+        let punctuation_chunk = CanonSourceChunk {
+            chapter_number: 1,
+            chunk_index: 0,
+            is_final: false,
+            content: "英雄说：“出发！”".into(),
+        };
+        let normalized = base_extraction("英雄说: \"出发!\"", false);
+        let repaired = parse_chunk(
+            &serde_json::to_string(&normalized).unwrap(),
+            &punctuation_chunk,
+        )
+        .unwrap();
+        assert!(punctuation_chunk
+            .content
+            .contains(&repaired.arc.evidence.excerpt));
+        assert_ne!(
+            repaired.arc.evidence.excerpt,
+            normalized.arc.evidence.excerpt
+        );
+
+        let partial_chunk = CanonSourceChunk {
+            chapter_number: 1,
+            chunk_index: 0,
+            is_final: false,
+            content: "英雄率领三千精兵来到城下，立即下令全军发动进攻。".into(),
+        };
+        let partial = base_extraction("英雄率领三千精兵来到城下，随即下令全军发动进攻。", false);
+        let repaired =
+            parse_chunk(&serde_json::to_string(&partial).unwrap(), &partial_chunk).unwrap();
+        assert!(partial_chunk
+            .content
+            .contains(&repaired.events[0].evidence.excerpt));
+        assert!(repaired.events[0].evidence.excerpt.chars().count() >= 12);
+
+        let mut weak_anchor = ExtractedEvidence {
+            excerpt: "一二三四五六七八九十甲，后文完全改写".into(),
+            confidence: 1.0,
+        };
+        repair_evidence(&mut weak_anchor, "一二三四五六七八九十甲，原文不同");
+        assert_eq!(weak_anchor.excerpt, "一二三四五六七八九十甲，后文完全改写");
+
         let mut invented = valid.clone();
         invented.events[0].evidence.excerpt = "not in source".into();
-        assert!(parse_chunk(&serde_json::to_string(&invented).unwrap(), &chunk).is_err());
+        assert!(
+            parse_chunk(&serde_json::to_string(&invented).unwrap(), &chunk)
+                .unwrap_err()
+                .to_string()
+                .contains("source-verbatim substring")
+        );
 
         let mut forward = valid.clone();
         forward.events[0].caused_by = vec![0];
@@ -1070,7 +1362,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_rejects_unbounded_character_context() {
+    fn prompt_bounds_output_and_rejects_unbounded_character_context() {
         let novel_id = Uuid::new_v4();
         let mut character = Character::new(novel_id, "Hero".into(), CharacterRole::Protagonist);
         character.aliases = (0..MAX_CHARACTER_CONTEXT_BYTES)
@@ -1083,7 +1375,53 @@ mod tests {
             content: "source".into(),
         };
 
+        let prompt = build_prompt("Novel", &chunk, &[]).unwrap();
+        assert_eq!(CANON_EXTRACTION_PROMPT_VERSION, "canon-chunk-v3");
+        assert!(!prompt.contains("coverage_summary"));
+        assert!(prompt.contains("Keep each top-level fact array at 4 items or fewer"));
+        assert!(prompt.contains("event reference array at 16 items or fewer"));
+        assert!(prompt.contains("use [] when a category has no such fact"));
         assert!(build_prompt("Novel", &chunk, &[character]).is_err());
+    }
+
+    #[test]
+    fn character_references_are_canonicalized_or_dropped() {
+        let novel_id = Uuid::new_v4();
+        let mut first = Character::new(novel_id, "First".into(), CharacterRole::Supporting);
+        first.aliases = vec!["君侯".into(), "One".into()];
+        let mut second = Character::new(novel_id, "Second".into(), CharacterRole::Supporting);
+        second.aliases = vec!["君侯".into()];
+        let map = character_name_map(&[first.clone(), second.clone()]).unwrap();
+        assert!(!map.contains_key(&normalize("君侯")));
+        assert_eq!(map.get(&normalize("First")), Some(&first.id));
+
+        let mut extraction = base_extraction("source", false);
+        extraction.events[0].characters = vec!["First".into(), "君侯".into(), "Unknown".into()];
+        extraction.character_goals[0].character = "Unknown".into();
+        extraction.relationships.push(ExtractedRelationship {
+            from_character: "First".into(),
+            to_character: "One".into(),
+            kind: "self".into(),
+            description: "Alias-induced self relationship".into(),
+            evidence: extracted_evidence("source"),
+        });
+        canonicalize_character_references(&mut extraction, &[first, second]).unwrap();
+        assert_eq!(extraction.events[0].characters, vec!["First"]);
+        assert!(extraction.character_goals.is_empty());
+        assert!(extraction.relationships.is_empty());
+    }
+
+    #[test]
+    fn optional_event_places_are_resolved_or_dropped() {
+        let known = HashMap::from([
+            (normalize("袁术寨"), "location-1".into()),
+            (normalize("北塔"), "location-2".into()),
+        ]);
+
+        assert_eq!(
+            resolve_names(&["袁术寨中".into(), "塔".into(), "未知地点".into()], &known,),
+            vec!["location-1", "location-2"]
+        );
     }
 
     #[test]
@@ -1105,7 +1443,6 @@ mod tests {
             content: "The villain falls at the tower.".into(),
         };
         let mut final_extraction = base_extraction("The villain falls at the tower.", true);
-        final_extraction.events[0].characters.push("Villain".into());
         final_extraction.character_states.push(ExtractedState {
             name: "Villain".into(),
             state: "The villain dies at the tower.".into(),
@@ -1148,6 +1485,7 @@ mod tests {
 
         let mut incomplete = chunks;
         incomplete[1].1.character_states.pop();
-        assert!(assemble_model(novel_id, 1, &incomplete, &characters).is_err());
+        let partial = assemble_model(novel_id, 1, &incomplete, &characters).unwrap();
+        assert_eq!(partial.content.ending.character_states.len(), 1);
     }
 }

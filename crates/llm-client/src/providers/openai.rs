@@ -71,6 +71,8 @@ struct OpenAIResponse {
 #[derive(Deserialize)]
 struct OpenAIChoice {
     message: OpenAIMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -193,10 +195,26 @@ fn parse_responses_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>>
 }
 
 fn response_content(response: &OpenAIResponse) -> Result<String> {
-    response
+    let choice = response
         .choices
         .first()
-        .and_then(|choice| choice.message.content.clone())
+        .ok_or_else(|| anyhow!("LLM response has no choices"))?;
+    match choice.finish_reason.as_deref() {
+        Some("length") => return Err(anyhow!("LLM response was truncated")),
+        Some("content_filter") => {
+            return Err(anyhow!("LLM response was blocked by content filtering"))
+        }
+        Some("stop") | None => {}
+        Some(reason) => {
+            return Err(anyhow!(
+                "LLM response ended with unsupported finish_reason {reason}"
+            ))
+        }
+    }
+    choice
+        .message
+        .content
+        .clone()
         .filter(|content| !content.trim().is_empty())
         .ok_or_else(|| anyhow!("LLM returned an empty response"))
 }
@@ -497,6 +515,18 @@ mod response_tests {
         assert_eq!(
             response_content(&response).unwrap_err().to_string(),
             "LLM returned an empty response"
+        );
+    }
+
+    #[test]
+    fn truncated_success_is_an_error_so_partial_json_is_never_accepted() {
+        let response: OpenAIResponse = serde_json::from_str(
+            r#"{"choices":[{"message":{"content":"{\"nodes\":["},"finish_reason":"length"}],"model":"test","usage":null}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            response_content(&response).unwrap_err().to_string(),
+            "LLM response was truncated"
         );
     }
 

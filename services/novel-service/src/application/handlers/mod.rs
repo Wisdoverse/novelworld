@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::{Duration as ChronoDuration, Utc};
 use futures::{stream, StreamExt};
+use serde::de::DeserializeOwned;
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
@@ -21,9 +22,10 @@ use crate::domain::ports::{
     DocumentTextExtractor, ImagePort, LlmPort, NovelLlmTask, PrivacyCleanupPort, SourceFileStorage,
 };
 use crate::domain::repositories::{
-    CanonStoryModelRepository, ChapterRepository, CharacterRelationshipRecord, CharacterRepository,
-    ImportClaim, LoreExcerpt, NovelRepository, ReadingProgressRecord, ReadingProgressRepository,
-    SourceFileDeletionRepository, IMPORT_BUDGET_EXHAUSTED_MESSAGE,
+    CanonExtractionCheckpoint, CanonStoryModelRepository, ChapterRepository,
+    CharacterRelationshipRecord, CharacterRepository, ImportClaim, LoreExcerpt, NovelRepository,
+    ReadingProgressRecord, ReadingProgressRepository, SourceFileDeletionRepository,
+    IMPORT_BUDGET_EXHAUSTED_MESSAGE,
 };
 use crate::domain::services::{canon_story_extractor, node_detector};
 use crate::domain::services::{
@@ -87,6 +89,86 @@ fn try_import_admission(
     })
 }
 
+async fn validated_json<T>(
+    llm: &dyn LlmPort,
+    task: NovelLlmTask,
+    prompt: &str,
+    validate: impl Fn(&T) -> Result<()>,
+) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    let mut last_error = None;
+    for attempt in 1..=3 {
+        // Transport retries already live in the shared client. This loop is
+        // only for a fresh model response after JSON/schema validation fails.
+        let raw = llm.chat_json(task, prompt).await?;
+        let result = serde_json::from_str::<T>(json_object_payload(&raw))
+            .map_err(anyhow::Error::from)
+            .and_then(|value| {
+                validate(&value)?;
+                Ok(value)
+            });
+        match result {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                tracing::warn!(attempt, %error, "LLM JSON output failed validation");
+                last_error = Some(error);
+            }
+        }
+    }
+    Err(last_error.expect("three validation attempts produce an error"))
+}
+
+fn canon_retry_prompt(base_prompt: &str, validation_error: &str) -> String {
+    format!(
+        "{base_prompt}\n\nCORRECTION REQUIRED: the previous response was rejected because {validation_error}. Return a completely new JSON object. Fix that validation error; copy every evidence excerpt directly from SOURCE."
+    )
+}
+
+#[cfg(test)]
+mod validated_json_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct InvalidThenValid(AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl LlmPort for InvalidThenValid {
+        async fn chat_json(&self, _task: NovelLlmTask, _prompt: &str) -> Result<String> {
+            Ok(if self.0.fetch_add(1, Ordering::Relaxed) == 0 {
+                "{".into()
+            } else {
+                r#"{"ok":true}"#.into()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn retries_invalid_json_with_a_fresh_model_response() {
+        let llm = InvalidThenValid(AtomicUsize::new(0));
+        let value: serde_json::Value = validated_json(
+            &llm,
+            NovelLlmTask::CharacterExtraction,
+            "prompt",
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(value["ok"], true);
+        assert_eq!(llm.0.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn canon_retry_feedback_names_the_rule_without_echoing_model_output() {
+        let prompt = canon_retry_prompt("BASE", "evidence excerpt is not source-verbatim");
+        assert!(prompt.starts_with("BASE\n\nCORRECTION REQUIRED:"));
+        assert!(prompt.contains("evidence excerpt is not source-verbatim"));
+        assert!(prompt.contains("copy every evidence excerpt directly from SOURCE"));
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("Novel import capacity is busy")]
 pub struct ImportCapacityUnavailable;
@@ -123,6 +205,8 @@ pub enum NovelDeletionError {
 
 const MAX_AVATARS_PER_NOVEL: usize = 30;
 const MAX_IMPORT_CHAPTERS: usize = 2_048;
+// 16 KiB canon chunks plus 24 KiB character scans keep the supported 5 MiB
+// paste limit below this cap while rejecting the next whole-MiB tier.
 const MAX_IMPORT_PROVIDER_CALLS: usize = 640;
 const IMPORT_LEASE_HEARTBEAT: Duration = Duration::from_secs(30);
 const IMPORT_RECOVERY_INTERVAL: Duration = Duration::from_secs(30);
@@ -602,13 +686,13 @@ impl NovelCommandHandler {
         info!("Extracting characters for novel {}", novel_id);
         let sample_text = build_representative_sample(chapters);
         let prompt = build_extraction_prompt(&title, &sample_text);
-        let extraction_json = self
-            .llm
-            .chat_json(NovelLlmTask::CharacterExtraction, &prompt)
-            .await?;
-        let base_extraction: ExtractionResult =
-            serde_json::from_str(json_object_payload(&extraction_json))?;
-        validate_extraction(&base_extraction)?;
+        let mut base_extraction: ExtractionResult = validated_json(
+            self.llm.as_ref(),
+            NovelLlmTask::CharacterExtraction,
+            &prompt,
+            |result| validate_extraction(result).map_err(Into::into),
+        )
+        .await?;
 
         let mut chunk_extractions = Vec::new();
         if needs_chunk_scan(chapters) {
@@ -619,28 +703,29 @@ impl NovelCommandHandler {
                     let title = title.clone();
                     async move {
                         let prompt = build_chunk_extraction_prompt(&title, &chunk, index);
-                        let json = llm
-                            .chat_json(NovelLlmTask::CharacterExtraction, &prompt)
-                            .await?;
-                        let result: ChunkExtractionResult =
-                            serde_json::from_str(json_object_payload(&json))?;
-                        validate_chunk_extraction(&result)?;
+                        let result: ChunkExtractionResult = validated_json(
+                            llm.as_ref(),
+                            NovelLlmTask::CharacterExtraction,
+                            &prompt,
+                            |result| validate_chunk_extraction(result).map_err(Into::into),
+                        )
+                        .await?;
                         Ok::<_, anyhow::Error>((index, result))
                     }
                 })
                 .buffer_unordered(3)
                 .collect::<Vec<_>>()
                 .await;
-            for result in results {
-                match result {
-                    Ok((_, extraction)) => chunk_extractions.push(extraction),
-                    Err(error) => tracing::warn!(
-                        novel_id = %novel_id,
-                        %error,
-                        "optional full-text character scan failed; keeping successful scans"
-                    ),
-                }
-            }
+            let mut results = results.into_iter().collect::<Result<Vec<_>>>()?;
+            results.sort_by_key(|(index, _)| *index);
+            chunk_extractions = results
+                .into_iter()
+                .map(|(_, extraction)| extraction)
+                .collect();
+            // The representative sample spans unrelated chapters. Use it for
+            // global metadata only; source-ordered chunks own character facts.
+            base_extraction.characters.clear();
+            base_extraction.relationships.clear();
         }
         let extraction = merge_extractions(base_extraction, chunk_extractions);
         validate_extraction(&extraction)?;
@@ -650,7 +735,8 @@ impl NovelCommandHandler {
             .characters
             .iter()
             .filter_map(|ec| {
-                let first_appearance = find_first_appearance(ec, chapters);
+                let first_appearance =
+                    find_first_appearance(ec, &extraction.characters, chapters);
                 let Some(first_appearance) = first_appearance else {
                     tracing::warn!(character = %ec.name, "omitting character without a source-proven first appearance");
                     return None;
@@ -709,49 +795,37 @@ impl NovelCommandHandler {
             .map(|c| (c.chapter_number, c.content.as_str()))
             .collect();
         let node_prompt = node_detector::build_node_detection_prompt(&title, &chapter_summaries);
-        match self
-            .llm
-            .chat_json(NovelLlmTask::NarrativeNodeDetection, &node_prompt)
-            .await
+        let chapter_numbers = chapters
+            .iter()
+            .map(|chapter| chapter.chapter_number)
+            .collect::<Vec<_>>();
+        let detection: node_detector::NodeDetectionResult = validated_json(
+            self.llm.as_ref(),
+            NovelLlmTask::NarrativeNodeDetection,
+            &node_prompt,
+            |result| {
+                node_detector::validate_detection(result, chapter_numbers.iter().copied())
+                    .map_err(Into::into)
+            },
+        )
+        .await?;
+        let nodes = detection
+            .nodes
+            .iter()
+            .map(|node| (node.chapter_number, node.description.clone()))
+            .collect::<Vec<_>>();
+        if !self
+            .chapter_repo
+            .replace_import_nodes(novel_id, claim.attempt, &nodes)
+            .await?
         {
-            Ok(node_json) => {
-                match serde_json::from_str::<node_detector::NodeDetectionResult>(
-                    json_object_payload(&node_json),
-                ) {
-                    Ok(detection) => {
-                        let validation = node_detector::validate_detection(
-                            &detection,
-                            chapters.iter().map(|chapter| chapter.chapter_number),
-                        );
-                        if let Err(error) = validation {
-                            tracing::warn!(%error, %novel_id, "node detection output rejected");
-                        } else {
-                            let nodes = detection
-                                .nodes
-                                .iter()
-                                .map(|node| (node.chapter_number, node.description.clone()))
-                                .collect::<Vec<_>>();
-                            if !self
-                                .chapter_repo
-                                .replace_import_nodes(novel_id, claim.attempt, &nodes)
-                                .await?
-                            {
-                                return Err(ImportLeaseLost.into());
-                            }
-                            info!(
-                                "Detected {} narrative nodes for novel {}",
-                                detection.nodes.len(),
-                                novel_id
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("Node detection JSON parse failed for {}: {}", novel_id, e)
-                    }
-                }
-            }
-            Err(e) => tracing::warn!("Node detection LLM call failed for {}: {}", novel_id, e),
+            return Err(ImportLeaseLost.into());
         }
+        info!(
+            "Detected {} narrative nodes for novel {}",
+            detection.nodes.len(),
+            novel_id
+        );
 
         if !self
             .novel_repo
@@ -787,9 +861,52 @@ impl NovelCommandHandler {
             let results = stream::iter(chunks.into_iter().enumerate())
                 .map(|(position, chunk)| {
                     let llm = self.llm.clone();
+                    let canon_repo = self.canon_repo.clone();
                     let title = novel.title.clone();
+                    let novel_id = novel.id;
+                    let import_attempt = claim.attempt;
                     async move {
-                        let prompt =
+                        let chunk_index = i32::try_from(chunk.chunk_index)
+                            .map_err(|_| anyhow::anyhow!("canon chunk index exceeds i32"))?;
+                        if let Some(checkpoint) = canon_repo
+                            .find_import_checkpoint(
+                                novel_id,
+                                1,
+                                canon_story_extractor::CANON_EXTRACTION_PROMPT_VERSION,
+                                chunk.chapter_number,
+                                chunk_index,
+                                &chunk.content,
+                            )
+                            .await?
+                        {
+                            match canon_story_extractor::parse_chunk(&checkpoint, &chunk).and_then(
+                                |mut extraction| {
+                                    canon_story_extractor::canonicalize_character_references(
+                                        &mut extraction,
+                                        characters,
+                                    )?;
+                                    Ok(extraction)
+                                },
+                            ) {
+                                Ok(extraction) => {
+                                    info!(
+                                        novel_id = %novel_id,
+                                        chapter = chunk.chapter_number,
+                                        chunk = chunk.chunk_index,
+                                        "resumed canonical extraction checkpoint"
+                                    );
+                                    return Ok::<_, anyhow::Error>((position, chunk, extraction));
+                                }
+                                Err(error) => tracing::warn!(
+                                    novel_id = %novel_id,
+                                    chapter = chunk.chapter_number,
+                                    chunk = chunk.chunk_index,
+                                    %error,
+                                    "discarding invalid canonical extraction checkpoint"
+                                ),
+                            }
+                        }
+                        let base_prompt =
                             canon_story_extractor::build_prompt(&title, &chunk, characters)?;
                         // Live-provider robustness: the extraction LLM is
                         // stochastic and can produce evidence excerpts that
@@ -800,11 +917,20 @@ impl NovelCommandHandler {
                         // stochastic pass land instead of failing a valid source.
                         let mut last_error = None;
                         let mut extraction = None;
+                        let mut prompt = base_prompt.clone();
                         for attempt in 0..3 {
                             let raw = llm
                                 .chat_json(NovelLlmTask::CanonExtraction, &prompt)
                                 .await?;
-                            match canon_story_extractor::parse_chunk(&raw, &chunk) {
+                            match canon_story_extractor::parse_chunk(&raw, &chunk).and_then(
+                                |mut extraction| {
+                                    canon_story_extractor::canonicalize_character_references(
+                                        &mut extraction,
+                                        characters,
+                                    )?;
+                                    Ok(extraction)
+                                },
+                            ) {
                                 Ok(parsed) => {
                                     extraction = Some(parsed);
                                     break;
@@ -815,6 +941,7 @@ impl NovelCommandHandler {
                                             %error, attempt,
                                             "canonical extraction failed the verbatim gate; retrying"
                                         );
+                                        prompt = canon_retry_prompt(&base_prompt, &error.to_string());
                                     }
                                     last_error = Some(error);
                                 }
@@ -822,14 +949,36 @@ impl NovelCommandHandler {
                         }
                         let extraction = extraction.ok_or_else(|| {
                             anyhow::anyhow!(
-                                "canonical extraction failed validation after 3 attempts: {:?}",
-                                last_error
+                                "canonical extraction failed validation after 3 attempts at chapter {} chunk {}: {:?}",
+                                chunk.chapter_number,
+                                chunk.chunk_index,
+                                last_error,
                             )
                         })?;
+                        let extraction_json = serde_json::to_string(&extraction)?;
+                        if !canon_repo
+                            .save_import_checkpoint(
+                                CanonExtractionCheckpoint {
+                                    novel_id,
+                                    model_version: 1,
+                                    prompt_version:
+                                        canon_story_extractor::CANON_EXTRACTION_PROMPT_VERSION,
+                                    chapter_number: chunk.chapter_number,
+                                    chunk_index,
+                                    is_final: chunk.is_final,
+                                    source_content: &chunk.content,
+                                    extraction_json: &extraction_json,
+                                },
+                                import_attempt,
+                            )
+                            .await?
+                        {
+                            return Err(ImportLeaseLost.into());
+                        }
                         Ok::<_, anyhow::Error>((position, chunk, extraction))
                     }
                 })
-                .buffer_unordered(3)
+                .buffer_unordered(4)
                 .collect::<Vec<_>>()
                 .await;
             let mut extracted = results.into_iter().collect::<Result<Vec<_>>>()?;

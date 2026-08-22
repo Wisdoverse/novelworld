@@ -64,6 +64,7 @@ async fn test_tables_exist() {
         "users",
         "novels",
         "novel_import_jobs",
+        "canon_extraction_checkpoints",
         "chapters",
         "chapter_chunks",
         "characters",

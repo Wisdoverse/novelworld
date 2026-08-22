@@ -41,9 +41,10 @@ use novel_service::domain::{
     entities::novel::Novel,
     ports::{ImagePort, LlmPort, NovelLlmTask, PrivacyCleanupPort, SourceFileStorage},
     repositories::{
-        CanonStoryModelRepository, ChapterRepository, CharacterRelationshipRecord,
-        CharacterRepository, NovelRepository, ReadingProgressRepository,
-        SourceFileDeletionRepository, IMPORT_BUDGET_EXHAUSTED_MESSAGE, MAX_IMPORT_ATTEMPTS,
+        CanonExtractionCheckpoint, CanonStoryModelRepository, ChapterRepository,
+        CharacterRelationshipRecord, CharacterRepository, NovelRepository,
+        ReadingProgressRepository, SourceFileDeletionRepository, IMPORT_BUDGET_EXHAUSTED_MESSAGE,
+        MAX_IMPORT_ATTEMPTS,
     },
     value_objects::{CharacterRole, ImportStage},
 };
@@ -1471,7 +1472,58 @@ async fn canon_story_models_are_versioned_and_immutable() {
     let mut fabricated = model.clone();
     fabricated.content.events[0].evidence.provenance[0].excerpt = "Invented evidence".into();
     assert!(repository.insert_import(&fabricated, 2).await.is_err());
+    let checkpoint_json = r#"{"coverage_summary":"The journey begins."}"#;
+    let checkpoint_source = "x".repeat(16_000);
+    assert!(!repository
+        .save_import_checkpoint(
+            CanonExtractionCheckpoint {
+                novel_id,
+                model_version: 1,
+                prompt_version: "canon-chunk-v3",
+                chapter_number: 1,
+                chunk_index: 0,
+                is_final: true,
+                source_content: &checkpoint_source,
+                extraction_json: checkpoint_json,
+            },
+            1,
+        )
+        .await
+        .unwrap());
+    assert!(repository
+        .save_import_checkpoint(
+            CanonExtractionCheckpoint {
+                novel_id,
+                model_version: 1,
+                prompt_version: "canon-chunk-v3",
+                chapter_number: 1,
+                chunk_index: 0,
+                is_final: true,
+                source_content: &checkpoint_source,
+                extraction_json: checkpoint_json,
+            },
+            2,
+        )
+        .await
+        .unwrap());
+    assert_eq!(
+        repository
+            .find_import_checkpoint(novel_id, 1, "canon-chunk-v3", 1, 0, &checkpoint_source)
+            .await
+            .unwrap(),
+        Some(checkpoint_json.into())
+    );
+    assert!(repository
+        .find_import_checkpoint(novel_id, 1, "canon-chunk-v3", 1, 0, "changed source")
+        .await
+        .unwrap()
+        .is_none());
     assert!(repository.insert_import(&model, 2).await.unwrap());
+    assert!(repository
+        .find_import_checkpoint(novel_id, 1, "canon-chunk-v3", 1, 0, &checkpoint_source)
+        .await
+        .unwrap()
+        .is_none());
     assert_eq!(
         repository.find_version(novel_id, 1).await.unwrap(),
         Some(model.clone())
