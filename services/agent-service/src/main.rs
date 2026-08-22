@@ -15,7 +15,7 @@ use agent_service::{
     application::handlers::AgentCommandHandler,
     domain::{self, ports::AccountExportPort, services::memory_manager::MemoryManager},
     infrastructure::{
-        cache::{RedisCache, RedisReadinessProbe},
+        cache::{AlwaysReadyProbe, NoopMessageCache, RedisCache, RedisReadinessProbe},
         embedding::EmbeddingAdapter,
         http::{narrative_client::NarrativeServiceClient, novel_client::NovelServiceClient},
         llm::LlmAdapter,
@@ -85,14 +85,26 @@ async fn run_body() -> Result<()> {
 
         tracing::info!("Connected to PostgreSQL");
 
-        // Redis connection pool
+        // Redis is a reconstructable projection. The portable desktop runtime
+        // uses the domain-port no-op adapter instead of shipping another daemon.
         let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://redis:6379".into());
-        let redis_cfg = deadpool_redis::Config::from_url(&redis_url);
-        let redis_pool = redis_cfg
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("Failed to create Redis pool");
-
-        tracing::info!("Redis pool created");
+        let (cache, redis_readiness): (
+            Arc<dyn domain::ports::MessageCache>,
+            Arc<dyn domain::ports::ReadinessProbe>,
+        ) = if redis_url == "memory://" {
+            tracing::info!("Redis disabled; using PostgreSQL-backed desktop memory path");
+            (Arc::new(NoopMessageCache), Arc::new(AlwaysReadyProbe))
+        } else {
+            let redis_cfg = deadpool_redis::Config::from_url(&redis_url);
+            let redis_pool = redis_cfg
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .expect("Failed to create Redis pool");
+            tracing::info!("Redis pool created");
+            (
+                Arc::new(RedisCache::new(redis_pool.clone())),
+                Arc::new(RedisReadinessProbe::new(redis_pool)),
+            )
+        };
 
         // Shared LLM client (from llm-client workspace crate)
         let api_key = std::env::var("LLM_API_KEY").unwrap_or_default();
@@ -127,9 +139,6 @@ async fn run_body() -> Result<()> {
         let world_context: Arc<dyn domain::ports::WorldContextPort> = narrative_client.clone();
         let narrative_readiness: Arc<dyn domain::ports::ReadinessProbe> = narrative_client;
 
-        // Redis cache
-        let cache = Arc::new(RedisCache::new(redis_pool.clone()));
-
         // Embedding adapter — auto-select model based on provider
         let embed_api_key = std::env::var("EMBEDDING_API_KEY").unwrap_or_else(|_| api_key.clone());
         let embed_api_url = std::env::var("EMBEDDING_API_URL").unwrap_or_else(|_| api_url.clone());
@@ -161,7 +170,7 @@ async fn run_body() -> Result<()> {
         let memory_manager = Arc::new(MemoryManager {
             memory_repo: memory_repo.clone(),
             chat_repo: chat_repo.clone(),
-            cache: cache.clone() as Arc<dyn domain::ports::MessageCache>,
+            cache,
             llm: llm.clone() as Arc<dyn domain::ports::TextSummarizer>,
             embedding,
         });
@@ -184,7 +193,7 @@ async fn run_body() -> Result<()> {
         let state = AppState {
             handler,
             postgres_readiness: Arc::new(PgReadinessProbe::new(pool)),
-            redis_readiness: Arc::new(RedisReadinessProbe::new(redis_pool)),
+            redis_readiness,
             novel_readiness,
             narrative_readiness,
             account_export,
@@ -203,7 +212,8 @@ async fn run_body() -> Result<()> {
             .layer(middleware::from_fn(trace_middleware));
 
         let port = std::env::var("PORT").unwrap_or_else(|_| "8003".into());
-        let addr = format!("0.0.0.0:{}", port);
+        let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0".into());
+        let addr = format!("{}:{}", bind_addr, port);
         tracing::info!("agent-service listening on {}", addr);
 
         let listener = tokio::net::TcpListener::bind(&addr).await?;

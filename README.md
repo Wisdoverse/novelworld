@@ -6,7 +6,7 @@
 
 **Upload a novel → AI extracts characters → Chat with them in real time → Reshape the story with your choices**
 
-[Quick Start](#-quick-start) · [Features](#-core-features) · [Architecture](#️-architecture) · [Docs](#-documentation)
+[Quick Start](#-quick-start) · [Platform Support](#platform-support) · [Features](#-core-features) · [Architecture](#️-architecture) · [Docs](#-documentation)
 
 </div>
 
@@ -87,28 +87,68 @@ tested single-timeline path; live causal quality is not yet qualified.
 
 ## 🚀 Quick Start
 
-### Docker Compose
+NovelWorld has two deliberately separate runtime modes.
+
+### 1. Server deployment — Docker Compose
+
+Use this mode for a self-hosted server. On Windows 10/11, install and start
+[Docker Desktop](https://docs.docker.com/desktop/setup/install/windows-install/),
+then double-click `start.cmd` or run:
+
+```bat
+start.cmd
+```
+
+On Linux, install Docker Engine and Docker Compose v2, then run:
 
 ```bash
 git clone https://github.com/schorsch888/novelworld.git
 cd novelworld
-# Linux
 ./start.sh
 ```
 
-On Windows, start Docker Desktop and run `start.cmd` from Command Prompt, or
-double-click it in Explorer.
+Keep the default preview on localhost. Remote access requires an
+operator-managed encrypted tunnel or TLS boundary; the current stack is not
+qualified for direct public-Internet hosting.
 
-Keep the default preview on localhost. Non-localhost access requires an
-operator-managed encrypted tunnel or TLS boundary; the stack does not supply
-the controls required for public Internet hosting.
+The server startup scripts check Docker, generate secrets, start all services,
+open `http://localhost`, and guide the operator through model and first-admin
+setup.
 
-The startup scripts will:
-1. Check Docker is installed
-2. Generate secure passwords automatically
-3. Start all services without asking command-line configuration questions
-4. Open http://localhost
-5. Guide you through choosing DeepSeek or OpenAI and creating the first administrator
+### 2. Portable desktop — no Docker or external NovelWorld server
+
+The experimental desktop build packages the React/FSD interface, all five Rust
+services, and a local PostgreSQL 18 + pgvector runtime. Redis is not
+shipped because it is only a reconstructable cache; the desktop adapter reads
+authoritative conversation state from PostgreSQL.
+
+Official `v*` tags publish the server manifest, SBOMs, checksums, and every
+desktop archive together on [GitHub Releases](https://github.com/Wisdoverse/novelworld/releases).
+The workflow can also be run manually to produce temporary Actions artifacts.
+
+| Platform | Portable artifact | Launch |
+|----------|-------------------|--------|
+| Windows 10/11 x64 | `novelworld-windows-x64-portable.zip` | Extract, then double-click `NovelWorld.exe` |
+| Linux x64 | `novelworld-linux-x64-appimage.tar.gz` | Extract, then double-click the AppImage |
+| macOS Apple Silicon | `novelworld-macos-arm64-app.zip` | Extract, then double-click `NovelWorld.app` |
+| macOS Intel | `novelworld-macos-x64-app.zip` | Extract, then double-click `NovelWorld.app` |
+
+The player does not install Docker, PostgreSQL, Redis, Node.js, or Rust, and the
+app never connects to an external NovelWorld server. All application services,
+data, and generated secrets stay on the player's computer in the operating
+system's per-user application data directory. AI features still require
+Internet access to the configured model provider and an API key on first launch.
+
+The current artifacts are unsigned engineering builds. Windows SmartScreen and
+macOS Gatekeeper may warn on first launch; public distribution requires platform
+code-signing certificates and macOS notarization.
+
+### Platform support
+
+| Mode | Windows | Linux | macOS |
+|------|---------|-------|-------|
+| Docker server | `start.cmd` | `./start.sh` | Not qualified |
+| Portable desktop | x64 engineering build | x64 AppImage engineering build | Apple Silicon and Intel engineering builds |
 
 No default application account is installed. A key entered in the setup page is
 sent only to your server, encrypted before PostgreSQL persistence, and never
@@ -191,7 +231,8 @@ Sign up → Upload novel → Wait for parsing → Start reading
 | Cache | Redis | Reconstructable recent-message projection |
 | AI | Operator-configured provider | Structured output + streaming, bounded retry |
 | Frontend | React + TypeScript | Tailwind CSS, Feature-Sliced Design |
-| Deploy | Docker Compose | 9 long-running containers plus a migration job |
+| Server deploy | Docker Compose | 9 long-running containers plus a migration job |
+| Desktop deploy | Tauri portable bundle | Same five services on loopback + bundled pg0; no Docker |
 
 ---
 
@@ -206,6 +247,7 @@ novelworld/
 │   ├── agent-service/       # Character AI (memory pyramid, streaming chat)
 │   └── narrative-service/   # Narrative engine (branches, choices, world state)
 ├── frontend/                # React app
+│   └── src-tauri/           # Portable desktop shell and local runtime supervisor
 ├── infra/                   # Database schema, Nginx config
 └── docker-compose.yml       # Full stack orchestration
 ```
@@ -220,7 +262,6 @@ novelworld/
 | [SPEC.md](./SPEC.md) | Candidate normative specification (RFC 2119) |
 | [SPEC_CONFORMANCE.md](./docs/SPEC_CONFORMANCE.md) | Clause dispositions, owners, and evidence boundaries |
 | [PRODUCT_CONTRACT.md](./docs/PRODUCT_CONTRACT.md) | Current supported envelope, responsibility boundary, and claim ledger |
-| [IMPLEMENTATION.md](./IMPLEMENTATION.md) | Entry point to current implementation sources |
 | [AGENTS.md](./AGENTS.md) | Instructions for AI coding assistants |
 | [DEPLOY.md](./DEPLOY.md) | Deployment guide |
 | [ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Architecture decisions |
@@ -234,9 +275,8 @@ novelworld/
 
 ## 🧪 Testing
 
-```bash
-cargo test --workspace    # unit and contract tests across all services
-```
+Use the commands and affected-gate matrix in
+[CONTRIBUTING.md](./CONTRIBUTING.md#verification).
 
 ---
 

@@ -221,15 +221,9 @@ See `.env.example` for the full list with defaults.
 
 ## Testing
 
-Unit and contract tests across all services run with `cargo test --workspace`.
-
-Tests cover: email validation, JWT roundtrip, bcrypt verification, chapter
-splitting (Chinese/English/fallback), novel status transitions, memory layer
-ordering, Chinese/English lore retrieval, anti-spoiler chapter filtering,
-narrative choice bounds, world state relationship clamping.
-
-Integration tests use PostgreSQL and Redis from `docker-compose.test.yml` and
-exercise production repositories plus replayable migrations.
+Use the narrow commands above while iterating. Before review, follow the
+affected-gate matrix in [`CONTRIBUTING.md`](./CONTRIBUTING.md#verification);
+CI remains the authoritative required gate.
 
 ## GitHub Project Governance
 

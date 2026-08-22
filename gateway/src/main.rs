@@ -153,7 +153,8 @@ async fn run_body() -> anyhow::Result<()> {
         let app = build_router(state)?;
 
         let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
-        let addr = format!("0.0.0.0:{}", port);
+        let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0".into());
+        let addr = format!("{}:{}", bind_addr, port);
         tracing::info!("Gateway listening on {}", addr);
 
         let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -509,20 +510,21 @@ fn parse_cors_origins(raw: &str) -> AnyResult<Vec<HeaderValue>> {
             let uri = origin
                 .parse::<axum::http::Uri>()
                 .with_context(|| format!("CORS_ORIGINS contains an invalid origin: {origin}"))?;
-            let http_scheme = uri
+            let allowed_scheme = uri
                 .scheme_str()
-                .is_some_and(|scheme| matches!(scheme, "http" | "https"));
+                .is_some_and(|scheme| matches!(scheme, "http" | "https"))
+                || matches!(origin, "http://tauri.localhost" | "tauri://localhost");
             // A trailing slash or fragment never matches a browser Origin
             // (origins carry neither); reject it so operator typos fail loudly
             // instead of silently narrowing the allowlist.
-            if !http_scheme
+            if !allowed_scheme
                 || uri.authority().is_none()
                 || uri.path() != "/"
                 || uri.query().is_some()
                 || origin.contains('#')
                 || origin.ends_with('/')
             {
-                bail!("CORS_ORIGINS origins must be http(s) origins without a path, query, or fragment: {origin}");
+                bail!("CORS_ORIGINS origins must be http(s) origins or a documented Tauri origin, without a path, query, or fragment: {origin}");
             }
             HeaderValue::from_str(origin)
                 .with_context(|| format!("CORS_ORIGINS contains an invalid origin: {origin}"))
@@ -751,19 +753,20 @@ mod cors_tests {
     #[test]
     fn parses_the_preview_origin_list() {
         let origins =
-            parse_cors_origins("http://localhost:5173, http://127.0.0.1:5173,,http://localhost")
+            parse_cors_origins("http://localhost:5173, http://127.0.0.1:5173,,http://localhost,http://tauri.localhost,tauri://localhost")
                 .unwrap();
-        assert_eq!(origins.len(), 3);
+        assert_eq!(origins.len(), 5);
         assert!(parse_cors_origins("not a valid origin value").is_err());
         assert!(parse_cors_origins(" , ").is_err());
         assert!(parse_cors_origins("http://localhost:5173/").is_err());
         assert!(parse_cors_origins("http://localhost:5173#fragment").is_err());
         assert!(parse_cors_origins("http://localhost:5173/api").is_err());
+        assert!(parse_cors_origins("custom://localhost").is_err());
     }
 
     async fn preflight_response(origin: &str) -> Response<Body> {
         let origins = parse_cors_origins(
-            "http://localhost:5173,http://127.0.0.1:5173,http://localhost,http://127.0.0.1",
+            "http://localhost:5173,http://127.0.0.1:5173,http://localhost,http://127.0.0.1,http://tauri.localhost,tauri://localhost",
         )
         .unwrap();
         let service = ServiceBuilder::new()
@@ -800,6 +803,16 @@ mod cors_tests {
                 .get("access-control-allow-origin")
                 .is_none(),
             "a foreign origin must not receive a CORS allowance"
+        );
+
+        let desktop = preflight_response("tauri://localhost").await;
+        assert_eq!(desktop.status(), StatusCode::OK);
+        assert_eq!(
+            desktop
+                .headers()
+                .get("access-control-allow-origin")
+                .unwrap(),
+            "tauri://localhost"
         );
     }
 }

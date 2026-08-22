@@ -11,7 +11,8 @@
     "type-check": "tsc --noEmit",
     "test": "vitest run",
     "lint:fsd": "node scripts/check-fsd.mjs --self-test",
-    "test:e2e:a11y": "playwright test"
+    "test:e2e:a11y": "playwright test",
+    "desktop": "tauri"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.2.6",
@@ -39,6 +40,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",
+    "@tauri-apps/cli": "2.11.4",
     "@tailwindcss/postcss": "^4.3.3",
     "@tailwindcss/typography": "^0.5.20",
     "@testing-library/jest-dom": "^7.0.1",

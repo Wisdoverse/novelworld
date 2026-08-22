@@ -15,6 +15,12 @@ jobs:
     permissions:
       contents: read
 
+  desktop:
+    needs: quality
+    uses: ./.github/workflows/desktop.yml
+    permissions:
+      contents: read
+
   rust-services:
     needs: quality
     runs-on: ubuntu-latest
@@ -167,3 +173,44 @@ jobs:
           path: |
             release.env
             sboms/
+
+  github-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release-manifest, desktop]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: novel-world-release-${{ github.sha }}
+          path: release-assets
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          pattern: novelworld-*
+          path: release-assets
+          merge-multiple: true
+      - name: Publish server and desktop assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag=$GITHUB_REF_NAME
+          cd release-assets
+          sha256sum novelworld-* > desktop-SHA256SUMS
+
+          state=missing
+          if state=$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null); then
+            :
+          else
+            flags=(--verify-tag --draft --generate-notes)
+            [[ "$tag" == *-* ]] && flags+=(--prerelease)
+            gh release create "$tag" "${flags[@]}"
+            state=true
+          fi
+
+          gh release upload "$tag" \
+            release.env sboms/* novelworld-* desktop-SHA256SUMS --clobber
+          [[ "$state" == false ]] || gh release edit "$tag" --draft=false

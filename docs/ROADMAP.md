@@ -120,27 +120,6 @@ safety constraints, and remain true across every architecture:
 Each horizon states the highest evidence it requires. A merged PR is never by
 itself evidence that a product or operational horizon is complete.
 
-## Landed engineering baseline
-
-The earlier H0–H5 work is retained as useful control evidence, not relabeled as
-full product completion:
-
-| Landed control | Evidence | Boundary of the evidence |
-|---|---|---|
-| Principal, ownership, atomicity, migrations, readiness, and release controls | [PR #72](https://github.com/schorsch888/novelworld/pull/72) | Required CI on that commit |
-| Structural reader loop and restart replay | [PR #76](https://github.com/schorsch888/novelworld/pull/76) | Deterministic test provider, not live semantic quality |
-| Canon/timeline structures, transition validation, replay, evaluation harness, provider telemetry, erasure, export, and threat model | [#79](https://github.com/schorsch888/novelworld/pull/79), [#84](https://github.com/schorsch888/novelworld/pull/84), [#86](https://github.com/schorsch888/novelworld/pull/86), [#88](https://github.com/schorsch888/novelworld/pull/88), [#90](https://github.com/schorsch888/novelworld/pull/90), [#92](https://github.com/schorsch888/novelworld/pull/92), [#94](https://github.com/schorsch888/novelworld/pull/94), [#96](https://github.com/schorsch888/novelworld/pull/96), [#98](https://github.com/schorsch888/novelworld/pull/98) | The recorded synthetic evaluation explicitly does not qualify a live provider |
-| Single-timeline living-world commit path | [PR #100](https://github.com/schorsch888/novelworld/pull/100) | Structural and end-to-end contract evidence, not long-term user coherence |
-| `single-node-v1` capacity policy | [PR #102](https://github.com/schorsch888/novelworld/pull/102) | Small deterministic single-node baseline; it does not predict internet scale |
-| Opt-in original-source retention and deletion lifecycle | [PR #105](https://github.com/schorsch888/novelworld/pull/105) | S3 retains original bytes when enabled and deletion is eventually enforced |
-| Durable import jobs with fenced attempts, startup recovery, and legacy backfill; catalog-based readiness checks | [PR #116](https://github.com/schorsch888/novelworld/pull/116), [PR #117](https://github.com/schorsch888/novelworld/pull/117) | Attempt fencing and recovery proven by integration and CI tests; live kill/restart evidence remains open |
-| Retained-source replay at the `source` import boundary | [PR #126](https://github.com/schorsch888/novelworld/pull/126) | With retention enabled, acceptance commits a `source`-stage job and the claimed worker rebuilds chapters from the retained object behind the attempt fence; deterministic integration/unit evidence, not live kill/restart qualification |
-| Live kill/restart drills at the `chapters` and `enriched` import boundaries | [PR #128](https://github.com/schorsch888/novelworld/pull/128) | Hard SIGKILL mid-provider-call on the compose topology, exact resume after the real lease fence, zero provider calls for completed work |
-| Live kill/restart drill at the S3 `source` import boundary | [PR #135](https://github.com/Wisdoverse/novelworld/pull/135) | Hard SIGKILL positioned at the fenced chapter commit of the retained-object replay on the compose topology with MinIO source retention, exact resume from the retained object, zero provider calls for completed work; two consecutive local runs and the required CI run pass |
-| Import provider unknown-outcome budget (`import-provider-budget-v1`) | [#130](https://github.com/schorsch888/novelworld/pull/130), [PR #131](https://github.com/schorsch888/novelworld/pull/131) | Policy approved before the enforcement it judges: 3-claim ceiling with terminal `budget_exhausted` at the claim boundary; deterministic integration and drill evidence, not a live cost observation |
-| Extraction quality gates (`extraction-quality-v1`) | [#133](https://github.com/schorsch888/novelworld/pull/133), [PR #135](https://github.com/schorsch888/novelworld/pull/135) | Versioned zh/en TXT corpus judged by the recorded CI gate on the production splitter with mechanism-targeted adversarial mutations (coverage, precision/hallucination, provenance, chronology, empty-canon anti-vacuity) and a live judge mode; recorded/live evidence does not qualify a provider |
-| The `backup-restore` recovery contract (v1 approved, superseded by v2) and its implementation judged against v2: erasure journal with migration-path replay, lineage tokens, encrypted artifacts, attest-or-erase restore, drills A/B/C in CI | [PR #119](https://github.com/schorsch888/novelworld/pull/119), [PR #121](https://github.com/schorsch888/novelworld/pull/121), [PR #120](https://github.com/schorsch888/novelworld/pull/120) | CI drills on the compose topology at drill-dataset scale; the recorded ≥5 GB RTO scale rehearsal, live kill/restart, and the remaining H1 exit gates are not yet run |
-
 ## Current truth that changes the plan
 
 The first review found product-critical gaps beyond the prior storage/avatar

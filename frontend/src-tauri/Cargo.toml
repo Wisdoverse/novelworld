@@ -1,0 +1,18 @@
+[package]
+name = "novelworld-desktop"
+version = "0.1.0"
+description = "Standalone portable NovelWorld desktop runtime"
+edition = "2021"
+license = "MIT"
+
+[build-dependencies]
+tauri-build = { version = "2.6.2", features = [] }
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2.11.5", features = [] }
+uuid = { version = "1", features = ["v4"] }
+
+[workspace]
