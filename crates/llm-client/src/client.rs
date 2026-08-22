@@ -584,7 +584,7 @@ impl LlmClient {
             )
             .message("user", prompt)
             .temperature(0.3)
-            .max_tokens(4096)
+            .max_tokens(operation.max_output_tokens())
             .json();
         self.chat(request).await.map(|r| r.content)
     }

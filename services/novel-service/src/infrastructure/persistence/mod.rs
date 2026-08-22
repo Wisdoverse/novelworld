@@ -35,6 +35,13 @@ impl ReadinessProbe for PgReadinessProbe {
                         FROM public.novel_import_jobs
                         LIMIT 1
                     ),
+                    checkpoint_columns AS MATERIALIZED (
+                        SELECT novel_id, model_version, prompt_version,
+                               chapter_number, chunk_index, is_final,
+                               source_content, extraction, created_at, updated_at
+                        FROM public.canon_extraction_checkpoints
+                        LIMIT 1
+                    ),
                     erasure_columns AS MATERIALIZED (
                         SELECT subject_type, subject_id, user_id, erased_at,
                                had_source, source_requeued_at
@@ -42,6 +49,7 @@ impl ReadinessProbe for PgReadinessProbe {
                         LIMIT 1
                     )
                     SELECT (SELECT pg_catalog.count(*) >= 0 FROM contract_columns)
+                       AND (SELECT pg_catalog.count(*) >= 0 FROM checkpoint_columns)
                        AND (SELECT pg_catalog.count(*) >= 0 FROM erasure_columns)
                        -- Exactly one lineage token. Without it a restore cannot
                        -- tell a continuation from a sibling of the same

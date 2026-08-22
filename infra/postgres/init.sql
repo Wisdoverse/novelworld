@@ -580,6 +580,36 @@ CREATE TRIGGER reject_canon_story_model_update
     BEFORE UPDATE ON canon_story_models
     FOR EACH ROW EXECUTE FUNCTION reject_canon_story_model_update();
 
+-- Validated, source-bound partial results survive pod/process restarts. They
+-- are deleted in the same transaction that publishes the immutable model.
+CREATE TABLE canon_extraction_checkpoints (
+    novel_id       UUID NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
+    model_version  INTEGER NOT NULL,
+    prompt_version VARCHAR(100) NOT NULL,
+    chapter_number INTEGER NOT NULL,
+    chunk_index    INTEGER NOT NULL,
+    is_final       BOOLEAN NOT NULL,
+    source_content TEXT NOT NULL,
+    extraction     JSONB NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (
+        novel_id, model_version, prompt_version, chapter_number, chunk_index
+    ),
+    CONSTRAINT canon_extraction_checkpoints_model_version_check
+        CHECK (model_version >= 1),
+    CONSTRAINT canon_extraction_checkpoints_prompt_version_check
+        CHECK (char_length(prompt_version) BETWEEN 1 AND 100),
+    CONSTRAINT canon_extraction_checkpoints_chapter_number_check
+        CHECK (chapter_number >= 1),
+    CONSTRAINT canon_extraction_checkpoints_chunk_index_check
+        CHECK (chunk_index >= 0),
+    CONSTRAINT canon_extraction_checkpoints_source_content_check
+        CHECK (octet_length(source_content) BETWEEN 1 AND 16000),
+    CONSTRAINT canon_extraction_checkpoints_extraction_check
+        CHECK (jsonb_typeof(extraction) = 'object')
+);
+
 -- ─── 阅读进度表 ────────────────────────────────────────────────────────────
 
 CREATE TABLE reading_progress (

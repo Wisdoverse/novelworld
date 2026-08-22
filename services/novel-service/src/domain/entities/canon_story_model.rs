@@ -375,10 +375,6 @@ impl CanonStoryModel {
         let ending = &self.content.ending;
         validate_text("ending summary", &ending.summary, 20_000)?;
         validate_evidence(&ending.evidence, source_chapters)?;
-        let ending_character_ids: HashSet<Uuid> = ending.character_states.keys().copied().collect();
-        if ending_character_ids != *canonical_character_ids {
-            return invalid("ending snapshot must contain every canonical character exactly once");
-        }
         for character_id in ending.character_states.keys() {
             require_known_character("ending snapshot", *character_id, canonical_character_ids)?;
         }
@@ -672,6 +668,20 @@ mod tests {
         let mut unknown_character = model.clone();
         unknown_character.content.events[0].character_ids = vec![Uuid::new_v4()];
         assert!(unknown_character.validate(&chapters, &characters).is_err());
+
+        let mut partial_ending = model.clone();
+        partial_ending.content.ending.character_states.pop_first();
+        partial_ending.validate(&chapters, &characters).unwrap();
+
+        let mut unknown_ending_character = model.clone();
+        unknown_ending_character
+            .content
+            .ending
+            .character_states
+            .insert(Uuid::new_v4(), "unknown".into());
+        assert!(unknown_ending_character
+            .validate(&chapters, &characters)
+            .is_err());
 
         let mut unknown_field = serde_json::to_value(model).unwrap();
         unknown_field["content"]["events"][0]["invented"] = true.into();

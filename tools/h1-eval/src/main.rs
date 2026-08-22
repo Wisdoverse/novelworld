@@ -1599,9 +1599,11 @@ async fn run_live(
     // self-reported ones.
     for index in 0..extraction.characters.len() {
         let extracted = &extraction.characters[index];
-        let Some(first_appearance) =
-            character_extractor::find_first_appearance(extracted, &chapters)
-        else {
+        let Some(first_appearance) = character_extractor::find_first_appearance(
+            extracted,
+            &extraction.characters,
+            &chapters,
+        ) else {
             bail!(
                 "provider character {} has no verifiable first appearance",
                 extracted.name

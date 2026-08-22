@@ -45,6 +45,10 @@ const DURABLE_IMPORT_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0015_durable_import_jobs.sql");
 const ERASURE_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0016_erasure_records.sql");
+const CANON_CHECKPOINT_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0017_canon_extraction_checkpoints.sql");
+const CANON_CHECKPOINT_EXPANSION_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0018_expand_canon_checkpoint_source.sql");
 
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
@@ -268,6 +272,14 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
             .await
             .unwrap();
         sqlx::raw_sql(ERASURE_MIGRATION)
+            .execute(&fresh)
+            .await
+            .unwrap();
+        sqlx::raw_sql(CANON_CHECKPOINT_MIGRATION)
+            .execute(&fresh)
+            .await
+            .unwrap();
+        sqlx::raw_sql(CANON_CHECKPOINT_EXPANSION_MIGRATION)
             .execute(&fresh)
             .await
             .unwrap();
@@ -854,6 +866,8 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
         "0013_living_world_turns.sql",
         "0014_source_file_storage.sql",
         "0015_durable_import_jobs.sql",
+        "0016_erasure_records.sql",
+        "0017_canon_extraction_checkpoints.sql",
     ] {
         let migration_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../infra/postgres/migrations")
@@ -938,6 +952,14 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
             .await
             .unwrap();
         sqlx::raw_sql(ERASURE_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
+        sqlx::raw_sql(CANON_CHECKPOINT_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
+        sqlx::raw_sql(CANON_CHECKPOINT_EXPANSION_MIGRATION)
             .execute(&mut *non_default_path)
             .await
             .unwrap();

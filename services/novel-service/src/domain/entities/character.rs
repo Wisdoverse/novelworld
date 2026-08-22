@@ -15,6 +15,11 @@ fn normalize_character_name(name: &str) -> Option<String> {
     .then(|| name.to_owned())
 }
 
+fn optional_profile(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
 /// 角色实体
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Character {
@@ -107,11 +112,11 @@ impl Character {
     ) -> Option<Self> {
         let role = CharacterRole::from_str(&ec.role);
         let mut ch = Self::new(novel_id, normalize_character_name(&ec.name)?, role);
-        ch.description = Some(ec.description.clone());
-        ch.personality = Some(ec.personality.clone());
-        ch.background = Some(ec.background.clone());
-        ch.speaking_style = Some(ec.speaking_style.clone());
-        ch.appearance = Some(ec.appearance.clone());
+        ch.description = optional_profile(&ec.description);
+        ch.personality = optional_profile(&ec.personality);
+        ch.background = optional_profile(&ec.background);
+        ch.speaking_style = optional_profile(&ec.speaking_style);
+        ch.appearance = optional_profile(&ec.appearance);
         ch.aliases = ec.aliases.clone();
         ch.first_appearance_chapter = ec.first_appearance_chapter;
         ch.build_system_prompt(novel_title, world_summary);

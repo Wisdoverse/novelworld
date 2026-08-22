@@ -225,6 +225,10 @@ fn operation_output_limits_include_hidden_reasoning_and_fail_before_io() {
         .max_tokens(1_024)
         .thinking(true);
     assert_eq!(request.effective_max_output_tokens(), Some(5_120));
+    assert_eq!(
+        crate::LlmOperation::CanonExtraction.max_output_tokens(),
+        8_192
+    );
 }
 
 #[test]

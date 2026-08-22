@@ -31,10 +31,15 @@ pub struct ExtractedCharacter {
     pub name: String,
     pub aliases: Vec<String>,
     pub role: String,
+    #[serde(default)]
     pub description: String,
+    #[serde(default)]
     pub personality: String,
+    #[serde(default)]
     pub background: String,
+    #[serde(default)]
     pub speaking_style: String,
+    #[serde(default)]
     pub appearance: String,
     pub first_appearance_chapter: Option<i32>,
 }
@@ -320,7 +325,12 @@ fn validate_parts(
             ("speaking_style", &character.speaking_style),
             ("appearance", &character.appearance),
         ] {
-            validate_nonempty(&format!("{} {field}", character.name), value, None)?;
+            if value.chars().count() > 2_000 {
+                return invalid(format!(
+                    "{} {field} exceeds its maximum length",
+                    character.name
+                ));
+            }
         }
         if character
             .first_appearance_chapter
@@ -410,10 +420,9 @@ pub fn merge_extractions(
     for batch in batches {
         for mut character in batch {
             normalize_character(&mut character);
-            let keys = character_keys(&character);
             if let Some(existing) = merged
                 .iter_mut()
-                .find(|candidate| !character_keys(&candidate.character).is_disjoint(&keys))
+                .find(|candidate| same_character(&candidate.character, &character))
             {
                 merge_character(&mut existing.character, character);
                 existing.mentions += 1;
@@ -510,11 +519,11 @@ fn merge_character(existing: &mut ExtractedCharacter, incoming: ExtractedCharact
     if role_rank(&incoming.role) > role_rank(&existing.role) {
         existing.role = incoming.role;
     }
-    prefer_longer(&mut existing.description, incoming.description);
-    prefer_longer(&mut existing.personality, incoming.personality);
-    prefer_longer(&mut existing.background, incoming.background);
-    prefer_longer(&mut existing.speaking_style, incoming.speaking_style);
-    prefer_longer(&mut existing.appearance, incoming.appearance);
+    fill_missing(&mut existing.description, incoming.description);
+    fill_missing(&mut existing.personality, incoming.personality);
+    fill_missing(&mut existing.background, incoming.background);
+    fill_missing(&mut existing.speaking_style, incoming.speaking_style);
+    fill_missing(&mut existing.appearance, incoming.appearance);
     existing.first_appearance_chapter = match (
         existing.first_appearance_chapter,
         incoming.first_appearance_chapter,
@@ -524,8 +533,8 @@ fn merge_character(existing: &mut ExtractedCharacter, incoming: ExtractedCharact
     };
 }
 
-fn prefer_longer(existing: &mut String, incoming: String) {
-    if incoming.chars().count() > existing.chars().count() {
+fn fill_missing(existing: &mut String, incoming: String) {
+    if existing.is_empty() && !incoming.is_empty() {
         *existing = incoming;
     }
 }
@@ -539,46 +548,84 @@ fn role_rank(role: &str) -> u8 {
     }
 }
 
-fn character_keys(character: &ExtractedCharacter) -> HashSet<String> {
-    std::iter::once(&character.name)
-        .chain(&character.aliases)
-        .map(|name| name.trim().to_lowercase())
-        .filter(|name| !name.is_empty())
-        .collect()
+fn same_character(left: &ExtractedCharacter, right: &ExtractedCharacter) -> bool {
+    left.name.eq_ignore_ascii_case(&right.name)
+        || left
+            .aliases
+            .iter()
+            .any(|alias| alias.eq_ignore_ascii_case(&right.name))
+        || right
+            .aliases
+            .iter()
+            .any(|alias| alias.eq_ignore_ascii_case(&left.name))
 }
 
 fn canonical_name(name: &str, characters: &[ExtractedCharacter]) -> Option<String> {
     let key = name.trim().to_lowercase();
-    characters
+    if let Some(character) = characters
         .iter()
-        .find(|character| character_keys(character).contains(&key))
-        .map(|character| character.name.clone())
+        .find(|character| character.name.to_lowercase() == key)
+    {
+        return Some(character.name.clone());
+    }
+    let mut matches = characters.iter().filter(|character| {
+        character
+            .aliases
+            .iter()
+            .any(|alias| alias.trim().to_lowercase() == key)
+    });
+    let character = matches.next()?;
+    matches.next().is_none().then(|| character.name.clone())
 }
 
-pub fn find_first_appearance(character: &ExtractedCharacter, chapters: &[Chapter]) -> Option<i32> {
-    first_chapter_containing(&character.name, chapters).or_else(|| {
+pub fn find_first_appearance(
+    character: &ExtractedCharacter,
+    all_characters: &[ExtractedCharacter],
+    chapters: &[Chapter],
+) -> Option<i32> {
+    let known_names = all_characters
+        .iter()
+        .flat_map(|candidate| std::iter::once(&candidate.name).chain(&candidate.aliases))
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
+        .collect::<HashSet<_>>();
+    first_chapter_containing(&character.name, &known_names, chapters).or_else(|| {
         character
             .aliases
             .iter()
             .filter(|alias| alias.trim().chars().count() >= 2)
-            .filter_map(|alias| first_chapter_containing(alias, chapters))
+            .filter_map(|alias| first_chapter_containing(alias, &known_names, chapters))
             .min()
     })
 }
 
-fn first_chapter_containing(name: &str, chapters: &[Chapter]) -> Option<i32> {
+fn first_chapter_containing(
+    name: &str,
+    known_names: &HashSet<&str>,
+    chapters: &[Chapter],
+) -> Option<i32> {
     chapters
         .iter()
-        .find(|chapter| text_contains_name(&chapter.content, name.trim()))
+        .find(|chapter| text_contains_name(&chapter.content, name.trim(), known_names))
         .map(|chapter| chapter.chapter_number)
 }
 
-fn text_contains_name(text: &str, name: &str) -> bool {
+fn text_contains_name(text: &str, name: &str, known_names: &HashSet<&str>) -> bool {
     if name.is_empty() {
         return false;
     }
     if !name.is_ascii() {
-        return text.contains(name);
+        return text.match_indices(name).any(|(start, _)| {
+            let end = start + name.len();
+            !known_names
+                .iter()
+                .filter(|known| known.len() > name.len())
+                .any(|known| {
+                    text.match_indices(known).any(|(known_start, _)| {
+                        known_start <= start && known_start + known.len() >= end
+                    })
+                })
+        });
     }
 
     let text = text.to_ascii_lowercase();
@@ -630,7 +677,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_uses_aliases_and_keeps_the_richer_profile() {
+    fn merge_uses_aliases_without_replacing_an_earlier_profile() {
         let mut brief = character("姑娘", &["沈知微"], "supporting");
         brief.description = "short".into();
         let mut detailed = character("沈知微", &["姑娘"], "protagonist");
@@ -650,10 +697,64 @@ mod tests {
 
         assert_eq!(result.characters.len(), 1);
         assert_eq!(result.characters[0].role, "protagonist");
-        assert_eq!(
-            result.characters[0].description,
-            "a much richer description"
+        assert_eq!(result.characters[0].description, "short");
+    }
+
+    #[test]
+    fn shared_titles_do_not_merge_distinct_characters_or_resolve_ambiguously() {
+        let he_jin = character("何进", &["大将军"], "supporting");
+        let cao_shuang = character("曹爽", &["大将军"], "supporting");
+        let result = merge_extractions(
+            ExtractionResult {
+                characters: vec![he_jin, cao_shuang],
+                world_summary: "world".into(),
+                genre: "history".into(),
+                relationships: vec![CharacterRelationship {
+                    from_character: "大将军".into(),
+                    to_character: "何进".into(),
+                    relationship_type: "同盟".into(),
+                    description: "ambiguous title".into(),
+                    strength: 50,
+                    first_appearance_chapter: Some(1),
+                }],
+            },
+            vec![],
         );
+
+        assert_eq!(result.characters.len(), 2);
+        assert!(result.relationships.is_empty());
+    }
+
+    #[test]
+    fn merge_fills_a_missing_optional_profile_field() {
+        let mut first = character("沈知微", &[], "protagonist");
+        first.speaking_style.clear();
+        let later = character("沈知微", &[], "protagonist");
+        let result = merge_extractions(
+            ExtractionResult {
+                characters: vec![first],
+                world_summary: "world".into(),
+                genre: "fantasy".into(),
+                relationships: vec![],
+            },
+            vec![ChunkExtractionResult {
+                characters: vec![later],
+                relationships: vec![],
+            }],
+        );
+
+        assert_eq!(result.characters[0].speaking_style, "speaking style");
+    }
+
+    #[test]
+    fn missing_optional_profile_fields_do_not_discard_a_scan() {
+        let extraction: ChunkExtractionResult = serde_json::from_str(
+            r#"{"characters":[{"name":"何进","aliases":[],"role":"supporting","first_appearance_chapter":1}],"relationships":[]}"#,
+        )
+        .unwrap();
+
+        assert!(validate_chunk_extraction(&extraction).is_ok());
+        assert!(extraction.characters[0].speaking_style.is_empty());
     }
 
     #[test]
@@ -759,7 +860,26 @@ mod tests {
             chapter(2, "Alice entered the room."),
         ];
 
-        assert_eq!(find_first_appearance(&alice, &chapters), Some(2));
+        assert_eq!(
+            find_first_appearance(&alice, std::slice::from_ref(&alice), &chapters),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn first_appearance_ignores_names_embedded_in_a_longer_alias() {
+        let zhang_yi = character("张翼", &[], "supporting");
+        let zhang_fei = character("张飞", &["张翼德"], "protagonist");
+        let characters = vec![zhang_yi.clone(), zhang_fei];
+        let chapters = vec![
+            chapter(2, "张翼德怒鞭督邮。"),
+            chapter(100, "张翼领兵出战。"),
+        ];
+
+        assert_eq!(
+            find_first_appearance(&zhang_yi, &characters, &chapters),
+            Some(100)
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::domain::{
     entities::canon_story_model::{CanonStoryContent, CanonStoryModel},
-    repositories::CanonStoryModelRepository,
+    repositories::{CanonExtractionCheckpoint, CanonStoryModelRepository},
 };
 
 pub struct PgCanonStoryModelRepository {
@@ -83,6 +83,82 @@ async fn insert_model(
 
 #[async_trait]
 impl CanonStoryModelRepository for PgCanonStoryModelRepository {
+    async fn find_import_checkpoint(
+        &self,
+        novel_id: Uuid,
+        model_version: i32,
+        prompt_version: &str,
+        chapter_number: i32,
+        chunk_index: i32,
+        source_content: &str,
+    ) -> Result<Option<String>> {
+        let extraction = sqlx::query_scalar::<_, serde_json::Value>(
+            r#"SELECT extraction
+               FROM canon_extraction_checkpoints
+               WHERE novel_id = $1 AND model_version = $2
+                 AND prompt_version = $3 AND chapter_number = $4
+                 AND chunk_index = $5 AND source_content = $6"#,
+        )
+        .bind(novel_id)
+        .bind(model_version)
+        .bind(prompt_version)
+        .bind(chapter_number)
+        .bind(chunk_index)
+        .bind(source_content)
+        .fetch_optional(&self.pool)
+        .await?;
+        extraction
+            .map(|value| serde_json::to_string(&value).map_err(Into::into))
+            .transpose()
+    }
+
+    async fn save_import_checkpoint(
+        &self,
+        checkpoint: CanonExtractionCheckpoint<'_>,
+        attempt: i64,
+    ) -> Result<bool> {
+        let extraction = serde_json::from_str::<serde_json::Value>(checkpoint.extraction_json)
+            .context("canon checkpoint extraction is invalid JSON")?;
+        let mut transaction = self.pool.begin().await?;
+        let fenced = sqlx::query_scalar::<_, bool>(
+            "SELECT TRUE FROM novel_import_jobs \
+             WHERE novel_id = $1 AND attempt = $2 AND status = 'in_progress' \
+               AND stage = 'enriched' \
+             FOR UPDATE",
+        )
+        .bind(checkpoint.novel_id)
+        .bind(attempt)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .unwrap_or(false);
+        if !fenced {
+            return Ok(false);
+        }
+        sqlx::query(
+            r#"INSERT INTO canon_extraction_checkpoints (
+                   novel_id, model_version, prompt_version, chapter_number,
+                   chunk_index, is_final, source_content, extraction
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+               ON CONFLICT (novel_id, model_version, prompt_version, chapter_number, chunk_index)
+               DO UPDATE SET is_final = EXCLUDED.is_final,
+                             source_content = EXCLUDED.source_content,
+                             extraction = EXCLUDED.extraction,
+                             updated_at = NOW()"#,
+        )
+        .bind(checkpoint.novel_id)
+        .bind(checkpoint.model_version)
+        .bind(checkpoint.prompt_version)
+        .bind(checkpoint.chapter_number)
+        .bind(checkpoint.chunk_index)
+        .bind(checkpoint.is_final)
+        .bind(checkpoint.source_content)
+        .bind(extraction)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(true)
+    }
+
     async fn insert_import(&self, model: &CanonStoryModel, attempt: i64) -> Result<bool> {
         let mut transaction = self.pool.begin().await?;
         let fenced = sqlx::query_scalar::<_, bool>(
@@ -101,6 +177,10 @@ impl CanonStoryModelRepository for PgCanonStoryModelRepository {
         }
         validate_model_source(&mut transaction, model).await?;
         insert_model(&mut transaction, model).await?;
+        sqlx::query("DELETE FROM canon_extraction_checkpoints WHERE novel_id = $1")
+            .bind(model.novel_id)
+            .execute(&mut *transaction)
+            .await?;
         transaction.commit().await?;
         Ok(true)
     }
