@@ -37,7 +37,7 @@ use crate::domain::services::{
     },
     novel_parser::NovelParserService,
 };
-use crate::domain::value_objects::{ImportStage, NovelStatus, ReaderIdentityType};
+use crate::domain::value_objects::{DeviationMode, ImportStage, NovelStatus, ReaderIdentityType};
 
 pub struct NovelCommandHandler {
     pub novel_repo: Arc<dyn NovelRepository>,
@@ -207,12 +207,12 @@ pub struct ImportChaptersUnusable;
 pub struct ImportSourceMissing;
 
 #[derive(Debug, thiserror::Error)]
-pub enum NovelDeletionError {
+pub enum ShelfMutationError {
     #[error("Novel not found")]
     NotFound,
     #[error("Novel privacy cleanup is unavailable")]
     PrivacyCleanup(#[source] anyhow::Error),
-    #[error("Novel deletion failed")]
+    #[error("Shelf mutation failed")]
     Repository(#[source] anyhow::Error),
 }
 
@@ -331,31 +331,53 @@ impl NovelCommandHandler {
         try_import_admission(&self.import_permits, &self.active_import_users, user_id)
     }
 
-    pub async fn delete_owned_novel(
+    pub async fn remove_from_shelf(
         &self,
         user_id: Uuid,
         novel_id: Uuid,
-    ) -> Result<(), NovelDeletionError> {
-        let owned = self
+    ) -> Result<(), ShelfMutationError> {
+        let attached = self
             .novel_repo
-            .find_by_id(novel_id)
+            .find_for_user(user_id, novel_id)
             .await
-            .map_err(NovelDeletionError::Repository)?
-            .is_some_and(|novel| novel.user_id == user_id);
-        if !owned {
-            return Err(NovelDeletionError::NotFound);
+            .map_err(ShelfMutationError::Repository)?
+            .is_some();
+        if !attached {
+            return Err(ShelfMutationError::NotFound);
         }
         if let Err(error) = self.privacy_cleanup.clear_novel(user_id, novel_id).await {
             if let Err(rollback_error) = self.privacy_cleanup.allow_novel(user_id, novel_id).await {
                 tracing::warn!(error = ?rollback_error, %user_id, %novel_id, "novel privacy cleanup rollback failed");
             }
-            return Err(NovelDeletionError::PrivacyCleanup(error));
+            return Err(ShelfMutationError::PrivacyCleanup(error));
         }
-        if let Err(error) = self.novel_repo.delete(novel_id).await {
+        if let Err(error) = self.novel_repo.detach_from_user(user_id, novel_id).await {
             if let Err(rollback_error) = self.privacy_cleanup.allow_novel(user_id, novel_id).await {
                 tracing::error!(error = ?rollback_error, %user_id, %novel_id, "novel privacy cleanup rollback failed");
             }
-            return Err(NovelDeletionError::Repository(error));
+            return Err(ShelfMutationError::Repository(error));
+        }
+        Ok(())
+    }
+
+    pub async fn attach_shared_novel(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        deviation_mode: DeviationMode,
+    ) -> Result<(), ShelfMutationError> {
+        let attached = self
+            .novel_repo
+            .attach_to_user(user_id, novel_id, deviation_mode)
+            .await
+            .map_err(ShelfMutationError::Repository)?;
+        if !attached {
+            return Err(ShelfMutationError::NotFound);
+        }
+        if let Err(error) = self.privacy_cleanup.allow_novel(user_id, novel_id).await {
+            // Keep the durable shelf association. The cache tombstone fails
+            // closed, and retrying this idempotent request repairs projection.
+            return Err(ShelfMutationError::PrivacyCleanup(error));
         }
         Ok(())
     }
@@ -1452,11 +1474,11 @@ impl ReadingProgressHandler {
     ) -> std::result::Result<crate::domain::entities::novel::Novel, ReadingProgressError> {
         match self
             .novel_repo
-            .find_by_id(novel_id)
+            .find_for_user(user_id, novel_id)
             .await
             .map_err(ReadingProgressError::Internal)?
         {
-            Some(novel) if novel.user_id == user_id => Ok(novel),
+            Some(novel) => Ok(novel),
             _ => Err(ReadingProgressError::NotFound),
         }
     }

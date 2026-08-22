@@ -1,13 +1,15 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Plus, BookOpen, Clock, Trash2, Loader2, CheckCircle, AlertCircle, Upload, RotateCcw, Settings } from 'lucide-react';
+import { Plus, BookOpen, Clock, BookMinus, Loader2, CheckCircle, AlertCircle, Upload, RotateCcw, Settings, Library } from 'lucide-react';
 import {
   useNovels,
   useImportNovel,
   useUploadNovel,
   useDeleteNovel,
   useRetryNovel,
+  useNovelCatalog,
+  useAttachNovel,
   validateNovelFile,
 } from '@/entities/novel/api';
 import type { Novel } from '@/shared/types';
@@ -67,13 +69,14 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, retrying }: {
         {/* 删除按钮 */}
         <button
           onClick={(e) => { e.stopPropagation(); onDelete(); }}
-          aria-label={`删除 ${novel.title}`}
+          aria-label={`将 ${novel.title} 移出书架`}
           className={`absolute top-3 left-3 p-1.5 rounded-lg transition-opacity ${
             novel.status === 'error' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
           }`}
-          style={{ background: '#fce8e6', color: '#b3261e' }}
+          title="移出书架（个人世界会保留）"
+          style={{ background: '#f1f3f4', color: '#5f6368' }}
         >
-          <Trash2 size={12} />
+          <BookMinus size={12} />
         </button>
       </div>
 
@@ -148,6 +151,92 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, retrying }: {
         )}
       </div>
     </motion.div>
+  );
+}
+
+function SharedLibraryModal({ onClose }: { onClose: () => void }) {
+  const { data: novels, isLoading, isError, refetch } = useNovelCatalog();
+  const attachNovel = useAttachNovel();
+  const [deviationMode, setDeviationMode] = useState('canon');
+
+  const attach = async (novelId: string) => {
+    try {
+      await attachNovel.mutateAsync({ novelId, deviationMode });
+      toast.success('已加入我的书架');
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, '加入书架失败'));
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ background: 'rgba(32,33,36,0.42)', backdropFilter: 'blur(8px)' }}
+      onClick={(event) => event.target === event.currentTarget && onClose()}
+    >
+      <motion.div
+        initial={{ opacity: 0, scale: 0.95, y: 20 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.95, y: 20 }}
+        className="surface-card flex max-h-[80vh] w-full max-w-2xl flex-col overflow-hidden"
+      >
+        <div className="border-b border-[#e8eaed] px-6 py-5 sm:px-8">
+          <h2 className="text-2xl font-medium text-[#1f1f1f]">共享书库</h2>
+          <p className="mt-2 text-sm text-[#5f6368]">直接加入已解析的小说；你的进度、身份和世界线独立保存。</p>
+          <div className="mt-4 flex flex-wrap gap-2">
+            {[
+              { value: 'canon', label: '忠实原著' },
+              { value: 'creative', label: '创意扩展' },
+              { value: 'remix', label: '自由改写' },
+            ].map(option => (
+              <button
+                key={option.value}
+                type="button"
+                onClick={() => setDeviationMode(option.value)}
+                className="rounded-full px-3 py-1.5 text-xs font-medium"
+                style={{
+                  background: deviationMode === option.value ? '#e8f0fe' : '#f8fafd',
+                  color: deviationMode === option.value ? '#0b57d0' : '#5f6368',
+                  border: `1px solid ${deviationMode === option.value ? '#a8c7fa' : '#dadce0'}`,
+                }}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="min-h-40 space-y-3 overflow-y-auto px-6 py-5 sm:px-8">
+          {isLoading ? (
+            <div className="flex h-32 items-center justify-center"><Loader2 className="animate-spin text-[#0b57d0]" /></div>
+          ) : isError ? (
+            <div className="py-12 text-center text-sm text-[#5f6368]">
+              <p>共享书库加载失败。</p>
+              <button type="button" onClick={() => refetch()} className="tonal-action mt-3 text-xs">重试</button>
+            </div>
+          ) : novels?.length ? novels.map(novel => {
+            const attaching = attachNovel.isPending && attachNovel.variables?.novelId === novel.id;
+            return (
+              <div key={novel.id} className="flex items-center gap-4 rounded-xl border border-[#e1e3e8] p-4">
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-[#eef3ff] text-[#174ea6]"><BookOpen size={19} /></div>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-semibold text-[#1f1f1f]">{novel.title}</p>
+                  <p className="mt-1 truncate text-xs text-[#5f6368]">{novel.author || '作者未知'} · {novel.total_chapters} 章</p>
+                </div>
+                <button type="button" disabled={attachNovel.isPending} onClick={() => attach(novel.id)} className="primary-action shrink-0 text-xs">
+                  {attaching ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
+                  加入书架
+                </button>
+              </div>
+            );
+          }) : (
+            <div className="py-12 text-center text-sm text-[#5f6368]">暂无可加入的小说，可以上传一本新小说。</div>
+          )}
+        </div>
+        <div className="flex justify-end border-t border-[#e8eaed] px-6 py-4 sm:px-8">
+          <button type="button" onClick={onClose} className="tonal-action text-sm">完成</button>
+        </div>
+      </motion.div>
+    </div>
   );
 }
 
@@ -367,6 +456,7 @@ export function ShelfPage() {
     novel => novel.status === 'pending' || novel.status === 'parsing',
   ).length ?? 0;
   const [showImport, setShowImport] = useState(false);
+  const [showSharedLibrary, setShowSharedLibrary] = useState(false);
 
   return (
     <div className="app-surface min-h-screen">
@@ -389,6 +479,13 @@ export function ShelfPage() {
         <div className="flex items-center gap-2">
           <button type="button" aria-label="设置" onClick={() => navigate('/settings')} className="flex h-10 w-10 items-center justify-center rounded-full text-[#0b57d0] transition-colors hover:bg-[#e8f0fe]">
             <Settings size={16} />
+          </button>
+          <button
+            onClick={() => setShowSharedLibrary(true)}
+            className="tonal-action px-3 text-sm sm:px-4"
+          >
+            <Library size={14} />
+            共享书库
           </button>
           <button
             onClick={() => setShowImport(true)}
@@ -444,7 +541,10 @@ export function ShelfPage() {
                   key={novel.id}
                   novel={novel}
                   onOpen={() => navigate(`/reader/${novel.id}`)}
-                  onDelete={() => deleteNovel.mutate(novel.id)}
+                  onDelete={() => deleteNovel.mutate(novel.id, {
+                    onSuccess: () => toast.success('已移出书架，重新加入后可继续原来的世界'),
+                    onError: (error) => toast.error(getApiErrorMessage(error, '移出书架失败')),
+                  })}
                   onRetry={() => retryNovel.mutate(novel.id, {
                     onSuccess: () => toast.success('已重新开始解析'),
                     onError: (error) => toast.error(getApiErrorMessage(error, '重试失败')),
@@ -459,6 +559,7 @@ export function ShelfPage() {
 
       <AnimatePresence>
         {showImport && <ImportModal onClose={() => setShowImport(false)} />}
+        {showSharedLibrary && <SharedLibraryModal onClose={() => setShowSharedLibrary(false)} />}
       </AnimatePresence>
     </div>
   );

@@ -6,6 +6,7 @@ import type { Novel, Chapter, Character } from '@/shared/types';
 export const novelKeys = {
   all: ['novels'] as const,
   list: () => [...novelKeys.all, 'list'] as const,
+  catalog: () => [...novelKeys.all, 'catalog'] as const,
   detail: (id: string) => [...novelKeys.all, 'detail', id] as const,
   chapters: (id: string) => [...novelKeys.all, id, 'chapters'] as const,
   chapter: (id: string, num: number) => [...novelKeys.all, id, 'chapters', num] as const,
@@ -26,6 +27,13 @@ export function useNovels() {
     queryKey: novelKeys.list(),
     queryFn: () => apiClient.get<Novel[]>('/novels').then(r => r.data),
     refetchInterval: (query) => shouldPollNovelList(query.state.data) ? 2000 : false,
+  });
+}
+
+export function useNovelCatalog() {
+  return useQuery({
+    queryKey: novelKeys.catalog(),
+    queryFn: () => apiClient.get<Novel[]>('/novels/catalog').then(r => r.data),
   });
 }
 
@@ -142,7 +150,22 @@ export function useDeleteNovel() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => apiClient.delete(`/novels/${id}`),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: novelKeys.list() }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: novelKeys.list() });
+      queryClient.invalidateQueries({ queryKey: novelKeys.catalog() });
+    },
+  });
+}
+
+export function useAttachNovel() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ novelId, deviationMode }: { novelId: string; deviationMode: string }) =>
+      apiClient.post(`/novels/${novelId}/shelf`, { deviation_mode: deviationMode }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: novelKeys.list() });
+      queryClient.invalidateQueries({ queryKey: novelKeys.catalog() });
+    },
   });
 }
 

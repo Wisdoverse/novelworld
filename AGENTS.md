@@ -180,6 +180,7 @@ Schema lives in `infra/postgres/init.sql`. Key tables:
 |-------|---------|
 | `users` | Auth, profiles |
 | `novels` | Uploaded books, parse status |
+| `user_novels` | Per-user shelf access to shared canonical novels |
 | `novel_import_jobs` | Durable import stage, attempt, lease, and terminal state |
 | `chapters` | Split chapter content |
 | `chapter_chunks` | Derived chunks for spoiler-bounded lore retrieval |

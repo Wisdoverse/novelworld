@@ -46,7 +46,7 @@ use novel_service::domain::{
         ReadingProgressRepository, SourceFileDeletionRepository, IMPORT_BUDGET_EXHAUSTED_MESSAGE,
         MAX_IMPORT_ATTEMPTS,
     },
-    value_objects::{CharacterRole, ImportStage},
+    value_objects::{CharacterRole, DeviationMode, ImportStage},
 };
 use novel_service::infrastructure::document::EbookTextExtractor;
 use novel_service::infrastructure::persistence::{
@@ -189,6 +189,153 @@ async fn accepted_import_already_has_durable_chapters_and_claim() {
             1,
         )
     );
+}
+
+#[tokio::test]
+async fn shared_novel_has_private_shelves_progress_and_worlds() {
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let uploader = insert_test_user(&pool, "shared-uploader").await;
+    let reader = insert_test_user(&pool, "shared-reader").await;
+    let mut novel = Novel::create(uploader, "One canonical novel".into(), None);
+    novel.set_deviation_mode(DeviationMode::Creative);
+    let chapter = Chapter::new(
+        novel.id,
+        1,
+        Some("Shared chapter".into()),
+        "The same canonical chapter is parsed exactly once. ".repeat(4),
+    );
+    let repo = NovelPgRepository::new(pool.clone());
+    repo.create_import(&novel, &[chapter]).await.unwrap();
+    sqlx::query(
+        "UPDATE novels SET status = 'ready'::novel_status, total_chapters = 1 WHERE id = $1",
+    )
+    .bind(novel.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    assert!(repo
+        .find_for_user(uploader, novel.id)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(repo
+        .find_available_to_user(reader)
+        .await
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate.id == novel.id));
+    assert!(repo
+        .attach_to_user(reader, novel.id, DeviationMode::Remix)
+        .await
+        .unwrap());
+    assert!(!repo
+        .find_available_to_user(reader)
+        .await
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate.id == novel.id));
+
+    let reader_novel = repo.find_for_user(reader, novel.id).await.unwrap().unwrap();
+    assert_eq!(reader_novel.deviation_mode, DeviationMode::Remix);
+    let modes: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT user_id, deviation_mode::text FROM reading_progress \
+         WHERE novel_id = $1 ORDER BY user_id",
+    )
+    .bind(novel.id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(modes.contains(&(uploader, "creative".into())));
+    assert!(modes.contains(&(reader, "remix".into())));
+
+    for (user_id, marker) in [(uploader, "uploader-world"), (reader, "reader-world")] {
+        sqlx::query(
+            "INSERT INTO world_states (id, user_id, novel_id, state) \
+             VALUES ($1, $2, $3, jsonb_build_object('marker', $4::text))",
+        )
+        .bind(Uuid::new_v4())
+        .bind(user_id)
+        .bind(novel.id)
+        .bind(marker)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let worlds: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT user_id, state->>'marker' FROM world_states WHERE novel_id = $1 ORDER BY user_id",
+    )
+    .bind(novel.id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(worlds.contains(&(uploader, "uploader-world".into())));
+    assert!(worlds.contains(&(reader, "reader-world".into())));
+
+    assert!(repo.detach_from_user(reader, novel.id).await.unwrap());
+    assert!(repo
+        .find_for_user(reader, novel.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT state->>'marker' FROM world_states WHERE user_id = $1 AND novel_id = $2",
+        )
+        .bind(reader)
+        .bind(novel.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        "reader-world"
+    );
+    assert!(repo
+        .attach_to_user(reader, novel.id, DeviationMode::Canon)
+        .await
+        .unwrap());
+    assert_eq!(
+        repo.find_for_user(reader, novel.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .deviation_mode,
+        DeviationMode::Canon
+    );
+
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(uploader)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(repo.find_by_id(novel.id).await.unwrap().is_some());
+    assert!(repo
+        .find_for_user(reader, novel.id)
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM world_states WHERE novel_id = $1")
+            .bind(novel.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(reader)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM novels WHERE id = $1")
+        .bind(novel.id)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -459,7 +606,7 @@ async fn durable_import_claim_is_recoverable_and_attempt_fenced() {
         .execute(&pool)
         .await
         .unwrap();
-    assert!(!sqlx::query_scalar::<_, bool>(
+    assert!(sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (SELECT 1 FROM novel_import_jobs WHERE novel_id = $1)",
     )
     .bind(novel.id)
@@ -1293,7 +1440,7 @@ async fn import_character_snapshot_is_atomic_and_attempt_fenced() {
 }
 
 #[tokio::test]
-async fn source_file_cleanup_intent_is_atomic_and_survives_account_cascade() {
+async fn source_file_cleanup_waits_for_shared_novel_deletion() {
     let pool = PgPoolOptions::new()
         .max_connections(2)
         .connect(&db_url())
@@ -1355,6 +1502,24 @@ async fn source_file_cleanup_intent_is_atomic_and_survives_account_cascade() {
 
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(!deletions
+        .due(100)
+        .await
+        .unwrap()
+        .iter()
+        .any(|pending| pending.object_key == object_key));
+    assert!(
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM novels WHERE id = $1)",)
+            .bind(novel.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    );
+    sqlx::query("DELETE FROM novels WHERE id = $1")
+        .bind(novel.id)
         .execute(&pool)
         .await
         .unwrap();

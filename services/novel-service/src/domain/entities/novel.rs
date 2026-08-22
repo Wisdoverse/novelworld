@@ -10,6 +10,9 @@ use crate::domain::value_objects::{DeviationMode, NovelStatus};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Novel {
     pub id: Uuid,
+    /// Immutable uploader attribution. Access is granted by the user's shelf,
+    /// never by comparing this value.
+    #[serde(skip_serializing)]
     pub user_id: Uuid,
     pub title: String,
     pub author: Option<String>,

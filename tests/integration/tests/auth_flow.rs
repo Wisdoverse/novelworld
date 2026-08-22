@@ -316,6 +316,12 @@ async fn account_erasure_fails_closed_cascades_owned_data_and_resets_final_setup
     .execute(&pool)
     .await
     .unwrap();
+    sqlx::query("INSERT INTO user_novels (user_id, novel_id) VALUES ($1, $2)")
+        .bind(target.id)
+        .bind(novel_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("INSERT INTO player_chapters (user_id, novel_id, chapter_number, content, origin) VALUES ($1, $2, 1, 'private generated prose', 'choice')")
         .bind(target.id)
         .bind(novel_id)
@@ -410,13 +416,36 @@ async fn account_erasure_fails_closed_cascades_owned_data_and_resets_final_setup
         .unwrap();
     assert_eq!(successful_cleanup.calls.load(Ordering::SeqCst), 1);
     assert!(repo.find_by_id(target.id).await.unwrap().is_none());
-    let retained: serde_json::Value = sqlx::query_scalar(
+    let canonical: serde_json::Value = sqlx::query_scalar(
         r#"SELECT jsonb_build_object(
             'novels', (SELECT COUNT(*) FROM novels),
             'chapters', (SELECT COUNT(*) FROM chapters),
             'chapter_chunks', (SELECT COUNT(*) FROM chapter_chunks),
             'characters', (SELECT COUNT(*) FROM characters),
             'character_relationships', (SELECT COUNT(*) FROM character_relationships),
+            'canon_story_models', (SELECT COUNT(*) FROM canon_story_models)
+        )"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    for (table, expected) in [
+        ("novels", 1),
+        ("chapters", 1),
+        ("chapter_chunks", 1),
+        ("characters", 2),
+        ("character_relationships", 1),
+        ("canon_story_models", 1),
+    ] {
+        assert_eq!(
+            canonical[table].as_i64(),
+            Some(expected),
+            "{table} was not shared"
+        );
+    }
+    let retained_private: serde_json::Value = sqlx::query_scalar(
+        r#"SELECT jsonb_build_object(
+            'user_novels', (SELECT COUNT(*) FROM user_novels),
             'character_memories', (SELECT COUNT(*) FROM character_memories),
             'chat_turns', (SELECT COUNT(*) FROM chat_turns),
             'chat_messages', (SELECT COUNT(*) FROM chat_messages),
@@ -424,7 +453,6 @@ async fn account_erasure_fails_closed_cascades_owned_data_and_resets_final_setup
             'user_choices', (SELECT COUNT(*) FROM user_choices),
             'world_states', (SELECT COUNT(*) FROM world_states),
             'player_chapters', (SELECT COUNT(*) FROM player_chapters),
-            'canon_story_models', (SELECT COUNT(*) FROM canon_story_models),
             'reading_progress', (SELECT COUNT(*) FROM reading_progress),
             'refresh_tokens', (SELECT COUNT(*) FROM refresh_tokens)
         )"#,
@@ -432,7 +460,7 @@ async fn account_erasure_fails_closed_cascades_owned_data_and_resets_final_setup
     .fetch_one(&pool)
     .await
     .unwrap();
-    for (table, count) in retained.as_object().unwrap() {
+    for (table, count) in retained_private.as_object().unwrap() {
         assert_eq!(count.as_i64(), Some(0), "{table} retained erased data");
     }
 

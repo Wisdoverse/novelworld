@@ -232,8 +232,8 @@ chat=$("${curl_cmd[@]}" --no-buffer "${admin_auth[@]}" \
   "$api/chat/$character_id/stream")
 grep -Fq 'event: done' <<<"$chat"
 
-# The reader's dependent rows for the cascade assertions later; the novels
-# themselves all came through the import path above.
+# The reader's dependent rows for the account-cascade assertions later; the
+# shared canonical novels themselves all came through the import path above.
 psql -c "INSERT INTO world_states (user_id, novel_id)
          VALUES ('$reader_id', '$novel_b1')" >/dev/null
 
@@ -329,9 +329,9 @@ done
 # restore under v2 and must carry a complete decision set.
 cat >"$work/decisions-retain-all" <<EOF
 operator=backup-restore-v2 drill A
-retain $admin_id novels=$novel_a1,$novel_a2
-retain $reader_id novels=$novel_b1,$novel_b2
-retain $third_id novels=$novel_c1
+retain $admin_id
+retain $reader_id
+retain $third_id
 EOF
 restore_started=$(date +%s)
 infra/backup/restore.sh --manifest "$manifest_one" --decisions "$work/decisions-retain-all" \
@@ -407,7 +407,7 @@ third_login=$("${curl_cmd[@]}" -H 'Content-Type: application/json' \
 check 'third account deleted after the artifact' 204 \
   "$(http_status -H "Authorization: Bearer $(json_get "value['access_token']" <<<"$third_login")" \
     -X DELETE "$api/auth/me")"
-check 'third account erasure records' 'novel:1|user:1' \
+check 'third account erasure records' 'user:1' \
   "$(psql -c "SELECT subject_type || ':' || COUNT(*) FROM erasure_records
                 WHERE subject_id IN ('$third_id', '$novel_c1')
                 GROUP BY subject_type ORDER BY 1" | paste -sd'|')"
@@ -428,15 +428,16 @@ psql -c "
           'source-files/$admin_id/$novel_a3');
   DELETE FROM novels WHERE id = '$novel_a3';" >/dev/null
 
-check 'B delete novel directly' 204 \
-  "$(http_status "${admin_auth[@]}" -X DELETE "$api/novels/$novel_a2")"
+psql -c "DELETE FROM novels WHERE id = '$novel_a2'" >/dev/null
+check 'B delete canonical novel directly' 0 \
+  "$(psql -c "SELECT COUNT(*) FROM novels WHERE id = '$novel_a2'")"
 pause
 reader_login=$("${curl_cmd[@]}" -H 'Content-Type: application/json' \
   --data "{\"email\":\"$reader_email\",\"password\":\"$password\"}" "$api/auth/login")
 reader_token=$(json_get "value['access_token']" <<<"$reader_login")
-check 'B delete account with cascade' 204 \
+check 'B delete account and private world' 204 \
   "$(http_status -H "Authorization: Bearer $reader_token" -X DELETE "$api/auth/me")"
-check 'B erasure records written' 'novel:4|user:1' \
+check 'B erasure records written' 'novel:2|user:1' \
   "$(psql -c "SELECT subject_type || ':' || COUNT(*) FROM erasure_records
                 WHERE subject_id IN ('$novel_a2','$novel_a3','$novel_b1','$novel_b2','$reader_id')
                 GROUP BY subject_type ORDER BY 1" | paste -sd'|')"
@@ -455,17 +456,19 @@ infra/backup/restore.sh --manifest "$manifest_newer" --env-file "$env_file" --i-
 check 'B recorded the restored artifact as parent' \
   "$(manifest_field "$manifest_newer" lineage_token)" "$(lineage_parent)"
 
-check 'B erased subjects stay deleted' '0:0:0:0:0' \
+check 'B erased subjects stay deleted and shared novels survive' '0:0:1:1:0' \
   "$(psql -c "SELECT (SELECT COUNT(*) FROM users WHERE id = '$reader_id') || ':' ||
                      (SELECT COUNT(*) FROM novels WHERE id = '$novel_a2') || ':' ||
                      (SELECT COUNT(*) FROM novels WHERE id = '$novel_b1') || ':' ||
                      (SELECT COUNT(*) FROM novels WHERE id = '$novel_b2') || ':' ||
                      (SELECT COUNT(*) FROM world_states WHERE user_id = '$reader_id')")"
-check 'B surviving journey intact' "1:$novel_a1" \
-  "$(psql -c "SELECT COUNT(*) || ':' || MIN(id::text) FROM novels")"
+check 'B surviving canonical novels intact' 4 \
+  "$(psql -c "SELECT COUNT(*) FROM novels")"
+check 'B primary journey novel intact' 1 \
+  "$(psql -c "SELECT COUNT(*) FROM novels WHERE id = '$novel_a1'")"
 check 'B third account stays erased across the restore' 0 \
   "$(psql -c "SELECT COUNT(*) FROM users WHERE id = '$third_id'")"
-check 'B retained sources re-queued' '4' \
+check 'B explicitly deleted retained sources re-queued' '2' \
   "$(psql -c "SELECT COUNT(*) FROM source_file_deletions WHERE object_key IN
                 ('source-files/$admin_id/$novel_a2',
                  'source-files/$reader_id/$novel_b1',
@@ -584,7 +587,7 @@ refusal_says 'refusing to complete a disaster restore'
 
 cat >"$work/decisions-partial" <<EOF
 operator=backup-restore-v2 drill C
-retain $admin_id novels=$novel_a1
+retain $admin_id
 EOF
 refuses 'C partial decisions' infra/backup/restore.sh --manifest "$manifest_one" \
   --decisions "$work/decisions-partial" --env-file "$env_file"
@@ -594,8 +597,8 @@ refusal_says "$reader_id"
 cat >"$work/decisions-no-admin" <<EOF
 operator=backup-restore-v2 drill C
 erase $admin_id
-retain $reader_id novels=$novel_b1
-retain $third_id novels=$novel_c1
+retain $reader_id
+retain $third_id
 EOF
 refuses 'C decisions leaving no administrator' infra/backup/restore.sh \
   --manifest "$manifest_one" --decisions "$work/decisions-no-admin" --env-file "$env_file"
@@ -617,7 +620,7 @@ fi
 cat >"$work/decisions-override" <<EOF
 operator=backup-restore-v2 drill C
 erase $admin_id
-retain $reader_id novels=$novel_b1
+retain $reader_id
 admin=$reader_id
 erase $third_id
 EOF
@@ -666,14 +669,14 @@ check 'C token-less restore records an absent parent' absent "$(lineage_parent)"
 [ -n "$(lineage_token)" ]
 
 # The sanctioned continuation: erase the administrator's account, retain the
-# reader with a partial novel list, designate the retained account as the
+# reader and all of that reader's private worlds, designate the retained account as the
 # administrator the installation would otherwise lack, and let replay enforce
 # the collected record covering the third account.
 cat >"$work/decisions-complete" <<EOF
-# One account retained with a partial novel list, one erased, one pre-decided.
+# One account retained, one erased, one pre-decided.
 operator=backup-restore-v2 drill C
 erase $admin_id
-retain $reader_id novels=$novel_b1
+retain $reader_id
 admin=$reader_id
 EOF
 failure_time=$(date -u +'%Y-%m-%d %H:%M:%S+00')
@@ -685,20 +688,20 @@ first_restore_token=$(lineage_token)
 check 'C erased account is gone' 0 "$(psql -c "SELECT COUNT(*) FROM users WHERE id = '$admin_id'")"
 check 'C collected-record account is gone' 0 \
   "$(psql -c "SELECT COUNT(*) FROM users WHERE id = '$third_id'")"
-check 'C collected-record novel is gone' 0 \
+check 'C collected account canonical novel survived' 1 \
   "$(psql -c "SELECT COUNT(*) FROM novels WHERE id = '$novel_c1'")"
-check 'C unlisted novel is gone' 0 "$(psql -c "SELECT COUNT(*) FROM novels WHERE id = '$novel_b2'")"
+check 'C retained account second canonical novel survived' 1 "$(psql -c "SELECT COUNT(*) FROM novels WHERE id = '$novel_b2'")"
 check 'C retained novel survived' 1 "$(psql -c "SELECT COUNT(*) FROM novels WHERE id = '$novel_b1'")"
 check 'C designated administrator promoted' 'admin' \
   "$(psql -c "SELECT role FROM users WHERE id = '$reader_id'")"
-check 'C decisions wrote erasure records' '1:1:1' \
+check 'C decisions wrote only account erasure records' '1:0:0' \
   "$(psql -c "SELECT (SELECT COUNT(*) FROM erasure_records
                         WHERE subject_type = 'user' AND subject_id = '$admin_id') || ':' ||
                      (SELECT COUNT(*) FROM erasure_records
                         WHERE subject_type = 'novel' AND subject_id = '$novel_b2') || ':' ||
                      (SELECT COUNT(*) FROM erasure_records
                         WHERE subject_type = 'novel' AND subject_id = '$novel_a1')")"
-check 'C cascade removed dependent rows' '0:0:0:0' \
+check 'C account cascade removed only erased-user data' '0:2:0:0' \
   "$(psql -c "SELECT (SELECT COUNT(*) FROM chat_messages) || ':' ||
                      (SELECT COUNT(*) FROM chapters WHERE novel_id = '$novel_b2') || ':' ||
                      (SELECT COUNT(*) FROM world_states WHERE user_id = '$admin_id') || ':' ||
@@ -756,7 +759,7 @@ login=$("${curl_cmd[@]}" -H 'Content-Type: application/json' \
   --data "{\"email\":\"$reader_email\",\"password\":\"$password\"}" "$api/auth/login")
 reader_token=$(json_get "value['access_token']" <<<"$login")
 reader_auth=(-H "Authorization: Bearer $reader_token")
-check 'C unlisted novel is not served' 404 \
+check 'C retained account second novel is served' 200 \
   "$(http_status "${reader_auth[@]}" "$api/novels/$novel_b2/chapters")"
 check 'C retained novel is served' 200 \
   "$(http_status "${reader_auth[@]}" "$api/novels/$novel_b1/chapters")"

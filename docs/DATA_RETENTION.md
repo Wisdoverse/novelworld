@@ -45,11 +45,16 @@ on that bucket for readiness and `s3:PutObject`/`s3:DeleteObject` only on the
 - The only administrator cannot delete their account while other users remain,
   because that would leave the installation without an operator. A sole final
   account can delete itself and return the installation to first-run setup.
-- A required Redis cleanup failure returns `503` before authoritative deletion.
+- A required Redis cleanup failure returns `503` before an account deletion or
+  shelf removal.
   The tombstone atomically rejects delayed cache and derived-memory projections,
   closing the concurrent-chat window without a second scan. Repeating deletion
-  is state-idempotent; a deleted account returns `204`, while a deleted novel is
-  no longer an owned resource and returns `404`.
+  is state-idempotent; a deleted account returns `204`, while a novel removed
+  from a user's shelf is no longer accessible to that user and returns `404`.
+- Removing a novel from a shelf does not delete the shared canonical novel or
+  another user's world. The removed user's durable progress and world are kept
+  for an explicit later re-attachment; deleting the account erases that user's
+  private state through the existing user-scoped cascades.
 - Deleted application data is intentionally unrecoverable. NovelWorld does not
   provide a per-item restore or recycle-bin workflow. Whole-database operator
   recovery is governed separately by the approved
@@ -58,8 +63,8 @@ on that bucket for readiness and `s3:PutObject`/`s3:DeleteObject` only on the
   deleted subject back; its implementation state is tracked in
   [`SPEC_CONFORMANCE.md`](./SPEC_CONFORMANCE.md) (§12.4).
 - S3 deletion is eventually complete rather than transactionally coupled to
-  PostgreSQL. The durable `source_file_deletions` outbox survives novel and
-  account cascades and service restarts; `/ready` fails while an enabled S3
+  PostgreSQL. The durable `source_file_deletions` outbox survives novel
+  cascades and service restarts; `/ready` fails while an enabled S3
   bucket is unavailable.
 
 ## Data outside NovelWorld
@@ -84,7 +89,7 @@ Settings and `GET /api/account/export` provide the acting user a versioned
 HTTP fragments with bounded memory; it never reads downstream tables. A final
 `complete` record is required before the browser saves the file.
 
-The export contains profile metadata; owned novels, source chapters,
+The export contains profile metadata; novels attached to the user's shelf, source chapters,
 characters, relationships, canon models, and reading progress; durable messages
 and memory content; and relevant narrative nodes, choices/transitions, world
 state, player chapters, and world-turn actions/transitions/results. It excludes credentials, tokens, runtime model
