@@ -5,7 +5,8 @@ export type DeviationMode = 'canon' | 'creative' | 'remix';
 
 export interface Novel {
   id: string;
-  user_id: string;
+  /** Legacy clients may receive uploader attribution; access never depends on it. */
+  user_id?: string;
   title: string;
   author?: string;
   cover_url?: string;

@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::application::commands::ImportNovelCommand;
 use crate::application::handlers::{
     ImportBudgetExceeded, ImportCapacityUnavailable, ImportRetryConflict, NovelCommandHandler,
-    NovelDeletionError, ReadingProgressError, ReadingProgressHandler, SourceFileStorageUnavailable,
+    ReadingProgressError, ReadingProgressHandler, ShelfMutationError, SourceFileStorageUnavailable,
 };
 use crate::domain::entities::novel::Novel;
 use crate::domain::ports::{
@@ -27,6 +27,7 @@ use crate::domain::repositories::{
 use crate::domain::services::canon_story_context::{
     build_canon_context, build_world_entry_context, original_player_name_available,
 };
+use crate::domain::value_objects::DeviationMode;
 use axum::routing::put;
 
 #[derive(Clone)]
@@ -55,8 +56,10 @@ fn routes() -> Router<AppState> {
         .route("/novels", post(import_novel))
         .route("/novels/upload", post(upload_novel))
         .route("/novels", get(list_novels))
+        .route("/novels/catalog", get(list_catalog))
         .route("/novels/{id}", get(get_novel))
         .route("/novels/{id}", delete(delete_novel))
+        .route("/novels/{id}/shelf", post(attach_novel))
         .route("/novels/{id}/retry", post(retry_novel))
         .route("/novels/{id}/chapters", get(list_chapters))
         .route("/novels/{id}/chapters/{num}", get(get_chapter))
@@ -793,6 +796,56 @@ async fn list_novels(State(state): State<AppState>, headers: HeaderMap) -> impl 
     }
 }
 
+async fn list_catalog(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let user_id = match extract_user_id(&headers) {
+        Some(user_id) => user_id,
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+    match state.novel_repo.find_available_to_user(user_id).await {
+        Ok(novels) => (StatusCode::OK, Json(novels)).into_response(),
+        Err(error) => {
+            tracing::error!(error = ?error, %user_id, "shared novel catalog lookup failed");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Shared library lookup failed",
+            )
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AttachNovelRequest {
+    deviation_mode: Option<String>,
+}
+
+async fn attach_novel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(request): Json<AttachNovelRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user_id(&headers) {
+        Some(user_id) => user_id,
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+    let mode = match request.deviation_mode.as_deref().unwrap_or("canon") {
+        "canon" => DeviationMode::Canon,
+        "creative" => DeviationMode::Creative,
+        "remix" => DeviationMode::Remix,
+        _ => return api_error(StatusCode::UNPROCESSABLE_ENTITY, "Invalid deviation_mode"),
+    };
+    match state.handler.attach_shared_novel(user_id, id, mode).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(ShelfMutationError::NotFound) => api_error(StatusCode::NOT_FOUND, "Novel not found"),
+        Err(ShelfMutationError::PrivacyCleanup(error)) => privacy_cleanup_error(error),
+        Err(ShelfMutationError::Repository(error)) => {
+            tracing::error!(error = ?error, %user_id, novel_id = %id, "shelf attachment failed");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "Shelf attachment failed")
+        }
+    }
+}
+
 async fn get_novel(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -813,22 +866,22 @@ async fn delete_novel(
         Some(user_id) => user_id,
         None => return StatusCode::UNAUTHORIZED.into_response(),
     };
-    match state.handler.delete_owned_novel(user_id, id).await {
+    match state.handler.remove_from_shelf(user_id, id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(NovelDeletionError::NotFound) => (
+        Err(ShelfMutationError::NotFound) => (
             StatusCode::NOT_FOUND,
             Json(ApiError {
                 error: "Novel not found".into(),
             }),
         )
             .into_response(),
-        Err(NovelDeletionError::PrivacyCleanup(error)) => privacy_cleanup_error(error),
-        Err(NovelDeletionError::Repository(error)) => {
-            tracing::error!(error = ?error, %user_id, novel_id = %id, "novel deletion failed");
+        Err(ShelfMutationError::PrivacyCleanup(error)) => privacy_cleanup_error(error),
+        Err(ShelfMutationError::Repository(error)) => {
+            tracing::error!(error = ?error, %user_id, novel_id = %id, "shelf removal failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiError {
-                    error: "Novel deletion failed".into(),
+                    error: "Shelf removal failed".into(),
                 }),
             )
                 .into_response()
@@ -837,11 +890,11 @@ async fn delete_novel(
 }
 
 fn privacy_cleanup_error(error: anyhow::Error) -> Response {
-    tracing::warn!(error = ?error, "novel privacy cleanup failed");
+    tracing::warn!(error = ?error, "shelf cache projection update failed");
     (
         StatusCode::SERVICE_UNAVAILABLE,
         Json(ApiError {
-            error: "Novel deletion is temporarily unavailable; retry the request".into(),
+            error: "Shelf update is temporarily unavailable; retry the request".into(),
         }),
     )
         .into_response()
@@ -1060,8 +1113,8 @@ async fn owned_novel(
         )
     })?;
 
-    match state.novel_repo.find_by_id(novel_id).await {
-        Ok(Some(novel)) if is_novel_owner(&novel, user_id) => Ok(novel),
+    match state.novel_repo.find_for_user(user_id, novel_id).await {
+        Ok(Some(novel)) => Ok(novel),
         Ok(_) => Err(Box::new(
             (
                 StatusCode::NOT_FOUND,
@@ -1079,10 +1132,6 @@ async fn owned_novel(
             )))
         }
     }
-}
-
-fn is_novel_owner(novel: &Novel, user_id: Uuid) -> bool {
-    novel.user_id == user_id
 }
 
 fn progress_error_response(error: ReadingProgressError) -> Response {
@@ -1291,12 +1340,11 @@ mod ownership_tests {
     }
 
     #[test]
-    fn novel_ownership_is_principal_scoped() {
-        let owner_id = Uuid::new_v4();
-        let novel = Novel::create(owner_id, "Private novel".into(), None);
+    fn public_novel_json_omits_uploader_identity() {
+        let novel = Novel::create(Uuid::new_v4(), "Shared novel".into(), None);
+        let json = serde_json::to_value(novel).unwrap();
 
-        assert!(is_novel_owner(&novel, owner_id));
-        assert!(!is_novel_owner(&novel, Uuid::new_v4()));
+        assert!(json.get("user_id").is_none());
     }
 
     #[test]

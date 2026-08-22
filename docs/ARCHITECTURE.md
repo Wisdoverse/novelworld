@@ -51,8 +51,9 @@ public-service qualification.
   `X-User-Role`, applies public routing/admission, and preserves SSE framing.
 - **User Service** owns users, password hashes, JWT/refresh tokens, first-run
   configuration, and account-level privacy orchestration.
-- **Novel Service** owns novels, chapters/chunks, characters, canon models,
-  reading progress, source ingestion, and optional retained source objects.
+- **Novel Service** owns shared canonical novels, per-user shelf associations,
+  chapters/chunks, characters, canon models, reading progress, source ingestion,
+  and optional retained source objects.
 - **Agent Service** owns chat turns/messages, memory records, and the bounded
   Redis message projection.
 - **Narrative Service** owns narrative nodes, player entities/timelines, world

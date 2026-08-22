@@ -275,7 +275,7 @@ check_timestamp "$writes_stopped_at" 'the writes-stopped timestamp'
 
 # ─── 3. collect erasure sources ────────────────────────────────────────────
 
-# Account and novel inventory of the restored dump, read from the dump's own
+# Account inventory of the restored dump, read from the dump's own
 # COPY headers so a column order change cannot silently shift a field. Read
 # before the live export because the lineage test below compares against it.
 copy_block() {
@@ -305,8 +305,6 @@ copy_block() {
 }
 copy_block users id,role >"$work/accounts.tsv" ||
   fail 'the dump has no id/role columns on users'
-copy_block novels id,user_id >"$work/novels.tsv" ||
-  fail 'the dump has no id/user_id columns on novels'
 cut -f1 "$work/accounts.tsv" | sort >"$work/account-ids.txt"
 
 # Live continuation is established only by token equality. Row counts and shared
@@ -389,7 +387,6 @@ if [ -n "$decisions" ]; then
     fail 'the residual window is empty; attest-or-erase decisions are not accepted for this restore'
   [ -f "$decisions" ] || fail "no decision file at $decisions"
   : >"$work/decided.tsv"
-  : >"$work/retained-novels.tsv"
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
     '' | '#'*) continue ;;
@@ -399,22 +396,9 @@ if [ -n "$decisions" ]; then
       check_uuid "$designated_admin" 'the designated administrator'
       ;;
     'retain '*)
-      rest=${line#retain }
-      account=${rest%% *}
-      novels=${rest#* }
+      account=${line#retain }
       check_uuid "$account" 'a retained account'
-      case "$novels" in
-      novels=*) : ;;
-      *) fail "retain $account must list its retained novels as novels=<uuid,...>" ;;
-      esac
       printf 'retain\t%s\n' "$account" >>"$work/decided.tsv"
-      # The trailing newline matters: read drops an unterminated last field,
-      # which would silently unlist the last retained novel of every account.
-      printf '%s\n' "${novels#novels=}" | tr ',' '\n' | while read -r novel; do
-        if [ -n "$novel" ]; then
-          printf '%s\t%s\n' "$account" "$novel" >>"$work/retained-novels.tsv"
-        fi
-      done
       ;;
     'erase '*)
       account=${line#erase }
@@ -444,15 +428,6 @@ if [ -n "$decisions" ]; then
   unknown=$(comm -13 "$work/account-ids.txt" "$work/decided-ids.txt")
   [ -z "$unknown" ] ||
     fail "decisions name accounts that are not in the artifact: $(printf '%s' "$unknown" | tr '\n' ' ')"
-  while IFS="$tab" read -r account novel; do
-    check_uuid "$novel" 'a retained novel'
-    owns "$work/novels.tsv" "$novel" "$account" ||
-      fail "retained novel $novel does not belong to account $account in this artifact"
-    if listed "$work/erased-novels.txt" "$novel"; then
-      fail "novel $novel is covered by a collected erasure record and cannot be retained"
-    fi
-  done <"$work/retained-novels.tsv"
-
   retained_any=false
   retained_admin=false
   while IFS="$tab" read -r decision account; do
@@ -485,18 +460,11 @@ elif [ "$live_source" = false ]; then
   printf 'restore: window %s .. %s; deletions committed inside it cannot be replayed.\n' \
     "$window_start" "$window_end" >&2
   printf 'restore: supply --decisions FILE with one line per account:\n' >&2
-  printf '  operator=<identity string>\n  retain <user_uuid> novels=<uuid,uuid>\n  erase <user_uuid>\n' >&2
-  # Novels already covered by a collected record are erased facts; the prompt
-  # must not advertise them as retainable.
-  awk -F'\t' 'NR == FNR { erased[$1] = 1; next } !($1 in erased)' \
-    "$work/erased-novels.txt" "$work/novels.tsv" >"$work/available-novels.tsv"
+  printf '  operator=<identity string>\n  retain <user_uuid>\n  erase <user_uuid>\n' >&2
   printf 'restore: accounts in this artifact that still need a decision:\n' >&2
   while IFS= read -r account; do
-    printf '  %s role=%s novels=%s\n' "$account" \
-      "$(awk -F'\t' -v id="$account" '$1 == id { print $2 }' "$work/accounts.tsv")" \
-      "$(awk -F'\t' -v owner="$account" \
-        '$2 == owner { printf "%s%s", separator, $1; separator = "," }' \
-        "$work/available-novels.tsv")" >&2
+    printf '  %s role=%s\n' "$account" \
+      "$(awk -F'\t' -v id="$account" '$1 == id { print $2 }' "$work/accounts.tsv")" >&2
   done <"$work/decision-required.txt"
   exit 2
 fi
@@ -557,19 +525,11 @@ docker compose run --rm postgres-migrate >/dev/null
   if [ -n "$decisions" ]; then
     while IFS="$tab" read -r decision account; do
       if [ "$decision" = erase ]; then
-        # Replay deletes the account; its cascade writes the per-novel records.
+        # Replay deletes only the account, its shelf, and its private world.
+        # Shared canonical novels remain independent subjects.
         printf "INSERT INTO public.erasure_records (subject_type, subject_id, user_id)"
         printf " VALUES ('user', '%s', '%s')" "$account" "$account"
         printf " ON CONFLICT (subject_type, subject_id) DO NOTHING;\n"
-      else
-        awk -F'\t' -v owner="$account" '$2 == owner { print $1 }' "$work/novels.tsv" |
-          while read -r novel; do
-            if ! owns "$work/retained-novels.tsv" "$account" "$novel"; then
-              printf "INSERT INTO public.erasure_records (subject_type, subject_id, user_id)"
-              printf " VALUES ('novel', '%s', '%s')" "$novel" "$account"
-              printf " ON CONFLICT (subject_type, subject_id) DO NOTHING;\n"
-            fi
-          done
       fi
       designated=FALSE
       [ "$account" != "$designated_admin" ] || designated=TRUE
