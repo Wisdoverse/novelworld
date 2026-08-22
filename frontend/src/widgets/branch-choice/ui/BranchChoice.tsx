@@ -47,17 +47,14 @@ export function BranchChoice({
     >
       {/* 标题 */}
       <div className="flex items-center gap-3 mb-6">
-        <div
-          className="w-10 h-10 rounded-full flex items-center justify-center"
-          style={{ background: 'linear-gradient(135deg, rgba(109,40,217,0.3), rgba(6,182,212,0.3))', border: '1px solid rgba(6,182,212,0.3)' }}
-        >
-          <GitBranch size={18} style={{ color: '#22d3ee' }} />
+        <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#e8f0fe] text-[#0b57d0]">
+          <GitBranch size={18} />
         </div>
         <div>
-          <div className="text-xs font-semibold uppercase tracking-widest mb-1" style={{ color: '#a78bfa' }}>
+          <div className="mb-1 text-xs font-semibold uppercase tracking-widest text-[#0b57d0]">
             命运交叉点
           </div>
-          <p className="text-sm leading-relaxed" style={{ color: '#94a3b8' }}>
+          <p className="text-sm leading-relaxed text-[#5f6368]">
             {node.description}
           </p>
         </div>
@@ -79,10 +76,10 @@ export function BranchChoice({
             style={{
               opacity: selectedIndex !== null && selectedIndex !== choice.index ? 0.4 : 1,
               background: selectedIndex === choice.index
-                ? 'rgba(6, 182, 212, 0.15)'
+                ? '#e8f0fe'
                 : undefined,
               borderColor: selectedIndex === choice.index
-                ? 'rgba(6, 182, 212, 0.6)'
+                ? '#0b57d0'
                 : undefined,
             }}
           >
@@ -92,8 +89,8 @@ export function BranchChoice({
                 className="flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold mt-0.5"
                 style={{
                   background: hoveredIndex === i || selectedIndex === choice.index
-                    ? 'linear-gradient(135deg, #0891b2, #6d28d9)'
-                    : 'rgba(71, 85, 105, 0.4)',
+                    ? '#0b57d0'
+                    : '#5f6368',
                   color: 'white',
                   transition: 'background 200ms',
                 }}
@@ -102,11 +99,11 @@ export function BranchChoice({
               </div>
 
               <div className="flex-1 min-w-0">
-                <p className="text-sm leading-relaxed" style={{ color: '#e2e8f0' }}>
+                <p className="text-sm leading-relaxed text-[#1f1f1f]">
                   {choice.text}
                 </p>
                 {choice.hint && (
-                  <p className="text-xs mt-1.5 flex items-center gap-1" style={{ color: '#a78bfa' }}>
+                  <p className="mt-1.5 flex items-center gap-1 text-xs text-[#0b57d0]">
                     <Sparkles size={10} />
                     {choice.hint}
                   </p>
@@ -117,7 +114,7 @@ export function BranchChoice({
                 size={16}
                 className="flex-shrink-0 mt-0.5 transition-transform"
                 style={{
-                  color: '#475569',
+                  color: '#5f6368',
                   transform: hoveredIndex === i ? 'translateX(3px)' : 'none',
                 }}
               />
@@ -133,11 +130,10 @@ export function BranchChoice({
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: 'auto' }}
             exit={{ opacity: 0, height: 0 }}
-            className="mt-4 p-4 rounded-xl text-center"
-            style={{ background: 'rgba(6, 182, 212, 0.08)', border: '1px solid rgba(6, 182, 212, 0.2)' }}
+            className="mt-4 rounded-xl border border-[#d2e3fc] bg-[#f8faff] p-4 text-center"
           >
-            <div className="flex items-center justify-center gap-2 text-sm" style={{ color: '#22d3ee' }}>
-              <div className="w-4 h-4 border-2 rounded-full animate-spin" style={{ borderColor: '#22d3ee', borderTopColor: 'transparent' }} />
+            <div className="flex items-center justify-center gap-2 text-sm text-[#0b57d0]">
+              <div className="h-4 w-4 animate-spin rounded-full border-2 border-[#0b57d0] border-t-transparent" />
               正在根据你的行动重新生成后续内容...
             </div>
           </motion.div>
@@ -147,8 +143,7 @@ export function BranchChoice({
       {error && !isLoading && (
         <div
           role="alert"
-          className="mt-4 p-4 rounded-xl text-sm"
-          style={{ background: 'rgba(220, 38, 38, 0.1)', border: '1px solid rgba(248, 113, 113, 0.25)', color: '#fca5a5' }}
+          className="mt-4 rounded-xl border border-[#f2b8b5] bg-[#fce8e6] p-4 text-sm text-[#b3261e]"
         >
           {error} 请重新选择。
         </div>
@@ -158,14 +153,13 @@ export function BranchChoice({
         <motion.div
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
-          className="mt-6 p-5 rounded-xl"
-          style={{ background: 'rgba(16, 185, 129, 0.08)', border: '1px solid rgba(52, 211, 153, 0.25)' }}
+          className="mt-6 rounded-xl border border-[#a8dab5] bg-[#e6f4ea] p-5"
         >
-          <div className="flex items-center gap-2 mb-3 text-sm font-semibold" style={{ color: '#6ee7b7' }}>
+          <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-[#0d652d]">
             <CheckCircle2 size={16} />
             你的行动改变了后续故事
           </div>
-          <p className="text-sm leading-7 whitespace-pre-wrap" style={{ color: '#cbd5e1' }}>
+          <p className="whitespace-pre-wrap text-sm leading-7 text-[#1f1f1f]">
             {consequence}
           </p>
         </motion.div>

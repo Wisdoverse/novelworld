@@ -55,22 +55,20 @@ export function PlayerEntryForm({
 
   return (
     <section
-      className="mt-8 p-6 rounded-xl"
-      style={{ background: 'rgba(109, 40, 217, 0.08)', border: '1px solid rgba(109, 40, 217, 0.25)' }}
+      className="surface-card mt-8 p-6"
       aria-labelledby="player-entry-title"
     >
-      <h2 id="player-entry-title" className="text-xl font-semibold" style={{ color: '#e2e8f0' }}>
+      <h2 id="player-entry-title" className="text-xl font-semibold text-[#1f1f1f]">
         创建你的原创角色
       </h2>
-      <p className="mt-2 text-sm" style={{ color: '#94a3b8' }}>
+      <p className="mt-2 text-sm text-[#5f6368]">
         从已解锁章节选择入场点；后续原著事件会从该处继续运行。
       </p>
       <form className="mt-5 space-y-4" onSubmit={submit}>
-        <label className="block text-sm" style={{ color: '#cbd5e1' }}>
+        <label className="block text-sm font-medium text-[#3c4043]">
           入场章节
           <select
-            className="mt-1 w-full rounded-lg px-3 py-2"
-            style={{ background: 'rgba(15, 23, 42, 0.8)', border: '1px solid #334155' }}
+            className="field-control mt-1"
             value={checkpointChapter}
             onChange={event => onCheckpointChange(Number(event.target.value))}
           >
@@ -79,22 +77,20 @@ export function PlayerEntryForm({
             ))}
           </select>
         </label>
-        <label className="block text-sm" style={{ color: '#cbd5e1' }}>
+        <label className="block text-sm font-medium text-[#3c4043]">
           名字
           <input
-            className="mt-1 w-full rounded-lg px-3 py-2"
-            style={{ background: 'rgba(15, 23, 42, 0.8)', border: '1px solid #334155' }}
+            className="field-control mt-1"
             value={name}
             onChange={event => setName(event.target.value)}
             maxLength={100}
             required
           />
         </label>
-        <label className="block text-sm" style={{ color: '#cbd5e1' }}>
+        <label className="block text-sm font-medium text-[#3c4043]">
           背景
           <textarea
-            className="mt-1 w-full rounded-lg px-3 py-2"
-            style={{ background: 'rgba(15, 23, 42, 0.8)', border: '1px solid #334155' }}
+            className="field-control mt-1"
             value={background}
             onChange={event => setBackground(event.target.value)}
             maxLength={2000}
@@ -102,22 +98,20 @@ export function PlayerEntryForm({
             required
           />
         </label>
-        <label className="block text-sm" style={{ color: '#cbd5e1' }}>
+        <label className="block text-sm font-medium text-[#3c4043]">
           能力（用逗号分隔）
           <input
-            className="mt-1 w-full rounded-lg px-3 py-2"
-            style={{ background: 'rgba(15, 23, 42, 0.8)', border: '1px solid #334155' }}
+            className="field-control mt-1"
             value={capabilities}
             onChange={event => setCapabilities(event.target.value)}
             maxLength={3200}
             required
           />
         </label>
-        <label className="block text-sm" style={{ color: '#cbd5e1' }}>
+        <label className="block text-sm font-medium text-[#3c4043]">
           初始地点
           <select
-            className="mt-1 w-full rounded-lg px-3 py-2"
-            style={{ background: 'rgba(15, 23, 42, 0.8)', border: '1px solid #334155' }}
+            className="field-control mt-1"
             value={locationId}
             onChange={event => setLocationId(event.target.value)}
             required
@@ -127,23 +121,21 @@ export function PlayerEntryForm({
             ))}
           </select>
         </label>
-        <label className="block text-sm" style={{ color: '#cbd5e1' }}>
+        <label className="block text-sm font-medium text-[#3c4043]">
           随身物品（可选，用逗号分隔）
           <input
-            className="mt-1 w-full rounded-lg px-3 py-2"
-            style={{ background: 'rgba(15, 23, 42, 0.8)', border: '1px solid #334155' }}
+            className="field-control mt-1"
             value={inventory}
             onChange={event => setInventory(event.target.value)}
             maxLength={6400}
           />
         </label>
-        {locations.length === 0 ? <p role="alert" className="text-sm" style={{ color: '#fca5a5' }}>当前进度没有可用地点。</p> : null}
-        {error ? <p role="alert" className="text-sm" style={{ color: '#fca5a5' }}>{error}</p> : null}
+        {locations.length === 0 ? <p role="alert" className="text-sm text-[#b3261e]">当前进度没有可用地点。</p> : null}
+        {error ? <p role="alert" className="text-sm text-[#b3261e]">{error}</p> : null}
         <button
           type="submit"
           disabled={isPending || locations.length === 0}
-          className="px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50"
-          style={{ background: '#6d28d9', color: 'white' }}
+          className="primary-action"
         >
           {isPending ? '正在进入世界…' : '进入故事'}
         </button>
