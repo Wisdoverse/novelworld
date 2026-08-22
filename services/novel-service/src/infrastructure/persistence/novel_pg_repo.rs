@@ -251,41 +251,43 @@ impl NovelRepository for NovelPgRepository {
         attempt: i64,
         chapters: &[Chapter],
     ) -> Result<bool> {
-        ensure!(!chapters.is_empty(), "replayed import requires chapters");
+        ensure!(!chapters.is_empty(), "import replacement requires chapters");
         ensure!(
             chapters.iter().all(|chapter| chapter.novel_id == novel_id),
-            "replayed import chapters belong to another novel"
+            "replacement chapters belong to another novel"
         );
         ensure!(
             chapters_are_importable(chapters),
-            "replayed import chapters must be contiguous and non-empty"
+            "replacement chapters must be contiguous and non-empty"
         );
         let mut transaction = self.pool.begin().await?;
         let Some(stage) = lock_import(&mut transaction, novel_id, attempt).await? else {
             return Ok(false);
         };
-        if stage != ImportStage::Source {
+        if !matches!(stage, ImportStage::Source | ImportStage::Chapters) {
             return Ok(false);
         }
-        // Legacy rows at stage `source` may carry partial or gapped chapters;
-        // replacing them is the point of the replay. Chunks cascade.
+        // Source replay and pre-enrichment boundary repair both replace the
+        // complete aggregate. Derived chunks cascade.
         sqlx::query("DELETE FROM chapters WHERE novel_id = $1")
             .bind(novel_id)
             .execute(&mut *transaction)
             .await?;
         save_batch_in_transaction(&mut transaction, chapters).await?;
-        let job = sqlx::query(
-            "UPDATE novel_import_jobs SET stage = 'chapters', updated_at = NOW() \
-             WHERE novel_id = $1 AND attempt = $2 AND status = 'in_progress' AND stage = 'source'",
-        )
-        .bind(novel_id)
-        .bind(attempt)
-        .execute(&mut *transaction)
-        .await?;
-        ensure!(
-            job.rows_affected() == 1,
-            "replayed import stage advance failed"
-        );
+        if stage == ImportStage::Source {
+            let job = sqlx::query(
+                "UPDATE novel_import_jobs SET stage = 'chapters', updated_at = NOW() \
+                 WHERE novel_id = $1 AND attempt = $2 AND status = 'in_progress' AND stage = 'source'",
+            )
+            .bind(novel_id)
+            .bind(attempt)
+            .execute(&mut *transaction)
+            .await?;
+            ensure!(
+                job.rows_affected() == 1,
+                "replayed import stage advance failed"
+            );
+        }
         transaction.commit().await?;
         Ok(true)
     }

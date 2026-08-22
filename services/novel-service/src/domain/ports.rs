@@ -24,6 +24,7 @@ pub trait LlmPort: Send + Sync {
 
 #[derive(Debug, Clone, Copy)]
 pub enum NovelLlmTask {
+    ChapterBoundaryDetection,
     CharacterExtraction,
     CanonExtraction,
     NarrativeNodeDetection,

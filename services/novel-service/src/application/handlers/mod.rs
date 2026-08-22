@@ -27,7 +27,7 @@ use crate::domain::repositories::{
     ReadingProgressRecord, ReadingProgressRepository, SourceFileDeletionRepository,
     IMPORT_BUDGET_EXHAUSTED_MESSAGE,
 };
-use crate::domain::services::{canon_story_extractor, node_detector};
+use crate::domain::services::{canon_story_extractor, chapter_boundary_detector, node_detector};
 use crate::domain::services::{
     character_extractor::{
         build_chunk_extraction_prompt, build_extraction_prompt, build_representative_sample,
@@ -99,10 +99,11 @@ where
     T: DeserializeOwned,
 {
     let mut last_error = None;
+    let mut current_prompt = prompt.to_string();
     for attempt in 1..=3 {
         // Transport retries already live in the shared client. This loop is
         // only for a fresh model response after JSON/schema validation fails.
-        let raw = llm.chat_json(task, prompt).await?;
+        let raw = llm.chat_json(task, &current_prompt).await?;
         let result = serde_json::from_str::<T>(json_object_payload(&raw))
             .map_err(anyhow::Error::from)
             .and_then(|value| {
@@ -113,6 +114,9 @@ where
             Ok(value) => return Ok(value),
             Err(error) => {
                 tracing::warn!(attempt, %error, "LLM JSON output failed validation");
+                current_prompt = format!(
+                    "{prompt}\n\nCORRECTION REQUIRED: the previous response failed validation: {error}. Return a new JSON object that fixes this error. Do not repeat the rejected value."
+                );
                 last_error = Some(error);
             }
         }
@@ -129,14 +133,19 @@ fn canon_retry_prompt(base_prompt: &str, validation_error: &str) -> String {
 #[cfg(test)]
 mod validated_json_tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    struct InvalidThenValid(AtomicUsize);
+    struct InvalidThenValid {
+        calls: AtomicUsize,
+        saw_correction: AtomicBool,
+    }
 
     #[async_trait::async_trait]
     impl LlmPort for InvalidThenValid {
-        async fn chat_json(&self, _task: NovelLlmTask, _prompt: &str) -> Result<String> {
-            Ok(if self.0.fetch_add(1, Ordering::Relaxed) == 0 {
+        async fn chat_json(&self, _task: NovelLlmTask, prompt: &str) -> Result<String> {
+            self.saw_correction
+                .fetch_or(prompt.contains("CORRECTION REQUIRED"), Ordering::Relaxed);
+            Ok(if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
                 "{".into()
             } else {
                 r#"{"ok":true}"#.into()
@@ -146,7 +155,10 @@ mod validated_json_tests {
 
     #[tokio::test]
     async fn retries_invalid_json_with_a_fresh_model_response() {
-        let llm = InvalidThenValid(AtomicUsize::new(0));
+        let llm = InvalidThenValid {
+            calls: AtomicUsize::new(0),
+            saw_correction: AtomicBool::new(false),
+        };
         let value: serde_json::Value = validated_json(
             &llm,
             NovelLlmTask::CharacterExtraction,
@@ -157,7 +169,8 @@ mod validated_json_tests {
         .unwrap();
 
         assert_eq!(value["ok"], true);
-        assert_eq!(llm.0.load(Ordering::Relaxed), 2);
+        assert_eq!(llm.calls.load(Ordering::Relaxed), 2);
+        assert!(llm.saw_correction.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -205,6 +218,8 @@ pub enum NovelDeletionError {
 
 const MAX_AVATARS_PER_NOVEL: usize = 30;
 const MAX_IMPORT_CHAPTERS: usize = 2_048;
+const MAX_BOUNDARY_REPAIR_SEGMENTS: usize = 8;
+const MAX_BOUNDARY_REPAIR_ROUNDS: usize = 3;
 // 16 KiB canon chunks plus 24 KiB character scans keep the supported 5 MiB
 // paste limit below this cap while rejecting the next whole-MiB tier.
 const MAX_IMPORT_PROVIDER_CALLS: usize = 640;
@@ -594,6 +609,11 @@ impl NovelCommandHandler {
                 chapters
             }
         };
+        let chapters = if matches!(claim.stage, ImportStage::Source | ImportStage::Chapters) {
+            self.repair_chapter_boundaries(chapters, claim).await?
+        } else {
+            chapters
+        };
         ensure_import_budget(&chapters)?;
 
         let characters = match claim.stage {
@@ -669,6 +689,98 @@ impl NovelCommandHandler {
             "novel import replayed retained source chapters"
         );
         Ok(chapters)
+    }
+
+    async fn repair_chapter_boundaries(
+        &self,
+        mut chapters: Vec<Chapter>,
+        claim: &ImportClaim,
+    ) -> Result<Vec<Chapter>> {
+        let mut repaired_segments = 0usize;
+        for round in 1..=MAX_BOUNDARY_REPAIR_ROUNDS {
+            let indexes = chapter_boundary_detector::suspicious_chapter_indexes(&chapters);
+            if indexes.is_empty() {
+                return Ok(chapters);
+            }
+            repaired_segments = repaired_segments.saturating_add(indexes.len());
+            if repaired_segments > MAX_BOUNDARY_REPAIR_SEGMENTS {
+                return Err(ImportBudgetExceeded.into());
+            }
+            info!(
+                novel_id = %claim.novel_id,
+                round,
+                segments = indexes.len(),
+                "repairing suspicious chapter boundaries"
+            );
+            let results = stream::iter(indexes)
+                .map(|index| {
+                    let llm = self.llm.clone();
+                    let chapter = chapters[index].clone();
+                    let expected_boundaries =
+                        chapter_boundary_detector::expected_boundary_count(&chapters, index);
+                    async move {
+                        let prompt =
+                            chapter_boundary_detector::build_prompt(&chapter, expected_boundaries)?;
+                        let detection: chapter_boundary_detector::ChapterBoundaryDetection =
+                            validated_json(
+                                llm.as_ref(),
+                                NovelLlmTask::ChapterBoundaryDetection,
+                                &prompt,
+                                |result| {
+                                    chapter_boundary_detector::validate_detection(
+                                        result,
+                                        &chapter.content,
+                                        expected_boundaries,
+                                    )
+                                    .map_err(Into::into)
+                                },
+                            )
+                            .await?;
+                        let parts = chapter_boundary_detector::split_chapter(
+                            &chapter,
+                            &detection,
+                            expected_boundaries,
+                        )?;
+                        Ok::<_, anyhow::Error>((index, parts))
+                    }
+                })
+                .buffer_unordered(2)
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>>>()?;
+            let repairs = results.into_iter().collect::<HashMap<_, _>>();
+            let mut repaired = Vec::new();
+            for (index, chapter) in chapters.into_iter().enumerate() {
+                match repairs.get(&index) {
+                    Some(parts) => repaired.extend(parts.iter().cloned()),
+                    None => repaired.push(chapter),
+                }
+            }
+            for (index, chapter) in repaired.iter_mut().enumerate() {
+                chapter.chapter_number = i32::try_from(index + 1)
+                    .map_err(|_| anyhow::anyhow!("chapter number exceeds i32"))?;
+            }
+            if !self
+                .novel_repo
+                .replace_import_chapters(claim.novel_id, claim.attempt, &repaired)
+                .await?
+            {
+                return Err(ImportLeaseLost.into());
+            }
+            info!(
+                novel_id = %claim.novel_id,
+                round,
+                chapters = repaired.len(),
+                "repaired chapter boundaries committed"
+            );
+            chapters = repaired;
+        }
+        if chapter_boundary_detector::suspicious_chapter_indexes(&chapters).is_empty() {
+            Ok(chapters)
+        } else {
+            anyhow::bail!("suspicious chapter boundaries remain after repair limit")
+        }
     }
 
     #[tracing::instrument(skip_all, fields(novel_id = %novel.id))]

@@ -198,6 +198,7 @@ impl RuntimeLlmClient {
     }
 
     pub async fn json_chat(&self, operation: crate::LlmOperation, prompt: &str) -> Result<String> {
+        let max_output_tokens = operation.max_output_tokens();
         self.chat(
             ChatRequest::new(operation, "")
                 .message(
@@ -206,7 +207,7 @@ impl RuntimeLlmClient {
                 )
                 .message("user", prompt)
                 .temperature(0.3)
-                .max_tokens(4096)
+                .max_tokens(max_output_tokens)
                 .thinking(false)
                 .json(),
         )

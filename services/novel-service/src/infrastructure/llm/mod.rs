@@ -20,6 +20,9 @@ impl LlmAdapter {
 impl LlmPort for LlmAdapter {
     async fn chat_json(&self, task: NovelLlmTask, prompt: &str) -> Result<String> {
         let operation = match task {
+            NovelLlmTask::ChapterBoundaryDetection => {
+                llm_client::LlmOperation::ChapterBoundaryDetection
+            }
             NovelLlmTask::CharacterExtraction => llm_client::LlmOperation::CharacterExtraction,
             NovelLlmTask::CanonExtraction => llm_client::LlmOperation::CanonExtraction,
             NovelLlmTask::NarrativeNodeDetection => {

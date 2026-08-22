@@ -127,6 +127,7 @@ impl ChatRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LlmOperation {
     SetupConnection,
+    ChapterBoundaryDetection,
     CharacterExtraction,
     CanonExtraction,
     NarrativeNodeDetection,
@@ -139,8 +140,9 @@ pub enum LlmOperation {
 }
 
 impl LlmOperation {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::SetupConnection,
+        Self::ChapterBoundaryDetection,
         Self::CharacterExtraction,
         Self::CanonExtraction,
         Self::NarrativeNodeDetection,
@@ -155,6 +157,7 @@ impl LlmOperation {
     pub const fn to_str(self) -> &'static str {
         match self {
             Self::SetupConnection => "setup_connection",
+            Self::ChapterBoundaryDetection => "chapter_boundary_detection",
             Self::CharacterExtraction => "character_extraction",
             Self::CanonExtraction => "canon_extraction",
             Self::NarrativeNodeDetection => "narrative_node_detection",
@@ -172,6 +175,7 @@ impl LlmOperation {
             Self::SetupConnection => 8,
             Self::MemorySummary => 256,
             Self::OfflineEvaluation => 800,
+            Self::ChapterBoundaryDetection => 2_048,
             Self::CharacterChat => 5_120,
             Self::CanonExtraction => 8_192,
             Self::CharacterExtraction
