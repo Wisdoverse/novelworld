@@ -40,9 +40,9 @@ pub trait NovelRepository: Send + Sync {
     async fn claim_import(&self, novel_id: Uuid, user_id: Uuid) -> Result<Option<ImportClaim>>;
     async fn recoverable_imports(&self, limit: i64) -> Result<Vec<RecoverableImport>>;
     async fn renew_import(&self, novel_id: Uuid, attempt: i64) -> Result<bool>;
-    /// Atomically replace the novel's chapters and advance the job from
-    /// `source` to `chapters`, fenced by `(novel_id, attempt)`. Returns false
-    /// when the fence is stale or the stage is not `source`.
+    /// Atomically replace the novel's chapters before enrichment, fenced by
+    /// `(novel_id, attempt)`. A `source` job advances to `chapters`; an
+    /// existing `chapters` job stays there while boundary repair is applied.
     async fn replace_import_chapters(
         &self,
         novel_id: Uuid,

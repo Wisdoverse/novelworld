@@ -937,6 +937,26 @@ async fn replayed_chapter_replacement_is_fenced_and_replaces_legacy_rows() {
     .unwrap();
     assert!(contents[0].starts_with("Replayed first chapter"));
     assert!(contents[1].starts_with("Replayed second chapter"));
+
+    let repaired = vec![
+        Chapter::new(novel.id, 1, None, "Repaired first chapter".repeat(4)),
+        Chapter::new(novel.id, 2, None, "Repaired second chapter".repeat(4)),
+        Chapter::new(novel.id, 3, None, "Repaired third chapter".repeat(4)),
+    ];
+    assert!(repo
+        .replace_import_chapters(novel.id, claim.attempt, &repaired)
+        .await
+        .unwrap());
+    let repaired_state: (String, i64) = sqlx::query_as(
+        "SELECT job.stage, (SELECT COUNT(*) FROM chapters WHERE novel_id = novel.id) \
+         FROM novels AS novel JOIN novel_import_jobs AS job ON job.novel_id = novel.id \
+         WHERE novel.id = $1",
+    )
+    .bind(novel.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(repaired_state, ("chapters".into(), 3));
 }
 
 #[tokio::test]
