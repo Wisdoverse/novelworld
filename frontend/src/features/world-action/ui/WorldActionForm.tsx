@@ -70,14 +70,13 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
 
   return (
     <form className="space-y-4" onSubmit={submit}>
-      <p className="text-sm" style={{ color: '#94a3b8' }}>
+      <p className="text-sm text-[#5f6368]">
         行动者始终是你创建的角色“{view.player.name}”；原著角色会依据自己的目标回应。
       </p>
-      <label className="block text-sm" style={{ color: '#cbd5e1' }}>
+      <label className="block text-sm font-medium text-[#3c4043]">
         行动
         <select
-          className="mt-1 w-full rounded-lg px-3 py-2"
-          style={{ background: 'rgba(15, 23, 42, 0.8)', border: '1px solid #334155' }}
+          className="field-control mt-1"
           value={kind}
           onChange={event => {
             setKind(event.target.value as WorldActionKind);
@@ -89,11 +88,10 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
           ))}
         </select>
       </label>
-      <label className="block text-sm" style={{ color: '#cbd5e1' }}>
+      <label className="block text-sm font-medium text-[#3c4043]">
         目标{targetRequired ? '' : '（可选）'}
         <select
-          className="mt-1 w-full rounded-lg px-3 py-2"
-          style={{ background: 'rgba(15, 23, 42, 0.8)', border: '1px solid #334155' }}
+          className="field-control mt-1"
           value={selectedTarget}
           onChange={event => setTargetId(event.target.value)}
           required={targetRequired}
@@ -105,15 +103,14 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
         </select>
       </label>
       {targetRequired && targetOptions.length === 0 ? (
-        <p role="alert" className="text-sm" style={{ color: '#fca5a5' }}>
+        <p role="alert" className="text-sm text-[#b3261e]">
           当前世界状态没有适合此行动的目标。
         </p>
       ) : null}
-      <label className="block text-sm" style={{ color: '#cbd5e1' }}>
+      <label className="block text-sm font-medium text-[#3c4043]">
         你的意图
         <textarea
-          className="mt-1 w-full rounded-lg px-3 py-2"
-          style={{ background: 'rgba(15, 23, 42, 0.8)', border: '1px solid #334155' }}
+          className="field-control mt-1"
           value={intent}
           onChange={event => setIntent(event.target.value)}
           maxLength={500}
@@ -124,8 +121,7 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
       <button
         type="submit"
         disabled={isPending || isLocked || !intent.trim() || (targetRequired && !selectedTarget)}
-        className="px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50"
-        style={{ background: '#0e7490', color: 'white' }}
+        className="primary-action"
       >
         {isPending ? '世界正在回应…' : '执行行动'}
       </button>

@@ -173,6 +173,14 @@ describe('ReaderPage progress gate', () => {
     expect(mocks.mutate).not.toHaveBeenCalled();
   });
 
+  it('uses the shared light app surface for the reader', () => {
+    mocks.progressError = false;
+
+    const { container } = render(<ReaderPage />);
+
+    expect(container.firstElementChild?.classList.contains('app-surface')).toBe(true);
+  });
+
   it('closes chat when rewind makes the active character unavailable', async () => {
     mocks.progressChapter = 2;
     mocks.progressError = false;
