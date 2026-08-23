@@ -42,6 +42,7 @@ test.describe('critical journey — keyboard operability', () => {
     await choice.focus();
     await page.keyboard.press('Space');
     await expect(page.getByText('旅人收下信，约定黎明出海。').first()).toBeVisible();
+    await expect(choice).toHaveAttribute('aria-pressed', 'true');
   });
 
   test('reader: chat input sends with Enter (SSE stub commits)', async ({ page }) => {

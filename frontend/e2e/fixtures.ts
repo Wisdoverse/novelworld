@@ -250,7 +250,22 @@ export const CHOICE_RESULT = {
   consequence: '旅人收下信，约定黎明出海。',
   transition: JOURNAL_ENTRY.transition,
   chapter_content: CHAPTER_TEXT,
-  world_state: WORLD_STATE,
+  world_state: {
+    ...WORLD_STATE,
+    state: {
+      ...WORLD_STATE.state,
+      choices: [{
+        node_id: NODE.id,
+        chapter: NODE.chapter_number,
+        choice_index: NODE.choices[0].index,
+        choice: NODE.choices[0].text,
+        consequence: '旅人收下信，约定黎明出海。',
+        canon_model_version: 1,
+        canonical_checkpoint_chapter: 1,
+        timestamp: '2025-01-01T00:00:00Z',
+      }],
+    },
+  },
 };
 
 export const LLM_SETTINGS = {
