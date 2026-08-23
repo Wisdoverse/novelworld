@@ -26,6 +26,10 @@ import { ChatPanel } from '@/widgets/chat-panel/ui/ChatPanel';
 import { BranchChoice } from '@/widgets/branch-choice/ui/BranchChoice';
 import { WorldDashboard } from '@/widgets/world-dashboard/ui/WorldDashboard';
 import { PlayerEntryForm } from '@/features/player-entry/ui/PlayerEntryForm';
+import {
+  TranslationControls,
+  useChapterTranslation,
+} from '@/features/chapter-translation';
 import { getApiErrorMessage } from '@/shared/api/client';
 import type { Character, NarrativeChoice } from '@/shared/types';
 
@@ -117,6 +121,7 @@ export function ReaderPage() {
   const [choiceError, setChoiceError] = useState<string | undefined>();
   const [choiceRecoveryLocked, setChoiceRecoveryLocked] = useState(false);
   const [chapterView, setChapterView] = useState<'timeline' | 'canon'>('timeline');
+  const [translationEnabled, setTranslationEnabled] = useState(false);
   const lastProgressAttempt = useRef<string | undefined>(undefined);
   const hasBranch = Boolean(chapter?.is_key_node && chapter.key_node_description);
   const {
@@ -189,6 +194,7 @@ export function ReaderPage() {
     setChoiceError(undefined);
     setChoiceRecoveryLocked(false);
     setChapterView('timeline');
+    setTranslationEnabled(false);
   }, [currentChapter, novelId]);
 
   useEffect(() => {
@@ -218,6 +224,17 @@ export function ReaderPage() {
   const inlineChapter = chapter && currentBranchNode && !showCanonReference
     ? splitChapterAtAnchor(displayContent, currentBranchNode.anchor_quote)
     : undefined;
+  const sourceContent = inlineChapter?.before ?? displayContent;
+  const canTranslate = Boolean(sourceContent) && (!isPlayerChapter || showCanonReference);
+  const translation = useChapterTranslation(
+    novelId || '',
+    currentChapter,
+    sourceContent,
+    translationEnabled && canTranslate,
+  );
+  const readerContent = translationEnabled && canTranslate && translation.data
+    ? translation.data.content
+    : sourceContent;
   const branchChoiceRequired = Boolean(
     currentBranchNode && selectedChoiceIndex === undefined && !openWorld,
   );
@@ -455,6 +472,15 @@ export function ReaderPage() {
                   这是原著内容，仅用于回看世界设定，不属于你当前时间线已经发生的历史。
                 </p>
               ) : null}
+              {canTranslate ? (
+                <TranslationControls
+                  active={translationEnabled}
+                  isLoading={translation.isFetching}
+                  isError={translation.isError}
+                  onToggle={() => setTranslationEnabled(enabled => !enabled)}
+                  onRetry={() => { void translation.refetch(); }}
+                />
+              ) : null}
             </div>
 
             {/* 正文中的分支节点：原文在锚点处暂停，选择后由生成内容接续。 */}
@@ -466,7 +492,7 @@ export function ReaderPage() {
             )}
             {(!hasBranch || !isBranchLoading) && (
               <div className="reader-content">
-                {(inlineChapter?.before ?? displayContent).split('\n\n').map((paragraph, i) => (
+                {readerContent.split('\n\n').map((paragraph, i) => (
                   <p key={i}>{paragraph}</p>
                 ))}
               </div>

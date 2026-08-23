@@ -13,12 +13,12 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use novel_service::{
     application::{
-        handlers::{NovelCommandHandler, ReadingProgressHandler},
+        handlers::{NovelCommandHandler, ReadingProgressHandler, TranslateChapterHandler},
         source_file_cleanup::SourceFileCleanupWorker,
     },
     domain::ports::{
         AccountExportPort, DocumentTextExtractor, ImagePort, LlmPort, PrivacyCleanupPort,
-        ReadinessProbe, SourceFileStorage,
+        ReadinessProbe, SourceFileStorage, TextTranslator,
     },
     infrastructure::{
         document::EbookTextExtractor,
@@ -92,7 +92,7 @@ async fn run_body() -> Result<()> {
 
         tracing::info!("Connected to PostgreSQL");
 
-        let llm = Arc::new(LlmAdapter::new(Arc::new(
+        let llm_adapter = Arc::new(LlmAdapter::new(Arc::new(
             llm_client::RuntimeLlmClient::from_env()?,
         )));
 
@@ -132,7 +132,8 @@ async fn run_body() -> Result<()> {
             SourceFileCleanupWorker::new(storage, source_deletions.clone()).spawn();
         }
 
-        let llm: Arc<dyn LlmPort> = llm;
+        let translator: Arc<dyn TextTranslator> = llm_adapter.clone();
+        let llm: Arc<dyn LlmPort> = llm_adapter;
         let image_client: Arc<dyn ImagePort> = image_client;
         let document_extractor: Arc<dyn DocumentTextExtractor> = Arc::new(EbookTextExtractor);
         let privacy_cleanup: Arc<dyn PrivacyCleanupPort> = Arc::new(AgentPrivacyClient::new(
@@ -164,6 +165,12 @@ async fn run_body() -> Result<()> {
             character_repo: character_repo.clone(),
             progress_repo,
         });
+        let translation_handler = Arc::new(TranslateChapterHandler {
+            chapter_repo: chapter_repo.clone(),
+            translator,
+            // ponytail: process-local admission matches the single-node runtime contract.
+            permits: Arc::new(Semaphore::new(2)),
+        });
 
         let state = AppState {
             handler,
@@ -172,6 +179,7 @@ async fn run_body() -> Result<()> {
             character_repo,
             canon_repo,
             progress_handler,
+            translation_handler,
             document_extractor,
             document_parse_permits: Arc::new(Semaphore::new(2)),
             account_export,

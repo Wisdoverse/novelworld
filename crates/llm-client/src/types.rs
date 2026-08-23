@@ -127,6 +127,7 @@ impl ChatRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LlmOperation {
     SetupConnection,
+    Translation,
     ChapterBoundaryDetection,
     CharacterExtraction,
     CanonExtraction,
@@ -140,8 +141,9 @@ pub enum LlmOperation {
 }
 
 impl LlmOperation {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::SetupConnection,
+        Self::Translation,
         Self::ChapterBoundaryDetection,
         Self::CharacterExtraction,
         Self::CanonExtraction,
@@ -157,6 +159,7 @@ impl LlmOperation {
     pub const fn to_str(self) -> &'static str {
         match self {
             Self::SetupConnection => "setup_connection",
+            Self::Translation => "translation",
             Self::ChapterBoundaryDetection => "chapter_boundary_detection",
             Self::CharacterExtraction => "character_extraction",
             Self::CanonExtraction => "canon_extraction",
@@ -173,6 +176,7 @@ impl LlmOperation {
     pub const fn max_output_tokens(self) -> u32 {
         match self {
             Self::SetupConnection => 8,
+            Self::Translation => 8_192,
             Self::MemorySummary => 256,
             Self::OfflineEvaluation => 800,
             Self::ChapterBoundaryDetection => 2_048,

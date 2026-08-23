@@ -20,6 +20,7 @@ use crate::domain::entities::{
 };
 use crate::domain::ports::{
     DocumentTextExtractor, ImagePort, LlmPort, NovelLlmTask, PrivacyCleanupPort, SourceFileStorage,
+    TextTranslator,
 };
 use crate::domain::repositories::{
     CanonExtractionCheckpoint, CanonStoryModelRepository, ChapterRepository,
@@ -197,6 +198,197 @@ pub struct ImportRetryConflict(pub &'static str);
 #[derive(Debug, thiserror::Error)]
 #[error("Source file storage is unavailable")]
 pub struct SourceFileStorageUnavailable(#[source] pub anyhow::Error);
+
+const MAX_TRANSLATION_BYTES: usize = 48_000;
+const TRANSLATION_CHUNK_BYTES: usize = 12_000;
+const TRANSLATION_TIMEOUT: Duration = Duration::from_secs(180);
+
+#[derive(Debug, thiserror::Error)]
+pub enum TranslationError {
+    #[error("Translation source must contain 1-48000 bytes")]
+    Validation,
+    #[error("Translation capacity is busy")]
+    Capacity,
+    #[error("Chapter not found")]
+    ChapterNotFound,
+    #[error("Translation source does not match the chapter")]
+    SourceMismatch,
+    #[error("Translation timed out")]
+    Timeout,
+    #[error("Translation repository failed")]
+    Repository(#[source] anyhow::Error),
+    #[error("Translation provider failed")]
+    Provider(#[source] anyhow::Error),
+}
+
+pub struct TranslateChapterHandler {
+    pub chapter_repo: Arc<dyn ChapterRepository>,
+    pub translator: Arc<dyn TextTranslator>,
+    pub permits: Arc<Semaphore>,
+}
+
+impl TranslateChapterHandler {
+    pub async fn translate(
+        &self,
+        novel_id: Uuid,
+        chapter_number: i32,
+        source: &str,
+    ) -> std::result::Result<String, TranslationError> {
+        if source.trim().is_empty() || source.len() > MAX_TRANSLATION_BYTES {
+            return Err(TranslationError::Validation);
+        }
+        let chapter = self
+            .chapter_repo
+            .find_by_number(novel_id, chapter_number)
+            .await
+            .map_err(TranslationError::Repository)?
+            .ok_or(TranslationError::ChapterNotFound)?;
+        if !chapter.content.starts_with(source) {
+            return Err(TranslationError::SourceMismatch);
+        }
+        let _permit = self
+            .permits
+            .try_acquire()
+            .map_err(|_| TranslationError::Capacity)?;
+        tokio::time::timeout(TRANSLATION_TIMEOUT, self.translate_chunks(source))
+            .await
+            .map_err(|_| TranslationError::Timeout)?
+    }
+
+    async fn translate_chunks(
+        &self,
+        source: &str,
+    ) -> std::result::Result<String, TranslationError> {
+        let mut translated = Vec::new();
+        for chunk in split_translation_chunks(source, TRANSLATION_CHUNK_BYTES) {
+            let value = self
+                .translator
+                .to_simplified_chinese(chunk)
+                .await
+                .map_err(TranslationError::Provider)?;
+            let value = value.trim();
+            if value.is_empty() {
+                return Err(TranslationError::Provider(anyhow::anyhow!(
+                    "translation provider returned empty text"
+                )));
+            }
+            translated.push(value.to_owned());
+        }
+        Ok(translated.join("\n\n"))
+    }
+}
+
+fn split_translation_chunks(source: &str, limit: usize) -> Vec<&str> {
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < source.len() {
+        let mut end = (start + limit).min(source.len());
+        while end > start && !source.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end < source.len() {
+            if let Some(paragraph_end) = source[start..end]
+                .rfind("\n\n")
+                .filter(|index| *index >= limit / 2)
+            {
+                end = start + paragraph_end + 2;
+            }
+        }
+        if end == start {
+            end = source[start..]
+                .char_indices()
+                .nth(1)
+                .map_or(source.len(), |(offset, _)| start + offset);
+        }
+        chunks.push(&source[start..end]);
+        start = end;
+    }
+    chunks
+}
+
+#[cfg(test)]
+mod translation_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct EchoTranslator(AtomicUsize);
+
+    struct FixedChapterRepository(String);
+
+    #[async_trait::async_trait]
+    impl ChapterRepository for FixedChapterRepository {
+        async fn replace_import_nodes(
+            &self,
+            _novel_id: Uuid,
+            _attempt: i64,
+            _nodes: &[(i32, String)],
+        ) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn find_by_novel(&self, _novel_id: Uuid) -> Result<Vec<Chapter>> {
+            Ok(Vec::new())
+        }
+
+        async fn find_by_number(&self, novel_id: Uuid, number: i32) -> Result<Option<Chapter>> {
+            Ok(Some(Chapter::new(novel_id, number, None, self.0.clone())))
+        }
+
+        async fn search_lore(
+            &self,
+            _novel_id: Uuid,
+            _max_chapter: i32,
+            _query: &str,
+            _limit: usize,
+        ) -> Result<Vec<LoreExcerpt>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TextTranslator for EchoTranslator {
+        async fn to_simplified_chinese(&self, source: &str) -> Result<String> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(format!("译：{source}"))
+        }
+    }
+
+    #[test]
+    fn translation_chunks_preserve_utf8_source_and_prefer_paragraphs() {
+        let source = format!("第一段。\n\n{}\n\nThe end.", "long text ".repeat(8));
+        let chunks = split_translation_chunks(&source, 32);
+
+        assert_eq!(chunks.concat(), source);
+        assert!(chunks.len() > 1);
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.is_char_boundary(chunk.len())));
+    }
+
+    #[tokio::test]
+    async fn translation_is_bounded_and_chunks_large_chapters() {
+        let source = "English paragraph. ".repeat(900);
+        let translator = Arc::new(EchoTranslator(AtomicUsize::new(0)));
+        let handler = TranslateChapterHandler {
+            chapter_repo: Arc::new(FixedChapterRepository(source.clone())),
+            translator: translator.clone(),
+            permits: Arc::new(Semaphore::new(1)),
+        };
+
+        assert!(matches!(
+            handler.translate(Uuid::nil(), 1, " \n ").await,
+            Err(TranslationError::Validation)
+        ));
+        assert!(matches!(
+            handler.translate(Uuid::nil(), 1, "other text").await,
+            Err(TranslationError::SourceMismatch)
+        ));
+        let translated = handler.translate(Uuid::nil(), 1, &source).await.unwrap();
+
+        assert!(translated.starts_with("译："));
+        assert!(translator.0.load(Ordering::Relaxed) > 1);
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error("Persisted import chapters cannot be resumed")]
