@@ -14,9 +14,20 @@ export const actionLabels: Record<WorldActionKind, string> = {
   converse: '与角色交谈',
   ally: '争取结盟',
   oppose: '公开反对',
-  resolve_thread: '解决事件线',
+  advance_thread: '推进事件线',
+  resolve_thread: '解决事件线（旧版）',
   pursue_goal: '追求自己的目标',
 };
+
+const availableActions: WorldActionKind[] = [
+  'travel',
+  'investigate',
+  'converse',
+  'ally',
+  'oppose',
+  'advance_thread',
+  'pursue_goal',
+];
 
 function targets(view: OpenWorldView, kind: WorldActionKind) {
   const { entry_context: context } = view.session;
@@ -26,7 +37,7 @@ function targets(view: OpenWorldView, kind: WorldActionKind) {
       !view.session.dead_character_ids.includes(character.id)
     ));
   }
-  if (kind === 'resolve_thread') {
+  if (kind === 'advance_thread' || kind === 'resolve_thread') {
     return Object.entries(view.world_state.state.threads ?? {})
       .filter(([, thread]) => thread.status === 'open')
       .map(([id, thread]) => ({ id, name: thread.description }));
@@ -83,8 +94,8 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
             setTargetId('');
           }}
         >
-          {Object.entries(actionLabels).map(([value, label]) => (
-            <option key={value} value={value}>{label}</option>
+          {availableActions.map(value => (
+            <option key={value} value={value}>{actionLabels[value]}</option>
           ))}
         </select>
       </label>

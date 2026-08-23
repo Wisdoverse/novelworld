@@ -36,5 +36,26 @@ describe('BranchChoice', () => {
 
     expect(screen.getByText('你的行动改变了后续故事')).toBeTruthy();
     expect(screen.getByText('三人的誓言从此改变了天下大势。')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /立即结义.*已选择/ }).getAttribute('aria-pressed'))
+      .toBe('true');
+  });
+
+  it('locks every option while a conflicting committed result is being recovered', () => {
+    const onChoose = vi.fn().mockResolvedValue(undefined);
+    const onRetryRecovery = vi.fn().mockResolvedValue(undefined);
+    render(
+      <BranchChoice
+        node={node}
+        onChoose={onChoose}
+        error="另一窗口已提交"
+        isRecoveryLocked
+        onRetryRecovery={onRetryRecovery}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: /立即结义/ }).hasAttribute('disabled')).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: '重新加载已提交结果' }));
+    expect(onRetryRecovery).toHaveBeenCalledOnce();
+    expect(onChoose).not.toHaveBeenCalled();
   });
 });

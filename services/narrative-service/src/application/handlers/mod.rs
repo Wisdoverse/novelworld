@@ -9,8 +9,9 @@ use uuid::Uuid;
 use crate::domain::entities::narrative_node::{NarrativeChoice, NarrativeNode, WorldState};
 use crate::domain::entities::player_entity::PlayerEntity;
 use crate::domain::entities::world_session::{
-    build_world_turn_prompt, parse_world_turn_transition, CharacterWorldContext, WorldAction,
-    WorldSession,
+    build_world_turn_prompt, parse_world_turn_transition, trailing_chars, CharacterWorldContext,
+    RecentWorldTurnContext, WorldAction, WorldSession, MAX_RECENT_WORLD_NARRATIVE_CHARS,
+    MAX_RECENT_WORLD_TURNS,
 };
 use crate::domain::ports::{AgentMemoryPort, LlmPort, NarrativeLlmTask};
 use crate::domain::repositories::{
@@ -111,8 +112,12 @@ pub enum NarrativeError {
     Validation(String),
     #[error("{0}")]
     Conflict(String),
+    #[error("A different choice is already committed")]
+    ChoiceConflict,
     #[error("World turn is already in progress")]
     TurnInProgress { retry_after_seconds: u64 },
+    #[error("World turn outcome is unknown; retry with the same Idempotency-Key")]
+    TurnOutcomeUnknown,
     #[error("Novel service is unavailable")]
     Unavailable(#[source] anyhow::Error),
     #[error("Consequence generation failed")]
@@ -122,6 +127,14 @@ pub enum NarrativeError {
 }
 
 pub type NarrativeResult<T> = std::result::Result<T, NarrativeError>;
+
+fn require_same_choice(requested: i32, committed: i32) -> NarrativeResult<()> {
+    if requested == committed {
+        Ok(())
+    } else {
+        Err(NarrativeError::ChoiceConflict)
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChoiceResult {
@@ -635,11 +648,34 @@ impl NarrativeCommandHandler {
                 ))
             }
         };
-        if let Err(error) = session.validate_action(&claim.action) {
+        if let Err(error) = world_state.validate_world_action(&claim.action, &session.entry_context)
+        {
             self.fail_world_turn(&claim, attempt, "validation_error")
                 .await;
             return Err(NarrativeError::Validation(error.to_string()));
         }
+
+        let recent_turns = match self
+            .world_turn_repo
+            .journal(user_id, novel_id, MAX_RECENT_WORLD_TURNS)
+            .await
+        {
+            Ok(turns) => turns
+                .into_iter()
+                .map(|turn| RecentWorldTurnContext {
+                    turn_number: turn.turn_number,
+                    action: turn.action,
+                    rendered_narrative: trailing_chars(
+                        &turn.transition.rendered_narrative,
+                        MAX_RECENT_WORLD_NARRATIVE_CHARS,
+                    ),
+                })
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                self.fail_world_turn(&claim, attempt, "history_error").await;
+                return Err(NarrativeError::Internal(error));
+            }
+        };
 
         let mut lease = WorldTurnLease::start(self.world_turn_repo.clone(), claim.id, attempt);
         let prompt = match build_world_turn_prompt(
@@ -648,6 +684,7 @@ impl NarrativeCommandHandler {
             &claim.action,
             &session,
             &world_state.state,
+            &recent_turns,
         ) {
             Ok(prompt) => prompt,
             Err(error) => {
@@ -678,9 +715,7 @@ impl NarrativeCommandHandler {
             }
             None => {
                 self.fail_world_turn(&claim, attempt, "lease_lost").await;
-                return Err(NarrativeError::Conflict(
-                    "World turn lease was lost; retry with the same Idempotency-Key".into(),
-                ));
+                return Err(NarrativeError::TurnOutcomeUnknown);
             }
         };
         if raw.len() > MAX_WORLD_TRANSITION_BYTES {
@@ -719,9 +754,7 @@ impl NarrativeCommandHandler {
             }
             None => {
                 self.fail_world_turn(&claim, attempt, "lease_lost").await;
-                return Err(NarrativeError::Conflict(
-                    "World turn lease was lost; retry with the same Idempotency-Key".into(),
-                ));
+                return Err(NarrativeError::TurnOutcomeUnknown);
             }
         };
         lease.stop();
@@ -915,6 +948,13 @@ impl NarrativeCommandHandler {
                 node.novel_id == novel_id && node.user_id.is_none_or(|owner_id| owner_id == user_id)
             })
             .ok_or(NarrativeError::NotFound)?;
+        let choice_text = usize::try_from(requested_choice_index)
+            .ok()
+            .and_then(|index| node.choices.get(index))
+            .map(|choice| choice.text.clone())
+            .ok_or_else(|| {
+                NarrativeError::Validation("choice_index is outside the node choices".into())
+            })?;
 
         let existing = self
             .choice_repo
@@ -922,6 +962,7 @@ impl NarrativeCommandHandler {
             .await
             .map_err(NarrativeError::Internal)?;
         if let Some(existing) = existing.as_ref() {
+            require_same_choice(requested_choice_index, existing.choice_index)?;
             warn!(
                 user_id = %user_id,
                 node_id = %node_id,
@@ -963,14 +1004,7 @@ impl NarrativeCommandHandler {
             ));
         }
 
-        let choice = usize::try_from(requested_choice_index)
-            .ok()
-            .and_then(|index| node.choices.get(index))
-            .ok_or_else(|| {
-                NarrativeError::Validation("choice_index is outside the node choices".into())
-            })?;
         let choice_index = requested_choice_index;
-        let choice_text = choice.text.clone();
         let chapter = self
             .resolve_chapter(user_id, novel_id, node.chapter_number, &novel_info)
             .await?;
@@ -1093,11 +1127,13 @@ impl NarrativeCommandHandler {
     }
 
     async fn commit_result(&self, draft: ChoiceCommit) -> NarrativeResult<ChoiceResult> {
+        let requested_choice_index = draft.choice_index;
         let committed = self
             .choice_repo
             .commit_choice(&draft)
             .await
             .map_err(NarrativeError::Internal)?;
+        require_same_choice(requested_choice_index, committed.choice.choice_index)?;
         Ok(ChoiceResult {
             chapter_number: committed.choice.chapter_number,
             consequence: committed.choice.consequence.clone(),
@@ -1411,5 +1447,19 @@ mod timeline_tests {
         assert!(is_next_chapter(9, 10));
         assert!(!is_next_chapter(8, 10));
         assert!(!is_next_chapter(i32::MAX, i32::MIN));
+    }
+
+    #[test]
+    fn a_committed_choice_is_only_replayed_for_the_same_index() {
+        assert!(require_same_choice(1, 1).is_ok());
+        assert!(matches!(
+            require_same_choice(1, 0),
+            Err(NarrativeError::ChoiceConflict)
+        ));
+    }
+
+    #[test]
+    fn recent_world_context_keeps_the_narrative_ending() {
+        assert_eq!(trailing_chars("一二三四", 2), "三四");
     }
 }

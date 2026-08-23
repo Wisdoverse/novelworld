@@ -50,6 +50,30 @@ describe('WorldActionForm', () => {
     }));
   });
 
+  it('advances an open thread without claiming it is resolved', async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const threadView = {
+      ...view,
+      world_state: {
+        state: {
+          threads: { siege: { status: 'open', description: '围城仍在继续', origin: 'canon' } },
+        },
+      },
+    } as unknown as OpenWorldView;
+    render(<WorldActionForm view={threadView} isPending={false} onSubmit={onSubmit} />);
+
+    expect(screen.queryByRole('option', { name: '解决事件线（旧版）' })).toBeNull();
+    fireEvent.change(screen.getByLabelText('行动'), { target: { value: 'advance_thread' } });
+    fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '回去与刘备会合' } });
+    fireEvent.click(screen.getByRole('button', { name: '执行行动' }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith({
+      kind: 'advance_thread',
+      target_id: 'siege',
+      intent: '回去与刘备会合',
+    }));
+  });
+
   it('does not offer characters killed after the entry checkpoint', () => {
     render(<WorldActionForm
       view={{ ...view, session: { ...view.session, dead_character_ids: ['character'] } }}

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { BookOpen, Compass, GitBranch, History, Users } from 'lucide-react';
-import { useSubmitWorldTurn } from '@/entities/narrative/api';
+import { isWorldTurnOutcomeUnknown, useSubmitWorldTurn } from '@/entities/narrative/api';
 import { WorldActionForm, actionLabels } from '@/features/world-action/ui/WorldActionForm';
 import { getApiErrorMessage } from '@/shared/api/client';
 import type { OpenWorldView, WorldAction } from '@/shared/types';
@@ -42,6 +42,8 @@ export function WorldDashboard({ novelId, view }: WorldDashboardProps) {
       await turn.mutateAsync(request);
       setPendingRequest(null);
     } catch (requestError) {
+      const outcomeUnknown = isWorldTurnOutcomeUnknown(requestError);
+      if (!outcomeUnknown) setPendingRequest(null);
       setError(getApiErrorMessage(requestError, '世界行动提交失败'));
       throw requestError;
     }
@@ -61,7 +63,7 @@ export function WorldDashboard({ novelId, view }: WorldDashboardProps) {
         <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-widest text-[#0b57d0]">
           <Compass size={14} /> 单一时间线
         </div>
-        <h2 id="living-world-title" className="mt-2 text-xl font-semibold text-[#1f1f1f]">
+        <h2 id="living-world-title" tabIndex={-1} className="mt-2 scroll-mt-24 text-xl font-semibold text-[#1f1f1f]">
           {view.player.name} 的开放世界
         </h2>
         <p className="mt-2 text-sm text-[#5f6368]">
@@ -118,7 +120,7 @@ export function WorldDashboard({ novelId, view }: WorldDashboardProps) {
       </div>
 
       <div>
-        <h3 className="flex items-center gap-2 text-sm font-semibold text-[#1f1f1f]">
+        <h3 id="world-action-journal" tabIndex={-1} className="flex scroll-mt-24 items-center gap-2 text-sm font-semibold text-[#1f1f1f]">
           <History size={14} /> 玩家行动日志
         </h3>
         {view.journal.length ? (
@@ -142,7 +144,7 @@ export function WorldDashboard({ novelId, view }: WorldDashboardProps) {
       </div>
 
       <div className="border-t border-[#e1e3e8] pt-6">
-        <h3 className="mb-4 text-sm font-semibold text-[#1f1f1f]">采取下一步行动</h3>
+        <h3 id="world-action-form" tabIndex={-1} className="mb-4 scroll-mt-24 text-sm font-semibold text-[#1f1f1f]">采取下一步行动</h3>
         <WorldActionForm
           view={view}
           isPending={turn.isPending}
@@ -151,18 +153,12 @@ export function WorldDashboard({ novelId, view }: WorldDashboardProps) {
         />
         {error ? (
           <div role="alert" className="mt-4 text-sm text-[#b3261e]">
-            {error}
+            {error} {pendingRequest
+              ? '尚未确认这次行动的最终结果；请使用原请求继续确认，避免重复行动。'
+              : '请求已被明确拒绝；请根据最新世界状态修改行动后重试。'}
             {pendingRequest ? (
               <button className="ml-2 underline" disabled={turn.isPending} onClick={() => void run(pendingRequest).catch(() => undefined)}>
-                使用同一个请求重试
-              </button>
-            ) : null}
-            {pendingRequest ? (
-              <button className="ml-2 underline" disabled={turn.isPending} onClick={() => {
-                setPendingRequest(null);
-                setError(undefined);
-              }}>
-                放弃此请求
+                继续确认结果
               </button>
             ) : null}
           </div>

@@ -40,7 +40,7 @@ Then you can:
 - 🔀 **Make story choices** — your decisions change the narrative direction
 - 🧭 **Enter a living world** — choose an unlocked checkpoint, act as your own player, and inspect canon versus player-created history
 - 🎭 **Use the primary self mode** — enter as an original player; character identity remains experimental
-- 🛡️ **Bound source context** — server-owned reading progress excludes future lore from prompts
+- 🛡️ **Bound source context** — server-owned reading progress bounds lore and committed memory; whole-novel persona extraction remains a recorded limitation
 
 ---
 
@@ -56,16 +56,16 @@ transitions require Chinese text, and the UI locale is Simplified Chinese
 
 ### 🧠 Durable Conversations
 
-PostgreSQL keeps committed chat history and the current runtime creates
-mid-term summaries. The four-layer memory model remains the target contract;
-production writers for long-term and permanent memories are an H3 gap.
+PostgreSQL keeps committed chat history. Mid-term summaries can promote into
+embedded long-term memory, and committed open-world turns can write permanent
+journey memory. These projections are best-effort; live semantic quality and
+the complete four-layer lifecycle remain H3 exit work.
 
 ### 🔀 Branching Narrative
 
-At key story moments, you're presented with 2–3 choices. Each decision:
-- Generates new story developments
-- Shifts character attitudes toward you
-- Mutates the world state
+At key story moments, you're presented with 2–3 choices. Each committed
+decision generates new story developments and may shift character attitudes or
+mutate the world state.
 
 ### 🎭 Reader Identity
 
@@ -78,10 +78,13 @@ boundary is defined in SPEC §8.2.
 ### 🧭 Living Open World
 
 Create an original player at any unlocked chapter, then travel, investigate,
-converse, ally, oppose, resolve a thread, or pursue your own goal. Canonical
-characters retain their own agency. Every turn is validated, committed once,
-auditable, and resumed exactly after a service restart in the structurally
-tested single-timeline path; live causal quality is not yet qualified.
+converse, ally, oppose, advance an open thread (which may resolve when the
+narrated facts justify it), or pursue your own goal. Canonical characters retain their own agency. Every turn is validated,
+committed once, auditable, and resumed exactly after a service restart in the
+structurally tested single-timeline path. New turns receive a bounded tail of
+committed actions and narrative endings. Ambiguous delivery or lease-loss
+responses retain the same logical-turn key; live causal quality is not yet
+qualified.
 
 ---
 
