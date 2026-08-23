@@ -3,6 +3,7 @@ set -euo pipefail
 
 api=${E2E_API_URL:-http://127.0.0.1/api}
 public_url=${E2E_PUBLIC_URL:-http://127.0.0.1}
+stub=${E2E_STUB_URL:-http://127.0.0.1:18080}
 email=admin@test.invalid
 password='RuntimeSmokeOnly123!'
 source_file=$(mktemp)
@@ -167,7 +168,8 @@ node_id=$(json_get "value['id']" <<<"$node")
 
 pause
 failed_choice_file=$(mktemp)
-trap 'rm -f "$source_file" "$failed_choice_file" "$metrics_file" "$account_export_file" "$account_export_headers"' EXIT
+choice_conflict_file=$(mktemp)
+trap 'rm -f "$source_file" "$failed_choice_file" "$choice_conflict_file" "$metrics_file" "$account_export_file" "$account_export_headers"' EXIT
 failed_choice_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   --output "$failed_choice_file" --write-out '%{http_code}' "${auth[@]}" \
   -H 'Content-Type: application/json' \
@@ -192,6 +194,24 @@ player_snapshot=$(docker exec novel-postgres psql \
 transition_snapshot=$(docker exec novel-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT md5(transition::text) || ':' || md5((SELECT state::text FROM world_states WHERE user_id = user_choices.user_id AND novel_id = user_choices.novel_id)) FROM user_choices WHERE node_id = '$node_id'")
+
+transition_calls_before=$(curl --silent "$stub/__control__/stats" |
+  json_get "value['calls'].get('narrative_transition', 0)")
+choice_conflict_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
+  --output "$choice_conflict_file" --write-out '%{http_code}' "${auth[@]}" \
+  -H 'Content-Type: application/json' \
+  --data "{\"novel_id\":\"$novel_id\",\"node_id\":\"$node_id\",\"choice_index\":1}" \
+  "$api/narrative/choose")
+[ "$choice_conflict_status" = 409 ]
+python3 -c "import json,sys; value=json.load(sys.stdin); assert value['error']['code']=='choice_conflict'" \
+  <"$choice_conflict_file"
+transition_calls_after=$(curl --silent "$stub/__control__/stats" |
+  json_get "value['calls'].get('narrative_transition', 0)")
+[ "$transition_calls_after" = "$transition_calls_before" ]
+conflict_transition_snapshot=$(docker exec novel-postgres psql \
+  -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
+  -c "SELECT md5(transition::text) || ':' || md5((SELECT state::text FROM world_states WHERE user_id = user_choices.user_id AND novel_id = user_choices.novel_id)) FROM user_choices WHERE node_id = '$node_id'")
+[ "$conflict_transition_snapshot" = "$transition_snapshot" ]
 
 pause
 chapter_two=$("${curl_cmd[@]}" "${auth[@]}" "$api/narrative/$novel_id/chapters/2")

@@ -19,12 +19,15 @@ const mocks = vi.hoisted(() => ({
   branchEnabled: false,
   branchNode: undefined as NarrativeNode | undefined,
   createPlayer: vi.fn(),
+  submitChoice: vi.fn(),
   startWorld: vi.fn(),
   openWorld: null as OpenWorldView | null,
   characters: [] as Array<Record<string, unknown>>,
   effectiveContent: 'Chapter two',
   effectiveGenerated: false,
   effectiveError: false,
+  worldChoices: [] as Array<{ node_id: string; choice_index: number; consequence?: string }>,
+  refetchWorldState: vi.fn(),
 }));
 
 vi.mock('react-router-dom', () => ({
@@ -105,7 +108,10 @@ vi.mock('@/entities/narrative/api', () => ({
     isPending: false,
     isError: false,
   }),
-  useWorldState: () => ({ data: undefined }),
+  useWorldState: () => ({
+    data: { state: { choices: mocks.worldChoices } },
+    refetch: mocks.refetchWorldState,
+  }),
   useOpenWorld: () => ({
     data: mocks.openWorld,
     isLoading: false,
@@ -118,9 +124,12 @@ vi.mock('@/entities/narrative/api', () => ({
     isError: false,
   }),
   useSubmitNarrativeChoice: () => ({
-    mutateAsync: vi.fn(),
+    mutateAsync: mocks.submitChoice,
     isPending: false,
   }),
+  isNarrativeChoiceConflict: (error: { response?: { data?: { error?: { code?: string } } } }) => (
+    error.response?.data?.error?.code === 'choice_conflict'
+  ),
 }));
 
 vi.mock('@/widgets/chat-panel/ui/ChatPanel', () => ({
@@ -129,9 +138,46 @@ vi.mock('@/widgets/chat-panel/ui/ChatPanel', () => ({
   ),
 }));
 vi.mock('@/widgets/branch-choice/ui/BranchChoice', () => ({
-  BranchChoice: () => <div data-testid="branch-choice" />,
+  BranchChoice: ({
+    node,
+    onChoose,
+    selectedChoiceIndex,
+    error,
+    isRecoveryLocked,
+    onRetryRecovery,
+  }: {
+    node: NarrativeNode;
+    onChoose: (choice: NarrativeNode['choices'][number]) => Promise<void>;
+    selectedChoiceIndex?: number;
+    error?: string;
+    isRecoveryLocked?: boolean;
+    onRetryRecovery?: () => Promise<void>;
+  }) => (
+    <div data-testid="branch-choice">
+      <span data-testid="selected-choice">{selectedChoiceIndex ?? 'none'}</span>
+      {node.choices[1] ? (
+        <button
+          type="button"
+          disabled={isRecoveryLocked}
+          onClick={() => void onChoose(node.choices[1]).catch(() => undefined)}
+        >
+          选择第二项
+        </button>
+      ) : null}
+      {error ? (
+        <div role="alert">
+          {error}
+          {isRecoveryLocked && onRetryRecovery ? (
+            <button type="button" onClick={() => void onRetryRecovery()}>重新加载已提交结果</button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  ),
 }));
-vi.mock('@/widgets/world-dashboard/ui/WorldDashboard', () => ({ WorldDashboard: () => null }));
+vi.mock('@/widgets/world-dashboard/ui/WorldDashboard', () => ({
+  WorldDashboard: () => <div id="world-action-journal" />,
+}));
 
 describe('ReaderPage progress gate', () => {
   beforeEach(() => {
@@ -151,6 +197,12 @@ describe('ReaderPage progress gate', () => {
     mocks.effectiveContent = 'Chapter two';
     mocks.effectiveGenerated = false;
     mocks.effectiveError = false;
+    mocks.worldChoices = [];
+    mocks.submitChoice.mockReset();
+    mocks.refetchWorldState.mockReset();
+    mocks.refetchWorldState.mockImplementation(async () => ({
+      data: { state: { choices: mocks.worldChoices } },
+    }));
   });
 
   it('offers an explicit retry after persistence fails', async () => {
@@ -324,7 +376,69 @@ describe('ReaderPage progress gate', () => {
     render(<ReaderPage />);
 
     expect(screen.queryByTestId('branch-choice')).toBeNull();
-    expect(screen.getByRole('button', { name: '下一章' }).hasAttribute('disabled')).toBe(false);
+    expect(screen.getByRole('button', { name: '继续旅程' }).hasAttribute('disabled')).toBe(false);
+  });
+
+  it('settles a choice conflict on the committed server state and clears recovery copy', async () => {
+    mocks.progressChapter = 2;
+    mocks.progressError = false;
+    mocks.hasBranch = true;
+    mocks.branchNode = {
+      id: 'node',
+      novel_id: 'novel',
+      chapter_number: 2,
+      description: '岔路',
+      choices: [
+        { index: 0, text: '另一窗口已提交', hint: '' },
+        { index: 1, text: '本窗口请求', hint: '' },
+      ],
+    };
+    mocks.submitChoice.mockRejectedValue({
+      response: { data: { error: { code: 'choice_conflict' } } },
+    });
+
+    const page = render(<ReaderPage />);
+    fireEvent.click(screen.getByRole('button', { name: '选择第二项' }));
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('另一窗口已经提交'));
+    expect(screen.getByRole('button', { name: '选择第二项' }).hasAttribute('disabled')).toBe(true);
+
+    mocks.worldChoices = [{ node_id: 'node', choice_index: 0, consequence: '权威结果' }];
+    fireEvent.click(screen.getByRole('button', { name: '重新加载已提交结果' }));
+    await waitFor(() => expect(mocks.refetchWorldState).toHaveBeenCalledOnce());
+    page.rerender(<ReaderPage />);
+
+    await waitFor(() => expect(screen.getByTestId('selected-choice').textContent).toBe('0'));
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+  });
+
+  it('reviews the world journal without changing the source chapter', () => {
+    mocks.progressChapter = 2;
+    mocks.progressError = false;
+    mocks.openWorld = {
+      session: { dead_character_ids: [] },
+    } as unknown as OpenWorldView;
+    const originalScrollIntoView = Element.prototype.scrollIntoView;
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(Element.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: scrollIntoView,
+    });
+    try {
+      render(<ReaderPage />);
+      fireEvent.click(screen.getByRole('button', { name: '回看行动日志' }));
+
+      expect(scrollIntoView).toHaveBeenCalledOnce();
+      expect(mocks.navigate).not.toHaveBeenCalled();
+    } finally {
+      if (originalScrollIntoView) {
+        Object.defineProperty(Element.prototype, 'scrollIntoView', {
+          configurable: true,
+          value: originalScrollIntoView,
+        });
+      } else {
+        Reflect.deleteProperty(Element.prototype, 'scrollIntoView');
+      }
+    }
   });
 });
 
@@ -348,7 +462,24 @@ describe('splitChapterAtAnchor', () => {
     render(<ReaderPage />);
 
     expect(screen.getByText('你推开旧城门，原著从未发生的战争由此开始。')).toBeTruthy();
-    expect(screen.getByText('玩家时间线 · 本章已因你的选择完全改写')).toBeTruthy();
+    expect(screen.getByText('原著坐标 · 第 2 章《Two》')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: '云舟的故事' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '回看行动日志' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '继续旅程' })).toBeTruthy();
+  });
+
+  it('keeps the immutable source available without mixing it into player history', () => {
+    mocks.progressChapter = 2;
+    mocks.progressError = false;
+    mocks.effectiveContent = '你推开旧城门，原著从未发生的战争由此开始。';
+    mocks.effectiveGenerated = true;
+
+    render(<ReaderPage />);
+    fireEvent.click(screen.getByRole('button', { name: '原著参考' }));
+
+    expect(screen.getByText('Chapter two')).toBeTruthy();
+    expect(screen.queryByText('你推开旧城门，原著从未发生的战争由此开始。')).toBeNull();
+    expect(screen.getByText('这是原著内容，仅用于回看世界设定，不属于你当前时间线已经发生的历史。')).toBeTruthy();
   });
 
   it('fails open to the full chapter when a legacy anchor is unavailable', () => {

@@ -10,6 +10,8 @@ interface BranchChoiceProps {
   selectedChoiceIndex?: number;
   consequence?: string;
   error?: string;
+  isRecoveryLocked?: boolean;
+  onRetryRecovery?: () => Promise<void>;
 }
 
 export function BranchChoice({
@@ -19,6 +21,8 @@ export function BranchChoice({
   selectedChoiceIndex,
   consequence,
   error,
+  isRecoveryLocked = false,
+  onRetryRecovery,
 }: BranchChoiceProps) {
   const [pendingIndex, setPendingIndex] = useState<number | null>(null);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
@@ -29,7 +33,7 @@ export function BranchChoice({
   }, [error, isLoading]);
 
   const handleChoose = async (choice: NarrativeChoice) => {
-    if (selectedChoiceIndex !== undefined || pendingIndex !== null || isLoading) return;
+    if (selectedChoiceIndex !== undefined || pendingIndex !== null || isLoading || isRecoveryLocked) return;
     setPendingIndex(choice.index);
     try {
       await onChoose(choice);
@@ -71,7 +75,8 @@ export function BranchChoice({
             onClick={() => handleChoose(choice)}
             onMouseEnter={() => setHoveredIndex(i)}
             onMouseLeave={() => setHoveredIndex(null)}
-            disabled={selectedChoiceIndex !== undefined || pendingIndex !== null || isLoading}
+            aria-pressed={selectedChoiceIndex === choice.index}
+            disabled={selectedChoiceIndex !== undefined || pendingIndex !== null || isLoading || isRecoveryLocked}
             className="choice-card w-full text-left"
             style={{
               opacity: selectedIndex !== null && selectedIndex !== choice.index ? 0.4 : 1,
@@ -101,6 +106,7 @@ export function BranchChoice({
               <div className="flex-1 min-w-0">
                 <p className="text-sm leading-relaxed text-[#1f1f1f]">
                   {choice.text}
+                  {selectedChoiceIndex === choice.index ? <span className="sr-only">（已选择）</span> : null}
                 </p>
                 {choice.hint && (
                   <p className="mt-1.5 flex items-center gap-1 text-xs text-[#0b57d0]">
@@ -145,7 +151,16 @@ export function BranchChoice({
           role="alert"
           className="mt-4 rounded-xl border border-[#f2b8b5] bg-[#fce8e6] p-4 text-sm text-[#b3261e]"
         >
-          {error} 请重新选择。
+          {error}
+          {isRecoveryLocked && onRetryRecovery ? (
+            <button
+              type="button"
+              className="ml-2 underline"
+              onClick={() => void onRetryRecovery()}
+            >
+              重新加载已提交结果
+            </button>
+          ) : null}
         </div>
       )}
 

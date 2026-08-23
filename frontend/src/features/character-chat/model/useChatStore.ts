@@ -35,7 +35,7 @@ interface ChatState {
     currentChapter: number;
   }) => void;
   retryMessage: (characterId: string) => void;
-  cancelMessage: (characterId: string) => void;
+  cancelMessage: (characterId: string, expectedTurnId?: string) => void;
   addMessage: (characterId: string, message: ChatMessage) => void;
   clearMessages: (characterId: string) => void;
   reset: () => void;
@@ -78,9 +78,11 @@ export const useChatStore = create<ChatState>((set, get) => {
         const finalText = state.streamingText[characterId] || '';
         const characterMessage: ChatMessage = {
           id: crypto.randomUUID(),
+          turn_id: turnId,
           role: 'character',
           content: finalText,
           character_id: characterId,
+          chapter_context: payload.current_chapter,
           created_at: new Date().toISOString(),
         };
         return {
@@ -172,9 +174,11 @@ export const useChatStore = create<ChatState>((set, get) => {
       };
       const userMessage: ChatMessage = {
         id: crypto.randomUUID(),
+        turn_id: turn.turnId,
         role: 'user',
         content: message,
         character_id: characterId,
+        chapter_context: currentChapter,
         created_at: new Date().toISOString(),
       };
       const generation = get().sessionGeneration;
@@ -215,9 +219,10 @@ export const useChatStore = create<ChatState>((set, get) => {
       startTurn(turn, generation);
     },
 
-    cancelMessage: characterId => {
+    cancelMessage: (characterId, expectedTurnId) => {
       const state = get();
       const turn = state.activeTurn[characterId];
+      if (expectedTurnId && turn?.turnId !== expectedTurnId) return;
       state.cancelStream[characterId]?.();
       set(current => ({
         streamingText: { ...current.streamingText, [characterId]: '' },

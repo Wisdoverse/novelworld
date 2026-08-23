@@ -4,8 +4,8 @@ use uuid::Uuid;
 
 use crate::domain::entities::player_entity::PlayerEntity;
 use crate::domain::entities::world_session::{
-    ActiveThread, CanonicalEventStatus, CharacterWorldContext, WorldAction, WorldEntryContext,
-    WorldHistoryItem, WorldSession, WorldTurnTransition,
+    ActiveThread, CanonicalEventStatus, CharacterWorldContext, WorldAction, WorldActionKind,
+    WorldEntryContext, WorldHistoryItem, WorldSession, WorldTurnTransition,
 };
 use crate::domain::services::narrative_transition::NarrativeTransition;
 
@@ -381,6 +381,11 @@ impl WorldState {
         let mut session = self.open_world()?.ok_or_else(|| {
             WorldStateError::InvalidWorldSession("world session has not started".into())
         })?;
+        if transition.prompt_version
+            == crate::domain::entities::world_session::WORLD_TURN_PROMPT_VERSION
+        {
+            self.validate_world_action(action, context)?;
+        }
         transition
             .validate_against(action, context, &session)
             .map_err(|error| WorldStateError::InvalidWorldSession(error.to_string()))?;
@@ -551,6 +556,46 @@ impl WorldState {
         }
         self.state = next;
         self.updated_at = Utc::now();
+        Ok(())
+    }
+
+    pub fn validate_world_action(
+        &self,
+        action: &WorldAction,
+        context: &WorldEntryContext,
+    ) -> Result<(), WorldStateError> {
+        let session = self.open_world()?.ok_or_else(|| {
+            WorldStateError::InvalidWorldSession("world session has not started".into())
+        })?;
+        if session.entry_context != *context {
+            return Err(WorldStateError::InvalidWorldSession(
+                "world entry context does not match the current session".into(),
+            ));
+        }
+        session
+            .validate_action(action)
+            .map_err(|error| WorldStateError::InvalidWorldSession(error.to_string()))?;
+        if matches!(
+            action.kind,
+            WorldActionKind::AdvanceThread | WorldActionKind::ResolveThread
+        ) {
+            let target = action.target_id.as_deref().ok_or_else(|| {
+                WorldStateError::InvalidWorldSession("thread target is required".into())
+            })?;
+            let is_open = self
+                .state
+                .get("threads")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|threads| threads.get(target))
+                .and_then(|thread| thread.get("status"))
+                .and_then(serde_json::Value::as_str)
+                == Some("open");
+            if !is_open {
+                return Err(WorldStateError::InvalidWorldSession(
+                    "thread target is not open".into(),
+                ));
+            }
+        }
         Ok(())
     }
 
