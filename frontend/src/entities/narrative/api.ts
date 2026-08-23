@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import axios from 'axios';
-import { apiClient } from '@/shared/api/client';
+import { apiClient, getApiErrorCode } from '@/shared/api/client';
 import type {
   NarrativeNode,
   OpenWorldView,
@@ -42,6 +42,18 @@ export interface EffectiveChapter {
   chapter_number: number;
   content: string;
   generated: boolean;
+}
+
+export function isNarrativeChoiceConflict(error: unknown) {
+  return getApiErrorCode(error) === 'choice_conflict';
+}
+
+export function isWorldTurnOutcomeUnknown(error: unknown) {
+  if (!axios.isAxiosError(error) || !error.response) return true;
+  const code = getApiErrorCode(error);
+  return code === 'turn_in_progress'
+    || code === 'turn_outcome_unknown'
+    || error.response.status >= 500;
 }
 
 export const narrativeKeys = {
@@ -171,6 +183,14 @@ export function useSubmitWorldTurn(novelId: string) {
       queryClient.setQueryData(narrativeKeys.worldState(novelId), result.world_state);
       void queryClient.invalidateQueries({ queryKey: narrativeKeys.openWorld(novelId) });
     },
+    onError: async error => {
+      if (!isWorldTurnOutcomeUnknown(error)) {
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: narrativeKeys.worldState(novelId) }),
+          queryClient.invalidateQueries({ queryKey: narrativeKeys.openWorld(novelId) }),
+        ]);
+      }
+    },
   });
 }
 
@@ -191,6 +211,15 @@ export function useSubmitNarrativeChoice(novelId: string) {
         content: result.chapter_content,
         generated: true,
       } satisfies EffectiveChapter);
+    },
+    onError: async (error) => {
+      if (axios.isAxiosError(error) && error.response?.status === 409) {
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: narrativeKeys.worldState(novelId) }),
+          queryClient.invalidateQueries({ queryKey: ['narrative', novelId, 'chapter'] }),
+          queryClient.invalidateQueries({ queryKey: narrativeKeys.openWorld(novelId) }),
+        ]);
+      }
     },
   });
 }

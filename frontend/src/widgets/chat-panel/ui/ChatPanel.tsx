@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Send, X, Minimize2, Maximize2, Brain } from 'lucide-react';
 import ReactMarkdown, { type Components } from 'react-markdown';
+import { useChatHistory } from '@/features/character-chat/api/useChatHistory';
 import { useChatStore } from '@/features/character-chat/model/useChatStore';
 import type { Character, ChatMessage } from '@/shared/types';
 
@@ -12,6 +13,21 @@ const SAFE_MARKDOWN_COMPONENTS: Components = {
 
 export function ChatMarkdown({ children }: { children: string }) {
   return <ReactMarkdown components={SAFE_MARKDOWN_COMPONENTS}>{children}</ReactMarkdown>;
+}
+
+export function mergeVisibleChatMessages(
+  history: ChatMessage[],
+  session: ChatMessage[],
+  currentChapter: number,
+) {
+  const seen = new Set<string>();
+  return [...history, ...session].filter(message => {
+    if (message.chapter_context != null && message.chapter_context > currentChapter) return false;
+    const key = message.turn_id ? `${message.turn_id}:${message.role}` : message.id;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 interface ChatPanelProps {
@@ -38,20 +54,49 @@ export function ChatPanel({
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  const charMessages = useChatStore(state => state.messages[character.id]) ?? EMPTY_MESSAGES;
-  const currentStreamText = useChatStore(state => state.streamingText[character.id]) || '';
-  const isCurrentlyStreaming = useChatStore(state => state.isStreaming[character.id]) || false;
+  const sessionMessages = useChatStore(state => state.messages[character.id]) ?? EMPTY_MESSAGES;
+  const rawStreamText = useChatStore(state => state.streamingText[character.id]) || '';
+  const isCharacterStreaming = useChatStore(state => state.isStreaming[character.id]) || false;
+  const activeTurn = useChatStore(state => state.activeTurn[character.id]);
   const failedTurn = useChatStore(state => state.failedTurn[character.id]);
   const sendMessage = useChatStore(state => state.sendMessage);
   const retryMessage = useChatStore(state => state.retryMessage);
   const cancelMessage = useChatStore(state => state.cancelMessage);
+  const characterMatchesNovel = character.novel_id === novelId;
+  const history = useChatHistory(
+    character.id,
+    currentChapter,
+    isOpen && canChat && characterMatchesNovel,
+  );
+  const activeTurnMatchesView = activeTurn?.payload.novel_id === novelId
+    && activeTurn.payload.current_chapter === currentChapter;
+  const isCurrentlyStreaming = isCharacterStreaming && activeTurnMatchesView;
+  const currentStreamText = isCurrentlyStreaming ? rawStreamText : '';
+  const visibleFailedTurn = failedTurn?.payload.novel_id === novelId
+    && failedTurn.payload.current_chapter === currentChapter
+    ? failedTurn
+    : undefined;
+  const charMessages = characterMatchesNovel
+    ? mergeVisibleChatMessages(
+      history.data ?? EMPTY_MESSAGES,
+      sessionMessages,
+      currentChapter,
+    )
+    : EMPTY_MESSAGES;
+  const historyReady = !history.isLoading && !history.isError;
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    messagesEndRef.current?.scrollIntoView?.({ behavior: 'smooth' });
   }, [charMessages, currentStreamText]);
 
+  useEffect(() => {
+    if (activeTurn && !activeTurnMatchesView) {
+      cancelMessage(character.id, activeTurn.turnId);
+    }
+  }, [activeTurn, activeTurnMatchesView, cancelMessage, character.id]);
+
   const handleSend = () => {
-    if (!canChat || !input.trim() || isCurrentlyStreaming) return;
+    if (!canChat || !historyReady || !input.trim() || isCurrentlyStreaming) return;
     sendMessage({
       characterId: character.id,
       novelId,
@@ -72,7 +117,7 @@ export function ChatPanel({
 
   return (
     <AnimatePresence>
-      {isOpen && (
+      {isOpen && characterMatchesNovel && (
         <motion.div
           initial={{ opacity: 0, x: 60, scale: 0.95 }}
           animate={{ opacity: 1, x: 0, scale: 1 }}
@@ -157,14 +202,27 @@ export function ChatPanel({
                   className="flex-1 overflow-y-auto p-4 space-y-4"
                   style={{ minHeight: 0 }}
                 >
-                  {charMessages.length === 0 && (
+                  {history.isLoading ? (
+                    <p role="status" className="py-8 text-center text-sm text-[#5f6368]">
+                      正在恢复对话记录…
+                    </p>
+                  ) : null}
+                  {history.isError ? (
+                    <div role="alert" className="py-8 text-center text-sm text-[#b3261e]">
+                      <p>对话记录加载失败，暂时不能继续发送。</p>
+                      <button type="button" className="mt-2 underline" onClick={() => void history.refetch()}>
+                        重试加载
+                      </button>
+                    </div>
+                  ) : null}
+                  {historyReady && charMessages.length === 0 && (
                     <div className="text-center py-8">
                       <Brain size={32} className="mx-auto mb-3 text-[#0b57d0] opacity-40" />
                       <p className="text-sm text-[#5f6368]">
                         与 {character.name} 开始对话
                       </p>
                       <p className="mt-1 text-xs text-[#5f6368]">
-                        TA 记得你们之前的所有互动
+                        会参考已提交的对话与可用记忆
                       </p>
                     </div>
                   )}
@@ -218,16 +276,16 @@ export function ChatPanel({
                       以「{readerIdentity}」身份对话
                     </div>
                   )}
-                  {failedTurn && !isCurrentlyStreaming && (
+                  {visibleFailedTurn && !isCurrentlyStreaming && (
                     <div
                       className="mb-2 flex items-center justify-between gap-2 rounded bg-[#fce8e6] px-2 py-1.5 text-xs text-[#b3261e]"
                       role="alert"
                     >
-                      <span>{failedTurn.error.message}</span>
+                      <span>{visibleFailedTurn.error.message}</span>
                       <button
                         type="button"
                         className="shrink-0 underline disabled:opacity-50"
-                        disabled={!canChat}
+                        disabled={!canChat || !historyReady}
                         onClick={() => retryMessage(character.id)}
                       >
                         重试
@@ -245,7 +303,7 @@ export function ChatPanel({
                       maxLength={4000}
                       className="field-control flex-1 resize-none text-sm"
                       style={{ fontFamily: 'var(--font-body)' }}
-                      disabled={!canChat || isCurrentlyStreaming}
+                      disabled={!canChat || !historyReady || isCurrentlyStreaming}
                     />
                     {isCurrentlyStreaming && (
                       <button
@@ -260,7 +318,7 @@ export function ChatPanel({
                       type="button"
                       onClick={handleSend}
                       aria-label="发送消息"
-                      disabled={!canChat || !input.trim() || isCurrentlyStreaming}
+                      disabled={!canChat || !historyReady || !input.trim() || isCurrentlyStreaming}
                       className="flex-shrink-0 rounded-full bg-[#0b57d0] p-2.5 text-white transition-colors hover:bg-[#0842a0] disabled:cursor-not-allowed disabled:bg-[#c4c7c5] disabled:text-[#747775]"
                     >
                       <Send size={16} />

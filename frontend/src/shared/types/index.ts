@@ -59,9 +59,11 @@ export interface Character {
 
 export interface ChatMessage {
   id: string;
+  turn_id?: string | null;
   role: 'user' | 'character';
   content: string;
   character_id: string;
+  chapter_context?: number | null;
   created_at: string;
 }
 
@@ -125,6 +127,7 @@ export type WorldActionKind =
   | 'converse'
   | 'ally'
   | 'oppose'
+  | 'advance_thread'
   | 'resolve_thread'
   | 'pursue_goal';
 

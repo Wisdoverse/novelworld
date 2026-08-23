@@ -12,6 +12,12 @@ interface ApiErrorBody {
   error?: string | { code?: string; message?: string };
 }
 
+export function getApiErrorCode(error: unknown): string | undefined {
+  if (!axios.isAxiosError<ApiErrorBody>(error)) return undefined;
+  const detail = error.response?.data?.error;
+  return typeof detail === 'string' ? undefined : detail?.code;
+}
+
 export function getApiErrorMessage(error: unknown, fallback: string): string {
   if (!axios.isAxiosError<ApiErrorBody>(error)) return fallback;
   const detail = error.response?.data?.error;

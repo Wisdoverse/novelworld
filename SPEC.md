@@ -812,7 +812,12 @@ When a reader advances to a chapter where `is_key_node = true`, the Narrative Se
 When a reader submits a choice:
 
 1. Validate that `choice_index` is within the bounds of `NarrativeNode.choices`.
-2. Store a `UserChoice` record.
+2. Treat `(user_id, node_id)` as the natural operation key. If that key already
+   contains the same `choice_index`, replay the committed choice, world state,
+   and effective chapter without another provider call. If it contains a
+   different index, return `409 choice_conflict` and reload the committed
+   choice, world state, and effective chapter; the
+   submitted index MUST NOT overwrite or masquerade as the committed choice.
 3. Invoke the LLM to generate replacement prose from the exact inline anchor
    through the end of the current chapter (see §7.3).
 4. Atomically persist the `UserChoice`, updated `WorldState`, and the complete
@@ -898,6 +903,19 @@ redirect those events. A world turn MUST produce a structured transition contain
 event, relationship, location, and thread changes alongside the narrative
 rendering. The transition MUST be schema-valid, entity-valid, spoiler-bounded,
 idempotent, and atomically committed before its prose is shown as complete.
+
+For one reader and novel, committed world turns form a single total order. A
+new turn MUST be generated from current authoritative state plus a bounded,
+ordered tail of committed turn actions and narrative endings so it continues
+from what the reader was last shown. Thread-advance and thread-resolution
+actions MUST target a currently open thread, and the committed transition MUST
+update that exact thread. This player timeline uses the PostgreSQL journal;
+a separate graph database is not required.
+
+The browser MUST keep the original world-turn `Idempotency-Key` when no
+response arrives, a `5xx` is returned, the turn is still in progress, or the
+server reports `409 turn_outcome_unknown`. A retry MUST reuse that key until a
+committed replay or a terminal rejection establishes the outcome.
 
 Players MAY enter at any checkpoint already unlocked by server-side reading
 progress. Future canon remains spoiler-bounded. Character agents, exploration,
@@ -1130,7 +1148,9 @@ Standard error codes:
 | `conflict` | 409 | Unique constraint violation |
 | `setup_required` | 409 | Initial administrator must be created first |
 | `turn_in_progress` | 409 | The same idempotent turn is still being produced |
+| `turn_outcome_unknown` | 409 | The world-turn lease was lost; retry the logical turn with the same key |
 | `idempotency_conflict` | 409 | The key was reused for a different request |
+| `choice_conflict` | 409 | A different choice is already committed for this reader and node |
 | `validation_error` | 422 | Request body failed validation |
 | `client_upgrade_required` | 426 | A stale chat client omitted the idempotency contract |
 | `rate_limited` | 429 | Request rate exceeded |

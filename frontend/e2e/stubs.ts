@@ -67,6 +67,7 @@ export async function installStubs(page: Page, opts: StubOptions = {}): Promise<
     ['POST', /^\/narrative\/[^/]+\/world$/, () => json(200, OPEN_WORLD)],
     ['POST', /^\/narrative\/[^/]+\/world\/turns$/, () => json(200, WORLD_TURN_RESULT)],
     ['POST', /^\/narrative\/choose$/, () => json(200, CHOICE_RESULT)],
+    ['GET', /^\/chat\/[^/]+\/history$/, () => json(200, { messages: [], count: 0 })],
     ['POST', /^\/chat\/[^/]+\/stream$/, (req) => {
       const turnId = (req.headers()['idempotency-key'] ?? '') as string;
       return turnId ? CHAT_DELTA_STREAM(turnId) : CHAT_STREAM;

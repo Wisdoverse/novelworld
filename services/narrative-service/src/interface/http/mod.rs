@@ -198,6 +198,13 @@ fn narrative_error_response(error: NarrativeError) -> axum::response::Response {
         NarrativeError::Conflict(message) => {
             return error_response(StatusCode::CONFLICT, "conflict", &message)
         }
+        NarrativeError::ChoiceConflict => {
+            return error_response(
+                StatusCode::CONFLICT,
+                "choice_conflict",
+                "A different choice is already committed",
+            )
+        }
         NarrativeError::TurnInProgress {
             retry_after_seconds,
         } => {
@@ -210,6 +217,13 @@ fn narrative_error_response(error: NarrativeError) -> axum::response::Response {
                 response.headers_mut().insert(RETRY_AFTER, value);
             }
             return response;
+        }
+        NarrativeError::TurnOutcomeUnknown => {
+            return error_response(
+                StatusCode::CONFLICT,
+                "turn_outcome_unknown",
+                "World turn outcome is unknown; retry with the same Idempotency-Key",
+            )
         }
         NarrativeError::Unavailable(error) => {
             tracing::warn!(error = ?error, "novel dependency unavailable");
@@ -585,6 +599,42 @@ mod principal_contract_tests {
                 "inventory": []
             }))
             .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn choice_conflict_uses_the_stable_gateway_error_envelope() {
+        let response = narrative_error_response(NarrativeError::ChoiceConflict);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({
+                "error": {
+                    "code": "choice_conflict",
+                    "message": "A different choice is already committed"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn lost_world_turn_lease_preserves_the_idempotency_contract() {
+        let response = narrative_error_response(NarrativeError::TurnOutcomeUnknown);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({
+                "error": {
+                    "code": "turn_outcome_unknown",
+                    "message": "World turn outcome is unknown; retry with the same Idempotency-Key"
+                }
+            })
         );
     }
 

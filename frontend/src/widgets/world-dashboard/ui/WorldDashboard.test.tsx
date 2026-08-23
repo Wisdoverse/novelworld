@@ -1,6 +1,6 @@
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { OpenWorldView } from '@/shared/types';
 import { WorldDashboard } from './WorldDashboard';
 
@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@/entities/narrative/api', () => ({
   useSubmitWorldTurn: () => ({ mutateAsync: mocks.submit, isPending: false }),
+  isWorldTurnOutcomeUnknown: (error: { outcomeUnknown?: boolean }) => error.outcomeUnknown !== false,
 }));
 
 const view = {
@@ -49,6 +50,10 @@ const view = {
 } satisfies OpenWorldView;
 
 describe('WorldDashboard', () => {
+  beforeEach(() => {
+    mocks.submit.mockReset();
+  });
+
   it('keeps canon provenance distinct and retries a failed turn with the same key', async () => {
     mocks.submit.mockRejectedValue(new Error('offline'));
     render(<WorldDashboard novelId="novel" view={view} />);
@@ -66,10 +71,25 @@ describe('WorldDashboard', () => {
     fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '前往城门' } });
     fireEvent.click(screen.getByRole('button', { name: '执行行动' }));
     await waitFor(() => expect(mocks.submit).toHaveBeenCalledTimes(1));
-    fireEvent.click(await screen.findByRole('button', { name: '使用同一个请求重试' }));
+    expect(screen.queryByRole('button', { name: '放弃此请求' })).toBeNull();
+    expect(screen.getByRole('alert').textContent).toContain('尚未确认这次行动的最终结果');
+    fireEvent.click(await screen.findByRole('button', { name: '继续确认结果' }));
     await waitFor(() => expect(mocks.submit).toHaveBeenCalledTimes(2));
 
     expect(mocks.submit.mock.calls[1][0].idempotencyKey)
       .toBe(mocks.submit.mock.calls[0][0].idempotencyKey);
+  });
+
+  it('unlocks the form after a terminal rejection', async () => {
+    mocks.submit.mockRejectedValue({ outcomeUnknown: false });
+    render(<WorldDashboard novelId="novel" view={view} />);
+
+    const intent = screen.getByLabelText('你的意图');
+    fireEvent.change(intent, { target: { value: '违反规则的行动' } });
+    fireEvent.click(screen.getByRole('button', { name: '执行行动' }));
+
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('请求已被明确拒绝'));
+    expect(screen.queryByRole('button', { name: '继续确认结果' })).toBeNull();
+    expect(intent.hasAttribute('disabled')).toBe(false);
   });
 });

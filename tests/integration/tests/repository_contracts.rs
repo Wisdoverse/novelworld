@@ -2718,6 +2718,78 @@ async fn production_repositories_match_fresh_schema() {
         .unwrap();
     choice_repo.commit_choice(&more_drafts[2]).await.unwrap();
 
+    let competing_node = NarrativeNode::new(
+        novel_id,
+        5,
+        "Competing decision".into(),
+        vec![
+            NarrativeChoice {
+                index: 0,
+                text: "Left".into(),
+                hint: "Take the left path".into(),
+                generated_consequence: None,
+            },
+            NarrativeChoice {
+                index: 1,
+                text: "Right".into(),
+                hint: "Take the right path".into(),
+                generated_consequence: None,
+            },
+        ],
+    );
+    node_repo.save(&competing_node).await.unwrap();
+    let left_draft = ChoiceCommit {
+        user_id,
+        novel_id,
+        node_id: competing_node.id,
+        chapter_number: 5,
+        choice_index: 0,
+        choice_text: "Left".into(),
+        transition: transition(5, "角色选择左路。"),
+        rewritten_chapter_content: "原著开篇。角色选择左路。".into(),
+    };
+    let right_draft = ChoiceCommit {
+        choice_index: 1,
+        choice_text: "Right".into(),
+        transition: transition(5, "角色选择右路。"),
+        rewritten_chapter_content: "原著开篇。角色选择右路。".into(),
+        ..left_draft.clone()
+    };
+    let (left_result, right_result) = tokio::join!(
+        choice_repo.commit_choice(&left_draft),
+        choice_repo.commit_choice(&right_draft)
+    );
+    let left_result = left_result.unwrap();
+    let right_result = right_result.unwrap();
+    assert_eq!(left_result.choice.id, right_result.choice.id);
+    assert_eq!(
+        left_result.choice.choice_index,
+        right_result.choice.choice_index
+    );
+    assert_eq!(
+        left_result.player_chapter_content,
+        right_result.player_chapter_content
+    );
+    match left_result.choice.choice_index {
+        0 => assert_eq!(
+            left_result.player_chapter_content,
+            "原著开篇。角色选择左路。"
+        ),
+        1 => assert_eq!(
+            left_result.player_chapter_content,
+            "原著开篇。角色选择右路。"
+        ),
+        index => panic!("unexpected competing choice index {index}"),
+    }
+    let competing_choice_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM user_choices WHERE user_id = $1 AND node_id = $2")
+            .bind(user_id)
+            .bind(competing_node.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(competing_choice_count, 1);
+
     let world_context = WorldEntryContext {
         model_version: 1,
         checkpoint_chapter: 1,
@@ -2897,13 +2969,18 @@ async fn production_repositories_match_fresh_schema() {
         world_turn_repo.begin_turn(&competing).await.unwrap(),
         BeginWorldTurn::Stale
     ));
+    let current_journal = world_turn_repo
+        .journal(user_id, novel_id, 100)
+        .await
+        .unwrap();
+    assert_eq!(current_journal.len(), 1);
     assert_eq!(
-        world_turn_repo
-            .journal(user_id, novel_id, 100)
-            .await
-            .unwrap()
-            .len(),
-        1
+        current_journal[0].transition.prompt_version,
+        WORLD_TURN_PROMPT_VERSION
+    );
+    assert_eq!(
+        current_journal[0].transition.rendered_narrative,
+        "你在塔中找到一条隐秘道路，守门人开始相信你的判断。"
     );
 
     let rollback_claim = WorldTurnClaim {
@@ -3201,6 +3278,44 @@ async fn world_turn_completed_key_replays_and_cannot_commit_twice() {
     .unwrap();
     assert_eq!(status, "completed");
     assert_eq!(turn_number, 1, "the world state must advance exactly once");
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn legacy_world_turn_replays_and_remains_in_the_journal() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (user_id, novel_id, context) = seed_world_turn(&pool).await;
+    let repo = PgWorldTurnRepository::new(pool.clone());
+    let claim = world_turn_claim(user_id, novel_id);
+    let mut transition = world_turn_transition();
+    transition.prompt_version = "world-turn-v1".into();
+    let attempt = world_turn_acquire(&repo, &claim).await;
+
+    let completed = repo
+        .complete_turn(&claim, attempt, &transition, &context)
+        .await
+        .unwrap();
+    let replayed = match repo.begin_turn(&claim).await.unwrap() {
+        BeginWorldTurn::Completed(replayed) => *replayed,
+        result => panic!("unexpected replay: {result:?}"),
+    };
+    let journal = repo.journal(user_id, novel_id, 10).await.unwrap();
+
+    assert_eq!(replayed, completed);
+    assert_eq!(journal.len(), 1);
+    assert_eq!(journal[0].transition.prompt_version, "world-turn-v1");
+    assert_eq!(
+        journal[0].transition.rendered_narrative,
+        transition.rendered_narrative
+    );
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
         .execute(&pool)

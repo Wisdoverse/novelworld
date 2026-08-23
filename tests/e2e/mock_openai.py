@@ -279,12 +279,25 @@ class Handler(BaseHTTPRequestHandler):
             if consume_failure("world_turn"):
                 return "{}"
             session = json.loads(prompt.split("WORLD_SESSION: ", 1)[1].split("\nWORLD_STATE:", 1)[0])
+            recent_turns = json.loads(prompt.split("RECENT_TURNS: ", 1)[1])
             context = session["entry_context"]
             current_event = next((
                 event for event in session["canonical_events"]
                 if event["status"] in ("scheduled", "delayed")
             ), None)
             first_turn = session["turn_number"] == 0
+            if first_turn and recent_turns:
+                return "{}"
+            if not first_turn:
+                previous = recent_turns[-1] if recent_turns else {}
+                if (
+                    previous.get("turn_number") != session["turn_number"]
+                    or previous.get("action", {}).get("intent") != "查清北塔换防并阻止伏击"
+                    or not previous.get("rendered_narrative", "").endswith(
+                        "林岚仍按自己的目标追查守门人，原定围堵因此受阻。"
+                    )
+                ):
+                    return "{}"
             return json.dumps({
                 "schema_version": 1,
                 "rendered_narrative": (

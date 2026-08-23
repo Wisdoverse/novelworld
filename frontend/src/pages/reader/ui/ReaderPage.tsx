@@ -19,6 +19,7 @@ import {
   useStartOpenWorld,
   useSubmitNarrativeChoice,
   useWorldState,
+  isNarrativeChoiceConflict,
   type ChoiceResult,
 } from '@/entities/narrative/api';
 import { ChatPanel } from '@/widgets/chat-panel/ui/ChatPanel';
@@ -38,6 +39,12 @@ export function splitChapterAtAnchor(content: string, anchorQuote?: string) {
     after: content.slice(anchorEnd),
     anchored: true,
   };
+}
+
+function focusSection(id: string) {
+  const target = document.getElementById(id);
+  target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  target?.focus({ preventScroll: true });
 }
 
 export function ReaderPage() {
@@ -107,8 +114,9 @@ export function ReaderPage() {
   const [activeChatCharacter, setActiveChatCharacter] = useState<Character | null>(null);
   const [showCharacterList, setShowCharacterList] = useState(false);
   const [choiceResult, setChoiceResult] = useState<ChoiceResult | null>(null);
-  const [submittedChoiceIndex, setSubmittedChoiceIndex] = useState<number | undefined>();
   const [choiceError, setChoiceError] = useState<string | undefined>();
+  const [choiceRecoveryLocked, setChoiceRecoveryLocked] = useState(false);
+  const [chapterView, setChapterView] = useState<'timeline' | 'canon'>('timeline');
   const lastProgressAttempt = useRef<string | undefined>(undefined);
   const hasBranch = Boolean(chapter?.is_key_node && chapter.key_node_description);
   const {
@@ -121,7 +129,10 @@ export function ReaderPage() {
     currentChapter,
     hasBranch && Boolean(effectiveChapter) && !isEffectiveChapterError && playerEntryReady,
   );
-  const { data: worldState } = useWorldState(novelId || '', Boolean(chapter));
+  const {
+    data: worldState,
+    refetch: refetchWorldState,
+  } = useWorldState(novelId || '', Boolean(chapter));
   const submitChoice = useSubmitNarrativeChoice(novelId || '');
 
   useEffect(() => {
@@ -175,8 +186,9 @@ export function ReaderPage() {
 
   useEffect(() => {
     setChoiceResult(null);
-    setSubmittedChoiceIndex(undefined);
     setChoiceError(undefined);
+    setChoiceRecoveryLocked(false);
+    setChapterView('timeline');
   }, [currentChapter, novelId]);
 
   useEffect(() => {
@@ -186,28 +198,63 @@ export function ReaderPage() {
   const savedChoice = currentBranchNode
     ? worldState?.state.choices.find(choice => choice.node_id === currentBranchNode.id)
     : undefined;
-  const selectedChoiceIndex = submittedChoiceIndex ?? savedChoice?.choice_index;
+  const resultChoice = currentBranchNode
+    ? choiceResult?.world_state.state.choices.find(choice => choice.node_id === currentBranchNode.id)
+    : undefined;
+  const selectedChoiceIndex = resultChoice?.choice_index ?? savedChoice?.choice_index;
   const consequence = choiceResult?.consequence ?? savedChoice?.consequence;
-  const displayContent = effectiveChapter?.content ?? '';
-  const inlineChapter = chapter && currentBranchNode
+
+  useEffect(() => {
+    if (choiceError && (selectedChoiceIndex !== undefined || openWorld)) {
+      setChoiceError(undefined);
+      setChoiceRecoveryLocked(false);
+    }
+  }, [choiceError, openWorld, selectedChoiceIndex]);
+  const isPlayerChapter = Boolean(effectiveChapter?.generated);
+  const isPlayerTimeline = Boolean(isPlayerChapter || openWorld);
+  const showCanonReference = Boolean(isPlayerChapter && chapterView === 'canon');
+  const isCanonReference = Boolean(showCanonReference || (openWorld && !isPlayerChapter));
+  const displayContent = showCanonReference ? chapter?.content ?? '' : effectiveChapter?.content ?? '';
+  const inlineChapter = chapter && currentBranchNode && !showCanonReference
     ? splitChapterAtAnchor(displayContent, currentBranchNode.anchor_quote)
     : undefined;
   const branchChoiceRequired = Boolean(
     currentBranchNode && selectedChoiceIndex === undefined && !openWorld,
   );
 
+  const recoverCommittedChoice = async () => {
+    if (!currentBranchNode) return;
+    setChoiceRecoveryLocked(true);
+    setChoiceError('正在重新加载已提交的时间线…');
+    const result = await refetchWorldState();
+    const committed = result.data?.state.choices.find(
+      choice => choice.node_id === currentBranchNode.id,
+    );
+    if (committed) {
+      setChoiceError(undefined);
+      setChoiceRecoveryLocked(false);
+      void refetchEffectiveChapter();
+      return;
+    }
+    setChoiceError('已提交结果暂时无法加载；为避免覆盖另一窗口的选择，本节点仍已锁定。');
+  };
+
   const handleChoose = async (choice: NarrativeChoice) => {
     if (!currentBranchNode || openWorld) return;
     setChoiceError(undefined);
+    setChoiceRecoveryLocked(false);
     try {
       const result = await submitChoice.mutateAsync({
         nodeId: currentBranchNode.id,
         choiceIndex: choice.index,
       });
-      setSubmittedChoiceIndex(choice.index);
       setChoiceResult(result);
     } catch (error) {
-      setChoiceError(getApiErrorMessage(error, '命运改写失败'));
+      const choiceConflict = isNarrativeChoiceConflict(error);
+      setChoiceRecoveryLocked(choiceConflict);
+      setChoiceError(choiceConflict
+        ? '另一窗口已经提交了这个命运节点。当前选项已锁定，正在恢复已提交的结果。'
+        : getApiErrorMessage(error, '命运改写失败，请重试'));
       throw error;
     }
   };
@@ -220,6 +267,22 @@ export function ReaderPage() {
       || (num > currentChapter && (branchChoiceRequired || playerEntityRequired))
     ) return;
     navigate(`/reader/${novelId}/${num}`);
+  };
+
+  const continueJourney = () => {
+    if (openWorld) {
+      focusSection('world-action-form');
+      return;
+    }
+    goToChapter(currentChapter + 1);
+  };
+
+  const goBack = () => {
+    if (openWorld) {
+      focusSection('world-action-journal');
+      return;
+    }
+    goToChapter(currentChapter - 1);
   };
 
   if (isProgressError) {
@@ -349,22 +412,49 @@ export function ReaderPage() {
             {/* 章节标题 */}
             <div className="text-center mb-12 pt-8">
               <div className="mb-2 text-xs font-semibold uppercase tracking-widest text-[#0b57d0]">
-                第 {currentChapter} 章
+                {isCanonReference ? '原著参考' : isPlayerChapter ? '我的时间线' : `第 ${currentChapter} 章`}
               </div>
-              {effectiveChapter.generated && (
-                <div className="mb-3 text-xs font-semibold tracking-wider text-[#0b57d0]">
-                  玩家时间线 · 本章已因你的选择完全改写
+              {isPlayerTimeline && (
+                <div className="mb-3 text-xs font-medium text-[#5f6368]">
+                  原著坐标 · 第 {currentChapter} 章{chapter.title ? `《${chapter.title}》` : ''}
                 </div>
               )}
-              {chapter.title && (
+              {(chapter.title || (isPlayerChapter && !showCanonReference)) && (
                 <h1
                   className="text-2xl md:text-3xl font-bold"
                   style={{ color: '#1f1f1f' }}
                 >
-                  {chapter.title}
+                  {isPlayerChapter && !showCanonReference
+                    ? `${playerEntry?.player?.name ?? '你'}的故事`
+                    : chapter.title}
                 </h1>
               )}
               <div className="mx-auto mt-4 h-px w-16 bg-[#0b57d0]" />
+              {effectiveChapter.generated ? (
+                <div className="mx-auto mt-6 inline-flex rounded-full bg-[#eef3fe] p-1" aria-label="阅读版本">
+                  <button
+                    type="button"
+                    aria-pressed={!showCanonReference}
+                    className={`rounded-full px-4 py-2 text-sm font-medium transition-colors ${!showCanonReference ? 'bg-white text-[#0b57d0] shadow-sm' : 'text-[#5f6368]'}`}
+                    onClick={() => setChapterView('timeline')}
+                  >
+                    我的时间线
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={showCanonReference}
+                    className={`rounded-full px-4 py-2 text-sm font-medium transition-colors ${showCanonReference ? 'bg-white text-[#0b57d0] shadow-sm' : 'text-[#5f6368]'}`}
+                    onClick={() => setChapterView('canon')}
+                  >
+                    原著参考
+                  </button>
+                </div>
+              ) : null}
+              {isCanonReference ? (
+                <p className="mx-auto mt-4 max-w-lg text-sm leading-6 text-[#5f6368]">
+                  这是原著内容，仅用于回看世界设定，不属于你当前时间线已经发生的历史。
+                </p>
+              ) : null}
             </div>
 
             {/* 正文中的分支节点：原文在锚点处暂停，选择后由生成内容接续。 */}
@@ -390,7 +480,7 @@ export function ReaderPage() {
                 <button className="text-sm underline" onClick={() => refetchBranch()}>重试</button>
               </div>
             )}
-            {currentBranchNode && (!openWorld || selectedChoiceIndex !== undefined) && (
+            {!showCanonReference && currentBranchNode && (!openWorld || selectedChoiceIndex !== undefined) && (
               <BranchChoice
                 node={currentBranchNode}
                 onChoose={handleChoose}
@@ -398,11 +488,13 @@ export function ReaderPage() {
                 selectedChoiceIndex={selectedChoiceIndex}
                 consequence={consequence}
                 error={choiceError}
+                isRecoveryLocked={choiceRecoveryLocked}
+                onRetryRecovery={recoverCommittedChoice}
               />
             )}
 
             {/* 章节摘要 */}
-            {chapter.summary && !hasBranch && (
+            {chapter.summary && !hasBranch && (!effectiveChapter.generated || showCanonReference) && (
               <div className="mt-12 rounded-xl border border-[#d2e3fc] bg-[#f8faff] p-4">
                 <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-[#0b57d0]">
                   <Sparkles size={12} />
@@ -475,16 +567,19 @@ export function ReaderPage() {
       {/* 底部翻页导航 */}
       <div className="fixed bottom-0 left-0 right-0 z-20 flex items-center justify-between gap-2 border-t border-[#e1e3e8] bg-white/95 px-3 py-3 shadow-[0_-1px_3px_rgba(60,64,67,0.08)] backdrop-blur-xl sm:px-6 sm:py-4">
         <button
-          onClick={() => goToChapter(currentChapter - 1)}
-          disabled={isProgressSaving || currentChapter <= 1}
+          onClick={goBack}
+          disabled={isProgressSaving || (!openWorld && currentChapter <= 1)}
           className="tonal-action shrink-0 px-3 text-sm sm:px-5"
         >
           <ChevronLeft size={14} />
-          上一章
+          {openWorld ? '回看行动日志' : '上一章'}
         </button>
 
         {/* 进度条 */}
         <div className="mx-4 hidden flex-1 sm:block">
+          <div className="mb-1 text-center text-[11px] text-[#5f6368]">
+            {isPlayerTimeline ? '原著坐标 · ' : ''}{currentChapter} / {novel?.total_chapters || '?'}
+          </div>
           <div className="reader-progress">
             <div
               className="reader-progress-fill"
@@ -494,11 +589,17 @@ export function ReaderPage() {
         </div>
 
         <button
-          onClick={() => goToChapter(currentChapter + 1)}
-          disabled={isProgressSaving || playerEntityRequired || branchChoiceRequired || !novel || currentChapter >= novel.total_chapters}
+          onClick={continueJourney}
+          disabled={isProgressSaving || playerEntityRequired || branchChoiceRequired || !novel || (!openWorld && currentChapter >= novel.total_chapters)}
           className="tonal-action min-w-0 px-3 text-sm sm:px-5"
         >
-          {playerEntityRequired ? '请先创建角色' : branchChoiceRequired ? '请先选择' : '下一章'}
+          {playerEntityRequired
+            ? '请先创建角色'
+            : branchChoiceRequired
+              ? '请先选择'
+              : isPlayerTimeline
+                ? '继续旅程'
+                : '下一章'}
           <ChevronRight size={14} />
         </button>
       </div>
