@@ -8,6 +8,7 @@ pub enum BillableTokenClass {
 }
 
 impl BillableTokenClass {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
             "cached_input" => Some(Self::CachedInput),
