@@ -9,11 +9,12 @@ use tracing::Instrument;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use user_service::{
-    application::handlers::AuthHandler,
+    application::handlers::{AuthHandler, LlmUsageHandler},
     domain::{self, entities::runtime_config::RuntimeLlmConfig},
     infrastructure::{
         auth::jwt::JwtService,
         llm::LlmClientTester,
+        llm_usage::{pricing_from_config, PrometheusLlmUsageReader},
         persistence::{pg_user_repo::PgUserRepository, PgReadinessProbe},
         privacy::AgentPrivacyClient,
     },
@@ -105,7 +106,7 @@ async fn run_body() -> Result<()> {
 
         let token_issuer: Arc<dyn domain::ports::AccessTokenIssuer> = jwt;
         let handler = Arc::new(AuthHandler {
-            user_repo,
+            user_repo: user_repo.clone(),
             jwt: token_issuer,
             llm_tester: Arc::new(LlmClientTester),
             privacy_cleanup,
@@ -113,10 +114,23 @@ async fn run_body() -> Result<()> {
             refresh_token_expiry,
             password_work: Arc::new(Semaphore::new(2)),
         });
+        let llm_usage_handler = Arc::new(LlmUsageHandler {
+            user_repo,
+            usage_reader: Arc::new(PrometheusLlmUsageReader::new(
+                &std::env::var("PROMETHEUS_URL")
+                    .unwrap_or_else(|_| "http://prometheus:9090".into()),
+                30,
+            )?),
+            pricing: pricing_from_config(
+                &std::env::var("LLM_PRICING_USD_PER_MILLION").unwrap_or_else(|_| "{}".into()),
+                std::env::var("USD_CNY_RATE").ok().as_deref(),
+            )?,
+        });
 
         let readiness = Arc::new(PgReadinessProbe::new(pool));
         let state = AppState {
             handler,
+            llm_usage_handler,
             readiness,
             internal_service_token: internal_service_token.into(),
             metrics,
