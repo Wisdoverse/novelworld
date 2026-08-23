@@ -1444,9 +1444,12 @@ Each LLM-calling service exposes Prometheus-compatible metrics at its internal
 - actual and static per-operation output-token ceilings
 
 LLM labels MUST come from bounded configuration and MUST NOT include prompts,
-raw URLs/errors, secrets, principals, or resource identifiers. Dollar cost is
-derived at query time from billable token classes and current provider pricing.
-The checked-in versioned release policy is the source of truth for H3 budgets.
+raw URLs/errors, secrets, principals, or resource identifiers. Cost is derived
+at query time from billable token classes and operator-maintained current
+provider pricing. User-facing presentation uses CNY when the UI language starts
+with `zh`, and USD otherwise; exchange rates are configuration, not embedded
+constants. The checked-in versioned release policy is the source of truth for
+H3 budgets.
 
 ---
 

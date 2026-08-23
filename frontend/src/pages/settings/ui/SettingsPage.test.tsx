@@ -20,6 +20,10 @@ vi.mock('@/shared/api/client', () => ({
   getApiErrorMessage: (_error: unknown, fallback: string) => fallback,
 }));
 
+vi.mock('@/features/llm-usage/ui/LlmUsageCard', () => ({
+  LlmUsageCard: () => <div>LLM usage card</div>,
+}));
+
 describe('SettingsPage', () => {
   beforeEach(() => {
     mocks.get.mockReset();

@@ -12,12 +12,13 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::application::handlers::{AuthError, AuthHandler};
+use crate::application::handlers::{AuthError, AuthHandler, LlmUsageError, LlmUsageHandler};
 use crate::domain::ports::ReadinessProbe;
 
 #[derive(Clone)]
 pub struct AppState {
     pub handler: Arc<AuthHandler>,
+    pub llm_usage_handler: Arc<LlmUsageHandler>,
     pub readiness: Arc<dyn ReadinessProbe>,
     pub internal_service_token: Arc<str>,
     pub metrics: llm_client::MetricsHandle,
@@ -34,6 +35,7 @@ pub fn router(state: AppState) -> Router {
         .route("/setup/init", post(setup_init))
         .route("/settings/llm", get(get_llm_settings))
         .route("/settings/llm", put(update_llm_settings))
+        .route("/settings/llm/usage", get(get_llm_usage))
         .route("/internal/runtime/llm", get(runtime_llm_config))
         .route(
             "/internal/privacy/users/{user_id}/export",
@@ -221,6 +223,30 @@ struct UpdateLlmSettingsRequest {
     thinking_enabled: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct LlmUsageResponse {
+    contract: u8,
+    window_days: u16,
+    tokens: LlmUsageTokensResponse,
+    costs: LlmUsageCostsResponse,
+    unpriced_tokens: String,
+}
+
+#[derive(Debug, Serialize)]
+struct LlmUsageTokensResponse {
+    input: String,
+    cached_input: String,
+    uncached_input: String,
+    output: String,
+    total: String,
+}
+
+#[derive(Debug, Serialize)]
+struct LlmUsageCostsResponse {
+    usd_micros: Option<String>,
+    cny_micros: Option<String>,
+}
+
 fn user_dto(u: &crate::domain::entities::user::User) -> UserDto {
     UserDto {
         id: u.id,
@@ -315,6 +341,31 @@ fn auth_error_response(error: AuthError) -> axum::response::Response {
         }
     };
     error_response(status, code, &message).into_response()
+}
+
+fn llm_usage_error_response(error: LlmUsageError) -> axum::response::Response {
+    let (status, code, message): (StatusCode, &'static str, &'static str) = match error {
+        LlmUsageError::Forbidden => (
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "Administrator access is required",
+        ),
+        LlmUsageError::Unavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "llm_usage_unavailable",
+            "LLM usage statistics are temporarily unavailable",
+        ),
+        LlmUsageError::NotFound => (StatusCode::NOT_FOUND, "not_found", "User not found"),
+        LlmUsageError::Internal(error) => {
+            tracing::error!(error = ?error, "LLM usage operation failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "LLM usage operation failed",
+            )
+        }
+    };
+    error_response(status, code, message).into_response()
 }
 
 async fn register(
@@ -513,6 +564,37 @@ async fn get_llm_settings(State(state): State<AppState>, headers: HeaderMap) -> 
         )
             .into_response(),
         Err(error) => auth_error_response(error),
+    }
+}
+
+async fn get_llm_usage(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let user_id = match extract_user_id(&headers) {
+        Some(user_id) => user_id,
+        None => return auth_error_response(AuthError::InvalidCredentials),
+    };
+    match state.llm_usage_handler.summary(user_id).await {
+        Ok(summary) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, "no-store")],
+            Json(LlmUsageResponse {
+                contract: 1,
+                window_days: summary.window_days,
+                tokens: LlmUsageTokensResponse {
+                    input: summary.input_tokens().to_string(),
+                    cached_input: summary.cached_input_tokens.to_string(),
+                    uncached_input: summary.uncached_input_tokens.to_string(),
+                    output: summary.output_tokens.to_string(),
+                    total: summary.total_tokens().to_string(),
+                },
+                costs: LlmUsageCostsResponse {
+                    usd_micros: summary.usd_micros.map(|value| value.to_string()),
+                    cny_micros: summary.cny_micros.map(|value| value.to_string()),
+                },
+                unpriced_tokens: summary.unpriced_tokens.to_string(),
+            }),
+        )
+            .into_response(),
+        Err(error) => llm_usage_error_response(error),
     }
 }
 
