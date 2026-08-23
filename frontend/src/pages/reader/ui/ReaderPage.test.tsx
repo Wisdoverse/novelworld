@@ -26,6 +26,8 @@ const mocks = vi.hoisted(() => ({
   effectiveContent: 'Chapter two',
   effectiveGenerated: false,
   effectiveError: false,
+  translationContent: '第二章',
+  translationError: false,
   worldChoices: [] as Array<{ node_id: string; choice_index: number; consequence?: string }>,
   refetchWorldState: vi.fn(),
 }));
@@ -67,6 +69,34 @@ vi.mock('@/entities/reading-progress/api', () => ({
     isError: mocks.progressError,
     reset: mocks.reset,
   }),
+}));
+
+vi.mock('@/features/chapter-translation', () => ({
+  useChapterTranslation: (
+    _novelId: string,
+    _chapterNumber: number,
+    _content: string,
+    enabled: boolean,
+  ) => ({
+    data: enabled && !mocks.translationError ? { content: mocks.translationContent } : undefined,
+    isFetching: false,
+    isError: enabled && mocks.translationError,
+    refetch: vi.fn(),
+  }),
+  TranslationControls: ({
+    active,
+    isError,
+    onToggle,
+  }: {
+    active: boolean;
+    isError: boolean;
+    onToggle: () => void;
+  }) => (
+    <>
+      <button onClick={onToggle}>{active ? '显示原文' : '翻译成中文'}</button>
+      {active && isError ? <span role="alert">翻译失败，当前显示原文。</span> : null}
+    </>
+  ),
 }));
 
 vi.mock('@/entities/narrative/api', () => ({
@@ -197,6 +227,8 @@ describe('ReaderPage progress gate', () => {
     mocks.effectiveContent = 'Chapter two';
     mocks.effectiveGenerated = false;
     mocks.effectiveError = false;
+    mocks.translationContent = '第二章';
+    mocks.translationError = false;
     mocks.worldChoices = [];
     mocks.submitChoice.mockReset();
     mocks.refetchWorldState.mockReset();
@@ -231,6 +263,28 @@ describe('ReaderPage progress gate', () => {
     const { container } = render(<ReaderPage />);
 
     expect(container.firstElementChild?.classList.contains('app-surface')).toBe(true);
+  });
+
+  it('switches the visible chapter body between the source and Chinese translation', () => {
+    mocks.progressError = false;
+    render(<ReaderPage />);
+
+    expect(screen.getByText('Chapter two')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '翻译成中文' }));
+    expect(screen.getByText('第二章')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '显示原文' }));
+    expect(screen.getByText('Chapter two')).toBeTruthy();
+  });
+
+  it('keeps the source visible when translation fails', () => {
+    mocks.progressError = false;
+    mocks.translationError = true;
+    render(<ReaderPage />);
+
+    fireEvent.click(screen.getByRole('button', { name: '翻译成中文' }));
+
+    expect(screen.getByText('Chapter two')).toBeTruthy();
+    expect(screen.getByRole('alert').textContent).toContain('当前显示原文');
   });
 
   it('closes chat when rewind makes the active character unavailable', async () => {
