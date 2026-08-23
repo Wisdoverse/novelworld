@@ -34,6 +34,7 @@ test.describe('character-identity boundary (SPEC §8.2)', () => {
     await choice.focus();
     await page.keyboard.press('Space');
     await expect(page.getByText('旅人收下信，约定黎明出海。').first()).toBeVisible();
+    await expect(choice).toHaveAttribute('aria-pressed', 'true');
   });
 
   test('character mode never opens the world dashboard', async ({ page }) => {
