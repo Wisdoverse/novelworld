@@ -24,6 +24,7 @@ struct WorldTurnRow {
     novel_id: Uuid,
     request_fingerprint: Vec<u8>,
     action: serde_json::Value,
+    resolution: Option<serde_json::Value>,
     expected_turn_number: i64,
     status: String,
     attempt: i64,
@@ -45,15 +46,25 @@ impl WorldTurnRow {
             && self.action()? == claim.action)
     }
 
+    fn resolution(&self) -> Result<Option<crate::domain::entities::game_rules::ActionCheck>> {
+        self.resolution
+            .clone()
+            .map(|value| serde_json::from_value(value).context("persisted action check is invalid"))
+            .transpose()
+    }
+
     fn claim(&self) -> Result<WorldTurnClaim> {
-        Ok(WorldTurnClaim {
+        let claim = WorldTurnClaim {
             id: self.id,
             user_id: self.user_id,
             novel_id: self.novel_id,
             request_fingerprint: self.request_fingerprint.clone(),
             action: self.action()?,
+            resolution: self.resolution()?,
             expected_turn_number: self.expected_turn_number,
-        })
+        };
+        validate_claim(&claim)?;
+        Ok(claim)
     }
 }
 
@@ -81,6 +92,7 @@ struct JournalRow {
     id: Uuid,
     turn_number: i64,
     action: serde_json::Value,
+    resolution: Option<serde_json::Value>,
     transition: serde_json::Value,
     created_at: DateTime<Utc>,
     completed_at: DateTime<Utc>,
@@ -134,7 +146,7 @@ impl PgWorldTurnRepository {
     async fn load_turn(&self, id: Uuid) -> Result<Option<WorldTurnRow>> {
         sqlx::query_as::<_, WorldTurnRow>(
             r#"
-            SELECT id, user_id, novel_id, request_fingerprint, action,
+            SELECT id, user_id, novel_id, request_fingerprint, action, resolution,
                    expected_turn_number, status, attempt, failure_code,
                    COALESCE(lease_expires_at <= NOW(), FALSE) AS lease_expired,
                    result
@@ -157,6 +169,7 @@ impl PgWorldTurnRepository {
         .context("completed world turn result is invalid")?;
         ensure!(result.turn_id == row.id);
         ensure!(result.action == row.action()?);
+        ensure!(result.resolution == row.resolution()?);
         ensure!(result.world_state.user_id == row.user_id);
         ensure!(result.world_state.novel_id == row.novel_id);
         let session = result
@@ -174,18 +187,23 @@ impl WorldTurnRepository for PgWorldTurnRepository {
         validate_claim(claim)?;
         for _ in 0..2 {
             let action = serde_json::to_value(&claim.action)?;
+            let resolution = claim
+                .resolution
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()?;
             let inserted = sqlx::query(
                 r#"
                 INSERT INTO world_turns (
-                    id, user_id, novel_id, request_fingerprint, action,
+                    id, user_id, novel_id, request_fingerprint, action, resolution,
                     expected_turn_number, status, attempt, lease_expires_at
                 )
-                SELECT $1, $2, $3, $4, $5, $6, 'in_progress', 1,
+                SELECT $1, $2, $3, $4, $5, $6, $7, 'in_progress', 1,
                        NOW() + INTERVAL '2 minutes'
                 FROM world_states
                 WHERE user_id = $2 AND novel_id = $3
                   AND jsonb_typeof(state #> '{open_world,turn_number}') = 'number'
-                  AND (state #>> '{open_world,turn_number}')::BIGINT = $6
+                  AND (state #>> '{open_world,turn_number}')::BIGINT = $7
                 ON CONFLICT (id) DO NOTHING
                 "#,
             )
@@ -194,6 +212,7 @@ impl WorldTurnRepository for PgWorldTurnRepository {
             .bind(claim.novel_id)
             .bind(&claim.request_fingerprint)
             .bind(action)
+            .bind(resolution)
             .bind(claim.expected_turn_number)
             .execute(&self.pool)
             .await;
@@ -201,7 +220,7 @@ impl WorldTurnRepository for PgWorldTurnRepository {
             match inserted {
                 Ok(result) if result.rows_affected() == 1 => {
                     return Ok(BeginWorldTurn::Acquired {
-                        claim: claim.clone(),
+                        claim: Box::new(claim.clone()),
                         attempt: 1,
                     });
                 }
@@ -275,7 +294,7 @@ impl WorldTurnRepository for PgWorldTurnRepository {
             };
             if let Some((attempt,)) = reclaimed {
                 return Ok(BeginWorldTurn::Acquired {
-                    claim: persisted_claim,
+                    claim: Box::new(persisted_claim),
                     attempt,
                 });
             }
@@ -315,7 +334,7 @@ impl WorldTurnRepository for PgWorldTurnRepository {
 
         let turn = sqlx::query_as::<_, WorldTurnRow>(
             r#"
-            SELECT id, user_id, novel_id, request_fingerprint, action,
+            SELECT id, user_id, novel_id, request_fingerprint, action, resolution,
                    expected_turn_number, status, attempt, failure_code,
                    COALESCE(lease_expires_at <= NOW(), FALSE) AS lease_expired,
                    result
@@ -354,7 +373,13 @@ impl WorldTurnRepository for PgWorldTurnRepository {
             session.entry_context == *context,
             "world entry context changed"
         );
-        world_state.apply_world_turn(claim.id, &claim.action, transition, context)?;
+        world_state.apply_world_turn_with_check(
+            claim.id,
+            &claim.action,
+            transition,
+            context,
+            claim.resolution.as_ref(),
+        )?;
 
         world_state.updated_at = sqlx::query_scalar(
             r#"
@@ -373,6 +398,7 @@ impl WorldTurnRepository for PgWorldTurnRepository {
         let result = WorldTurnResult {
             turn_id: claim.id,
             action: claim.action.clone(),
+            resolution: claim.resolution.clone(),
             transition: transition.clone(),
             world_state,
         };
@@ -436,9 +462,9 @@ impl WorldTurnRepository for PgWorldTurnRepository {
         ensure!((1..=100).contains(&limit), "journal limit must be 1-100");
         let rows = sqlx::query_as::<_, JournalRow>(
             r#"
-            SELECT id, turn_number, action, transition, created_at, completed_at
+            SELECT id, turn_number, action, resolution, transition, created_at, completed_at
             FROM (
-                SELECT id, expected_turn_number + 1 AS turn_number, action,
+                SELECT id, expected_turn_number + 1 AS turn_number, action, resolution,
                        transition, created_at, completed_at
                 FROM world_turns
                 WHERE user_id = $1 AND novel_id = $2 AND status = 'completed'
@@ -459,6 +485,7 @@ impl WorldTurnRepository for PgWorldTurnRepository {
                     turn_id: row.id,
                     turn_number: row.turn_number,
                     action: serde_json::from_value(row.action)?,
+                    resolution: row.resolution.map(serde_json::from_value).transpose()?,
                     transition: serde_json::from_value(row.transition)?,
                     created_at: row.created_at,
                     completed_at: row.completed_at,
@@ -472,5 +499,8 @@ fn validate_claim(claim: &WorldTurnClaim) -> Result<()> {
     ensure!(!claim.id.is_nil() && !claim.user_id.is_nil() && !claim.novel_id.is_nil());
     ensure!(claim.request_fingerprint.len() == 32);
     ensure!(claim.expected_turn_number >= 0);
+    if let Some(resolution) = &claim.resolution {
+        resolution.validate()?;
+    }
     Ok(())
 }

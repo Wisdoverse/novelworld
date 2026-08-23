@@ -49,3 +49,15 @@ pub trait AgentMemoryPort: Send + Sync {
         importance: i32,
     ) -> Result<()>;
 }
+
+/// Server-owned entropy port. Implementations must return the same result for
+/// the same committed turn identity so retries cannot reroll an outcome.
+pub trait DiceRollerPort: Send + Sync {
+    fn roll_d20(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        expected_turn_number: i64,
+        request_fingerprint: &[u8; 32],
+    ) -> u8;
+}

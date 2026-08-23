@@ -113,3 +113,7 @@ Copy [the ADR template](./adr/0000-template.md) to
 `docs/adr/NNNN-short-title.md`. An ADR must be accepted in the same change that
 introduces the decision. Later decisions supersede earlier records; they do not
 rewrite history.
+
+Accepted records:
+
+- [ADR 0001: Source-bound shared rules and server-owned D20 resolution](./adr/0001-source-bound-advanced-game-rules.md)

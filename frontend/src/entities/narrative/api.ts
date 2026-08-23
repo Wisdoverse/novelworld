@@ -3,11 +3,13 @@ import axios from 'axios';
 import { apiClient, getApiErrorCode } from '@/shared/api/client';
 import type {
   NarrativeNode,
+  GameRuleTemplate,
   OpenWorldView,
   PlayerEntry,
   WorldAction,
   WorldState,
   WorldTurnResult,
+  PlayerRuleProfile,
 } from '@/shared/types';
 
 export interface NarrativeTransition {
@@ -73,6 +75,25 @@ export interface CreatePlayerEntityInput {
   capabilities: string[];
   location_id: string;
   inventory: string[];
+  rules: PlayerRuleProfile;
+}
+
+export function useGenerateGameRules(novelId: string) {
+  return useMutation({
+    mutationFn: () => apiClient
+      .post<GameRuleTemplate>(`/narrative/${novelId}/game-rules`, undefined, {
+        timeout: 15_000,
+      })
+      .then(response => response.data),
+    retry: (failureCount, error) => failureCount < 180
+      && getApiErrorCode(error) === 'game_rule_generation_in_progress',
+    retryDelay: (_attempt, error) => {
+      const retryAfter = axios.isAxiosError(error)
+        ? Number(error.response?.headers['retry-after'])
+        : Number.NaN;
+      return Number.isFinite(retryAfter) ? retryAfter * 1_000 : 2_000;
+    },
+  });
 }
 
 export function usePlayerEntry(novelId: string, enabled: boolean, checkpoint?: number) {
