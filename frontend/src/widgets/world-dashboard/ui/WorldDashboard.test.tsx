@@ -92,4 +92,33 @@ describe('WorldDashboard', () => {
     expect(screen.queryByRole('button', { name: '继续确认结果' })).toBeNull();
     expect(intent.hasAttribute('disabled')).toBe(false);
   });
+
+  it('renders advanced attributes and the persisted server dice result', () => {
+    const advancedView = {
+      ...view,
+      player: {
+        ...view.player,
+        rules: { mode: 'advanced', attributes: { qinggong: 12 } },
+      },
+      session: {
+        ...view.session,
+        game_rules: {
+          attributes: [{ key: 'qinggong', label: '轻功', description: '腾挪身法' }],
+          action_rules: [],
+        },
+      },
+      journal: [{
+        ...view.journal[0],
+        resolution: {
+          attribute_key: 'qinggong', attribute_label: '轻功', score: 12,
+          modifier: 1, roll: 14, total: 15, difficulty_class: 13, succeeded: true,
+        },
+      }],
+    } as unknown as OpenWorldView;
+
+    render(<WorldDashboard novelId="novel" view={advancedView} />);
+
+    expect(screen.getByText('小说属性')).toBeTruthy();
+    expect(screen.getByText('轻功检定：D20 14 + 1 = 15 / 难度 13 · 成功')).toBeTruthy();
+  });
 });

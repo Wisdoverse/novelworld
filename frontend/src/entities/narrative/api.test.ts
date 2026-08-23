@@ -8,6 +8,7 @@ import {
   isNarrativeChoiceConflict,
   isWorldTurnOutcomeUnknown,
   narrativeKeys,
+  useGenerateGameRules,
   useSubmitNarrativeChoice,
 } from './api';
 
@@ -32,6 +33,7 @@ function wrapper({ children }: PropsWithChildren) {
 
 describe('narrative error recovery', () => {
   beforeEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     queryClient.clear();
   });
@@ -68,5 +70,47 @@ describe('narrative error recovery', () => {
     await waitFor(() => expect(
       queryClient.getQueryState(narrativeKeys.openWorld('novel'))?.isInvalidated,
     ).toBe(true));
+  });
+
+  it('honors Retry-After while polling an in-progress game-rule generation', async () => {
+    vi.useFakeTimers();
+    const template = {
+      novel_id: 'novel',
+      canon_model_version: 1,
+      schema_version: 1,
+      prompt_version: '1.0',
+      point_budget: 30,
+      minimum_score: 8,
+      maximum_score: 15,
+      attributes: [],
+      action_rules: [],
+      source_chapters: [1],
+    };
+    const inProgress = {
+      isAxiosError: true,
+      response: {
+        status: 409,
+        data: { error: { code: 'game_rule_generation_in_progress' } },
+        headers: { 'retry-after': '3' },
+      },
+    };
+    const post = vi.spyOn(apiClient, 'post')
+      .mockRejectedValueOnce(inProgress)
+      .mockResolvedValueOnce({ data: template });
+    const { result } = renderHook(
+      () => useGenerateGameRules('novel'),
+      { wrapper },
+    );
+
+    let completion: Promise<unknown>;
+    act(() => {
+      completion = result.current.mutateAsync();
+    });
+    await vi.advanceTimersByTimeAsync(2_999);
+    expect(post).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(completion!).resolves.toEqual(template);
+    expect(post).toHaveBeenCalledTimes(2);
   });
 });

@@ -131,6 +131,7 @@ pub enum LlmOperation {
     ChapterBoundaryDetection,
     CharacterExtraction,
     CanonExtraction,
+    GameRuleGeneration,
     NarrativeNodeDetection,
     BranchGeneration,
     NarrativeTransition,
@@ -141,12 +142,13 @@ pub enum LlmOperation {
 }
 
 impl LlmOperation {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::SetupConnection,
         Self::Translation,
         Self::ChapterBoundaryDetection,
         Self::CharacterExtraction,
         Self::CanonExtraction,
+        Self::GameRuleGeneration,
         Self::NarrativeNodeDetection,
         Self::BranchGeneration,
         Self::NarrativeTransition,
@@ -163,6 +165,7 @@ impl LlmOperation {
             Self::ChapterBoundaryDetection => "chapter_boundary_detection",
             Self::CharacterExtraction => "character_extraction",
             Self::CanonExtraction => "canon_extraction",
+            Self::GameRuleGeneration => "game_rule_generation",
             Self::NarrativeNodeDetection => "narrative_node_detection",
             Self::BranchGeneration => "branch_generation",
             Self::NarrativeTransition => "narrative_transition",
@@ -181,7 +184,7 @@ impl LlmOperation {
             Self::OfflineEvaluation => 800,
             Self::ChapterBoundaryDetection => 2_048,
             Self::CharacterChat => 5_120,
-            Self::CanonExtraction => 8_192,
+            Self::CanonExtraction | Self::GameRuleGeneration => 8_192,
             Self::CharacterExtraction
             | Self::NarrativeNodeDetection
             | Self::BranchGeneration

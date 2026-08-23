@@ -112,13 +112,53 @@ export interface PlayerEntity {
   relationships: Record<string, { score: number; last_change: string }>;
   faction_standing: Record<string, number>;
   discovered_knowledge: string[];
+  rules?: PlayerRuleProfile;
   created_at: string;
+}
+
+export type ResolutionMode = 'narrative' | 'advanced';
+
+export interface PlayerRuleProfile {
+  mode: ResolutionMode;
+  canon_model_version: number | null;
+  template_schema_version: number | null;
+  template_prompt_version: string | null;
+  attributes: Record<string, number>;
+}
+
+export interface GameAttribute {
+  key: string;
+  label: string;
+  description: string;
+  default_score: number;
+  source_chapters: number[];
+}
+
+export interface GameActionRule {
+  kind: WorldActionKind;
+  attribute_key: string;
+  difficulty_class: number;
+  description: string;
+  source_chapters: number[];
+}
+
+export interface GameRuleTemplate {
+  novel_id: string;
+  canon_model_version: number;
+  schema_version: number;
+  prompt_version: string;
+  minimum_score: number;
+  maximum_score: number;
+  point_budget: number;
+  attributes: GameAttribute[];
+  action_rules: GameActionRule[];
 }
 
 export interface PlayerEntry {
   player: PlayerEntity | null;
   checkpoint_chapter: number;
   locations: Array<{ id: string; name: string }>;
+  game_rules?: GameRuleTemplate | null;
 }
 
 export type WorldActionKind =
@@ -190,6 +230,21 @@ export interface WorldSession {
   canonical_events: CanonicalEventState[];
   dead_character_ids: string[];
   character_perceptions: Record<string, string>;
+  game_rules?: GameRuleTemplate | null;
+}
+
+export interface ActionCheck {
+  schema_version: number;
+  canon_model_version: number;
+  template_prompt_version: string;
+  attribute_key: string;
+  attribute_label: string;
+  score: number;
+  modifier: number;
+  roll: number;
+  difficulty_class: number;
+  total: number;
+  succeeded: boolean;
 }
 
 export interface WorldTurnTransition {
@@ -226,6 +281,7 @@ export interface WorldTurnJournalEntry {
   turn_id: string;
   turn_number: number;
   action: WorldAction;
+  resolution?: ActionCheck | null;
   transition: WorldTurnTransition;
   created_at: string;
   completed_at: string;
@@ -281,6 +337,7 @@ export interface OpenWorldView {
 export interface WorldTurnResult {
   turn_id: string;
   action: WorldAction;
+  resolution?: ActionCheck | null;
   transition: WorldTurnTransition;
   world_state: WorldState;
 }

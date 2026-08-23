@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { BookOpen, Compass, GitBranch, History, Users } from 'lucide-react';
+import { BookOpen, Compass, Dices, GitBranch, History, Users } from 'lucide-react';
 import { isWorldTurnOutcomeUnknown, useSubmitWorldTurn } from '@/entities/narrative/api';
 import { WorldActionForm, actionLabels } from '@/features/world-action/ui/WorldActionForm';
 import { getApiErrorMessage } from '@/shared/api/client';
@@ -72,6 +72,21 @@ export function WorldDashboard({ novelId, view }: WorldDashboardProps) {
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
+        {view.session.game_rules && view.player.rules?.mode === 'advanced' ? (
+          <div className="rounded-xl border border-[#d2e3fc] bg-[#f8faff] p-4 md:col-span-2">
+            <h3 className="flex items-center gap-2 text-sm font-semibold text-[#0b57d0]">
+              <Dices size={14} /> 小说属性
+            </h3>
+            <dl className="mt-3 grid gap-2 sm:grid-cols-3">
+              {view.session.game_rules.attributes.map(attribute => (
+                <div key={attribute.key} className="rounded-lg bg-white p-3">
+                  <dt className="text-xs text-[#5f6368]">{attribute.label}</dt>
+                  <dd className="text-lg font-semibold text-[#1f1f1f]">{view.player.rules?.attributes[attribute.key]}</dd>
+                </div>
+              ))}
+            </dl>
+          </div>
+        ) : null}
         <div className="rounded-xl border border-[#d2e3fc] bg-[#f8faff] p-4">
           <h3 className="flex items-center gap-2 text-sm font-semibold text-[#0b57d0]">
             <GitBranch size={14} /> 活跃事件线
@@ -130,6 +145,11 @@ export function WorldDashboard({ novelId, view }: WorldDashboardProps) {
                 <span className="mr-2 text-xs font-semibold text-[#0b57d0]">回合 {entry.turn_number}</span>
                 <span className="mr-2 text-xs font-semibold text-[#0d652d]">读者行动</span>
                 {actionLabels[entry.action.kind]}：{entry.action.intent}
+                {entry.resolution ? (
+                  <div className={`mt-2 text-xs font-semibold ${entry.resolution.succeeded ? 'text-[#0d652d]' : 'text-[#b3261e]'}`}>
+                    {entry.resolution.attribute_label}检定：D20 {entry.resolution.roll} {entry.resolution.modifier >= 0 ? '+' : '−'} {Math.abs(entry.resolution.modifier)} = {entry.resolution.total} / 难度 {entry.resolution.difficulty_class} · {entry.resolution.succeeded ? '成功' : '失败'}
+                  </div>
+                ) : null}
                 <div className="mt-1 text-xs text-[#5f6368]">
                   <span className="mr-2 font-semibold text-[#0b57d0]">生成叙事</span>
                   {entry.transition.rendered_narrative}

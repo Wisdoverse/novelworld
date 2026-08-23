@@ -503,6 +503,7 @@ CREATE TABLE world_turns (
     novel_id             UUID NOT NULL,
     request_fingerprint  BYTEA NOT NULL,
     action               JSONB NOT NULL,
+    resolution           JSONB,
     expected_turn_number BIGINT NOT NULL,
     status               VARCHAR(16) NOT NULL,
     attempt              BIGINT NOT NULL DEFAULT 1,
@@ -519,6 +520,8 @@ CREATE TABLE world_turns (
     CONSTRAINT world_turns_request_fingerprint_check
         CHECK (octet_length(request_fingerprint) = 32),
     CONSTRAINT world_turns_action_check CHECK (jsonb_typeof(action) = 'object'),
+    CONSTRAINT world_turns_resolution_check
+        CHECK (resolution IS NULL OR jsonb_typeof(resolution) = 'object'),
     CONSTRAINT world_turns_expected_turn_check CHECK (expected_turn_number >= 0),
     CONSTRAINT world_turns_status_check
         CHECK (status IN ('in_progress', 'completed', 'failed')),
@@ -619,6 +622,61 @@ CREATE TABLE canon_extraction_checkpoints (
     CONSTRAINT canon_extraction_checkpoints_extraction_check
         CHECK (jsonb_typeof(extraction) = 'object')
 );
+
+-- Novel-service-owned, lazily generated gameplay rules. A lease fences provider
+-- work across replicas; only validated ready content is consumed downstream.
+CREATE TABLE novel_game_rule_templates (
+    novel_id            UUID NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
+    canon_model_version INTEGER NOT NULL,
+    schema_version      INTEGER NOT NULL,
+    prompt_version      VARCHAR(100) NOT NULL,
+    status              VARCHAR(16) NOT NULL,
+    attempt             BIGINT NOT NULL DEFAULT 1,
+    lease_expires_at    TIMESTAMPTZ,
+    content             JSONB,
+    failure_code        VARCHAR(64),
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at        TIMESTAMPTZ,
+    PRIMARY KEY (novel_id, canon_model_version),
+    CONSTRAINT novel_game_rule_templates_model_fkey
+        FOREIGN KEY (novel_id, canon_model_version)
+        REFERENCES canon_story_models(novel_id, model_version) ON DELETE CASCADE,
+    CONSTRAINT novel_game_rule_templates_version_check CHECK (
+        canon_model_version >= 1 AND schema_version >= 1
+        AND char_length(prompt_version) BETWEEN 1 AND 100
+    ),
+    CONSTRAINT novel_game_rule_templates_status_check
+        CHECK (status IN ('generating', 'ready', 'failed')),
+    CONSTRAINT novel_game_rule_templates_attempt_check CHECK (attempt >= 1),
+    CONSTRAINT novel_game_rule_templates_state_check CHECK (
+        (status = 'generating' AND lease_expires_at IS NOT NULL
+            AND content IS NULL AND failure_code IS NULL AND completed_at IS NULL)
+        OR (status = 'ready' AND lease_expires_at IS NULL
+            AND jsonb_typeof(content) = 'object' AND failure_code IS NULL
+            AND completed_at IS NOT NULL)
+        OR (status = 'failed' AND lease_expires_at IS NULL
+            AND content IS NULL AND failure_code IS NOT NULL
+            AND failure_code <> '' AND completed_at IS NULL)
+    )
+);
+
+CREATE FUNCTION reject_ready_game_rule_template_update()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $function$
+BEGIN
+    IF OLD.status = 'ready' THEN
+        RAISE EXCEPTION 'ready game rule templates are immutable' USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END
+$function$;
+
+CREATE TRIGGER reject_ready_game_rule_template_update
+    BEFORE UPDATE ON novel_game_rule_templates
+    FOR EACH ROW EXECUTE FUNCTION reject_ready_game_rule_template_update();
 
 -- ─── 阅读进度表 ────────────────────────────────────────────────────────────
 

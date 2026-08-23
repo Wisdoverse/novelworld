@@ -63,6 +63,14 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
   const selectedTarget = targetOptions.some(option => option.id === targetId)
     ? targetId
     : targetRequired ? targetOptions[0]?.id ?? '' : '';
+  const actionRule = view.session.game_rules?.action_rules.find(rule => rule.kind === kind);
+  const actionAttribute = view.session.game_rules?.attributes.find(
+    attribute => attribute.key === actionRule?.attribute_key,
+  );
+  const actionScore = actionAttribute
+    ? view.player.rules?.attributes[actionAttribute.key]
+    : undefined;
+  const actionModifier = actionScore === undefined ? undefined : Math.floor((actionScore - 10) / 2);
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -99,6 +107,13 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
           ))}
         </select>
       </label>
+      {actionRule && actionAttribute && actionScore !== undefined && actionModifier !== undefined ? (
+        <div className="rounded-lg border border-[#d2e3fc] bg-[#f8faff] p-3 text-sm text-[#3c4043]">
+          <span className="font-semibold text-[#0b57d0]">检定预览</span>
+          <span className="ml-2">D20 + {actionAttribute.label} {actionModifier >= 0 ? `+${actionModifier}` : actionModifier}，难度 {actionRule.difficulty_class}</span>
+          <p className="mt-1 text-xs text-[#5f6368]">{actionRule.description}；骰点由服务器在提交时生成。</p>
+        </div>
+      ) : null}
       <label className="block text-sm font-medium text-[#3c4043]">
         目标{targetRequired ? '' : '（可选）'}
         <select

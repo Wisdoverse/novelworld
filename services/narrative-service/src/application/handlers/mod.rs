@@ -6,19 +6,23 @@ use tokio::sync::{oneshot, watch};
 use tracing::{info, warn, Instrument};
 use uuid::Uuid;
 
+use crate::domain::entities::game_rules::{
+    resolve_action_check, GameRuleTemplate, PlayerRuleProfile, ResolutionMode,
+};
 use crate::domain::entities::narrative_node::{NarrativeChoice, NarrativeNode, WorldState};
 use crate::domain::entities::player_entity::PlayerEntity;
 use crate::domain::entities::world_session::{
-    build_world_turn_prompt, parse_world_turn_transition, trailing_chars, CharacterWorldContext,
-    RecentWorldTurnContext, WorldAction, WorldSession, MAX_RECENT_WORLD_NARRATIVE_CHARS,
-    MAX_RECENT_WORLD_TURNS,
+    build_world_turn_prompt_with_check, parse_world_turn_transition_with_check, trailing_chars,
+    CharacterWorldContext, RecentWorldTurnContext, WorldAction, WorldSession,
+    MAX_RECENT_WORLD_NARRATIVE_CHARS, MAX_RECENT_WORLD_TURNS,
 };
-use crate::domain::ports::{AgentMemoryPort, LlmPort, NarrativeLlmTask};
+use crate::domain::ports::{AgentMemoryPort, DiceRollerPort, LlmPort, NarrativeLlmTask};
 use crate::domain::repositories::{
     BeginWorldTurn, ChapterInfo, ChapterReadRepository, CharacterBrief, ChoiceCommit,
-    NarrativeNodeRepository, NovelInfo, PlayerChapter, PlayerChapterOrigin,
-    PlayerChapterRepository, UserChoiceRecord, UserChoiceRepository, WorldStateRepository,
-    WorldTurnClaim, WorldTurnJournalEntry, WorldTurnRepository, WorldTurnResult,
+    GameRuleTemplateRequestError, NarrativeNodeRepository, NovelInfo, PlayerChapter,
+    PlayerChapterOrigin, PlayerChapterRepository, UserChoiceRecord, UserChoiceRepository,
+    WorldStateRepository, WorldTurnClaim, WorldTurnJournalEntry, WorldTurnRepository,
+    WorldTurnResult,
 };
 use crate::domain::services::narrative_engine::{
     build_branch_prompt, build_player_chapter_prompt, is_chinese_narrative, parse_generated_branch,
@@ -118,6 +122,10 @@ pub enum NarrativeError {
     TurnInProgress { retry_after_seconds: u64 },
     #[error("World turn outcome is unknown; retry with the same Idempotency-Key")]
     TurnOutcomeUnknown,
+    #[error("Game rule template generation is in progress")]
+    GameRulesInProgress { retry_after_seconds: u64 },
+    #[error("Game rule template generation budget is exhausted")]
+    GameRulesExhausted,
     #[error("Novel service is unavailable")]
     Unavailable(#[source] anyhow::Error),
     #[error("Consequence generation failed")]
@@ -160,6 +168,7 @@ pub struct CreatePlayerEntityCommand {
     pub capabilities: Vec<String>,
     pub location_id: String,
     pub inventory: Vec<String>,
+    pub rules: PlayerRuleProfile,
 }
 
 #[derive(Debug, Serialize)]
@@ -167,6 +176,7 @@ pub struct PlayerEntry {
     pub player: Option<PlayerEntity>,
     pub checkpoint_chapter: i32,
     pub locations: Vec<CanonEntityRef>,
+    pub game_rules: Option<GameRuleTemplate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -192,6 +202,7 @@ pub struct NarrativeCommandHandler {
     pub world_turn_repo: Arc<dyn WorldTurnRepository>,
     pub llm: Arc<dyn LlmPort>,
     pub agent_memory: Arc<dyn AgentMemoryPort>,
+    pub dice_roller: Arc<dyn DiceRollerPort>,
 }
 
 struct WorldTurnLease {
@@ -324,10 +335,39 @@ impl NarrativeCommandHandler {
             .player_entity()
             .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
         {
+            let game_rules = match player.rules.mode {
+                ResolutionMode::Narrative => None,
+                ResolutionMode::Advanced => {
+                    let template = self
+                        .chapter_repo
+                        .get_game_rule_template(
+                            novel_id,
+                            player.rules.canon_model_version.ok_or_else(|| {
+                                NarrativeError::Internal(anyhow::anyhow!(
+                                    "advanced player template version is missing"
+                                ))
+                            })?,
+                            user_id,
+                        )
+                        .await
+                        .map_err(NarrativeError::Unavailable)?
+                        .ok_or_else(|| {
+                            NarrativeError::Conflict(
+                                "The player's game rule template is unavailable".into(),
+                            )
+                        })?;
+                    player
+                        .rules
+                        .validate_against(&template)
+                        .map_err(|error| NarrativeError::Conflict(error.to_string()))?;
+                    Some(template)
+                }
+            };
             return Ok(PlayerEntry {
                 checkpoint_chapter: player.canonical_checkpoint_chapter,
                 player: Some(player),
                 locations: Vec::new(),
+                game_rules,
             });
         }
         let context = self
@@ -340,7 +380,31 @@ impl NarrativeCommandHandler {
             player: None,
             checkpoint_chapter: context.checkpoint_chapter,
             locations: context.locations,
+            game_rules: None,
         })
+    }
+
+    #[tracing::instrument(skip(self))]
+    pub async fn request_game_rule_template(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+    ) -> NarrativeResult<GameRuleTemplate> {
+        self.owned_novel(novel_id, user_id).await?;
+        self.chapter_repo
+            .request_game_rule_template(novel_id, user_id)
+            .await
+            .map_err(|error| match error {
+                GameRuleTemplateRequestError::InProgress {
+                    retry_after_seconds,
+                } => NarrativeError::GameRulesInProgress {
+                    retry_after_seconds,
+                },
+                GameRuleTemplateRequestError::Exhausted => NarrativeError::GameRulesExhausted,
+                GameRuleTemplateRequestError::Unavailable(error) => {
+                    NarrativeError::Unavailable(error)
+                }
+            })
     }
 
     #[tracing::instrument(skip(self, command))]
@@ -367,6 +431,33 @@ impl NarrativeCommandHandler {
             &command.inventory,
         )
         .map_err(|error| NarrativeError::Validation(error.to_string()))?;
+        command
+            .rules
+            .validate()
+            .map_err(|error| NarrativeError::Validation(error.to_string()))?;
+        let _validated_game_rules = match command.rules.mode {
+            ResolutionMode::Narrative => None,
+            ResolutionMode::Advanced => {
+                let version = command.rules.canon_model_version.ok_or_else(|| {
+                    NarrativeError::Validation("Advanced template version is required".into())
+                })?;
+                let template = self
+                    .chapter_repo
+                    .get_game_rule_template(novel_id, version, user_id)
+                    .await
+                    .map_err(NarrativeError::Unavailable)?
+                    .ok_or_else(|| {
+                        NarrativeError::Validation(
+                            "Game rule template is unavailable at current progress".into(),
+                        )
+                    })?;
+                command
+                    .rules
+                    .validate_against(&template)
+                    .map_err(|error| NarrativeError::Validation(error.to_string()))?;
+                Some(template)
+            }
+        };
         let world_state = self
             .world_state_repo
             .get_or_create(user_id, novel_id)
@@ -386,7 +477,9 @@ impl NarrativeCommandHandler {
                     &command.capabilities,
                     &command.location_id,
                     &command.inventory,
-                ) {
+                )
+                && existing.matches_rules(&command.rules)
+            {
                 Ok(existing)
             } else {
                 Err(NarrativeError::Conflict(
@@ -419,7 +512,7 @@ impl NarrativeCommandHandler {
                 "Player location is not visible at the unlocked checkpoint".into(),
             ));
         }
-        let candidate = PlayerEntity::new(
+        let candidate = PlayerEntity::new_with_rules(
             user_id,
             novel_id,
             context.checkpoint_chapter,
@@ -428,6 +521,7 @@ impl NarrativeCommandHandler {
             command.capabilities,
             command.location_id,
             command.inventory,
+            command.rules,
         )
         .map_err(|error| NarrativeError::Validation(error.to_string()))?;
         let stored = self
@@ -441,7 +535,8 @@ impl NarrativeCommandHandler {
             &candidate.capabilities,
             &candidate.location_id,
             &candidate.inventory,
-        ) {
+        ) || !stored.matches_rules(&candidate.rules)
+        {
             return Err(NarrativeError::Conflict(
                 "PlayerEntity was concurrently created with a different definition".into(),
             ));
@@ -474,15 +569,47 @@ impl NarrativeCommandHandler {
         {
             return self.open_world_view(user_id, novel_id, state).await;
         }
+        let game_rules = match player.rules.mode {
+            ResolutionMode::Narrative => None,
+            ResolutionMode::Advanced => {
+                let version = player.rules.canon_model_version.ok_or_else(|| {
+                    NarrativeError::Internal(anyhow::anyhow!(
+                        "advanced player template version is missing"
+                    ))
+                })?;
+                let template = self
+                    .chapter_repo
+                    .get_game_rule_template(novel_id, version, user_id)
+                    .await
+                    .map_err(NarrativeError::Unavailable)?
+                    .ok_or_else(|| {
+                        NarrativeError::Conflict(
+                            "The player's game rule template is unavailable".into(),
+                        )
+                    })?;
+                player
+                    .rules
+                    .validate_against(&template)
+                    .map_err(|error| NarrativeError::Conflict(error.to_string()))?;
+                Some(template)
+            }
+        };
         let context = self
             .chapter_repo
             .get_world_entry_context(novel_id, player.canonical_checkpoint_chapter, user_id)
             .await
             .map_err(NarrativeError::Unavailable)?
             .ok_or(NarrativeError::NotFound)?;
+        if let Some(template) = &game_rules {
+            if template.canon_model_version != context.model_version {
+                return Err(NarrativeError::Conflict(
+                    "Game rule template no longer matches the world entry canon".into(),
+                ));
+            }
+        }
         let state = self
             .world_state_repo
-            .start_open_world(user_id, novel_id, &context)
+            .start_open_world(user_id, novel_id, &context, game_rules.as_ref())
             .await
             .map_err(NarrativeError::Internal)?;
         self.open_world_view(user_id, novel_id, state).await
@@ -599,12 +726,34 @@ impl NarrativeCommandHandler {
             .ok_or(NarrativeError::NotFound)?;
         let request =
             serde_json::to_vec(&action).map_err(|error| NarrativeError::Internal(error.into()))?;
+        let request_fingerprint: [u8; 32] = Sha256::digest(&request).into();
+        let resolution = match player.rules.mode {
+            ResolutionMode::Narrative => None,
+            ResolutionMode::Advanced => {
+                let template = session.game_rules.as_ref().ok_or_else(|| {
+                    NarrativeError::Conflict(
+                        "Advanced game rules are missing from the session".into(),
+                    )
+                })?;
+                let roll = self.dice_roller.roll_d20(
+                    user_id,
+                    novel_id,
+                    session.turn_number,
+                    &request_fingerprint,
+                );
+                Some(
+                    resolve_action_check(template, &player.rules, action.kind, roll)
+                        .map_err(|error| NarrativeError::Validation(error.to_string()))?,
+                )
+            }
+        };
         let claim = WorldTurnClaim {
             id: turn_id,
             user_id,
             novel_id,
-            request_fingerprint: Sha256::digest(&request).to_vec(),
+            request_fingerprint: request_fingerprint.to_vec(),
             action,
+            resolution,
             expected_turn_number: session.turn_number,
         };
         let (claim, attempt) = match self
@@ -613,7 +762,7 @@ impl NarrativeCommandHandler {
             .await
             .map_err(NarrativeError::Internal)?
         {
-            BeginWorldTurn::Acquired { claim, attempt } => (claim, attempt),
+            BeginWorldTurn::Acquired { claim, attempt } => (*claim, attempt),
             BeginWorldTurn::Completed(result) => {
                 let result = *result;
                 // Replay path: the committed turn may have missed its memory
@@ -678,13 +827,14 @@ impl NarrativeCommandHandler {
         };
 
         let mut lease = WorldTurnLease::start(self.world_turn_repo.clone(), claim.id, attempt);
-        let prompt = match build_world_turn_prompt(
+        let prompt = match build_world_turn_prompt_with_check(
             &novel.title,
             &player,
             &claim.action,
             &session,
             &world_state.state,
             &recent_turns,
+            claim.resolution.as_ref(),
         ) {
             Ok(prompt) => prompt,
             Err(error) => {
@@ -725,11 +875,12 @@ impl NarrativeCommandHandler {
                 "world transition exceeded its budget"
             )));
         }
-        let transition = match parse_world_turn_transition(
+        let transition = match parse_world_turn_transition_with_check(
             &raw,
             &claim.action,
             &session.entry_context,
             &session,
+            claim.resolution.as_ref(),
         ) {
             Ok(transition) => transition,
             Err(error) => {

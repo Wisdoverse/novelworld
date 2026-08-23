@@ -5,6 +5,7 @@ import type { NarrativeNode, OpenWorldView } from '@/shared/types';
 import { ReaderPage, splitChapterAtAnchor } from './ReaderPage';
 
 const mocks = vi.hoisted(() => ({
+  novelId: 'novel',
   navigate: vi.fn(),
   mutate: vi.fn(),
   reset: vi.fn(),
@@ -34,11 +35,11 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('react-router-dom', () => ({
   useNavigate: () => mocks.navigate,
-  useParams: () => ({ novelId: 'novel', chapterNum: '2' }),
+  useParams: () => ({ novelId: mocks.novelId, chapterNum: '2' }),
 }));
 
 vi.mock('@/entities/novel/api', () => ({
-  useNovel: () => ({ data: { id: 'novel', title: 'Novel', total_chapters: 3 } }),
+  useNovel: () => ({ data: { id: mocks.novelId, title: 'Novel', total_chapters: 3 } }),
   useChapter: () => ({
     data: {
       chapter_number: 2,
@@ -138,6 +139,12 @@ vi.mock('@/entities/narrative/api', () => ({
     isPending: false,
     isError: false,
   }),
+  useGenerateGameRules: () => ({
+    mutate: vi.fn(),
+    isPending: false,
+    isError: false,
+    error: null,
+  }),
   useWorldState: () => ({
     data: { state: { choices: mocks.worldChoices } },
     refetch: mocks.refetchWorldState,
@@ -212,6 +219,7 @@ vi.mock('@/widgets/world-dashboard/ui/WorldDashboard', () => ({
 describe('ReaderPage progress gate', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.novelId = 'novel';
     mocks.progressSaving = false;
     mocks.progressError = true;
     mocks.progressChapter = 1;
@@ -348,6 +356,7 @@ describe('ReaderPage progress gate', () => {
     render(<ReaderPage />);
 
     expect(screen.getByRole('heading', { name: '创建你的原创角色' })).toBeTruthy();
+    expect(screen.getByText('行动判定（高级项）')).toBeTruthy();
     expect(screen.getByRole('button', { name: '请先创建角色' }).hasAttribute('disabled')).toBe(true);
     expect(mocks.branchEnabled).toBe(false);
 
@@ -364,7 +373,28 @@ describe('ReaderPage progress gate', () => {
       capabilities: ['识图', '追踪'],
       location_id: 'tower',
       inventory: ['旧地图'],
+      rules: {
+        mode: 'narrative',
+        canon_model_version: null,
+        template_schema_version: null,
+        template_prompt_version: null,
+        attributes: {},
+      },
     }));
+  });
+
+  it('resets player-entry state when navigating to another novel', () => {
+    mocks.progressError = false;
+    mocks.player = null;
+    const page = render(<ReaderPage />);
+
+    fireEvent.change(screen.getByLabelText('名字'), { target: { value: '云舟' } });
+    expect((screen.getByLabelText('名字') as HTMLInputElement).value).toBe('云舟');
+
+    mocks.novelId = 'another-novel';
+    page.rerender(<ReaderPage />);
+
+    expect((screen.getByLabelText('名字') as HTMLInputElement).value).toBe('');
   });
 
   it('lets a completed reader choose an earlier unlocked entry checkpoint', async () => {

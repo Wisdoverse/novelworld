@@ -85,4 +85,32 @@ describe('WorldActionForm', () => {
 
     expect(screen.getByText('当前世界状态没有适合此行动的目标。')).toBeTruthy();
   });
+
+  it('previews the server-owned D20 rule for an advanced player', () => {
+    const advancedView = {
+      ...view,
+      player: {
+        ...view.player,
+        rules: { mode: 'advanced', attributes: { qinggong: 12 } },
+      },
+      session: {
+        ...view.session,
+        game_rules: {
+          attributes: [{ key: 'qinggong', label: '轻功', description: '腾挪身法' }],
+          action_rules: [{
+            kind: 'travel',
+            attribute_key: 'qinggong',
+            difficulty_class: 13,
+            description: '在复杂地形中移动',
+          }],
+        },
+      },
+    } as unknown as OpenWorldView;
+
+    render(<WorldActionForm view={advancedView} isPending={false} onSubmit={vi.fn()} />);
+
+    expect(screen.getByText('检定预览')).toBeTruthy();
+    expect(screen.getByText(/D20 \+ 轻功 \+1，难度 13/)).toBeTruthy();
+    expect(screen.getByText(/骰点由服务器在提交时生成/)).toBeTruthy();
+  });
 });
