@@ -25,6 +25,7 @@ impl LlmPort for LlmAdapter {
             }
             NovelLlmTask::CharacterExtraction => llm_client::LlmOperation::CharacterExtraction,
             NovelLlmTask::CanonExtraction => llm_client::LlmOperation::CanonExtraction,
+            NovelLlmTask::GameRuleGeneration => llm_client::LlmOperation::GameRuleGeneration,
             NovelLlmTask::NarrativeNodeDetection => {
                 llm_client::LlmOperation::NarrativeNodeDetection
             }

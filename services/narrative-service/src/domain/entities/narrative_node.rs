@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::domain::entities::game_rules::{ActionCheck, GameRuleTemplate};
 use crate::domain::entities::player_entity::PlayerEntity;
 use crate::domain::entities::world_session::{
     ActiveThread, CanonicalEventStatus, CharacterWorldContext, WorldAction, WorldActionKind,
@@ -315,12 +316,29 @@ impl WorldState {
         session
             .validate()
             .map_err(|error| WorldStateError::InvalidWorldSession(error.to_string()))?;
+        if session
+            .game_rules
+            .as_ref()
+            .is_some_and(|template| template.novel_id != self.novel_id)
+        {
+            return Err(WorldStateError::InvalidWorldSession(
+                "game rule template belongs to another novel".into(),
+            ));
+        }
         Ok(Some(session))
     }
 
     pub fn start_open_world(
         &mut self,
         context: &WorldEntryContext,
+    ) -> Result<WorldSession, WorldStateError> {
+        self.start_open_world_with_rules(context, None)
+    }
+
+    pub fn start_open_world_with_rules(
+        &mut self,
+        context: &WorldEntryContext,
+        game_rules: Option<&GameRuleTemplate>,
     ) -> Result<WorldSession, WorldStateError> {
         let player = self.player_entity()?.ok_or_else(|| {
             WorldStateError::InvalidWorldSession("PlayerEntity must be created first".into())
@@ -331,15 +349,17 @@ impl WorldState {
             ));
         }
         if let Some(existing) = self.open_world()? {
-            if existing.entry_context != *context {
+            // The stored entry context is the pinned canonical checkpoint;
+            // a later model must not rewrite it on an idempotent start.
+            if existing.game_rules.as_ref() != game_rules {
                 return Err(WorldStateError::InvalidWorldSession(
-                    "existing world session uses different canon".into(),
+                    "existing world session uses different game rules".into(),
                 ));
             }
             return Ok(existing);
         }
 
-        let session = WorldSession::from_context(context)
+        let session = WorldSession::from_context_with_rules(context, game_rules)
             .map_err(|error| WorldStateError::InvalidWorldSession(error.to_string()))?;
         let mut next = self.state.clone();
         {
@@ -373,6 +393,17 @@ impl WorldState {
         transition: &WorldTurnTransition,
         context: &WorldEntryContext,
     ) -> Result<(), WorldStateError> {
+        self.apply_world_turn_with_check(turn_id, action, transition, context, None)
+    }
+
+    pub fn apply_world_turn_with_check(
+        &mut self,
+        turn_id: Uuid,
+        action: &WorldAction,
+        transition: &WorldTurnTransition,
+        context: &WorldEntryContext,
+        resolution: Option<&ActionCheck>,
+    ) -> Result<(), WorldStateError> {
         if turn_id.is_nil() {
             return Err(WorldStateError::InvalidWorldSession(
                 "world turn ID must not be nil".into(),
@@ -387,7 +418,7 @@ impl WorldState {
             self.validate_world_action(action, context)?;
         }
         transition
-            .validate_against(action, context, &session)
+            .validate_against_with_check(action, context, &session, resolution)
             .map_err(|error| WorldStateError::InvalidWorldSession(error.to_string()))?;
         let mut player = self.player_entity()?.ok_or_else(|| {
             WorldStateError::InvalidWorldSession("PlayerEntity is missing".into())

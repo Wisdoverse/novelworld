@@ -8,6 +8,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::domain::entities::{
+    game_rules::GameRuleTemplate,
     narrative_node::WorldState,
     player_entity::{PlayerEntity, RelationshipState},
     world_session::WorldEntryContext,
@@ -139,6 +140,7 @@ impl WorldStateRepository for PgWorldStateRepository {
         user_id: Uuid,
         novel_id: Uuid,
         context: &WorldEntryContext,
+        game_rules: Option<&GameRuleTemplate>,
     ) -> Result<WorldState> {
         context.validate()?;
         let mut transaction = self.pool.begin().await?;
@@ -155,12 +157,8 @@ impl WorldStateRepository for PgWorldStateRepository {
         .fetch_one(&mut *transaction)
         .await?;
         let mut world_state = WorldState::from(row);
-        if world_state.open_world()?.is_some() {
-            transaction.commit().await?;
-            return Ok(world_state);
-        }
         let before = world_state.state.clone();
-        world_state.start_open_world(context)?;
+        world_state.start_open_world_with_rules(context, game_rules)?;
         if world_state.state != before {
             let row = sqlx::query_as::<_, WorldStateRow>(
                 r#"

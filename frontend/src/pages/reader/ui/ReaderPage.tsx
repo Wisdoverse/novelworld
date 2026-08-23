@@ -394,8 +394,10 @@ export function ReaderPage() {
           </div>
         ) : null}
         {isSelfMode && playerEntry && !playerEntry.player ? (
-          <PlayerEntryForm
-            checkpointChapter={playerEntry.checkpoint_chapter}
+                  <PlayerEntryForm
+                    key={novelId}
+                    novelId={novelId ?? ''}
+                    checkpointChapter={playerEntry.checkpoint_chapter}
             unlockedThroughChapter={readingProgress?.current_chapter ?? playerEntry.checkpoint_chapter}
             locations={playerEntry.locations}
             isPending={createPlayerEntity.isPending}

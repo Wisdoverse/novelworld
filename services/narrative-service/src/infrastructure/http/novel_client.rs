@@ -1,10 +1,12 @@
-use crate::domain::entities::world_session::WorldEntryContext;
+use crate::domain::entities::{game_rules::GameRuleTemplate, world_session::WorldEntryContext};
 use crate::domain::repositories::{
-    ChapterInfo, ChapterReadRepository, CharacterBrief, NovelInfo, PlayerEntryContext,
+    ChapterInfo, ChapterReadRepository, CharacterBrief, GameRuleTemplateRequestError, NovelInfo,
+    PlayerEntryContext,
 };
 use crate::domain::services::narrative_transition::CanonContext;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use reqwest::header::RETRY_AFTER;
 use reqwest::Client;
 use std::time::Duration;
 use uuid::Uuid;
@@ -17,6 +19,7 @@ pub struct NovelServiceClient {
 }
 
 const NOVEL_SERVICE_TIMEOUT: Duration = Duration::from_secs(2);
+const GAME_RULE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl NovelServiceClient {
     pub fn new(base_url: String, internal_service_token: String) -> Self {
@@ -285,5 +288,106 @@ impl ChapterReadRepository for NovelServiceClient {
             return Err(anyhow!("Novel service returned the wrong world checkpoint"));
         }
         Ok(Some(context))
+    }
+
+    async fn request_game_rule_template(
+        &self,
+        novel_id: Uuid,
+        user_id: Uuid,
+    ) -> std::result::Result<GameRuleTemplate, GameRuleTemplateRequestError> {
+        let response = self
+            .client
+            .post(format!(
+                "{}/internal/novels/{}/game-rules",
+                self.base_url, novel_id
+            ))
+            .timeout(GAME_RULE_REQUEST_TIMEOUT)
+            .header("X-User-Id", user_id.to_string())
+            .header("X-Internal-Service-Token", &self.internal_service_token)
+            .send()
+            .await
+            .map_err(|error| GameRuleTemplateRequestError::Unavailable(error.into()))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let retry_after_seconds = response
+                .headers()
+                .get(RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|seconds| *seconds > 0);
+            if status == reqwest::StatusCode::CONFLICT {
+                if let Some(retry_after_seconds) = retry_after_seconds {
+                    return Err(GameRuleTemplateRequestError::InProgress {
+                        retry_after_seconds,
+                    });
+                }
+            }
+            let body = response.json::<serde_json::Value>().await.ok();
+            let code = body
+                .as_ref()
+                .and_then(|body| body.get("error"))
+                .and_then(|error| error.get("code"))
+                .and_then(serde_json::Value::as_str);
+            if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
+                && code == Some("game_rule_generation_exhausted")
+            {
+                return Err(GameRuleTemplateRequestError::Exhausted);
+            }
+            return Err(GameRuleTemplateRequestError::Unavailable(anyhow!(
+                "Novel service returned {status} for game rules"
+            )));
+        }
+        let template = response
+            .json::<GameRuleTemplate>()
+            .await
+            .map_err(|error| GameRuleTemplateRequestError::Unavailable(error.into()))?;
+        template.validate().map_err(|error| {
+            GameRuleTemplateRequestError::Unavailable(anyhow!(
+                "Novel service returned invalid game rules: {error}"
+            ))
+        })?;
+        if template.novel_id != novel_id {
+            return Err(GameRuleTemplateRequestError::Unavailable(anyhow!(
+                "Novel service returned game rules for another novel"
+            )));
+        }
+        Ok(template)
+    }
+
+    async fn get_game_rule_template(
+        &self,
+        novel_id: Uuid,
+        canon_model_version: i32,
+        user_id: Uuid,
+    ) -> Result<Option<GameRuleTemplate>> {
+        let response = self
+            .client
+            .get(format!(
+                "{}/internal/novels/{}/game-rules/{}",
+                self.base_url, novel_id, canon_model_version
+            ))
+            .header("X-User-Id", user_id.to_string())
+            .header("X-Internal-Service-Token", &self.internal_service_token)
+            .send()
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "Novel service returned {} for game rules",
+                response.status()
+            ));
+        }
+        let template = response.json::<GameRuleTemplate>().await?;
+        template
+            .validate()
+            .map_err(|error| anyhow!("Novel service returned invalid game rules: {error}"))?;
+        if template.novel_id != novel_id || template.canon_model_version != canon_model_version {
+            return Err(anyhow!(
+                "Novel service returned the wrong game rule template"
+            ));
+        }
+        Ok(Some(template))
     }
 }

@@ -7,6 +7,7 @@ use agent_service::infrastructure::persistence::{
 };
 use narrative_service::domain::{
     entities::{
+        game_rules::ActionCheck,
         narrative_node::{NarrativeChoice, NarrativeNode},
         player_entity::PlayerEntity,
         world_session::{
@@ -38,11 +39,14 @@ use novel_service::domain::{
     },
     entities::chapter::Chapter,
     entities::character::Character,
+    entities::game_rule_template::{
+        GameActionKind, GameActionRule, GameAttribute, GameRuleTemplate,
+    },
     entities::novel::Novel,
     ports::{ImagePort, LlmPort, NovelLlmTask, PrivacyCleanupPort, SourceFileStorage},
     repositories::{
-        CanonExtractionCheckpoint, CanonStoryModelRepository, ChapterRepository,
-        CharacterRelationshipRecord, CharacterRepository, NovelRepository,
+        BeginGameRuleGeneration, CanonExtractionCheckpoint, CanonStoryModelRepository,
+        ChapterRepository, CharacterRelationshipRecord, CharacterRepository, NovelRepository,
         ReadingProgressRepository, SourceFileDeletionRepository, IMPORT_BUDGET_EXHAUSTED_MESSAGE,
         MAX_IMPORT_ATTEMPTS,
     },
@@ -1748,6 +1752,229 @@ async fn canon_story_models_are_versioned_and_immutable() {
     );
 }
 
+fn test_game_rule_template(novel_id: Uuid) -> GameRuleTemplate {
+    let attributes = ["vigor", "insight", "influence"]
+        .into_iter()
+        .map(|key| GameAttribute {
+            key: key.into(),
+            label: key.into(),
+            description: format!("{key} in this novel"),
+            default_score: 10,
+            source_chapters: vec![1],
+        })
+        .collect::<Vec<_>>();
+    let action_rules = GameActionKind::ALL
+        .into_iter()
+        .enumerate()
+        .map(|(index, kind)| GameActionRule {
+            kind,
+            attribute_key: attributes[index % attributes.len()].key.clone(),
+            difficulty_class: 12,
+            description: "Resolve an uncertain action".into(),
+            source_chapters: vec![1],
+        })
+        .collect();
+    GameRuleTemplate::new(novel_id, 1, attributes, action_rules).unwrap()
+}
+
+async fn seed_game_rule_model(pool: &PgPool, label: &str) -> (Uuid, Uuid) {
+    let user_id = insert_test_user(pool, label).await;
+    let novel_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO novels (id, user_id, title, total_chapters, status) \
+         VALUES ($1, $2, $3, 1, 'ready')",
+    )
+    .bind(novel_id)
+    .bind(user_id)
+    .bind(format!("{label} novel"))
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO canon_story_models \
+         (novel_id, model_version, schema_version, prompt_version, content) \
+         VALUES ($1, 1, 1, 'game-rule-contract-v1', '{}'::jsonb)",
+    )
+    .bind(novel_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    (user_id, novel_id)
+}
+
+#[tokio::test]
+async fn game_rule_generation_is_single_owner_fenced_bounded_and_immutable() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (user_id, novel_id) = seed_game_rule_model(&pool, "game-rule-contract").await;
+    let repository = PgCanonStoryModelRepository::new(pool.clone());
+
+    let (first, second) = tokio::join!(
+        repository.begin_game_rule_generation(novel_id, 1),
+        repository.begin_game_rule_generation(novel_id, 1),
+    );
+    let outcomes = [first.unwrap(), second.unwrap()];
+    let attempt = outcomes
+        .iter()
+        .find_map(|outcome| match outcome {
+            BeginGameRuleGeneration::Acquired { attempt } => Some(*attempt),
+            _ => None,
+        })
+        .expect("one concurrent caller must acquire the generation lease");
+    assert_eq!(attempt, 1);
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, BeginGameRuleGeneration::InProgress { .. }))
+            .count(),
+        1,
+    );
+    assert!(repository
+        .renew_game_rule_generation(novel_id, 1, attempt)
+        .await
+        .unwrap());
+
+    sqlx::query(
+        "UPDATE novel_game_rule_templates \
+         SET lease_expires_at = NOW() - INTERVAL '1 second' \
+         WHERE novel_id = $1 AND canon_model_version = 1",
+    )
+    .bind(novel_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let reclaimed = match repository
+        .begin_game_rule_generation(novel_id, 1)
+        .await
+        .unwrap()
+    {
+        BeginGameRuleGeneration::Acquired { attempt } => attempt,
+        outcome => panic!("unexpected reclaim outcome: {outcome:?}"),
+    };
+    assert_eq!(reclaimed, 2);
+    assert!(!repository
+        .complete_game_rule_generation(&test_game_rule_template(novel_id), attempt)
+        .await
+        .unwrap());
+    assert!(repository
+        .fail_game_rule_generation(novel_id, 1, reclaimed, "provider_failed")
+        .await
+        .unwrap());
+    let final_attempt = match repository
+        .begin_game_rule_generation(novel_id, 1)
+        .await
+        .unwrap()
+    {
+        BeginGameRuleGeneration::Acquired { attempt } => attempt,
+        outcome => panic!("unexpected final claim outcome: {outcome:?}"),
+    };
+    assert_eq!(final_attempt, 3);
+    let template = test_game_rule_template(novel_id);
+    assert!(repository
+        .complete_game_rule_generation(&template, final_attempt)
+        .await
+        .unwrap());
+    assert_eq!(
+        repository
+            .find_game_rule_template(novel_id, 1)
+            .await
+            .unwrap(),
+        Some(template.clone()),
+    );
+    assert!(matches!(
+        repository
+            .begin_game_rule_generation(novel_id, 1)
+            .await
+            .unwrap(),
+        BeginGameRuleGeneration::Ready(found) if found == template
+    ));
+    let immutable_error = sqlx::query(
+        "UPDATE novel_game_rule_templates SET prompt_version = 'changed' \
+         WHERE novel_id = $1 AND canon_model_version = 1",
+    )
+    .bind(novel_id)
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    assert_eq!(
+        immutable_error
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some(std::borrow::Cow::Borrowed("55000")),
+    );
+
+    let (exhausted_user, exhausted_novel) =
+        seed_game_rule_model(&pool, "game-rule-exhaustion").await;
+    for expected_attempt in 1..=2 {
+        let claimed = repository
+            .begin_game_rule_generation(exhausted_novel, 1)
+            .await
+            .unwrap();
+        let attempt = match claimed {
+            BeginGameRuleGeneration::Acquired { attempt } => attempt,
+            outcome => panic!("unexpected budget claim: {outcome:?}"),
+        };
+        assert_eq!(attempt, expected_attempt);
+        assert!(repository
+            .fail_game_rule_generation(exhausted_novel, 1, attempt, "invalid_output")
+            .await
+            .unwrap());
+    }
+    let final_claim = repository
+        .begin_game_rule_generation(exhausted_novel, 1)
+        .await
+        .unwrap();
+    assert!(matches!(
+        final_claim,
+        BeginGameRuleGeneration::Acquired { attempt: 3 }
+    ));
+    sqlx::query(
+        "UPDATE novel_game_rule_templates \
+         SET lease_expires_at = NOW() - INTERVAL '1 second' \
+         WHERE novel_id = $1 AND canon_model_version = 1",
+    )
+    .bind(exhausted_novel)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(matches!(
+        repository
+            .begin_game_rule_generation(exhausted_novel, 1)
+            .await
+            .unwrap(),
+        BeginGameRuleGeneration::Exhausted
+    ));
+    assert!(matches!(
+        repository
+            .begin_game_rule_generation(exhausted_novel, 1)
+            .await
+            .unwrap(),
+        BeginGameRuleGeneration::Exhausted
+    ));
+    assert_eq!(
+        sqlx::query_as::<_, (String, i64, Option<String>)>(
+            "SELECT status, attempt, failure_code FROM novel_game_rule_templates \
+             WHERE novel_id = $1 AND canon_model_version = 1",
+        )
+        .bind(exhausted_novel)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        ("failed".into(), 3, Some("budget_exhausted".into())),
+    );
+
+    for cleanup_user in [user_id, exhausted_user] {
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(cleanup_user)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+}
+
 async fn wait_for_blocked_query(pool: &PgPool, needle: &str) {
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
@@ -2833,14 +3060,14 @@ async fn production_repositories_match_fresh_schema() {
         }],
     };
     let started = world_state_repo
-        .start_open_world(user_id, novel_id, &world_context)
+        .start_open_world(user_id, novel_id, &world_context, None)
         .await
         .unwrap();
     assert_eq!(started.open_world().unwrap().unwrap().turn_number, 0);
     let mut drifted_context = world_context.clone();
     drifted_context.model_version = 2;
     let resumed = world_state_repo
-        .start_open_world(user_id, novel_id, &drifted_context)
+        .start_open_world(user_id, novel_id, &drifted_context, None)
         .await
         .unwrap();
     assert_eq!(resumed, started);
@@ -2867,6 +3094,7 @@ async fn production_repositories_match_fresh_schema() {
         request_fingerprint: vec![7; 32],
         action: action.clone(),
         expected_turn_number: 0,
+        resolution: None,
     };
     let attempt = match world_turn_repo.begin_turn(&claim).await.unwrap() {
         BeginWorldTurn::Acquired { attempt, .. } => attempt,
@@ -3118,7 +3346,7 @@ async fn seed_world_turn(pool: &PgPool) -> (Uuid, Uuid, WorldEntryContext) {
         character_goals: vec![],
     };
     world_state_repo
-        .start_open_world(user_id, novel_id, &context)
+        .start_open_world(user_id, novel_id, &context, None)
         .await
         .unwrap();
     (user_id, novel_id, context)
@@ -3168,6 +3396,7 @@ fn world_turn_claim_at(user_id: Uuid, novel_id: Uuid, expected_turn_number: i64)
         request_fingerprint: vec![7; 32],
         action: world_turn_action(),
         expected_turn_number,
+        resolution: None,
     }
 }
 
@@ -3278,6 +3507,64 @@ async fn world_turn_completed_key_replays_and_cannot_commit_twice() {
     .unwrap();
     assert_eq!(status, "completed");
     assert_eq!(turn_number, 1, "the world state must advance exactly once");
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn world_turn_persists_and_exactly_replays_the_server_action_check() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (user_id, novel_id, context) = seed_world_turn(&pool).await;
+    let repo = PgWorldTurnRepository::new(pool.clone());
+    let resolution = ActionCheck {
+        schema_version: 1,
+        canon_model_version: 1,
+        template_prompt_version: "novel-game-rules-v1".into(),
+        attribute_key: "vigor".into(),
+        attribute_label: "身法".into(),
+        score: 12,
+        modifier: 1,
+        roll: 14,
+        difficulty_class: 13,
+        total: 15,
+        succeeded: true,
+    };
+    let claim = WorldTurnClaim {
+        resolution: Some(resolution.clone()),
+        ..world_turn_claim(user_id, novel_id)
+    };
+    let attempt = world_turn_acquire(&repo, &claim).await;
+    let completed = repo
+        .complete_turn(&claim, attempt, &world_turn_transition(), &context)
+        .await
+        .unwrap();
+    let replayed = match repo.begin_turn(&claim).await.unwrap() {
+        BeginWorldTurn::Completed(replayed) => *replayed,
+        outcome => panic!("unexpected replay: {outcome:?}"),
+    };
+    let journal = repo.journal(user_id, novel_id, 10).await.unwrap();
+
+    assert_eq!(completed.resolution, Some(resolution.clone()));
+    assert_eq!(replayed, completed);
+    assert_eq!(journal[0].resolution, Some(resolution.clone()));
+    assert_eq!(
+        sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT resolution FROM world_turns WHERE id = $1",
+        )
+        .bind(claim.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        serde_json::to_value(resolution).unwrap(),
+    );
+
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
         .execute(&pool)
@@ -3566,6 +3853,7 @@ async fn world_turn_multi_turn_journal_rebuilds_equivalent_state() {
         request_fingerprint: vec![8; 32],
         action: world_turn_action_to("harbor", "前往港湾"),
         expected_turn_number: 1,
+        resolution: None,
     };
     let attempt2 = world_turn_acquire(&repo, &claim2).await;
     let transition2 = WorldTurnTransition {

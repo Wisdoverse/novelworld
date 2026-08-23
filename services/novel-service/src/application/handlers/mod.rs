@@ -6,7 +6,7 @@ use std::{
     collections::{HashMap, HashSet},
     future::Future,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::{oneshot, watch, OwnedSemaphorePermit, Semaphore};
 use tracing::{error, info, Instrument};
@@ -16,6 +16,7 @@ use crate::application::commands::ImportNovelCommand;
 use crate::domain::entities::{
     chapter::{chapters_are_importable, Chapter},
     character::Character,
+    game_rule_template::GameRuleTemplate,
     novel::Novel,
 };
 use crate::domain::ports::{
@@ -23,12 +24,14 @@ use crate::domain::ports::{
     TextTranslator,
 };
 use crate::domain::repositories::{
-    CanonExtractionCheckpoint, CanonStoryModelRepository, ChapterRepository,
-    CharacterRelationshipRecord, CharacterRepository, ImportClaim, LoreExcerpt, NovelRepository,
-    ReadingProgressRecord, ReadingProgressRepository, SourceFileDeletionRepository,
-    IMPORT_BUDGET_EXHAUSTED_MESSAGE,
+    BeginGameRuleGeneration, CanonExtractionCheckpoint, CanonStoryModelRepository,
+    ChapterRepository, CharacterRelationshipRecord, CharacterRepository, ImportClaim, LoreExcerpt,
+    NovelRepository, ReadingProgressRecord, ReadingProgressRepository,
+    SourceFileDeletionRepository, IMPORT_BUDGET_EXHAUSTED_MESSAGE,
 };
-use crate::domain::services::{canon_story_extractor, chapter_boundary_detector, node_detector};
+use crate::domain::services::{
+    canon_story_extractor, chapter_boundary_detector, game_rule_generator, node_detector,
+};
 use crate::domain::services::{
     character_extractor::{
         build_chunk_extraction_prompt, build_extraction_prompt, build_representative_sample,
@@ -408,6 +411,24 @@ pub enum ShelfMutationError {
     Repository(#[source] anyhow::Error),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum GameRuleTemplateRequest {
+    Ready(GameRuleTemplate),
+    InProgress { retry_after_seconds: u64 },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum GameRuleTemplateRequestError {
+    #[error("Novel not found")]
+    NovelNotFound,
+    #[error("Canonical story model is unavailable")]
+    CanonUnavailable,
+    #[error("Game rule generation budget is exhausted")]
+    BudgetExhausted,
+    #[error("Game rule repository failed")]
+    Repository(#[source] anyhow::Error),
+}
+
 const MAX_AVATARS_PER_NOVEL: usize = 30;
 const MAX_IMPORT_CHAPTERS: usize = 2_048;
 const MAX_BOUNDARY_REPAIR_SEGMENTS: usize = 8;
@@ -417,6 +438,7 @@ const MAX_BOUNDARY_REPAIR_ROUNDS: usize = 3;
 const MAX_IMPORT_PROVIDER_CALLS: usize = 640;
 const IMPORT_LEASE_HEARTBEAT: Duration = Duration::from_secs(30);
 const IMPORT_RECOVERY_INTERVAL: Duration = Duration::from_secs(30);
+const GAME_RULE_LEASE_HEARTBEAT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, thiserror::Error)]
 #[error("Novel import lease was lost")]
@@ -489,6 +511,101 @@ impl ImportLease {
 }
 
 impl Drop for ImportLease {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+struct GameRuleLease {
+    stop: Option<oneshot::Sender<()>>,
+    lost: watch::Receiver<bool>,
+}
+
+impl GameRuleLease {
+    fn start(
+        repo: Arc<dyn CanonStoryModelRepository>,
+        novel_id: Uuid,
+        canon_model_version: i32,
+        attempt: i64,
+    ) -> Self {
+        let (stop, mut stopped) = oneshot::channel();
+        let (lost, receiver) = watch::channel(false);
+        let current_span = tracing::Span::current();
+        tokio::spawn(
+            async move {
+                let mut heartbeat = tokio::time::interval(GAME_RULE_LEASE_HEARTBEAT);
+                heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                heartbeat.tick().await;
+                loop {
+                    tokio::select! {
+                        _ = &mut stopped => return,
+                        _ = heartbeat.tick() => {
+                            match repo
+                                .renew_game_rule_generation(
+                                    novel_id,
+                                    canon_model_version,
+                                    attempt,
+                                )
+                                .await
+                            {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    tracing::warn!(
+                                        %novel_id,
+                                        canon_model_version,
+                                        attempt,
+                                        "game rule generation lease was fenced"
+                                    );
+                                    let _ = lost.send(true);
+                                    return;
+                                }
+                                Err(error) => {
+                                    tracing::error!(
+                                        %novel_id,
+                                        canon_model_version,
+                                        attempt,
+                                        error = ?error,
+                                        "game rule generation lease renewal failed"
+                                    );
+                                    let _ = lost.send(true);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .instrument(current_span),
+        );
+        Self {
+            stop: Some(stop),
+            lost: receiver,
+        }
+    }
+
+    async fn run<T>(&mut self, operation: impl Future<Output = T>) -> Option<T> {
+        if *self.lost.borrow() {
+            return None;
+        }
+        tokio::select! {
+            biased;
+            result = operation => Some(result),
+            _ = self.wait_until_lost() => None,
+        }
+    }
+
+    async fn wait_until_lost(&mut self) {
+        while !*self.lost.borrow() && self.lost.changed().await.is_ok() {}
+    }
+
+    fn stop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+    }
+}
+
+impl Drop for GameRuleLease {
     fn drop(&mut self) {
         self.stop();
     }
@@ -572,6 +689,163 @@ impl NovelCommandHandler {
             return Err(ShelfMutationError::PrivacyCleanup(error));
         }
         Ok(())
+    }
+
+    pub async fn request_game_rule_template(
+        self: &Arc<Self>,
+        novel_id: Uuid,
+    ) -> std::result::Result<GameRuleTemplateRequest, GameRuleTemplateRequestError> {
+        let novel = self
+            .novel_repo
+            .find_by_id(novel_id)
+            .await
+            .map_err(GameRuleTemplateRequestError::Repository)?
+            .ok_or(GameRuleTemplateRequestError::NovelNotFound)?;
+        let model = self
+            .canon_repo
+            .find_latest(novel_id)
+            .await
+            .map_err(GameRuleTemplateRequestError::Repository)?
+            .ok_or(GameRuleTemplateRequestError::CanonUnavailable)?;
+        let attempt = match self
+            .canon_repo
+            .begin_game_rule_generation(novel_id, model.model_version)
+            .await
+            .map_err(GameRuleTemplateRequestError::Repository)?
+        {
+            BeginGameRuleGeneration::Ready(template) => {
+                return Ok(GameRuleTemplateRequest::Ready(template));
+            }
+            BeginGameRuleGeneration::InProgress {
+                retry_after_seconds,
+            } => {
+                return Ok(GameRuleTemplateRequest::InProgress {
+                    retry_after_seconds,
+                });
+            }
+            BeginGameRuleGeneration::Exhausted => {
+                return Err(GameRuleTemplateRequestError::BudgetExhausted);
+            }
+            BeginGameRuleGeneration::Acquired { attempt } => attempt,
+        };
+
+        self.spawn_game_rule_generation(novel, model, attempt);
+        Ok(GameRuleTemplateRequest::InProgress {
+            retry_after_seconds: 2,
+        })
+    }
+
+    fn spawn_game_rule_generation(
+        self: &Arc<Self>,
+        novel: Novel,
+        model: crate::domain::entities::canon_story_model::CanonStoryModel,
+        attempt: i64,
+    ) {
+        let handler = Arc::clone(self);
+        let current_span = tracing::Span::current();
+        tokio::spawn(
+            async move {
+                handler
+                    .finish_claimed_game_rule_generation(novel, model, attempt)
+                    .await;
+            }
+            .instrument(current_span),
+        );
+    }
+
+    async fn finish_claimed_game_rule_generation(
+        &self,
+        novel: Novel,
+        model: crate::domain::entities::canon_story_model::CanonStoryModel,
+        attempt: i64,
+    ) {
+        let novel_id = novel.id;
+        let generation_started = Instant::now();
+        match self
+            .generate_claimed_game_rule_template(&novel, &model, attempt)
+            .await
+        {
+            Ok(_) => {
+                info!(
+                    %novel_id,
+                    canon_model_version = model.model_version,
+                    attempt,
+                    elapsed_ms = generation_started.elapsed().as_millis(),
+                    "game rule template generation completed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(
+                    %novel_id,
+                    canon_model_version = model.model_version,
+                    attempt,
+                    elapsed_ms = generation_started.elapsed().as_millis(),
+                    error = ?error,
+                    "game rule generation failed"
+                );
+                if let Err(failure_error) = self
+                    .canon_repo
+                    .fail_game_rule_generation(
+                        novel_id,
+                        model.model_version,
+                        attempt,
+                        "generation_failed",
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        %novel_id,
+                        canon_model_version = model.model_version,
+                        attempt,
+                        error = ?failure_error,
+                        "failed to persist game rule generation failure"
+                    );
+                }
+            }
+        }
+    }
+
+    async fn generate_claimed_game_rule_template(
+        &self,
+        novel: &Novel,
+        model: &crate::domain::entities::canon_story_model::CanonStoryModel,
+        attempt: i64,
+    ) -> Result<GameRuleTemplate> {
+        let prompt = game_rule_generator::build_prompt(&novel.title, model)?;
+        let allowed_source_chapters = game_rule_generator::source_chapters(model);
+        let mut lease = GameRuleLease::start(
+            self.canon_repo.clone(),
+            novel.id,
+            model.model_version,
+            attempt,
+        );
+        anyhow::ensure!(
+            prompt.len() <= game_rule_generator::MAX_GAME_RULE_PROMPT_BYTES,
+            "game rule prompt exceeds its byte budget"
+        );
+        let raw = lease
+            .run(
+                self.llm
+                    .chat_json(NovelLlmTask::GameRuleGeneration, &prompt),
+            )
+            .await
+            .ok_or_else(|| anyhow::anyhow!("game rule generation lease was lost"))??;
+        let template = game_rule_generator::parse_template(
+            &raw,
+            novel.id,
+            model.model_version,
+            &allowed_source_chapters,
+        )?;
+        let completed = lease
+            .run(
+                self.canon_repo
+                    .complete_game_rule_generation(&template, attempt),
+            )
+            .await
+            .ok_or_else(|| anyhow::anyhow!("game rule generation lease was lost"))??;
+        anyhow::ensure!(completed, "game rule generation completion was fenced");
+        lease.stop();
+        Ok(template)
     }
 
     pub fn spawn_import_recovery(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {

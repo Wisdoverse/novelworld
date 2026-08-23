@@ -32,6 +32,7 @@ pub enum NovelLlmTask {
     ChapterBoundaryDetection,
     CharacterExtraction,
     CanonExtraction,
+    GameRuleGeneration,
     NarrativeNodeDetection,
 }
 

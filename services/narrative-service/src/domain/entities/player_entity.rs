@@ -4,6 +4,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::domain::entities::game_rules::PlayerRuleProfile;
+
 const MAX_CAPABILITIES: usize = 16;
 const MAX_INVENTORY: usize = 32;
 const MAX_RELATIONSHIPS: usize = 256;
@@ -32,6 +34,8 @@ pub struct PlayerEntity {
     pub relationships: BTreeMap<Uuid, RelationshipState>,
     pub faction_standing: BTreeMap<String, i32>,
     pub discovered_knowledge: Vec<String>,
+    #[serde(default, skip_serializing_if = "PlayerRuleProfile::is_narrative")]
+    pub rules: PlayerRuleProfile,
     pub created_at: DateTime<Utc>,
 }
 
@@ -51,6 +55,31 @@ impl PlayerEntity {
         location_id: String,
         inventory: Vec<String>,
     ) -> Result<Self, PlayerEntityError> {
+        Self::new_with_rules(
+            user_id,
+            novel_id,
+            canonical_checkpoint_chapter,
+            name,
+            background,
+            capabilities,
+            location_id,
+            inventory,
+            PlayerRuleProfile::narrative(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_rules(
+        user_id: Uuid,
+        novel_id: Uuid,
+        canonical_checkpoint_chapter: i32,
+        name: String,
+        background: String,
+        capabilities: Vec<String>,
+        location_id: String,
+        inventory: Vec<String>,
+        rules: PlayerRuleProfile,
+    ) -> Result<Self, PlayerEntityError> {
         let entity = Self {
             id: Uuid::new_v4(),
             user_id,
@@ -64,6 +93,7 @@ impl PlayerEntity {
             relationships: BTreeMap::new(),
             faction_standing: BTreeMap::new(),
             discovered_knowledge: Vec::new(),
+            rules,
             created_at: Utc::now(),
         };
         entity.validate()?;
@@ -107,6 +137,9 @@ impl PlayerEntity {
             MAX_KNOWLEDGE,
             200,
         )?;
+        self.rules
+            .validate()
+            .map_err(|error| PlayerEntityError(error.to_string()))?;
         Ok(())
     }
 
@@ -137,6 +170,10 @@ impl PlayerEntity {
             && self.capabilities == capabilities
             && self.location_id == location_id
             && self.inventory == inventory
+    }
+
+    pub fn matches_rules(&self, rules: &PlayerRuleProfile) -> bool {
+        &self.rules == rules
     }
 }
 
@@ -235,5 +272,15 @@ mod tests {
         let mut unknown = serde_json::to_value(entity).unwrap();
         unknown["source_character_id"] = Uuid::new_v4().to_string().into();
         assert!(serde_json::from_value::<PlayerEntity>(unknown).is_err());
+    }
+
+    #[test]
+    fn narrative_players_keep_the_previous_serialized_shape() {
+        let entity = valid();
+        let value = serde_json::to_value(&entity).unwrap();
+
+        assert!(value.get("rules").is_none());
+        let restored = serde_json::from_value::<PlayerEntity>(value).unwrap();
+        assert!(restored.rules.is_narrative());
     }
 }

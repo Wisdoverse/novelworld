@@ -1,4 +1,5 @@
 use crate::application::handlers::{record_world_journey_memory, resolve_protagonist};
+use crate::domain::entities::game_rules::GameRuleTemplate;
 use crate::domain::entities::narrative_node::{NarrativeChoice, NarrativeNode, WorldState};
 use crate::domain::entities::world_session::WorldEntryContext;
 use crate::domain::ports::AgentMemoryPort;
@@ -115,6 +116,30 @@ impl ChapterReadRepository for FixedChapterRepo {
         _checkpoint_chapter: i32,
         _user_id: Uuid,
     ) -> Result<Option<WorldEntryContext>> {
+        Ok(None)
+    }
+
+    async fn request_game_rule_template(
+        &self,
+        _novel_id: Uuid,
+        _user_id: Uuid,
+    ) -> std::result::Result<
+        GameRuleTemplate,
+        crate::domain::repositories::GameRuleTemplateRequestError,
+    > {
+        Err(
+            crate::domain::repositories::GameRuleTemplateRequestError::Unavailable(anyhow!(
+                "game rules are not configured in this test"
+            )),
+        )
+    }
+
+    async fn get_game_rule_template(
+        &self,
+        _novel_id: Uuid,
+        _canon_model_version: i32,
+        _user_id: Uuid,
+    ) -> Result<Option<GameRuleTemplate>> {
         Ok(None)
     }
 }

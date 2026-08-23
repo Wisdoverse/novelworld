@@ -1,7 +1,7 @@
 import type { Page, Request } from '@playwright/test';
 import {
   AUTH_TOKENS, CHAPTER, CHARACTERS, CHARACTER_PROGRESS, CHOICE_RESULT, EFFECTIVE_CHAPTER,
-  JOURNAL_ENTRY, LLM_SETTINGS, NODE, NOVEL, NOVELS, OPEN_WORLD, PLAYER_ENTRY,
+  GAME_RULE_TEMPLATE, JOURNAL_ENTRY, LLM_SETTINGS, NODE, NOVEL, NOVELS, OPEN_WORLD, PLAYER_ENTRY,
   PLAYER_ENTRY_NO_PLAYER, PROGRESS, SETUP_STATUS, WORLD_STATE, WORLD_TURN_RESULT, USER,
 } from './fixtures';
 
@@ -60,6 +60,7 @@ export async function installStubs(page: Page, opts: StubOptions = {}): Promise<
     ['PUT', /^\/progress\/[^/]+$/, () => json(200, progress)],
     ['GET', /^\/narrative\/[^/]+\/player-entry$/, () => json(200, entry)],
     ['PUT', /^\/narrative\/[^/]+\/player-entry$/, () => json(200, PLAYER_ENTRY)],
+    ['POST', /^\/narrative\/[^/]+\/game-rules$/, () => json(200, GAME_RULE_TEMPLATE)],
     ['GET', /^\/narrative\/[^/]+\/chapters\/[^/]+$/, () => json(200, EFFECTIVE_CHAPTER)],
     ['GET', /^\/narrative\/[^/]+\/world-state$/, () => json(200, WORLD_STATE)],
     ['GET', /^\/narrative\/[^/]+\/world$/, () => (openWorld ? json(200, OPEN_WORLD) : { status: 404 })],

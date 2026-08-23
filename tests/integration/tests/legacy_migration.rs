@@ -49,6 +49,8 @@ const CANON_CHECKPOINT_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0017_canon_extraction_checkpoints.sql");
 const CANON_CHECKPOINT_EXPANSION_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0018_expand_canon_checkpoint_source.sql");
+const ADVANCED_GAME_RULES_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0020_advanced_game_rules.sql");
 
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
@@ -280,6 +282,10 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
             .await
             .unwrap();
         sqlx::raw_sql(CANON_CHECKPOINT_EXPANSION_MIGRATION)
+            .execute(&fresh)
+            .await
+            .unwrap();
+        sqlx::raw_sql(ADVANCED_GAME_RULES_MIGRATION)
             .execute(&fresh)
             .await
             .unwrap();
@@ -960,6 +966,10 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
             .await
             .unwrap();
         sqlx::raw_sql(CANON_CHECKPOINT_EXPANSION_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
+        sqlx::raw_sql(ADVANCED_GAME_RULES_MIGRATION)
             .execute(&mut *non_default_path)
             .await
             .unwrap();

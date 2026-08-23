@@ -11,6 +11,7 @@ use narrative_service::{
     application::handlers::NarrativeCommandHandler,
     domain,
     infrastructure::{
+        dice::Sha256DiceRoller,
         http::{agent_client::AgentServiceClient, novel_client::NovelServiceClient},
         llm::LlmAdapter,
         persistence::{
@@ -109,6 +110,9 @@ async fn run_body() -> Result<()> {
         let agent_memory: Arc<dyn domain::ports::AgentMemoryPort> = Arc::new(
             AgentServiceClient::new(agent_service_url, internal_service_token.clone()),
         );
+        let dice_roller: Arc<dyn domain::ports::DiceRollerPort> = Arc::new(Sha256DiceRoller::new(
+            internal_service_token.as_bytes().to_vec(),
+        )?);
 
         // Application handler
         let handler = Arc::new(NarrativeCommandHandler {
@@ -120,6 +124,7 @@ async fn run_body() -> Result<()> {
             chapter_repo,
             llm,
             agent_memory,
+            dice_roller,
         });
 
         let state = AppState {

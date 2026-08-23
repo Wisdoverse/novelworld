@@ -1,4 +1,5 @@
 use crate::domain::entities::{
+    game_rules::{ActionCheck, GameRuleTemplate},
     narrative_node::{NarrativeNode, WorldState},
     player_entity::PlayerEntity,
     world_session::{WorldAction, WorldEntryContext, WorldTurnTransition},
@@ -9,6 +10,16 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::services::narrative_transition::{CanonContext, NarrativeTransition};
+
+#[derive(Debug, thiserror::Error)]
+pub enum GameRuleTemplateRequestError {
+    #[error("Game rule template generation is in progress")]
+    InProgress { retry_after_seconds: u64 },
+    #[error("Game rule template generation budget is exhausted")]
+    Exhausted,
+    #[error("Novel service is unavailable")]
+    Unavailable(#[source] anyhow::Error),
+}
 
 #[async_trait]
 pub trait NarrativeNodeRepository: Send + Sync {
@@ -42,6 +53,7 @@ pub trait WorldStateRepository: Send + Sync {
         user_id: Uuid,
         novel_id: Uuid,
         context: &WorldEntryContext,
+        game_rules: Option<&GameRuleTemplate>,
     ) -> Result<WorldState>;
     async fn update(&self, state: &WorldState) -> Result<()>;
 }
@@ -53,6 +65,8 @@ pub struct WorldTurnClaim {
     pub novel_id: Uuid,
     pub request_fingerprint: Vec<u8>,
     pub action: WorldAction,
+    #[serde(default)]
+    pub resolution: Option<ActionCheck>,
     pub expected_turn_number: i64,
 }
 
@@ -60,15 +74,22 @@ pub struct WorldTurnClaim {
 pub struct WorldTurnResult {
     pub turn_id: Uuid,
     pub action: WorldAction,
+    #[serde(default)]
+    pub resolution: Option<ActionCheck>,
     pub transition: WorldTurnTransition,
     pub world_state: WorldState,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BeginWorldTurn {
-    Acquired { claim: WorldTurnClaim, attempt: i64 },
+    Acquired {
+        claim: Box<WorldTurnClaim>,
+        attempt: i64,
+    },
     Completed(Box<WorldTurnResult>),
-    InProgress { retry_after_seconds: u64 },
+    InProgress {
+        retry_after_seconds: u64,
+    },
     Conflict,
     Stale,
 }
@@ -78,6 +99,8 @@ pub struct WorldTurnJournalEntry {
     pub turn_id: Uuid,
     pub turn_number: i64,
     pub action: WorldAction,
+    #[serde(default)]
+    pub resolution: Option<ActionCheck>,
     pub transition: WorldTurnTransition,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub completed_at: chrono::DateTime<chrono::Utc>,
@@ -142,6 +165,17 @@ pub trait ChapterReadRepository: Send + Sync {
         checkpoint_chapter: i32,
         user_id: Uuid,
     ) -> Result<Option<WorldEntryContext>>;
+    async fn request_game_rule_template(
+        &self,
+        novel_id: Uuid,
+        user_id: Uuid,
+    ) -> std::result::Result<GameRuleTemplate, GameRuleTemplateRequestError>;
+    async fn get_game_rule_template(
+        &self,
+        novel_id: Uuid,
+        canon_model_version: i32,
+        user_id: Uuid,
+    ) -> Result<Option<GameRuleTemplate>>;
 }
 
 #[async_trait]

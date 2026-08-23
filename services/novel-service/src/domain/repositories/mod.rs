@@ -3,7 +3,8 @@ use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::domain::entities::{
-    canon_story_model::CanonStoryModel, chapter::Chapter, character::Character, novel::Novel,
+    canon_story_model::CanonStoryModel, chapter::Chapter, character::Character,
+    game_rule_template::GameRuleTemplate, novel::Novel,
 };
 use crate::domain::value_objects::{DeviationMode, ImportStage};
 
@@ -15,6 +16,9 @@ pub const MAX_IMPORT_ATTEMPTS: i64 = 3;
 /// is reached; the retry endpoint surfaces it without a provider call.
 pub const IMPORT_BUDGET_EXHAUSTED_MESSAGE: &str =
     "Import provider budget exhausted; re-upload the source";
+// ponytail: terminal three-attempt budget; add an operator retry workflow only
+// when real support cases justify more provider-facing state and UI.
+pub const MAX_GAME_RULE_GENERATION_ATTEMPTS: i64 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportClaim {
@@ -103,6 +107,14 @@ pub struct CanonExtractionCheckpoint<'a> {
     pub extraction_json: &'a str,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum BeginGameRuleGeneration {
+    Acquired { attempt: i64 },
+    Ready(GameRuleTemplate),
+    InProgress { retry_after_seconds: u64 },
+    Exhausted,
+}
+
 #[async_trait]
 pub trait CanonStoryModelRepository: Send + Sync {
     async fn find_import_checkpoint(
@@ -126,6 +138,34 @@ pub trait CanonStoryModelRepository: Send + Sync {
         model_version: i32,
     ) -> Result<Option<CanonStoryModel>>;
     async fn find_latest(&self, novel_id: Uuid) -> Result<Option<CanonStoryModel>>;
+    async fn begin_game_rule_generation(
+        &self,
+        novel_id: Uuid,
+        canon_model_version: i32,
+    ) -> Result<BeginGameRuleGeneration>;
+    async fn renew_game_rule_generation(
+        &self,
+        novel_id: Uuid,
+        canon_model_version: i32,
+        attempt: i64,
+    ) -> Result<bool>;
+    async fn complete_game_rule_generation(
+        &self,
+        template: &GameRuleTemplate,
+        attempt: i64,
+    ) -> Result<bool>;
+    async fn fail_game_rule_generation(
+        &self,
+        novel_id: Uuid,
+        canon_model_version: i32,
+        attempt: i64,
+        failure_code: &str,
+    ) -> Result<bool>;
+    async fn find_game_rule_template(
+        &self,
+        novel_id: Uuid,
+        canon_model_version: i32,
+    ) -> Result<Option<GameRuleTemplate>>;
 }
 
 #[async_trait]

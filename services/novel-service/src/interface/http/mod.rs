@@ -14,8 +14,9 @@ use uuid::Uuid;
 
 use crate::application::commands::ImportNovelCommand;
 use crate::application::handlers::{
-    ImportBudgetExceeded, ImportCapacityUnavailable, ImportRetryConflict, NovelCommandHandler,
-    ReadingProgressError, ReadingProgressHandler, ShelfMutationError, SourceFileStorageUnavailable,
+    GameRuleTemplateRequest, GameRuleTemplateRequestError, ImportBudgetExceeded,
+    ImportCapacityUnavailable, ImportRetryConflict, NovelCommandHandler, ReadingProgressError,
+    ReadingProgressHandler, ShelfMutationError, SourceFileStorageUnavailable,
     TranslateChapterHandler, TranslationError,
 };
 use crate::domain::entities::novel::Novel;
@@ -85,6 +86,14 @@ fn routes() -> Router<AppState> {
             get(get_world_entry_context),
         )
         .route(
+            "/internal/novels/{id}/game-rules",
+            post(request_game_rule_template),
+        )
+        .route(
+            "/internal/novels/{id}/game-rules/{model_version}",
+            get(get_game_rule_template),
+        )
+        .route(
             "/internal/privacy/users/{user_id}/export",
             get(export_account),
         )
@@ -97,6 +106,118 @@ fn routes() -> Router<AppState> {
         .route("/ready", get(ready))
         .route("/metrics", get(metrics))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_SIZE))
+}
+
+async fn request_game_rule_template(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(novel_id): Path<Uuid>,
+) -> Response {
+    if !internal_request_authorized(&state, &headers) {
+        return api_error(
+            StatusCode::UNAUTHORIZED,
+            "Invalid internal service identity",
+        );
+    }
+    let user_id = match extract_user_id(&headers) {
+        Some(id) => id,
+        None => return api_error(StatusCode::UNAUTHORIZED, "Missing user ID"),
+    };
+    let progress = match state.progress_handler.get(user_id, novel_id).await {
+        Ok(progress) => progress,
+        Err(error) => return progress_error_response(error),
+    };
+    match state.handler.request_game_rule_template(novel_id).await {
+        Ok(GameRuleTemplateRequest::Ready(template)) => {
+            match template.visible_at(progress.current_chapter) {
+                Some(visible) => (StatusCode::OK, Json(visible)).into_response(),
+                None => coded_api_error(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "game_rules_unavailable_at_progress",
+                    "Game rules are not yet available at current reading progress",
+                ),
+            }
+        }
+        Ok(GameRuleTemplateRequest::InProgress {
+            retry_after_seconds,
+        }) => {
+            let mut response = coded_api_error(
+                StatusCode::CONFLICT,
+                "game_rule_generation_in_progress",
+                "Game rule template generation is in progress",
+            );
+            if let Ok(value) = HeaderValue::from_str(&retry_after_seconds.to_string()) {
+                response.headers_mut().insert("retry-after", value);
+            }
+            response
+        }
+        Err(GameRuleTemplateRequestError::NovelNotFound) => {
+            coded_api_error(StatusCode::NOT_FOUND, "not_found", "Novel not found")
+        }
+        Err(GameRuleTemplateRequestError::CanonUnavailable) => coded_api_error(
+            StatusCode::CONFLICT,
+            "canon_unavailable",
+            "Canonical story model is not ready",
+        ),
+        Err(GameRuleTemplateRequestError::BudgetExhausted) => coded_api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "game_rule_generation_exhausted",
+            "Game rule generation budget is exhausted",
+        ),
+        Err(error) => {
+            tracing::error!(%error, %novel_id, "game rule template request failed");
+            coded_api_error(
+                StatusCode::BAD_GATEWAY,
+                "game_rule_generation_failed",
+                "Game rule generation failed",
+            )
+        }
+    }
+}
+
+async fn get_game_rule_template(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((novel_id, model_version)): Path<(Uuid, i32)>,
+) -> Response {
+    if !internal_request_authorized(&state, &headers) {
+        return api_error(
+            StatusCode::UNAUTHORIZED,
+            "Invalid internal service identity",
+        );
+    }
+    let user_id = match extract_user_id(&headers) {
+        Some(id) => id,
+        None => return api_error(StatusCode::UNAUTHORIZED, "Missing user ID"),
+    };
+    if model_version < 1 {
+        return api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Canonical model version must be at least 1",
+        );
+    }
+    let progress = match state.progress_handler.get(user_id, novel_id).await {
+        Ok(progress) => progress,
+        Err(error) => return progress_error_response(error),
+    };
+    match state
+        .canon_repo
+        .find_game_rule_template(novel_id, model_version)
+        .await
+    {
+        Ok(Some(template)) => match template.visible_at(progress.current_chapter) {
+            Some(visible) => (StatusCode::OK, Json(visible)).into_response(),
+            None => api_error(
+                StatusCode::NOT_FOUND,
+                "Game rule template is unavailable at current reading progress",
+            ),
+        },
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "Game rule template not found"),
+        Err(error) => {
+            tracing::error!(%error, %novel_id, model_version, "failed to load game rules");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
+        }
+    }
 }
 
 async fn export_account(
@@ -393,6 +514,17 @@ pub struct ApiError {
     pub error: String,
 }
 
+#[derive(Debug, Serialize)]
+struct CodedApiError {
+    error: CodedApiErrorDetail,
+}
+
+#[derive(Debug, Serialize)]
+struct CodedApiErrorDetail {
+    code: &'static str,
+    message: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LoreSearchRequest {
@@ -500,6 +632,19 @@ fn api_error(status: StatusCode, message: impl Into<String>) -> Response {
         status,
         Json(ApiError {
             error: message.into(),
+        }),
+    )
+        .into_response()
+}
+
+fn coded_api_error(status: StatusCode, code: &'static str, message: impl Into<String>) -> Response {
+    (
+        status,
+        Json(CodedApiError {
+            error: CodedApiErrorDetail {
+                code,
+                message: message.into(),
+            },
         }),
     )
         .into_response()
@@ -1489,6 +1634,27 @@ mod ownership_tests {
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
             serde_json::json!({"error": "Import cannot be retried"})
+        );
+    }
+
+    #[tokio::test]
+    async fn coded_game_rule_errors_are_machine_readable() {
+        let response = coded_api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "game_rule_generation_exhausted",
+            "Game rule generation budget is exhausted",
+        );
+        let body = axum::body::to_bytes(response.into_body(), 1_024)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({
+                "error": {
+                    "code": "game_rule_generation_exhausted",
+                    "message": "Game rule generation budget is exhausted"
+                }
+            }),
         );
     }
 

@@ -137,6 +137,29 @@ export const PLAYER_ENTRY_NO_PLAYER = {
   locations: PLAYER_ENTRY.locations,
 };
 
+export const GAME_RULE_TEMPLATE = {
+  novel_id: 'novel-1',
+  canon_model_version: 1,
+  schema_version: 1,
+  prompt_version: 'novel-game-rules-v1',
+  minimum_score: 8,
+  maximum_score: 15,
+  point_budget: 30,
+  attributes: [
+    { key: 'qinggong', label: '轻功', description: '在屋脊与山道间腾挪。', default_score: 10, source_chapters: [1] },
+    { key: 'dongcha', label: '洞察', description: '辨认江湖话术与隐藏线索。', default_score: 10, source_chapters: [1] },
+    { key: 'renmai', label: '人脉', description: '借助门派声望与江湖关系。', default_score: 10, source_chapters: [1] },
+  ],
+  action_rules: [
+    ['travel', 'qinggong'], ['investigate', 'dongcha'], ['converse', 'renmai'],
+    ['ally', 'renmai'], ['oppose', 'dongcha'], ['advance_thread', 'dongcha'],
+    ['resolve_thread', 'qinggong'], ['pursue_goal', 'qinggong'],
+  ].map(([kind, attribute_key]) => ({
+    kind, attribute_key, difficulty_class: 12,
+    description: '依据小说世界规则完成不确定行动。', source_chapters: [1],
+  })),
+};
+
 export const WORLD_STATE = {
   user_id: 'user-1',
   novel_id: 'novel-1',

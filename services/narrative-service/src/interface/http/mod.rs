@@ -17,6 +17,7 @@ use uuid::Uuid;
 use crate::application::handlers::{
     CreatePlayerEntityCommand, NarrativeCommandHandler, NarrativeError,
 };
+use crate::domain::entities::game_rules::PlayerRuleProfile;
 use crate::domain::entities::world_session::WorldAction;
 use crate::domain::ports::{AccountExportPort, ReadinessProbe};
 
@@ -45,6 +46,10 @@ fn routes() -> Router<AppState> {
             get(get_player_entry)
                 .put(put_player_entry)
                 .layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
+            "/narrative/{novel_id}/game-rules",
+            post(request_game_rule_template),
         )
         .route("/narrative/{novel_id}/{chapter}", get(get_branch_node))
         .route("/narrative/choose", post(submit_choice))
@@ -149,6 +154,8 @@ pub struct CreatePlayerEntityRequest {
     pub capabilities: Vec<String>,
     pub location_id: String,
     pub inventory: Vec<String>,
+    #[serde(default)]
+    pub rules: PlayerRuleProfile,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -225,6 +232,26 @@ fn narrative_error_response(error: NarrativeError) -> axum::response::Response {
                 "World turn outcome is unknown; retry with the same Idempotency-Key",
             )
         }
+        NarrativeError::GameRulesInProgress {
+            retry_after_seconds,
+        } => {
+            let mut response = error_response(
+                StatusCode::CONFLICT,
+                "game_rule_generation_in_progress",
+                "Game rule template generation is in progress",
+            );
+            if let Ok(value) = HeaderValue::from_str(&retry_after_seconds.to_string()) {
+                response.headers_mut().insert(RETRY_AFTER, value);
+            }
+            return response;
+        }
+        NarrativeError::GameRulesExhausted => {
+            return error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "game_rule_generation_exhausted",
+                "Game rule template generation budget is exhausted",
+            )
+        }
         NarrativeError::Unavailable(error) => {
             tracing::warn!(error = ?error, "novel dependency unavailable");
             (
@@ -298,6 +325,7 @@ async fn put_player_entry(
         capabilities: req.capabilities,
         location_id: req.location_id,
         inventory: req.inventory,
+        rules: req.rules,
     };
     match state
         .handler
@@ -313,6 +341,28 @@ async fn put_player_entry(
             })),
         )
             .into_response(),
+        Err(error) => narrative_error_response(error),
+    }
+}
+
+async fn request_game_rule_template(
+    State(state): State<AppState>,
+    Path(novel_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some(user_id) = extract_user_id(&headers) else {
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "Missing or invalid user identity",
+        );
+    };
+    match state
+        .handler
+        .request_game_rule_template(user_id, novel_id)
+        .await
+    {
+        Ok(template) => (StatusCode::OK, Json(template)).into_response(),
         Err(error) => narrative_error_response(error),
     }
 }
@@ -635,6 +685,45 @@ mod principal_contract_tests {
                     "message": "World turn outcome is unknown; retry with the same Idempotency-Key"
                 }
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn game_rule_generation_errors_preserve_retry_and_budget_contracts() {
+        let in_progress = narrative_error_response(NarrativeError::GameRulesInProgress {
+            retry_after_seconds: 5,
+        });
+        assert_eq!(in_progress.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            in_progress.headers().get(RETRY_AFTER).unwrap(),
+            HeaderValue::from_static("5"),
+        );
+        let body = axum::body::to_bytes(in_progress.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({
+                "error": {
+                    "code": "game_rule_generation_in_progress",
+                    "message": "Game rule template generation is in progress"
+                }
+            }),
+        );
+
+        let exhausted = narrative_error_response(NarrativeError::GameRulesExhausted);
+        assert_eq!(exhausted.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = axum::body::to_bytes(exhausted.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({
+                "error": {
+                    "code": "game_rule_generation_exhausted",
+                    "message": "Game rule template generation budget is exhausted"
+                }
+            }),
         );
     }
 
