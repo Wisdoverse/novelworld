@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { apiClient, getApiErrorMessage } from '@/shared/api/client';
 import { useAuthStore } from '@/features/auth/model/useAuthStore';
+import { LlmUsageCard } from '@/features/llm-usage/ui/LlmUsageCard';
 
 type LlmSettings = {
   provider: 'deepseek' | 'openai';
@@ -195,6 +196,8 @@ export function SettingsPage() {
             </div>
           </form>
         </section>}
+
+        {isAdmin && <LlmUsageCard />}
 
         <section className="surface-card mt-6 p-6 sm:p-8" aria-labelledby="account-settings-heading">
           <div className="mb-5 flex items-center gap-3">

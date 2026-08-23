@@ -172,8 +172,11 @@ UUID v4 `Idempotency-Key` 后，输入脚本
 指标按受控的 `service/provider/model/operation/mode/status` 标签记录逻辑
 请求、实际 provider 尝试、重试、延迟、首 token、usage 缺失、输入/输出/
 缓存命中 token，以及 cached-input/uncached-input/output 计费 token。指标不
-包含 prompt、URL、错误正文、用户或小说标识。美元成本应在查询时用当前
-provider 价格乘计费 token；代码不内置会过期的价格表。
+包含 prompt、URL、错误正文、用户或小说标识。成本在查询时用
+`LLM_PRICING_USD_PER_MILLION` 中当前 provider/model 价格乘计费 token；
+代码不内置会过期的价格表。设置页的管理员统计卡从 Prometheus 查询近 30 天
+增量：页面语言以 `zh` 开头时使用配置的 `USD_CNY_RATE` 显示人民币，其他
+语言显示美元。未配置价格或汇率时仍显示 token，并明确标出未定价部分。
 
 H3 发布样本使用版本化策略校验：
 

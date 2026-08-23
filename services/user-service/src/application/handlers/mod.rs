@@ -3,10 +3,13 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::domain::entities::{
+    llm_usage::{LlmPricingCatalog, LlmUsageSummary},
     runtime_config::RuntimeLlmConfig,
     user::{RefreshToken, User, UserRole},
 };
-use crate::domain::ports::{AccessTokenIssuer, LlmConnectionTester, PrivacyCleanupPort};
+use crate::domain::ports::{
+    AccessTokenIssuer, LlmConnectionTester, LlmUsageReader, PrivacyCleanupPort,
+};
 use crate::domain::repositories::{AccountDeletion, UserRepository, UserSave};
 
 const MAX_PASSWORD_BYTES: usize = 72;
@@ -44,6 +47,18 @@ pub enum AuthError {
 
 pub type AuthResult<T> = std::result::Result<T, AuthError>;
 
+#[derive(Debug, thiserror::Error)]
+pub enum LlmUsageError {
+    #[error("Administrator access is required")]
+    Forbidden,
+    #[error("LLM usage statistics are temporarily unavailable")]
+    Unavailable,
+    #[error("User not found")]
+    NotFound,
+    #[error("LLM usage operation failed")]
+    Internal(#[source] anyhow::Error),
+}
+
 pub struct AuthHandler {
     pub user_repo: Arc<dyn UserRepository>,
     pub jwt: Arc<dyn AccessTokenIssuer>,
@@ -57,6 +72,34 @@ pub struct AuthHandler {
 pub struct SetupStatus {
     pub admin_configured: bool,
     pub llm_configured: bool,
+}
+
+pub struct LlmUsageHandler {
+    pub user_repo: Arc<dyn UserRepository>,
+    pub usage_reader: Arc<dyn LlmUsageReader>,
+    pub pricing: LlmPricingCatalog,
+}
+
+impl LlmUsageHandler {
+    pub async fn summary(
+        &self,
+        user_id: Uuid,
+    ) -> std::result::Result<LlmUsageSummary, LlmUsageError> {
+        let user = self
+            .user_repo
+            .find_by_id(user_id)
+            .await
+            .map_err(LlmUsageError::Internal)?
+            .ok_or(LlmUsageError::NotFound)?;
+        if user.role != UserRole::Admin {
+            return Err(LlmUsageError::Forbidden);
+        }
+        let snapshot = self.usage_reader.read().await.map_err(|error| {
+            tracing::warn!(error = ?error, "LLM usage metrics query failed");
+            LlmUsageError::Unavailable
+        })?;
+        Ok(self.pricing.summarize(snapshot))
+    }
 }
 
 impl SetupStatus {
