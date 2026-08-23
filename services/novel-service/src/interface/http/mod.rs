@@ -16,6 +16,7 @@ use crate::application::commands::ImportNovelCommand;
 use crate::application::handlers::{
     ImportBudgetExceeded, ImportCapacityUnavailable, ImportRetryConflict, NovelCommandHandler,
     ReadingProgressError, ReadingProgressHandler, ShelfMutationError, SourceFileStorageUnavailable,
+    TranslateChapterHandler, TranslationError,
 };
 use crate::domain::entities::novel::Novel;
 use crate::domain::ports::{
@@ -38,6 +39,7 @@ pub struct AppState {
     pub character_repo: Arc<dyn CharacterRepository>,
     pub canon_repo: Arc<dyn CanonStoryModelRepository>,
     pub progress_handler: Arc<ReadingProgressHandler>,
+    pub translation_handler: Arc<TranslateChapterHandler>,
     pub document_extractor: Arc<dyn DocumentTextExtractor>,
     pub document_parse_permits: Arc<Semaphore>,
     pub account_export: Arc<dyn AccountExportPort>,
@@ -63,6 +65,10 @@ fn routes() -> Router<AppState> {
         .route("/novels/{id}/retry", post(retry_novel))
         .route("/novels/{id}/chapters", get(list_chapters))
         .route("/novels/{id}/chapters/{num}", get(get_chapter))
+        .route(
+            "/novels/{id}/chapters/{num}/translation",
+            post(translate_chapter_text),
+        )
         .route("/novels/{id}/lore/search", post(search_lore))
         .route("/novels/{id}/characters", get(list_characters))
         .route("/characters/{id}", get(get_character_by_id))
@@ -398,6 +404,17 @@ struct LoreSearchRequest {
 #[derive(Debug, Serialize)]
 struct LoreSearchResponse {
     excerpts: Vec<crate::domain::repositories::LoreExcerpt>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TranslationRequest {
+    content: String,
+}
+
+#[derive(Debug, Serialize)]
+struct TranslationResponse {
+    content: String,
 }
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
@@ -970,6 +987,59 @@ async fn get_chapter(
             }),
         )
             .into_response(),
+    }
+}
+
+async fn translate_chapter_text(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((novel_id, chapter_number)): Path<(Uuid, i32)>,
+    Json(request): Json<TranslationRequest>,
+) -> Response {
+    if let Err(response) = owned_novel(&state, &headers, novel_id).await {
+        return *response;
+    }
+    match state
+        .translation_handler
+        .translate(novel_id, chapter_number, &request.content)
+        .await
+    {
+        Ok(content) => (StatusCode::OK, Json(TranslationResponse { content })).into_response(),
+        Err(TranslationError::Validation) => api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Translation source must contain 1-48000 bytes",
+        ),
+        Err(TranslationError::Capacity) => {
+            let mut response = api_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many translations are running",
+            );
+            response
+                .headers_mut()
+                .insert("Retry-After", HeaderValue::from_static("5"));
+            response
+        }
+        Err(TranslationError::ChapterNotFound) => {
+            api_error(StatusCode::NOT_FOUND, "Chapter not found")
+        }
+        Err(TranslationError::SourceMismatch) => api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Translation source must be visible text from the requested chapter",
+        ),
+        Err(TranslationError::Timeout) => {
+            api_error(StatusCode::GATEWAY_TIMEOUT, "Translation timed out")
+        }
+        Err(TranslationError::Provider(error)) => {
+            tracing::warn!(error = ?error, %novel_id, "chapter translation failed");
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Translation is temporarily unavailable",
+            )
+        }
+        Err(TranslationError::Repository(error)) => {
+            tracing::error!(error = ?error, %novel_id, chapter_number, "translation chapter lookup failed");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
+        }
     }
 }
 

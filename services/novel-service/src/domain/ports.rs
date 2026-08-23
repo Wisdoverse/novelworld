@@ -22,6 +22,11 @@ pub trait LlmPort: Send + Sync {
     async fn chat_json(&self, task: NovelLlmTask, prompt: &str) -> Result<String>;
 }
 
+#[async_trait]
+pub trait TextTranslator: Send + Sync {
+    async fn to_simplified_chinese(&self, source: &str) -> Result<String>;
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum NovelLlmTask {
     ChapterBoundaryDetection,
