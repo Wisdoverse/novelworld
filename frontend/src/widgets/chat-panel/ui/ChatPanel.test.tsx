@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   chatSessionKey,
   useChatStore,
-} from '@/features/character-chat/model/useChatStore';
+} from '@/features/character-chat';
 import type { Character, ChatMessage } from '@/shared/types';
 import { ChatMarkdown, ChatPanel, mergeVisibleChatMessages } from './ChatPanel';
 
@@ -20,21 +20,27 @@ const mocks = vi.hoisted(() => ({
   historyScope: '',
 }));
 
-vi.mock('@/features/character-chat/api/useChatHistory', () => ({
-  useChatHistory: (
-    _characterId: string,
-    _chapter: number,
-    identityScope: string,
-    enabled: boolean,
-  ) => {
-    mocks.historyEnabled = enabled;
-    mocks.historyScope = identityScope;
-    return {
-      ...mocks.history,
-      data: mocks.historyByScope[identityScope] ?? mocks.history.data,
-    };
-  },
-}));
+vi.mock('@/features/character-chat', async () => {
+  const actual = await vi.importActual<typeof import('@/features/character-chat')>(
+    '@/features/character-chat',
+  );
+  return {
+    ...actual,
+    useChatHistory: (
+      _characterId: string,
+      _chapter: number,
+      identityScope: string,
+      enabled: boolean,
+    ) => {
+      mocks.historyEnabled = enabled;
+      mocks.historyScope = identityScope;
+      return {
+        ...mocks.history,
+        data: mocks.historyByScope[identityScope] ?? mocks.history.data,
+      };
+    },
+  };
+});
 
 const character = {
   id: 'character',

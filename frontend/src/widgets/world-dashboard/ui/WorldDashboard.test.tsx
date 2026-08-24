@@ -8,7 +8,7 @@ const mocks = vi.hoisted(() => ({
   submit: vi.fn(),
 }));
 
-vi.mock('@/entities/narrative/api', () => ({
+vi.mock('@/entities/narrative', () => ({
   useSubmitWorldTurn: () => ({ mutateAsync: mocks.submit, isPending: false }),
   isWorldTurnOutcomeUnknown: (error: { outcomeUnknown?: boolean }) => error.outcomeUnknown === true,
 }));

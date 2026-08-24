@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { useGenerateGameRules, type CreatePlayerEntityInput } from '@/entities/narrative/api';
+import { useGenerateGameRules, type CreatePlayerEntityInput } from '@/entities/narrative';
 import { getApiErrorMessage } from '@/shared/api/client';
 import type { GameRuleTemplate, ResolutionMode } from '@/shared/types';
 

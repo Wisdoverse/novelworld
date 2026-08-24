@@ -6,7 +6,7 @@ import { LlmUsageCard } from './LlmUsageCard';
 
 const getLlmUsage = vi.hoisted(() => vi.fn());
 
-vi.mock('@/entities/llm-usage/api', () => ({ getLlmUsage }));
+vi.mock('@/entities/llm-usage', () => ({ getLlmUsage }));
 
 describe('LlmUsageCard', () => {
   beforeEach(() => {

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { narrativeKeys } from '@/entities/narrative/api';
+import { narrativeKeys } from '@/entities/narrative';
 import { apiClient } from '@/shared/api/client';
 import { queryClient } from '@/shared/api/queryClient';
 import { worldTurnPendingStorageKey } from '@/shared/lib/worldTurnStorage';

@@ -109,8 +109,25 @@ The frontend follows Feature-Sliced Design:
 app -> pages -> widgets -> features -> entities -> shared
 ```
 
-Imports only point downward. Server state uses TanStack Query, client state uses
-Zustand, and API/SSE traffic goes through `frontend/src/shared/api/client.ts`.
+`pages`, `widgets`, `features`, and `entities` are sliced layers. Cross-layer
+consumers address a slice only through its root `index.ts`/`index.tsx` public
+API; no consumer reaches into another slice's `ui`, `model`, `api`, or other
+private path. Imports never point upward, and same-layer slices do not depend on
+one another. Relative imports are private to the current slice.
+
+Root entry modules may only bootstrap `app`. The non-sliced `app` and `shared`
+layers have the minimum composition exception for their own internal relative
+imports; this does not permit bypassing a sliced-layer public API. The blocking
+`pnpm lint:fsd` gate analyzes every TypeScript/TSX module under `frontend/src`
+with no legacy allowlist, including tests and source-side mocks. It resolves static
+and type-only imports, import types, literal dynamic imports, re-exports,
+`require`/import-equals, literal Vitest/Jest module APIs (`mock`, `doMock`,
+unmocking, and actual/mock loaders), aliases, and relative dependency edges. It
+is a structural import check, not evidence of semantic ownership, runtime
+loading, or product correctness.
+
+Server state uses TanStack Query, client state uses Zustand, and API/SSE traffic
+goes through `frontend/src/shared/api/client.ts`.
 
 ## Change rule
 

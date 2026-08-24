@@ -5,11 +5,11 @@ import {
   AlertCircle, ChevronLeft, ChevronRight, MessageCircle, Users,
   BookOpen, MapPin, Sparkles
 } from 'lucide-react';
-import { useChapter, useCharacters, useNovel } from '@/entities/novel/api';
+import { useChapter, useCharacters, useNovel } from '@/entities/novel';
 import {
   useReadingProgress,
   useUpdateReadingProgress,
-} from '@/entities/reading-progress/api';
+} from '@/entities/reading-progress';
 import {
   useEffectiveChapter,
   useCreatePlayerEntity,
@@ -20,11 +20,11 @@ import {
   useSubmitNarrativeChoice,
   useWorldState,
   isNarrativeChoiceConflict,
-} from '@/entities/narrative/api';
-import { ChatPanel } from '@/widgets/chat-panel/ui/ChatPanel';
-import { BranchChoice } from '@/widgets/branch-choice/ui/BranchChoice';
-import { WorldDashboard } from '@/widgets/world-dashboard/ui/WorldDashboard';
-import { PlayerEntryForm } from '@/features/player-entry/ui/PlayerEntryForm';
+} from '@/entities/narrative';
+import { ChatPanel } from '@/widgets/chat-panel';
+import { BranchChoice } from '@/widgets/branch-choice';
+import { WorldDashboard } from '@/widgets/world-dashboard';
+import { PlayerEntryForm } from '@/features/player-entry';
 import {
   TranslationControls,
   useChapterTranslation,

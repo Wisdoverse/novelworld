@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { useAuthStore } from '@/features/auth/model/useAuthStore';
+import { useAuthStore } from '@/features/auth';
 import { getApiErrorMessage } from '@/shared/api/client';
 import { toast } from 'sonner';
 import { ArrowRight, BookOpen } from 'lucide-react';
