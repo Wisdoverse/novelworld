@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SettingsPage } from './SettingsPage';
-import { useAuthStore } from '@/features/auth/model/useAuthStore';
+import { useAuthStore } from '@/features/auth';
 
 const mocks = vi.hoisted(() => ({
   delete: vi.fn(),
@@ -20,7 +20,7 @@ vi.mock('@/shared/api/client', () => ({
   getApiErrorMessage: (_error: unknown, fallback: string) => fallback,
 }));
 
-vi.mock('@/features/llm-usage/ui/LlmUsageCard', () => ({
+vi.mock('@/features/llm-usage', () => ({
   LlmUsageCard: () => <div>LLM usage card</div>,
 }));
 

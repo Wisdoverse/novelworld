@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { BarChart3, Loader2, RefreshCw } from 'lucide-react';
-import { getLlmUsage } from '@/entities/llm-usage/api';
+import { getLlmUsage } from '@/entities/llm-usage';
 import {
   currencyForLanguage,
   formatCurrencyMicros,

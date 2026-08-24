@@ -11,8 +11,8 @@ import {
   useNovelCatalog,
   useAttachNovel,
   validateNovelFile,
-} from '@/entities/novel/api';
-import { useAuthStore } from '@/features/auth/model/useAuthStore';
+} from '@/entities/novel';
+import { useAuthStore } from '@/features/auth';
 import type { Novel } from '@/shared/types';
 import { getApiErrorMessage } from '@/shared/api/client';
 import { toast } from 'sonner';

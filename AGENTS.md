@@ -123,6 +123,7 @@ pnpm install
 pnpm dev
 pnpm build
 pnpm lint
+pnpm lint:fsd
 pnpm type-check
 ```
 
@@ -143,8 +144,24 @@ docker compose -f docker-compose.yml up -d    # production
   - Each service owns its data; cross-service reads use HTTP adapters in `infrastructure/http/`.
 - **Frontend: Feature-Sliced Design (FSD) is mandatory.** Import rules:
   - `app` → `pages` → `widgets` → `features` → `entities` → `shared`.
-  - Never import upward. `features/` cannot import from `widgets/` or `pages/`.
-  - Each slice is self-contained: `ui/`, `model/`, `api/` co-located.
+  - `pages`, `widgets`, `features`, and `entities` are sliced layers. Every
+    cross-layer import into one of their slices must use that slice's root
+    `index.ts`/`index.tsx` public API (for example, `@/features/auth`), never
+    `ui/`, `model/`, `api/`, or another private path below the slice root.
+  - Imports never point upward, and one slice must not import another slice in
+    the same layer. Code within a slice may use relative imports to its own
+    private segments.
+  - Root entry modules may only bootstrap `app`. The non-sliced `app` and
+    `shared` layers have the minimum composition exception for their own
+    internal relative imports. They still cannot bypass a sliced-layer public
+    API or violate the downward layer direction.
+  - The rule covers every TypeScript/TSX module under `frontend/src`, including
+    tests and source-side mocks. Static and type-only imports, import types,
+    literal dynamic imports, re-exports, `require`/import-equals, and literal
+    Vitest/Jest module APIs (`mock`, `doMock`, unmocking, and actual/mock
+    loaders), aliases, and relative paths are evaluated as architecture edges.
+  - `pnpm lint:fsd` has no legacy allowlist. Any reported boundary violation
+    blocks merge.
 
 Violating these constraints is a blocking issue — fix before merging.
 
@@ -163,8 +180,10 @@ Violating these constraints is a blocking issue — fix before merging.
 
 ### Frontend
 
-- Feature-Sliced Design: `app` → `pages` → `widgets` → `features` →
-  `entities` → `shared`. Never import upward.
+- Feature-Sliced Design follows the mandatory public-API, slice-isolation, and
+  full-source rules in [Architecture Constraints](#architecture-constraints).
+  `pnpm lint:fsd` is the blocking structural gate; passing it does not prove
+  runtime behavior, semantic ownership, or product correctness.
 - State: Zustand for client state, TanStack Query for server state.
 - API: All calls through `shared/api/client.ts` (axios with JWT interceptor).
 - SSE: Custom `createChatStream()` in `shared/api/client.ts` using fetch +

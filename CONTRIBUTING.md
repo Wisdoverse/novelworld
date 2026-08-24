@@ -65,8 +65,26 @@ Frontend changes must preserve Feature-Sliced Design:
 app -> pages -> widgets -> features -> entities -> shared
 ```
 
-Imports only point downward. Server state uses TanStack Query, client state uses
-Zustand, and HTTP/SSE calls go through `frontend/src/shared/api/client.ts`.
+`pages`, `widgets`, `features`, and `entities` are sliced layers. Imports only
+point downward, and an import into one of those slices must address its root
+`index.ts`/`index.tsx` public API, such as `@/entities/character`; importing a
+private `ui`, `model`, `api`, or other path below another slice is forbidden.
+Slices in the same layer cannot import one another. A slice may use relative
+paths only for its own internals.
+
+Root entry modules may only bootstrap `app`. The non-sliced `app` and `shared`
+layers retain the relative imports needed for their own composition and shared
+internals. Those exceptions do not permit an upward import or bypassing a
+sliced-layer public API. The architecture check scans every TypeScript/TSX
+module under `frontend/src`, including tests and source-side mocks, and treats static
+and type-only imports, import types, literal dynamic imports, re-exports,
+`require`/import-equals, literal Vitest/Jest module APIs (`mock`, `doMock`,
+unmocking, and actual/mock loaders), aliases, and relative paths as dependency
+edges. There is no legacy allowlist: any violation fails `pnpm lint:fsd` and
+blocks merge.
+
+Server state uses TanStack Query, client state uses Zustand, and HTTP/SSE calls
+go through `frontend/src/shared/api/client.ts`.
 
 ## Verification
 
@@ -93,6 +111,11 @@ pnpm lint:fsd
 pnpm test
 pnpm build
 ```
+
+`pnpm lint:fsd` proves only the statically detectable import boundary contract.
+It does not prove that a feature has the correct semantic owner, that runtime
+loading succeeds, or that user-visible behavior is correct; type, unit, build,
+and applicable browser gates remain required.
 
 Run `pnpm exec playwright test` for user-flow, responsive, or accessibility
 changes. Run the PostgreSQL/Redis integration suite when changing persistence,

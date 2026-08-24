@@ -2,11 +2,11 @@ import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Send, X, Minimize2, Maximize2, Brain } from 'lucide-react';
 import ReactMarkdown, { type Components } from 'react-markdown';
-import { useChatHistory } from '@/features/character-chat/api/useChatHistory';
 import {
   chatSessionKey,
+  useChatHistory,
   useChatStore,
-} from '@/features/character-chat/model/useChatStore';
+} from '@/features/character-chat';
 import type { Character, ChatMessage } from '@/shared/types';
 
 const EMPTY_MESSAGES: ChatMessage[] = [];

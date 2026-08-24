@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { BookOpen, Compass, Dices, GitBranch, History, Users } from 'lucide-react';
-import { isWorldTurnOutcomeUnknown, useSubmitWorldTurn } from '@/entities/narrative/api';
-import { WorldActionForm, actionLabels } from '@/features/world-action/ui/WorldActionForm';
+import { isWorldTurnOutcomeUnknown, useSubmitWorldTurn } from '@/entities/narrative';
+import { WorldActionForm, actionLabels } from '@/features/world-action';
 import { getApiErrorMessage } from '@/shared/api/client';
 import {
   removeWorldTurnPendingRequest,

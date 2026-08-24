@@ -65,7 +65,7 @@ vi.mock('react-router-dom', () => ({
   useParams: () => ({ novelId: mocks.novelId, chapterNum: mocks.routeChapter }),
 }));
 
-vi.mock('@/entities/novel/api', () => ({
+vi.mock('@/entities/novel', () => ({
   useNovel: () => ({ data: { id: mocks.novelId, title: 'Novel', total_chapters: 3 } }),
   useChapter: () => ({
     data: {
@@ -88,7 +88,7 @@ vi.mock('@/entities/novel/api', () => ({
   },
 }));
 
-vi.mock('@/entities/reading-progress/api', () => ({
+vi.mock('@/entities/reading-progress', () => ({
   useReadingProgress: () => ({
     data: {
       current_chapter: mocks.progressChapter,
@@ -137,7 +137,7 @@ vi.mock('@/features/chapter-translation', () => ({
   ),
 }));
 
-vi.mock('@/entities/narrative/api', () => ({
+vi.mock('@/entities/narrative', () => ({
   useEffectiveChapter: (
     _novelId: string,
     _chapter: number,
@@ -229,12 +229,12 @@ vi.mock('@/entities/narrative/api', () => ({
   ),
 }));
 
-vi.mock('@/widgets/chat-panel/ui/ChatPanel', () => ({
+vi.mock('@/widgets/chat-panel', () => ({
   ChatPanel: ({ character }: { character: { name: string } }) => (
     <div data-testid="chat-panel">{character.name}</div>
   ),
 }));
-vi.mock('@/widgets/branch-choice/ui/BranchChoice', () => ({
+vi.mock('@/widgets/branch-choice', () => ({
   BranchChoice: ({
     node,
     onChoose,
@@ -272,7 +272,7 @@ vi.mock('@/widgets/branch-choice/ui/BranchChoice', () => ({
     </div>
   ),
 }));
-vi.mock('@/widgets/world-dashboard/ui/WorldDashboard', () => ({
+vi.mock('@/widgets/world-dashboard', () => ({
   WorldDashboard: ({ actionsDisabled }: { actionsDisabled?: boolean }) => (
     <button id="world-action-journal" disabled={actionsDisabled}>模拟世界行动</button>
   ),
