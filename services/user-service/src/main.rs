@@ -110,7 +110,7 @@ async fn run_body() -> Result<()> {
             jwt: token_issuer,
             llm_tester: Arc::new(LlmClientTester),
             privacy_cleanup,
-            environment_llm_config,
+            environment_llm_config: environment_llm_config.clone(),
             refresh_token_expiry,
             password_work: Arc::new(Semaphore::new(2)),
         });
@@ -125,6 +125,7 @@ async fn run_body() -> Result<()> {
                 &std::env::var("LLM_PRICING_USD_PER_MILLION").unwrap_or_else(|_| "{}".into()),
                 std::env::var("USD_CNY_RATE").ok().as_deref(),
             )?,
+            environment_llm_config,
         });
 
         let readiness = Arc::new(PgReadinessProbe::new(pool));

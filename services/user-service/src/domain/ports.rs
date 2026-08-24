@@ -20,7 +20,7 @@ pub trait LlmConnectionTester: Send + Sync {
 
 #[async_trait]
 pub trait LlmUsageReader: Send + Sync {
-    async fn read(&self) -> Result<LlmUsageSnapshot>;
+    async fn read(&self, config: &RuntimeLlmConfig) -> Result<LlmUsageSnapshot>;
 }
 
 #[async_trait]

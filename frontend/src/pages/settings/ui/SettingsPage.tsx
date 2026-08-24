@@ -1,13 +1,19 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { ArrowLeft, Brain, Download, Key, Loader2, Save, Settings, Trash2 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
+import {
+  llmUsageKeys,
+  type LlmUsageScope,
+} from '@/entities/llm-usage';
 import { apiClient, getApiErrorMessage } from '@/shared/api/client';
+import { queryClient } from '@/shared/api/queryClient';
 import { useAuthStore } from '@/features/auth';
 import { LlmUsageCard } from '@/features/llm-usage';
 
 type LlmSettings = {
-  provider: 'deepseek' | 'openai';
+  scope: LlmUsageScope;
+  provider: EditableProvider | 'environment';
   model: string;
   thinking_enabled: boolean;
   api_key_configured: boolean;
@@ -24,26 +30,59 @@ const MODELS = {
   ],
 } as const;
 
+type EditableProvider = keyof typeof MODELS;
+
 export function SettingsPage() {
   const navigate = useNavigate();
   const user = useAuthStore(state => state.user);
   const deleteAccount = useAuthStore(state => state.deleteAccount);
   const [settings, setSettings] = useState<LlmSettings | null>(null);
+  const [settingsLoading, setSettingsLoading] = useState(true);
+  const [settingsError, setSettingsError] = useState(false);
   const [apiKey, setApiKey] = useState('');
   const [saving, setSaving] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const isAdmin = user?.role === 'admin';
-  const models = useMemo(() => settings ? MODELS[settings.provider] : [], [settings]);
+  const models = settings && settings.provider !== 'environment' ? MODELS[settings.provider] : [];
+  const isEnvironmentManaged = isAdmin && settings?.provider === 'environment';
+
+  const loadSettings = useCallback(async () => {
+    const principalId = user?.id;
+    if (!principalId) return;
+    setSettings(null);
+    setSettingsError(false);
+    setSettingsLoading(true);
+    try {
+      const response = await apiClient.get<LlmSettings>('/settings/llm');
+      const currentUser = useAuthStore.getState().user;
+      if (currentUser?.id !== principalId) return;
+      setSettings(currentUser.role !== 'admin' && response.data.provider === 'environment'
+        ? {
+            ...response.data,
+            provider: 'deepseek',
+            model: MODELS.deepseek[0].id,
+            thinking_enabled: false,
+          }
+        : response.data);
+    } catch (error) {
+      if (useAuthStore.getState().user?.id !== principalId) return;
+      setSettingsError(true);
+      toast.error(getApiErrorMessage(error, '模型设置加载失败'));
+    } finally {
+      if (useAuthStore.getState().user?.id === principalId) setSettingsLoading(false);
+    }
+  }, [user?.id]);
 
   useEffect(() => {
-    if (!isAdmin) return;
-    apiClient.get<LlmSettings>('/settings/llm')
-      .then(response => setSettings(response.data))
-      .catch(error => toast.error(getApiErrorMessage(error, '模型设置加载失败')));
-  }, [isAdmin]);
+    void loadSettings();
+  }, [loadSettings]);
 
-  const selectProvider = (provider: LlmSettings['provider']) => {
+  useEffect(() => {
+    setApiKey('');
+  }, [user?.id]);
+
+  const selectProvider = (provider: EditableProvider) => {
     setSettings(current => current ? {
       ...current,
       provider,
@@ -54,24 +93,43 @@ export function SettingsPage() {
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!settings) return;
+    const principalId = user?.id;
+    if (!settings || !principalId || settings.provider === 'environment') return;
+    const trimmedApiKey = apiKey.trim();
+    if (!isAdmin && !settings.api_key_configured && !trimmedApiKey) {
+      toast.error('请输入个人 API Key');
+      return;
+    }
     setSaving(true);
     try {
       const response = await apiClient.put<LlmSettings>('/settings/llm', {
         provider: settings.provider,
         model: settings.model,
         thinking_enabled: settings.thinking_enabled,
-        api_key: apiKey.trim() || undefined,
+        api_key: trimmedApiKey || undefined,
       });
+      if (useAuthStore.getState().user?.id !== principalId) return;
       setSettings(response.data);
       setApiKey('');
-      toast.success('模型设置已保存，后续请求自动生效');
+      void queryClient.invalidateQueries({
+        queryKey: llmUsageKeys.summary(principalId, response.data.scope),
+        exact: true,
+      });
+      toast.success(`${isAdmin ? '平台' : '个人'}模型设置已保存，后续请求自动生效`);
     } catch (error) {
-      toast.error(getApiErrorMessage(error, '模型设置保存失败'));
+      if (useAuthStore.getState().user?.id === principalId) {
+        toast.error(getApiErrorMessage(error, '模型设置保存失败'));
+      }
     } finally {
       setSaving(false);
     }
   };
+
+  const usageScope: LlmUsageScope | null = isAdmin && settings?.scope === 'platform'
+    ? 'platform'
+    : !isAdmin && settings?.scope === 'user' && settings.api_key_configured
+      ? 'user'
+      : null;
 
   const eraseAccount = async () => {
     if (!window.confirm('永久删除账号及全部小说、对话、记忆和时间线？此操作无法撤销。')) return;
@@ -141,22 +199,41 @@ export function SettingsPage() {
           <p className="mt-2 text-sm text-[#5f6368]">管理模型、API Key 与账号数据。</p>
         </header>
 
-        {isAdmin && !settings && <div className="surface-card flex items-center justify-center p-10">
+        {settingsLoading && <div className="surface-card flex items-center justify-center p-10">
           <Loader2 className="animate-spin text-[#0b57d0]" aria-label="正在加载模型设置" />
         </div>}
 
-        {isAdmin && settings && <section className="surface-card p-6 sm:p-8" aria-labelledby="model-settings-heading">
+        {!settingsLoading && settingsError && <section className="surface-card p-6 sm:p-8" aria-labelledby="model-settings-heading">
+          <h2 id="model-settings-heading" className="text-xl font-semibold text-[#1f1f1f]">模型设置暂时不可用</h2>
+          <p className="mt-2 text-sm text-[#5f6368]">账号数据仍可正常管理，请稍后重试模型设置。</p>
+          <button type="button" onClick={() => void loadSettings()} className="tonal-action mt-5">
+            重试
+          </button>
+        </section>}
+
+        {!settingsLoading && settings && <section className="surface-card p-6 sm:p-8" aria-labelledby="model-settings-heading">
           <div className="mb-7 flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#e8f0fe] text-[#0b57d0]">
               <Settings size={20} />
             </div>
             <div>
-              <h2 id="model-settings-heading" className="text-xl font-semibold text-[#1f1f1f]">模型设置</h2>
-              <p className="text-sm text-[#5f6368]">更改后续解析与角色对话使用的模型</p>
+              <h2 id="model-settings-heading" className="text-xl font-semibold text-[#1f1f1f]">
+                {isAdmin ? '平台模型设置' : '个人模型设置'}
+              </h2>
+              <p className="text-sm text-[#5f6368]">
+                {isAdmin
+                  ? '供未配置个人 Key 的请求使用'
+                  : '仅你的请求使用，不会显示或修改平台 Key'}
+              </p>
             </div>
           </div>
 
-          <form onSubmit={submit} className="space-y-6">
+          {isEnvironmentManaged ? (
+            <div className="rounded-2xl border border-[#a8c7fa] bg-[#eef4ff] p-4 text-sm text-[#3c4043]">
+              <p className="font-semibold text-[#1f1f1f]">平台模型由环境变量管理</p>
+              <p className="mt-1 leading-6">当前模型：{settings.model}。请在部署环境中更新平台配置。</p>
+            </div>
+          ) : <form onSubmit={submit} className="space-y-6">
             <fieldset>
               <legend className="mb-2 text-sm font-medium text-[#3c4043]">服务商</legend>
               <div className="grid grid-cols-2 gap-3">
@@ -191,21 +268,47 @@ export function SettingsPage() {
               </label>
             )}
 
-            <label className="block text-sm font-medium text-[#3c4043]">
-              <span className="flex items-center gap-2"><Key size={15} /> API Key（留空则保持现有 Key）</span>
-              <input type="password" value={apiKey} onChange={event => setApiKey(event.target.value)} autoComplete="off" placeholder={settings.api_key_configured ? '已配置' : '请输入 API Key'} className="field-control mt-2" />
-            </label>
+            <div>
+              <label htmlFor="llm-api-key" className="block text-sm font-medium text-[#3c4043]">
+                <span className="flex items-center gap-2">
+                  <Key size={15} />
+                  {isAdmin
+                    ? '平台 API Key（留空则保持现有 Key）'
+                    : settings.api_key_configured
+                      ? '个人 API Key（留空则保持现有 Key）'
+                      : '个人 API Key'}
+                </span>
+              </label>
+              <input
+                id="llm-api-key"
+                type="password"
+                value={apiKey}
+                onChange={event => setApiKey(event.target.value)}
+                autoComplete="off"
+                required={!isAdmin && !settings.api_key_configured}
+                aria-describedby={!isAdmin && !settings.api_key_configured ? 'llm-api-key-help' : undefined}
+                placeholder={settings.api_key_configured ? '已配置' : '请输入 API Key'}
+                className="field-control mt-2"
+              />
+              {!isAdmin && !settings.api_key_configured && (
+                <p id="llm-api-key-help" className="mt-2 text-xs font-normal leading-5 text-[#5f6368]">
+                  配置个人 Key 后，可查看该 Key 的消耗；配置前继续使用平台模型。
+                </p>
+              )}
+            </div>
 
             <div className="flex justify-end">
               <button type="submit" disabled={saving} className="primary-action">
                 {saving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
-                {saving ? '正在验证并保存…' : '保存模型设置'}
+                {saving ? '正在验证并保存…' : `保存${isAdmin ? '平台' : '个人'}设置`}
               </button>
             </div>
-          </form>
+          </form>}
         </section>}
 
-        {isAdmin && <LlmUsageCard />}
+        {user && usageScope && (
+          <LlmUsageCard principalId={user.id} scope={usageScope} />
+        )}
 
         <section className="surface-card mt-6 p-6 sm:p-8" aria-labelledby="account-settings-heading">
           <div className="mb-5 flex items-center gap-3">

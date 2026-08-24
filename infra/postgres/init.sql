@@ -809,6 +809,20 @@ CREATE TABLE runtime_llm_config (
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Per-user model settings. Keys are encrypted by user-service with AAD bound
+-- to user_id so ciphertext cannot be moved between accounts.
+CREATE TABLE user_llm_configs (
+    user_id            UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    provider           VARCHAR(32) NOT NULL,
+    api_url            TEXT NOT NULL,
+    model              VARCHAR(200) NOT NULL,
+    thinking_enabled   BOOLEAN NOT NULL DEFAULT FALSE,
+    api_key_nonce      BYTEA NOT NULL,
+    api_key_ciphertext BYTEA NOT NULL,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- ─── 触发器：自动更新 updated_at ──────────────────────────────────────────
 
 CREATE OR REPLACE FUNCTION update_updated_at()

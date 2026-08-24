@@ -1,7 +1,7 @@
 import type { Page, Request } from '@playwright/test';
 import {
   AUTH_TOKENS, CHAPTER, CHARACTERS, CHARACTER_PROGRESS, CHOICE_RESULT, EFFECTIVE_CHAPTER,
-  GAME_RULE_TEMPLATE, JOURNAL_ENTRY, LLM_SETTINGS, NODE, NOVEL, NOVELS, OPEN_WORLD, PLAYER_ENTRY,
+  GAME_RULE_TEMPLATE, JOURNAL_ENTRY, LLM_SETTINGS, LLM_USAGE, NODE, NOVEL, NOVELS, OPEN_WORLD, PLAYER_ENTRY,
   PLAYER_ENTRY_NO_PLAYER, PROGRESS, SETUP_STATUS, WORLD_STATE, WORLD_TURN_RESULT, USER,
 } from './fixtures';
 
@@ -109,6 +109,7 @@ export async function installStubs(page: Page, opts: StubOptions = {}): Promise<
       return turnId ? CHAT_DELTA_STREAM(turnId) : CHAT_STREAM;
     }],
     ['GET', /^\/settings\/llm$/, () => json(200, LLM_SETTINGS)],
+    ['GET', /^\/settings\/llm\/usage$/, () => json(200, LLM_USAGE)],
     ['PUT', /^\/settings\/llm$/, () => json(200, LLM_SETTINGS)],
     ['POST', /^\/setup\/init$/, () => {
       setupNeeded = false;

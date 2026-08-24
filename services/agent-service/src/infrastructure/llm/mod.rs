@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures::StreamExt;
 use std::sync::Arc;
+use uuid::Uuid;
 
 use crate::domain::ports::{ChatCompletion, ChatCompletionEvent, ChatStream, TextSummarizer};
 
@@ -17,8 +18,13 @@ impl LlmAdapter {
 
 #[async_trait]
 impl ChatCompletion for LlmAdapter {
-    async fn chat_stream(&self, messages: Vec<(String, String)>) -> Result<ChatStream> {
-        let mut req = llm_client::ChatRequest::new(llm_client::LlmOperation::CharacterChat, "");
+    async fn chat_stream(
+        &self,
+        user_id: Uuid,
+        messages: Vec<(String, String)>,
+    ) -> Result<ChatStream> {
+        let mut req = llm_client::ChatRequest::new(llm_client::LlmOperation::CharacterChat, "")
+            .runtime_user_id(user_id.to_string());
         for (role, content) in messages {
             req = req.message(&role, content);
         }
@@ -39,12 +45,17 @@ impl ChatCompletion for LlmAdapter {
         )))
     }
 
-    async fn chat_messages(&self, messages: Vec<(String, String)>) -> Result<String> {
+    async fn chat_messages(
+        &self,
+        user_id: Uuid,
+        messages: Vec<(String, String)>,
+    ) -> Result<String> {
         let msgs: Vec<llm_client::ChatMessage> = messages
             .into_iter()
             .map(|(role, content)| llm_client::ChatMessage { role, content })
             .collect();
         let req = llm_client::ChatRequest::new(llm_client::LlmOperation::CharacterChat, "")
+            .runtime_user_id(user_id.to_string())
             .messages(msgs)
             .temperature(0.85)
             .max_tokens(1024);
@@ -54,8 +65,9 @@ impl ChatCompletion for LlmAdapter {
 
 #[async_trait]
 impl TextSummarizer for LlmAdapter {
-    async fn summarize(&self, system: &str, text: &str) -> Result<String> {
+    async fn summarize(&self, user_id: Uuid, system: &str, text: &str) -> Result<String> {
         let request = llm_client::ChatRequest::new(llm_client::LlmOperation::MemorySummary, "")
+            .runtime_user_id(user_id.to_string())
             .message("system", system)
             .message("user", text)
             .temperature(0.3)

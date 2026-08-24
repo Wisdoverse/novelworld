@@ -78,6 +78,7 @@ async fn test_tables_exist() {
         "reading_progress",
         "refresh_tokens",
         "runtime_llm_config",
+        "user_llm_configs",
     ];
 
     for table in &expected_tables {

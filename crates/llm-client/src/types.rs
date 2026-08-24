@@ -67,6 +67,7 @@ impl ChatMessage {
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
     pub operation: LlmOperation,
+    pub runtime_user_id: Option<String>,
     pub model: String,
     pub messages: Vec<ChatMessage>,
     pub temperature: Option<f32>,
@@ -80,6 +81,7 @@ impl ChatRequest {
     pub fn new(operation: LlmOperation, model: impl Into<String>) -> Self {
         Self {
             operation,
+            runtime_user_id: None,
             model: model.into(),
             messages: vec![],
             temperature: None,
@@ -88,6 +90,11 @@ impl ChatRequest {
             json_mode: false,
             thinking: None,
         }
+    }
+
+    pub fn runtime_user_id(mut self, user_id: impl Into<String>) -> Self {
+        self.runtime_user_id = Some(user_id.into());
+        self
     }
 
     pub fn message(mut self, role: &str, content: impl Into<String>) -> Self {

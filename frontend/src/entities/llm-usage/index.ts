@@ -1,2 +1,2 @@
-export { getLlmUsage } from './api';
-export type { LlmUsageSummary } from './api';
+export { getLlmUsage, llmUsageKeys } from './api';
+export type { LlmUsageScope, LlmUsageSummary } from './api';

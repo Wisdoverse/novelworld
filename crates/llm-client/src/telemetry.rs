@@ -1,11 +1,26 @@
-use std::time::Instant;
+use std::{fmt::Write, time::Instant};
 
 use metrics::{counter, gauge, histogram};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use sha2::{Digest, Sha256};
 
 use crate::{LlmOperation, Usage};
 
 const MAX_LABEL_CHARS: usize = 200;
+const USAGE_KEY_FINGERPRINT_DOMAIN: &[u8] = b"novelworld-llm-usage-v1\0";
+
+pub fn usage_key_fingerprint(api_key: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(USAGE_KEY_FINGERPRINT_DOMAIN);
+    digest.update(api_key.as_bytes());
+    digest
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut fingerprint, byte| {
+            write!(fingerprint, "{byte:02x}").expect("writing to a String cannot fail");
+            fingerprint
+        })
+}
 
 #[derive(Clone)]
 pub struct MetricsHandle(PrometheusHandle);
@@ -36,6 +51,7 @@ pub fn install_metrics(service: &'static str) -> anyhow::Result<MetricsHandle> {
 pub(crate) struct RequestLabels {
     provider: String,
     model: String,
+    usage_key: String,
     operation: &'static str,
     mode: &'static str,
     output_token_limit: u32,
@@ -45,6 +61,7 @@ impl RequestLabels {
     pub(crate) fn new(
         provider: &str,
         model: &str,
+        api_key: &str,
         operation: LlmOperation,
         mode: &'static str,
         output_token_limit: u32,
@@ -52,6 +69,7 @@ impl RequestLabels {
         Self {
             provider: bounded_label(provider),
             model: bounded_label(model),
+            usage_key: usage_key_fingerprint(api_key),
             operation: operation.to_str(),
             mode,
             output_token_limit,
@@ -227,6 +245,7 @@ impl RequestLabels {
             "model" => self.model.clone(),
             "operation" => self.operation,
             "class" => class,
+            "usage_key" => self.usage_key.clone(),
         )
         .increment(value.into());
     }
@@ -249,7 +268,7 @@ fn bounded_label(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::bounded_label;
+    use super::{bounded_label, usage_key_fingerprint};
 
     #[test]
     fn labels_are_bounded_and_cannot_carry_secrets_or_control_text() {
@@ -257,5 +276,15 @@ mod tests {
         assert_eq!(bounded_label("https://secret.invalid?q=key"), "invalid");
         assert_eq!(bounded_label("line\nbreak"), "invalid");
         assert_eq!(bounded_label(&"x".repeat(201)), "invalid");
+    }
+
+    #[test]
+    fn usage_key_fingerprint_is_stable_bounded_and_one_way() {
+        let fingerprint = usage_key_fingerprint("sk-secret");
+        assert_eq!(fingerprint.len(), 64);
+        assert!(fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(fingerprint, usage_key_fingerprint("sk-secret"));
+        assert_ne!(fingerprint, usage_key_fingerprint("sk-other"));
+        assert!(!fingerprint.contains("secret"));
     }
 }

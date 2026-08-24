@@ -70,10 +70,13 @@ Attacker-controlled input includes:
   instruction-like text, malformed structured output, URLs, or oversized data.
 - Browser-visible persisted content and filenames. A reader can arrange for
   their own content to be rendered, downloaded, streamed, or exported later.
+- A reader's optional personal model-provider API key. It is a user-supplied
+  secret, not content, and must never be returned, logged, exported, or placed
+  directly in a metric label.
 
 Operator-controlled input includes environment variables, Compose overrides,
 TLS and reverse-proxy configuration, database/Redis access, provider selection,
-operator-only model settings, provider base URLs supplied through privileged
+platform model settings, provider base URLs supplied through privileged
 environment configuration, secrets, backups, logs, and host access. The first
 web setup flow creates the initial administrator and accepts only the built-in
 provider choices defined by the runtime configuration domain model.
@@ -145,6 +148,10 @@ limit but cannot enforce.
    accidental instruction confusion but are not an authorization mechanism.
    Structured responses must pass JSON and domain validation before durable
    state changes; free-form chat remains untrusted display data.
+   For user-initiated work, the trusted Gateway principal selects a user-owned
+   encrypted credential when present and otherwise falls back to the platform
+   credential. Accounting uses only a one-way fingerprint of the credential
+   actually selected, never the principal or raw key.
    Open-world prompts label the novel, action, session, and state as untrusted
    data. The model proposes bounded typed changes over IDs in a persisted entry
    snapshot; it cannot select the acting player or commit.
@@ -162,10 +169,14 @@ limit but cannot enforce.
 8. **Administrator setup and runtime configuration.** Initial setup is public
    only while no administrator exists and persists the administrator, refresh
    token, and optional encrypted model configuration atomically. Later model
-   settings require an administrator principal. Provider keys stored in
-   PostgreSQL are encrypted with the operator-supplied AES-GCM key. A malicious
-   administrator or a host process that can read secrets is already privileged;
-   an ordinary reader reaching these operations is not.
+   settings are scope-bound: administrators manage the platform configuration,
+   while ordinary readers may manage only their own optional configuration.
+   Provider keys stored in PostgreSQL are encrypted with the operator-supplied
+   AES-GCM key; personal ciphertext additionally binds its user UUID as
+   authenticated context so rows cannot be swapped between accounts. A reader
+   without a personal key may use the platform fallback but cannot read its
+   usage. A malicious administrator or a host process that can read secrets is
+   already privileged; one reader reaching another scope is not.
 
 9. **Developer/CI to release.** Required CI checks Rust formatting, compilation,
    tests, Clippy, frontend type/lint/test/build, real PostgreSQL/Redis adapters,

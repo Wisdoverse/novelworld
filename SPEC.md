@@ -1351,8 +1351,9 @@ routes are outside this public contract.
 | GET | `/api/auth/me` | User | JWT | Current user profile |
 | DELETE | `/api/auth/me` | User | JWT | Permanently delete the acting account and owned application data |
 | POST | `/api/auth/logout` | User | JWT | Invalidate refresh token |
-| GET | `/api/settings/llm` | User | JWT + admin | Read the effective model configuration without returning its secret |
-| PUT | `/api/settings/llm` | User | JWT + admin | Validate and update the encrypted model configuration |
+| GET | `/api/settings/llm` | User | JWT | Read the acting scope without returning a secret: platform for administrators; personal when configured for other users, otherwise platform fallback metadata |
+| PUT | `/api/settings/llm` | User | JWT | Validate and update the platform configuration for administrators or the acting user's encrypted personal configuration |
+| GET | `/api/settings/llm/usage` | User | JWT | Read key-scoped usage: platform for administrators, personal for other users; return 403 when no personal key is configured |
 | GET | `/api/account/export` | Gateway | JWT | Stream the acting user's complete `account-export-v1` NDJSON data |
 
 ### 10.2 Novel Endpoints
@@ -1819,8 +1820,13 @@ raw URLs/errors, secrets, principals, or resource identifiers. Cost is derived
 at query time from billable token classes and operator-maintained current
 provider pricing. User-facing presentation uses CNY when the UI language starts
 with `zh`, and USD otherwise; exchange rates are configuration, not embedded
-constants. The checked-in versioned release policy is the source of truth for
-H3 budgets.
+constants. Billable-token series identify the credential that actually paid for
+the request only through a stable one-way SHA-256 fingerprint; raw API keys and
+user identifiers MUST NOT appear in metrics or Prometheus queries. Administrators
+may view usage for the platform credential. A non-administrator may view usage
+only after configuring a personal credential, and only for that credential;
+falling back to the platform credential does not grant access to platform usage.
+The checked-in versioned release policy is the source of truth for H3 budgets.
 
 ---
 

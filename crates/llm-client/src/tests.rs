@@ -442,6 +442,7 @@ fn provider_metrics_count_logical_requests_attempts_usage_and_stream_terminals()
     server.join().unwrap();
 
     let rendered = handle.render();
+    let usage_key = crate::usage_key_fingerprint("key");
     assert_eq!(
         metric_value(
             &rendered,
@@ -524,7 +525,8 @@ fn provider_metrics_count_logical_requests_attempts_usage_and_stream_terminals()
             "novelworld_llm_billable_tokens_total",
             &[
                 ("operation", "character_extraction"),
-                ("class", "uncached_input")
+                ("class", "uncached_input"),
+                ("usage_key", usage_key.as_str())
             ],
         ),
         6.0

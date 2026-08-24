@@ -57,6 +57,8 @@ const WORLD_TURN_MEMORY_PROJECTION_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0021_world_turn_memory_projection.sql");
 const CHAPTER_TRANSLATIONS_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0022_chapter_translations.sql");
+const USER_LLM_CONFIG_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0023_user_llm_config.sql");
 
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
@@ -304,6 +306,10 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
             .await
             .unwrap();
         sqlx::raw_sql(CHAPTER_TRANSLATIONS_MIGRATION)
+            .execute(&fresh)
+            .await
+            .unwrap();
+        sqlx::raw_sql(USER_LLM_CONFIG_MIGRATION)
             .execute(&fresh)
             .await
             .unwrap();
@@ -1376,6 +1382,7 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
         "0020_advanced_game_rules.sql",
         "0021_world_turn_memory_projection.sql",
         "0022_chapter_translations.sql",
+        "0023_user_llm_config.sql",
     ] {
         let migration_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../infra/postgres/migrations")
@@ -1484,6 +1491,10 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
             .await
             .unwrap();
         sqlx::raw_sql(CHAPTER_TRANSLATIONS_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
+        sqlx::raw_sql(USER_LLM_CONFIG_MIGRATION)
             .execute(&mut *non_default_path)
             .await
             .unwrap();

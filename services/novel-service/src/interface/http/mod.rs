@@ -127,7 +127,11 @@ async fn request_game_rule_template(
         Ok(progress) => progress,
         Err(error) => return progress_error_response(error),
     };
-    match state.handler.request_game_rule_template(novel_id).await {
+    match state
+        .handler
+        .request_game_rule_template(user_id, novel_id)
+        .await
+    {
         Ok(GameRuleTemplateRequest::Ready(template)) => {
             match template.visible_at(progress.current_chapter) {
                 Some(visible) => (StatusCode::OK, Json(visible)).into_response(),
@@ -1141,12 +1145,16 @@ async fn translate_chapter_text(
     Path((novel_id, chapter_number)): Path<(Uuid, i32)>,
     Json(request): Json<TranslationRequest>,
 ) -> Response {
+    let user_id = match extract_user_id(&headers) {
+        Some(id) => id,
+        None => return api_error(StatusCode::UNAUTHORIZED, "Missing user ID"),
+    };
     if let Err(response) = owned_novel(&state, &headers, novel_id).await {
         return *response;
     }
     match state
         .translation_handler
-        .translate(novel_id, chapter_number, &request.content)
+        .translate(user_id, novel_id, chapter_number, &request.content)
         .await
     {
         Ok(content) => (StatusCode::OK, Json(TranslationResponse { content })).into_response(),

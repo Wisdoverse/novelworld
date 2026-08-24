@@ -111,6 +111,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0022_chapter_translations.sql",
         include_str!("../../../infra/postgres/migrations/0022_chapter_translations.sql"),
     ),
+    (
+        "0023_user_llm_config.sql",
+        include_str!("../../../infra/postgres/migrations/0023_user_llm_config.sql"),
+    ),
 ];
 
 #[derive(Serialize, Deserialize)]
@@ -461,10 +465,7 @@ mod tests {
     #[test]
     fn embedded_migrations_are_complete_and_ordered() {
         assert_eq!(MIGRATIONS.first().unwrap().0, "0001_runtime_contract.sql");
-        assert_eq!(
-            MIGRATIONS.last().unwrap().0,
-            "0022_chapter_translations.sql"
-        );
+        assert_eq!(MIGRATIONS.last().unwrap().0, "0023_user_llm_config.sql");
         assert!(MIGRATIONS.windows(2).all(|pair| pair[0].0 < pair[1].0));
     }
 

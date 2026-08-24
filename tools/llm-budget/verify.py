@@ -12,6 +12,7 @@ LINE = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{.*\})?\s+([^\s]+)$")
 LABEL = re.compile(r'(?:^|,)([a-zA-Z_][a-zA-Z0-9_]*)="((?:\\.|[^"\\])*)"')
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 BOUNDED_LABEL = re.compile(r"^[A-Za-z0-9._/:-]{1,200}$")
+USAGE_KEY = re.compile(r"^[0-9a-f]{64}$")
 FORBIDDEN_LABELS = {
     "api_key", "character_id", "error", "message", "novel_id", "prompt",
     "trace_id", "url", "user_id",
@@ -24,7 +25,9 @@ COUNTER_LABELS = {
     "novelworld_llm_requests_total": {"provider", "model", "operation", "mode", "status"},
     "novelworld_llm_usage_reports_total": {"provider", "model", "operation", "mode", "status"},
     "novelworld_llm_tokens_total": {"provider", "model", "operation", "type"},
-    "novelworld_llm_billable_tokens_total": {"provider", "model", "operation", "class"},
+    "novelworld_llm_billable_tokens_total": {
+        "provider", "model", "operation", "class", "usage_key",
+    },
 }
 HISTOGRAM_LABELS = {
     "novelworld_llm_attempt_duration_seconds": {"provider", "model", "operation", "mode", "status"},
@@ -125,6 +128,9 @@ def parse_metrics(data):
                 label_value = tags.get(key)
                 if label_value is not None and not BOUNDED_LABEL.fullmatch(label_value):
                     raise BudgetError(f"invalid {key} label on line {number}")
+            usage_key = tags.get("usage_key")
+            if usage_key is not None and not USAGE_KEY.fullmatch(usage_key):
+                raise BudgetError(f"invalid usage_key label on line {number}")
         samples.append((name, tags, value))
     return samples
 

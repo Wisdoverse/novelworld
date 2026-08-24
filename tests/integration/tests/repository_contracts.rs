@@ -78,7 +78,12 @@ struct BlockingImportLlm;
 
 #[async_trait::async_trait]
 impl LlmPort for BlockingImportLlm {
-    async fn chat_json(&self, _task: NovelLlmTask, _prompt: &str) -> anyhow::Result<String> {
+    async fn chat_json(
+        &self,
+        _user_id: Uuid,
+        _task: NovelLlmTask,
+        _prompt: &str,
+    ) -> anyhow::Result<String> {
         futures::future::pending().await
     }
 }

@@ -21,8 +21,8 @@ novelworld_llm_output_token_limit{contract="llm-observability-v1",service="novel
 novelworld_llm_tokens_per_request{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="character_extraction",type="output",quantile="1"} 20
 novelworld_llm_tokens_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="character_extraction",type="input"} 180
 novelworld_llm_tokens_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="character_extraction",type="output"} 40
-novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="character_extraction",class="uncached_input"} 180
-novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="character_extraction",class="output"} 40
+novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="character_extraction",class="uncached_input",usage_key="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} 180
+novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="character_extraction",class="output",usage_key="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} 40
 novelworld_llm_requests_started_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="canon_extraction",mode="sync"} 2
 novelworld_llm_attempts_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="canon_extraction",mode="sync",status="success"} 2
 novelworld_llm_requests_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="canon_extraction",mode="sync",status="success"} 2
@@ -32,8 +32,8 @@ novelworld_llm_output_token_limit{contract="llm-observability-v1",service="novel
 novelworld_llm_tokens_per_request{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="canon_extraction",type="output",quantile="1"} 40
 novelworld_llm_tokens_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="canon_extraction",type="input"} 360
 novelworld_llm_tokens_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="canon_extraction",type="output"} 80
-novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="canon_extraction",class="uncached_input"} 360
-novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="canon_extraction",class="output"} 80
+novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="canon_extraction",class="uncached_input",usage_key="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} 360
+novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="canon_extraction",class="output",usage_key="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} 80
 novelworld_llm_requests_started_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="narrative_node_detection",mode="sync"} 1
 novelworld_llm_attempts_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="narrative_node_detection",mode="sync",status="success"} 1
 novelworld_llm_requests_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="narrative_node_detection",mode="sync",status="success"} 1
@@ -43,8 +43,8 @@ novelworld_llm_output_token_limit{contract="llm-observability-v1",service="novel
 novelworld_llm_tokens_per_request{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="narrative_node_detection",type="output",quantile="1"} 30
 novelworld_llm_tokens_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="narrative_node_detection",type="input"} 200
 novelworld_llm_tokens_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="narrative_node_detection",type="output"} 30
-novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="narrative_node_detection",class="uncached_input"} 200
-novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="narrative_node_detection",class="output"} 30
+novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="narrative_node_detection",class="uncached_input",usage_key="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} 200
+novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="narrative_node_detection",class="output",usage_key="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} 30
 novelworld_llm_requests_started_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="branch_generation",mode="sync"} 1
 novelworld_llm_attempts_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="branch_generation",mode="sync",status="success"} 1
 novelworld_llm_requests_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="branch_generation",mode="sync",status="success"} 1
@@ -54,8 +54,8 @@ novelworld_llm_output_token_limit{contract="llm-observability-v1",service="narra
 novelworld_llm_tokens_per_request{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="branch_generation",type="output",quantile="1"} 25
 novelworld_llm_tokens_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="branch_generation",type="input"} 180
 novelworld_llm_tokens_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="branch_generation",type="output"} 25
-novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="branch_generation",class="uncached_input"} 180
-novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="branch_generation",class="output"} 25
+novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="branch_generation",class="uncached_input",usage_key="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} 180
+novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="branch_generation",class="output",usage_key="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} 25
 novelworld_llm_requests_started_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="narrative_transition",mode="sync"} 2
 novelworld_llm_attempts_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="narrative_transition",mode="sync",status="success"} 2
 novelworld_llm_requests_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="narrative_transition",mode="sync",status="success"} 2
@@ -65,8 +65,8 @@ novelworld_llm_output_token_limit{contract="llm-observability-v1",service="narra
 novelworld_llm_tokens_per_request{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="narrative_transition",type="output",quantile="1"} 40
 novelworld_llm_tokens_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="narrative_transition",type="input"} 360
 novelworld_llm_tokens_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="narrative_transition",type="output"} 80
-novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="narrative_transition",class="uncached_input"} 360
-novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="narrative_transition",class="output"} 80
+novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="narrative_transition",class="uncached_input",usage_key="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} 360
+novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="narrative_transition",class="output",usage_key="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} 80
 novelworld_llm_requests_started_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="player_chapter",mode="sync"} 1
 novelworld_llm_attempts_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="player_chapter",mode="sync",status="success"} 1
 novelworld_llm_requests_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="player_chapter",mode="sync",status="success"} 1
@@ -76,8 +76,8 @@ novelworld_llm_output_token_limit{contract="llm-observability-v1",service="narra
 novelworld_llm_tokens_per_request{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="player_chapter",type="output",quantile="1"} 50
 novelworld_llm_tokens_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="player_chapter",type="input"} 220
 novelworld_llm_tokens_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="player_chapter",type="output"} 50
-novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="player_chapter",class="uncached_input"} 220
-novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="player_chapter",class="output"} 50
+novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="player_chapter",class="uncached_input",usage_key="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} 220
+novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",operation="player_chapter",class="output",usage_key="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} 50
 novelworld_llm_requests_started_total{contract="llm-observability-v1",service="agent-service",provider="environment",model="e2e",operation="character_chat",mode="stream"} 1
 novelworld_llm_attempts_total{contract="llm-observability-v1",service="agent-service",provider="environment",model="e2e",operation="character_chat",mode="stream",status="success"} 1
 novelworld_llm_requests_total{contract="llm-observability-v1",service="agent-service",provider="environment",model="e2e",operation="character_chat",mode="stream",status="success"} 1
@@ -88,5 +88,5 @@ novelworld_llm_output_token_limit{contract="llm-observability-v1",service="agent
 novelworld_llm_tokens_per_request{contract="llm-observability-v1",service="agent-service",provider="environment",model="e2e",operation="character_chat",type="output",quantile="1"} 10
 novelworld_llm_tokens_total{contract="llm-observability-v1",service="agent-service",provider="environment",model="e2e",operation="character_chat",type="input"} 80
 novelworld_llm_tokens_total{contract="llm-observability-v1",service="agent-service",provider="environment",model="e2e",operation="character_chat",type="output"} 10
-novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="agent-service",provider="environment",model="e2e",operation="character_chat",class="uncached_input"} 80
-novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="agent-service",provider="environment",model="e2e",operation="character_chat",class="output"} 10
+novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="agent-service",provider="environment",model="e2e",operation="character_chat",class="uncached_input",usage_key="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} 80
+novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="agent-service",provider="environment",model="e2e",operation="character_chat",class="output",usage_key="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} 10

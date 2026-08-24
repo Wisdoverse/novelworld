@@ -6,7 +6,7 @@ use std::sync::{
 };
 use tokio::sync::Semaphore;
 use user_service::{
-    application::handlers::{AuthError, AuthHandler},
+    application::handlers::{AuthError, AuthHandler, LlmSettingsScope},
     domain::{
         entities::{
             runtime_config::RuntimeLlmConfig,
@@ -215,6 +215,12 @@ async fn account_erasure_fails_closed_cascades_owned_data_and_resets_final_setup
     )
     .await
     .unwrap();
+    repo.save_user_llm_config(
+        target.id,
+        &RuntimeLlmConfig::for_provider("openai", "target-secret").unwrap(),
+    )
+    .await
+    .unwrap();
 
     let novel_id = Uuid::new_v4();
     let chapter_id = Uuid::new_v4();
@@ -359,6 +365,38 @@ async fn account_erasure_fails_closed_cascades_owned_data_and_resets_final_setup
         refresh_token_expiry: 60,
         password_work: Arc::new(Semaphore::new(2)),
     };
+    let admin_settings = handler(Arc::new(RecordingPrivacyCleanup::default()))
+        .llm_settings(admin.id)
+        .await
+        .unwrap();
+    assert_eq!(admin_settings.scope, LlmSettingsScope::Platform);
+    assert_eq!(admin_settings.config.api_key, "privacy-secret");
+    let target_settings = handler(Arc::new(RecordingPrivacyCleanup::default()))
+        .llm_settings(target.id)
+        .await
+        .unwrap();
+    assert_eq!(target_settings.scope, LlmSettingsScope::User);
+    assert_eq!(target_settings.config.api_key, "target-secret");
+    let fallback_settings = handler(Arc::new(RecordingPrivacyCleanup::default()))
+        .llm_settings(remaining.id)
+        .await
+        .unwrap();
+    assert_eq!(fallback_settings.scope, LlmSettingsScope::Platform);
+    assert!(!fallback_settings.api_key_configured);
+    assert_eq!(
+        handler(Arc::new(RecordingPrivacyCleanup::default()))
+            .runtime_llm_config_for(Some(admin.id))
+            .await
+            .unwrap()
+            .api_key,
+        "privacy-secret"
+    );
+    assert!(matches!(
+        handler(Arc::new(RecordingPrivacyCleanup::default()))
+            .runtime_llm_config_for(Some(Uuid::new_v4()))
+            .await,
+        Err(AuthError::NotFound)
+    ));
     assert!(matches!(
         handler(last_admin_cleanup.clone())
             .delete_account(admin.id)
@@ -416,6 +454,11 @@ async fn account_erasure_fails_closed_cascades_owned_data_and_resets_final_setup
         .unwrap();
     assert_eq!(successful_cleanup.calls.load(Ordering::SeqCst), 1);
     assert!(repo.find_by_id(target.id).await.unwrap().is_none());
+    assert!(repo
+        .find_user_llm_config(target.id)
+        .await
+        .unwrap()
+        .is_none());
     let canonical: serde_json::Value = sqlx::query_scalar(
         r#"SELECT jsonb_build_object(
             'novels', (SELECT COUNT(*) FROM novels),
@@ -454,7 +497,8 @@ async fn account_erasure_fails_closed_cascades_owned_data_and_resets_final_setup
             'world_states', (SELECT COUNT(*) FROM world_states),
             'player_chapters', (SELECT COUNT(*) FROM player_chapters),
             'reading_progress', (SELECT COUNT(*) FROM reading_progress),
-            'refresh_tokens', (SELECT COUNT(*) FROM refresh_tokens)
+            'refresh_tokens', (SELECT COUNT(*) FROM refresh_tokens),
+            'user_llm_configs', (SELECT COUNT(*) FROM user_llm_configs)
         )"#,
     )
     .fetch_one(&pool)

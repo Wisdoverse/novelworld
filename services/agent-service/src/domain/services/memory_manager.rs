@@ -637,6 +637,7 @@ impl MemoryManager {
         let summary = self
             .llm
             .summarize(
+                user_id,
                 "你是一个对话摘要助手。请将以下对话压缩为2-3句话的摘要，保留关键信息和情感变化。",
                 &conversation,
             )
@@ -995,7 +996,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TextSummarizer for FakeSummarizer {
-        async fn summarize(&self, _system: &str, _text: &str) -> Result<String> {
+        async fn summarize(&self, _user_id: Uuid, _system: &str, _text: &str) -> Result<String> {
             Ok(self.0.clone())
         }
     }

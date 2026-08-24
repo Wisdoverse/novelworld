@@ -12,6 +12,7 @@ use crate::domain::entities::user::{RefreshToken, User, UserRole};
 use crate::domain::repositories::{AccountDeletion, UserRepository, UserSave};
 
 const CONFIG_AAD: &[u8] = b"novelworld-runtime-llm-v1";
+const USER_CONFIG_AAD_PREFIX: &[u8] = b"novelworld-user-llm-v1";
 
 pub struct PgUserRepository {
     pool: PgPool,
@@ -27,6 +28,14 @@ impl PgUserRepository {
     }
 
     fn encrypt_api_key(&self, api_key: &str) -> Result<(Vec<u8>, Vec<u8>)> {
+        self.encrypt_api_key_with_aad(api_key, CONFIG_AAD)
+    }
+
+    fn encrypt_user_api_key(&self, user_id: Uuid, api_key: &str) -> Result<(Vec<u8>, Vec<u8>)> {
+        self.encrypt_api_key_with_aad(api_key, &user_config_aad(user_id))
+    }
+
+    fn encrypt_api_key_with_aad(&self, api_key: &str, aad: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
         let nonce = Nonce::<Aes256Gcm>::try_generate()
             .map_err(|_| anyhow::anyhow!("failed to generate runtime configuration nonce"))?;
         let ciphertext = self
@@ -35,7 +44,7 @@ impl PgUserRepository {
                 &nonce,
                 Payload {
                     msg: api_key.as_bytes(),
-                    aad: CONFIG_AAD,
+                    aad,
                 },
             )
             .map_err(|_| anyhow::anyhow!("failed to encrypt runtime configuration"))?;
@@ -43,6 +52,24 @@ impl PgUserRepository {
     }
 
     fn decrypt_api_key(&self, nonce: &[u8], ciphertext: &[u8]) -> Result<String> {
+        self.decrypt_api_key_with_aad(nonce, ciphertext, CONFIG_AAD)
+    }
+
+    fn decrypt_user_api_key(
+        &self,
+        user_id: Uuid,
+        nonce: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<String> {
+        self.decrypt_api_key_with_aad(nonce, ciphertext, &user_config_aad(user_id))
+    }
+
+    fn decrypt_api_key_with_aad(
+        &self,
+        nonce: &[u8],
+        ciphertext: &[u8],
+        aad: &[u8],
+    ) -> Result<String> {
         let nonce: &[u8; 12] = nonce
             .try_into()
             .map_err(|_| anyhow::anyhow!("runtime configuration nonce is invalid"))?;
@@ -52,13 +79,20 @@ impl PgUserRepository {
                 nonce.into(),
                 Payload {
                     msg: ciphertext,
-                    aad: CONFIG_AAD,
+                    aad,
                 },
             )
             .map_err(|_| anyhow::anyhow!("failed to decrypt runtime configuration"))?;
         String::from_utf8(plaintext)
             .map_err(|_| anyhow::anyhow!("runtime configuration contains invalid UTF-8"))
     }
+}
+
+fn user_config_aad(user_id: Uuid) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(USER_CONFIG_AAD_PREFIX.len() + 16);
+    aad.extend_from_slice(USER_CONFIG_AAD_PREFIX);
+    aad.extend_from_slice(user_id.as_bytes());
+    aad
 }
 
 fn decode_hex_key(value: &str) -> Result<[u8; 32]> {
@@ -232,6 +266,60 @@ impl UserRepository for PgUserRepository {
                  api_key_ciphertext = EXCLUDED.api_key_ciphertext,
                  updated_at = NOW()"#,
         )
+        .bind(&config.provider)
+        .bind(&config.api_url)
+        .bind(&config.model)
+        .bind(config.thinking_enabled)
+        .bind(nonce)
+        .bind(ciphertext)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn find_user_llm_config(&self, user_id: Uuid) -> Result<Option<RuntimeLlmConfig>> {
+        let row = sqlx::query_as::<_, RuntimeLlmConfigRow>(
+            r#"SELECT provider, api_url, model, thinking_enabled, api_key_nonce, api_key_ciphertext
+               FROM user_llm_configs WHERE user_id = $1"#,
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            let api_key =
+                self.decrypt_user_api_key(user_id, &row.api_key_nonce, &row.api_key_ciphertext)?;
+            let config = RuntimeLlmConfig::for_settings(
+                &row.provider,
+                &row.model,
+                &api_key,
+                row.thinking_enabled,
+            )
+            .map_err(anyhow::Error::msg)?;
+            anyhow::ensure!(
+                config.api_url == row.api_url,
+                "stored user LLM endpoint does not match its provider"
+            );
+            Ok(config)
+        })
+        .transpose()
+    }
+
+    async fn save_user_llm_config(&self, user_id: Uuid, config: &RuntimeLlmConfig) -> Result<()> {
+        let (nonce, ciphertext) = self.encrypt_user_api_key(user_id, &config.api_key)?;
+        sqlx::query(
+            r#"INSERT INTO user_llm_configs
+               (user_id, provider, api_url, model, thinking_enabled, api_key_nonce, api_key_ciphertext)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)
+               ON CONFLICT (user_id) DO UPDATE SET
+                 provider = EXCLUDED.provider,
+                 api_url = EXCLUDED.api_url,
+                 model = EXCLUDED.model,
+                 thinking_enabled = EXCLUDED.thinking_enabled,
+                 api_key_nonce = EXCLUDED.api_key_nonce,
+                 api_key_ciphertext = EXCLUDED.api_key_ciphertext,
+                 updated_at = NOW()"#,
+        )
+        .bind(user_id)
         .bind(&config.provider)
         .bind(&config.api_url)
         .bind(&config.model)
@@ -450,12 +538,22 @@ struct RuntimeLlmConfigRow {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_hex_key;
+    use super::{decode_hex_key, user_config_aad, USER_CONFIG_AAD_PREFIX};
+    use uuid::Uuid;
 
     #[test]
     fn runtime_key_must_be_exactly_32_hex_bytes() {
         assert!(decode_hex_key(&"ab".repeat(32)).is_ok());
         assert!(decode_hex_key("not-a-key").is_err());
         assert!(decode_hex_key(&"ab".repeat(31)).is_err());
+    }
+
+    #[test]
+    fn personal_config_aad_is_bound_to_the_user() {
+        let left = user_config_aad(Uuid::from_u128(1));
+        let right = user_config_aad(Uuid::from_u128(2));
+        assert!(left.starts_with(USER_CONFIG_AAD_PREFIX));
+        assert_eq!(left.len(), USER_CONFIG_AAD_PREFIX.len() + 16);
+        assert_ne!(left, right);
     }
 }

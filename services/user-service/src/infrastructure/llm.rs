@@ -9,7 +9,7 @@ pub struct LlmClientTester;
 impl LlmConnectionTester for LlmClientTester {
     async fn test(&self, config: &RuntimeLlmConfig) -> Result<()> {
         let client = llm_client::LlmClient::new().with_openai_compatible(
-            "setup",
+            &config.provider,
             &config.api_key,
             &config.api_url,
         );
@@ -17,7 +17,7 @@ impl LlmConnectionTester for LlmClientTester {
             .chat(
                 llm_client::ChatRequest::new(
                     llm_client::LlmOperation::SetupConnection,
-                    format!("setup/{}", config.model),
+                    format!("{}/{}", config.provider, config.model),
                 )
                 .message("user", "Reply OK")
                 .max_tokens(8)
