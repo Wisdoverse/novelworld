@@ -410,6 +410,87 @@ async fn startup_recovery_claims_a_pending_import() {
 }
 
 #[tokio::test]
+async fn batch_import_acceptance_is_atomic() {
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let user_id = insert_test_user(&pool, "batch-import").await;
+    let first = Novel::create(user_id, "First batch novel".into(), None);
+    let second = Novel::create(user_id, "Second batch novel".into(), None);
+    let imports = vec![
+        (
+            first.clone(),
+            vec![Chapter::new(
+                first.id,
+                1,
+                None,
+                "First durable batch chapter. ".repeat(8),
+            )],
+        ),
+        (
+            second.clone(),
+            vec![Chapter::new(
+                second.id,
+                1,
+                None,
+                "Second durable batch chapter. ".repeat(8),
+            )],
+        ),
+    ];
+    let repo = NovelPgRepository::new(pool.clone());
+    repo.create_import_batch(&imports).await.unwrap();
+
+    let accepted: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT novel.id, job.stage, job.status \
+         FROM novels AS novel JOIN novel_import_jobs AS job ON job.novel_id = novel.id \
+         WHERE novel.id = $1 OR novel.id = $2 ORDER BY novel.title",
+    )
+    .bind(first.id)
+    .bind(second.id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(accepted.len(), 2);
+    assert!(accepted
+        .iter()
+        .all(|(_, stage, status)| stage == "chapters" && status == "pending"));
+
+    let valid = Novel::create(user_id, "Rolled back valid novel".into(), None);
+    let invalid = Novel::create(user_id, "Rolled back invalid novel".into(), None);
+    let invalid_batch = vec![
+        (
+            valid.clone(),
+            vec![Chapter::new(
+                valid.id,
+                1,
+                None,
+                "This row must roll back with its sibling. ".repeat(8),
+            )],
+        ),
+        (
+            invalid.clone(),
+            vec![Chapter::new(
+                valid.id,
+                1,
+                None,
+                "This chapter belongs to the wrong aggregate. ".repeat(8),
+            )],
+        ),
+    ];
+    assert!(repo.create_import_batch(&invalid_batch).await.is_err());
+    let rolled_back: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM novels WHERE id = $1 OR id = $2")
+            .bind(valid.id)
+            .bind(invalid.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rolled_back, 0);
+}
+
+#[tokio::test]
 async fn durable_import_claim_is_recoverable_and_attempt_fenced() {
     let pool = PgPoolOptions::new()
         .max_connections(2)

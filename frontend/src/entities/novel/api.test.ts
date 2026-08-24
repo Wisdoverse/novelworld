@@ -6,10 +6,13 @@ import { apiClient } from '@/shared/api/client';
 import { worldTurnPendingStorageKey } from '@/shared/lib/worldTurnStorage';
 import type { Character } from '@/shared/types';
 import {
+  buildNovelBatchUploadFormData,
   buildNovelUploadFormData,
   isCharacterAvailable,
+  novelTitleFromFile,
   shouldPollNovelList,
   useDeleteNovel,
+  validateNovelBatchFiles,
   validateNovelFile,
 } from './api';
 
@@ -43,6 +46,39 @@ describe('novel file uploads', () => {
     expect(form.get('deviation_mode')).toBe('canon');
     expect(form.get('file')).toBe(file);
     expect(form.has('user_id')).toBe(false);
+  });
+
+  it('builds one bounded multipart request for a file batch', () => {
+    const files = [
+      new File(['first'], 'first.txt', { type: 'text/plain' }),
+      new File(['second'], 'second.pdf', { type: 'application/pdf' }),
+    ];
+    const form = buildNovelBatchUploadFormData({
+      author: 'Shared author',
+      deviationMode: 'creative',
+      files,
+    });
+
+    expect(form.getAll('file')).toEqual(files);
+    expect(form.get('author')).toBe('Shared author');
+    expect(form.get('deviation_mode')).toBe('creative');
+    expect(form.has('user_id')).toBe(false);
+  });
+
+  it('bounds a batch and derives titles from supported file names', () => {
+    expect(novelTitleFromFile(new File([], 'The Story.EPUB'))).toBe('The Story');
+    expect(validateNovelBatchFiles([
+      new File(['one'], 'one.txt'),
+      new File(['two'], 'two.pdf'),
+    ])).toBeNull();
+    expect(validateNovelBatchFiles(
+      Array.from({ length: 6 }, (_, index) => new File(['x'], `${index}.txt`)),
+    )).toContain('最多导入 5 本');
+    expect(validateNovelBatchFiles([
+      { name: 'one.epub', size: 20 * 1024 * 1024 } as File,
+      { name: 'two.epub', size: 20 * 1024 * 1024 } as File,
+      { name: 'three.txt', size: 1 } as File,
+    ])).toContain('合计不能超过 40 MiB');
   });
 });
 

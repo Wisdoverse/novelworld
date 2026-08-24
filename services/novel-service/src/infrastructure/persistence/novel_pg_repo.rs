@@ -119,6 +119,45 @@ async fn insert_initial_shelf(tx: &mut Transaction<'_, Postgres>, novel: &Novel)
     Ok(())
 }
 
+async fn insert_pending_import(
+    tx: &mut Transaction<'_, Postgres>,
+    novel: &Novel,
+    chapters: &[Chapter],
+) -> Result<()> {
+    let stage = if chapters.is_empty() {
+        ensure!(
+            novel.file_key.is_some(),
+            "source-stage import requires a retained source key"
+        );
+        "source"
+    } else {
+        ensure!(
+            chapters.iter().all(|chapter| chapter.novel_id == novel.id),
+            "durable import chapters belong to another novel"
+        );
+        ensure!(
+            chapters_are_importable(chapters),
+            "durable import chapters must be contiguous and non-empty"
+        );
+        "chapters"
+    };
+
+    insert_novel(tx, novel).await?;
+    insert_initial_shelf(tx, novel).await?;
+    if !chapters.is_empty() {
+        save_batch_in_transaction(tx, chapters).await?;
+    }
+    sqlx::query(
+        "INSERT INTO novel_import_jobs (novel_id, stage, status) \
+         VALUES ($1, $2, 'pending')",
+    )
+    .bind(novel.id)
+    .bind(stage)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 async fn lock_import(
     tx: &mut Transaction<'_, Postgres>,
     novel_id: Uuid,
@@ -145,25 +184,18 @@ async fn lock_import(
 impl NovelRepository for NovelPgRepository {
     async fn create_import(&self, novel: &Novel, chapters: &[Chapter]) -> Result<()> {
         ensure!(!chapters.is_empty(), "durable import requires chapters");
-        ensure!(
-            chapters.iter().all(|chapter| chapter.novel_id == novel.id),
-            "durable import chapters belong to another novel"
-        );
-        ensure!(
-            chapters_are_importable(chapters),
-            "durable import chapters must be contiguous and non-empty"
-        );
         let mut transaction = self.pool.begin().await?;
-        insert_novel(&mut transaction, novel).await?;
-        insert_initial_shelf(&mut transaction, novel).await?;
-        save_batch_in_transaction(&mut transaction, chapters).await?;
-        sqlx::query(
-            "INSERT INTO novel_import_jobs (novel_id, stage, status) \
-             VALUES ($1, 'chapters', 'pending')",
-        )
-        .bind(novel.id)
-        .execute(&mut *transaction)
-        .await?;
+        insert_pending_import(&mut transaction, novel, chapters).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn create_import_batch(&self, imports: &[(Novel, Vec<Chapter>)]) -> Result<()> {
+        ensure!(!imports.is_empty(), "import batch cannot be empty");
+        let mut transaction = self.pool.begin().await?;
+        for (novel, chapters) in imports {
+            insert_pending_import(&mut transaction, novel, chapters).await?;
+        }
         transaction.commit().await?;
         Ok(())
     }
@@ -174,15 +206,7 @@ impl NovelRepository for NovelPgRepository {
             "source-stage import requires a retained source key"
         );
         let mut transaction = self.pool.begin().await?;
-        insert_novel(&mut transaction, novel).await?;
-        insert_initial_shelf(&mut transaction, novel).await?;
-        sqlx::query(
-            "INSERT INTO novel_import_jobs (novel_id, stage, status) \
-             VALUES ($1, 'source', 'pending')",
-        )
-        .bind(novel.id)
-        .execute(&mut *transaction)
-        .await?;
+        insert_pending_import(&mut transaction, novel, &[]).await?;
         transaction.commit().await?;
         Ok(())
     }

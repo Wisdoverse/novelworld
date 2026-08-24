@@ -113,6 +113,20 @@ export interface NovelUploadInput {
   file: File;
 }
 
+export interface NovelBatchUploadInput {
+  author?: string;
+  deviationMode: string;
+  files: File[];
+}
+
+export interface NovelImportAccepted {
+  novel_id: string;
+  status: string;
+}
+
+export const MAX_NOVEL_BATCH_FILES = 5;
+export const MAX_NOVEL_BATCH_BYTES = 40 * 1024 * 1024;
+
 export function buildNovelUploadFormData(input: NovelUploadInput) {
   const form = new FormData();
   form.append('title', input.title);
@@ -120,6 +134,18 @@ export function buildNovelUploadFormData(input: NovelUploadInput) {
   form.append('deviation_mode', input.deviationMode);
   form.append('file', input.file);
   return form;
+}
+
+export function buildNovelBatchUploadFormData(input: NovelBatchUploadInput) {
+  const form = new FormData();
+  if (input.author) form.append('author', input.author);
+  form.append('deviation_mode', input.deviationMode);
+  input.files.forEach(file => form.append('file', file));
+  return form;
+}
+
+export function novelTitleFromFile(file: File) {
+  return file.name.replace(/\.(txt|epub|pdf)$/i, '');
 }
 
 export function validateNovelFile(file: File): string | null {
@@ -134,6 +160,21 @@ export function validateNovelFile(file: File): string | null {
   return null;
 }
 
+export function validateNovelBatchFiles(files: File[]): string | null {
+  if (!files.length) return '请至少选择一本小说';
+  if (files.length > MAX_NOVEL_BATCH_FILES) {
+    return `每次最多导入 ${MAX_NOVEL_BATCH_FILES} 本小说`;
+  }
+  for (const file of files) {
+    const error = validateNovelFile(file);
+    if (error) return `${file.name}：${error}`;
+  }
+  if (files.reduce((total, file) => total + file.size, 0) > MAX_NOVEL_BATCH_BYTES) {
+    return '所选文件合计不能超过 40 MiB';
+  }
+  return null;
+}
+
 export function useUploadNovel() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -142,6 +183,19 @@ export function useUploadNovel() {
       status: string;
     }>('/novels/upload', buildNovelUploadFormData(input), {
       timeout: 60_000,
+    }).then(r => r.data),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: novelKeys.list() }),
+  });
+}
+
+export function useUploadNovelsBatch() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: NovelBatchUploadInput) => apiClient.post<{
+      novels: NovelImportAccepted[];
+      message: string;
+    }>('/novels/upload/batch', buildNovelBatchUploadFormData(input), {
+      timeout: 120_000,
     }).then(r => r.data),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: novelKeys.list() }),
   });
