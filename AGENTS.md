@@ -196,7 +196,10 @@ Schema lives in `infra/postgres/init.sql`. Key tables:
 | `reading_progress` | Chapter position, reader identity |
 | `refresh_tokens` | JWT refresh token storage |
 
-All IDs are UUID v4. All timestamps are TIMESTAMPTZ (UTC).
+IDs are UUID v4 by default. The committed-world-turn journey-memory projection
+is the explicit exception: it uses a private, fixed UUID v5 namespace so a
+pending replay addresses the same durable fact. All timestamps are TIMESTAMPTZ
+(UTC).
 
 ## Environment Variables
 

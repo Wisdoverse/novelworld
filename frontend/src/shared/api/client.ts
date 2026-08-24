@@ -1,5 +1,7 @@
-import axios, { AxiosInstance } from 'axios';
+import axios, { AxiosHeaders, AxiosInstance } from 'axios';
 import { isDesktopClient } from '@/shared/config/runtime';
+import { clearPrivateQueryCache } from '@/shared/api/queryClient';
+import { clearWorldTurnPendingRequests } from '@/shared/lib/worldTurnStorage';
 
 const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080/api';
 
@@ -7,6 +9,45 @@ export const apiClient: AxiosInstance = axios.create({
   baseURL: BASE_URL,
   timeout: 30000,
 });
+
+const PUBLIC_CREDENTIAL_PATHS = new Set(['/auth/login', '/auth/register', '/setup/init']);
+
+export function invalidateSessionForUnauthorizedRequest(
+  status: number | undefined,
+  requestAuthorization: unknown,
+  requestUrl?: string,
+) {
+  if (status !== 401) return false;
+  if (requestUrl && PUBLIC_CREDENTIAL_PATHS.has(requestUrl)) return false;
+  const currentToken = localStorage.getItem('auth_token');
+  if (
+    !currentToken
+    || typeof requestAuthorization !== 'string'
+    || requestAuthorization !== `Bearer ${currentToken}`
+  ) return false;
+  clearPrivateQueryCache();
+  localStorage.removeItem('auth_token');
+  localStorage.removeItem('refresh_token');
+  clearWorldTurnPendingRequests();
+  return true;
+}
+
+export function invalidateSessionForUnauthorizedResponse(error: unknown) {
+  if (!axios.isAxiosError(error)) return false;
+  return invalidateSessionForUnauthorizedRequest(
+    error.response?.status,
+    AxiosHeaders.from(error.config?.headers).get('Authorization'),
+    error.config?.url?.split(/[?#]/)[0],
+  );
+}
+
+function reloadOrRedirectAfterUnauthorized() {
+  if (isDesktopClient) {
+    window.location.reload();
+  } else {
+    window.location.href = '/login';
+  }
+}
 
 interface ApiErrorBody {
   error?: string | { code?: string; message?: string };
@@ -27,7 +68,7 @@ export function getApiErrorMessage(error: unknown, fallback: string): string {
 // 请求拦截器：注入 JWT
 apiClient.interceptors.request.use((config) => {
   const token = localStorage.getItem('auth_token');
-  if (token) {
+  if (token && !config.headers.has('Authorization')) {
     config.headers.Authorization = `Bearer ${token}`;
   }
   return config;
@@ -37,9 +78,8 @@ apiClient.interceptors.request.use((config) => {
 apiClient.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response?.status === 401) {
-      localStorage.removeItem('auth_token');
-      window.location.href = isDesktopClient ? '#/login' : '/login';
+    if (invalidateSessionForUnauthorizedResponse(error)) {
+      reloadOrRedirectAfterUnauthorized();
     }
     return Promise.reject(error);
   }
@@ -337,6 +377,13 @@ export function createChatStream(options: ChatStreamOptions): () => void {
     }
 
     if (!response.ok) {
+      if (invalidateSessionForUnauthorizedRequest(
+        response.status,
+        token ? `Bearer ${token}` : undefined,
+        `/chat/${options.characterId}/stream`,
+      )) {
+        reloadOrRedirectAfterUnauthorized();
+      }
       const body = await response.json().catch(() => undefined);
       const error = responseErrorBody(body, response.status);
       if (response.status >= 500 || (response.status === 409 && error.code === 'turn_in_progress')) {

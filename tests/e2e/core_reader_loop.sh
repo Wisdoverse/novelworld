@@ -17,6 +17,10 @@ json_get() {
   python3 -c "import json,sys; value=json.load(sys.stdin); print($1)"
 }
 
+journey_memory_id() {
+  python3 -c 'import hashlib,sys,uuid; namespace=uuid.UUID("4d5f215d-111c-5f25-8614-71e85f8a3e63"); source=uuid.UUID(sys.argv[1]); value=bytearray(hashlib.sha1(namespace.bytes+source.bytes).digest()[:16]); value[6]=(value[6]&15)|80; value[8]=(value[8]&63)|128; print(uuid.UUID(bytes=bytes(value)))' "$1"
+}
+
 pause() {
   sleep 1.1
 }
@@ -116,19 +120,21 @@ pause
 player_entry=$("${curl_cmd[@]}" "${auth[@]}" "$api/narrative/$novel_id/player-entry?checkpoint_chapter=1")
 location_id=$(json_get "value['locations'][0]['id']" <<<"$player_entry")
 python3 -c "import json,sys; value=json.load(sys.stdin); assert value['player'] is None; assert value['checkpoint_chapter']==1; assert len(value['locations'])==1" <<<"$player_entry"
+player_definition="{\"checkpoint_chapter\":1,\"name\":\"云舟\",\"background\":\"来自边城的地图学徒。\",\"capabilities\":[\"辨认古地图\"],\"location_id\":\"$location_id\",\"inventory\":[\"旧地图\"]}"
 
 pause
 player=$("${curl_cmd[@]}" "${auth[@]}" \
   -X PUT -H 'Content-Type: application/json' \
-  --data "{\"checkpoint_chapter\":1,\"name\":\"云舟\",\"background\":\"来自边城的地图学徒。\",\"capabilities\":[\"辨认古地图\"],\"location_id\":\"$location_id\",\"inventory\":[\"旧地图\"]}" \
+  --data "$player_definition" \
   "$api/narrative/$novel_id/player-entry")
 player_id=$(json_get "value['player']['id']" <<<"$player")
+player_entity_hash=$(python3 -c 'import hashlib,json,sys; value=json.load(sys.stdin); print(hashlib.sha256(json.dumps(value["player"],ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()).hexdigest())' <<<"$player")
 python3 -c "import json,sys; value=json.load(sys.stdin); player=value['player']; assert value['checkpoint_chapter']==1; assert player['name']=='云舟'; assert player['location_id']=='$location_id'; assert player['relationships']=={}" <<<"$player"
 
 pause
 same_player=$("${curl_cmd[@]}" "${auth[@]}" \
   -X PUT -H 'Content-Type: application/json' \
-  --data "{\"checkpoint_chapter\":1,\"name\":\"云舟\",\"background\":\"来自边城的地图学徒。\",\"capabilities\":[\"辨认古地图\"],\"location_id\":\"$location_id\",\"inventory\":[\"旧地图\"]}" \
+  --data "$player_definition" \
   "$api/narrative/$novel_id/player-entry")
 [ "$(json_get "value['player']['id']" <<<"$same_player")" = "$player_id" ]
 pause
@@ -169,7 +175,8 @@ node_id=$(json_get "value['id']" <<<"$node")
 pause
 failed_choice_file=$(mktemp)
 choice_conflict_file=$(mktemp)
-trap 'rm -f "$source_file" "$failed_choice_file" "$choice_conflict_file" "$metrics_file" "$account_export_file" "$account_export_headers"' EXIT
+rewind_response_file=$(mktemp)
+trap 'rm -f "$source_file" "$failed_choice_file" "$choice_conflict_file" "$rewind_response_file" "$metrics_file" "$account_export_file" "$account_export_headers"' EXIT
 failed_choice_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   --output "$failed_choice_file" --write-out '%{http_code}' "${auth[@]}" \
   -H 'Content-Type: application/json' \
@@ -228,13 +235,18 @@ same_open_world=$("${curl_cmd[@]}" "${auth[@]}" -X POST "$api/narrative/$novel_i
 [ "$(printf '%s' "$same_open_world" | sha256sum | cut -d' ' -f1)" = "$(printf '%s' "$open_world" | sha256sum | cut -d' ' -f1)" ]
 
 world_turn_one_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
-world_action_one="{\"kind\":\"investigate\",\"target_id\":\"$canon_event_id\",\"intent\":\"查清北塔换防并阻止伏击\"}"
+world_action_one="{\"expected_turn_number\":0,\"kind\":\"investigate\",\"target_id\":\"$canon_event_id\",\"intent\":\"查清北塔换防并阻止伏击\"}"
 pause
 world_turn_one=$("${curl_cmd[@]}" "${auth[@]}" \
   -H 'Content-Type: application/json' -H "Idempotency-Key: $world_turn_one_id" \
   --data "$world_action_one" "$api/narrative/$novel_id/world/turns")
 world_turn_one_hash=$(printf '%s' "$world_turn_one" | sha256sum | cut -d' ' -f1)
-python3 -c "import json,sys; value=json.load(sys.stdin); transition=value['transition']; session=value['world_state']['state']['open_world']; assert value['turn_id']=='$world_turn_one_id'; assert transition['canonical_event_change']['event_id']=='$canon_event_id'; assert transition['canonical_event_change']['status']=='obstructed'; assert transition['events'][0]['actor_character_ids']==[]; assert session['turn_number']==1; assert session['canonical_events'][0]['status']=='obstructed'" <<<"$world_turn_one"
+python3 -c "import json,sys; value=json.load(sys.stdin); transition=value['transition']; session=value['world_state']['state']['open_world']; assert value['turn_id']=='$world_turn_one_id'; assert value['memory_projection_status']=='saved'; assert transition['canonical_event_change']['event_id']=='$canon_event_id'; assert transition['canonical_event_change']['status']=='obstructed'; assert transition['events'][0]['actor_character_ids']==['$character_id']; assert session['turn_number']==1; assert session['canonical_events'][0]['status']=='obstructed'" <<<"$world_turn_one"
+journey_memory_one_id=$(journey_memory_id "$world_turn_one_id")
+journey_memory_one=$(docker exec novel-postgres psql \
+  -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
+  -c "SELECT jsonb_build_object('id', id, 'character_id', character_id, 'user_id', user_id, 'novel_id', novel_id, 'layer', layer, 'importance', importance, 'chapter_number', chapter_number, 'fact', content::jsonb)::text FROM character_memories WHERE id = '$journey_memory_one_id'")
+python3 -c "import json,sys; value=json.load(sys.stdin); fact=value['fact']; assert value['id']=='$journey_memory_one_id'; assert value['character_id']=='$character_id'; assert value['user_id']=='$user_id'; assert value['novel_id']=='$novel_id'; assert value['layer']=='permanent'; assert value['importance']==7; assert value['chapter_number']==2; assert fact['schema_version']==2; assert fact['source']=='committed_world_turn'; assert fact['authority']=='explicit_character_witness_facts'; assert fact['source_turn_id']=='$world_turn_one_id'; assert fact['witness_character_id']=='$character_id'; assert fact['turn_number']==1; assert fact['world_time']==1; assert fact['change_counts']=={'events':1,'relationships':1,'reader_action':0}" <<<"$journey_memory_one"
 
 pause
 replayed_world_turn_one=$("${curl_cmd[@]}" "${auth[@]}" \
@@ -246,16 +258,16 @@ pause
 test "$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   --output /dev/null --write-out '%{http_code}' "${auth[@]}" \
   -H 'Content-Type: application/json' -H "Idempotency-Key: $world_turn_one_id" \
-  --data "{\"kind\":\"investigate\",\"target_id\":\"$canon_event_id\",\"intent\":\"提交冲突的另一项行动\"}" \
+  --data "{\"expected_turn_number\":0,\"kind\":\"investigate\",\"target_id\":\"$canon_event_id\",\"intent\":\"提交冲突的另一项行动\"}" \
   "$api/narrative/$novel_id/world/turns")" = 409
 
 world_turn_two_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
-world_action_two='{"kind":"pursue_goal","target_id":null,"intent":"绘制地下回廊并寻找守门人的踪迹"}'
+world_action_two='{"expected_turn_number":1,"kind":"pursue_goal","target_id":null,"intent":"绘制地下回廊并寻找守门人的踪迹"}'
 pause
 world_turn_two=$("${curl_cmd[@]}" "${auth[@]}" \
   -H 'Content-Type: application/json' -H "Idempotency-Key: $world_turn_two_id" \
   --data "$world_action_two" "$api/narrative/$novel_id/world/turns")
-python3 -c "import json,sys; value=json.load(sys.stdin); session=value['world_state']['state']['open_world']; assert value['turn_id']=='$world_turn_two_id'; assert value['transition']['canonical_event_change'] is None; assert session['turn_number']==2; assert session['world_time']==2" <<<"$world_turn_two"
+python3 -c "import json,sys; value=json.load(sys.stdin); session=value['world_state']['state']['open_world']; assert value['turn_id']=='$world_turn_two_id'; assert value['memory_projection_status']=='saved'; assert value['transition']['canonical_event_change'] is None; assert session['turn_number']==2; assert session['world_time']==2" <<<"$world_turn_two"
 
 pause
 world_view=$("${curl_cmd[@]}" "${auth[@]}" "$api/narrative/$novel_id/world")
@@ -267,6 +279,93 @@ player_snapshot=$(docker exec novel-postgres psql \
 transition_snapshot=$(docker exec novel-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT md5(transition::text) || ':' || md5((SELECT state::text FROM world_states WHERE user_id = user_choices.user_id AND novel_id = user_choices.novel_id)) FROM user_choices WHERE node_id = '$node_id'")
+
+pause
+"${curl_cmd[@]}" --output /dev/null "${auth[@]}" \
+  -X PUT -H 'Content-Type: application/json' --data '{"current_chapter":1}' \
+  "$api/progress/$novel_id"
+
+rewind_world_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
+  --output "$rewind_response_file" --write-out '%{http_code}' "${auth[@]}" \
+  "$api/narrative/$novel_id/world")
+[ "$rewind_world_status" = 409 ]
+python3 -c "import json,sys; value=json.load(sys.stdin); assert value['error']['code']=='reading_progress_behind_world'; assert not ({'session','journal','world_state'} & value.keys())" \
+  <"$rewind_response_file"
+
+rewind_state_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
+  --output "$rewind_response_file" --write-out '%{http_code}' "${auth[@]}" \
+  "$api/narrative/$novel_id/world-state")
+[ "$rewind_state_status" = 409 ]
+python3 -c "import json,sys; value=json.load(sys.stdin); assert value['error']['code']=='reading_progress_behind_world'; assert 'state' not in value" \
+  <"$rewind_response_file"
+
+rewind_player_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
+  --output "$rewind_response_file" --write-out '%{http_code}' "${auth[@]}" \
+  "$api/narrative/$novel_id/player-entry")
+[ "$rewind_player_status" = 409 ]
+python3 -c "import json,sys; value=json.load(sys.stdin); assert value['error']['code']=='reading_progress_behind_world'; assert not ({'player','locations','checkpoint_chapter'} & value.keys())" \
+  <"$rewind_response_file"
+
+rewind_player_replay_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
+  --output "$rewind_response_file" --write-out '%{http_code}' "${auth[@]}" \
+  -X PUT -H 'Content-Type: application/json' --data "$player_definition" \
+  "$api/narrative/$novel_id/player-entry")
+[ "$rewind_player_replay_status" = 409 ]
+python3 -c "import json,sys; value=json.load(sys.stdin); assert value['error']['code']=='reading_progress_behind_world'; assert not ({'player','locations','checkpoint_chapter'} & value.keys())" \
+  <"$rewind_response_file"
+
+rewind_effective_chapter=$("${curl_cmd[@]}" "${auth[@]}" \
+  "$api/narrative/$novel_id/chapters/2")
+python3 -c "import json,sys; value=json.load(sys.stdin); assert value['generated'] is False; assert '北塔深处' not in value['content']" \
+  <<<"$rewind_effective_chapter"
+
+rewind_replay_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
+  --output "$rewind_response_file" --write-out '%{http_code}' "${auth[@]}" \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: $world_turn_one_id" \
+  --data "$world_action_one" "$api/narrative/$novel_id/world/turns")
+[ "$rewind_replay_status" = 409 ]
+python3 -c "import json,sys; value=json.load(sys.stdin); assert value['error']['code']=='turn_outcome_unknown'; assert not ({'turn_id','transition','world_state'} & value.keys())" \
+  <"$rewind_response_file"
+
+rewind_turn_count_before=$(docker exec novel-postgres psql \
+  -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
+  -c "SELECT COUNT(*) FROM world_turns WHERE user_id = '$user_id' AND novel_id = '$novel_id'")
+rewind_llm_calls_before=$(curl --silent "$stub/__control__/stats" |
+  json_get "value['calls'].get('world_turn', 0)")
+rewind_new_turn_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
+rewind_new_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
+  --output "$rewind_response_file" --write-out '%{http_code}' "${auth[@]}" \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: $rewind_new_turn_id" \
+  --data '{"expected_turn_number":2,"kind":"pursue_goal","target_id":null,"intent":"回退后不应执行的行动"}' \
+  "$api/narrative/$novel_id/world/turns")
+[ "$rewind_new_status" = 409 ]
+python3 -c "import json,sys; value=json.load(sys.stdin); assert value['error']['code']=='reading_progress_behind_world'" \
+  <"$rewind_response_file"
+rewind_turn_count_after=$(docker exec novel-postgres psql \
+  -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
+  -c "SELECT COUNT(*) FROM world_turns WHERE user_id = '$user_id' AND novel_id = '$novel_id'")
+rewind_llm_calls_after=$(curl --silent "$stub/__control__/stats" |
+  json_get "value['calls'].get('world_turn', 0)")
+[ "$rewind_turn_count_after" = "$rewind_turn_count_before" ]
+[ "$rewind_llm_calls_after" = "$rewind_llm_calls_before" ]
+
+pause
+"${curl_cmd[@]}" --output /dev/null "${auth[@]}" \
+  -X PUT -H 'Content-Type: application/json' --data '{"current_chapter":2}' \
+  "$api/progress/$novel_id"
+restored_player=$("${curl_cmd[@]}" "${auth[@]}" "$api/narrative/$novel_id/player-entry")
+[ "$(python3 -c 'import hashlib,json,sys; value=json.load(sys.stdin); print(hashlib.sha256(json.dumps(value["player"],ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()).hexdigest())' <<<"$restored_player")" = "$player_entity_hash" ]
+restored_player_replay=$("${curl_cmd[@]}" "${auth[@]}" \
+  -X PUT -H 'Content-Type: application/json' --data "$player_definition" \
+  "$api/narrative/$novel_id/player-entry")
+[ "$(python3 -c 'import hashlib,json,sys; value=json.load(sys.stdin); print(hashlib.sha256(json.dumps(value["player"],ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()).hexdigest())' <<<"$restored_player_replay")" = "$player_entity_hash" ]
+restored_effective_chapter=$("${curl_cmd[@]}" "${auth[@]}" \
+  "$api/narrative/$novel_id/chapters/2")
+[ "$(printf '%s' "$restored_effective_chapter" | sha256sum | cut -d' ' -f1)" = "$chapter_hash" ]
+restored_world_turn_one=$("${curl_cmd[@]}" "${auth[@]}" \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: $world_turn_one_id" \
+  --data "$world_action_one" "$api/narrative/$novel_id/world/turns")
+[ "$(printf '%s' "$restored_world_turn_one" | sha256sum | cut -d' ' -f1)" = "$world_turn_one_hash" ]
 
 world_chat_turn_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
 pause
@@ -323,6 +422,16 @@ resumed_world_replay=$("${curl_cmd[@]}" "${auth[@]}" \
   -H 'Content-Type: application/json' -H "Idempotency-Key: $world_turn_one_id" \
   --data "$world_action_one" "$api/narrative/$novel_id/world/turns")
 [ "$(printf '%s' "$resumed_world_replay" | sha256sum | cut -d' ' -f1)" = "$world_turn_one_hash" ]
+
+resumed_world_chat_turn_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
+pause
+resumed_world_chat=$("${curl_cmd[@]}" --no-buffer "${auth[@]}" \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: $resumed_world_chat_turn_id" \
+  --data "{\"message\":\"重启后，你还记得我在北塔作出的选择吗？\",\"novel_id\":\"$novel_id\"}" \
+  "$api/chat/$character_id/stream")
+grep -Fq '林岚知道你已经改变了两回合的世界，也会依照自己的目标继续调查。' <<<"$resumed_world_chat"
+grep -Fq 'event: done' <<<"$resumed_world_chat"
+
 pause
 current_world=$("${curl_cmd[@]}" "${auth[@]}" "$api/narrative/$novel_id/world")
 python3 -c "import json,sys; value=json.load(sys.stdin); assert value['session']['turn_number']==2; assert len(value['journal'])==2" <<<"$current_world"

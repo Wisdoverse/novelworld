@@ -20,7 +20,6 @@ import {
   useSubmitNarrativeChoice,
   useWorldState,
   isNarrativeChoiceConflict,
-  type ChoiceResult,
 } from '@/entities/narrative/api';
 import { ChatPanel } from '@/widgets/chat-panel/ui/ChatPanel';
 import { BranchChoice } from '@/widgets/branch-choice/ui/BranchChoice';
@@ -31,6 +30,7 @@ import {
   useChapterTranslation,
 } from '@/features/chapter-translation';
 import { getApiErrorMessage } from '@/shared/api/client';
+import { getReaderIdentityScope } from '@/shared/lib/readerIdentityScope';
 import type { Character, NarrativeChoice } from '@/shared/types';
 
 export function splitChapterAtAnchor(content: string, anchorQuote?: string) {
@@ -73,6 +73,15 @@ export function ReaderPage() {
     ? parsedChapter
     : undefined;
   const currentChapter = routeChapter ?? readingProgress?.current_chapter ?? 0;
+  const timelineMutationLocked = isProgressSaving
+    || readingProgress?.current_chapter !== currentChapter;
+  const visibleChapterBoundary = Math.min(
+    currentChapter,
+    readingProgress?.current_chapter ?? 0,
+  );
+  const isSelfMode = readingProgress?.reader_identity_type === 'self';
+  const readerIdentityScope = getReaderIdentityScope(readingProgress);
+  const progressBoundary = readingProgress?.current_chapter ?? 0;
 
   const { data: novel } = useNovel(novelId!);
   const { data: chapter, isLoading } = useChapter(novelId!, currentChapter);
@@ -81,14 +90,21 @@ export function ReaderPage() {
     isLoading: isEffectiveChapterLoading,
     isError: isEffectiveChapterError,
     refetch: refetchEffectiveChapter,
-  } = useEffectiveChapter(novelId || '', currentChapter, Boolean(chapter));
+  } = useEffectiveChapter(
+    novelId || '',
+    currentChapter,
+    readerIdentityScope,
+    progressBoundary,
+    Boolean(chapter && readingProgress && !timelineMutationLocked),
+  );
   const { data: characters } = useCharacters(
     novelId || '',
-    readingProgress?.current_chapter ?? 0,
+    visibleChapterBoundary,
   );
-  const isSelfMode = readingProgress?.reader_identity_type === 'self';
   const [entryCheckpoint, setEntryCheckpoint] = useState<number>();
-  const requestedEntryCheckpoint = entryCheckpoint ?? readingProgress?.current_chapter;
+  const requestedEntryCheckpoint = readingProgress
+    ? Math.min(entryCheckpoint ?? readingProgress.current_chapter, readingProgress.current_chapter, currentChapter)
+    : undefined;
   const {
     data: playerEntry,
     isLoading: isPlayerEntryLoading,
@@ -102,14 +118,42 @@ export function ReaderPage() {
   const createPlayerEntity = useCreatePlayerEntity(novelId || '');
   const playerEntryReady = Boolean(readingProgress)
     && (!isSelfMode || Boolean(playerEntry?.player));
-  const playerEntityRequired = Boolean(isSelfMode && !playerEntry?.player);
   const openWorldEnabled = Boolean(isSelfMode && playerEntry?.player);
   const {
-    data: openWorld,
+    data: cachedOpenWorld,
     isLoading: isOpenWorldLoading,
     isError: isOpenWorldError,
     refetch: refetchOpenWorld,
   } = useOpenWorld(novelId || '', openWorldEnabled);
+  const {
+    data: worldState,
+    refetch: refetchWorldState,
+  } = useWorldState(novelId || '', Boolean(chapter));
+  const worldSourceChapters = [
+    ...(isSelfMode ? [
+      cachedOpenWorld?.session.entry_context?.unlocked_through_chapter,
+      playerEntry?.player?.canonical_checkpoint_chapter,
+      worldState?.state.player_entity?.canonical_checkpoint_chapter,
+      worldState?.state.open_world?.entry_context.unlocked_through_chapter,
+    ] : []),
+    ...(worldState?.state.choices.map(choice => choice.chapter) ?? []),
+  ].filter((chapterNumber): chapterNumber is number => (
+    typeof chapterNumber === 'number'
+      && Number.isInteger(chapterNumber)
+      && chapterNumber >= 1
+  ));
+  const worldSourceHighWater = worldSourceChapters.length > 0
+    ? Math.max(...worldSourceChapters)
+    : undefined;
+  const worldSourceVisible = worldSourceHighWater === undefined
+    || visibleChapterBoundary >= worldSourceHighWater;
+  const derivedTimelineVisible = !timelineMutationLocked && worldSourceVisible;
+  const visibleEffectiveChapter = derivedTimelineVisible
+    ? effectiveChapter
+    : chapter
+      ? { chapter_number: currentChapter, content: chapter.content, generated: false }
+      : undefined;
+  const openWorld = isSelfMode && derivedTimelineVisible ? cachedOpenWorld : null;
   const startOpenWorld = useStartOpenWorld(novelId || '');
   const entryLocation = playerEntry?.locations.find(
     location => location.id === playerEntry.player?.location_id,
@@ -117,13 +161,29 @@ export function ReaderPage() {
 
   const [activeChatCharacter, setActiveChatCharacter] = useState<Character | null>(null);
   const [showCharacterList, setShowCharacterList] = useState(false);
-  const [choiceResult, setChoiceResult] = useState<ChoiceResult | null>(null);
   const [choiceError, setChoiceError] = useState<string | undefined>();
   const [choiceRecoveryLocked, setChoiceRecoveryLocked] = useState(false);
   const [chapterView, setChapterView] = useState<'timeline' | 'canon'>('timeline');
   const [translationEnabled, setTranslationEnabled] = useState(false);
   const lastProgressAttempt = useRef<string | undefined>(undefined);
   const hasBranch = Boolean(chapter?.is_key_node && chapter.key_node_description);
+  const branchIsWithinPlayerCheckpoint = !isSelfMode
+    || !playerEntry?.player
+    || currentChapter <= playerEntry.player.canonical_checkpoint_chapter;
+  const branchAvailableBeforeOpenWorld = !openWorldEnabled
+    || (worldSourceVisible && !isOpenWorldLoading && !isOpenWorldError && !openWorld);
+  const hasCommittedChoiceAtChapter = Boolean(
+    derivedTimelineVisible
+      && worldState?.state.choices.some(choice => choice.chapter === currentChapter),
+  );
+  const branchEnabled = hasBranch
+    && !timelineMutationLocked
+    && Boolean(visibleEffectiveChapter)
+    && !isEffectiveChapterError
+    && playerEntryReady
+    && branchIsWithinPlayerCheckpoint
+    && branchAvailableBeforeOpenWorld
+    && (isSelfMode || hasCommittedChoiceAtChapter);
   const {
     data: currentBranchNode,
     isLoading: isBranchLoading,
@@ -132,12 +192,25 @@ export function ReaderPage() {
   } = useNarrativeNode(
     novelId || '',
     currentChapter,
-    hasBranch && Boolean(effectiveChapter) && !isEffectiveChapterError && playerEntryReady,
+    branchEnabled,
   );
-  const {
-    data: worldState,
-    refetch: refetchWorldState,
-  } = useWorldState(novelId || '', Boolean(chapter));
+  const activeBranchNode = branchEnabled ? currentBranchNode : undefined;
+  const visibleWorldState = derivedTimelineVisible ? worldState : undefined;
+  const previousProgressChapter = useRef(readingProgress?.current_chapter);
+
+  useEffect(() => {
+    const previous = previousProgressChapter.current;
+    const current = readingProgress?.current_chapter;
+    previousProgressChapter.current = current;
+    if (previous === undefined || current === undefined || previous === current) return;
+    void refetchWorldState();
+    if (openWorldEnabled) void refetchOpenWorld();
+  }, [
+    openWorldEnabled,
+    readingProgress?.current_chapter,
+    refetchOpenWorld,
+    refetchWorldState,
+  ]);
   const submitChoice = useSubmitNarrativeChoice(novelId || '');
 
   useEffect(() => {
@@ -174,6 +247,7 @@ export function ReaderPage() {
   const isChatReady = Boolean(
     routeChapter !== undefined
       && readingProgress
+      && readerIdentityScope !== 'unresolved'
       && readingProgress.current_chapter === currentChapter
       && !isProgressSaving,
   );
@@ -184,31 +258,28 @@ export function ReaderPage() {
   );
 
   useEffect(() => {
-    if (activeChatCharacter && characters && !activeCharacterIsAvailable) {
+    if (activeChatCharacter && !activeCharacterIsAvailable) {
       setActiveChatCharacter(null);
     }
-  }, [activeChatCharacter, activeCharacterIsAvailable, characters]);
+    if (timelineMutationLocked) setShowCharacterList(false);
+  }, [activeChatCharacter, activeCharacterIsAvailable, timelineMutationLocked]);
 
   useEffect(() => {
-    setChoiceResult(null);
     setChoiceError(undefined);
     setChoiceRecoveryLocked(false);
     setChapterView('timeline');
     setTranslationEnabled(false);
-  }, [currentChapter, novelId]);
+  }, [currentChapter, novelId, readerIdentityScope]);
 
   useEffect(() => {
     setEntryCheckpoint(undefined);
-  }, [novelId]);
+  }, [novelId, readingProgress?.current_chapter, readingProgress?.reader_identity_type]);
 
-  const savedChoice = currentBranchNode
-    ? worldState?.state.choices.find(choice => choice.node_id === currentBranchNode.id)
+  const savedChoice = activeBranchNode
+    ? visibleWorldState?.state.choices.find(choice => choice.node_id === activeBranchNode.id)
     : undefined;
-  const resultChoice = currentBranchNode
-    ? choiceResult?.world_state.state.choices.find(choice => choice.node_id === currentBranchNode.id)
-    : undefined;
-  const selectedChoiceIndex = resultChoice?.choice_index ?? savedChoice?.choice_index;
-  const consequence = choiceResult?.consequence ?? savedChoice?.consequence;
+  const selectedChoiceIndex = savedChoice?.choice_index;
+  const consequence = savedChoice?.consequence;
 
   useEffect(() => {
     if (choiceError && (selectedChoiceIndex !== undefined || openWorld)) {
@@ -216,13 +287,15 @@ export function ReaderPage() {
       setChoiceRecoveryLocked(false);
     }
   }, [choiceError, openWorld, selectedChoiceIndex]);
-  const isPlayerChapter = Boolean(effectiveChapter?.generated);
+  const isPlayerChapter = Boolean(visibleEffectiveChapter?.generated);
   const isPlayerTimeline = Boolean(isPlayerChapter || openWorld);
   const showCanonReference = Boolean(isPlayerChapter && chapterView === 'canon');
   const isCanonReference = Boolean(showCanonReference || (openWorld && !isPlayerChapter));
-  const displayContent = showCanonReference ? chapter?.content ?? '' : effectiveChapter?.content ?? '';
-  const inlineChapter = chapter && currentBranchNode && !showCanonReference
-    ? splitChapterAtAnchor(displayContent, currentBranchNode.anchor_quote)
+  const displayContent = showCanonReference
+    ? chapter?.content ?? ''
+    : visibleEffectiveChapter?.content ?? '';
+  const inlineChapter = chapter && activeBranchNode && !showCanonReference
+    ? splitChapterAtAnchor(displayContent, activeBranchNode.anchor_quote)
     : undefined;
   const sourceContent = inlineChapter?.before ?? displayContent;
   const canTranslate = Boolean(sourceContent) && (!isPlayerChapter || showCanonReference);
@@ -236,16 +309,16 @@ export function ReaderPage() {
     ? translation.data.content
     : sourceContent;
   const branchChoiceRequired = Boolean(
-    currentBranchNode && selectedChoiceIndex === undefined && !openWorld,
+    activeBranchNode && selectedChoiceIndex === undefined && !openWorld,
   );
 
   const recoverCommittedChoice = async () => {
-    if (!currentBranchNode) return;
+    if (!activeBranchNode) return;
     setChoiceRecoveryLocked(true);
     setChoiceError('正在重新加载已提交的时间线…');
     const result = await refetchWorldState();
     const committed = result.data?.state.choices.find(
-      choice => choice.node_id === currentBranchNode.id,
+      choice => choice.node_id === activeBranchNode.id,
     );
     if (committed) {
       setChoiceError(undefined);
@@ -257,15 +330,14 @@ export function ReaderPage() {
   };
 
   const handleChoose = async (choice: NarrativeChoice) => {
-    if (!currentBranchNode || openWorld) return;
+    if (!activeBranchNode || openWorld || !isSelfMode) return;
     setChoiceError(undefined);
     setChoiceRecoveryLocked(false);
     try {
-      const result = await submitChoice.mutateAsync({
-        nodeId: currentBranchNode.id,
+      await submitChoice.mutateAsync({
+        nodeId: activeBranchNode.id,
         choiceIndex: choice.index,
       });
-      setChoiceResult(result);
     } catch (error) {
       const choiceConflict = isNarrativeChoiceConflict(error);
       setChoiceRecoveryLocked(choiceConflict);
@@ -281,7 +353,7 @@ export function ReaderPage() {
       isProgressSaving
       || num < 1
       || (novel && num > novel.total_chapters)
-      || (num > currentChapter && (branchChoiceRequired || playerEntityRequired))
+      || (num > currentChapter && branchChoiceRequired)
     ) return;
     navigate(`/reader/${novelId}/${num}`);
   };
@@ -367,7 +439,10 @@ export function ReaderPage() {
 
           {/* 角色列表按钮 */}
           <button
-            onClick={() => setShowCharacterList(!showCharacterList)}
+            disabled={timelineMutationLocked}
+            onClick={() => {
+              if (!timelineMutationLocked) setShowCharacterList(!showCharacterList);
+            }}
             className={`flex shrink-0 items-center gap-1.5 rounded-full px-3 py-2 text-xs font-semibold transition-colors ${showCharacterList ? 'bg-[#d2e3fc] text-[#0842a0]' : 'bg-[#e8f0fe] text-[#0b57d0] hover:bg-[#d2e3fc]'}`}
           >
             <Users size={12} />
@@ -401,6 +476,7 @@ export function ReaderPage() {
             unlockedThroughChapter={readingProgress?.current_chapter ?? playerEntry.checkpoint_chapter}
             locations={playerEntry.locations}
             isPending={createPlayerEntity.isPending}
+            isTimelineLocked={timelineMutationLocked}
             error={createPlayerEntity.isError
               ? getApiErrorMessage(createPlayerEntity.error, '原创角色创建失败')
               : undefined}
@@ -408,11 +484,11 @@ export function ReaderPage() {
             onSubmit={createPlayerEntity.mutateAsync}
           />
         ) : null}
-        {isLoading || isEffectiveChapterLoading ? (
+        {isLoading || (worldSourceVisible && isEffectiveChapterLoading) ? (
           <div className="flex items-center justify-center h-64">
             <div className="h-8 w-8 animate-spin rounded-full border-2 border-[#0b57d0] border-t-transparent" />
           </div>
-        ) : isEffectiveChapterError ? (
+        ) : worldSourceVisible && isEffectiveChapterError ? (
           <div
             role="alert"
             className="mt-16 flex items-center justify-between gap-4 rounded-xl border border-[#f2b8b5] bg-[#fce8e6] p-5 text-[#b3261e]"
@@ -420,7 +496,7 @@ export function ReaderPage() {
             <span className="text-sm">玩家时间线生成失败。为避免回退到已经失效的原著因果，本章暂不显示。</span>
             <button className="text-sm underline" onClick={() => refetchEffectiveChapter()}>重新生成</button>
           </div>
-        ) : chapter && effectiveChapter ? (
+        ) : chapter && visibleEffectiveChapter ? (
           <motion.div
             key={currentChapter}
             initial={{ opacity: 0, y: 20 }}
@@ -444,12 +520,14 @@ export function ReaderPage() {
                   style={{ color: '#1f1f1f' }}
                 >
                   {isPlayerChapter && !showCanonReference
-                    ? `${playerEntry?.player?.name ?? '你'}的故事`
+                    ? isSelfMode
+                      ? `${playerEntry?.player?.name ?? '你'}的故事`
+                      : '角色时间线'
                     : chapter.title}
                 </h1>
               )}
               <div className="mx-auto mt-4 h-px w-16 bg-[#0b57d0]" />
-              {effectiveChapter.generated ? (
+              {visibleEffectiveChapter.generated ? (
                 <div className="mx-auto mt-6 inline-flex rounded-full bg-[#eef3fe] p-1" aria-label="阅读版本">
                   <button
                     type="button"
@@ -486,20 +564,20 @@ export function ReaderPage() {
             </div>
 
             {/* 正文中的分支节点：原文在锚点处暂停，选择后由生成内容接续。 */}
-            {hasBranch && isBranchLoading && (
+            {branchEnabled && isBranchLoading && (
               <div className="my-16 flex items-center justify-center gap-2 p-5 text-sm text-[#0b57d0]">
                 <div className="h-4 w-4 animate-spin rounded-full border-2 border-[#0b57d0] border-t-transparent" />
                 正在定位章节中的命运交叉点...
               </div>
             )}
-            {(!hasBranch || !isBranchLoading) && (
+            {(!branchEnabled || !isBranchLoading) && (
               <div className="reader-content">
                 {readerContent.split('\n\n').map((paragraph, i) => (
                   <p key={i}>{paragraph}</p>
                 ))}
               </div>
             )}
-            {hasBranch && isBranchError && (
+            {branchEnabled && isBranchError && (
               <div
                 role="alert"
                 className="my-8 flex items-center justify-between gap-4 rounded-xl border border-[#f2b8b5] bg-[#fce8e6] p-4 text-[#b3261e]"
@@ -508,9 +586,9 @@ export function ReaderPage() {
                 <button className="text-sm underline" onClick={() => refetchBranch()}>重试</button>
               </div>
             )}
-            {!showCanonReference && currentBranchNode && (!openWorld || selectedChoiceIndex !== undefined) && (
+            {!showCanonReference && activeBranchNode && (!openWorld || selectedChoiceIndex !== undefined) && (
               <BranchChoice
-                node={currentBranchNode}
+                node={activeBranchNode}
                 onChoose={handleChoose}
                 isLoading={submitChoice.isPending}
                 selectedChoiceIndex={selectedChoiceIndex}
@@ -522,7 +600,7 @@ export function ReaderPage() {
             )}
 
             {/* 章节摘要 */}
-            {chapter.summary && !hasBranch && (!effectiveChapter.generated || showCanonReference) && (
+            {chapter.summary && !hasBranch && (!visibleEffectiveChapter.generated || showCanonReference) && (
               <div className="mt-12 rounded-xl border border-[#d2e3fc] bg-[#f8faff] p-4">
                 <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-[#0b57d0]">
                   <Sparkles size={12} />
@@ -538,13 +616,22 @@ export function ReaderPage() {
         {openWorldEnabled && isOpenWorldLoading ? (
           <p className="mt-12 text-sm text-[#5f6368]">正在恢复开放世界…</p>
         ) : null}
-        {openWorldEnabled && isOpenWorldError ? (
+        {openWorldEnabled && !worldSourceVisible ? (
+          <div className="mt-12 rounded-xl border border-[#d2e3fc] bg-[#f8faff] p-4 text-[#3c4043]" role="status">
+            当前阅读位置早于这条世界线的来源。阅读到第 {worldSourceHighWater} 章后，行动与日志会自动恢复。
+          </div>
+        ) : null}
+        {openWorldEnabled && isOpenWorldError && worldSourceVisible ? (
           <div className="mt-12 flex items-center justify-between gap-4 rounded-xl border border-[#f2b8b5] bg-[#fce8e6] p-4 text-[#b3261e]" role="alert">
             <span className="text-sm">开放世界加载失败，已暂停新的行动。</span>
             <button className="text-sm underline" onClick={() => refetchOpenWorld()}>重试</button>
           </div>
         ) : null}
-        {openWorldEnabled && !isOpenWorldLoading && !isOpenWorldError && !openWorld ? (
+        {openWorldEnabled
+          && worldSourceVisible
+          && !isOpenWorldLoading
+          && !isOpenWorldError
+          && !cachedOpenWorld ? (
           <section
             className="surface-card relative mt-14 overflow-hidden bg-[#f8faff] px-6 py-8 md:px-10 md:py-10"
             aria-labelledby="enter-world-title"
@@ -580,8 +667,10 @@ export function ReaderPage() {
               ) : null}
               <button
                 className="primary-action mt-7 w-full md:w-auto"
-                disabled={startOpenWorld.isPending}
-                onClick={() => startOpenWorld.mutate()}
+                disabled={startOpenWorld.isPending || timelineMutationLocked}
+                onClick={() => {
+                  if (!timelineMutationLocked) startOpenWorld.mutate();
+                }}
               >
                 {startOpenWorld.isPending ? '正在创建时间线…' : '进入开放世界'}
                 {!startOpenWorld.isPending ? <ChevronRight size={16} aria-hidden="true" /> : null}
@@ -589,7 +678,13 @@ export function ReaderPage() {
             </div>
           </section>
         ) : null}
-        {openWorld ? <WorldDashboard novelId={novelId || ''} view={openWorld} /> : null}
+        {openWorld ? (
+          <WorldDashboard
+            novelId={novelId || ''}
+            view={openWorld}
+            actionsDisabled={isOpenWorldError || timelineMutationLocked}
+          />
+        ) : null}
       </div>
 
       {/* 底部翻页导航 */}
@@ -618,12 +713,10 @@ export function ReaderPage() {
 
         <button
           onClick={continueJourney}
-          disabled={isProgressSaving || playerEntityRequired || branchChoiceRequired || !novel || (!openWorld && currentChapter >= novel.total_chapters)}
+          disabled={isProgressSaving || branchChoiceRequired || !novel || (!openWorld && currentChapter >= novel.total_chapters)}
           className="tonal-action min-w-0 px-3 text-sm sm:px-5"
         >
-          {playerEntityRequired
-            ? '请先创建角色'
-            : branchChoiceRequired
+          {branchChoiceRequired
               ? '请先选择'
               : isPlayerTimeline
                 ? '继续旅程'
@@ -633,9 +726,10 @@ export function ReaderPage() {
       </div>
 
       {/* 角色列表侧边栏 */}
-      <AnimatePresence>
-        {showCharacterList && (
-          <motion.div
+      {!timelineMutationLocked ? (
+        <AnimatePresence>
+          {showCharacterList && (
+            <motion.div
             initial={{ opacity: 0, x: 300 }}
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: 300 }}
@@ -682,17 +776,19 @@ export function ReaderPage() {
                 </button>
               );
             })}
-          </motion.div>
-        )}
-      </AnimatePresence>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      ) : null}
 
       {/* 角色对话面板 */}
-      {activeChatCharacter && (
+      {activeChatCharacter && activeCharacterIsAvailable && !timelineMutationLocked && (
         <ChatPanel
           character={activeChatCharacter}
           novelId={novelId!}
           currentChapter={currentChapter}
           readerIdentity={readingProgress?.reader_identity}
+          readerIdentityScope={readerIdentityScope}
           canChat={isChatReady && activeCharacterIsAvailable}
           isOpen={!!activeChatCharacter}
           onClose={() => setActiveChatCharacter(null)}

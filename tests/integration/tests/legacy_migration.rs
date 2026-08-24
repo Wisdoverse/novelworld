@@ -49,8 +49,12 @@ const CANON_CHECKPOINT_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0017_canon_extraction_checkpoints.sql");
 const CANON_CHECKPOINT_EXPANSION_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0018_expand_canon_checkpoint_source.sql");
+const SHARED_NOVEL_SHELVES_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0019_share_novels_across_user_shelves.sql");
 const ADVANCED_GAME_RULES_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0020_advanced_game_rules.sql");
+const WORLD_TURN_MEMORY_PROJECTION_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0021_world_turn_memory_projection.sql");
 
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
@@ -285,7 +289,15 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
             .execute(&fresh)
             .await
             .unwrap();
+        sqlx::raw_sql(SHARED_NOVEL_SHELVES_MIGRATION)
+            .execute(&fresh)
+            .await
+            .unwrap();
         sqlx::raw_sql(ADVANCED_GAME_RULES_MIGRATION)
+            .execute(&fresh)
+            .await
+            .unwrap();
+        sqlx::raw_sql(WORLD_TURN_MEMORY_PROJECTION_MIGRATION)
             .execute(&fresh)
             .await
             .unwrap();
@@ -494,6 +506,220 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
 
     let narrative_readiness = NarrativePgReadinessProbe::new(fresh.clone());
     assert!(narrative_readiness.is_ready().await);
+    sqlx::raw_sql(
+        "ALTER TABLE public.world_turns \
+         DROP CONSTRAINT world_turns_resolution_check, \
+         ADD CONSTRAINT world_turns_resolution_check CHECK (resolution IS NULL)",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    assert!(!narrative_readiness.is_ready().await);
+    sqlx::raw_sql(
+        "ALTER TABLE public.world_turns \
+         DROP CONSTRAINT world_turns_resolution_check, \
+         ADD CONSTRAINT world_turns_resolution_check \
+         CHECK (resolution IS NULL OR pg_catalog.jsonb_typeof(resolution) = 'object')",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    assert!(narrative_readiness.is_ready().await);
+    sqlx::raw_sql(
+        "ALTER TABLE public.world_turns \
+         DROP COLUMN memory_projection_completed_at, \
+         DROP COLUMN memory_projection_status CASCADE",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    assert!(!narrative_readiness.is_ready().await);
+    sqlx::raw_sql(WORLD_TURN_MEMORY_PROJECTION_MIGRATION)
+        .execute(&fresh)
+        .await
+        .unwrap();
+    assert!(narrative_readiness.is_ready().await);
+    sqlx::raw_sql(
+        "ALTER TABLE public.world_turns \
+         DROP CONSTRAINT world_turns_memory_projection_state_check, \
+         ADD CONSTRAINT world_turns_memory_projection_state_check \
+         CHECK (memory_projection_completed_at IS NULL OR status = 'completed')",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    assert!(!narrative_readiness.is_ready().await);
+    let constraint_drift = sqlx::raw_sql(WORLD_TURN_MEMORY_PROJECTION_MIGRATION)
+        .execute(&fresh)
+        .await
+        .unwrap_err();
+    assert!(
+        constraint_drift
+            .to_string()
+            .contains("world turn memory projection state constraint has an unexpected definition"),
+        "unexpected migration error: {constraint_drift:#}"
+    );
+    // Production executes this explicitly transactional file through a
+    // short-lived psql process, whose failed connection closes and rolls back.
+    // This test deliberately keeps one pooled connection, so clear the failed
+    // transaction before repairing the injected drift.
+    sqlx::query("ROLLBACK").execute(&fresh).await.unwrap();
+    sqlx::query(
+        "ALTER TABLE public.world_turns \
+         DROP CONSTRAINT world_turns_memory_projection_state_check",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    sqlx::raw_sql(WORLD_TURN_MEMORY_PROJECTION_MIGRATION)
+        .execute(&fresh)
+        .await
+        .unwrap();
+    assert!(narrative_readiness.is_ready().await);
+    sqlx::query(
+        "ALTER TABLE public.world_turns \
+         ALTER COLUMN memory_projection_status SET DEFAULT 'saved'::character varying",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    let column_drift = sqlx::raw_sql(WORLD_TURN_MEMORY_PROJECTION_MIGRATION)
+        .execute(&fresh)
+        .await
+        .unwrap_err();
+    assert!(
+        column_drift
+            .to_string()
+            .contains("world turn memory projection columns have an unexpected definition"),
+        "unexpected migration error: {column_drift:#}"
+    );
+    sqlx::query("ROLLBACK").execute(&fresh).await.unwrap();
+    sqlx::query(
+        "ALTER TABLE public.world_turns \
+         ALTER COLUMN memory_projection_status SET DEFAULT 'pending'::character varying",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    sqlx::raw_sql(WORLD_TURN_MEMORY_PROJECTION_MIGRATION)
+        .execute(&fresh)
+        .await
+        .unwrap();
+    assert!(narrative_readiness.is_ready().await);
+
+    // A failed concurrent unique-index build leaves an exact-name, exact-SQL
+    // catalog object that is not enforced. Neither migration replay nor
+    // readiness may mistake those strings for an authoritative uniqueness
+    // fence.
+    sqlx::query(
+        "INSERT INTO public.world_states (user_id, novel_id) VALUES ($1, $2) \
+         ON CONFLICT (user_id, novel_id) DO NOTHING",
+    )
+    .bind(incomplete_user)
+    .bind(incomplete_novel)
+    .execute(&fresh)
+    .await
+    .unwrap();
+    sqlx::query("DROP INDEX public.idx_world_turns_one_in_progress")
+        .execute(&fresh)
+        .await
+        .unwrap();
+    let invalid_turn_a = uuid::Uuid::new_v4();
+    let invalid_turn_b = uuid::Uuid::new_v4();
+    for (turn_id, fingerprint, expected_turn_number) in [
+        (invalid_turn_a, vec![91_u8; 32], 0_i64),
+        (invalid_turn_b, vec![92_u8; 32], 1_i64),
+    ] {
+        sqlx::query(
+            "INSERT INTO public.world_turns ( \
+                 id, user_id, novel_id, request_fingerprint, action, \
+                 expected_turn_number, status, lease_expires_at \
+             ) VALUES ($1, $2, $3, $4, '{}'::jsonb, $5, 'in_progress', \
+                       NOW() + INTERVAL '5 minutes')",
+        )
+        .bind(turn_id)
+        .bind(incomplete_user)
+        .bind(incomplete_novel)
+        .bind(fingerprint)
+        .bind(expected_turn_number)
+        .execute(&fresh)
+        .await
+        .unwrap();
+    }
+    let concurrent_build_error = sqlx::query(
+        "CREATE UNIQUE INDEX CONCURRENTLY idx_world_turns_one_in_progress \
+         ON public.world_turns(user_id, novel_id) \
+         WHERE status = 'in_progress' \
+            OR (status = 'completed' AND memory_projection_status = 'pending')",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap_err();
+    assert_eq!(
+        concurrent_build_error
+            .as_database_error()
+            .and_then(|error| error.code().map(|code| code.into_owned()))
+            .as_deref(),
+        Some("23505"),
+        "unexpected concurrent index error: {concurrent_build_error:#}"
+    );
+    let invalid_index_flags: (bool, bool, bool, bool) = sqlx::query_as(
+        "SELECT indisunique, indisvalid, indisready, indislive \
+         FROM pg_catalog.pg_index \
+         WHERE indexrelid = \
+             'public.idx_world_turns_one_in_progress'::pg_catalog.regclass \
+           AND indrelid = 'public.world_turns'::pg_catalog.regclass",
+    )
+    .fetch_one(&fresh)
+    .await
+    .unwrap();
+    assert!(invalid_index_flags.0);
+    assert!(!invalid_index_flags.1 || !invalid_index_flags.2 || !invalid_index_flags.3);
+    assert!(!narrative_readiness.is_ready().await);
+
+    sqlx::query("DELETE FROM public.world_turns WHERE id = $1")
+        .bind(invalid_turn_b)
+        .execute(&fresh)
+        .await
+        .unwrap();
+    sqlx::raw_sql(WORLD_TURN_MEMORY_PROJECTION_MIGRATION)
+        .execute(&fresh)
+        .await
+        .unwrap();
+    let repaired_index_flags: (bool, bool, bool, bool) = sqlx::query_as(
+        "SELECT indisunique, indisvalid, indisready, indislive \
+         FROM pg_catalog.pg_index \
+         WHERE indexrelid = \
+             'public.idx_world_turns_one_in_progress'::pg_catalog.regclass \
+           AND indrelid = 'public.world_turns'::pg_catalog.regclass",
+    )
+    .fetch_one(&fresh)
+    .await
+    .unwrap();
+    assert_eq!(repaired_index_flags, (true, true, true, true));
+    assert!(narrative_readiness.is_ready().await);
+    let duplicate_after_repair = sqlx::query(
+        "INSERT INTO public.world_turns ( \
+             id, user_id, novel_id, request_fingerprint, action, \
+             expected_turn_number, status, lease_expires_at \
+         ) VALUES ($1, $2, $3, $4, '{}'::jsonb, 2, 'in_progress', \
+                   NOW() + INTERVAL '5 minutes')",
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(incomplete_user)
+    .bind(incomplete_novel)
+    .bind(vec![93_u8; 32])
+    .execute(&fresh)
+    .await
+    .unwrap_err();
+    assert_eq!(
+        duplicate_after_repair
+            .as_database_error()
+            .and_then(|error| error.code().map(|code| code.into_owned()))
+            .as_deref(),
+        Some("23505")
+    );
+
     let novel_readiness = NovelPgReadinessProbe::new(fresh.clone());
     assert!(novel_readiness.is_ready().await);
     sqlx::raw_sql(
@@ -798,6 +1024,241 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
 }
 
 #[tokio::test]
+async fn legacy_world_turn_prose_is_retained_while_old_turns_become_terminal() {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    sqlx::query("DROP DATABASE IF EXISTS novelworld_projection_contract WITH (FORCE)")
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("CREATE DATABASE novelworld_projection_contract")
+        .execute(&admin)
+        .await
+        .unwrap();
+
+    let options = PgConnectOptions::from_str(&db_url())
+        .unwrap()
+        .database("novelworld_projection_contract");
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::raw_sql(FRESH_SCHEMA).execute(&pool).await.unwrap();
+    sqlx::raw_sql(
+        "ALTER TABLE public.world_turns \
+         DROP COLUMN memory_projection_completed_at, \
+         DROP COLUMN memory_projection_status CASCADE; \
+         CREATE UNIQUE INDEX idx_world_turns_one_in_progress \
+         ON public.world_turns(user_id, novel_id) \
+         WHERE status = 'in_progress'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let user_id = uuid::Uuid::new_v4();
+    let novel_id = uuid::Uuid::new_v4();
+    let character_id = uuid::Uuid::new_v4();
+    let non_protagonist_id = uuid::Uuid::new_v4();
+    let legacy_turn_id = uuid::Uuid::new_v4();
+    let collision_turn_id = uuid::Uuid::new_v4();
+    let malformed_turn_id = uuid::Uuid::new_v4();
+    let non_protagonist_turn_id = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO users (id, email, password_hash) VALUES ($1, $2, 'hash')")
+        .bind(user_id)
+        .bind(format!("projection-{user_id}@test.invalid"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO novels (id, user_id, title) VALUES ($1, $2, 'Projection')")
+        .bind(novel_id)
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO characters \
+             (id, novel_id, name, role, first_appearance_chapter) \
+         VALUES ($1, $2, 'Witness', 'protagonist', 1), \
+                ($3, $2, 'Bystander', 'supporting', 1)",
+    )
+    .bind(character_id)
+    .bind(novel_id)
+    .bind(non_protagonist_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO world_states (user_id, novel_id) VALUES ($1, $2)")
+        .bind(user_id)
+        .bind(novel_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let result = serde_json::json!({
+        "world_state": {
+            "state": {
+                "open_world": {
+                    "entry_context": {
+                        "checkpoint_chapter": 1,
+                        "unlocked_through_chapter": 2
+                    }
+                }
+            }
+        }
+    });
+    for (index, turn_id, rendered_narrative) in [
+        (
+            0_i64,
+            legacy_turn_id,
+            "\u{3000}\u{00a0}\r\nlegacy projected prose\r\n\u{00a0}\u{3000}",
+        ),
+        (1_i64, collision_turn_id, "different committed prose"),
+        (
+            2_i64,
+            non_protagonist_turn_id,
+            "non protagonist exact prose",
+        ),
+    ] {
+        let transition = serde_json::json!({
+            "canonical_checkpoint_chapter": 1,
+            "rendered_narrative": rendered_narrative
+        });
+        sqlx::query(
+            "INSERT INTO world_turns ( \
+                 id, user_id, novel_id, request_fingerprint, action, \
+                 expected_turn_number, status, transition, result, completed_at \
+             ) VALUES ($1, $2, $3, $4, '{}'::jsonb, $5, 'completed', $6, $7, NOW())",
+        )
+        .bind(turn_id)
+        .bind(user_id)
+        .bind(novel_id)
+        .bind(vec![index as u8 + 1; 32])
+        .bind(index)
+        .bind(transition)
+        .bind(result.clone())
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let malformed_transition = serde_json::json!({
+        "rendered_narrative": "malformed legacy prose"
+    });
+    sqlx::query(
+        "INSERT INTO world_turns ( \
+             id, user_id, novel_id, request_fingerprint, action, \
+             expected_turn_number, status, transition, result, completed_at \
+         ) VALUES ($1, $2, $3, $4, '{}'::jsonb, 3, 'completed', $5, '{}'::jsonb, NOW())",
+    )
+    .bind(malformed_turn_id)
+    .bind(user_id)
+    .bind(novel_id)
+    .bind(vec![4_u8; 32])
+    .bind(malformed_transition)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO character_memories ( \
+             id, character_id, user_id, novel_id, layer, content, importance, chapter_number \
+         ) VALUES \
+             ($1, $2, $3, $4, 'permanent', 'legacy projected prose', 7, 1), \
+             ($5, $2, $3, $4, 'permanent', 'hostile collision', 7, 1), \
+             ($6, $2, $3, $4, 'permanent', 'malformed legacy prose', 7, 1), \
+             ($7, $8, $3, $4, 'permanent', 'non protagonist exact prose', 7, 1)",
+    )
+    .bind(legacy_turn_id)
+    .bind(character_id)
+    .bind(user_id)
+    .bind(novel_id)
+    .bind(collision_turn_id)
+    .bind(malformed_turn_id)
+    .bind(non_protagonist_turn_id)
+    .bind(non_protagonist_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::raw_sql(WORLD_TURN_MEMORY_PROJECTION_MIGRATION)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let rows: (i64, i32, i32, i32) = sqlx::query_as(
+        "SELECT \
+             (SELECT COUNT(*) FROM character_memories WHERE id = $1), \
+             (SELECT chapter_number FROM character_memories WHERE id = $2), \
+             (SELECT chapter_number FROM character_memories WHERE id = $3), \
+             (SELECT chapter_number FROM character_memories WHERE id = $4)",
+    )
+    .bind(legacy_turn_id)
+    .bind(collision_turn_id)
+    .bind(malformed_turn_id)
+    .bind(non_protagonist_turn_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    // Migration cannot reconstruct the exact historical protagonist/witness
+    // boundary, so it is deliberately lossless. Agent prompt consumers own
+    // the fail-closed quarantine of the former producer class.
+    assert_eq!(rows, (1, 1, 1, 1));
+    let skipped_turns: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM world_turns \
+         WHERE id IN ($1, $2, $3, $4) \
+           AND memory_projection_status = 'skipped' \
+           AND memory_projection_completed_at IS NOT NULL",
+    )
+    .bind(legacy_turn_id)
+    .bind(collision_turn_id)
+    .bind(malformed_turn_id)
+    .bind(non_protagonist_turn_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(skipped_turns, 4);
+
+    let new_pending_turn_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO world_turns ( \
+             id, user_id, novel_id, request_fingerprint, action, \
+             expected_turn_number, status, transition, result, completed_at \
+         ) VALUES ($1, $2, $3, $4, '{}'::jsonb, 4, 'completed', \
+             '{}'::jsonb, '{}'::jsonb, NOW())",
+    )
+    .bind(new_pending_turn_id)
+    .bind(user_id)
+    .bind(novel_id)
+    .bind(vec![5_u8; 32])
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(WORLD_TURN_MEMORY_PROJECTION_MIGRATION)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let replay_preserved_pending: bool = sqlx::query_scalar(
+        "SELECT memory_projection_status = 'pending' \
+             AND memory_projection_completed_at IS NULL \
+         FROM world_turns WHERE id = $1",
+    )
+    .bind(new_pending_turn_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(replay_preserved_pending);
+
+    pool.close().await;
+    sqlx::query("DROP DATABASE novelworld_projection_contract WITH (FORCE)")
+        .execute(&admin)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
     let admin = PgPoolOptions::new()
         .max_connections(1)
@@ -874,6 +1335,10 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
         "0015_durable_import_jobs.sql",
         "0016_erasure_records.sql",
         "0017_canon_extraction_checkpoints.sql",
+        "0018_expand_canon_checkpoint_source.sql",
+        "0019_share_novels_across_user_shelves.sql",
+        "0020_advanced_game_rules.sql",
+        "0021_world_turn_memory_projection.sql",
     ] {
         let migration_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../infra/postgres/migrations")
@@ -969,7 +1434,15 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
             .execute(&mut *non_default_path)
             .await
             .unwrap();
+        sqlx::raw_sql(SHARED_NOVEL_SHELVES_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
         sqlx::raw_sql(ADVANCED_GAME_RULES_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
+        sqlx::raw_sql(WORLD_TURN_MEMORY_PROJECTION_MIGRATION)
             .execute(&mut *non_default_path)
             .await
             .unwrap();
@@ -980,13 +1453,23 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
         .unwrap();
     drop(non_default_path);
 
-    let novel_id: uuid::Uuid = sqlx::query_scalar(
-        "SELECT novel_id FROM public.character_memories WHERE content = 'legacy memory'",
+    let legacy_memory: (uuid::Uuid, uuid::Uuid, String, i16, Option<i32>) = sqlx::query_as(
+        "SELECT id, novel_id, content, importance, chapter_number \
+         FROM public.character_memories WHERE content = 'legacy memory'",
     )
     .fetch_one(&legacy)
     .await
     .unwrap();
-    assert_eq!(novel_id.to_string(), "00000000-0000-0000-0000-000000000002");
+    assert_eq!(
+        legacy_memory,
+        (
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000004").unwrap(),
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
+            "legacy memory".into(),
+            5,
+            None,
+        )
+    );
 
     let chapter_context: Option<i32> = sqlx::query_scalar(
         "SELECT chapter_context FROM public.chat_messages WHERE content = 'legacy chat'",
@@ -1530,9 +2013,9 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
         "INSERT INTO public.users (id, email, password_hash) VALUES \
              ('00000000-0000-0000-0000-000000000016', \
               'legacy-repair@test.invalid', 'legacy-test-hash'); \
-         INSERT INTO public.novels (id, user_id, total_chapters) VALUES \
+         INSERT INTO public.novels (id, user_id, title, total_chapters) VALUES \
              ('00000000-0000-0000-0000-000000000017', \
-              '00000000-0000-0000-0000-000000000016', 3); \
+              '00000000-0000-0000-0000-000000000016', 'Pending repair', 3); \
          INSERT INTO public.characters (id, novel_id, name, first_appearance_chapter) VALUES \
              ('00000000-0000-0000-0000-000000000018', \
               '00000000-0000-0000-0000-000000000017', E'\\tPending repair\\t', 1); \

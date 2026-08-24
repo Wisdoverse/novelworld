@@ -9,6 +9,7 @@ import type { ChatMessage } from '@/shared/types';
 
 interface ChatTurn {
   turnId: string;
+  sessionKey: string;
   characterId: string;
   payload: ChatStreamPayload;
 }
@@ -32,18 +33,22 @@ interface ChatState {
     novelId: string;
     message: string;
     readerIdentity?: string;
+    readerIdentityScope: string;
     currentChapter: number;
   }) => void;
-  retryMessage: (characterId: string) => void;
-  cancelMessage: (characterId: string, expectedTurnId?: string) => void;
-  addMessage: (characterId: string, message: ChatMessage) => void;
-  clearMessages: (characterId: string) => void;
+  retryMessage: (sessionKey: string) => void;
+  cancelMessage: (sessionKey: string, expectedTurnId?: string) => void;
+  addMessage: (sessionKey: string, message: ChatMessage) => void;
+  clearMessages: (sessionKey: string) => void;
   reset: () => void;
 }
 
+export const chatSessionKey = (characterId: string, readerIdentityScope: string) =>
+  `${characterId}:${readerIdentityScope}`;
+
 export const useChatStore = create<ChatState>((set, get) => {
   const startTurn = (turn: ChatTurn, generation: number) => {
-    const { characterId, turnId, payload } = turn;
+    const { characterId, sessionKey, turnId, payload } = turn;
     const cancel = createChatStream({
       characterId,
       turnId,
@@ -51,31 +56,31 @@ export const useChatStore = create<ChatState>((set, get) => {
       onChunk: chunk => set(state => {
         if (
           state.sessionGeneration !== generation
-          || state.activeTurnId[characterId] !== turnId
+          || state.activeTurnId[sessionKey] !== turnId
         ) return state;
         return {
           streamingText: {
             ...state.streamingText,
-            [characterId]: (state.streamingText[characterId] || '') + chunk,
+            [sessionKey]: (state.streamingText[sessionKey] || '') + chunk,
           },
         };
       }),
       onRetry: () => set(state => {
         if (
           state.sessionGeneration !== generation
-          || state.activeTurnId[characterId] !== turnId
+          || state.activeTurnId[sessionKey] !== turnId
         ) return state;
         return {
-          streamingText: { ...state.streamingText, [characterId]: '' },
+          streamingText: { ...state.streamingText, [sessionKey]: '' },
         };
       }),
       onDone: result => set(state => {
         if (
           result.turnId !== turnId
           || state.sessionGeneration !== generation
-          || state.activeTurnId[characterId] !== turnId
+          || state.activeTurnId[sessionKey] !== turnId
         ) return state;
-        const finalText = state.streamingText[characterId] || '';
+        const finalText = state.streamingText[sessionKey] || '';
         const characterMessage: ChatMessage = {
           id: crypto.randomUUID(),
           turn_id: turnId,
@@ -88,27 +93,27 @@ export const useChatStore = create<ChatState>((set, get) => {
         return {
           messages: {
             ...state.messages,
-            [characterId]: [...(state.messages[characterId] || []), characterMessage],
+            [sessionKey]: [...(state.messages[sessionKey] || []), characterMessage],
           },
-          streamingText: { ...state.streamingText, [characterId]: '' },
-          isStreaming: { ...state.isStreaming, [characterId]: false },
-          cancelStream: { ...state.cancelStream, [characterId]: null },
-          activeTurnId: { ...state.activeTurnId, [characterId]: undefined },
-          activeTurn: { ...state.activeTurn, [characterId]: undefined },
-          failedTurn: { ...state.failedTurn, [characterId]: undefined },
+          streamingText: { ...state.streamingText, [sessionKey]: '' },
+          isStreaming: { ...state.isStreaming, [sessionKey]: false },
+          cancelStream: { ...state.cancelStream, [sessionKey]: null },
+          activeTurnId: { ...state.activeTurnId, [sessionKey]: undefined },
+          activeTurn: { ...state.activeTurn, [sessionKey]: undefined },
+          failedTurn: { ...state.failedTurn, [sessionKey]: undefined },
         };
       }),
       onError: error => set(state => {
         if (
           state.sessionGeneration !== generation
-          || state.activeTurnId[characterId] !== turnId
+          || state.activeTurnId[sessionKey] !== turnId
         ) return state;
         return {
-          streamingText: { ...state.streamingText, [characterId]: '' },
-          isStreaming: { ...state.isStreaming, [characterId]: false },
-          cancelStream: { ...state.cancelStream, [characterId]: null },
-          activeTurn: { ...state.activeTurn, [characterId]: undefined },
-          failedTurn: { ...state.failedTurn, [characterId]: { ...turn, error } },
+          streamingText: { ...state.streamingText, [sessionKey]: '' },
+          isStreaming: { ...state.isStreaming, [sessionKey]: false },
+          cancelStream: { ...state.cancelStream, [sessionKey]: null },
+          activeTurn: { ...state.activeTurn, [sessionKey]: undefined },
+          failedTurn: { ...state.failedTurn, [sessionKey]: { ...turn, error } },
         };
       }),
     });
@@ -116,11 +121,11 @@ export const useChatStore = create<ChatState>((set, get) => {
     set(state => {
       if (
         state.sessionGeneration !== generation
-        || state.activeTurnId[characterId] !== turnId
-        || !state.isStreaming[characterId]
+        || state.activeTurnId[sessionKey] !== turnId
+        || !state.isStreaming[sessionKey]
       ) return state;
       return {
-        cancelStream: { ...state.cancelStream, [characterId]: cancel },
+        cancelStream: { ...state.cancelStream, [sessionKey]: cancel },
       };
     });
   };
@@ -135,15 +140,15 @@ export const useChatStore = create<ChatState>((set, get) => {
     failedTurn: {},
     sessionGeneration: 0,
 
-    addMessage: (characterId, message) => set(state => ({
+    addMessage: (sessionKey, message) => set(state => ({
       messages: {
         ...state.messages,
-        [characterId]: [...(state.messages[characterId] || []), message],
+        [sessionKey]: [...(state.messages[sessionKey] || []), message],
       },
     })),
 
-    clearMessages: characterId => set(state => ({
-      messages: { ...state.messages, [characterId]: [] },
+    clearMessages: sessionKey => set(state => ({
+      messages: { ...state.messages, [sessionKey]: [] },
     })),
 
     reset: () => {
@@ -160,10 +165,19 @@ export const useChatStore = create<ChatState>((set, get) => {
       }));
     },
 
-    sendMessage: ({ characterId, novelId, message, readerIdentity, currentChapter }) => {
-      get().cancelStream[characterId]?.();
+    sendMessage: ({
+      characterId,
+      novelId,
+      message,
+      readerIdentity,
+      readerIdentityScope,
+      currentChapter,
+    }) => {
+      const sessionKey = chatSessionKey(characterId, readerIdentityScope);
+      get().cancelStream[sessionKey]?.();
       const turn: ChatTurn = {
         turnId: crypto.randomUUID(),
+        sessionKey,
         characterId,
         payload: {
           novel_id: novelId,
@@ -186,56 +200,57 @@ export const useChatStore = create<ChatState>((set, get) => {
       set(state => ({
         messages: {
           ...state.messages,
-          [characterId]: [...(state.messages[characterId] || []), userMessage],
+          [sessionKey]: [...(state.messages[sessionKey] || []), userMessage],
         },
-        streamingText: { ...state.streamingText, [characterId]: '' },
-        isStreaming: { ...state.isStreaming, [characterId]: true },
-        cancelStream: { ...state.cancelStream, [characterId]: null },
-        activeTurnId: { ...state.activeTurnId, [characterId]: turn.turnId },
-        activeTurn: { ...state.activeTurn, [characterId]: turn },
-        failedTurn: { ...state.failedTurn, [characterId]: undefined },
+        streamingText: { ...state.streamingText, [sessionKey]: '' },
+        isStreaming: { ...state.isStreaming, [sessionKey]: true },
+        cancelStream: { ...state.cancelStream, [sessionKey]: null },
+        activeTurnId: { ...state.activeTurnId, [sessionKey]: turn.turnId },
+        activeTurn: { ...state.activeTurn, [sessionKey]: turn },
+        failedTurn: { ...state.failedTurn, [sessionKey]: undefined },
       }));
       startTurn(turn, generation);
     },
 
-    retryMessage: characterId => {
-      const failed = get().failedTurn[characterId];
+    retryMessage: sessionKey => {
+      const failed = get().failedTurn[sessionKey];
       if (!failed) return;
-      get().cancelStream[characterId]?.();
+      get().cancelStream[sessionKey]?.();
       const turn: ChatTurn = {
         turnId: failed.turnId,
+        sessionKey,
         characterId: failed.characterId,
         payload: failed.payload,
       };
       const generation = get().sessionGeneration;
       set(state => ({
-        streamingText: { ...state.streamingText, [characterId]: '' },
-        isStreaming: { ...state.isStreaming, [characterId]: true },
-        cancelStream: { ...state.cancelStream, [characterId]: null },
-        activeTurnId: { ...state.activeTurnId, [characterId]: turn.turnId },
-        activeTurn: { ...state.activeTurn, [characterId]: turn },
-        failedTurn: { ...state.failedTurn, [characterId]: undefined },
+        streamingText: { ...state.streamingText, [sessionKey]: '' },
+        isStreaming: { ...state.isStreaming, [sessionKey]: true },
+        cancelStream: { ...state.cancelStream, [sessionKey]: null },
+        activeTurnId: { ...state.activeTurnId, [sessionKey]: turn.turnId },
+        activeTurn: { ...state.activeTurn, [sessionKey]: turn },
+        failedTurn: { ...state.failedTurn, [sessionKey]: undefined },
       }));
       startTurn(turn, generation);
     },
 
-    cancelMessage: (characterId, expectedTurnId) => {
+    cancelMessage: (sessionKey, expectedTurnId) => {
       const state = get();
-      const turn = state.activeTurn[characterId];
+      const turn = state.activeTurn[sessionKey];
       if (expectedTurnId && turn?.turnId !== expectedTurnId) return;
-      state.cancelStream[characterId]?.();
+      state.cancelStream[sessionKey]?.();
       set(current => ({
-        streamingText: { ...current.streamingText, [characterId]: '' },
-        isStreaming: { ...current.isStreaming, [characterId]: false },
-        cancelStream: { ...current.cancelStream, [characterId]: null },
-        activeTurnId: { ...current.activeTurnId, [characterId]: undefined },
-        activeTurn: { ...current.activeTurn, [characterId]: undefined },
+        streamingText: { ...current.streamingText, [sessionKey]: '' },
+        isStreaming: { ...current.isStreaming, [sessionKey]: false },
+        cancelStream: { ...current.cancelStream, [sessionKey]: null },
+        activeTurnId: { ...current.activeTurnId, [sessionKey]: undefined },
+        activeTurn: { ...current.activeTurn, [sessionKey]: undefined },
         failedTurn: {
           ...current.failedTurn,
-          [characterId]: turn ? {
+          [sessionKey]: turn ? {
             ...turn,
             error: { code: 'cancelled', message: '已停止接收，可重试此消息。' },
-          } : current.failedTurn[characterId],
+          } : current.failedTurn[sessionKey],
         },
       }));
     },

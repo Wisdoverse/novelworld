@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { BrowserRouter, HashRouter, Routes, Route, Navigate } from 'react-router-dom';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
 import './styles/globals.css';
 
@@ -14,27 +14,28 @@ import { SettingsPage } from '@/pages/settings/ui/SettingsPage';
 import { useAuthStore } from '@/features/auth/model/useAuthStore';
 import { useChatStore } from '@/features/character-chat/model/useChatStore';
 import { apiClient } from '@/shared/api/client';
+import { clearPrivateQueryCache, queryClient } from '@/shared/api/queryClient';
 import { isDesktopClient } from '@/shared/config/runtime';
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      retry: 1,
-      staleTime: 30_000,
-    },
-  },
-});
-
 export function resetPrivateClientStateForPrincipalChange(
-  client: QueryClient,
   previousPrincipal: string | null,
   currentPrincipal: string | null,
 ) {
   if (previousPrincipal !== currentPrincipal) {
-    client.clear();
     useChatStore.getState().reset();
   }
   return currentPrincipal;
+}
+
+export function handleAuthTokenStorageChange(
+  event: Pick<StorageEvent, 'key' | 'oldValue' | 'newValue'>,
+  reload: () => void = () => window.location.reload(),
+) {
+  if (event.key !== 'auth_token' || event.oldValue === event.newValue) return false;
+  clearPrivateQueryCache();
+  useChatStore.getState().reset();
+  reload();
+  return true;
 }
 
 export function AppRoutes() {
@@ -46,7 +47,6 @@ export function AppRoutes() {
 
   useLayoutEffect(() => {
     previousPrincipal.current = resetPrivateClientStateForPrincipalChange(
-      queryClient,
       previousPrincipal.current,
       user?.id ?? null,
     );
@@ -143,6 +143,13 @@ export function AppRoutes() {
 
 export function App() {
   const Router = isDesktopClient ? HashRouter : BrowserRouter;
+  useEffect(() => {
+    const handleStorage = (event: StorageEvent) => {
+      handleAuthTokenStorageChange(event);
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, []);
   return (
     <QueryClientProvider client={queryClient}>
       <Router>

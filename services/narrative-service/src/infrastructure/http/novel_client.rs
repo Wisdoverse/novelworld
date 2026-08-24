@@ -32,6 +32,26 @@ impl NovelServiceClient {
             internal_service_token,
         }
     }
+
+    async fn reading_progress(
+        &self,
+        novel_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<ReadingProgressResponse> {
+        let response = self
+            .client
+            .get(format!("{}/progress/{}", self.base_url, novel_id))
+            .header("X-User-Id", user_id.to_string())
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(anyhow!("Novel service returned {}", response.status()));
+        }
+        response
+            .json::<ReadingProgressResponse>()
+            .await
+            .map_err(Into::into)
+    }
 }
 
 #[async_trait]
@@ -64,6 +84,7 @@ struct NovelResponse {
 
 #[derive(serde::Deserialize)]
 struct ReadingProgressResponse {
+    current_chapter: i32,
     reader_identity_type: String,
 }
 
@@ -183,6 +204,14 @@ impl ChapterReadRepository for NovelServiceClient {
         Ok(Some(context))
     }
 
+    async fn get_current_chapter(&self, novel_id: Uuid, user_id: Uuid) -> Result<i32> {
+        let progress = self.reading_progress(novel_id, user_id).await?;
+        if progress.current_chapter < 1 {
+            return Err(anyhow!("Novel service returned an invalid current chapter"));
+        }
+        Ok(progress.current_chapter)
+    }
+
     async fn get_player_entry_context(
         &self,
         novel_id: Uuid,
@@ -230,18 +259,9 @@ impl ChapterReadRepository for NovelServiceClient {
         Ok(Some(context))
     }
 
-    async fn uses_original_player_identity(&self, novel_id: Uuid, user_id: Uuid) -> Result<bool> {
-        let resp = self
-            .client
-            .get(format!("{}/progress/{}", self.base_url, novel_id))
-            .header("X-User-Id", user_id.to_string())
-            .send()
-            .await?;
-        if !resp.status().is_success() {
-            return Err(anyhow!("Novel service returned {}", resp.status()));
-        }
-        match resp
-            .json::<ReadingProgressResponse>()
+    async fn reader_identity_is_self(&self, novel_id: Uuid, user_id: Uuid) -> Result<bool> {
+        match self
+            .reading_progress(novel_id, user_id)
             .await?
             .reader_identity_type
             .as_str()

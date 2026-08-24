@@ -25,6 +25,8 @@ const CHAT_TURN_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0003_chat_turn_contract.sql");
 const ERASURE_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0016_erasure_records.sql");
+const WORLD_TURN_MEMORY_PROJECTION_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0021_world_turn_memory_projection.sql");
 
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
@@ -623,6 +625,22 @@ async fn restored_constraint_spelling_still_migrates_and_reaches_readiness() {
              ('in_progress'::character varying)::text, \
              ('completed'::character varying)::text, \
              ('failed'::character varying)::text]))); \
+         ALTER TABLE public.world_turns \
+         DROP CONSTRAINT world_turns_memory_projection_status_check, \
+         ADD CONSTRAINT world_turns_memory_projection_status_check \
+         CHECK (((memory_projection_status)::text = ANY (ARRAY[\
+             ('pending'::character varying)::text, \
+             ('saved'::character varying)::text, \
+             ('skipped'::character varying)::text]))), \
+         DROP CONSTRAINT world_turns_memory_projection_state_check, \
+         ADD CONSTRAINT world_turns_memory_projection_state_check CHECK (\
+             (((memory_projection_status)::text = 'pending'::text) \
+                 AND memory_projection_completed_at IS NULL) \
+             OR (((memory_projection_status)::text = ANY (ARRAY[\
+                 ('saved'::character varying)::text, \
+                 ('skipped'::character varying)::text])) \
+                 AND (status)::text = 'completed'::text \
+                 AND memory_projection_completed_at IS NOT NULL)); \
          ALTER TABLE public.novel_import_jobs DROP CONSTRAINT novel_import_jobs_stage_check, \
          ADD CONSTRAINT novel_import_jobs_stage_check CHECK (((stage)::text = ANY (ARRAY[\
              ('source'::character varying)::text, \
@@ -647,10 +665,96 @@ async fn restored_constraint_spelling_still_migrates_and_reaches_readiness() {
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::raw_sql(WORLD_TURN_MEMORY_PROJECTION_MIGRATION)
+        .execute(&pool)
+        .await
+        .unwrap();
     assert!(novel_readiness.is_ready().await);
     assert!(NarrativeReadinessPort::is_ready(&narrative_readiness).await);
 
-    // Tolerating the restored spelling must not tolerate a different constraint.
+    // Tolerating the restored spelling must not admit an extra status.
+    let mut migration_connection = pool.acquire().await.unwrap();
+    sqlx::raw_sql(
+        "ALTER TABLE public.world_turns \
+         DROP CONSTRAINT world_turns_memory_projection_status_check, \
+         ADD CONSTRAINT world_turns_memory_projection_status_check \
+         CHECK (memory_projection_status IN ('pending', 'saved', 'skipped', 'anything'))",
+    )
+    .execute(&mut *migration_connection)
+    .await
+    .unwrap();
+    assert!(!NarrativeReadinessPort::is_ready(&narrative_readiness).await);
+    let invalid_status = sqlx::raw_sql(WORLD_TURN_MEMORY_PROJECTION_MIGRATION)
+        .execute(&mut *migration_connection)
+        .await
+        .unwrap_err();
+    assert!(
+        invalid_status.to_string().contains(
+            "world turn memory projection status constraint has an unexpected definition"
+        ),
+        "unexpected migration error: {invalid_status:#}"
+    );
+    sqlx::query("ROLLBACK")
+        .execute(&mut *migration_connection)
+        .await
+        .unwrap();
+    sqlx::query(
+        "ALTER TABLE public.world_turns \
+         DROP CONSTRAINT world_turns_memory_projection_status_check",
+    )
+    .execute(&mut *migration_connection)
+    .await
+    .unwrap();
+    sqlx::raw_sql(WORLD_TURN_MEMORY_PROJECTION_MIGRATION)
+        .execute(&mut *migration_connection)
+        .await
+        .unwrap();
+    assert!(NarrativeReadinessPort::is_ready(&narrative_readiness).await);
+
+    // Nor may the state check be weakened to accept a terminal projection on
+    // a world turn that is not completed.
+    sqlx::raw_sql(
+        "ALTER TABLE public.world_turns \
+         DROP CONSTRAINT world_turns_memory_projection_state_check, \
+         ADD CONSTRAINT world_turns_memory_projection_state_check CHECK (\
+             (memory_projection_status = 'pending' \
+                 AND memory_projection_completed_at IS NULL) \
+             OR (memory_projection_status IN ('saved', 'skipped') \
+                 AND memory_projection_completed_at IS NOT NULL))",
+    )
+    .execute(&mut *migration_connection)
+    .await
+    .unwrap();
+    assert!(!NarrativeReadinessPort::is_ready(&narrative_readiness).await);
+    let relaxed_state = sqlx::raw_sql(WORLD_TURN_MEMORY_PROJECTION_MIGRATION)
+        .execute(&mut *migration_connection)
+        .await
+        .unwrap_err();
+    assert!(
+        relaxed_state
+            .to_string()
+            .contains("world turn memory projection state constraint has an unexpected definition"),
+        "unexpected migration error: {relaxed_state:#}"
+    );
+    sqlx::query("ROLLBACK")
+        .execute(&mut *migration_connection)
+        .await
+        .unwrap();
+    sqlx::query(
+        "ALTER TABLE public.world_turns \
+         DROP CONSTRAINT world_turns_memory_projection_state_check",
+    )
+    .execute(&mut *migration_connection)
+    .await
+    .unwrap();
+    sqlx::raw_sql(WORLD_TURN_MEMORY_PROJECTION_MIGRATION)
+        .execute(&mut *migration_connection)
+        .await
+        .unwrap();
+    assert!(NarrativeReadinessPort::is_ready(&narrative_readiness).await);
+    drop(migration_connection);
+
+    // Other restored varchar constraints keep the same exactness guarantee.
     sqlx::raw_sql(
         "ALTER TABLE public.novel_import_jobs DROP CONSTRAINT novel_import_jobs_stage_check, \
          ADD CONSTRAINT novel_import_jobs_stage_check CHECK (((stage)::text = ANY (ARRAY[\

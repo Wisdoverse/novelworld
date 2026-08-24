@@ -11,6 +11,8 @@ import {
   UserRound,
 } from 'lucide-react';
 import { apiClient, getApiErrorMessage } from '@/shared/api/client';
+import { clearPrivateQueryCache } from '@/shared/api/queryClient';
+import { clearWorldTurnPendingRequests } from '@/shared/lib/worldTurnStorage';
 
 const PROVIDERS = [
   { id: 'deepseek', name: 'DeepSeek', hint: '推荐，中文小说性价比高', keyUrl: 'https://platform.deepseek.com/api_keys' },
@@ -49,6 +51,8 @@ export function SetupPage({
         name: name || undefined,
         ...(llmConfigured ? {} : { provider, api_key: apiKey }),
       });
+      clearPrivateQueryCache();
+      clearWorldTurnPendingRequests(response.data.user.id);
       localStorage.setItem('auth_token', response.data.access_token);
       localStorage.setItem('refresh_token', response.data.refresh_token);
       setApiKey('');

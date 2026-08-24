@@ -78,8 +78,9 @@ export const PROGRESS = {
   last_read_at: '2025-01-01T00:00:00Z',
 };
 
-// H4 identity boundary: character-identity readers keep conversation and
-// branch choices; they must never see open-world or player-entry agency.
+// H4 identity boundary: character-identity readers keep conversation and may
+// read an exact committed branch; they must never create a new branch or see
+// open-world/player-entry agency.
 export const CHARACTER_PROGRESS = {
   ...PROGRESS,
   id: 'p-char-1',
@@ -232,6 +233,7 @@ export const SESSION = {
 export const JOURNAL_ENTRY = {
   turn_id: 't-1',
   turn_number: 1,
+  memory_projection_status: 'saved' as const,
   action: { kind: 'travel', target_id: 'loc-2', intent: '前往海港' },
   transition: {
     schema_version: 1,
@@ -254,11 +256,35 @@ export const JOURNAL_ENTRY = {
   completed_at: '2025-01-01T00:00:00Z',
 };
 
+const LONG_TIMELINE_TOKEN = 'A'.repeat(500);
+const OPEN_WORLD_STATE = {
+  ...WORLD_STATE,
+  state: {
+    ...WORLD_STATE.state,
+    choices: [{
+      chapter: 1,
+      choice: `长选择起点\n${LONG_TIMELINE_TOKEN}`,
+      consequence: `长选择投影起点\n${LONG_TIMELINE_TOKEN}`,
+    }],
+  },
+};
+const OPEN_WORLD_JOURNAL_ENTRY = {
+  ...JOURNAL_ENTRY,
+  action: {
+    ...JOURNAL_ENTRY.action,
+    intent: `前往海港\n${LONG_TIMELINE_TOKEN}`,
+  },
+  transition: {
+    ...JOURNAL_ENTRY.transition,
+    rendered_narrative: `${JOURNAL_ENTRY.transition.rendered_narrative}\n长行动投影起点\n${LONG_TIMELINE_TOKEN}`,
+  },
+};
+
 export const OPEN_WORLD = {
   player: PLAYER,
   session: SESSION,
-  world_state: WORLD_STATE,
-  journal: [JOURNAL_ENTRY],
+  world_state: OPEN_WORLD_STATE,
+  journal: [OPEN_WORLD_JOURNAL_ENTRY],
 };
 
 export const WORLD_TURN_RESULT = {
@@ -266,6 +292,7 @@ export const WORLD_TURN_RESULT = {
   action: { kind: 'travel', target_id: 'loc-2', intent: '前往海港' },
   transition: JOURNAL_ENTRY.transition,
   world_state: WORLD_STATE,
+  memory_projection_status: 'saved' as const,
 };
 
 export const CHOICE_RESULT = {

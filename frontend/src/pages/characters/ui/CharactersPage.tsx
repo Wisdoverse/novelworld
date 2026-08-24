@@ -6,6 +6,7 @@ import { CharacterCard } from '@/widgets/character-card/ui/CharacterCard';
 import { ChatPanel } from '@/widgets/chat-panel/ui/ChatPanel';
 import { useAuthStore } from '@/features/auth/model/useAuthStore';
 import type { Character } from '@/shared/types';
+import { getReaderIdentityScope } from '@/shared/lib/readerIdentityScope';
 import { AlertCircle, ArrowLeft, Users } from 'lucide-react';
 
 export function CharactersPage() {
@@ -26,6 +27,7 @@ export function CharactersPage() {
   const chatCharacterIsAvailable = Boolean(
     chatCharacter && characters?.some(character => character.id === chatCharacter.id),
   );
+  const readerIdentityScope = getReaderIdentityScope(readingProgress);
 
   useEffect(() => {
     if (chatCharacter && characters && !chatCharacterIsAvailable) {
@@ -93,7 +95,8 @@ export function CharactersPage() {
           novelId={novelId}
           currentChapter={readingProgress?.current_chapter || 1}
           readerIdentity={readingProgress?.reader_identity}
-          canChat={Boolean(readingProgress) && chatCharacterIsAvailable}
+          readerIdentityScope={readerIdentityScope}
+          canChat={readerIdentityScope !== 'unresolved' && chatCharacterIsAvailable}
           isOpen={!!chatCharacter}
           onClose={() => setChatCharacter(null)}
         />

@@ -77,7 +77,7 @@ export function SettingsPage() {
     if (!window.confirm('永久删除账号及全部小说、对话、记忆和时间线？此操作无法撤销。')) return;
     setDeleting(true);
     try {
-      await deleteAccount();
+      if (!await deleteAccount()) return;
       toast.success('账号数据已删除');
       navigate('/', { replace: true });
     } catch (error) {
@@ -88,6 +88,12 @@ export function SettingsPage() {
   };
 
   const exportAccount = async () => {
+    const token = localStorage.getItem('auth_token');
+    const userId = user?.id;
+    const principalIsCurrent = () => (
+      localStorage.getItem('auth_token') === token
+      && useAuthStore.getState().user?.id === userId
+    );
     setExporting(true);
     try {
       // ponytail: A browser Blob prevents saving partial exports; adopt the File
@@ -96,7 +102,9 @@ export function SettingsPage() {
         responseType: 'blob',
         timeout: 16 * 60 * 1000,
       });
+      if (!principalIsCurrent()) return;
       const tail = await response.data.slice(Math.max(0, response.data.size - 4096)).text();
+      if (!principalIsCurrent()) return;
       const lines = tail.trimEnd().split('\n');
       const lastLine = lines[lines.length - 1];
       const completion = lastLine ? JSON.parse(lastLine) : null;
@@ -107,7 +115,7 @@ export function SettingsPage() {
       const url = URL.createObjectURL(response.data);
       const link = document.createElement('a');
       link.href = url;
-      link.download = `novelworld-account-${user?.id}-${new Date().toISOString().slice(0, 10)}.ndjson`;
+      link.download = `novelworld-account-${userId}-${new Date().toISOString().slice(0, 10)}.ndjson`;
       document.body.appendChild(link);
       link.click();
       link.remove();
