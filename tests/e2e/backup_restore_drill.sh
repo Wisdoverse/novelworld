@@ -222,7 +222,7 @@ pause
 "${curl_cmd[@]}" --output /dev/null "${admin_auth[@]}" \
   -H 'Content-Type: application/json' \
   -H "Idempotency-Key: $(python3 -c 'import uuid; print(uuid.uuid4())')" \
-  --data '{"kind":"pursue_goal","target_id":null,"intent":"绘制地下回廊并寻找守门人的踪迹"}' \
+  --data '{"expected_turn_number":0,"kind":"pursue_goal","target_id":null,"intent":"绘制地下回廊并寻找守门人的踪迹"}' \
   "$api/narrative/$novel_a1/world/turns"
 pause
 chat=$("${curl_cmd[@]}" --no-buffer "${admin_auth[@]}" \

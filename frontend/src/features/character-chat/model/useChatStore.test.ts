@@ -12,13 +12,16 @@ vi.mock('@/shared/api/client', () => ({
   }),
 }));
 
-import { useChatStore } from './useChatStore';
+import { chatSessionKey, useChatStore } from './useChatStore';
 
-function send(message = 'private') {
+const SELF_SESSION = chatSessionKey('character', 'self');
+
+function send(message = 'private', readerIdentityScope = 'self') {
   useChatStore.getState().sendMessage({
     characterId: 'character',
     novelId: 'novel',
     message,
+    readerIdentityScope,
     currentChapter: 1,
   });
 }
@@ -49,16 +52,16 @@ describe('chat turn isolation', () => {
     first.onChunk('partial');
     first.onError({ code: 'stream_error', message: 'try again' });
 
-    useChatStore.getState().retryMessage('character');
+    useChatStore.getState().retryMessage(SELF_SESSION);
     const retry = streams[1];
 
     expect(retry.turnId).toBe(first.turnId);
-    expect(useChatStore.getState().messages.character).toHaveLength(1);
+    expect(useChatStore.getState().messages[SELF_SESSION]).toHaveLength(1);
     retry.onRetry?.();
-    expect(useChatStore.getState().streamingText.character).toBe('');
+    expect(useChatStore.getState().streamingText[SELF_SESSION]).toBe('');
     retry.onChunk('complete');
     retry.onDone({ turnId: first.turnId, replayed: true, legacy: false });
-    expect(useChatStore.getState().messages.character.map(message => message.role)).toEqual([
+    expect(useChatStore.getState().messages[SELF_SESSION].map(message => message.role)).toEqual([
       'user',
       'character',
     ]);
@@ -75,23 +78,23 @@ describe('chat turn isolation', () => {
     first.onDone({ turnId: first.turnId, replayed: false, legacy: false });
     second.onChunk('current');
 
-    expect(useChatStore.getState().streamingText.character).toBe('current');
-    expect(useChatStore.getState().messages.character).toHaveLength(2);
+    expect(useChatStore.getState().streamingText[SELF_SESSION]).toBe('current');
+    expect(useChatStore.getState().messages[SELF_SESSION]).toHaveLength(2);
   });
 
   it('keeps a cancelled turn retryable and ignores its late callbacks', () => {
     send();
     const stream = streams[0];
 
-    useChatStore.getState().cancelMessage('character');
+    useChatStore.getState().cancelMessage(SELF_SESSION);
     stream.onChunk('late secret');
     stream.onDone({ turnId: stream.turnId, replayed: false, legacy: false });
 
     const state = useChatStore.getState();
     expect(stream.cancel).toHaveBeenCalledOnce();
-    expect(state.streamingText.character).toBe('');
-    expect(state.messages.character).toHaveLength(1);
-    expect(state.failedTurn.character?.turnId).toBe(stream.turnId);
+    expect(state.streamingText[SELF_SESSION]).toBe('');
+    expect(state.messages[SELF_SESSION]).toHaveLength(1);
+    expect(state.failedTurn[SELF_SESSION]?.turnId).toBe(stream.turnId);
   });
 
   it('cancels active streams and ignores their late callbacks after reset', () => {
@@ -105,5 +108,26 @@ describe('chat turn isolation', () => {
     expect(stream.cancel).toHaveBeenCalledOnce();
     expect(useChatStore.getState().messages).toEqual({});
     expect(useChatStore.getState().streamingText).toEqual({});
+  });
+
+  it('isolates self and character identities while retaining the same character identity session', () => {
+    const characterASession = chatSessionKey('character', 'character:a');
+    const characterBSession = chatSessionKey('character', 'character:b');
+
+    send('self-only');
+    send('character-a-only', 'character:a');
+
+    expect(useChatStore.getState().messages[SELF_SESSION].map(item => item.content))
+      .toEqual(['self-only']);
+    expect(useChatStore.getState().messages[characterASession].map(item => item.content))
+      .toEqual(['character-a-only']);
+    expect(useChatStore.getState().messages[characterBSession]).toBeUndefined();
+
+    send('same-character', 'character:a');
+
+    expect(useChatStore.getState().messages[characterASession].map(item => item.content))
+      .toEqual(['character-a-only', 'same-character']);
+    expect(useChatStore.getState().messages[SELF_SESSION].map(item => item.content))
+      .toEqual(['self-only']);
   });
 });

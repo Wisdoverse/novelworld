@@ -80,13 +80,48 @@ pub struct WorldTurnResult {
     pub world_state: WorldState,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryProjectionStatus {
+    Pending,
+    Saved,
+    Skipped,
+}
+
+impl MemoryProjectionStatus {
+    pub fn to_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Saved => "saved",
+            Self::Skipped => "skipped",
+        }
+    }
+
+    #[allow(clippy::should_implement_trait)] // Repository enums use the workspace to_str/from_str convention.
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "pending" => Some(Self::Pending),
+            "saved" => Some(Self::Saved),
+            "skipped" => Some(Self::Skipped),
+            _ => None,
+        }
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Saved | Self::Skipped)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum BeginWorldTurn {
     Acquired {
         claim: Box<WorldTurnClaim>,
         attempt: i64,
     },
-    Completed(Box<WorldTurnResult>),
+    Completed {
+        result: Box<WorldTurnResult>,
+        memory_projection: MemoryProjectionStatus,
+    },
     InProgress {
         retry_after_seconds: u64,
     },
@@ -98,6 +133,7 @@ pub enum BeginWorldTurn {
 pub struct WorldTurnJournalEntry {
     pub turn_id: Uuid,
     pub turn_number: i64,
+    pub memory_projection_status: MemoryProjectionStatus,
     pub action: WorldAction,
     #[serde(default)]
     pub resolution: Option<ActionCheck>,
@@ -118,6 +154,13 @@ pub trait WorldTurnRepository: Send + Sync {
         context: &WorldEntryContext,
     ) -> Result<WorldTurnResult>;
     async fn fail_turn(&self, turn_id: Uuid, attempt: i64, failure_code: &str) -> Result<bool>;
+    async fn finish_memory_projection(
+        &self,
+        turn_id: Uuid,
+        user_id: Uuid,
+        novel_id: Uuid,
+        status: MemoryProjectionStatus,
+    ) -> Result<bool>;
     async fn journal(
         &self,
         user_id: Uuid,
@@ -150,6 +193,7 @@ pub trait ChapterReadRepository: Send + Sync {
         checkpoint_chapter: i32,
         user_id: Uuid,
     ) -> Result<Option<CanonContext>>;
+    async fn get_current_chapter(&self, novel_id: Uuid, user_id: Uuid) -> Result<i32>;
     async fn list_characters(&self, novel_id: Uuid, user_id: Uuid) -> Result<Vec<CharacterBrief>>;
     async fn get_player_entry_context(
         &self,
@@ -158,7 +202,7 @@ pub trait ChapterReadRepository: Send + Sync {
         checkpoint_chapter: Option<i32>,
         proposed_name: Option<&str>,
     ) -> Result<Option<PlayerEntryContext>>;
-    async fn uses_original_player_identity(&self, novel_id: Uuid, user_id: Uuid) -> Result<bool>;
+    async fn reader_identity_is_self(&self, novel_id: Uuid, user_id: Uuid) -> Result<bool>;
     async fn get_world_entry_context(
         &self,
         novel_id: Uuid,
@@ -267,6 +311,9 @@ pub struct ChoiceCommit {
     pub chapter_number: i32,
     pub choice_index: i32,
     pub choice_text: String,
+    /// Exact state snapshot used to generate this transition. The persistence
+    /// adapter compares it while holding the world-state row lock.
+    pub expected_world_state_fingerprint: [u8; 32],
     pub transition: NarrativeTransition,
     pub rewritten_chapter_content: String,
 }

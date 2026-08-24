@@ -1,3 +1,4 @@
+use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -9,20 +10,23 @@ use uuid::Uuid;
 use crate::domain::entities::game_rules::{
     resolve_action_check, GameRuleTemplate, PlayerRuleProfile, ResolutionMode,
 };
-use crate::domain::entities::narrative_node::{NarrativeChoice, NarrativeNode, WorldState};
+use crate::domain::entities::narrative_node::{
+    fit_character_world_context, NarrativeChoice, NarrativeNode, WorldState, WorldStateError,
+};
 use crate::domain::entities::player_entity::PlayerEntity;
 use crate::domain::entities::world_session::{
     build_world_turn_prompt_with_check, parse_world_turn_transition_with_check, trailing_chars,
-    CharacterWorldContext, RecentWorldTurnContext, WorldAction, WorldSession,
+    CharacterWorldContext, ObservedWorldAction, RecentWorldActionContext, RecentWorldTurnContext,
+    WorldAction, WorldActionKind, WorldSession, MAX_CHARACTER_RECENT_ACTIONS,
     MAX_RECENT_WORLD_NARRATIVE_CHARS, MAX_RECENT_WORLD_TURNS,
 };
 use crate::domain::ports::{AgentMemoryPort, DiceRollerPort, LlmPort, NarrativeLlmTask};
 use crate::domain::repositories::{
     BeginWorldTurn, ChapterInfo, ChapterReadRepository, CharacterBrief, ChoiceCommit,
-    GameRuleTemplateRequestError, NarrativeNodeRepository, NovelInfo, PlayerChapter,
-    PlayerChapterOrigin, PlayerChapterRepository, UserChoiceRecord, UserChoiceRepository,
-    WorldStateRepository, WorldTurnClaim, WorldTurnJournalEntry, WorldTurnRepository,
-    WorldTurnResult,
+    GameRuleTemplateRequestError, MemoryProjectionStatus, NarrativeNodeRepository, NovelInfo,
+    PlayerChapter, PlayerChapterOrigin, PlayerChapterRepository, UserChoiceRecord,
+    UserChoiceRepository, WorldStateRepository, WorldTurnClaim, WorldTurnJournalEntry,
+    WorldTurnRepository, WorldTurnResult,
 };
 use crate::domain::services::narrative_engine::{
     build_branch_prompt, build_player_chapter_prompt, is_chinese_narrative, parse_generated_branch,
@@ -42,11 +46,73 @@ const MAX_WORLD_TURN_PROMPT_BYTES: usize = 64 * 1024;
 const MAX_WORLD_TURN_PROMPT_CHARS: usize = 32_000;
 const MAX_WORLD_TRANSITION_BYTES: usize = 128 * 1024;
 const WORLD_TURN_LEASE_HEARTBEAT: Duration = Duration::from_secs(30);
-/// Journey memories: bounded event text, fixed importance for committed world
-/// turns, and bounded best-effort retries (a memory loss never fails a turn).
+/// Journey memories: bounded structured fact text, fixed importance for
+/// committed world turns, and bounded retries inside the turn ambiguity
+/// boundary.
 const MAX_JOURNEY_MEMORY_EVENT_CHARS: usize = 2_000;
+const MAX_JOURNEY_MEMORY_FIELD_CHARS: usize = 128;
+const MAX_JOURNEY_MEMORY_LOCATION_CHARS: usize = 200;
 const WORLD_TURN_MEMORY_IMPORTANCE: i32 = 7;
 const JOURNEY_MEMORY_RETRIES: usize = 2;
+const MAX_WORLD_JOURNAL_ENTRIES: usize = 100;
+const JOURNEY_MEMORY_NAMESPACE: Uuid = Uuid::from_u128(0x4d5f_215d_111c_5f25_8614_71e8_5f8a_3e63);
+
+pub(crate) fn journey_memory_id(turn_id: Uuid) -> Uuid {
+    Uuid::new_v5(&JOURNEY_MEMORY_NAMESPACE, turn_id.as_bytes())
+}
+
+fn action_targets_character(action: &WorldAction, character_id: Uuid) -> bool {
+    matches!(
+        action.kind,
+        WorldActionKind::Converse | WorldActionKind::Ally | WorldActionKind::Oppose
+    ) && action
+        .target_id
+        .as_deref()
+        .and_then(|target| Uuid::parse_str(target).ok())
+        .is_some_and(|target| target == character_id)
+}
+
+fn character_witnessed_turn(
+    action: &WorldAction,
+    transition: &crate::domain::entities::world_session::WorldTurnTransition,
+    character_id: Uuid,
+) -> bool {
+    action_targets_character(action, character_id)
+        || transition
+            .events
+            .iter()
+            .any(|event| event.actor_character_ids.contains(&character_id))
+        || transition
+            .relationship_changes
+            .iter()
+            .any(|change| change.character_id == character_id)
+}
+
+fn recent_character_actions(
+    journal: Vec<WorldTurnJournalEntry>,
+    character_id: Uuid,
+    maximum_turn_number: i64,
+) -> Vec<RecentWorldActionContext> {
+    let mut selected = journal
+        .into_iter()
+        .rev()
+        .filter(|entry| {
+            entry.turn_number <= maximum_turn_number
+                && action_targets_character(&entry.action, character_id)
+        })
+        .take(MAX_CHARACTER_RECENT_ACTIONS)
+        .map(|entry| RecentWorldActionContext {
+            turn_id: entry.turn_id,
+            turn_number: entry.turn_number,
+            action: ObservedWorldAction {
+                kind: entry.action.kind,
+                target_id: entry.action.target_id,
+            },
+        })
+        .collect::<Vec<_>>();
+    selected.reverse();
+    selected
+}
 
 /// Deterministic protagonist pick: role 'protagonist', earliest first
 /// appearance, stable id tiebreak. Zero protagonists => None (caller skips).
@@ -56,56 +122,211 @@ pub(crate) fn resolve_protagonist(characters: &[CharacterBrief]) -> Option<Uuid>
         .filter(|character| character.role == "protagonist")
         .min_by_key(|character| {
             (
-                character.first_appearance_chapter.unwrap_or(0),
+                character.first_appearance_chapter.is_none(),
+                character.first_appearance_chapter,
                 character.id,
             )
         })
         .map(|character| character.id)
 }
 
-/// Best-effort projection of a committed world turn into the permanent memory
-/// layer: idempotent (memory id = turn id), fire-and-forget with bounded
-/// retries, and it never fails or delays the caller's turn result.
+/// Idempotently project a committed world-turn fact into permanent memory.
+/// Eligible turns are acknowledged before the caller receives success; a
+/// failed acknowledgement stays inside the same-key replay boundary.
+#[allow(clippy::too_many_arguments)] // Explicit projection scope.
 pub(crate) async fn record_world_journey_memory(
     agent_memory: &dyn AgentMemoryPort,
     chapter_repo: &dyn ChapterReadRepository,
-    turn_id: Uuid,
+    memory_id: Uuid,
     user_id: Uuid,
     novel_id: Uuid,
-    checkpoint_chapter: i32,
-    event: &str,
-) {
-    let characters = match chapter_repo.list_characters(novel_id, user_id).await {
-        Ok(characters) => characters,
-        Err(error) => {
-            tracing::debug!(%error, %novel_id, "character list unavailable; skipping journey memory");
-            return;
-        }
-    };
+    result: &WorldTurnResult,
+) -> Result<bool> {
+    let characters = chapter_repo.list_characters(novel_id, user_id).await?;
     let Some(character_id) = resolve_protagonist(&characters) else {
         tracing::debug!(%novel_id, "no protagonist found; skipping journey memory");
-        return;
+        return Ok(false);
     };
-    let event: String = event.chars().take(MAX_JOURNEY_MEMORY_EVENT_CHARS).collect();
+    if !character_witnessed_turn(&result.action, &result.transition, character_id) {
+        tracing::debug!(%novel_id, %character_id, "protagonist did not witness the world turn; skipping journey memory");
+        return Ok(false);
+    }
+    let Some((event, source_chapter_high_water)) = world_journey_fact(result, character_id)? else {
+        tracing::debug!(%novel_id, %character_id, "witnessed turn had no admissible journey fact; skipping journey memory");
+        return Ok(false);
+    };
+    let mut last_error = None;
     for attempt in 0..=JOURNEY_MEMORY_RETRIES {
         match agent_memory
             .save_permanent_memory(
-                turn_id,
+                memory_id,
                 character_id,
                 user_id,
                 novel_id,
-                checkpoint_chapter,
+                source_chapter_high_water,
                 &event,
                 WORLD_TURN_MEMORY_IMPORTANCE,
             )
             .await
         {
-            Ok(()) => return,
+            Ok(()) => return Ok(true),
             Err(error) => {
-                warn!(%error, attempt, %turn_id, "journey memory save failed");
+                warn!(%error, attempt, %memory_id, "journey memory save failed");
+                last_error = Some(error);
             }
         }
     }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("journey memory projection failed")))
+}
+
+fn leading_chars(value: &str, maximum: usize) -> String {
+    value.chars().take(maximum).collect()
+}
+
+fn bounded_trimmed_chars(value: &str, maximum: usize) -> Option<String> {
+    let bounded = leading_chars(value, maximum);
+    let trimmed = bounded.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+fn add_journey_fact_section(
+    fact: &mut serde_json::Value,
+    key: &'static str,
+    mut items: Vec<serde_json::Value>,
+) -> Result<()> {
+    while !items.is_empty() {
+        fact["committed_changes"]
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("journey fact changes must be an object"))?
+            .insert(key.into(), serde_json::Value::Array(items.clone()));
+        if serde_json::to_string(fact)?.chars().count() <= MAX_JOURNEY_MEMORY_EVENT_CHARS {
+            return Ok(());
+        }
+        items.pop();
+    }
+    fact["committed_changes"]
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("journey fact changes must be an object"))?
+        .remove(key);
+    Ok(())
+}
+
+/// Serialize only facts with explicit provenance for one character. Generated
+/// prose and unrelated mutations are deliberately excluded: witnessing one
+/// part of a turn does not make the character omniscient about the whole turn.
+fn world_journey_fact(
+    result: &WorldTurnResult,
+    character_id: Uuid,
+) -> Result<Option<(String, i32)>> {
+    let session = result
+        .world_state
+        .open_world()
+        .map_err(|error| anyhow::anyhow!(error))?
+        .ok_or_else(|| anyhow::anyhow!("committed world turn has no world session"))?;
+    Ok(world_journey_fact_at(
+        result,
+        character_id,
+        session.turn_number,
+        session.world_time,
+    )?
+    .map(|fact| (fact, session.entry_context.unlocked_through_chapter)))
+}
+
+fn world_journey_fact_at(
+    result: &WorldTurnResult,
+    character_id: Uuid,
+    turn_number: i64,
+    world_time: i64,
+) -> Result<Option<String>> {
+    let transition = &result.transition;
+    let reader_action = action_targets_character(&result.action, character_id).then(|| {
+        serde_json::json!({
+            "kind": result.action.kind,
+            "target_id": character_id,
+        })
+    });
+    let events = transition
+        .events
+        .iter()
+        .filter(|event| event.actor_character_ids.contains(&character_id))
+        .filter_map(|event| {
+            let summary = bounded_trimmed_chars(&event.summary, MAX_JOURNEY_MEMORY_FIELD_CHARS)?;
+            let location_id = event.location_id.as_deref().and_then(|location| {
+                bounded_trimmed_chars(location, MAX_JOURNEY_MEMORY_LOCATION_CHARS)
+                    .filter(|location| !location.chars().any(char::is_control))
+            });
+            Some(serde_json::json!({
+                "summary": summary,
+                "actor_character_ids": [character_id],
+                "location_id": location_id,
+            }))
+        })
+        .take(4)
+        .collect::<Vec<_>>();
+    let relationships = transition
+        .relationship_changes
+        .iter()
+        .filter(|change| change.character_id == character_id)
+        .take(4)
+        .map(|change| {
+            serde_json::json!({
+                "character_id": change.character_id,
+                "delta": change.delta,
+            })
+        })
+        .collect::<Vec<_>>();
+    let reader_action_count = usize::from(reader_action.is_some());
+    let mut fact = serde_json::json!({
+        "schema_version": 2,
+        "source": "committed_world_turn",
+        "authority": "explicit_character_witness_facts",
+        "source_turn_id": result.turn_id,
+        "witness_character_id": character_id,
+        "turn_number": turn_number,
+        "world_time": world_time,
+        "canonical_checkpoint_chapter": transition.canonical_checkpoint_chapter,
+        "change_counts": {
+            "events": events.len(),
+            "relationships": relationships.len(),
+            "reader_action": reader_action_count,
+        },
+        "committed_changes": {},
+    });
+    if let Some(reader_action) = reader_action {
+        fact.as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("journey fact must be an object"))?
+            .insert("reader_action".into(), serde_json::to_value(reader_action)?);
+    }
+
+    add_journey_fact_section(&mut fact, "relationships", relationships)?;
+    add_journey_fact_section(&mut fact, "events", events)?;
+    let committed_changes = fact["committed_changes"]
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("journey fact changes must be an object"))?;
+    let emitted_relationships = committed_changes
+        .get("relationships")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    let emitted_events = committed_changes
+        .get("events")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    fact["change_counts"] = serde_json::json!({
+        "events": emitted_events,
+        "relationships": emitted_relationships,
+        "reader_action": reader_action_count,
+    });
+
+    if reader_action_count == 0 && emitted_events == 0 && emitted_relationships == 0 {
+        return Ok(None);
+    }
+
+    let encoded = serde_json::to_string(&fact)?;
+    anyhow::ensure!(
+        encoded.chars().count() <= MAX_JOURNEY_MEMORY_EVENT_CHARS,
+        "journey fact exceeded its budget"
+    );
+    Ok(Some(encoded))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -126,6 +347,8 @@ pub enum NarrativeError {
     GameRulesInProgress { retry_after_seconds: u64 },
     #[error("Game rule template generation budget is exhausted")]
     GameRulesExhausted,
+    #[error("Reading progress is behind the committed world context")]
+    ReadingProgressBehindWorld,
     #[error("Novel service is unavailable")]
     Unavailable(#[source] anyhow::Error),
     #[error("Consequence generation failed")]
@@ -136,12 +359,44 @@ pub enum NarrativeError {
 
 pub type NarrativeResult<T> = std::result::Result<T, NarrativeError>;
 
+fn map_world_state_write_error(error: anyhow::Error) -> NarrativeError {
+    match error.downcast_ref::<WorldStateError>() {
+        Some(WorldStateError::TimelineConflict(message)) => {
+            NarrativeError::Conflict(message.clone())
+        }
+        _ => NarrativeError::Internal(error),
+    }
+}
+
 fn require_same_choice(requested: i32, committed: i32) -> NarrativeResult<()> {
     if requested == committed {
         Ok(())
     } else {
         Err(NarrativeError::ChoiceConflict)
     }
+}
+
+fn require_choice_submission_allowed(
+    requested: i32,
+    committed: Option<i32>,
+    choice_chapter: i32,
+    player_checkpoint: Option<i32>,
+    open_world_started: bool,
+) -> NarrativeResult<()> {
+    if let Some(committed) = committed {
+        return require_same_choice(requested, committed);
+    }
+    if open_world_started {
+        return Err(NarrativeError::Conflict(
+            "Use world actions after entering the open world".into(),
+        ));
+    }
+    if player_checkpoint.is_some_and(|checkpoint| choice_chapter > checkpoint) {
+        return Err(NarrativeError::Conflict(
+            "Branch choice is later than the sealed PlayerEntity checkpoint".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -187,10 +442,21 @@ pub struct OpenWorldView {
     pub journal: Vec<WorldTurnJournalEntry>,
 }
 
+/// HTTP-facing completion view. The committed result remains the single
+/// persisted payload; projection status is the separately committed journal
+/// state flattened into the wire response.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WorldTurnResponse {
+    #[serde(flatten)]
+    pub result: WorldTurnResult,
+    pub memory_projection_status: MemoryProjectionStatus,
+}
+
 struct ResolvedChapter {
     canonical: ChapterInfo,
     content: String,
     generated: bool,
+    origin: Option<PlayerChapterOrigin>,
 }
 
 pub struct NarrativeCommandHandler {
@@ -286,11 +552,186 @@ impl NarrativeCommandHandler {
             .ok_or(NarrativeError::NotFound)
     }
 
+    async fn reader_identity_is_self(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+    ) -> NarrativeResult<bool> {
+        self.chapter_repo
+            .reader_identity_is_self(novel_id, user_id)
+            .await
+            .map_err(NarrativeError::Unavailable)
+    }
+
+    async fn require_self_reader_identity(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+    ) -> NarrativeResult<()> {
+        if self.reader_identity_is_self(user_id, novel_id).await? {
+            Ok(())
+        } else {
+            Err(NarrativeError::Conflict(
+                "Player and open-world access require the self reader identity".into(),
+            ))
+        }
+    }
+
+    fn choices_only_world_state(mut world_state: WorldState) -> NarrativeResult<WorldState> {
+        let choices = world_state
+            .state
+            .get("choices")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .ok_or_else(|| {
+                NarrativeError::Internal(anyhow::anyhow!(WorldStateError::InvalidChoices))
+            })?;
+        world_state.state = serde_json::json!({
+            "choices": choices,
+            "world_events": [],
+        });
+        Ok(world_state)
+    }
+
+    async fn require_world_source_visible(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        world_state: &WorldState,
+    ) -> NarrativeResult<()> {
+        let Some(source_chapter_high_water) = world_state
+            .source_chapter_high_water()
+            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
+        else {
+            return Ok(());
+        };
+        self.require_source_chapter_visible(user_id, novel_id, source_chapter_high_water)
+            .await
+    }
+
+    async fn require_source_chapter_visible(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        source_chapter: i32,
+    ) -> NarrativeResult<()> {
+        let current_chapter = self
+            .chapter_repo
+            .get_current_chapter(novel_id, user_id)
+            .await
+            .map_err(NarrativeError::Unavailable)?;
+        if current_chapter < source_chapter {
+            return Err(NarrativeError::ReadingProgressBehindWorld);
+        }
+        Ok(())
+    }
+
+    async fn branch_node_if_visible(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        source_chapter: i32,
+        node: Option<NarrativeNode>,
+    ) -> NarrativeResult<Option<NarrativeNode>> {
+        if let Some(node) = &node {
+            self.require_source_chapter_visible(
+                user_id,
+                novel_id,
+                source_chapter.max(node.chapter_number),
+            )
+            .await?;
+        }
+        Ok(node)
+    }
+
+    fn uncommitted_branch_is_eligible(
+        world_state: &WorldState,
+        chapter_number: i32,
+    ) -> NarrativeResult<bool> {
+        let open_world_started = world_state
+            .open_world()
+            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
+            .is_some();
+        let beyond_player_checkpoint = world_state
+            .player_entity()
+            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
+            .is_some_and(|player| chapter_number > player.canonical_checkpoint_chapter);
+        let precedes_committed_prefix = world_state
+            .latest_choice_chapter()
+            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
+            .is_some_and(|latest| chapter_number <= latest);
+        Ok(!open_world_started && !beyond_player_checkpoint && !precedes_committed_prefix)
+    }
+
+    async fn committed_branch_node(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        chapter_number: i32,
+    ) -> NarrativeResult<Option<NarrativeNode>> {
+        let existing_choice = self
+            .choice_repo
+            .find_by_novel(user_id, novel_id)
+            .await
+            .map_err(NarrativeError::Internal)?
+            .into_iter()
+            .find(|choice| choice.chapter_number == chapter_number);
+        let Some(existing_choice) = existing_choice else {
+            return Ok(None);
+        };
+        let node = self
+            .node_repo
+            .find_by_id(existing_choice.node_id)
+            .await
+            .map_err(NarrativeError::Internal)?
+            .filter(|node| {
+                node.novel_id == novel_id
+                    && node.chapter_number == chapter_number
+                    && node.user_id.is_none_or(|owner_id| owner_id == user_id)
+            })
+            .ok_or(NarrativeError::NotFound)?;
+        Ok(Some(node))
+    }
+
+    /// A node read or provider call can overlap Player creation, a choice, or
+    /// open-world entry. Reload the committed choice and WorldState after the
+    /// candidate is durable; this final state read is the response's
+    /// linearization point and prevents returning options that cannot submit.
+    async fn finalize_uncommitted_branch_node(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        chapter_number: i32,
+        node: Option<NarrativeNode>,
+    ) -> NarrativeResult<Option<NarrativeNode>> {
+        if let Some(committed) = self
+            .committed_branch_node(user_id, novel_id, chapter_number)
+            .await?
+        {
+            return self
+                .branch_node_if_visible(user_id, novel_id, chapter_number, Some(committed))
+                .await;
+        }
+        if !self.reader_identity_is_self(user_id, novel_id).await? {
+            return Ok(None);
+        }
+        let latest_world_state = self
+            .world_state_repo
+            .get_or_create(user_id, novel_id)
+            .await
+            .map_err(NarrativeError::Internal)?;
+        if !Self::uncommitted_branch_is_eligible(&latest_world_state, chapter_number)? {
+            return Ok(None);
+        }
+        self.branch_node_if_visible(user_id, novel_id, chapter_number, node)
+            .await
+    }
+
     async fn narrative_world_state(
         &self,
         user_id: Uuid,
         novel_id: Uuid,
-    ) -> NarrativeResult<(WorldState, Option<PlayerEntity>)> {
+    ) -> NarrativeResult<(WorldState, Option<PlayerEntity>, bool)> {
         let world_state = self
             .world_state_repo
             .get_or_create(user_id, novel_id)
@@ -299,18 +740,24 @@ impl NarrativeCommandHandler {
         let player = world_state
             .player_entity()
             .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?;
-        if player.is_none()
-            && self
-                .chapter_repo
-                .uses_original_player_identity(novel_id, user_id)
-                .await
-                .map_err(NarrativeError::Unavailable)?
-        {
+        let self_identity = self.reader_identity_is_self(user_id, novel_id).await?;
+        if self_identity && player.is_none() {
             return Err(NarrativeError::Conflict(
                 "Create PlayerEntity before entering an original-player branch".into(),
             ));
         }
-        Ok((world_state, player))
+        let visible_state = if self_identity {
+            world_state.clone()
+        } else {
+            Self::choices_only_world_state(world_state.clone())?
+        };
+        self.require_world_source_visible(user_id, novel_id, &visible_state)
+            .await?;
+        Ok((
+            world_state,
+            self_identity.then_some(player).flatten(),
+            self_identity,
+        ))
     }
 
     #[tracing::instrument(skip(self))]
@@ -326,6 +773,7 @@ impl NarrativeCommandHandler {
             ));
         }
         self.owned_novel(novel_id, user_id).await?;
+        self.require_self_reader_identity(user_id, novel_id).await?;
         let world_state = self
             .world_state_repo
             .get_or_create(user_id, novel_id)
@@ -363,6 +811,10 @@ impl NarrativeCommandHandler {
                     Some(template)
                 }
             };
+            self.require_self_reader_identity(user_id, novel_id).await?;
+            self.require_world_source_visible(user_id, novel_id, &world_state)
+                .await?;
+            self.require_self_reader_identity(user_id, novel_id).await?;
             return Ok(PlayerEntry {
                 checkpoint_chapter: player.canonical_checkpoint_chapter,
                 player: Some(player),
@@ -376,6 +828,10 @@ impl NarrativeCommandHandler {
             .await
             .map_err(NarrativeError::Unavailable)?
             .ok_or(NarrativeError::NotFound)?;
+        self.require_self_reader_identity(user_id, novel_id).await?;
+        self.require_source_chapter_visible(user_id, novel_id, context.checkpoint_chapter)
+            .await?;
+        self.require_self_reader_identity(user_id, novel_id).await?;
         Ok(PlayerEntry {
             player: None,
             checkpoint_chapter: context.checkpoint_chapter,
@@ -415,6 +871,7 @@ impl NarrativeCommandHandler {
         command: CreatePlayerEntityCommand,
     ) -> NarrativeResult<PlayerEntity> {
         self.owned_novel(novel_id, user_id).await?;
+        self.require_self_reader_identity(user_id, novel_id).await?;
         if command
             .checkpoint_chapter
             .is_some_and(|chapter| chapter < 1)
@@ -470,22 +927,30 @@ impl NarrativeCommandHandler {
             let checkpoint_matches = command
                 .checkpoint_chapter
                 .is_none_or(|chapter| chapter == existing.canonical_checkpoint_chapter);
-            return if checkpoint_matches
-                && existing.matches_definition(
+            if !checkpoint_matches
+                || !existing.matches_definition(
                     &command.name,
                     &command.background,
                     &command.capabilities,
                     &command.location_id,
                     &command.inventory,
                 )
-                && existing.matches_rules(&command.rules)
+                || !existing.matches_rules(&command.rules)
             {
-                Ok(existing)
-            } else {
-                Err(NarrativeError::Conflict(
+                return Err(NarrativeError::Conflict(
                     "PlayerEntity already exists with a different definition".into(),
-                ))
-            };
+                ));
+            }
+            self.require_self_reader_identity(user_id, novel_id).await?;
+            let stored = self
+                .world_state_repo
+                .create_player_entity(&existing)
+                .await
+                .map_err(map_world_state_write_error)?;
+            self.require_world_source_visible(user_id, novel_id, &world_state)
+                .await?;
+            self.require_self_reader_identity(user_id, novel_id).await?;
+            return Ok(stored);
         }
         let context = self
             .chapter_repo
@@ -512,6 +977,9 @@ impl NarrativeCommandHandler {
                 "Player location is not visible at the unlocked checkpoint".into(),
             ));
         }
+        world_state
+            .validate_world_entry_checkpoint(context.checkpoint_chapter)
+            .map_err(|error| NarrativeError::Conflict(error.to_string()))?;
         let candidate = PlayerEntity::new_with_rules(
             user_id,
             novel_id,
@@ -524,23 +992,35 @@ impl NarrativeCommandHandler {
             command.rules,
         )
         .map_err(|error| NarrativeError::Validation(error.to_string()))?;
+        self.require_self_reader_identity(user_id, novel_id).await?;
         let stored = self
             .world_state_repo
             .create_player_entity(&candidate)
             .await
-            .map_err(NarrativeError::Internal)?;
-        if !stored.matches_definition(
-            &candidate.name,
-            &candidate.background,
-            &candidate.capabilities,
-            &candidate.location_id,
-            &candidate.inventory,
-        ) || !stored.matches_rules(&candidate.rules)
+            .map_err(map_world_state_write_error)?;
+        if stored.canonical_checkpoint_chapter != candidate.canonical_checkpoint_chapter
+            || !stored.matches_definition(
+                &candidate.name,
+                &candidate.background,
+                &candidate.capabilities,
+                &candidate.location_id,
+                &candidate.inventory,
+            )
+            || !stored.matches_rules(&candidate.rules)
         {
             return Err(NarrativeError::Conflict(
                 "PlayerEntity was concurrently created with a different definition".into(),
             ));
         }
+        let committed_world_state = self
+            .world_state_repo
+            .get_or_create(user_id, novel_id)
+            .await
+            .map_err(NarrativeError::Internal)?;
+        self.require_self_reader_identity(user_id, novel_id).await?;
+        self.require_world_source_visible(user_id, novel_id, &committed_world_state)
+            .await?;
+        self.require_self_reader_identity(user_id, novel_id).await?;
         Ok(stored)
     }
 
@@ -551,6 +1031,7 @@ impl NarrativeCommandHandler {
         novel_id: Uuid,
     ) -> NarrativeResult<OpenWorldView> {
         self.owned_novel(novel_id, user_id).await?;
+        self.require_self_reader_identity(user_id, novel_id).await?;
         let state = self
             .world_state_repo
             .get_or_create(user_id, novel_id)
@@ -562,11 +1043,24 @@ impl NarrativeCommandHandler {
             .ok_or_else(|| {
                 NarrativeError::Conflict("Create PlayerEntity before entering the world".into())
             })?;
-        if state
+        state
+            .validate_world_entry_checkpoint(player.canonical_checkpoint_chapter)
+            .map_err(|error| NarrativeError::Conflict(error.to_string()))?;
+        if let Some(session) = state
             .open_world()
             .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
-            .is_some()
         {
+            self.require_self_reader_identity(user_id, novel_id).await?;
+            let state = self
+                .world_state_repo
+                .start_open_world(
+                    user_id,
+                    novel_id,
+                    &session.entry_context,
+                    session.game_rules.as_ref(),
+                )
+                .await
+                .map_err(map_world_state_write_error)?;
             return self.open_world_view(user_id, novel_id, state).await;
         }
         let game_rules = match player.rules.mode {
@@ -607,11 +1101,12 @@ impl NarrativeCommandHandler {
                 ));
             }
         }
+        self.require_self_reader_identity(user_id, novel_id).await?;
         let state = self
             .world_state_repo
             .start_open_world(user_id, novel_id, &context, game_rules.as_ref())
             .await
-            .map_err(NarrativeError::Internal)?;
+            .map_err(map_world_state_write_error)?;
         self.open_world_view(user_id, novel_id, state).await
     }
 
@@ -622,6 +1117,7 @@ impl NarrativeCommandHandler {
         novel_id: Uuid,
     ) -> NarrativeResult<OpenWorldView> {
         self.owned_novel(novel_id, user_id).await?;
+        self.require_self_reader_identity(user_id, novel_id).await?;
         let state = self
             .world_state_repo
             .get_or_create(user_id, novel_id)
@@ -637,14 +1133,31 @@ impl NarrativeCommandHandler {
         character_id: Uuid,
     ) -> NarrativeResult<Option<CharacterWorldContext>> {
         self.owned_novel(novel_id, user_id).await?;
+        if !self.reader_identity_is_self(user_id, novel_id).await? {
+            return Ok(None);
+        }
         let state = self
             .world_state_repo
             .get_or_create(user_id, novel_id)
             .await
             .map_err(NarrativeError::Internal)?;
-        state
+        let Some(mut context) = state
             .character_world_context(character_id)
-            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))
+            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
+        else {
+            return Ok(None);
+        };
+        let journal = self
+            .world_turn_repo
+            .journal(user_id, novel_id, MAX_WORLD_JOURNAL_ENTRIES)
+            .await
+            .map_err(NarrativeError::Internal)?;
+        context.recent_actions =
+            recent_character_actions(journal, character_id, context.turn_number);
+        if !self.reader_identity_is_self(user_id, novel_id).await? {
+            return Ok(None);
+        }
+        Ok(Some(fit_character_world_context(context)))
     }
 
     async fn open_world_view(
@@ -661,11 +1174,20 @@ impl NarrativeCommandHandler {
             .open_world()
             .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
             .ok_or(NarrativeError::NotFound)?;
+        self.require_world_source_visible(user_id, novel_id, &world_state)
+            .await?;
         let journal = self
             .world_turn_repo
-            .journal(user_id, novel_id, 100)
+            .journal(user_id, novel_id, MAX_WORLD_JOURNAL_ENTRIES)
             .await
-            .map_err(NarrativeError::Internal)?;
+            .map_err(NarrativeError::Internal)?
+            .into_iter()
+            .filter(|entry| entry.turn_number <= session.turn_number)
+            .collect();
+        self.require_self_reader_identity(user_id, novel_id).await?;
+        self.require_world_source_visible(user_id, novel_id, &world_state)
+            .await?;
+        self.require_self_reader_identity(user_id, novel_id).await?;
         Ok(OpenWorldView {
             player,
             session,
@@ -674,32 +1196,81 @@ impl NarrativeCommandHandler {
         })
     }
 
-    /// Fire the journey-memory projection without blocking the turn response:
-    /// the committed turn is already durable, and a lost write is healed by the
-    /// idempotent replay path (memory id = turn id), so this is best-effort and
-    /// must never delay or fail the caller.
-    fn fire_journey_memory(
+    /// A successful response implies that the eligible permanent fact reached
+    /// Agent. If projection is ambiguous after the world commit, the client
+    /// keeps the same turn key and the completed replay retries idempotently.
+    async fn project_journey_memory(
         &self,
-        turn_id: Uuid,
         user_id: Uuid,
         novel_id: Uuid,
-        checkpoint_chapter: i32,
-        event: String,
-    ) {
-        let agent_memory = Arc::clone(&self.agent_memory);
-        let chapter_repo = Arc::clone(&self.chapter_repo);
-        tokio::spawn(async move {
-            record_world_journey_memory(
-                agent_memory.as_ref(),
-                chapter_repo.as_ref(),
-                turn_id,
-                user_id,
-                novel_id,
-                checkpoint_chapter,
-                &event,
-            )
-            .await;
-        });
+        result: &WorldTurnResult,
+    ) -> NarrativeResult<MemoryProjectionStatus> {
+        match record_world_journey_memory(
+            self.agent_memory.as_ref(),
+            self.chapter_repo.as_ref(),
+            journey_memory_id(result.turn_id),
+            user_id,
+            novel_id,
+            result,
+        )
+        .await
+        {
+            Ok(true) => Ok(MemoryProjectionStatus::Saved),
+            Ok(false) => {
+                warn!(
+                    turn_id = %result.turn_id,
+                    %novel_id,
+                    "committed world turn has no protagonist memory projection"
+                );
+                Ok(MemoryProjectionStatus::Skipped)
+            }
+            Err(error) => {
+                warn!(
+                    %error,
+                    turn_id = %result.turn_id,
+                    "committed world turn memory projection is ambiguous"
+                );
+                Err(NarrativeError::TurnOutcomeUnknown)
+            }
+        }
+    }
+
+    async fn finish_journey_memory_projection(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        result: &WorldTurnResult,
+    ) -> NarrativeResult<MemoryProjectionStatus> {
+        let status = self
+            .project_journey_memory(user_id, novel_id, result)
+            .await?;
+        self.require_world_source_visible(user_id, novel_id, &result.world_state)
+            .await
+            .map_err(|_| NarrativeError::TurnOutcomeUnknown)?;
+        match self
+            .world_turn_repo
+            .finish_memory_projection(result.turn_id, user_id, novel_id, status)
+            .await
+        {
+            Ok(true) => Ok(status),
+            Ok(false) => {
+                warn!(
+                    turn_id = %result.turn_id,
+                    ?status,
+                    "world turn memory projection terminal state conflicted"
+                );
+                Err(NarrativeError::TurnOutcomeUnknown)
+            }
+            Err(error) => {
+                warn!(
+                    %error,
+                    turn_id = %result.turn_id,
+                    ?status,
+                    "world turn memory projection acknowledgement is ambiguous"
+                );
+                Err(NarrativeError::TurnOutcomeUnknown)
+            }
+        }
     }
 
     #[tracing::instrument(skip(self, action), fields(turn_id = %turn_id))]
@@ -708,9 +1279,18 @@ impl NarrativeCommandHandler {
         turn_id: Uuid,
         user_id: Uuid,
         novel_id: Uuid,
+        expected_turn_number: i64,
         action: WorldAction,
-    ) -> NarrativeResult<WorldTurnResult> {
+    ) -> NarrativeResult<WorldTurnResponse> {
+        if expected_turn_number < 0 {
+            return Err(NarrativeError::Validation(
+                "expected_turn_number must be non-negative".into(),
+            ));
+        }
         let novel = self.owned_novel(novel_id, user_id).await?;
+        self.require_self_reader_identity(user_id, novel_id)
+            .await
+            .map_err(|_| NarrativeError::TurnOutcomeUnknown)?;
         let world_state = self
             .world_state_repo
             .get_or_create(user_id, novel_id)
@@ -724,8 +1304,10 @@ impl NarrativeCommandHandler {
             .open_world()
             .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
             .ok_or(NarrativeError::NotFound)?;
-        let request =
-            serde_json::to_vec(&action).map_err(|error| NarrativeError::Internal(error.into()))?;
+        self.require_world_source_visible(user_id, novel_id, &world_state)
+            .await?;
+        let request = serde_json::to_vec(&(expected_turn_number, &action))
+            .map_err(|error| NarrativeError::Internal(error.into()))?;
         let request_fingerprint: [u8; 32] = Sha256::digest(&request).into();
         let resolution = match player.rules.mode {
             ResolutionMode::Narrative => None,
@@ -738,7 +1320,7 @@ impl NarrativeCommandHandler {
                 let roll = self.dice_roller.roll_d20(
                     user_id,
                     novel_id,
-                    session.turn_number,
+                    expected_turn_number,
                     &request_fingerprint,
                 );
                 Some(
@@ -754,30 +1336,41 @@ impl NarrativeCommandHandler {
             request_fingerprint: request_fingerprint.to_vec(),
             action,
             resolution,
-            expected_turn_number: session.turn_number,
+            expected_turn_number,
         };
         let (claim, attempt) = match self
             .world_turn_repo
             .begin_turn(&claim)
             .await
-            .map_err(NarrativeError::Internal)?
+            .map_err(map_world_state_write_error)?
         {
             BeginWorldTurn::Acquired { claim, attempt } => (*claim, attempt),
-            BeginWorldTurn::Completed(result) => {
+            BeginWorldTurn::Completed {
+                result,
+                memory_projection,
+            } => {
                 let result = *result;
-                // Replay path: the committed turn may have missed its memory
-                // projection on the original attempt; the write is idempotent
-                // (memory id = turn id), so firing here heals lost writes.
-                // Anchor at the COMMITTED turn's checkpoint: the live session
-                // may have advanced since the original commit.
-                self.fire_journey_memory(
-                    result.turn_id,
-                    user_id,
-                    novel_id,
-                    result.transition.canonical_checkpoint_chapter,
-                    result.transition.rendered_narrative.clone(),
-                );
-                return Ok(result);
+                self.require_self_reader_identity(user_id, novel_id)
+                    .await
+                    .map_err(|_| NarrativeError::TurnOutcomeUnknown)?;
+                let memory_projection_status = if memory_projection.is_terminal() {
+                    memory_projection
+                } else {
+                    // Anchor at the COMMITTED turn's checkpoint: the live
+                    // session may have advanced since the original commit.
+                    self.finish_journey_memory_projection(user_id, novel_id, &result)
+                        .await?
+                };
+                self.require_world_source_visible(user_id, novel_id, &result.world_state)
+                    .await
+                    .map_err(|_| NarrativeError::TurnOutcomeUnknown)?;
+                self.require_self_reader_identity(user_id, novel_id)
+                    .await
+                    .map_err(|_| NarrativeError::TurnOutcomeUnknown)?;
+                return Ok(WorldTurnResponse {
+                    result,
+                    memory_projection_status,
+                });
             }
             BeginWorldTurn::InProgress {
                 retry_after_seconds,
@@ -797,11 +1390,21 @@ impl NarrativeCommandHandler {
                 ))
             }
         };
+        if session.turn_number != claim.expected_turn_number {
+            self.fail_world_turn(&claim, attempt, "state_snapshot_stale")
+                .await;
+            return Err(NarrativeError::Conflict(
+                "World state advanced; reload before submitting this action".into(),
+            ));
+        }
         if let Err(error) = world_state.validate_world_action(&claim.action, &session.entry_context)
         {
             self.fail_world_turn(&claim, attempt, "validation_error")
                 .await;
-            return Err(NarrativeError::Validation(error.to_string()));
+            return Err(match error {
+                WorldStateError::TimelineConflict(message) => NarrativeError::Conflict(message),
+                error => NarrativeError::Validation(error.to_string()),
+            });
         }
 
         let recent_turns = match self
@@ -889,6 +1492,19 @@ impl NarrativeCommandHandler {
                 return Err(NarrativeError::Llm(anyhow::anyhow!(error)));
             }
         };
+        if let Err(error) = self
+            .require_world_source_visible(user_id, novel_id, &world_state)
+            .await
+        {
+            self.fail_world_turn(&claim, attempt, "progress_rewind")
+                .await;
+            return Err(error);
+        }
+        if let Err(error) = self.require_self_reader_identity(user_id, novel_id).await {
+            self.fail_world_turn(&claim, attempt, "identity_changed")
+                .await;
+            return Err(error);
+        }
         let committed = match lease
             .run(self.world_turn_repo.complete_turn(
                 &claim,
@@ -900,8 +1516,36 @@ impl NarrativeCommandHandler {
         {
             Some(Ok(result)) => result,
             Some(Err(error)) => {
+                if matches!(
+                    error.downcast_ref::<WorldStateError>(),
+                    Some(WorldStateError::TimelineConflict(_))
+                ) {
+                    match self
+                        .world_turn_repo
+                        .fail_turn(claim.id, attempt, "commit_error")
+                        .await
+                    {
+                        Ok(true) => return Err(map_world_state_write_error(error)),
+                        Ok(false) => {
+                            tracing::error!(
+                                turn_id = %claim.id,
+                                attempt,
+                                "timeline conflict could not fence the world turn"
+                            );
+                        }
+                        Err(fence_error) => {
+                            tracing::error!(
+                                turn_id = %claim.id,
+                                attempt,
+                                error = ?fence_error,
+                                "failed to fence a timeline-conflicted world turn"
+                            );
+                        }
+                    }
+                    return Err(NarrativeError::TurnOutcomeUnknown);
+                }
                 self.fail_world_turn(&claim, attempt, "commit_error").await;
-                return Err(NarrativeError::Internal(error));
+                return Err(map_world_state_write_error(error));
             }
             None => {
                 self.fail_world_turn(&claim, attempt, "lease_lost").await;
@@ -909,17 +1553,28 @@ impl NarrativeCommandHandler {
             }
         };
         lease.stop();
-        // Fresh-commit path: project the committed turn into the permanent
-        // memory layer (idempotent by turn id, never fails the turn). The
-        // committed transition's checkpoint is the authoritative anchor.
-        self.fire_journey_memory(
-            committed.turn_id,
-            user_id,
-            novel_id,
-            committed.transition.canonical_checkpoint_chapter,
-            committed.transition.rendered_narrative.clone(),
-        );
-        Ok(committed)
+        self.require_self_reader_identity(user_id, novel_id)
+            .await
+            .map_err(|_| NarrativeError::TurnOutcomeUnknown)?;
+        // Fresh-commit path: the authoritative turn is already durable. Keep
+        // its exact key ambiguous until the eligible permanent fact is
+        // acknowledged, so a retry heals a crash or dependency failure.
+        let memory_projection_status = self
+            .finish_journey_memory_projection(user_id, novel_id, &committed)
+            .await?;
+        self.require_self_reader_identity(user_id, novel_id)
+            .await
+            .map_err(|_| NarrativeError::TurnOutcomeUnknown)?;
+        self.require_world_source_visible(user_id, novel_id, &committed.world_state)
+            .await
+            .map_err(|_| NarrativeError::TurnOutcomeUnknown)?;
+        self.require_self_reader_identity(user_id, novel_id)
+            .await
+            .map_err(|_| NarrativeError::TurnOutcomeUnknown)?;
+        Ok(WorldTurnResponse {
+            result: committed,
+            memory_projection_status,
+        })
     }
 
     async fn fail_world_turn(
@@ -950,38 +1605,47 @@ impl NarrativeCommandHandler {
             ));
         }
         let novel_info = self.owned_novel(novel_id, user_id).await?;
-        let (world_state, player) = self.narrative_world_state(user_id, novel_id).await?;
+        self.require_source_chapter_visible(user_id, novel_id, chapter_number)
+            .await?;
+        if !self.reader_identity_is_self(user_id, novel_id).await? {
+            let committed = self
+                .committed_branch_node(user_id, novel_id, chapter_number)
+                .await?;
+            return self
+                .branch_node_if_visible(user_id, novel_id, chapter_number, committed)
+                .await;
+        }
+        let (world_state, player, _) = self.narrative_world_state(user_id, novel_id).await?;
         let chapter = self
             .resolve_chapter(user_id, novel_id, chapter_number, &novel_info)
             .await?;
-        if let Some(existing_choice) = self
-            .choice_repo
-            .find_by_novel(user_id, novel_id)
-            .await
-            .map_err(NarrativeError::Internal)?
-            .into_iter()
-            .find(|choice| choice.chapter_number == chapter_number)
+        if let Some(existing_node) = self
+            .committed_branch_node(user_id, novel_id, chapter_number)
+            .await?
         {
-            let existing_node = self
-                .node_repo
-                .find_by_id(existing_choice.node_id)
-                .await
-                .map_err(NarrativeError::Internal)?
-                .filter(|node| {
-                    node.novel_id == novel_id
-                        && node.user_id.is_none_or(|owner_id| owner_id == user_id)
-                })
-                .ok_or(NarrativeError::NotFound)?;
-            return Ok(Some(existing_node));
+            return self
+                .branch_node_if_visible(user_id, novel_id, chapter_number, Some(existing_node))
+                .await;
         }
-        let node_owner = chapter.generated.then_some(user_id);
+        if !Self::uncommitted_branch_is_eligible(&world_state, chapter_number)? {
+            // A committed choice above is replayable, but an uncommitted node
+            // outside the frozen branch prefix must not spend an LLM call or
+            // create an option the user can never submit.
+            return Ok(None);
+        }
+        // Branch prompts include the PlayerEntity, private world state, and
+        // deviation mode. Their output is therefore never safe to share
+        // between users, even when the source chapter itself is canonical.
+        let node_owner = Some(user_id);
         if let Some(node) = self
             .node_repo
             .find_by_chapter(novel_id, chapter_number, node_owner)
             .await
             .map_err(NarrativeError::Internal)?
         {
-            return Ok(Some(node));
+            return self
+                .finalize_uncommitted_branch_node(user_id, novel_id, chapter_number, Some(node))
+                .await;
         }
         if !chapter.canonical.is_key_node {
             return Ok(None);
@@ -996,6 +1660,7 @@ impl NarrativeCommandHandler {
                     "key chapter is missing its node description"
                 ))
             })?;
+        self.require_self_reader_identity(user_id, novel_id).await?;
         let prompt = build_branch_prompt(
             &novel_info.title,
             &chapter.content,
@@ -1020,12 +1685,13 @@ impl NarrativeCommandHandler {
                 parse_generated_branch(&json)
                     .map_err(|error| NarrativeError::Llm(anyhow::anyhow!(error)))
             })?;
+        self.require_self_reader_identity(user_id, novel_id).await?;
         if !chapter.content.contains(&generated.anchor_quote) {
             return Err(NarrativeError::Llm(anyhow::anyhow!(
                 "generated branch anchor was not present in chapter source"
             )));
         }
-        let mut node = NarrativeNode::new(
+        let node = NarrativeNode::new(
             novel_id,
             chapter_number,
             generated.description,
@@ -1041,20 +1707,24 @@ impl NarrativeCommandHandler {
                 })
                 .collect(),
         )
-        .with_anchor_quote(generated.anchor_quote);
-        if let Some(user_id) = node_owner {
-            node = node.for_user(user_id);
-        }
+        .with_anchor_quote(generated.anchor_quote)
+        .for_user(user_id);
         self.node_repo
             .save(&node)
             .await
             .map_err(NarrativeError::Internal)?;
         // Reload after the upsert so concurrent first readers receive the same
         // persisted node id.
-        self.node_repo
+        let node = self
+            .node_repo
             .find_by_chapter(novel_id, chapter_number, node_owner)
             .await
-            .map_err(NarrativeError::Internal)
+            .map_err(NarrativeError::Internal)?;
+        // Progress can be rewound while any repository/provider call is in
+        // flight. A node may remain durable, but no future-derived option may
+        // cross the response boundary until its own source chapter is visible.
+        self.finalize_uncommitted_branch_node(user_id, novel_id, chapter_number, node)
+            .await
     }
 
     #[tracing::instrument(skip(self))]
@@ -1070,9 +1740,123 @@ impl NarrativeCommandHandler {
             ));
         }
         let novel_info = self.owned_novel(novel_id, user_id).await?;
-        let chapter = self
+        if let Err(error) = self
+            .require_source_chapter_visible(user_id, novel_id, chapter_number)
+            .await
+        {
+            if !matches!(&error, NarrativeError::ReadingProgressBehindWorld) {
+                return Err(error);
+            }
+            let canonical = self
+                .chapter_repo
+                .get_chapter(novel_id, chapter_number, user_id)
+                .await
+                .map_err(NarrativeError::Unavailable)?
+                .ok_or(NarrativeError::NotFound)?;
+            return Ok(EffectiveChapter {
+                chapter_number,
+                content: canonical.content,
+                generated: false,
+            });
+        }
+        let world_state = self
+            .world_state_repo
+            .get_or_create(user_id, novel_id)
+            .await
+            .map_err(NarrativeError::Internal)?;
+        let world_state = if self.reader_identity_is_self(user_id, novel_id).await? {
+            world_state
+        } else {
+            Self::choices_only_world_state(world_state)?
+        };
+        match self
+            .require_world_source_visible(user_id, novel_id, &world_state)
+            .await
+        {
+            Ok(()) => {}
+            Err(NarrativeError::ReadingProgressBehindWorld) => {
+                // Rewinding restores the immutable source view. Never return a
+                // cached/generated PlayerChapter or invoke its continuation LLM
+                // until the canonical source boundary has been reread.
+                let canonical = self
+                    .chapter_repo
+                    .get_chapter(novel_id, chapter_number, user_id)
+                    .await
+                    .map_err(NarrativeError::Unavailable)?
+                    .ok_or(NarrativeError::NotFound)?;
+                return Ok(EffectiveChapter {
+                    chapter_number,
+                    content: canonical.content,
+                    generated: false,
+                });
+            }
+            Err(error) => return Err(error),
+        }
+        let chapter = match self
             .resolve_chapter(user_id, novel_id, chapter_number, &novel_info)
-            .await?;
+            .await
+        {
+            Ok(chapter) => chapter,
+            Err(NarrativeError::ReadingProgressBehindWorld) => {
+                let canonical = self
+                    .chapter_repo
+                    .get_chapter(novel_id, chapter_number, user_id)
+                    .await
+                    .map_err(NarrativeError::Unavailable)?
+                    .ok_or(NarrativeError::NotFound)?;
+                return Ok(EffectiveChapter {
+                    chapter_number,
+                    content: canonical.content,
+                    generated: false,
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        let current_world_state = self
+            .world_state_repo
+            .get_or_create(user_id, novel_id)
+            .await
+            .map_err(NarrativeError::Internal)?;
+        let current_world_state = if self.reader_identity_is_self(user_id, novel_id).await? {
+            current_world_state
+        } else {
+            Self::choices_only_world_state(current_world_state)?
+        };
+        match self
+            .require_world_source_visible(user_id, novel_id, &current_world_state)
+            .await
+        {
+            Ok(()) => {}
+            Err(NarrativeError::ReadingProgressBehindWorld) => {
+                return Ok(EffectiveChapter {
+                    chapter_number,
+                    content: chapter.canonical.content,
+                    generated: false,
+                });
+            }
+            Err(error) => return Err(error),
+        }
+        match self
+            .require_source_chapter_visible(user_id, novel_id, chapter_number)
+            .await
+        {
+            Ok(()) => {}
+            Err(NarrativeError::ReadingProgressBehindWorld) => {
+                return Ok(EffectiveChapter {
+                    chapter_number,
+                    content: chapter.canonical.content,
+                    generated: false,
+                });
+            }
+            Err(error) => return Err(error),
+        }
+        if !self.reader_identity_is_self(user_id, novel_id).await?
+            && chapter.origin == Some(PlayerChapterOrigin::Continuation)
+        {
+            return Err(NarrativeError::Conflict(
+                "Original-player continuation requires the self reader identity".into(),
+            ));
+        }
         Ok(EffectiveChapter {
             chapter_number,
             content: chapter.content,
@@ -1089,31 +1873,57 @@ impl NarrativeCommandHandler {
         requested_choice_index: i32,
     ) -> NarrativeResult<ChoiceResult> {
         let novel_info = self.owned_novel(novel_id, user_id).await?;
-        let (world_state, _) = self.narrative_world_state(user_id, novel_id).await?;
+        let initial_self_identity = self.reader_identity_is_self(user_id, novel_id).await?;
+        let (world_state, _, _) = self.narrative_world_state(user_id, novel_id).await?;
         let node = self
             .node_repo
             .find_by_id(node_id)
             .await
             .map_err(NarrativeError::Internal)?
-            .filter(|node| {
-                node.novel_id == novel_id && node.user_id.is_none_or(|owner_id| owner_id == user_id)
-            })
+            .filter(|node| node.novel_id == novel_id)
             .ok_or(NarrativeError::NotFound)?;
-        let choice_text = usize::try_from(requested_choice_index)
-            .ok()
-            .and_then(|index| node.choices.get(index))
-            .map(|choice| choice.text.clone())
-            .ok_or_else(|| {
-                NarrativeError::Validation("choice_index is outside the node choices".into())
-            })?;
-
         let existing = self
             .choice_repo
             .find_user_choice(user_id, node_id)
             .await
             .map_err(NarrativeError::Internal)?;
+        match node.user_id {
+            Some(owner_id) if owner_id == user_id => {}
+            // A legacy shared node is readable only as the durable source of
+            // an already-committed choice. It can never start a new branch.
+            None if existing.is_some() => {}
+            Some(_) | None => return Err(NarrativeError::NotFound),
+        }
+        if existing.is_none() && !initial_self_identity {
+            return Err(NarrativeError::Conflict(
+                "New branch choices require the self reader identity".into(),
+            ));
+        }
+        let open_world_started = world_state
+            .open_world()
+            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
+            .is_some();
+        let player_checkpoint = world_state
+            .player_entity()
+            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
+            .map(|player| player.canonical_checkpoint_chapter);
+        require_choice_submission_allowed(
+            requested_choice_index,
+            existing.as_ref().map(|choice| choice.choice_index),
+            node.chapter_number,
+            player_checkpoint,
+            open_world_started,
+        )?;
         if let Some(existing) = existing.as_ref() {
-            require_same_choice(requested_choice_index, existing.choice_index)?;
+            if existing.user_id != user_id
+                || existing.novel_id != novel_id
+                || existing.node_id != node.id
+                || existing.chapter_number != node.chapter_number
+            {
+                return Err(NarrativeError::Internal(anyhow::anyhow!(
+                    "committed choice does not match its narrative node"
+                )));
+            }
             warn!(
                 user_id = %user_id,
                 node_id = %node_id,
@@ -1126,8 +1936,8 @@ impl NarrativeCommandHandler {
                 .await
                 .map_err(NarrativeError::Internal)?
             {
-                Some(chapter) => chapter.content,
-                None => {
+                Some(chapter) if chapter.origin == PlayerChapterOrigin::Choice => chapter.content,
+                Some(_) | None => {
                     let chapter = self
                         .chapter_repo
                         .get_chapter(novel_id, node.chapter_number, user_id)
@@ -1142,20 +1952,24 @@ impl NarrativeCommandHandler {
                 }
             };
             return self
-                .commit_result(choice_draft(existing, full_content))
+                .commit_result(choice_draft(
+                    existing,
+                    world_state.fingerprint(),
+                    full_content,
+                ))
                 .await;
         }
-        if world_state
-            .open_world()
-            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
-            .is_some()
-        {
-            return Err(NarrativeError::Conflict(
-                "Use world actions after entering the open world".into(),
-            ));
-        }
+
+        self.require_self_reader_identity(user_id, novel_id).await?;
 
         let choice_index = requested_choice_index;
+        let choice_text = usize::try_from(choice_index)
+            .ok()
+            .and_then(|index| node.choices.get(index))
+            .map(|choice| choice.text.clone())
+            .ok_or_else(|| {
+                NarrativeError::Validation("choice_index is outside the node choices".into())
+            })?;
         let chapter = self
             .resolve_chapter(user_id, novel_id, node.chapter_number, &novel_info)
             .await?;
@@ -1176,6 +1990,7 @@ impl NarrativeCommandHandler {
                 "chapter is ahead of the reader's progress".into(),
             ));
         }
+        self.require_self_reader_identity(user_id, novel_id).await?;
         let prompt = build_transition_prompt(
             &novel_info.title,
             &choice_text,
@@ -1251,6 +2066,7 @@ impl NarrativeCommandHandler {
             chapter_prefix.trim_end(),
             consequence.trim_start()
         );
+        self.require_self_reader_identity(user_id, novel_id).await?;
         self.commit_result(ChoiceCommit {
             user_id,
             novel_id,
@@ -1258,6 +2074,7 @@ impl NarrativeCommandHandler {
             chapter_number: node.chapter_number,
             choice_index,
             choice_text,
+            expected_world_state_fingerprint: world_state.fingerprint(),
             transition,
             rewritten_chapter_content,
         })
@@ -1271,10 +2088,24 @@ impl NarrativeCommandHandler {
         novel_id: Uuid,
     ) -> NarrativeResult<WorldState> {
         self.owned_novel(novel_id, user_id).await?;
-        self.world_state_repo
+        let world_state = self
+            .world_state_repo
             .get_or_create(user_id, novel_id)
             .await
-            .map_err(NarrativeError::Internal)
+            .map_err(NarrativeError::Internal)?;
+        let mut world_state = if self.reader_identity_is_self(user_id, novel_id).await? {
+            world_state
+        } else {
+            Self::choices_only_world_state(world_state)?
+        };
+        self.require_world_source_visible(user_id, novel_id, &world_state)
+            .await?;
+        if !self.reader_identity_is_self(user_id, novel_id).await? {
+            world_state = Self::choices_only_world_state(world_state)?;
+            self.require_world_source_visible(user_id, novel_id, &world_state)
+                .await?;
+        }
+        Ok(world_state)
     }
 
     async fn commit_result(&self, draft: ChoiceCommit) -> NarrativeResult<ChoiceResult> {
@@ -1283,14 +2114,35 @@ impl NarrativeCommandHandler {
             .choice_repo
             .commit_choice(&draft)
             .await
-            .map_err(NarrativeError::Internal)?;
+            .map_err(map_world_state_write_error)?;
         require_same_choice(requested_choice_index, committed.choice.choice_index)?;
+        let mut response_world_state = if self
+            .reader_identity_is_self(draft.user_id, draft.novel_id)
+            .await?
+        {
+            committed.world_state
+        } else {
+            Self::choices_only_world_state(committed.world_state)?
+        };
+        // The choice commit is authoritative even if another tab rewinds
+        // progress during generation. Recheck before returning any derived
+        // prose/state; same-choice replay becomes visible after rereading.
+        self.require_world_source_visible(draft.user_id, draft.novel_id, &response_world_state)
+            .await?;
+        if !self
+            .reader_identity_is_self(draft.user_id, draft.novel_id)
+            .await?
+        {
+            response_world_state = Self::choices_only_world_state(response_world_state)?;
+            self.require_world_source_visible(draft.user_id, draft.novel_id, &response_world_state)
+                .await?;
+        }
         Ok(ChoiceResult {
             chapter_number: committed.choice.chapter_number,
             consequence: committed.choice.consequence.clone(),
             transition: committed.choice.transition,
             chapter_content: committed.player_chapter_content,
-            world_state: committed.world_state,
+            world_state: response_world_state,
         })
     }
 
@@ -1307,16 +2159,21 @@ impl NarrativeCommandHandler {
             .await
             .map_err(NarrativeError::Unavailable)?
             .ok_or(NarrativeError::NotFound)?;
+        let self_identity = self.reader_identity_is_self(user_id, novel_id).await?;
         if let Some(player_chapter) = self
             .player_chapter_repo
             .find(user_id, novel_id, chapter_number)
             .await
             .map_err(NarrativeError::Internal)?
         {
+            if player_chapter.origin == PlayerChapterOrigin::Continuation {
+                self.require_self_reader_identity(user_id, novel_id).await?;
+            }
             return Ok(ResolvedChapter {
                 canonical,
                 content: player_chapter.content,
                 generated: true,
+                origin: Some(player_chapter.origin),
             });
         }
 
@@ -1335,7 +2192,26 @@ impl NarrativeCommandHandler {
                 content: canonical.content.clone(),
                 canonical,
                 generated: false,
+                origin: None,
             });
+        }
+
+        if !self_identity {
+            if let Some(choice) = committed_choices
+                .iter()
+                .find(|choice| choice.chapter_number == chapter_number)
+            {
+                let chapter = self.reconstruct_choice_chapter(choice).await?;
+                return Ok(ResolvedChapter {
+                    canonical,
+                    content: chapter.content,
+                    generated: true,
+                    origin: Some(PlayerChapterOrigin::Choice),
+                });
+            }
+            return Err(NarrativeError::Conflict(
+                "Original-player continuation requires the self reader identity".into(),
+            ));
         }
 
         let mut previous = self
@@ -1357,6 +2233,7 @@ impl NarrativeCommandHandler {
                 canonical,
                 content: previous.content,
                 generated: true,
+                origin: Some(previous.origin),
             });
         }
 
@@ -1369,6 +2246,7 @@ impl NarrativeCommandHandler {
                 canonical,
                 content: chapter.content,
                 generated: true,
+                origin: Some(chapter.origin),
             });
         }
         if !is_next_chapter(previous.chapter_number, chapter_number) {
@@ -1405,6 +2283,7 @@ impl NarrativeCommandHandler {
             canonical,
             content: previous.content,
             generated: true,
+            origin: Some(previous.origin),
         })
     }
 
@@ -1459,6 +2338,9 @@ impl NarrativeCommandHandler {
         novel_info: &NovelInfo,
         world_state: &WorldState,
     ) -> NarrativeResult<PlayerChapter> {
+        self.require_self_reader_identity(user_id, novel_id).await?;
+        self.require_source_chapter_visible(user_id, novel_id, chapter_number)
+            .await?;
         let prompt = build_player_chapter_prompt(
             &novel_info.title,
             chapter_number,
@@ -1492,6 +2374,9 @@ impl NarrativeCommandHandler {
             .trim()
             .to_owned();
         validate_player_chapter(&content)?;
+        self.require_self_reader_identity(user_id, novel_id).await?;
+        self.require_source_chapter_visible(user_id, novel_id, chapter_number)
+            .await?;
         self.player_chapter_repo
             .save_if_absent(&PlayerChapter {
                 user_id,
@@ -1510,7 +2395,11 @@ fn is_next_chapter(previous: i32, requested: i32) -> bool {
     previous.checked_add(1) == Some(requested)
 }
 
-fn choice_draft(existing: &UserChoiceRecord, rewritten_chapter_content: String) -> ChoiceCommit {
+fn choice_draft(
+    existing: &UserChoiceRecord,
+    expected_world_state_fingerprint: [u8; 32],
+    rewritten_chapter_content: String,
+) -> ChoiceCommit {
     ChoiceCommit {
         user_id: existing.user_id,
         novel_id: existing.novel_id,
@@ -1518,6 +2407,7 @@ fn choice_draft(existing: &UserChoiceRecord, rewritten_chapter_content: String) 
         chapter_number: existing.chapter_number,
         choice_index: existing.choice_index,
         choice_text: existing.choice_text.clone(),
+        expected_world_state_fingerprint,
         transition: existing.transition.clone(),
         rewritten_chapter_content,
     }
@@ -1566,6 +2456,112 @@ fn validate_player_chapter(content: &str) -> NarrativeResult<()> {
 mod timeline_tests {
     use super::*;
 
+    fn journal_entry(turn_number: i64, target_character_id: Uuid) -> WorldTurnJournalEntry {
+        let now = Utc::now();
+        WorldTurnJournalEntry {
+            turn_id: Uuid::new_v4(),
+            turn_number,
+            memory_projection_status: MemoryProjectionStatus::Saved,
+            action: WorldAction {
+                kind: WorldActionKind::Converse,
+                target_id: Some(target_character_id.to_string()),
+                intent: format!("调查第 {turn_number} 回合"),
+            },
+            resolution: None,
+            transition: crate::domain::entities::world_session::WorldTurnTransition {
+                schema_version: 1,
+                prompt_version: "world-turn-v2".into(),
+                canon_model_version: 1,
+                canonical_checkpoint_chapter: 1,
+                rendered_narrative: format!("第 {turn_number} 回合"),
+                events: vec![],
+                relationship_changes: vec![],
+                location_changes: vec![],
+                thread_changes: vec![],
+                player_location_id: None,
+                inventory_additions: vec![],
+                inventory_removals: vec![],
+                knowledge_discoveries: vec![],
+                faction_changes: vec![],
+                canonical_event_change: None,
+            },
+            created_at: now,
+            completed_at: now,
+        }
+    }
+
+    fn assert_consumer_compatible_journey_fact(encoded: &str, character_id: Uuid) {
+        assert!(encoded.chars().count() <= MAX_JOURNEY_MEMORY_EVENT_CHARS);
+        let fact: serde_json::Value = serde_json::from_str(encoded).unwrap();
+        assert_eq!(fact["schema_version"], 2);
+        assert_eq!(fact["source"], "committed_world_turn");
+        assert_eq!(fact["authority"], "explicit_character_witness_facts");
+        assert_eq!(fact["witness_character_id"], character_id.to_string());
+        let changes = fact["committed_changes"].as_object().unwrap();
+        let events = changes
+            .get("events")
+            .and_then(serde_json::Value::as_array)
+            .map_or(&[][..], Vec::as_slice);
+        let relationships = changes
+            .get("relationships")
+            .and_then(serde_json::Value::as_array)
+            .map_or(&[][..], Vec::as_slice);
+        assert!(events.len() <= 4);
+        assert!(relationships.len() <= 4);
+        for event in events {
+            let summary = event["summary"].as_str().unwrap();
+            assert!(!summary.is_empty());
+            assert_eq!(summary.trim(), summary);
+            assert!(summary.chars().count() <= MAX_JOURNEY_MEMORY_FIELD_CHARS);
+            assert_eq!(
+                event["actor_character_ids"],
+                serde_json::json!([character_id])
+            );
+            if let Some(location) = event["location_id"].as_str() {
+                assert_eq!(location.trim(), location);
+                assert!(location.chars().count() <= MAX_JOURNEY_MEMORY_LOCATION_CHARS);
+                assert!(!location.chars().any(char::is_control));
+            }
+        }
+        for relationship in relationships {
+            assert_eq!(relationship["character_id"], character_id.to_string());
+            assert!(relationship["delta"]
+                .as_i64()
+                .is_some_and(|delta| { delta != 0 && (-20..=20).contains(&delta) }));
+        }
+        let reader_action = fact.get("reader_action");
+        if let Some(action) = reader_action {
+            assert_eq!(action.as_object().unwrap().len(), 2);
+            assert!(matches!(
+                action["kind"].as_str().unwrap(),
+                "converse" | "ally" | "oppose"
+            ));
+            assert_eq!(action["target_id"], character_id.to_string());
+            assert!(action.get("intent").is_none());
+        }
+        assert_eq!(fact["change_counts"]["events"], events.len());
+        assert_eq!(fact["change_counts"]["relationships"], relationships.len());
+        assert_eq!(
+            fact["change_counts"]["reader_action"],
+            usize::from(reader_action.is_some())
+        );
+        assert!(reader_action.is_some() || !events.is_empty() || !relationships.is_empty());
+    }
+
+    #[test]
+    fn typed_timeline_write_errors_map_to_conflicts() {
+        let mapped = map_world_state_write_error(
+            WorldStateError::TimelineConflict("timeline advanced".into()).into(),
+        );
+        assert!(matches!(
+            mapped,
+            NarrativeError::Conflict(message) if message == "timeline advanced"
+        ));
+
+        let mapped = map_world_state_write_error(anyhow::anyhow!("database unavailable"));
+        assert!(matches!(mapped, NarrativeError::Internal(_)));
+    }
+
     #[test]
     fn choice_replaces_everything_after_the_anchor() {
         let rewritten = rewrite_after_anchor(
@@ -1580,6 +2576,456 @@ mod timeline_tests {
             "原著开端。关键时刻。\n\n你介入以后，新的因果开始运转。"
         );
         assert!(!rewritten.contains("原著结局不再成立"));
+    }
+
+    #[test]
+    fn character_context_keeps_a_directed_turn_behind_unrelated_global_tail() {
+        let character_id = Uuid::new_v4();
+        let unrelated_character_id = Uuid::new_v4();
+        let journal = (1..=5)
+            .map(|turn_number| {
+                journal_entry(
+                    turn_number,
+                    if turn_number == 1 {
+                        character_id
+                    } else {
+                        unrelated_character_id
+                    },
+                )
+            })
+            .collect();
+
+        let selected = recent_character_actions(journal, character_id, 5);
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|entry| entry.turn_number)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn character_context_keeps_only_the_latest_four_directed_turns_in_order() {
+        let character_id = Uuid::new_v4();
+        let journal = (1..=6)
+            .map(|turn_number| journal_entry(turn_number, character_id))
+            .collect();
+
+        let selected = recent_character_actions(journal, character_id, 6);
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|entry| entry.turn_number)
+                .collect::<Vec<_>>(),
+            vec![3, 4, 5, 6]
+        );
+    }
+
+    #[test]
+    fn character_context_exposes_the_directed_action_but_not_private_intent() {
+        let character_id = Uuid::new_v4();
+        let private_marker = "PRIVATE_INTENT_PRETEND_TO_ALLY_THEN_BETRAY";
+        let mut entry = journal_entry(1, character_id);
+        entry.action.intent = private_marker.into();
+
+        let selected = recent_character_actions(vec![entry], character_id, 1);
+        let encoded = serde_json::to_string(&selected).unwrap();
+
+        assert_eq!(selected[0].action.kind, WorldActionKind::Converse);
+        assert_eq!(
+            selected[0].action.target_id.as_deref(),
+            Some(character_id.to_string().as_str())
+        );
+        assert!(!encoded.contains(private_marker));
+        assert!(!encoded.contains("intent"));
+    }
+
+    #[test]
+    fn character_context_does_not_leak_an_action_from_event_or_relationship_witnessing() {
+        let character_id = Uuid::new_v4();
+        let mut entry = journal_entry(1, Uuid::new_v4());
+        entry.action = WorldAction {
+            kind: WorldActionKind::Investigate,
+            target_id: Some("sealed-archive".into()),
+            intent: "秘密调查角色不应知道的档案".into(),
+        };
+        entry.transition.events.push(
+            crate::domain::services::narrative_transition::TransitionEvent {
+                summary: "角色参与了同一回合的公开事件".into(),
+                actor_character_ids: vec![character_id],
+                location_id: None,
+            },
+        );
+        entry.transition.relationship_changes.push(
+            crate::domain::services::narrative_transition::RelationshipChange {
+                character_id,
+                delta: 1,
+                reason: "角色对公开事件作出反应".into(),
+            },
+        );
+
+        assert!(character_witnessed_turn(
+            &entry.action,
+            &entry.transition,
+            character_id,
+        ));
+        assert!(recent_character_actions(vec![entry], character_id, 1).is_empty());
+    }
+
+    #[test]
+    fn permanent_journey_fact_excludes_rendered_prose_and_keeps_coordinates() {
+        let user_id = Uuid::new_v4();
+        let novel_id = Uuid::new_v4();
+        let character_id = Uuid::new_v4();
+        let mut result = WorldTurnResult {
+            turn_id: Uuid::new_v4(),
+            action: WorldAction {
+                kind: WorldActionKind::Converse,
+                target_id: Some(character_id.to_string()),
+                intent: "PRIVATE_INTENT_PRETEND_TO_COOPERATE_THEN_BETRAY".into(),
+            },
+            resolution: None,
+            transition: crate::domain::entities::world_session::WorldTurnTransition {
+                schema_version: 1,
+                prompt_version: "world-turn-v2".into(),
+                canon_model_version: 1,
+                canonical_checkpoint_chapter: 3,
+                rendered_narrative: "这段生成叙事绝不能成为永久事实。".into(),
+                events: vec![
+                    crate::domain::services::narrative_transition::TransitionEvent {
+                        summary: "玩家发现北塔换防记录".into(),
+                        actor_character_ids: vec![character_id],
+                        location_id: Some("north-tower".into()),
+                    },
+                ],
+                relationship_changes: vec![],
+                location_changes: vec![],
+                thread_changes: vec![],
+                player_location_id: None,
+                inventory_additions: vec![],
+                inventory_removals: vec![],
+                knowledge_discoveries: vec!["守门人曾修改换防表".into()],
+                faction_changes: vec![],
+                canonical_event_change: None,
+            },
+            world_state: WorldState::new(user_id, novel_id),
+        };
+
+        let entry_context = crate::domain::entities::world_session::WorldEntryContext {
+            model_version: 1,
+            checkpoint_chapter: 3,
+            unlocked_through_chapter: 7,
+            characters: vec![],
+            locations: vec![],
+            factions: vec![],
+            hard_rules: vec![],
+            dead_character_ids: vec![],
+            threads: vec![],
+            scheduled_events: vec![],
+            character_goals: vec![],
+        };
+        result.world_state.state["open_world"] = serde_json::to_value(
+            crate::domain::entities::world_session::WorldSession::from_context(&entry_context)
+                .unwrap(),
+        )
+        .unwrap();
+        let response = serde_json::to_value(WorldTurnResponse {
+            result: result.clone(),
+            memory_projection_status: MemoryProjectionStatus::Saved,
+        })
+        .unwrap();
+        assert_eq!(response["turn_id"], result.turn_id.to_string());
+        assert_eq!(response["memory_projection_status"], "saved");
+        assert!(response.get("result").is_none());
+        let (projected, source_chapter_high_water) =
+            world_journey_fact(&result, character_id).unwrap().unwrap();
+        assert_eq!(source_chapter_high_water, 7);
+        assert!(!projected.contains("这段生成叙事绝不能成为永久事实"));
+
+        let encoded = world_journey_fact_at(&result, character_id, 7, 9)
+            .unwrap()
+            .unwrap();
+        let fact: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(fact["schema_version"], 2);
+        assert_eq!(fact["source"], "committed_world_turn");
+        assert_eq!(fact["source_turn_id"], result.turn_id.to_string());
+        assert_eq!(fact["turn_number"], 7);
+        assert_eq!(fact["world_time"], 9);
+        assert_eq!(fact["witness_character_id"], character_id.to_string());
+        assert_eq!(fact["reader_action"]["kind"], "converse");
+        assert_eq!(fact["reader_action"]["target_id"], character_id.to_string());
+        assert!(fact["reader_action"].get("intent").is_none());
+        assert!(fact["committed_changes"]["knowledge_discoveries"].is_null());
+        assert!(!encoded.contains("这段生成叙事绝不能成为永久事实"));
+        assert!(!encoded.contains("PRIVATE_INTENT_PRETEND_TO_COOPERATE_THEN_BETRAY"));
+        assert!(encoded.chars().count() <= MAX_JOURNEY_MEMORY_EVENT_CHARS);
+
+        assert!(character_witnessed_turn(
+            &result.action,
+            &result.transition,
+            character_id,
+        ));
+    }
+
+    #[test]
+    fn non_character_action_does_not_witness_a_uuid_collision() {
+        let user_id = Uuid::new_v4();
+        let novel_id = Uuid::new_v4();
+        let character_id = Uuid::new_v4();
+        let entry = journal_entry(1, character_id);
+        let result = WorldTurnResult {
+            turn_id: entry.turn_id,
+            action: WorldAction {
+                kind: WorldActionKind::Travel,
+                target_id: Some(character_id.to_string()),
+                intent: "前往同名地点".into(),
+            },
+            resolution: None,
+            transition: entry.transition,
+            world_state: WorldState::new(user_id, novel_id),
+        };
+
+        assert!(!character_witnessed_turn(
+            &result.action,
+            &result.transition,
+            character_id,
+        ));
+        assert!(world_journey_fact_at(&result, character_id, 1, 1)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn permanent_journey_fact_excludes_unwitnessed_secrets_from_a_mixed_turn() {
+        use crate::domain::entities::world_session::{
+            CanonicalEventChange, CanonicalEventStatus, FactionStandingChange,
+        };
+        use crate::domain::services::narrative_transition::{
+            LocationChange, RelationshipChange, ThreadChange, ThreadStatus, TransitionEvent,
+        };
+
+        let user_id = Uuid::new_v4();
+        let novel_id = Uuid::new_v4();
+        let character_id = Uuid::new_v4();
+        let unrelated_character_id = Uuid::new_v4();
+        let repeated = "边界内容".repeat(MAX_JOURNEY_MEMORY_FIELD_CHARS);
+        let result = WorldTurnResult {
+            turn_id: Uuid::new_v4(),
+            action: WorldAction {
+                kind: crate::domain::entities::world_session::WorldActionKind::Investigate,
+                target_id: Some("north-tower".into()),
+                intent: repeated.clone(),
+            },
+            resolution: None,
+            transition: crate::domain::entities::world_session::WorldTurnTransition {
+                schema_version: 1,
+                prompt_version: "world-turn-v2".into(),
+                canon_model_version: 1,
+                canonical_checkpoint_chapter: 3,
+                rendered_narrative: "不应进入事实".into(),
+                events: vec![
+                    TransitionEvent {
+                        summary: "主角明确见证的事件".into(),
+                        actor_character_ids: vec![character_id],
+                        location_id: Some("north-tower".into()),
+                    },
+                    TransitionEvent {
+                        summary: "异地角色的秘密事件".into(),
+                        actor_character_ids: vec![unrelated_character_id],
+                        location_id: Some(repeated.clone()),
+                    },
+                ],
+                relationship_changes: vec![RelationshipChange {
+                    character_id,
+                    delta: 2,
+                    reason: repeated.clone(),
+                }],
+                location_changes: vec![LocationChange {
+                    location_id: "north-tower".into(),
+                    state: repeated.clone(),
+                    reason: repeated.clone(),
+                }],
+                thread_changes: vec![ThreadChange {
+                    thread_id: "gatekeeper".into(),
+                    status: ThreadStatus::Resolved,
+                    description: repeated.clone(),
+                }],
+                player_location_id: Some("north-tower".into()),
+                inventory_additions: vec![repeated.clone(); 4],
+                inventory_removals: vec![repeated.clone(); 4],
+                knowledge_discoveries: vec!["玩家私有发现".into()],
+                faction_changes: vec![FactionStandingChange {
+                    faction_id: "watch".into(),
+                    delta: 1,
+                    reason: repeated,
+                }],
+                canonical_event_change: Some(CanonicalEventChange {
+                    event_id: "changing-of-the-guard".into(),
+                    status: CanonicalEventStatus::Witnessed,
+                    reason: "玩家亲历".into(),
+                }),
+            },
+            world_state: WorldState::new(user_id, novel_id),
+        };
+
+        let encoded = world_journey_fact_at(&result, character_id, 7, 9)
+            .unwrap()
+            .unwrap();
+        let fact: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        let changes = &fact["committed_changes"];
+
+        assert_eq!(changes["relationships"][0]["delta"], 2);
+        assert_eq!(changes["events"][0]["summary"], "主角明确见证的事件");
+        assert!(fact["reader_action"].is_null());
+        assert!(!encoded.contains("异地角色的秘密事件"));
+        assert!(!encoded.contains("玩家私有发现"));
+        assert!(!encoded.contains("changing-of-the-guard"));
+        assert!(changes["locations"].is_null());
+        assert!(changes["threads"].is_null());
+        assert!(changes["factions"].is_null());
+        assert!(encoded.chars().count() <= MAX_JOURNEY_MEMORY_EVENT_CHARS);
+        assert!(!encoded.contains("不应进入事实"));
+    }
+
+    #[test]
+    fn journey_fact_counts_match_sections_left_after_budget_trimming() {
+        use crate::domain::services::narrative_transition::TransitionEvent;
+
+        let character_id = Uuid::new_v4();
+        let mut entry = journal_entry(1, character_id);
+        entry.action.kind = WorldActionKind::Investigate;
+        entry.action.target_id = None;
+        entry.transition.events = (0..4)
+            .map(|_| TransitionEvent {
+                summary: "事".repeat(MAX_JOURNEY_MEMORY_FIELD_CHARS),
+                actor_character_ids: vec![character_id],
+                location_id: Some("l".repeat(200)),
+            })
+            .collect();
+        let result = WorldTurnResult {
+            turn_id: entry.turn_id,
+            action: entry.action,
+            resolution: None,
+            transition: entry.transition,
+            world_state: WorldState::new(Uuid::new_v4(), Uuid::new_v4()),
+        };
+
+        let encoded = world_journey_fact_at(&result, character_id, 1, 1)
+            .unwrap()
+            .unwrap();
+        let fact: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        let changes = fact["committed_changes"].as_object().unwrap();
+        let emitted_events = changes
+            .get("events")
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len);
+        let emitted_relationships = changes
+            .get("relationships")
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len);
+
+        assert!((1..=4).contains(&emitted_events));
+        assert_eq!(emitted_relationships, 0);
+        assert_eq!(fact["change_counts"]["events"], emitted_events);
+        assert_eq!(
+            fact["change_counts"]["relationships"],
+            emitted_relationships
+        );
+        assert_eq!(fact["change_counts"]["reader_action"], 0);
+        assert_consumer_compatible_journey_fact(&encoded, character_id);
+    }
+
+    #[test]
+    fn journey_fact_omits_a_direct_action_private_intent() {
+        let character_id = Uuid::new_v4();
+        let mut entry = journal_entry(1, character_id);
+        entry.action.target_id = Some(character_id.to_string().to_uppercase());
+        entry.action.intent = "PRIVATE_INTENT_WITHHOLD_THE_REAL_PLAN".into();
+        let result = WorldTurnResult {
+            turn_id: entry.turn_id,
+            action: entry.action,
+            resolution: None,
+            transition: entry.transition,
+            world_state: WorldState::new(Uuid::new_v4(), Uuid::new_v4()),
+        };
+
+        let encoded = world_journey_fact_at(&result, character_id, 1, 1)
+            .unwrap()
+            .unwrap();
+        let fact: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(fact["reader_action"]["kind"], "converse");
+        assert_eq!(fact["reader_action"]["target_id"], character_id.to_string());
+        assert!(fact["reader_action"].get("intent").is_none());
+        assert!(!encoded.contains("PRIVATE_INTENT_WITHHOLD_THE_REAL_PLAN"));
+        assert_consumer_compatible_journey_fact(&encoded, character_id);
+    }
+
+    #[test]
+    fn journey_fact_normalizes_event_boundary_whitespace_for_the_consumer() {
+        use crate::domain::services::narrative_transition::TransitionEvent;
+
+        let character_id = Uuid::new_v4();
+        let mut entry = journal_entry(1, character_id);
+        entry.action.kind = WorldActionKind::Investigate;
+        entry.action.target_id = None;
+        entry.transition.events = vec![TransitionEvent {
+            summary: "\r\n\u{3000}角色见证了事件\u{2003}\n".into(),
+            actor_character_ids: vec![character_id],
+            location_id: Some("\u{3000}north-tower\u{2003}".into()),
+        }];
+        let result = WorldTurnResult {
+            turn_id: entry.turn_id,
+            action: entry.action,
+            resolution: None,
+            transition: entry.transition,
+            world_state: WorldState::new(Uuid::new_v4(), Uuid::new_v4()),
+        };
+
+        let encoded = world_journey_fact_at(&result, character_id, 1, 1)
+            .unwrap()
+            .unwrap();
+        let fact: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(
+            fact["committed_changes"]["events"][0]["summary"],
+            "角色见证了事件"
+        );
+        assert_eq!(
+            fact["committed_changes"]["events"][0]["location_id"],
+            "north-tower"
+        );
+        assert_consumer_compatible_journey_fact(&encoded, character_id);
+    }
+
+    #[test]
+    fn journey_fact_skips_when_all_witness_text_normalizes_to_empty() {
+        use crate::domain::services::narrative_transition::TransitionEvent;
+
+        let character_id = Uuid::new_v4();
+        let mut entry = journal_entry(1, character_id);
+        entry.action.kind = WorldActionKind::Investigate;
+        entry.action.target_id = None;
+        entry.action.intent = " \r\n\u{3000}".into();
+        entry.transition.events = vec![TransitionEvent {
+            summary: "\r\n\u{2003}".into(),
+            actor_character_ids: vec![character_id],
+            location_id: None,
+        }];
+        let result = WorldTurnResult {
+            turn_id: entry.turn_id,
+            action: entry.action,
+            resolution: None,
+            transition: entry.transition,
+            world_state: WorldState::new(Uuid::new_v4(), Uuid::new_v4()),
+        };
+
+        assert!(world_journey_fact_at(&result, character_id, 1, 1)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1607,6 +3053,25 @@ mod timeline_tests {
             require_same_choice(1, 0),
             Err(NarrativeError::ChoiceConflict)
         ));
+    }
+
+    #[test]
+    fn open_world_freezes_new_branch_choices_but_keeps_exact_replay() {
+        assert!(require_choice_submission_allowed(1, Some(1), 8, Some(2), true).is_ok());
+        assert!(matches!(
+            require_choice_submission_allowed(1, Some(0), 8, Some(2), true),
+            Err(NarrativeError::ChoiceConflict)
+        ));
+        assert!(matches!(
+            require_choice_submission_allowed(1, None, 2, Some(2), true),
+            Err(NarrativeError::Conflict(_))
+        ));
+        assert!(matches!(
+            require_choice_submission_allowed(1, None, 3, Some(2), false),
+            Err(NarrativeError::Conflict(_))
+        ));
+        assert!(require_choice_submission_allowed(1, None, 2, Some(2), false).is_ok());
+        assert!(require_choice_submission_allowed(1, None, 8, None, false).is_ok());
     }
 
     #[test]

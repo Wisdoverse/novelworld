@@ -3,7 +3,10 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Send, X, Minimize2, Maximize2, Brain } from 'lucide-react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import { useChatHistory } from '@/features/character-chat/api/useChatHistory';
-import { useChatStore } from '@/features/character-chat/model/useChatStore';
+import {
+  chatSessionKey,
+  useChatStore,
+} from '@/features/character-chat/model/useChatStore';
 import type { Character, ChatMessage } from '@/shared/types';
 
 const EMPTY_MESSAGES: ChatMessage[] = [];
@@ -35,6 +38,7 @@ interface ChatPanelProps {
   novelId: string;
   currentChapter: number;
   readerIdentity?: string;
+  readerIdentityScope: string;
   canChat: boolean;
   isOpen: boolean;
   onClose: () => void;
@@ -45,6 +49,7 @@ export function ChatPanel({
   novelId,
   currentChapter,
   readerIdentity,
+  readerIdentityScope,
   canChat,
   isOpen,
   onClose,
@@ -54,11 +59,12 @@ export function ChatPanel({
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  const sessionMessages = useChatStore(state => state.messages[character.id]) ?? EMPTY_MESSAGES;
-  const rawStreamText = useChatStore(state => state.streamingText[character.id]) || '';
-  const isCharacterStreaming = useChatStore(state => state.isStreaming[character.id]) || false;
-  const activeTurn = useChatStore(state => state.activeTurn[character.id]);
-  const failedTurn = useChatStore(state => state.failedTurn[character.id]);
+  const sessionKey = chatSessionKey(character.id, readerIdentityScope);
+  const sessionMessages = useChatStore(state => state.messages[sessionKey]) ?? EMPTY_MESSAGES;
+  const rawStreamText = useChatStore(state => state.streamingText[sessionKey]) || '';
+  const isCharacterStreaming = useChatStore(state => state.isStreaming[sessionKey]) || false;
+  const activeTurn = useChatStore(state => state.activeTurn[sessionKey]);
+  const failedTurn = useChatStore(state => state.failedTurn[sessionKey]);
   const sendMessage = useChatStore(state => state.sendMessage);
   const retryMessage = useChatStore(state => state.retryMessage);
   const cancelMessage = useChatStore(state => state.cancelMessage);
@@ -66,6 +72,7 @@ export function ChatPanel({
   const history = useChatHistory(
     character.id,
     currentChapter,
+    readerIdentityScope,
     isOpen && canChat && characterMatchesNovel,
   );
   const activeTurnMatchesView = activeTurn?.payload.novel_id === novelId
@@ -91,9 +98,9 @@ export function ChatPanel({
 
   useEffect(() => {
     if (activeTurn && !activeTurnMatchesView) {
-      cancelMessage(character.id, activeTurn.turnId);
+      cancelMessage(sessionKey, activeTurn.turnId);
     }
-  }, [activeTurn, activeTurnMatchesView, cancelMessage, character.id]);
+  }, [activeTurn, activeTurnMatchesView, cancelMessage, sessionKey]);
 
   const handleSend = () => {
     if (!canChat || !historyReady || !input.trim() || isCurrentlyStreaming) return;
@@ -102,6 +109,7 @@ export function ChatPanel({
       novelId,
       message: input.trim(),
       readerIdentity,
+      readerIdentityScope,
       currentChapter,
     });
     setInput('');
@@ -286,7 +294,7 @@ export function ChatPanel({
                         type="button"
                         className="shrink-0 underline disabled:opacity-50"
                         disabled={!canChat || !historyReady}
-                        onClick={() => retryMessage(character.id)}
+                        onClick={() => retryMessage(sessionKey)}
                       >
                         重试
                       </button>
@@ -308,7 +316,7 @@ export function ChatPanel({
                     {isCurrentlyStreaming && (
                       <button
                         type="button"
-                        onClick={() => cancelMessage(character.id)}
+                        onClick={() => cancelMessage(sessionKey)}
                         className="flex-shrink-0 rounded-full bg-[#fce8e6] px-3 py-2.5 text-xs font-semibold text-[#b3261e] transition-colors hover:bg-[#f9dedc]"
                       >
                         停止

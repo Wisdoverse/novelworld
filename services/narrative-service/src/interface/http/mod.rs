@@ -12,14 +12,17 @@ use axum::{
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use uuid::Uuid;
+use uuid::{Uuid, Variant, Version};
 
 use crate::application::handlers::{
     CreatePlayerEntityCommand, NarrativeCommandHandler, NarrativeError,
 };
 use crate::domain::entities::game_rules::PlayerRuleProfile;
-use crate::domain::entities::world_session::WorldAction;
+use crate::domain::entities::world_session::{CharacterWorldContext, WorldAction, WorldActionKind};
 use crate::domain::ports::{AccountExportPort, ReadinessProbe};
+
+const WORLD_CONTEXT_VERSION_HEADER: &str = "X-World-Context-Version";
+const WORLD_CONTEXT_VERSION: &str = "2";
 
 #[derive(Clone)]
 pub struct AppState {
@@ -114,11 +117,21 @@ async fn get_character_world_context(
     let Some(user_id) = extract_user_id(&headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    match state
-        .handler
-        .get_character_world_context(user_id, novel_id, character_id)
-        .await
-    {
+    if !supports_world_context_v2(&headers) {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    character_world_context_response(
+        state
+            .handler
+            .get_character_world_context(user_id, novel_id, character_id)
+            .await,
+    )
+}
+
+fn character_world_context_response(
+    result: Result<Option<CharacterWorldContext>, NarrativeError>,
+) -> Response {
+    match result {
         Ok(Some(context)) => (StatusCode::OK, Json(context)).into_response(),
         Ok(None) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => narrative_error_response(error),
@@ -250,6 +263,13 @@ fn narrative_error_response(error: NarrativeError) -> axum::response::Response {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "game_rule_generation_exhausted",
                 "Game rule template generation budget is exhausted",
+            )
+        }
+        NarrativeError::ReadingProgressBehindWorld => {
+            return error_response(
+                StatusCode::CONFLICT,
+                "reading_progress_behind_world",
+                "Read through the world context source chapter before resuming this timeline",
             )
         }
         NarrativeError::Unavailable(error) => {
@@ -511,11 +531,33 @@ async fn get_open_world(
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorldTurnRequest {
+    expected_turn_number: i64,
+    kind: WorldActionKind,
+    target_id: Option<String>,
+    intent: String,
+}
+
+impl WorldTurnRequest {
+    fn into_parts(self) -> (i64, WorldAction) {
+        (
+            self.expected_turn_number,
+            WorldAction {
+                kind: self.kind,
+                target_id: self.target_id,
+                intent: self.intent,
+            },
+        )
+    }
+}
+
 async fn submit_world_turn(
     State(state): State<AppState>,
     Path(novel_id): Path<Uuid>,
     headers: HeaderMap,
-    Json(action): Json<WorldAction>,
+    Json(request): Json<WorldTurnRequest>,
 ) -> impl IntoResponse {
     let Some(user_id) = extract_user_id(&headers) else {
         return error_response(
@@ -528,9 +570,10 @@ async fn submit_world_turn(
         Ok(turn_id) => turn_id,
         Err(message) => return error_response(StatusCode::BAD_REQUEST, "invalid_request", message),
     };
+    let (expected_turn_number, action) = request.into_parts();
     match state
         .handler
-        .submit_world_turn(turn_id, user_id, novel_id, action)
+        .submit_world_turn(turn_id, user_id, novel_id, expected_turn_number, action)
         .await
     {
         Ok(result) => (StatusCode::OK, Json(result)).into_response(),
@@ -586,7 +629,10 @@ fn extract_idempotency_key(headers: &HeaderMap) -> Result<Uuid, &'static str> {
         .to_str()
         .map_err(|_| "Idempotency-Key must be a UUID v4")?;
     let id = Uuid::parse_str(value).map_err(|_| "Idempotency-Key must be a UUID v4")?;
-    if id.get_version_num() != 4 || id.to_string() != value.to_ascii_lowercase() {
+    if id.get_version() != Some(Version::Random)
+        || id.get_variant() != Variant::RFC4122
+        || id.to_string() != value.to_ascii_lowercase()
+    {
         return Err("Idempotency-Key must be a canonical UUID v4");
     }
     Ok(id)
@@ -594,6 +640,13 @@ fn extract_idempotency_key(headers: &HeaderMap) -> Result<Uuid, &'static str> {
 
 fn internal_request_authorized(state: &AppState, headers: &HeaderMap) -> bool {
     internal_token_authorized(headers, state.internal_service_token.as_ref())
+}
+
+fn supports_world_context_v2(headers: &HeaderMap) -> bool {
+    headers
+        .get(WORLD_CONTEXT_VERSION_HEADER)
+        .and_then(|value| value.to_str().ok())
+        == Some(WORLD_CONTEXT_VERSION)
 }
 
 fn internal_token_authorized(headers: &HeaderMap, expected: &str) -> bool {
@@ -626,6 +679,32 @@ mod principal_contract_tests {
         async fn is_ready(&self) -> bool {
             self.0
         }
+    }
+
+    #[test]
+    fn world_context_version_gate_is_fail_closed_for_old_consumers() {
+        let mut headers = HeaderMap::new();
+        assert!(!supports_world_context_v2(&headers));
+
+        for unsupported in ["1", "3"] {
+            headers.insert(
+                WORLD_CONTEXT_VERSION_HEADER,
+                HeaderValue::from_static(unsupported),
+            );
+            assert!(!supports_world_context_v2(&headers));
+        }
+
+        headers.insert(
+            WORLD_CONTEXT_VERSION_HEADER,
+            HeaderValue::from_static(WORLD_CONTEXT_VERSION),
+        );
+        assert!(supports_world_context_v2(&headers));
+    }
+
+    #[test]
+    fn absent_character_world_context_is_a_no_content_response() {
+        let response = character_world_context_response(Ok(None));
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
     }
 
     #[test]
@@ -665,6 +744,60 @@ mod principal_contract_tests {
                 "error": {
                     "code": "choice_conflict",
                     "message": "A different choice is already committed"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn world_turn_requires_a_strict_client_revision() {
+        assert!(
+            serde_json::from_value::<WorldTurnRequest>(serde_json::json!({
+                "kind": "pursue_goal",
+                "target_id": null,
+                "intent": "继续追查"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<WorldTurnRequest>(serde_json::json!({
+                "expected_turn_number": 3,
+                "kind": "pursue_goal",
+                "target_id": null,
+                "intent": "继续追查",
+                "user_id": Uuid::new_v4()
+            }))
+            .is_err()
+        );
+
+        let request = serde_json::from_value::<WorldTurnRequest>(serde_json::json!({
+            "expected_turn_number": 3,
+            "kind": "pursue_goal",
+            "target_id": null,
+            "intent": "继续追查"
+        }))
+        .unwrap();
+        let (expected_turn_number, action) = request.into_parts();
+        assert_eq!(expected_turn_number, 3);
+        assert_eq!(action.kind, WorldActionKind::PursueGoal);
+        assert_eq!(action.intent, "继续追查");
+    }
+
+    #[tokio::test]
+    async fn stale_branch_tab_after_world_start_uses_conflict_envelope() {
+        let response = narrative_error_response(NarrativeError::Conflict(
+            "Use world actions after entering the open world".into(),
+        ));
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({
+                "error": {
+                    "code": "conflict",
+                    "message": "Use world actions after entering the open world"
                 }
             })
         );
@@ -727,6 +860,20 @@ mod principal_contract_tests {
         );
     }
 
+    #[tokio::test]
+    async fn rewind_hides_world_content_behind_a_stable_conflict_code() {
+        let response = narrative_error_response(NarrativeError::ReadingProgressBehindWorld);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"]["code"],
+            "reading_progress_behind_world"
+        );
+        assert!(!String::from_utf8_lossy(&body).contains("world_state"));
+    }
+
     #[test]
     fn routes_construct_with_axum_08_syntax() {
         let _ = routes();
@@ -739,6 +886,11 @@ mod principal_contract_tests {
         headers.insert("Idempotency-Key", "not-a-uuid".parse().unwrap());
         assert!(extract_idempotency_key(&headers).is_err());
         headers.insert("Idempotency-Key", Uuid::nil().to_string().parse().unwrap());
+        assert!(extract_idempotency_key(&headers).is_err());
+        headers.insert(
+            "Idempotency-Key",
+            "00000000-0000-4000-0000-000000000000".parse().unwrap(),
+        );
         assert!(extract_idempotency_key(&headers).is_err());
         let id = Uuid::new_v4();
         headers.insert("Idempotency-Key", id.to_string().parse().unwrap());

@@ -100,7 +100,10 @@ WITH relevant_nodes AS (
            jsonb_build_object(
                'id', t.id, 'user_id', t.user_id, 'novel_id', t.novel_id,
                'action', t.action, 'expected_turn_number', t.expected_turn_number,
+               'resolution', t.resolution,
                'status', t.status, 'transition', t.transition, 'result', t.result,
+               'memory_projection_status', t.memory_projection_status,
+               'memory_projection_completed_at', t.memory_projection_completed_at,
                'created_at', t.created_at, 'updated_at', t.updated_at,
                'completed_at', t.completed_at,
                'source', CASE WHEN t.transition IS NOT NULL THEN 'mixed' ELSE 'reader' END
@@ -123,6 +126,10 @@ mod tests {
         assert!(EXPORT_SQL.contains("n.user_id IS NULL"));
         assert!(EXPORT_SQL.contains("c.user_id = $1 AND c.node_id = n.id"));
         assert!(EXPORT_SQL.contains("FROM world_turns t"));
+        assert!(EXPORT_SQL.contains("'resolution', t.resolution"));
+        assert!(EXPORT_SQL.contains("'memory_projection_status', t.memory_projection_status"));
+        assert!(EXPORT_SQL
+            .contains("'memory_projection_completed_at', t.memory_projection_completed_at"));
         assert!(!EXPORT_SQL.contains("request_fingerprint"));
     }
 }

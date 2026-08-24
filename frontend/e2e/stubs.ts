@@ -38,13 +38,20 @@ const CHAT_DELTA_STREAM = (turnId: string) => sse(
 
 /** Route table: method + pathname regex -> response builder. */
 export async function installStubs(page: Page, opts: StubOptions = {}): Promise<void> {
-  const openWorld = opts.openWorld ?? false;
-  const entry = opts.entryRequired ? PLAYER_ENTRY_NO_PLAYER : PLAYER_ENTRY;
+  let setupNeeded = opts.setupNeeded ?? false;
+  let entry = opts.entryRequired ? PLAYER_ENTRY_NO_PLAYER : PLAYER_ENTRY;
   const progress = opts.characterIdentity ? CHARACTER_PROGRESS : PROGRESS;
+  let effectiveChapter = EFFECTIVE_CHAPTER;
+  let worldState = opts.characterIdentity
+    ? CHOICE_RESULT.world_state
+    : opts.openWorld
+      ? OPEN_WORLD.world_state
+      : WORLD_STATE;
+  let openWorld = opts.openWorld ? OPEN_WORLD : null;
 
   type ResponseSpec = ReturnType<typeof json> | ReturnType<typeof sse> | { status: number };
   const table: Array<[string, RegExp, (req: Request) => ResponseSpec]> = [
-    ['GET', /^\/setup\/status$/, () => json(200, opts.setupNeeded
+    ['GET', /^\/setup\/status$/, () => json(200, setupNeeded
       ? { ...SETUP_STATUS, configured: false, llm_configured: false }
       : SETUP_STATUS)],
     ['GET', /^\/auth\/me$/, () => json(200, USER)],
@@ -59,15 +66,43 @@ export async function installStubs(page: Page, opts: StubOptions = {}): Promise<
     ['GET', /^\/progress\/[^/]+$/, () => json(200, progress)],
     ['PUT', /^\/progress\/[^/]+$/, () => json(200, progress)],
     ['GET', /^\/narrative\/[^/]+\/player-entry$/, () => json(200, entry)],
-    ['PUT', /^\/narrative\/[^/]+\/player-entry$/, () => json(200, PLAYER_ENTRY)],
+    ['PUT', /^\/narrative\/[^/]+\/player-entry$/, () => {
+      entry = PLAYER_ENTRY;
+      worldState = WORLD_STATE;
+      return json(200, entry);
+    }],
     ['POST', /^\/narrative\/[^/]+\/game-rules$/, () => json(200, GAME_RULE_TEMPLATE)],
-    ['GET', /^\/narrative\/[^/]+\/chapters\/[^/]+$/, () => json(200, EFFECTIVE_CHAPTER)],
-    ['GET', /^\/narrative\/[^/]+\/world-state$/, () => json(200, WORLD_STATE)],
-    ['GET', /^\/narrative\/[^/]+\/world$/, () => (openWorld ? json(200, OPEN_WORLD) : { status: 404 })],
+    ['GET', /^\/narrative\/[^/]+\/chapters\/[^/]+$/, () => json(200, effectiveChapter)],
+    ['GET', /^\/narrative\/[^/]+\/world-state$/, () => json(200, worldState)],
+    ['GET', /^\/narrative\/[^/]+\/world$/, () => (openWorld ? json(200, openWorld) : { status: 404 })],
     ['GET', /^\/narrative\/[^/]+\/[^/]+$/, () => json(200, NODE)],
-    ['POST', /^\/narrative\/[^/]+\/world$/, () => json(200, OPEN_WORLD)],
-    ['POST', /^\/narrative\/[^/]+\/world\/turns$/, () => json(200, WORLD_TURN_RESULT)],
-    ['POST', /^\/narrative\/choose$/, () => json(200, CHOICE_RESULT)],
+    ['POST', /^\/narrative\/[^/]+\/world$/, () => {
+      openWorld = OPEN_WORLD;
+      worldState = OPEN_WORLD.world_state;
+      return json(200, openWorld);
+    }],
+    ['POST', /^\/narrative\/[^/]+\/world\/turns$/, () => {
+      worldState = WORLD_TURN_RESULT.world_state;
+      openWorld = {
+        ...OPEN_WORLD,
+        session: { ...OPEN_WORLD.session, turn_number: 2 },
+        world_state: worldState,
+        journal: [
+          ...OPEN_WORLD.journal,
+          { ...JOURNAL_ENTRY, turn_id: WORLD_TURN_RESULT.turn_id, turn_number: 2 },
+        ],
+      };
+      return json(200, WORLD_TURN_RESULT);
+    }],
+    ['POST', /^\/narrative\/choose$/, () => {
+      worldState = CHOICE_RESULT.world_state;
+      effectiveChapter = {
+        chapter_number: CHOICE_RESULT.chapter_number,
+        content: CHOICE_RESULT.chapter_content,
+        generated: true,
+      };
+      return json(200, CHOICE_RESULT);
+    }],
     ['GET', /^\/chat\/[^/]+\/history$/, () => json(200, { messages: [], count: 0 })],
     ['POST', /^\/chat\/[^/]+\/stream$/, (req) => {
       const turnId = (req.headers()['idempotency-key'] ?? '') as string;
@@ -75,7 +110,10 @@ export async function installStubs(page: Page, opts: StubOptions = {}): Promise<
     }],
     ['GET', /^\/settings\/llm$/, () => json(200, LLM_SETTINGS)],
     ['PUT', /^\/settings\/llm$/, () => json(200, LLM_SETTINGS)],
-    ['POST', /^\/setup\/init$/, () => json(200, { ok: true })],
+    ['POST', /^\/setup\/init$/, () => {
+      setupNeeded = false;
+      return json(200, AUTH_TOKENS);
+    }],
   ];
 
   await page.route('**/api/**', async (route) => {

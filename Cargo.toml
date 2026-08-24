@@ -36,7 +36,7 @@ serde_json = "1"
 # Auth
 jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs"] }
 bcrypt = "0.19"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 # HTTP client (for LLM API)
 reqwest = { version = "0.13", features = ["json", "stream"] }

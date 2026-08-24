@@ -90,10 +90,21 @@ crosses internal-token-authenticated service calls) succeeds after rotation.
 `infra/docker/release.sh` is the release/rollback state machine for the
 compromised-release response. Manifests pin every image to an immutable
 `@sha256` digest plus a release version and git SHA; the state dir holds
-`current.env` and `previous.env` with a flock-guarded lock, and a rollback
-that dies mid-promotion leaves a `rollback.pending` marker that the next
-locked operation recovers before doing anything else. (Upgrades promote
-atomically between two staged manifests and do not use the marker.)
+`current.env` and `previous.env` with a flock-guarded lock. Every new
+post-client-gate deployment, including normal restore and healthy rollback,
+writes the exact target to `schema-transition.pending` before migration.
+Restore and rollback first discard an unmarked staged candidate so it cannot
+conflict with that authority. New rollback uses the same promotion protocol as
+upgrade. `rollback.pending` is accepted only as a compatibility recovery record
+from older tooling, and the next locked operation converges it before doing
+anything else.
+That marker is the only recovery authority until promotion: a transition that
+may have crossed migration 0021 rolls the exact target forward and never starts
+the older writer. The marker is storage-synced before migration; promotion is
+synced before marker removal, and marker removal is synced again. For an
+upgrade, the former current manifest is renamed and synced as `previous`
+before the new current manifest is installed. In both adoption and upgrade,
+the installed target tempfile is included in that pre-rename sync.
 
 What the release_state_drill.sh proves locally (no registry required):
 
@@ -104,14 +115,24 @@ What the release_state_drill.sh proves locally (no registry required):
   the current SHA, infrastructure-image changes, malformed rollback targets,
   a missing or mismatched previous release, and concurrent operations (held
   lock) all stop with an actionable error.
-- An interrupted rollback recovers its current/previous pair before the next
-  command, and a wedged marker with missing files fails closed: the marker
-  survives and requires explicit operator clearing.
+- A normal restore and a healthy rollback clear an unmarked candidate before
+  the schema marker is written, durably promote the exact marked target, and
+  clear the marker only after the promoted pair is synced.
+- A legacy interrupted rollback recovers its current/previous pair before the
+  next command, and a wedged legacy marker with missing files fails closed: the
+  marker survives and requires explicit operator clearing.
+- An interrupted 0020 adoption/upgrade rolls the exact schema-transition
+  manifest forward, accepts a missing downloaded candidate, rejects a
+  different candidate, preserves the old current as previous on upgrade, and
+  clears the marker only after the health-gated manifest is promoted.
 
 What stays gated: the image-level deployment (`deploy_manifest`: git checkout
 of the release SHA plus `compose pull` of the digest-pinned images) runs only
 with a reachable registry. CI validates the manifest grammar and lock
-guards; the deployment path itself is not exercised by a local drill.
+guards; the deployment path itself is not exercised by a local drill. The
+state drill pins sync/rename order and simulates process crashes, but it does
+not inject a real Linux host power loss or prove filesystem directory-entry
+durability across one.
 SBOM generation has since landed (see Dependency Policy); deploy-time SBOM
 verification, provenance/attestation, and signing remain gated.
 ### Dependency Policy

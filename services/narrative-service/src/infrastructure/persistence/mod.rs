@@ -3,10 +3,85 @@ pub mod pg_narrative_repo;
 pub mod pg_world_state_repo;
 pub mod pg_world_turn_repo;
 
-use crate::domain::ports::ReadinessProbe;
+use crate::domain::{entities::narrative_node::WorldStateError, ports::ReadinessProbe};
+use anyhow::Result;
 use async_trait::async_trait;
-use sqlx::PgPool;
+use sqlx::{Executor, PgPool, Postgres};
 use std::time::Duration;
+use uuid::Uuid;
+
+pub(super) async fn ensure_choice_projection_consistent<'e, E>(
+    executor: E,
+    user_id: Uuid,
+    novel_id: Uuid,
+) -> Result<()>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let consistent = sqlx::query_scalar::<_, bool>(
+        r#"
+        WITH durable AS (
+            SELECT node_id, chapter_number, choice_index, choice_text,
+                   consequence, transition
+            FROM user_choices
+            WHERE user_id = $1 AND novel_id = $2
+        ), world AS (
+            SELECT state
+            FROM world_states
+            WHERE user_id = $1 AND novel_id = $2
+        ), projected AS (
+            SELECT choice
+            FROM world
+            CROSS JOIN LATERAL jsonb_array_elements(
+                CASE
+                    WHEN jsonb_typeof(world.state -> 'choices') = 'array'
+                    THEN world.state -> 'choices'
+                    ELSE '[]'::jsonb
+                END
+            ) AS items(choice)
+        )
+        SELECT COALESCE(
+                   (SELECT jsonb_typeof(state -> 'choices') = 'array' FROM world),
+                   FALSE
+               )
+           AND (SELECT COUNT(*) FROM projected) = (SELECT COUNT(*) FROM durable)
+           AND NOT EXISTS (
+               SELECT 1
+               FROM projected
+               WHERE jsonb_typeof(choice) <> 'object'
+                  OR NOT choice ? 'node_id'
+           )
+           AND NOT EXISTS (
+               SELECT 1
+               FROM durable
+               WHERE NOT EXISTS (
+                   SELECT 1
+                   FROM projected
+                   WHERE projected.choice ->> 'node_id' = durable.node_id::text
+                     AND projected.choice ->> 'chapter' = durable.chapter_number::text
+                     AND projected.choice ->> 'choice_index' = durable.choice_index::text
+                     AND projected.choice ->> 'choice' = durable.choice_text
+                     AND projected.choice ->> 'consequence' = durable.consequence
+                     AND projected.choice ->> 'canon_model_version' =
+                         durable.transition ->> 'canon_model_version'
+                     AND projected.choice ->> 'canonical_checkpoint_chapter' =
+                         durable.transition ->> 'canonical_checkpoint_chapter'
+               )
+           )
+        "#,
+    )
+    .bind(user_id)
+    .bind(novel_id)
+    .fetch_one(executor)
+    .await?;
+    if !consistent {
+        return Err(WorldStateError::TimelineConflict(
+            "durable branch choices do not match the world-state projection".into(),
+        )
+        .into());
+    }
+    Ok(())
+}
 
 pub struct PgReadinessProbe {
     pool: PgPool,
@@ -26,15 +101,37 @@ impl ReadinessProbe for PgReadinessProbe {
                 Duration::from_secs(2),
                 sqlx::query_scalar::<_, bool>(
                     r#"
-                    SELECT pg_catalog.count(*) = 18
+                    SELECT pg_catalog.count(*) = 21
+                       AND (
+                           SELECT pg_catalog.count(*) = 2
+                           FROM pg_catalog.pg_attribute AS attribute
+                           LEFT JOIN pg_catalog.pg_attrdef AS default_value
+                             ON default_value.adrelid = attribute.attrelid
+                            AND default_value.adnum = attribute.attnum
+                           JOIN (VALUES
+                               ('memory_projection_status', 'character varying(16)', TRUE, '''pending''::character varying'),
+                               ('memory_projection_completed_at', 'timestamp with time zone', FALSE, NULL)
+                           ) AS expected_column(name, data_type, not_null, default_expression)
+                             ON attribute.attname = expected_column.name
+                            AND pg_catalog.format_type(attribute.atttypid, attribute.atttypmod) = expected_column.data_type
+                            AND attribute.attnotnull = expected_column.not_null
+                            AND pg_catalog.pg_get_expr(default_value.adbin, default_value.adrelid)
+                                IS NOT DISTINCT FROM expected_column.default_expression
+                           WHERE attribute.attrelid = 'public.world_turns'::pg_catalog.regclass
+                             AND NOT attribute.attisdropped
+                       )
                        AND (
                            SELECT pg_catalog.count(*) = 2
                            FROM pg_catalog.pg_index AS index_definition
                            JOIN (VALUES
-                               ('idx_world_turns_one_in_progress', 'CREATE UNIQUE INDEX idx_world_turns_one_in_progress ON public.world_turns USING btree (user_id, novel_id) WHERE ((status)::text = ''in_progress''::text)'),
-                               ('idx_world_turns_journal', 'CREATE INDEX idx_world_turns_journal ON public.world_turns USING btree (user_id, novel_id, completed_at DESC) WHERE ((status)::text = ''completed''::text)')
-                           ) AS expected_index(name, definition)
+                               ('idx_world_turns_one_in_progress', TRUE, 'CREATE UNIQUE INDEX idx_world_turns_one_in_progress ON public.world_turns USING btree (user_id, novel_id) WHERE (((status)::text = ''in_progress''::text) OR (((status)::text = ''completed''::text) AND ((memory_projection_status)::text = ''pending''::text)))'),
+                               ('idx_world_turns_journal', FALSE, 'CREATE INDEX idx_world_turns_journal ON public.world_turns USING btree (user_id, novel_id, completed_at DESC) WHERE ((status)::text = ''completed''::text)')
+                           ) AS expected_index(name, is_unique, definition)
                              ON pg_catalog.pg_get_indexdef(index_definition.indexrelid) = expected_index.definition
+                            AND index_definition.indisunique = expected_index.is_unique
+                            AND index_definition.indisvalid
+                            AND index_definition.indisready
+                            AND index_definition.indislive
                            JOIN pg_catalog.pg_class AS index_relation
                              ON index_relation.oid = index_definition.indexrelid
                             AND index_relation.relname = expected_index.name
@@ -138,6 +235,7 @@ impl ReadinessProbe for PgReadinessProbe {
                         ('public.world_turns'::pg_catalog.regclass, 'world_turns_pkey', 'p', 'PRIMARY KEY (id)'),
                         ('public.world_turns'::pg_catalog.regclass, 'world_turns_request_fingerprint_check', 'c', 'CHECK ((octet_length(request_fingerprint) = 32))'),
                         ('public.world_turns'::pg_catalog.regclass, 'world_turns_action_check', 'c', 'CHECK ((jsonb_typeof(action) = ''object''::text))'),
+                        ('public.world_turns'::pg_catalog.regclass, 'world_turns_resolution_check', 'c', 'CHECK (((resolution IS NULL) OR (jsonb_typeof(resolution) = ''object''::text)))'),
                         ('public.world_turns'::pg_catalog.regclass, 'world_turns_expected_turn_check', 'c', 'CHECK ((expected_turn_number >= 0))'),
                         -- The next two rows are one constraint in its two
                         -- spellings: PostgreSQL deparses CHECK (status IN (...))
@@ -149,7 +247,15 @@ impl ReadinessProbe for PgReadinessProbe {
                         ('public.world_turns'::pg_catalog.regclass, 'world_turns_status_check', 'c', 'CHECK (((status)::text = ANY ((ARRAY[''in_progress''::character varying, ''completed''::character varying, ''failed''::character varying])::text[])))'),
                         ('public.world_turns'::pg_catalog.regclass, 'world_turns_status_check', 'c', 'CHECK (((status)::text = ANY (ARRAY[(''in_progress''::character varying)::text, (''completed''::character varying)::text, (''failed''::character varying)::text])))'),
                         ('public.world_turns'::pg_catalog.regclass, 'world_turns_attempt_check', 'c', 'CHECK ((attempt >= 1))'),
-                        ('public.world_turns'::pg_catalog.regclass, 'world_turns_state_check', 'c', 'CHECK (((((status)::text = ''in_progress''::text) AND (lease_expires_at IS NOT NULL) AND (transition IS NULL) AND (result IS NULL) AND (failure_code IS NULL) AND (completed_at IS NULL)) OR (((status)::text = ''completed''::text) AND (lease_expires_at IS NULL) AND (jsonb_typeof(transition) = ''object''::text) AND (jsonb_typeof(result) = ''object''::text) AND (failure_code IS NULL) AND (completed_at IS NOT NULL)) OR (((status)::text = ''failed''::text) AND (lease_expires_at IS NULL) AND (transition IS NULL) AND (result IS NULL) AND (failure_code IS NOT NULL) AND ((failure_code)::text <> ''''::text) AND (completed_at IS NULL))))')
+                        ('public.world_turns'::pg_catalog.regclass, 'world_turns_state_check', 'c', 'CHECK (((((status)::text = ''in_progress''::text) AND (lease_expires_at IS NOT NULL) AND (transition IS NULL) AND (result IS NULL) AND (failure_code IS NULL) AND (completed_at IS NULL)) OR (((status)::text = ''completed''::text) AND (lease_expires_at IS NULL) AND (jsonb_typeof(transition) = ''object''::text) AND (jsonb_typeof(result) = ''object''::text) AND (failure_code IS NULL) AND (completed_at IS NOT NULL)) OR (((status)::text = ''failed''::text) AND (lease_expires_at IS NULL) AND (transition IS NULL) AND (result IS NULL) AND (failure_code IS NOT NULL) AND ((failure_code)::text <> ''''::text) AND (completed_at IS NULL))))'),
+                        -- These pairs have the same dump/restore spelling
+                        -- behavior as world_turns_status_check above. One row
+                        -- in each pair can match, so the expected count remains
+                        -- the number of actual constraints.
+                        ('public.world_turns'::pg_catalog.regclass, 'world_turns_memory_projection_status_check', 'c', 'CHECK (((memory_projection_status)::text = ANY ((ARRAY[''pending''::character varying, ''saved''::character varying, ''skipped''::character varying])::text[])))'),
+                        ('public.world_turns'::pg_catalog.regclass, 'world_turns_memory_projection_status_check', 'c', 'CHECK (((memory_projection_status)::text = ANY (ARRAY[(''pending''::character varying)::text, (''saved''::character varying)::text, (''skipped''::character varying)::text])))'),
+                        ('public.world_turns'::pg_catalog.regclass, 'world_turns_memory_projection_state_check', 'c', 'CHECK (((((memory_projection_status)::text = ''pending''::text) AND (memory_projection_completed_at IS NULL)) OR (((memory_projection_status)::text = ANY ((ARRAY[''saved''::character varying, ''skipped''::character varying])::text[])) AND ((status)::text = ''completed''::text) AND (memory_projection_completed_at IS NOT NULL))))'),
+                        ('public.world_turns'::pg_catalog.regclass, 'world_turns_memory_projection_state_check', 'c', 'CHECK (((((memory_projection_status)::text = ''pending''::text) AND (memory_projection_completed_at IS NULL)) OR (((memory_projection_status)::text = ANY (ARRAY[(''saved''::character varying)::text, (''skipped''::character varying)::text])) AND ((status)::text = ''completed''::text) AND (memory_projection_completed_at IS NOT NULL))))')
                     ) AS expected(relation_id, name, kind, definition)
                       ON actual.conrelid = expected.relation_id
                      AND actual.conname = expected.name

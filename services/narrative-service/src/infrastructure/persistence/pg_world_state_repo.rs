@@ -10,10 +10,13 @@ use uuid::Uuid;
 use crate::domain::entities::{
     game_rules::GameRuleTemplate,
     narrative_node::WorldState,
+    narrative_node::WorldStateError,
     player_entity::{PlayerEntity, RelationshipState},
     world_session::WorldEntryContext,
 };
 use crate::domain::repositories::WorldStateRepository;
+
+use super::ensure_choice_projection_consistent;
 
 #[derive(Debug, FromRow)]
 struct WorldStateRow {
@@ -95,9 +98,29 @@ impl WorldStateRepository for PgWorldStateRepository {
         .fetch_one(&mut *transaction)
         .await?;
         let mut world_state = WorldState::from(row);
+        ensure_choice_projection_consistent(&mut *transaction, player.user_id, player.novel_id)
+            .await?;
         if let Some(existing) = world_state.player_entity()? {
+            if existing.canonical_checkpoint_chapter != player.canonical_checkpoint_chapter
+                || !existing.matches_definition(
+                    &player.name,
+                    &player.background,
+                    &player.capabilities,
+                    &player.location_id,
+                    &player.inventory,
+                )
+                || !existing.matches_rules(&player.rules)
+            {
+                return Err(WorldStateError::TimelineConflict(
+                    "PlayerEntity was concurrently created with a different checkpoint or definition"
+                        .into(),
+                )
+                .into());
+            }
+            transaction.commit().await?;
             return Ok(existing);
         }
+        world_state.validate_world_entry_checkpoint(player.canonical_checkpoint_chapter)?;
         let legacy_relationships = world_state
             .state
             .as_object()
@@ -157,6 +180,7 @@ impl WorldStateRepository for PgWorldStateRepository {
         .fetch_one(&mut *transaction)
         .await?;
         let mut world_state = WorldState::from(row);
+        ensure_choice_projection_consistent(&mut *transaction, user_id, novel_id).await?;
         let before = world_state.state.clone();
         world_state.start_open_world_with_rules(context, game_rules)?;
         if world_state.state != before {

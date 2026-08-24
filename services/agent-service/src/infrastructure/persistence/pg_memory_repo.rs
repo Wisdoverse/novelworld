@@ -67,13 +67,46 @@ impl PgMemoryRepository {
 
 #[async_trait]
 impl MemoryRepository for PgMemoryRepository {
-    async fn exists(&self, id: Uuid) -> Result<bool> {
-        let row: (bool,) =
-            sqlx::query_as("SELECT EXISTS(SELECT 1 FROM character_memories WHERE id = $1)")
-                .bind(id)
-                .fetch_one(&self.pool)
-                .await?;
-        Ok(row.0)
+    async fn insert_if_absent(&self, memory: &Memory) -> Result<bool> {
+        let chapter_number = memory
+            .chapter_number
+            .ok_or_else(|| anyhow::anyhow!("memory chapter_number is required"))?;
+        let result = sqlx::query(
+            r#"
+            INSERT INTO character_memories (
+                id, character_id, user_id, novel_id,
+                layer, content, importance, chapter_number, embedding, created_at
+            ) VALUES ($1, $2, $3, $4, $5::memory_layer, $6, $7, $8, NULL, $9)
+            ON CONFLICT (id) DO NOTHING
+            "#,
+        )
+        .bind(memory.id)
+        .bind(memory.character_id)
+        .bind(memory.user_id)
+        .bind(memory.novel_id)
+        .bind(layer_to_str(&memory.layer))
+        .bind(&memory.content)
+        .bind(i16::try_from(memory.importance)?)
+        .bind(chapter_number)
+        .bind(memory.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn find_by_id(&self, id: Uuid) -> Result<Option<Memory>> {
+        let row = sqlx::query_as::<_, MemoryRow>(
+            r#"
+            SELECT id, character_id, user_id, novel_id,
+                   layer::text AS layer, content, importance, chapter_number, created_at
+            FROM character_memories
+            WHERE id = $1
+            "#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(Memory::from))
     }
 
     async fn save(&self, memory: &Memory) -> Result<()> {
@@ -154,6 +187,67 @@ impl MemoryRepository for PgMemoryRepository {
         Ok(rows.into_iter().map(Memory::from).collect())
     }
 
+    async fn find_permanent_candidates(
+        &self,
+        character_id: Uuid,
+        user_id: Uuid,
+        novel_id: Uuid,
+        max_chapter: i32,
+        journey_limit: i64,
+        legacy_limit: i64,
+    ) -> Result<Vec<Memory>> {
+        let rows = sqlx::query_as::<_, MemoryRow>(
+            r#"
+            WITH journey_candidates AS (
+                SELECT id, character_id, user_id, novel_id,
+                       layer::text AS layer, content, importance, chapter_number, created_at,
+                       0 AS candidate_bucket
+                FROM character_memories
+                WHERE character_id = $1 AND user_id = $2 AND novel_id = $3
+                  AND layer = 'permanent'::memory_layer
+                  AND chapter_number IS NOT NULL AND chapter_number <= $4
+                  AND (get_byte(uuid_send(id), 6) >> 4) = 5
+                ORDER BY created_at DESC, id DESC
+                LIMIT $5
+            ),
+            legacy_candidates AS (
+                SELECT id, character_id, user_id, novel_id,
+                       layer::text AS layer, content, importance, chapter_number, created_at,
+                       1 AS candidate_bucket
+                FROM character_memories
+                WHERE character_id = $1 AND user_id = $2 AND novel_id = $3
+                  AND layer = 'permanent'::memory_layer
+                  AND chapter_number IS NOT NULL AND chapter_number <= $4
+                  AND (get_byte(uuid_send(id), 6) >> 4) <> 5
+                  AND NOT (
+                      (get_byte(uuid_send(id), 6) >> 4) = 4
+                      AND importance = 7
+                  )
+                ORDER BY importance DESC, created_at DESC, id DESC
+                LIMIT $6
+            )
+            SELECT id, character_id, user_id, novel_id,
+                   layer, content, importance, chapter_number, created_at
+            FROM (
+                SELECT * FROM journey_candidates
+                UNION ALL
+                SELECT * FROM legacy_candidates
+            ) AS candidates
+            ORDER BY candidate_bucket, importance DESC, created_at DESC, id DESC
+            "#,
+        )
+        .bind(character_id)
+        .bind(user_id)
+        .bind(novel_id)
+        .bind(max_chapter)
+        .bind(journey_limit)
+        .bind(legacy_limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(Memory::from).collect())
+    }
+
     async fn search_similar(
         &self,
         character_id: Uuid,
@@ -185,6 +279,11 @@ impl MemoryRepository for PgMemoryRepository {
               AND chapter_number <= $5
               AND embedding IS NOT NULL
               AND layer IN ('long', 'permanent')
+              AND NOT (
+                  layer = 'permanent'::memory_layer
+                  AND importance = 7
+                  AND (get_byte(uuid_send(id), 6) >> 4) = 4
+              )
             ORDER BY embedding <=> $4::vector
             LIMIT $6
             "#,

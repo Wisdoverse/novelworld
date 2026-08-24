@@ -7,9 +7,12 @@ use uuid::Uuid;
 use crate::domain::{
     entities::{narrative_node::WorldState, world_session::WorldEntryContext},
     repositories::{
-        BeginWorldTurn, WorldTurnClaim, WorldTurnJournalEntry, WorldTurnRepository, WorldTurnResult,
+        BeginWorldTurn, MemoryProjectionStatus, WorldTurnClaim, WorldTurnJournalEntry,
+        WorldTurnRepository, WorldTurnResult,
     },
 };
+
+use super::ensure_choice_projection_consistent;
 
 const ACTIVE_TURN_INDEX: &str = "idx_world_turns_one_in_progress";
 
@@ -29,6 +32,7 @@ struct WorldTurnRow {
     status: String,
     attempt: i64,
     failure_code: Option<String>,
+    memory_projection_status: String,
     lease_expired: bool,
     result: Option<serde_json::Value>,
 }
@@ -43,7 +47,8 @@ impl WorldTurnRow {
             && self.user_id == claim.user_id
             && self.novel_id == claim.novel_id
             && self.request_fingerprint == claim.request_fingerprint
-            && self.action()? == claim.action)
+            && self.action()? == claim.action
+            && self.expected_turn_number == claim.expected_turn_number)
     }
 
     fn resolution(&self) -> Result<Option<crate::domain::entities::game_rules::ActionCheck>> {
@@ -91,6 +96,7 @@ impl From<WorldStateRow> for WorldState {
 struct JournalRow {
     id: Uuid,
     turn_number: i64,
+    memory_projection_status: String,
     action: serde_json::Value,
     resolution: Option<serde_json::Value>,
     transition: serde_json::Value,
@@ -148,6 +154,7 @@ impl PgWorldTurnRepository {
             r#"
             SELECT id, user_id, novel_id, request_fingerprint, action, resolution,
                    expected_turn_number, status, attempt, failure_code,
+                   memory_projection_status,
                    COALESCE(lease_expires_at <= NOW(), FALSE) AS lease_expired,
                    result
             FROM world_turns
@@ -185,6 +192,7 @@ impl PgWorldTurnRepository {
 impl WorldTurnRepository for PgWorldTurnRepository {
     async fn begin_turn(&self, claim: &WorldTurnClaim) -> Result<BeginWorldTurn> {
         validate_claim(claim)?;
+        ensure_choice_projection_consistent(&self.pool, claim.user_id, claim.novel_id).await?;
         for _ in 0..2 {
             let action = serde_json::to_value(&claim.action)?;
             let resolution = claim
@@ -244,9 +252,13 @@ impl WorldTurnRepository for PgWorldTurnRepository {
             }
             let persisted_claim = row.claim()?;
             if row.status == "completed" {
-                return Ok(BeginWorldTurn::Completed(Box::new(Self::completed_result(
-                    &row,
-                )?)));
+                let memory_projection =
+                    MemoryProjectionStatus::from_str(&row.memory_projection_status)
+                        .context("completed world turn has invalid memory projection status")?;
+                return Ok(BeginWorldTurn::Completed {
+                    result: Box::new(Self::completed_result(&row)?),
+                    memory_projection,
+                });
             }
             if row.status == "in_progress" && !row.lease_expired {
                 return Ok(BeginWorldTurn::InProgress {
@@ -286,6 +298,9 @@ impl WorldTurnRepository for PgWorldTurnRepository {
             {
                 Ok(value) => value,
                 Err(error) if is_active_turn_conflict(&error) => {
+                    if self.supersede_expired_turn(claim).await? {
+                        continue;
+                    }
                     return Ok(BeginWorldTurn::InProgress {
                         retry_after_seconds: self.active_retry_after(claim).await?,
                     });
@@ -336,6 +351,7 @@ impl WorldTurnRepository for PgWorldTurnRepository {
             r#"
             SELECT id, user_id, novel_id, request_fingerprint, action, resolution,
                    expected_turn_number, status, attempt, failure_code,
+                   memory_projection_status,
                    COALESCE(lease_expires_at <= NOW(), FALSE) AS lease_expired,
                    result
             FROM world_turns
@@ -362,6 +378,8 @@ impl WorldTurnRepository for PgWorldTurnRepository {
         .fetch_one(&mut *transaction)
         .await?;
         let mut world_state = WorldState::from(state_row);
+        ensure_choice_projection_consistent(&mut *transaction, claim.user_id, claim.novel_id)
+            .await?;
         let session = world_state
             .open_world()?
             .context("world session has not started")?;
@@ -453,6 +471,41 @@ impl WorldTurnRepository for PgWorldTurnRepository {
         Ok(result.rows_affected() == 1)
     }
 
+    async fn finish_memory_projection(
+        &self,
+        turn_id: Uuid,
+        user_id: Uuid,
+        novel_id: Uuid,
+        status: MemoryProjectionStatus,
+    ) -> Result<bool> {
+        ensure!(
+            status.is_terminal(),
+            "memory projection status must be terminal"
+        );
+        let value = status.to_str();
+        let result = sqlx::query(
+            r#"
+            UPDATE world_turns
+            SET memory_projection_status = $4,
+                memory_projection_completed_at = COALESCE(
+                    memory_projection_completed_at,
+                    NOW()
+                ),
+                updated_at = NOW()
+            WHERE id = $1 AND user_id = $2 AND novel_id = $3
+              AND status = 'completed'
+              AND memory_projection_status IN ('pending', $4)
+            "#,
+        )
+        .bind(turn_id)
+        .bind(user_id)
+        .bind(novel_id)
+        .bind(value)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     async fn journal(
         &self,
         user_id: Uuid,
@@ -462,10 +515,11 @@ impl WorldTurnRepository for PgWorldTurnRepository {
         ensure!((1..=100).contains(&limit), "journal limit must be 1-100");
         let rows = sqlx::query_as::<_, JournalRow>(
             r#"
-            SELECT id, turn_number, action, resolution, transition, created_at, completed_at
+            SELECT id, turn_number, memory_projection_status,
+                   action, resolution, transition, created_at, completed_at
             FROM (
                 SELECT id, expected_turn_number + 1 AS turn_number, action, resolution,
-                       transition, created_at, completed_at
+                       transition, memory_projection_status, created_at, completed_at
                 FROM world_turns
                 WHERE user_id = $1 AND novel_id = $2 AND status = 'completed'
                 ORDER BY expected_turn_number DESC
@@ -484,6 +538,10 @@ impl WorldTurnRepository for PgWorldTurnRepository {
                 Ok(WorldTurnJournalEntry {
                     turn_id: row.id,
                     turn_number: row.turn_number,
+                    memory_projection_status: MemoryProjectionStatus::from_str(
+                        &row.memory_projection_status,
+                    )
+                    .context("journal contains invalid memory projection status")?,
                     action: serde_json::from_value(row.action)?,
                     resolution: row.resolution.map(serde_json::from_value).transpose()?,
                     transition: serde_json::from_value(row.transition)?,

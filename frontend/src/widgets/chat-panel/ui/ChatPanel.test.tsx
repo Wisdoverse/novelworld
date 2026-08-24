@@ -1,7 +1,10 @@
 import React from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { useChatStore } from '@/features/character-chat/model/useChatStore';
+import {
+  chatSessionKey,
+  useChatStore,
+} from '@/features/character-chat/model/useChatStore';
 import type { Character, ChatMessage } from '@/shared/types';
 import { ChatMarkdown, ChatPanel, mergeVisibleChatMessages } from './ChatPanel';
 
@@ -12,13 +15,24 @@ const mocks = vi.hoisted(() => ({
     isError: false,
     refetch: vi.fn(),
   },
+  historyByScope: {} as Record<string, ChatMessage[]>,
   historyEnabled: false,
+  historyScope: '',
 }));
 
 vi.mock('@/features/character-chat/api/useChatHistory', () => ({
-  useChatHistory: (_characterId: string, _chapter: number, enabled: boolean) => {
+  useChatHistory: (
+    _characterId: string,
+    _chapter: number,
+    identityScope: string,
+    enabled: boolean,
+  ) => {
     mocks.historyEnabled = enabled;
-    return mocks.history;
+    mocks.historyScope = identityScope;
+    return {
+      ...mocks.history,
+      data: mocks.historyByScope[identityScope] ?? mocks.history.data,
+    };
   },
 }));
 
@@ -43,12 +57,16 @@ describe('ChatMarkdown', () => {
 });
 
 describe('ChatPanel history', () => {
+  const selfSession = chatSessionKey(character.id, 'self');
+
   beforeEach(() => {
     mocks.history.data = [];
     mocks.history.isLoading = false;
     mocks.history.isError = false;
     mocks.history.refetch.mockReset();
+    mocks.historyByScope = {};
     mocks.historyEnabled = false;
+    mocks.historyScope = '';
     useChatStore.getState().reset();
   });
 
@@ -77,6 +95,7 @@ describe('ChatPanel history', () => {
         character={character}
         novelId="novel"
         currentChapter={1}
+        readerIdentityScope="self"
         canChat
         isOpen
         onClose={() => undefined}
@@ -95,6 +114,7 @@ describe('ChatPanel history', () => {
         character={character}
         novelId="novel"
         currentChapter={2}
+        readerIdentityScope="self"
         canChat={false}
         isOpen
         onClose={() => undefined}
@@ -114,13 +134,14 @@ describe('ChatPanel history', () => {
       created_at: '2026-08-23T00:00:00Z',
     };
     mocks.history.data = [oldMessage];
-    useChatStore.setState({ messages: { character: [oldMessage] } });
+    useChatStore.setState({ messages: { [selfSession]: [oldMessage] } });
 
     const { container } = render(
       <ChatPanel
         character={character}
         novelId="new-novel"
         currentChapter={1}
+        readerIdentityScope="self"
         canChat
         isOpen
         onClose={() => undefined}
@@ -135,13 +156,14 @@ describe('ChatPanel history', () => {
   it('cancels and hides a stream created in another chapter', async () => {
     const cancel = vi.fn();
     useChatStore.setState({
-      streamingText: { character: '第二章的未来内容' },
-      isStreaming: { character: true },
-      cancelStream: { character: cancel },
-      activeTurnId: { character: 'turn-2' },
+      streamingText: { [selfSession]: '第二章的未来内容' },
+      isStreaming: { [selfSession]: true },
+      cancelStream: { [selfSession]: cancel },
+      activeTurnId: { [selfSession]: 'turn-2' },
       activeTurn: {
-        character: {
+        [selfSession]: {
           turnId: 'turn-2',
+          sessionKey: selfSession,
           characterId: 'character',
           payload: {
             novel_id: 'novel',
@@ -157,6 +179,7 @@ describe('ChatPanel history', () => {
         character={character}
         novelId="novel"
         currentChapter={1}
+        readerIdentityScope="self"
         canChat
         isOpen
         onClose={() => undefined}
@@ -170,13 +193,14 @@ describe('ChatPanel history', () => {
   it('cancels and hides a stream from another novel at the same chapter', async () => {
     const cancel = vi.fn();
     useChatStore.setState({
-      streamingText: { character: '另一部小说的内容' },
-      isStreaming: { character: true },
-      cancelStream: { character: cancel },
-      activeTurnId: { character: 'turn-old-novel' },
+      streamingText: { [selfSession]: '另一部小说的内容' },
+      isStreaming: { [selfSession]: true },
+      cancelStream: { [selfSession]: cancel },
+      activeTurnId: { [selfSession]: 'turn-old-novel' },
       activeTurn: {
-        character: {
+        [selfSession]: {
           turnId: 'turn-old-novel',
+          sessionKey: selfSession,
           characterId: 'character',
           payload: {
             novel_id: 'old-novel',
@@ -192,6 +216,7 @@ describe('ChatPanel history', () => {
         character={{ ...character, novel_id: 'new-novel' }}
         novelId="new-novel"
         currentChapter={1}
+        readerIdentityScope="self"
         canChat
         isOpen
         onClose={() => undefined}
@@ -201,5 +226,85 @@ describe('ChatPanel history', () => {
     expect(screen.queryByText('另一部小说的内容')).toBeNull();
     await waitFor(() => expect(cancel).toHaveBeenCalledOnce());
     expect(screen.queryByRole('button', { name: '重试' })).toBeNull();
+  });
+
+  it('hides cached messages in the same render when reader identity changes', () => {
+    const base = {
+      role: 'user' as const,
+      character_id: character.id,
+      chapter_context: 1,
+      created_at: '2026-08-23T00:00:00Z',
+    };
+    const selfMessage = { ...base, id: 'self', content: 'self-only marker' };
+    const characterAMessage = { ...base, id: 'a', content: 'character-a marker' };
+    const characterASession = chatSessionKey(character.id, 'character:a');
+
+    mocks.historyByScope.self = [selfMessage];
+    useChatStore.setState({
+      messages: {
+        [selfSession]: [selfMessage],
+        [characterASession]: [characterAMessage],
+      },
+    });
+
+    const { rerender } = render(
+      <ChatPanel
+        character={character}
+        novelId="novel"
+        currentChapter={1}
+        readerIdentityScope="self"
+        canChat
+        isOpen
+        onClose={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText('self-only marker')).toBeTruthy();
+
+    rerender(
+      <ChatPanel
+        character={character}
+        novelId="novel"
+        currentChapter={1}
+        readerIdentity="角色甲"
+        readerIdentityScope="character:a"
+        canChat
+        isOpen
+        onClose={() => undefined}
+      />,
+    );
+
+    expect(mocks.historyScope).toBe('character:a');
+    expect(screen.queryByText('self-only marker')).toBeNull();
+    expect(screen.getByText('character-a marker')).toBeTruthy();
+
+    rerender(
+      <ChatPanel
+        character={character}
+        novelId="novel"
+        currentChapter={1}
+        readerIdentity="角色甲（新显示名）"
+        readerIdentityScope="character:a"
+        canChat
+        isOpen
+        onClose={() => undefined}
+      />,
+    );
+    expect(screen.getByText('character-a marker')).toBeTruthy();
+
+    rerender(
+      <ChatPanel
+        character={character}
+        novelId="novel"
+        currentChapter={1}
+        readerIdentity="角色乙"
+        readerIdentityScope="character:b"
+        canChat
+        isOpen
+        onClose={() => undefined}
+      />,
+    );
+    expect(mocks.historyScope).toBe('character:b');
+    expect(screen.queryByText('character-a marker')).toBeNull();
   });
 });

@@ -60,6 +60,7 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
   const [intent, setIntent] = useState('');
   const targetOptions = useMemo(() => targets(view, kind), [kind, view]);
   const targetRequired = kind !== 'pursue_goal';
+  const controlsDisabled = isPending || isLocked;
   const selectedTarget = targetOptions.some(option => option.id === targetId)
     ? targetId
     : targetRequired ? targetOptions[0]?.id ?? '' : '';
@@ -74,7 +75,7 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (targetRequired && !selectedTarget) return;
+    if (controlsDisabled || (targetRequired && !selectedTarget)) return;
     try {
       await onSubmit({
         kind,
@@ -96,6 +97,7 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
         行动
         <select
           className="field-control mt-1"
+          disabled={controlsDisabled}
           value={kind}
           onChange={event => {
             setKind(event.target.value as WorldActionKind);
@@ -118,6 +120,7 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
         目标{targetRequired ? '' : '（可选）'}
         <select
           className="field-control mt-1"
+          disabled={controlsDisabled}
           value={selectedTarget}
           onChange={event => setTargetId(event.target.value)}
           required={targetRequired}
@@ -137,6 +140,7 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
         你的意图
         <textarea
           className="field-control mt-1"
+          disabled={controlsDisabled}
           value={intent}
           onChange={event => setIntent(event.target.value)}
           maxLength={500}
@@ -146,7 +150,7 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
       </label>
       <button
         type="submit"
-        disabled={isPending || isLocked || !intent.trim() || (targetRequired && !selectedTarget)}
+        disabled={controlsDisabled || !intent.trim() || (targetRequired && !selectedTarget)}
         className="primary-action"
       >
         {isPending ? '世界正在回应…' : '执行行动'}

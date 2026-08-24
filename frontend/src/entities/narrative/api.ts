@@ -50,17 +50,34 @@ export function isNarrativeChoiceConflict(error: unknown) {
   return getApiErrorCode(error) === 'choice_conflict';
 }
 
+class WorldTurnConfirmationUnknownError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WorldTurnConfirmationUnknownError';
+  }
+}
+
 export function isWorldTurnOutcomeUnknown(error: unknown) {
-  if (!axios.isAxiosError(error) || !error.response) return true;
+  if (error instanceof WorldTurnConfirmationUnknownError) return true;
+  if (!axios.isAxiosError(error)) return false;
+  if (!error.response) return true;
   const code = getApiErrorCode(error);
   return code === 'turn_in_progress'
     || code === 'turn_outcome_unknown'
+    || code === 'reading_progress_behind_world'
     || error.response.status >= 500;
 }
 
 export const narrativeKeys = {
   node: (novelId: string, chapter: number) => ['narrative', novelId, 'node', chapter] as const,
-  chapter: (novelId: string, chapter: number) => ['narrative', novelId, 'chapter', chapter] as const,
+  chapter: (
+    novelId: string,
+    chapter: number,
+    identityScope: string,
+    progressBoundary: number,
+  ) => [
+    'narrative', novelId, 'chapter', chapter, identityScope, progressBoundary,
+  ] as const,
   worldState: (novelId: string) => ['narrative', novelId, 'world-state'] as const,
   playerEntry: (novelId: string, checkpoint?: number) => [
     'narrative', novelId, 'player-entry', checkpoint ?? 'current',
@@ -115,19 +132,30 @@ export function useCreatePlayerEntity(novelId: string) {
     mutationFn: (input: CreatePlayerEntityInput) => apiClient
       .put<PlayerEntry>(`/narrative/${novelId}/player-entry`, input)
       .then(response => response.data),
-    onSuccess: (entry) => {
-      queryClient.setQueryData(
-        narrativeKeys.playerEntry(novelId, entry.checkpoint_chapter),
-        entry,
-      );
-      void queryClient.invalidateQueries({ queryKey: narrativeKeys.worldState(novelId) });
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: ['narrative', novelId, 'player-entry'],
+          refetchType: 'active',
+        }),
+        queryClient.invalidateQueries({
+          queryKey: narrativeKeys.worldState(novelId),
+          refetchType: 'active',
+        }),
+      ]);
     },
   });
 }
 
-export function useEffectiveChapter(novelId: string, chapter: number, enabled: boolean) {
+export function useEffectiveChapter(
+  novelId: string,
+  chapter: number,
+  identityScope: string,
+  progressBoundary: number,
+  enabled: boolean,
+) {
   return useQuery({
-    queryKey: narrativeKeys.chapter(novelId, chapter),
+    queryKey: narrativeKeys.chapter(novelId, chapter, identityScope, progressBoundary),
     queryFn: () => apiClient
       .get<EffectiveChapter>(`/narrative/${novelId}/chapters/${chapter}`, { timeout: 5 * 60_000 })
       .then(response => response.data),
@@ -181,9 +209,17 @@ export function useStartOpenWorld(novelId: string) {
     mutationFn: () => apiClient
       .post<OpenWorldView>(`/narrative/${novelId}/world`)
       .then(response => response.data),
-    onSuccess: view => {
-      queryClient.setQueryData(narrativeKeys.openWorld(novelId), view);
-      queryClient.setQueryData(narrativeKeys.worldState(novelId), view.world_state);
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: narrativeKeys.openWorld(novelId),
+          refetchType: 'active',
+        }),
+        queryClient.invalidateQueries({
+          queryKey: narrativeKeys.worldState(novelId),
+          refetchType: 'active',
+        }),
+      ]);
     },
   });
 }
@@ -191,20 +227,61 @@ export function useStartOpenWorld(novelId: string) {
 export function useSubmitWorldTurn(novelId: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ action, idempotencyKey }: {
+    mutationFn: ({ action, idempotencyKey, expectedTurnNumber }: {
       action: WorldAction;
       idempotencyKey: string;
+      expectedTurnNumber: number;
     }) => apiClient
-      .post<WorldTurnResult>(`/narrative/${novelId}/world/turns`, action, {
+      .post<WorldTurnResult>(`/narrative/${novelId}/world/turns`, {
+        ...action,
+        expected_turn_number: expectedTurnNumber,
+      }, {
         headers: { 'Idempotency-Key': idempotencyKey },
         timeout: 120_000,
       })
       .then(response => response.data),
-    onSuccess: result => {
-      queryClient.setQueryData(narrativeKeys.worldState(novelId), result.world_state);
-      void queryClient.invalidateQueries({ queryKey: narrativeKeys.openWorld(novelId) });
+    onSuccess: async result => {
+      const openWorldKey = narrativeKeys.openWorld(novelId);
+      const projectionIsTerminal = result.memory_projection_status === 'saved'
+        || result.memory_projection_status === 'skipped';
+      try {
+        await queryClient.invalidateQueries(
+          { queryKey: openWorldKey, refetchType: 'active' },
+          { throwOnError: true },
+        );
+      } catch {
+        // The POST already committed. A rejected confirmation GET must never
+        // be reclassified as a terminal rejection that unlocks a new action.
+        throw new WorldTurnConfirmationUnknownError('已提交行动尚无法从最新世界状态确认');
+      }
+      await queryClient.invalidateQueries({
+        queryKey: narrativeKeys.worldState(novelId),
+        refetchType: 'active',
+      });
+      // A terminal POST is authoritative even after its turn falls outside the
+      // bounded journal, but the active view must still advance before the
+      // form unlocks and accepts an action based on that view.
+      if (projectionIsTerminal) return;
+      const view = queryClient.getQueryData<OpenWorldView | null>(openWorldKey);
+      const journalEntry = view?.journal.find(entry => entry.turn_id === result.turn_id);
+      if (!journalEntry) {
+        throw new WorldTurnConfirmationUnknownError('已提交行动尚未出现在最新世界状态中');
+      }
+      if (journalEntry.memory_projection_status !== 'saved'
+        && journalEntry.memory_projection_status !== 'skipped') {
+        throw new WorldTurnConfirmationUnknownError('已提交行动的记忆投影尚未确认');
+      }
     },
     onError: async error => {
+      if (getApiErrorCode(error) === 'turn_in_progress') {
+        // Another key owns the single unresolved authority slot. Refresh so
+        // the journal can replace this tab's stale request with that exact turn.
+        await queryClient.invalidateQueries({
+          queryKey: narrativeKeys.openWorld(novelId),
+          refetchType: 'active',
+        }).catch(() => undefined);
+        return;
+      }
       if (!isWorldTurnOutcomeUnknown(error)) {
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: narrativeKeys.worldState(novelId) }),
@@ -225,13 +302,17 @@ export function useSubmitNarrativeChoice(novelId: string) {
         choice_index: input.choiceIndex,
       }, { timeout: 120_000 })
       .then(response => response.data),
-    onSuccess: (result) => {
-      queryClient.setQueryData(narrativeKeys.worldState(novelId), result.world_state);
-      queryClient.setQueryData(narrativeKeys.chapter(novelId, result.chapter_number), {
-        chapter_number: result.chapter_number,
-        content: result.chapter_content,
-        generated: true,
-      } satisfies EffectiveChapter);
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: narrativeKeys.worldState(novelId),
+          refetchType: 'active',
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ['narrative', novelId, 'chapter'],
+          refetchType: 'active',
+        }),
+      ]);
     },
     onError: async (error) => {
       if (axios.isAxiosError(error) && error.response?.status === 409) {

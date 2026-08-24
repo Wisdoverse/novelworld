@@ -281,16 +281,38 @@ pair so that each reader maintains a private relationship with each character.
 
 Fields:
 
-- `id` (UUID v4)
+- `id` (UUID)
+  - Version 4 by default. A permanent fact projected from a committed world
+    turn uses a deterministic UUID v5 derived from that turn's UUID v4 under a
+    private fixed namespace; it MUST NOT reuse the client-controlled turn UUID
+    directly.
 - `character_id` (UUID, foreign key → Character)
 - `user_id` (UUID, foreign key → User)
 - `layer` (enum: `short` | `mid` | `long` | `permanent`)
 - `content` (text)
-  - Natural language description of the memory.
+  - Memory data. A new committed-world-turn permanent fact is bounded JSON
+    containing only facts with explicit provenance for its target character:
+    the reader action only when its kind is character-directed (`converse`,
+    `ally`, or `oppose`) and its target is that character UUID, events only
+    when their actor list names that character, and relationship mutations
+    only for that character. A UUID collision in a location or thread target
+    MUST NOT count as character witness. Other turn mutations and generated
+    narrative prose MUST NOT be promoted into that character's memory.
+    A consumer MUST NOT classify content as an authoritative committed-world
+    fact from JSON fields alone. It MUST also verify the deterministic UUID v5
+    against the embedded source-turn UUID and the local layer, importance,
+    character/user/novel, witness, and chapter-scope metadata; an unverified
+    row that claims the committed-world protocol MUST be rejected at ingress
+    before persistence and omitted from authoritative retrieval. The internal
+    write endpoint MUST return success only after this complete gate passes and
+    the canonical fact is inserted or an exact durable replay is confirmed;
+    malformed counts/shape, witness or scope drift, a non-deterministic ID,
+    unknown fields, and importance other than 7 return `422` with no write.
 - `importance` (integer, 1–10)
   - Higher values survive compression longer.
 - `embedding` (vector(1536) or null)
-  - Semantic embedding for similarity search. REQUIRED for `long` and `permanent` layers.
+  - Semantic embedding for similarity search. REQUIRED for `long`; optional for
+    `permanent`, whose durable fact remains directly retrievable without it.
 - `access_count` (integer)
   - Incremented each time this memory is retrieved during prompt construction.
 - `last_accessed` (timestamptz or null)
@@ -444,7 +466,9 @@ Constraint: unique on `(user_id, novel_id)`.
 
 ### 4.2 Normalization Rules
 
-- All UUIDs MUST be version 4 unless otherwise specified.
+- All UUIDs MUST be version 4 unless otherwise specified. The deterministic
+  permanent-memory projection ID in §4.1.5 is the only current version-5
+  exception.
 - All timestamps MUST be stored as `TIMESTAMPTZ` (UTC-normalized).
 - `chapter_number` is 1-indexed throughout the system.
 - Character `name` comparisons for deduplication MUST be case-insensitive.
@@ -686,7 +710,7 @@ The memory pyramid has four layers. Each layer has distinct characteristics:
 | `short` | PostgreSQL messages + bounded Redis projection | 50 projected messages | Recency | Account/novel lifecycle |
 | `mid` | PostgreSQL | Implementation-defined | Recency + Importance | Account/novel lifecycle |
 | `long` | PostgreSQL + pgvector | Implementation-defined | Semantic similarity | Account/novel lifecycle |
-| `permanent` | PostgreSQL + pgvector | Implementation-defined | Semantic similarity + Importance | No automatic eviction; account/novel lifecycle still applies |
+| `permanent` | PostgreSQL + optional pgvector projection | Implementation-defined | Bounded direct candidates (journey recency plus legacy importance/recency) + optional semantic similarity | No automatic eviction; account/novel lifecycle still applies |
 
 #### 6.2.1 Short-Term Layer
 
@@ -701,7 +725,9 @@ The memory pyramid has four layers. Each layer has distinct characteristics:
 - Contains compressed summaries of past conversation sessions.
 - Created by the Compression Pipeline from short-term entries.
 - Retrieved by recency and importance score during prompt construction.
-- Production promotion to long-term memory is an H3 gap.
+- Each created mid-term summary attempts best-effort promotion to a 1536-dim
+  embedded long-term entry. An unavailable or incompatible embedding leaves the
+  mid-term summary intact.
 
 #### 6.2.3 Long-Term Layer
 
@@ -714,8 +740,46 @@ The memory pyramid has four layers. Each layer has distinct characteristics:
 - Contains immutable facts: the reader's name, major choices, and critical relationship events.
 - Entries in this layer MUST NOT be compressed or removed by memory maintenance.
 - Novel or account deletion MUST erase them under the data-lifecycle contract.
-- Each entry MUST have an `embedding` vector.
-- Retrieved via cosine similarity search, weighted by `importance`.
+- The committed fact MUST be stored before embedding generation. Embedding is
+  an optional search projection; provider failure or an incompatible vector
+  MUST NOT discard the fact.
+- Retrieved directly within the reader's chapter boundary and, when a valid
+  embedding exists, optionally via cosine similarity. Directly included IDs
+  MUST NOT be duplicated by semantic retrieval.
+- A world-turn fact's chapter coordinate MUST be the committed session's
+  `entry_context.unlocked_through_chapter`, not merely its player checkpoint,
+  because any validated mutation may have been influenced by canon up to that
+  source high-water mark. A later reading-progress rewind MUST therefore
+  exclude that fact until the boundary is unlocked again.
+- At first adoption, upgrade migration MUST mark every pre-contract completed
+  world turn terminal `skipped`; old output has no trustworthy character-
+  witness provenance and MUST NOT be promoted into a new structured fact.
+  Migration MUST retain pre-contract memory rows for export and ordinary
+  lifecycle deletion rather than guess an unavailable historical protagonist.
+  Every Agent prompt-consumer path MUST quarantine the old producer class
+  (`permanent`, importance 7, UUID version nibble 4) from direct and semantic
+  retrieval. The quarantine deliberately does not require an RFC UUID variant,
+  because the former producer accepted any UUID with version nibble 4. This
+   conservative boundary can hide a legitimate legacy row in the same narrow
+   class, but MUST NOT delete it or fabricate a replacement historical fact.
+- An authenticated committed-world-turn fact MUST enter direct or semantic
+  prompt memory only when the persisted conversation-turn identity snapshot is
+  `self`. Until memory records carry durable reader-identity provenance, a
+  `character` turn MUST omit every direct `mid`/`long`/`permanent` and semantic
+  memory candidate and MUST NOT create a summary or other derived memory
+  projection. This deliberately sacrifices unprovable continuity rather than
+  leak self-mode or another-character context.
+- A committed-world-turn fact MUST be scoped to the deterministic protagonist
+  only when that protagonist is explicitly named by a direct UUID action
+  target, an event's `actor_character_ids`, or a relationship mutation. No
+  protagonist, or no such witness evidence, produces a terminal `skipped`
+  projection rather than inferred character knowledge. The stored payload MUST
+  then be filtered to that same evidence: a directly targeted action's
+  observable kind and target UUID, events
+  naming the protagonist as actor, and that protagonist's relationship
+  changes only. The reader's free-form `intent` is private motivation, not
+  witnessed dialogue, and MUST NOT cross into character memory. Witnessing one part of a turn MUST NOT expose unrelated event,
+  knowledge, inventory, location, thread, faction, or canon-event mutations.
 
 ### 6.3 Compression Pipeline
 
@@ -729,8 +793,23 @@ Steps:
    emotional tone, and relationship developments.
 3. Store the summary as a new `mid` layer entry with bounded importance.
 4. Keep committed chat messages in PostgreSQL; the Redis projection remains bounded independently.
-5. Long-term and permanent promotion is not part of the current production path and remains an H3
-   requirement.
+5. Attempt best-effort 1536-dim long-term promotion of the new mid summary.
+   Separately, every committed open-world turn stores a durable projection
+   status on its `world_turns` row: `pending` until a protagonist-scoped
+   permanent fact is acknowledged as `saved`, or eligibility is conclusively
+   recorded as `skipped`. A same-key replay MUST compensate `pending` using the
+   same deterministic memory ID. Narrative may record `saved` only after Agent
+   returns success for a fully authenticated insert or exact durable replay;
+   parsing a JSON-shaped payload or reserving an unauthenticated row is not an
+   acknowledgement. `saved` and `skipped` are terminal and MUST
+   replay the committed result without an Agent Service call. After projection
+   returns either terminal candidate but before acknowledging it on the turn
+   row, Narrative MUST recheck the committed world's source high-water against
+   current server-owned progress. A concurrent rewind MUST return the content-free
+   `reading_progress_behind_world` error and leave the row `pending`; restoring
+   progress allows the same key to compensate without another world generation
+   or commit. There is no
+   current autonomous reconciliation scan for an abandoned `pending` row.
 
 ### 6.4 Prompt Construction
 
@@ -738,19 +817,69 @@ Before invoking the LLM for a conversation turn, the Agent Service MUST construc
 follows:
 
 1. **System prompt**: character identity block (§6.1).
-2. **Memory block**: retrieved memories formatted as a `<memories>` XML block:
-   - All `permanent` layer entries (always included).
-   - Top-K `long` layer entries by cosine similarity to the current user message (K = 5).
-   - Most recent N `mid` layer entries (N = 3).
-   - Most recent M `short` layer entries (M = `memory.short_term_limit`, default 10).
-3. **World state block**: the reader's `WorldState.state` formatted as a `<world_state>` XML block.
-4. **Conversation history**: the last `agent.context_window_turns` (default: 20) `ChatMessage`
-   records for this `(character_id, user_id)` pair, in chronological order.
-5. **User message**: the current reader input.
+2. **Memory data blocks**: in `self` mode, bounded JSON explicitly labeled as
+   untrusted data, never as instructions:
+   - Bounded directly retrieved `permanent` entries within the server-owned
+     chapter boundary. Authenticated committed-world facts are selected before
+     legacy prose consumes the permanent-memory character budget; at least the
+     newest eligible fact MUST remain whole when one fits the block, and the
+     selected facts are emitted in causal turn order after any legacy text.
+   - Bounded `long`/`permanent` semantic results when a compatible query
+     embedding is available, excluding permanent IDs already included directly.
+   - Bounded recent/important `mid` entries.
+   A `character` turn MUST omit this entire block until each candidate has
+   durable identity provenance, and MUST NOT project that turn into the
+   unscoped memory layers.
+3. **Conversation history**: bounded recent committed PostgreSQL `ChatMessage`
+   records within the chapter boundary, in chronological order. Scope MUST be
+   applied in PostgreSQL before ordering and limiting: `self` admits completed
+   self claims plus legacy messages without a persisted identity claim, while
+   `character` admits only completed claims whose `reader_character_id` exactly
+   matches that turn's persisted identity snapshot. Failed, incomplete,
+   other-character, self, and unprovenanced rows MUST be absent from a character
+   prompt. Redis is only a projection and is not prompt authority.
+4. **Source and reader context**: bounded chapter-visible lore, persisted
+   progress, identity, and deviation mode.
+5. **World context**: Agent MUST attempt this lookup only when the persisted
+   conversation-turn identity snapshot is `self`; a `character` turn MUST omit
+   the lookup even if the current downstream identity changes concurrently.
+   After open-world entry, Narrative may return a bounded,
+   server-committed transport DTO. After validating its scope and bounds, Agent
+   MUST build a separate provider-facing allowlist containing only world
+   time/turn, that character's numeric relationship score and goals, a canonical
+   event naming that character, directly targeted recent player actions, and
+   actor-listed recent player events. Routing UUIDs, protocol/model metadata,
+   player name/location, branch choices, active threads, relationship-change
+   prose, perception, and model-generated reasons MUST NOT be sent to the
+   provider. Those fields have no independent per-character witness provenance
+   in this version and are therefore omitted rather than
+   treated as character knowledge. Structured action fields are authoritative
+   facts; rendered narrative fields are labeled as generated projections and
+  cannot override structured state or agency. Free-form player `intent` is not
+  character-visible and MUST be omitted. A recent action supplied
+   to a character MUST have a character-directed kind (`converse`, `ally`, or
+   `oppose`) whose target is that character UUID. Events use their separately
+   filtered fields, while relationship context exposes only its numeric score,
+   rather than exposing an originating action or private intent. A supplied player-origin event MUST list the character in its own
+   `actor_character_ids`, and the Agent consumer MUST reject an event that does
+   not name the requested character. The world view MUST carry the committed
+   session's `entry_context.unlocked_through_chapter` as its canonical source
+   high-water mark. If that mark is absent during a rolling deploy or exceeds
+   current server-owned reading progress, the Agent MUST omit the entire world
+   view before provider invocation, including after reading progress is
+   rewound. Agent requests for this view MUST declare
+   `X-World-Context-Version: 2`; Narrative MUST return no view to an
+   authenticated older consumer that omits or changes that version. Thus either
+   mixed-version direction degrades to no world context rather than exposing an
+   unbounded view. Narrative and Agent MUST each enforce the character-directed
+   action kind and target UUID before provider invocation. The current
+   structural visibility model does not infer line of sight, location
+   propagation, or social knowledge beyond explicit IDs.
+6. **User message**: the current reader input.
 
-The total prompt MUST NOT exceed the LLM's context window. If it does, the Agent Service MUST
-truncate mid-term and long-term memory blocks first, then short-term blocks, preserving the most
-recent entries.
+Each data block has a fixed character/item bound and the complete prompt MUST
+remain within the Agent Service prompt budget. A request that still exceeds the
+total budget fails closed before provider invocation.
 
 ### 6.5 Streaming Response
 
@@ -805,7 +934,18 @@ When a reader advances to a chapter where `is_key_node = true`, the Narrative Se
 1. Check whether the reader has already made a choice at this node by querying `UserChoice` for
    `(user_id, node_id)`.
 2. If a choice exists, return the existing choice and consequence without re-presenting options.
-3. If no choice exists, return the `NarrativeNode` with its `description` and `choices` array.
+3. If no choice exists, generate/cache the `NarrativeNode` under
+   `(user_id, novel_id, chapter_number)` and return its `description` and
+   `choices` array. Runtime nodes MUST be player-scoped because their prompt
+   includes PlayerEntity, private WorldState, and deviation mode; an
+   uncommitted legacy shared node MUST NOT start a new choice.
+4. Node persistence is first-writer-wins. A competing generation MUST reload
+   and return the durable node without replacing its id, description, anchor,
+   choices, or creation time.
+5. Before returning uncommitted options, reload the latest WorldState and omit
+   them if open-world entry started, the Player checkpoint sealed the chapter,
+   or the committed choice prefix reached the chapter. A committed same-user
+   legacy choice remains exactly replayable.
 
 ### 7.2 Choice Submission
 
@@ -818,12 +958,22 @@ When a reader submits a choice:
    different index, return `409 choice_conflict` and reload the committed
    choice, world state, and effective chapter; the
    submitted index MUST NOT overwrite or masquerade as the committed choice.
-3. Invoke the LLM to generate replacement prose from the exact inline anchor
-   through the end of the current chapter (see §7.3).
-4. Atomically persist the `UserChoice`, updated `WorldState`, and the complete
-   current `PlayerChapter`. The source `Chapter` MUST remain unchanged.
-5. Optionally update `WorldState.state.world_events` if the consequence implies a world-level event.
-6. Return both the consequence and the persisted effective chapter to the reader.
+3. Snapshot a deterministic fingerprint of the `WorldState` used for
+   generation, then invoke the LLM to generate replacement prose from the
+   exact inline anchor through the end of the current chapter (see §7.3).
+4. Under the same `WorldState` row lock used for persistence, require a new
+   choice's fingerprint to still match and its chapter to be strictly later
+   than the latest committed choice chapter. A stale, same-chapter, or backward
+   draft MUST return `409` without leaving a `UserChoice`, state mutation, or
+   `PlayerChapter`. Exact same-index replay bypasses these new-choice guards.
+5. Atomically persist the `UserChoice`, updated `WorldState`, and the complete
+   current `PlayerChapter`. If an earlier continuation projection occupies the
+   same chapter, the committed choice rewrite MUST replace it atomically. An
+   existing choice projection may only replay when it matches the committed
+   result; any other projection conflict MUST roll back the whole transaction.
+   The source `Chapter` MUST remain unchanged.
+6. Optionally update `WorldState.state.world_events` if the consequence implies a world-level event.
+7. Return both the consequence and the persisted effective chapter to the reader.
 
 ### 7.3 Consequence Generation
 
@@ -839,6 +989,10 @@ The LLM MUST be prompted to generate a consequence narrative that:
 
 The consequence MUST be stored in `UserChoice.consequence`, and the resulting
 complete chapter MUST be stored as a `PlayerChapter` with `origin = choice`.
+For an already committed choice whose legacy same-chapter projection is absent
+or has `origin = continuation`, exact replay MUST reconstruct the chapter from
+the immutable source, inline node anchor, and committed consequence, then
+atomically restore the `choice` projection without another provider call.
 
 ### 7.4 Full Chapter Regeneration After Divergence
 
@@ -859,8 +1013,9 @@ story. For each requested chapter, the Narrative Service MUST:
 6. Fail closed when generation is unavailable rather than fall back to original
    prose that contradicts the player's timeline.
 
-Narrative nodes created after divergence MUST also be player-scoped. Two users
-in different timelines MUST NOT receive or mutate the same generated node.
+All runtime-generated narrative nodes MUST be player-scoped. Two users MUST NOT
+receive or mutate the same generated node even before divergence because Player
+identity, private world state, and deviation mode already affect the prompt.
 
 ### 7.5 World State Consistency
 
@@ -869,6 +1024,18 @@ The Narrative Service MUST ensure that:
 - `WorldState` is created on first access for a `(user_id, novel_id)` pair if it does not exist.
 - All mutations to `WorldState.state` are atomic (use database transactions or optimistic locking).
 - The `relationships` map in `WorldState.state` uses `character_id` (UUID string) as keys.
+- Provider-generated branch transitions are committed only against the exact
+  deterministic state fingerprint from which they were generated, and new
+  choices advance strictly by chapter under the same row lock.
+- `user_choices` is the durable branch-decision authority. Every element of
+  `WorldState.state.choices` MUST be a node-keyed projection of exactly one
+  durable choice, and every durable choice MUST have exactly one projection
+  with matching node, chapter, index, text, consequence, canon-model version,
+  and canonical checkpoint. Player creation, open-world entry, choice commit
+  or replay, and world-turn reservation or completion MUST validate this
+  bijection under their transaction lock. Missing, duplicate, unkeyed,
+  malformed, or mismatched projections MUST return a typed conflict before a
+  provider call or new authoritative write; exact replay MUST NOT bypass it.
 
 ### 7.6 Canonical Mainline and Open-World Evolution
 
@@ -903,9 +1070,17 @@ redirect those events. A world turn MUST produce a structured transition contain
 event, relationship, location, and thread changes alongside the narrative
 rendering. The transition MUST be schema-valid, entity-valid, spoiler-bounded,
 idempotent, and atomically committed before its prose is shown as complete.
+The first successfully committed start MUST seal its `WorldSession.entry_context`.
+A later valid start request is a resume hint and MUST return that persisted
+winner without replacing it with a freshly derived candidate context.
 
 For one reader and novel, committed world turns form a single total order. A
-new turn MUST be generated from current authoritative state plus a bounded,
+new request MUST carry the `expected_turn_number` of the world view from which
+the reader chose its action. Narrative MUST use that client-observed revision
+in the durable claim and reject a different logical key when authoritative
+state has advanced; it MUST NOT silently reinterpret a delayed action as the
+next turn. Exact-key replay matches the persisted expected revision and remains
+valid after its own commit. A new turn MUST be generated from current authoritative state plus a bounded,
 ordered tail of committed turn actions and narrative endings so it continues
 from what the reader was last shown. Thread-advance and thread-resolution
 actions MUST target a currently open thread, and the committed transition MUST
@@ -918,9 +1093,112 @@ server reports `409 turn_outcome_unknown`. A retry MUST reuse that key until a
 committed replay or a terminal rejection establishes the outcome.
 
 Players MAY enter at any checkpoint already unlocked by server-side reading
-progress. Future canon remains spoiler-bounded. Character agents, exploration,
-scheduled canon events, and future narrative turns MUST read the same committed
-player timeline.
+progress only when every already committed branch choice and chapter-tagged
+player event is at or before that checkpoint. Creating the `PlayerEntity`
+seals this checkpoint as the upper bound for later branch-choice commits. A new
+choice after open-world entry MUST be rejected; a request for the already
+committed choice index MUST still replay, while a different index MUST
+conflict. These rules MUST be repeated under the same database lock that
+persists player or choice state so a race cannot create an invalid prefix.
+Every new world action MUST also revalidate the stored entry checkpoint against
+the complete committed choice/player-event prefix before provider invocation
+or world commit. A legacy or externally restored state whose prefix extends
+beyond that checkpoint MUST fail with a conflict; it MUST NOT project a fact at
+the lower checkpoint chapter.
+
+Future canon remains spoiler-bounded. Character agents, exploration, scheduled
+canon events, and future narrative turns MUST consume the same committed player
+timeline subject to the explicit character-visibility rule in §6.4.
+
+Every player-entry/world-state/world-session read, new turn, exact turn replay,
+and choice or branch response MUST recheck server-owned reading progress against
+the session's canonical source high-water immediately before returning
+world-derived state or prose. If progress has been rewound below that boundary,
+those endpoints MUST return `409 reading_progress_behind_world`, MUST NOT
+include the derived result, and a new world turn MUST NOT reserve a key or invoke
+the provider. A choice or node generated concurrently with the rewind may remain
+durable but MUST NOT cross the response boundary until progress is restored.
+The effective-chapter endpoint is the safe exception: while behind, it MUST
+return the immutable source chapter with `generated = false`, MUST NOT generate
+or return a player projection, and MUST recheck after any in-flight generation
+before responding. The browser MUST synchronously replace cached generated
+chapter/world content with source content while behind and refetch after every
+progress change. Generated-chapter cache identity MUST include the active
+reader identity and server-owned progress boundary. While route and persisted
+progress differ, the browser MUST use their lower chapter for character
+availability, hide every generated chapter, and close a chat whose character
+is not confirmed visible at that boundary. Restoring progress to the boundary
+makes exact player results available again.
+
+The `world_turns` row MUST durably record `memory_projection_status` as
+`pending`, `saved`, or `skipped`. A fresh committed turn does not return success
+until its projection reaches a terminal state; failure after the authoritative
+turn commit is an unknown outcome, not a rollback of that turn. Replaying the
+same logical-turn key MUST compensate `pending` idempotently. Replaying
+`saved`/`skipped` MUST return the exact committed result without recontacting
+the Agent Service. While a committed turn remains `pending`, the persistence
+boundary MUST refuse every different logical-turn key for the same user and
+novel; the unresolved turn and an in-progress turn share one database-
+serialized authority slot. Before changing `pending` to a terminal status, Narrative
+MUST recheck the committed result's source high-water. If progress concurrently
+falls behind, the request MUST return content-free
+`reading_progress_behind_world`, keep the row `pending`, and allow the same key
+to finish after progress is restored without regenerating or recommitting the
+world turn. This is request-driven compensation, not a background
+reconciliation guarantee.
+The successful world-turn POST MUST include its terminal
+`memory_projection_status`. A browser that receives that terminal response MAY
+clear the pending request immediately; compatibility with an older response
+shape MAY confirm the journal row before clearing.
+
+Before sending a world turn, the browser MUST store the bounded, validated
+`(action, expected_turn_number, Idempotency-Key)` tuple per `(user, novel)` in
+`sessionStorage`. While
+the result is ambiguous it MUST prevent a different action, restore the same
+tuple across a same-tab reload or remount, and offer only same-key confirmation.
+A matching committed journal row remains ambiguous while
+`memory_projection_status = pending`; the browser MUST clear the stored request
+only after that row reaches `saved`/`skipped`, or after an explicit terminal
+rejection of the original POST establishes that no commit occurred. When local
+storage is absent but the authoritative bounded journal contains its unique
+`pending` row, the browser MUST reconstruct the exact action, turn UUID, and
+`turn_number - 1` expected revision, lock the form, and offer same-key
+compensation. A failed
+confirmation refresh after a successful POST remains ambiguous regardless of
+that refresh response's status. `sessionStorage` covers the interval before a
+commit becomes journal-visible; committed-pending recovery does not depend on
+the original tab. This remains user-driven recovery, not an autonomous scan.
+When first-run setup, login, registration, or session confirmation establishes the authenticated
+principal, the browser MUST remove NovelWorld pending world-turn records for
+every other principal while retaining exact recovery records for the confirmed
+principal. Before exposing that principal, it MUST also cancel and clear the
+in-memory server-query cache so a private response from the previous principal
+cannot satisfy the new principal's query. An authenticated mutation that
+finishes after this boundary MUST NOT insert its response into that cache;
+successful mutations invalidate and refetch only queries active under the
+current authenticated principal. On logout, successful account deletion,
+absence of an authentication token, or a confirmed `401`/`403` session
+invalidation, the browser MUST clear the server-query cache and remove every
+NovelWorld pending record before exposing the unauthenticated state. A
+transient authentication failure or failed account-deletion request MUST retain
+the applicable cache and recovery records. Every transition MUST preserve
+unrelated `sessionStorage` keys.
+Every protected asynchronous browser operation MUST remain bound to the access
+token and, when already known, principal that initiated it. A late `401` or
+`403` MAY invalidate the global session only when the request's actual bearer
+token still equals the current token. A late identity refresh or account
+deletion MUST NOT clear, replace, or expose a newer principal's auth state,
+query/chat cache, or recovery records. Account-export bytes MUST be discarded
+before inspection, Blob creation, or download if either the token or principal
+changed while the request was in flight. When another browsing context changes
+the shared `auth_token`, the current context MUST synchronously clear private
+query and chat state and reload/re-authenticate before issuing or presenting
+principal-scoped work; a refresh-token-only event or unchanged token MUST NOT
+trigger that boundary.
+After a novel is successfully removed from the authenticated user's shelf, the
+browser MUST remove only that principal-and-novel pending record. A failed
+novel-removal request MUST retain it, and neither outcome may alter pending
+records belonging to another principal or novel.
 
 ---
 
@@ -935,12 +1213,14 @@ existing wire name is retained for compatibility:
   new person. The display name does not have to be the user's real identity.
   Agents address the player in second person and canonical characters perceive
   the player as another person in their world.
-- `character`: A legacy compatibility mode in which the reader adopts a character identity for
-  conversation and branch paths. Its agency boundary is defined in §8.2 and MUST NOT exceed it:
-  a character-identity reader MAY chat in-character and take branch choices, but MUST NOT create
-  a `PlayerEntity`, enter the open world, submit world turns, read or mutate the world journal,
-  or hold relationship/faction/location mutation authority. The open world and all its turns,
-  journal, and mutation paths remain exclusive to `self` mode with a durable `PlayerEntity`.
+- `character`: A legacy compatibility mode in which the reader adopts a
+  character identity for conversation. Until narrative nodes carry durable
+  identity provenance, a character-identity reader MAY replay an already
+  committed branch result but MUST NOT receive or submit a new branch. They
+  also MUST NOT create a `PlayerEntity`, enter the open world, submit world
+  turns, read or mutate the world journal, or hold relationship/faction/location
+  mutation authority. The open world and every new narrative decision remain
+  exclusive to `self` mode with a durable `PlayerEntity`.
 
 ### 8.2 Identity Constraints
 
@@ -949,8 +1229,33 @@ existing wire name is retained for compatibility:
 - A reader MUST NOT adopt the identity of the character they are currently conversing with.
 - Identity changes take effect immediately for new conversation turns; they do not retroactively
   alter existing `ChatMessage` records.
-- Character-identity readers MUST be refused open-world entry and world-turn submission when they
-  hold no `PlayerEntity`; the refusal MUST be a conflict/not-found error, never a silent no-op.
+- Character-identity readers MUST be refused every Player/open-world endpoint: reading or creating
+  the Player entry, reading or starting the open-world session, and submitting or replaying a world
+  turn. This remains true when a previously created `PlayerEntity` is retained; the refusal MUST be
+  a conflict error, never a silent no-op.
+- Character-identity readers MUST NOT receive an uncommitted narrative node or
+  submit a new narrative choice. The server MUST fail closed before provider or
+  persistence work; only exact read/replay of an already committed choice is
+  allowed until node persistence is keyed by durable identity provenance.
+- A character-identity chat turn MUST be fenced by the identity snapshot stored
+  with its idempotent claim: Agent MUST neither request nor inject Player world
+  context even if the reader concurrently switches to `self` before generation.
+- The same persisted claim is the authority for conversation visibility. A
+  character-identity prompt and history read MUST include only messages backed
+  by completed claims for the exact same `reader_character_id`, with the scope
+  predicate applied before pagination. Self, another character, failed or
+  incomplete turns, and legacy messages without an identity claim MUST be
+  omitted. Self-mode prompt/history reads MAY retain legacy unclaimed messages
+  for compatibility.
+- Until memory records gain equally durable identity provenance, character mode
+  MUST return no mid/long/permanent/semantic memory, MUST expose no such records
+  through the memory read endpoint, and MUST NOT create summary or promotion
+  projections. Exact same-character committed recent chat is its only current
+  cross-turn memory source.
+- A general WorldState read in character mode MUST expose only the reader's `choices` plus the
+  required empty `world_events` field. This choices-only projection MUST happen before source
+  high-water validation, so hidden Player/open-world state neither leaks nor blocks a valid branch
+  recovery. Internal character-world-context reads in character mode MUST return no content.
 - Switching identity from `character` to `self` (or back) MUST NOT create or destroy a
   `PlayerEntity`; the `self`-mode open world only exists once the reader explicitly creates one.
 - Character-identity data (identity type, name, character id) is portable account data: it MUST
@@ -1251,6 +1556,72 @@ Implementations MUST create the following indexes:
 
 Implementations MUST apply schema changes through versioned migration files. Migrations MUST be
 idempotent where possible. The initial migration MUST be applied before the first service start.
+Migration 0021 MUST be one explicit transaction. Its first-adoption backfill
+MUST terminally skip pre-contract completed turns before replacing the old
+in-progress-only uniqueness rule with a single unresolved-turn authority rule;
+replaying 0020 MUST NOT skip a new-protocol `pending` turn.
+The unresolved-turn authority index is accepted only when it belongs to
+`public.world_turns`, has the exact predicate/columns, and PostgreSQL reports it
+unique, valid, ready, and live. Migration replay MUST replace an exact-name but
+non-enforcing index, and Narrative readiness MUST fail while any of those
+catalog flags is false.
+Before applying migration 0021, the supported release path MUST first stop and
+drain the Narrative Service world-turn producer before candidate client assets
+are exposed, then stop and drain the Agent Service memory-projection consumer.
+During the client contract gate, a candidate world action MUST receive a
+retryable `5xx` from the stopped producer rather than a terminal validation
+response from an older DTO, so its exact recovery key remains retained.
+Zero-downtime world actions are not claimed. Only after both services quiesce may the repair run, so first-adoption
+backfill and activation of the consumer quarantine share one clean release
+boundary.
+
+An installation whose active release script predates this drain/barrier logic
+MUST use a two-stage managed upgrade: first activate a control-only release
+that contains the new release script but not migration 0021, then use that
+script to deploy the migration and matching services. Initial adoption through
+the new script MUST select a release that already contains migration 0021.
+Adoption, upgrade, restore, and rollback tooling MUST fail closed rather than
+activate a pre-0020 writer after the contract is present. Crossing that barrier
+requires a separately approved database compatibility procedure.
+The release state MUST persist the exact target manifest immediately before
+starting the migration phase and MUST clear that transition marker only after
+the deployed manifest is durably promoted. A successful storage sync of the
+marker MUST precede migration. Promotion and staged-candidate removal MUST be
+synced before marker deletion, and that deletion MUST be synced again; a sync
+failure MUST leave the marker recoverable. Restore/rollback schema barriers
+MUST use this marker, not the mere presence of a downloaded candidate: a
+failure before the marker is written may restore the current release, while an
+interrupted marked transition MUST NOT activate an incompatible older writer.
+Restore MUST roll every marked transition forward to its exact manifest. When
+that manifest is not yet `current`, it MUST preserve the former `current` as
+`previous` and promote only after migration replay and service health succeed;
+when it is already `current`, recovery MUST retain the existing `previous`.
+Whenever an upgrade has a former `current`, its rename to `previous` MUST be
+successfully storage-synced before the target manifest replaces `current`, so
+no crash can make the target durable while losing its rollback authority.
+For both initial adoption and upgrade, the fully installed target tempfile MUST
+be included in a successful storage sync before it is renamed to `current`, so
+a durable directory entry cannot name an unpersisted target file.
+If initial adoption is interrupted after the marker is written but before a
+`current` manifest exists, restore MUST roll forward the exact marked manifest,
+MUST reject a different candidate or an impossible previous release, MUST work
+when the candidate file is absent, and MUST promote `current` only after the
+idempotent migration and service health checks succeed.
+Before normal restore or rollback writes a transition marker, it MUST remove
+any unmarked staged candidate. Normal restore and rollback MUST use the same
+exact-target marker and durable finalization barrier as adoption and upgrade;
+rollback MUST also use the same target-tempfile and previous-manifest promotion
+protocol. A legacy rollback marker MAY be recovered for compatibility, but new
+rollback operations MUST NOT create a second recovery authority alongside the
+schema-transition marker.
+
+The local Docker launchers MUST stop the existing Compose project without
+removing named volumes before starting the rebuilt stack. This MUST remove the
+old one-shot migration container and quiesce old writers so migrations rerun
+before dependent services. The portable desktop runtime MUST stop its named
+embedded database, refuse startup while old service ports remain occupied,
+apply its embedded migrations through 0020, and only then spawn application
+services.
 
 ### 12.4 Backup, Restore, and Erasure Replay
 

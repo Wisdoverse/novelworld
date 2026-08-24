@@ -17,7 +17,7 @@ use uuid::{Uuid, Variant, Version};
 use crate::application::handlers::{AgentCommandHandler, AgentRequestError, AgentStreamEvent};
 use crate::domain::entities::memory::MemoryLayer;
 use crate::domain::ports::{AccountExportPort, ReadinessProbe};
-use crate::domain::services::memory_manager::PermanentMemorySave;
+use crate::domain::services::memory_manager::PermanentMemorySaveError;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -113,8 +113,9 @@ const MAX_PERMANENT_EVENT_CHARS: usize = 2_000;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SavePermanentMemoryRequest {
-    /// Caller-supplied idempotency key (narrative's committed turn id); the
-    /// repository upsert makes a replay idempotent.
+    /// Deterministic private UUIDv5 derived from the committed source turn; the
+    /// repository atomically reserves it and validates an existing row before
+    /// accepting a replay.
     memory_id: Uuid,
     character_id: Uuid,
     user_id: Uuid,
@@ -138,8 +139,8 @@ fn validate_permanent_memory_request(
     if chapter_number < 1 {
         return Err("chapter_number must be >= 1");
     }
-    if !(1..=10).contains(&importance) {
-        return Err("importance must be 1..=10");
+    if importance != 7 {
+        return Err("importance must be 7");
     }
     Ok(())
 }
@@ -164,7 +165,7 @@ async fn save_permanent_memory(
         )
             .into_response();
     }
-    match state
+    let result = state
         .handler
         .memory_manager
         .save_permanent_memory(
@@ -176,37 +177,21 @@ async fn save_permanent_memory(
             event,
             request.importance,
         )
-        .await
-    {
-        Ok(PermanentMemorySave::Saved) => {
-            (StatusCode::OK, Json(serde_json::json!({"saved": true}))).into_response()
-        }
-        Ok(PermanentMemorySave::SkippedWrongDimensions) => {
-            // Non-retryable policy skip (SPEC 6.2.4): honest 200 so the caller
-            // does not burn its retry budget on a config issue.
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "saved": false,
-                    "reason": "embedding dimension policy"
-                })),
-            )
-                .into_response()
-        }
-        Ok(PermanentMemorySave::SkippedEmbeddingUnavailable) => {
-            // Retryable: surface as an error so the caller's bounded retry
-            // loop covers transient embedding-provider outages.
-            tracing::warn!("permanent memory skipped: embedding unavailable");
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "saved": false,
-                    "reason": "embedding unavailable"
-                })),
-            )
-                .into_response()
-        }
-        Err(error) => {
+        .await;
+    permanent_memory_save_response(result)
+}
+
+fn permanent_memory_save_response(
+    result: std::result::Result<(), PermanentMemorySaveError>,
+) -> Response {
+    match result {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"saved": true}))).into_response(),
+        Err(PermanentMemorySaveError::Validation(error)) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+        Err(PermanentMemorySaveError::Internal(error)) => {
             tracing::error!(%error, "permanent memory save failed");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
@@ -978,13 +963,28 @@ mod principal_contract_tests {
         );
         assert_eq!(
             validate_permanent_memory_request("ok", 1, 0),
-            Err("importance must be 1..=10")
+            Err("importance must be 7")
         );
         assert_eq!(
-            validate_permanent_memory_request("ok", 1, 11),
-            Err("importance must be 1..=10")
+            validate_permanent_memory_request("ok", 1, 8),
+            Err("importance must be 7")
         );
-        assert!(validate_permanent_memory_request("ok", 1, 5).is_ok());
+        assert!(validate_permanent_memory_request("ok", 1, 7).is_ok());
+    }
+
+    #[test]
+    fn permanent_memory_terminal_ack_is_true_only_for_authenticated_success() {
+        assert_eq!(
+            permanent_memory_save_response(Ok(())).status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            permanent_memory_save_response(Err(PermanentMemorySaveError::Validation(
+                crate::domain::services::memory_manager::InvalidCommittedWorldTurn,
+            )))
+            .status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
     }
 
     #[test]

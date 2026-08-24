@@ -511,6 +511,8 @@ CREATE TABLE world_turns (
     transition           JSONB,
     result               JSONB,
     failure_code         VARCHAR(64),
+    memory_projection_status VARCHAR(16) NOT NULL DEFAULT 'pending',
+    memory_projection_completed_at TIMESTAMPTZ,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_at         TIMESTAMPTZ,
@@ -526,6 +528,14 @@ CREATE TABLE world_turns (
     CONSTRAINT world_turns_status_check
         CHECK (status IN ('in_progress', 'completed', 'failed')),
     CONSTRAINT world_turns_attempt_check CHECK (attempt >= 1),
+    CONSTRAINT world_turns_memory_projection_status_check
+        CHECK (memory_projection_status IN ('pending', 'saved', 'skipped')),
+    CONSTRAINT world_turns_memory_projection_state_check CHECK (
+        (memory_projection_status = 'pending' AND memory_projection_completed_at IS NULL)
+        OR (memory_projection_status IN ('saved', 'skipped')
+            AND status = 'completed'
+            AND memory_projection_completed_at IS NOT NULL)
+    ),
     CONSTRAINT world_turns_state_check CHECK (
         (
             status = 'in_progress'
@@ -556,7 +566,9 @@ CREATE TABLE world_turns (
 );
 
 CREATE UNIQUE INDEX idx_world_turns_one_in_progress
-    ON world_turns(user_id, novel_id) WHERE status = 'in_progress';
+    ON world_turns(user_id, novel_id)
+    WHERE status = 'in_progress'
+       OR (status = 'completed' AND memory_projection_status = 'pending');
 CREATE INDEX idx_world_turns_journal
     ON world_turns(user_id, novel_id, completed_at DESC)
     WHERE status = 'completed';

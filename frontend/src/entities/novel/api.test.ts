@@ -1,9 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import React, { type PropsWithChildren } from 'react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { act, renderHook } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { apiClient } from '@/shared/api/client';
+import { worldTurnPendingStorageKey } from '@/shared/lib/worldTurnStorage';
 import type { Character } from '@/shared/types';
 import {
   buildNovelUploadFormData,
   isCharacterAvailable,
   shouldPollNovelList,
+  useDeleteNovel,
   validateNovelFile,
 } from './api';
 
@@ -66,5 +72,55 @@ describe('character visibility', () => {
     expect(isCharacterAvailable(character(5), 4)).toBe(false);
     expect(isCharacterAvailable(character(5), 5)).toBe(true);
     expect(isCharacterAvailable(character(5), 1)).toBe(false);
+  });
+});
+
+describe('novel lifecycle pending-turn cleanup', () => {
+  let queryClient: QueryClient;
+  let wrapper: ({ children }: PropsWithChildren) => React.ReactElement;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    sessionStorage.clear();
+    queryClient = new QueryClient({
+      defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+    });
+    wrapper = ({ children }) => React.createElement(
+      QueryClientProvider,
+      { client: queryClient },
+      children,
+    );
+  });
+
+  it('removes only the deleted novel request after server success', async () => {
+    vi.spyOn(apiClient, 'delete').mockResolvedValue({ data: undefined });
+    const deleted = worldTurnPendingStorageKey('user-a', 'novel-a');
+    const otherNovel = worldTurnPendingStorageKey('user-a', 'novel-b');
+    const otherUser = worldTurnPendingStorageKey('user-b', 'novel-a');
+    sessionStorage.setItem(deleted, 'private deleted intent');
+    sessionStorage.setItem(otherNovel, 'keep other novel');
+    sessionStorage.setItem(otherUser, 'keep other user');
+    const { result } = renderHook(() => useDeleteNovel('user-a'), { wrapper });
+
+    await act(async () => {
+      await result.current.mutateAsync('novel-a');
+    });
+
+    expect(sessionStorage.getItem(deleted)).toBeNull();
+    expect(sessionStorage.getItem(otherNovel)).toBe('keep other novel');
+    expect(sessionStorage.getItem(otherUser)).toBe('keep other user');
+  });
+
+  it('retains exact recovery state when novel deletion fails', async () => {
+    vi.spyOn(apiClient, 'delete').mockRejectedValue(new Error('delete unavailable'));
+    const pendingKey = worldTurnPendingStorageKey('user-a', 'novel-a');
+    sessionStorage.setItem(pendingKey, 'recoverable intent');
+    const { result } = renderHook(() => useDeleteNovel('user-a'), { wrapper });
+
+    await act(async () => {
+      await expect(result.current.mutateAsync('novel-a')).rejects.toThrow('delete unavailable');
+    });
+
+    expect(sessionStorage.getItem(pendingKey)).toBe('recoverable intent');
   });
 });

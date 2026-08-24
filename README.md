@@ -57,34 +57,144 @@ transitions require Chinese text, and the UI locale is Simplified Chinese
 ### 🧠 Durable Conversations
 
 PostgreSQL keeps committed chat history. Mid-term summaries can promote into
-embedded long-term memory, and committed open-world turns can write permanent
-journey memory. These projections are best-effort; live semantic quality and
-the complete four-layer lifecycle remain H3 exit work.
+embedded long-term memory. A committed open-world turn also carries a durable
+`pending` memory-projection state until it reaches terminal `saved` or
+`skipped`: the same logical-turn key compensates a pending projection, while a
+terminal replay returns the committed result without depending on the Agent
+Service. After projection returns `saved`/`skipped`, Narrative rechecks the
+committed source high-water before terminalizing the journal; a concurrent
+rewind returns a content-free typed conflict and leaves the row `pending` for
+same-key compensation after progress is restored. Eligible permanent journey
+facts use a private namespaced UUID v5 and store only the observable kind and
+target of `converse`, `ally`, or `oppose` directed at the protagonist—never the
+reader's free-form private intent—plus events and relationship changes that explicitly name
+that protagonist, and are atomically stored without waiting on an embedding
+provider. Optional permanent-memory semantic enrichment is not implemented in
+this candidate. The Agent authenticates a structured fact from its UUID v5 and
+complete local scope/shape metadata before inserting it or returning
+`saved: true`; malformed ingress returns `422` without a repository write.
+The same gate authenticates retrieval, and reserves permanent
+prompt budget for the newest authenticated fact before legacy prose. Unrelated knowledge, inventory,
+location, thread, faction, canon-event, and generated-prose changes are not
+promoted into character memory. A missing protagonist or a turn the
+protagonist did not explicitly witness is recorded as `skipped`, not invented
+as character knowledge. At first adoption, migration marks pre-contract
+completed turns terminal `skipped` because their witness provenance cannot be
+proved, but retains their old rows for export and normal lifecycle deletion.
+Agent prompt consumers quarantine the former producer class—permanent,
+importance 7, UUID version nibble 4—instead of guessing a historical
+protagonist and deleting data. This may conservatively hide a legitimate legacy
+memory in that narrow class; no historical fact is fabricated. Under the new contract,
+a different logical key cannot advance the same reader world while an earlier
+committed turn is still `pending`; only exact-key compensation can close it.
+There is no autonomous scan for abandoned `pending` rows; live
+semantic/lifecycle quality and the complete H3 exit evidence remain open.
 
 ### 🔀 Branching Narrative
 
 At key story moments, you're presented with 2–3 choices. Each committed
 decision generates new story developments and may shift character attitudes or
-mutate the world state.
+mutate the world state. Creating an original player seals an upper chapter
+boundary for that branch prefix: a later branch choice is rejected, and once
+the open world starts every new branch choice is rejected. An exact replay of
+an already committed choice remains valid. New choice consequences commit only
+if the locked world state still matches the snapshot used for generation and
+their chapter advances the committed choice prefix. A choice rewrite replaces
+an older same-chapter continuation projection atomically; conflicts leave no
+partial choice, chapter, or world-state update.
 
 ### 🎭 Reader Identity
 
 The primary mode creates an original `PlayerEntity` so canonical characters
 retain their own agency. A legacy character-identity path remains available for
-compatibility: it supports in-character conversation and branch choices only,
-with no open-world agency (no `PlayerEntity`, world turns, or journal) — the
-boundary is defined in SPEC §8.2.
+compatibility: it supports in-character conversation and exact replay/read of
+an already committed branch result only. New nodes/choices and every
+Player/open-world endpoint remain self-only even if a prior `PlayerEntity` is
+retained. Character-mode WorldState reads expose choices only, and internal
+character-world context is omitted based on the chat turn's persisted identity
+snapshot, so a concurrent switch to self cannot re-enable the lookup.
+Authenticated self-mode journey facts are
+also excluded from both direct and semantic memory blocks in character mode;
+until memory rows carry durable identity provenance, character mode also omits
+mid-, long-, permanent-, and semantic-memory blocks and does not create derived
+summaries. Its conversation continuity is limited to recent committed chat
+whose persisted turn claim names the exact same character identity; legacy or
+unprovenanced chat remains available only in self mode. SPEC §8.2 defines the
+boundary.
 
 ### 🧭 Living Open World
 
-Create an original player at any unlocked chapter, then travel, investigate,
-converse, ally, oppose, advance an open thread (which may resolve when the
-narrated facts justify it), or pursue your own goal. Canonical characters retain their own agency. Every turn is validated,
-committed once, auditable, and resumed exactly after a service restart in the
-structurally tested single-timeline path. New turns receive a bounded tail of
-committed actions and narrative endings. Ambiguous delivery or lease-loss
-responses retain the same logical-turn key; live causal quality is not yet
-qualified.
+Create an original player at an unlocked chapter compatible with the already
+committed branch prefix, then travel, investigate, converse, ally, oppose,
+advance an open thread (which may resolve when the narrated facts justify it),
+or pursue your own goal. Canonical characters retain their own agency. Every
+turn is validated, committed once, auditable, and resumed exactly after a
+service restart in the structurally tested single-timeline path. New turns
+receive a bounded tail of committed actions and narrative projections. The
+first start commits its world-entry context as the winner; a later valid
+start request resumes that session instead of rewriting it from fresh canon.
+Each new action revalidates that the complete committed choice/player-event
+prefix still fits the sealed checkpoint, so inconsistent legacy data conflicts
+before a provider call or world commit instead of lowering fact provenance.
+The same transaction also requires every durable branch choice and its
+node-keyed WorldState projection to match one-for-one; missing, duplicate,
+unkeyed, or malformed legacy projections fail closed instead of being guessed
+or late-applied after the world is sealed.
+Once the open world has begun, character chat receives only the latest four
+character-directed (`converse`, `ally`, or `oppose`) actions selected from a
+bounded 100-turn scan, plus player-origin events whose actor list names the
+character and that character's numeric relationship score. Relationship-change
+prose, perception, reasons, and branch choices are omitted because they do not
+yet carry independent per-character witness provenance. The provider
+view is an allowlist: route/player UUIDs, technical metadata, player name and
+location, branch choices, and unscoped active threads are excluded. Narrative and
+Agent boundaries independently reject an action whose kind/target does not
+address the requested character, and Agent also rejects a player event that
+does not name it. Derived world context carries the highest canonical
+source chapter that could have influenced it and is omitted when that boundary
+is missing or later than current server-owned progress, including after a
+rewind. While progress is behind, player/world reads, new actions, and exact
+replays return `reading_progress_behind_world` without derived content or a
+provider call. Effective-chapter reads instead return immutable canon with
+`generated=false`; the browser synchronously replaces cached player prose with
+canon and refetches after progress changes. Restoring progress makes the exact
+player timeline available again. Permanent journey facts use the same conservative chapter boundary.
+The journey timeline labels reader decisions separately from generated prose.
+
+Before sending a world action, the browser stores the validated action and its
+logical-turn key per user and novel in `sessionStorage`. An ambiguous result
+locks new actions and a same-tab reload restores the exact request for confirmation; a
+matching journal entry clears it only after memory projection is terminal
+`saved`/`skipped`, while an explicit rejection of the original POST also clears
+it. A terminal POST response carries that projection status directly; journal
+confirmation remains an older-response compatibility path. Failure of the subsequent confirmation refresh, including a 4xx response,
+remains ambiguous and keeps the action/key locked. The key
+is scoped by user and novel. This recovery is limited to the current browser
+session and requires writable `sessionStorage`; when the browser blocks that
+storage, only the current mounted form remains locked and remount recovery is
+not promised. Successful first-run setup, login, registration, or session confirmation removes
+other principals' NovelWorld pending-turn records but retains the confirmed
+principal's exact recovery records. The same principal boundary cancels and
+clears the in-memory server-query cache before the new identity is exposed;
+late mutation success can only invalidate/refetch active current-user queries,
+not write a previous user's private response into cache. Logout, successful
+account deletion, missing credentials, or a confirmed `401`/`403` clears both
+private query cache and all such recovery records; transient authentication
+failure and failed deletion retain them. Unrelated session data is preserved.
+That clearing is credential-fenced: a delayed response from an older bearer
+cannot clear or replace a newer login. Delayed account deletion and export are
+also fenced by both initiating token and user; stale export bytes are dropped
+before inspection or download. An `auth_token` change from another tab clears
+this tab's query/chat state and reloads it for authoritative re-authentication
+before private UI can continue.
+It is not autonomous server reconciliation.
+Successful removal of one novel from the current shelf clears only that
+user-and-novel pending record; a failed removal retains it, and records for
+other users or novels are untouched.
+Pre-open-world branch-to-chat continuity, exact chat/world revision provenance,
+visibility beyond explicit IDs, continuous-window selection under late memory compensation, live
+provider/lifecycle evidence, and human accessibility qualification remain open
+H3/H4 work.
 
 ---
 
@@ -114,9 +224,43 @@ Keep the default preview on localhost. Remote access requires an
 operator-managed encrypted tunnel or TLS boundary; the current stack is not
 qualified for direct public-Internet hosting.
 
-The server startup scripts check Docker, generate secrets, start all services,
-open `http://localhost`, and guide the operator through model and first-admin
-setup.
+Migration 0021 uses a maintenance window: the managed release path stops the
+old Narrative producer before exposing candidate client assets, verifies that
+world actions fail with a retryable `5xx` while preserving their recovery key,
+then drains Agent before migrating. Zero-downtime world actions are not claimed.
+An installation running older release tooling must first activate a
+control-only release containing the new release script but not 0020, then use
+that script for the migration release. New-script adoption requires a target
+that already contains 0020; upgrade, restore, and rollback refuse a schema
+downgrade to older writers. A durable schema-transition manifest is written
+only immediately before the migrator runs and is cleared only after release
+state promotion. Normal restore and healthy rollback discard any unmarked
+candidate before writing that exact marker, then use the same finalization
+barrier as adoption and upgrade. The marker is flushed before migration;
+promoted state is flushed before marker deletion, and deletion is flushed
+again. On upgrade or rollback, the former `current` is renamed to `previous`
+and flushed before the new `current` is installed; on every promotion, the
+target tempfile is flushed before it is renamed to `current`. Thus neither the
+target content nor rollback authority can lag a durable active-manifest
+directory entry. A legacy `rollback.pending` pair is still recovered for
+compatibility, but new rollback operations use the schema-transition protocol.
+Merely
+downloading a candidate cannot block restoration of the current release. Any
+marked transition rolls the exact marked manifest forward; a 0020 transition
+therefore never revives the older writer. Recovery is idempotent even when the
+downloaded candidate file is gone, and promotes it only after health succeeds.
+An interrupted upgrade preserves the former
+`current` as `previous`; initial adoption creates no fictitious predecessor.
+The drill covers ordering and process-crash recovery with fake dependencies;
+real Linux filesystem power-loss injection and live registry/image health are
+still release evidence gaps.
+
+The server startup scripts check Docker, generate secrets, run `docker compose
+down` without `--volumes`, then build and start all services. This preserves
+named-volume data while stopping old writers and removing the old one-shot
+migration container so every local pull/restart reapplies migrations before
+services start. They then open `http://localhost` and guide the operator through
+model and first-admin setup.
 
 ### 2. Portable desktop — no Docker or external NovelWorld server
 
@@ -141,6 +285,9 @@ app never connects to an external NovelWorld server. All application services,
 data, and generated secrets stay on the player's computer in the operating
 system's per-user application data directory. AI features still require
 Internet access to the configured model provider and an API key on first launch.
+Desktop startup stops its named embedded database, refuses occupied service
+ports, applies every embedded migration through 0020, and only then starts the
+five services; the migration therefore runs without an old local writer.
 
 The current artifacts are unsigned engineering builds. Windows SmartScreen and
 macOS Gatekeeper may warn on first launch; public distribution requires platform

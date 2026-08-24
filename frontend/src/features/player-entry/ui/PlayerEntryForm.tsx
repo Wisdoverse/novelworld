@@ -9,6 +9,7 @@ interface PlayerEntryFormProps {
   unlockedThroughChapter: number;
   locations: Array<{ id: string; name: string }>;
   isPending: boolean;
+  isTimelineLocked: boolean;
   error?: string;
   onCheckpointChange: (chapter: number) => void;
   onSubmit: (input: CreatePlayerEntityInput) => Promise<unknown>;
@@ -24,6 +25,7 @@ export function PlayerEntryForm({
   unlockedThroughChapter,
   locations,
   isPending,
+  isTimelineLocked,
   error,
   onCheckpointChange,
   onSubmit,
@@ -48,6 +50,7 @@ export function PlayerEntryForm({
     }));
   const advancedReady = resolutionMode === 'narrative'
     || Boolean(gameRules && scoresValid && assignedPoints === gameRules.point_budget);
+  const controlsLocked = isPending || isTimelineLocked;
 
   useEffect(() => {
     if (!locations.some(location => location.id === locationId)) {
@@ -57,7 +60,7 @@ export function PlayerEntryForm({
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!locationId) return;
+    if (isPending || isTimelineLocked || !locationId) return;
     try {
       await onSubmit({
         checkpoint_chapter: checkpointChapter,
@@ -94,7 +97,8 @@ export function PlayerEntryForm({
         创建你的原创角色
       </h2>
       <p className="mt-2 text-sm text-[#5f6368]">
-        从已解锁章节选择入场点；后续原著事件会从该处继续运行。
+        你可以先继续阅读，再从已解锁章节选择入场点。创建后入场点及此前历史不可更改；
+        你仍可完成入场章的命运选择，之后的因果由你的开放世界行动推进。
       </p>
       <form className="mt-5 space-y-4" onSubmit={submit}>
         <label className="block text-sm font-medium text-[#3c4043]">
@@ -102,6 +106,7 @@ export function PlayerEntryForm({
           <select
             className="field-control mt-1"
             value={checkpointChapter}
+            disabled={controlsLocked}
             onChange={event => onCheckpointChange(Number(event.target.value))}
           >
             {Array.from({ length: unlockedThroughChapter }, (_, index) => index + 1).map(chapter => (
@@ -109,7 +114,7 @@ export function PlayerEntryForm({
             ))}
           </select>
         </label>
-        <fieldset className="rounded-xl border border-[#d2e3fc] bg-[#f8faff] p-4">
+        <fieldset disabled={controlsLocked} className="rounded-xl border border-[#d2e3fc] bg-[#f8faff] p-4">
           <legend className="px-1 text-sm font-semibold text-[#0b57d0]">行动判定（高级项）</legend>
           <label className="mt-2 flex items-start gap-2 text-sm text-[#3c4043]">
             <input
@@ -187,6 +192,7 @@ export function PlayerEntryForm({
           <input
             className="field-control mt-1"
             value={name}
+            disabled={controlsLocked}
             onChange={event => setName(event.target.value)}
             maxLength={100}
             required
@@ -197,6 +203,7 @@ export function PlayerEntryForm({
           <textarea
             className="field-control mt-1"
             value={background}
+            disabled={controlsLocked}
             onChange={event => setBackground(event.target.value)}
             maxLength={2000}
             rows={3}
@@ -208,6 +215,7 @@ export function PlayerEntryForm({
           <input
             className="field-control mt-1"
             value={capabilities}
+            disabled={controlsLocked}
             onChange={event => setCapabilities(event.target.value)}
             maxLength={3200}
             required
@@ -218,6 +226,7 @@ export function PlayerEntryForm({
           <select
             className="field-control mt-1"
             value={locationId}
+            disabled={controlsLocked}
             onChange={event => setLocationId(event.target.value)}
             required
           >
@@ -231,6 +240,7 @@ export function PlayerEntryForm({
           <input
             className="field-control mt-1"
             value={inventory}
+            disabled={controlsLocked}
             onChange={event => setInventory(event.target.value)}
             maxLength={6400}
           />
@@ -239,7 +249,7 @@ export function PlayerEntryForm({
         {error ? <p role="alert" className="text-sm text-[#b3261e]">{error}</p> : null}
         <button
           type="submit"
-          disabled={isPending || locations.length === 0 || !advancedReady}
+          disabled={controlsLocked || locations.length === 0 || !advancedReady}
           className="primary-action"
         >
           {isPending ? '正在进入世界…' : '进入故事'}

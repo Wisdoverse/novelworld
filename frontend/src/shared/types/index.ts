@@ -280,6 +280,7 @@ export interface WorldTurnTransition {
 export interface WorldTurnJournalEntry {
   turn_id: string;
   turn_number: number;
+  memory_projection_status: 'pending' | 'saved' | 'skipped';
   action: WorldAction;
   resolution?: ActionCheck | null;
   transition: WorldTurnTransition;
@@ -336,6 +337,8 @@ export interface OpenWorldView {
 
 export interface WorldTurnResult {
   turn_id: string;
+  /** Present on the terminal H3 contract; absent on an older Narrative service. */
+  memory_projection_status?: 'saved' | 'skipped';
   action: WorldAction;
   resolution?: ActionCheck | null;
   transition: WorldTurnTransition;

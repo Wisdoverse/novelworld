@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createChatStream, type ChatStreamError } from './client';
+import { queryClient } from './queryClient';
+import { worldTurnPendingStorageKey } from '@/shared/lib/worldTurnStorage';
+import {
+  apiClient,
+  createChatStream,
+  invalidateSessionForUnauthorizedResponse,
+  type ChatStreamError,
+} from './client';
 
 const encoder = new TextEncoder();
 
@@ -43,7 +50,9 @@ function streamChat() {
 
 describe('createChatStream', () => {
   beforeEach(() => {
+    queryClient.clear();
     localStorage.clear();
+    sessionStorage.clear();
     vi.stubGlobal('fetch', vi.fn());
   });
 
@@ -182,5 +191,153 @@ describe('createChatStream', () => {
 
     await expect(completed).resolves.toMatchObject({ done: { turnId, replayed: true } });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('invalidates the current principal when the SSE request gets a same-token 401', async () => {
+    localStorage.setItem('auth_token', 'access');
+    localStorage.setItem('refresh_token', 'refresh');
+    sessionStorage.setItem(worldTurnPendingStorageKey('user-a', 'novel-a'), 'pending-a');
+    queryClient.setQueryData(['principal-a'], 'private-a');
+    vi.mocked(fetch).mockResolvedValue(
+      responseFromChunks([encoder.encode('{"error":{"code":"unauthorized"}}')], 401),
+    );
+
+    const error = await new Promise<ChatStreamError>(resolve => {
+      createChatStream({
+        characterId: 'character',
+        turnId: '11111111-1111-4111-8111-111111111111',
+        payload: { novel_id: 'novel', message: 'hello', current_chapter: 1 },
+        onChunk: vi.fn(),
+        onDone: vi.fn(),
+        onError: resolve,
+      });
+    });
+
+    expect(error.code).toBe('unauthorized');
+    expect(localStorage.getItem('auth_token')).toBeNull();
+    expect(localStorage.getItem('refresh_token')).toBeNull();
+    expect(sessionStorage.getItem(worldTurnPendingStorageKey('user-a', 'novel-a'))).toBeNull();
+    expect(queryClient.getQueryData(['principal-a'])).toBeUndefined();
+  });
+
+  it('does not invalidate B when an old-token SSE request gets a late 401', async () => {
+    localStorage.setItem('auth_token', 'access-a');
+    vi.mocked(fetch).mockResolvedValue(
+      responseFromChunks([encoder.encode('{"error":{"code":"unauthorized"}}')], 401),
+    );
+    const error = new Promise<ChatStreamError>(resolve => {
+      createChatStream({
+        characterId: 'character',
+        turnId: '11111111-1111-4111-8111-111111111111',
+        payload: { novel_id: 'novel', message: 'hello', current_chapter: 1 },
+        onChunk: vi.fn(),
+        onDone: vi.fn(),
+        onError: resolve,
+      });
+    });
+    localStorage.setItem('auth_token', 'access-b');
+    localStorage.setItem('refresh_token', 'refresh-b');
+    sessionStorage.setItem(worldTurnPendingStorageKey('user-b', 'novel-b'), 'pending-b');
+    queryClient.setQueryData(['principal-b'], 'private-b');
+
+    await expect(error).resolves.toMatchObject({ code: 'unauthorized' });
+    expect(localStorage.getItem('auth_token')).toBe('access-b');
+    expect(localStorage.getItem('refresh_token')).toBe('refresh-b');
+    expect(sessionStorage.getItem(worldTurnPendingStorageKey('user-b', 'novel-b'))).toBe('pending-b');
+    expect(queryClient.getQueryData(['principal-b'])).toBe('private-b');
+  });
+
+  it('clears all private client state after a protected API returns 401', () => {
+    localStorage.setItem('auth_token', 'access');
+    localStorage.setItem('refresh_token', 'refresh');
+    sessionStorage.setItem(worldTurnPendingStorageKey('user-a', 'novel-a'), 'private');
+    sessionStorage.setItem('unrelated', 'keep');
+    queryClient.setQueryData(['private'], 'marker');
+
+    expect(invalidateSessionForUnauthorizedResponse({
+      isAxiosError: true,
+      config: { url: '/novels', headers: { Authorization: 'Bearer access' } },
+      response: { status: 401 },
+    })).toBe(true);
+
+    expect(localStorage.getItem('auth_token')).toBeNull();
+    expect(localStorage.getItem('refresh_token')).toBeNull();
+    expect(sessionStorage.getItem(worldTurnPendingStorageKey('user-a', 'novel-a'))).toBeNull();
+    expect(sessionStorage.getItem('unrelated')).toBe('keep');
+    expect(queryClient.getQueryData(['private'])).toBeUndefined();
+  });
+
+  it('preserves a newer principal when an older bearer request returns 401 late', () => {
+    localStorage.setItem('auth_token', 'new-access');
+    localStorage.setItem('refresh_token', 'new-refresh');
+    sessionStorage.setItem(worldTurnPendingStorageKey('user-b', 'novel-b'), 'pending-b');
+    queryClient.setQueryData(['principal-b'], 'private-b');
+
+    expect(invalidateSessionForUnauthorizedResponse({
+      isAxiosError: true,
+      config: { url: '/novels', headers: { Authorization: 'Bearer old-access' } },
+      response: { status: 401 },
+    })).toBe(false);
+
+    expect(localStorage.getItem('auth_token')).toBe('new-access');
+    expect(localStorage.getItem('refresh_token')).toBe('new-refresh');
+    expect(sessionStorage.getItem(worldTurnPendingStorageKey('user-b', 'novel-b'))).toBe('pending-b');
+    expect(queryClient.getQueryData(['principal-b'])).toBe('private-b');
+  });
+
+  it.each(['/auth/login', '/auth/register', '/setup/init'])(
+    'preserves the current principal after a public credential failure at %s',
+    requestUrl => {
+      localStorage.setItem('auth_token', 'access');
+      localStorage.setItem('refresh_token', 'refresh');
+      sessionStorage.setItem(worldTurnPendingStorageKey('user-a', 'novel-a'), 'private');
+      queryClient.setQueryData(['private'], 'marker');
+
+      expect(invalidateSessionForUnauthorizedResponse({
+        isAxiosError: true,
+        config: { url: requestUrl },
+        response: { status: 401 },
+      })).toBe(false);
+
+      expect(localStorage.getItem('auth_token')).toBe('access');
+      expect(localStorage.getItem('refresh_token')).toBe('refresh');
+      expect(sessionStorage.getItem(worldTurnPendingStorageKey('user-a', 'novel-a'))).toBe('private');
+      expect(queryClient.getQueryData(['private'])).toBe('marker');
+    },
+  );
+
+  it('does not treat a general 403 as global session invalidation', () => {
+    localStorage.setItem('auth_token', 'access');
+    queryClient.setQueryData(['private'], 'marker');
+
+    expect(invalidateSessionForUnauthorizedResponse({
+      isAxiosError: true,
+      config: { url: '/novels' },
+      response: { status: 403 },
+    })).toBe(false);
+
+    expect(localStorage.getItem('auth_token')).toBe('access');
+    expect(queryClient.getQueryData(['private'])).toBe('marker');
+  });
+
+  it('preserves an explicit initiating credential when the current principal changes', async () => {
+    localStorage.setItem('auth_token', 'access-b');
+    let authorization: unknown;
+
+    await apiClient.post('/auth/logout', { refresh_token: 'refresh-a' }, {
+      headers: { Authorization: 'Bearer access-a' },
+      adapter: async config => {
+        authorization = config.headers.get('Authorization');
+        return {
+          data: undefined,
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          config,
+        };
+      },
+    });
+
+    expect(authorization).toBe('Bearer access-a');
   });
 });

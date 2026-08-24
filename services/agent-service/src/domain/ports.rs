@@ -128,6 +128,11 @@ pub struct CharacterWorldContext {
     pub character_alive: bool,
     pub canon_model_version: i32,
     pub checkpoint_chapter: i32,
+    /// Highest canonical chapter that may have influenced derived world state.
+    /// `None` is accepted only as a rolling-deploy legacy shape; callers must
+    /// omit that world context because its spoiler boundary cannot be proven.
+    #[serde(default)]
+    pub source_chapter_high_water: Option<i32>,
     pub turn_number: i64,
     pub world_time: i64,
     pub player_id: Uuid,
@@ -137,8 +142,23 @@ pub struct CharacterWorldContext {
     pub goals: Vec<WorldCharacterGoal>,
     pub perception_of_player: Option<String>,
     pub current_canonical_event: Option<WorldCanonicalEvent>,
+    #[serde(default)]
+    pub recent_actions: Vec<WorldActionContext>,
     pub recent_player_events: Vec<WorldHistoryItem>,
     pub active_threads: Vec<WorldActiveThread>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorldActionContext {
+    pub turn_id: Uuid,
+    pub turn_number: i64,
+    pub action: WorldActionData,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorldActionData {
+    pub kind: String,
+    pub target_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

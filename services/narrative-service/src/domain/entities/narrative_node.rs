@@ -1,12 +1,15 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::domain::entities::game_rules::{ActionCheck, GameRuleTemplate};
 use crate::domain::entities::player_entity::PlayerEntity;
 use crate::domain::entities::world_session::{
-    ActiveThread, CanonicalEventStatus, CharacterWorldContext, WorldAction, WorldActionKind,
-    WorldEntryContext, WorldHistoryItem, WorldSession, WorldTurnTransition,
+    CanonicalEventStatus, CharacterWorldContext, WorldAction, WorldActionKind, WorldEntryContext,
+    WorldHistoryItem, WorldSession, WorldTurnTransition, MAX_CHARACTER_CONTEXT_REFERENCES,
+    MAX_CHARACTER_CONTEXT_SOURCE_CHAPTERS, MAX_CHARACTER_CONTEXT_TEXT_CHARS, MAX_CHARACTER_GOALS,
+    MAX_CHARACTER_RECENT_EVENTS, MAX_CHARACTER_WORLD_CONTEXT_CHARS,
 };
 use crate::domain::services::narrative_transition::NarrativeTransition;
 
@@ -14,7 +17,8 @@ use crate::domain::services::narrative_transition::NarrativeTransition;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NarrativeNode {
     pub id: Uuid,
-    /// None for the immutable canonical timeline, Some for a player's fork.
+    /// Runtime-generated nodes are player-scoped. `None` is retained only so
+    /// already-committed legacy shared nodes remain exactly replayable.
     pub user_id: Option<Uuid>,
     pub novel_id: Uuid,
     pub chapter_number: i32,
@@ -80,6 +84,8 @@ pub struct WorldState {
 
 #[derive(Debug, thiserror::Error)]
 pub enum WorldStateError {
+    #[error("timeline conflict: {0}")]
+    TimelineConflict(String),
     #[error("world state choices must be an array")]
     InvalidChoices,
     #[error("world state {0} must be an object")]
@@ -107,6 +113,52 @@ impl WorldState {
             }),
             updated_at: Utc::now(),
         }
+    }
+
+    pub fn fingerprint(&self) -> [u8; 32] {
+        Sha256::digest(self.state.to_string().as_bytes()).into()
+    }
+
+    pub fn latest_choice_chapter(&self) -> Result<Option<i32>, WorldStateError> {
+        let choices = self
+            .state
+            .get("choices")
+            .and_then(serde_json::Value::as_array)
+            .ok_or(WorldStateError::InvalidChoices)?;
+        choices
+            .iter()
+            .map(|choice| {
+                choice
+                    .get("chapter")
+                    .and_then(serde_json::Value::as_i64)
+                    .and_then(|chapter| i32::try_from(chapter).ok())
+                    .filter(|chapter| *chapter >= 1)
+                    .ok_or(WorldStateError::InvalidChoices)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(|chapters| chapters.into_iter().max())
+    }
+
+    /// Highest source chapter represented anywhere in the user-visible world
+    /// state. Consumers compare this with current reading progress and omit the
+    /// whole derived state after a rewind rather than partially leaking it.
+    pub fn source_chapter_high_water(&self) -> Result<Option<i32>, WorldStateError> {
+        let mut high_water = self.latest_choice_chapter()?;
+        if let Some(player) = self.player_entity()? {
+            high_water = Some(
+                high_water.map_or(player.canonical_checkpoint_chapter, |chapter| {
+                    chapter.max(player.canonical_checkpoint_chapter)
+                }),
+            );
+        }
+        if let Some(session) = self.open_world()? {
+            high_water = Some(
+                high_water.map_or(session.entry_context.unlocked_through_chapter, |chapter| {
+                    chapter.max(session.entry_context.unlocked_through_chapter)
+                }),
+            );
+        }
+        Ok(high_water)
     }
 
     /// 记录读者的选择
@@ -340,11 +392,14 @@ impl WorldState {
         context: &WorldEntryContext,
         game_rules: Option<&GameRuleTemplate>,
     ) -> Result<WorldSession, WorldStateError> {
+        context
+            .validate()
+            .map_err(|error| WorldStateError::InvalidWorldSession(error.to_string()))?;
         let player = self.player_entity()?.ok_or_else(|| {
             WorldStateError::InvalidWorldSession("PlayerEntity must be created first".into())
         })?;
         if player.canonical_checkpoint_chapter != context.checkpoint_chapter {
-            return Err(WorldStateError::InvalidWorldSession(
+            return Err(WorldStateError::TimelineConflict(
                 "player checkpoint does not match world entry".into(),
             ));
         }
@@ -359,6 +414,7 @@ impl WorldState {
             return Ok(existing);
         }
 
+        self.validate_world_entry_checkpoint(context.checkpoint_chapter)?;
         let session = WorldSession::from_context_with_rules(context, game_rules)
             .map_err(|error| WorldStateError::InvalidWorldSession(error.to_string()))?;
         let mut next = self.state.clone();
@@ -384,6 +440,54 @@ impl WorldState {
         self.state = next;
         self.updated_at = Utc::now();
         Ok(session)
+    }
+
+    pub fn validate_world_entry_checkpoint(
+        &self,
+        checkpoint_chapter: i32,
+    ) -> Result<(), WorldStateError> {
+        let choices = self
+            .state
+            .get("choices")
+            .and_then(serde_json::Value::as_array)
+            .ok_or(WorldStateError::InvalidChoices)?;
+        for choice in choices {
+            let chapter = choice
+                .get("chapter")
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|chapter| i32::try_from(chapter).ok())
+                .ok_or(WorldStateError::InvalidChoices)?;
+            if !(1..=checkpoint_chapter).contains(&chapter) {
+                return Err(WorldStateError::TimelineConflict(
+                    "world entry checkpoint precedes a committed branch choice".into(),
+                ));
+            }
+        }
+        if let Some(events) = self
+            .state
+            .get("world_events")
+            .and_then(serde_json::Value::as_array)
+        {
+            for event in events {
+                let Some(chapter_value) = event.get("chapter") else {
+                    continue;
+                };
+                let chapter = chapter_value
+                    .as_i64()
+                    .and_then(|chapter| i32::try_from(chapter).ok())
+                    .ok_or_else(|| {
+                        WorldStateError::InvalidWorldSession(
+                            "world event chapter is invalid".into(),
+                        )
+                    })?;
+                if !(1..=checkpoint_chapter).contains(&chapter) {
+                    return Err(WorldStateError::TimelineConflict(
+                        "world entry checkpoint precedes a committed branch event".into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn apply_world_turn(
@@ -603,6 +707,7 @@ impl WorldState {
                 "world entry context does not match the current session".into(),
             ));
         }
+        self.validate_world_entry_checkpoint(session.entry_context.checkpoint_chapter)?;
         session
             .validate_action(action)
             .map_err(|error| WorldStateError::InvalidWorldSession(error.to_string()))?;
@@ -637,6 +742,7 @@ impl WorldState {
         let Some(session) = self.open_world()? else {
             return Ok(None);
         };
+        self.validate_world_entry_checkpoint(session.entry_context.checkpoint_chapter)?;
         if !session
             .entry_context
             .characters
@@ -656,65 +762,61 @@ impl WorldState {
             .flatten()
             .rev()
             .filter_map(parse_world_history_item)
-            .take(16)
+            .filter(|event| event.actor_character_ids.contains(&character_id))
+            .map(|event| bounded_world_history_item(event, character_id))
+            .take(MAX_CHARACTER_RECENT_EVENTS)
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
             .collect();
-        let active_threads = self
-            .state
-            .get("threads")
-            .and_then(serde_json::Value::as_object)
-            .into_iter()
-            .flatten()
-            .filter(|(_, value)| {
-                value.get("status").and_then(serde_json::Value::as_str) == Some("open")
-            })
-            .map(|(id, value)| ActiveThread {
-                id: id.clone(),
-                description: value
-                    .get("description")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-                origin: value
-                    .get("origin")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("canon")
-                    .to_owned(),
-            })
-            .take(32)
-            .collect();
-        Ok(Some(CharacterWorldContext {
+        // Thread rows currently carry no character witness provenance. Keep
+        // the wire field but fail closed instead of sharing every open thread.
+        let active_threads = vec![];
+        let context = CharacterWorldContext {
             user_id: self.user_id,
             novel_id: self.novel_id,
             character_id,
             character_alive: !session.dead_character_ids.contains(&character_id),
             canon_model_version: session.entry_context.model_version,
             checkpoint_chapter: session.entry_context.checkpoint_chapter,
+            source_chapter_high_water: session.entry_context.unlocked_through_chapter,
             turn_number: session.turn_number,
             world_time: session.world_time,
             player_id: player.id,
             player_name: player.name,
             player_location_id: player.location_id,
-            relationship: player.relationships.get(&character_id).cloned(),
+            relationship: player
+                .relationships
+                .get(&character_id)
+                .cloned()
+                .map(|mut value| {
+                    value.last_change =
+                        leading_chars(&value.last_change, MAX_CHARACTER_CONTEXT_TEXT_CHARS);
+                    value
+                }),
             goals: session
                 .entry_context
                 .character_goals
                 .iter()
                 .filter(|goal| goal.character_id == character_id)
-                .cloned()
+                .map(bounded_character_goal)
+                .take(MAX_CHARACTER_GOALS)
                 .collect(),
-            perception_of_player: session.character_perceptions.get(&character_id).cloned(),
+            perception_of_player: session
+                .character_perceptions
+                .get(&character_id)
+                .map(|value| leading_chars(value, MAX_CHARACTER_CONTEXT_TEXT_CHARS)),
             current_canonical_event: session
                 .canonical_events
                 .iter()
                 .find(|event| event.status.is_pending())
                 .filter(|event| event.event.character_ids.contains(&character_id))
-                .cloned(),
+                .map(|event| bounded_canonical_event(event, character_id)),
+            recent_actions: vec![],
             recent_player_events,
             active_threads,
-        }))
+        };
+        Ok(Some(fit_character_world_context(context)))
     }
 
     /// 更新角色关系
@@ -775,6 +877,127 @@ fn parse_world_history_item(value: &serde_json::Value) -> Option<WorldHistoryIte
     })
 }
 
+fn bounded_character_goal(
+    goal: &crate::domain::entities::world_session::CharacterGoalRef,
+) -> crate::domain::entities::world_session::CharacterGoalRef {
+    let mut goal = goal.clone();
+    goal.description = leading_chars(&goal.description, MAX_CHARACTER_CONTEXT_TEXT_CHARS);
+    keep_recent(
+        &mut goal.source_chapters,
+        MAX_CHARACTER_CONTEXT_SOURCE_CHAPTERS,
+    );
+    goal
+}
+
+fn bounded_world_history_item(mut event: WorldHistoryItem, character_id: Uuid) -> WorldHistoryItem {
+    event.summary = leading_chars(&event.summary, MAX_CHARACTER_CONTEXT_TEXT_CHARS);
+    event.actor_character_ids = bounded_character_ids(&event.actor_character_ids, character_id);
+    event
+}
+
+fn bounded_canonical_event(
+    event: &crate::domain::entities::world_session::CanonicalEventState,
+    character_id: Uuid,
+) -> crate::domain::entities::world_session::CanonicalEventState {
+    let mut event = event.clone();
+    event.event.summary = leading_chars(&event.event.summary, MAX_CHARACTER_CONTEXT_TEXT_CHARS);
+    event.reason = event
+        .reason
+        .as_deref()
+        .map(|reason| leading_chars(reason, MAX_CHARACTER_CONTEXT_TEXT_CHARS));
+    event.event.character_ids = bounded_character_ids(&event.event.character_ids, character_id);
+    event
+        .event
+        .location_ids
+        .truncate(MAX_CHARACTER_CONTEXT_REFERENCES);
+    event
+        .event
+        .faction_ids
+        .truncate(MAX_CHARACTER_CONTEXT_REFERENCES);
+    event
+        .event
+        .death_character_ids
+        .retain(|id| event.event.character_ids.contains(id));
+    event
+        .event
+        .death_character_ids
+        .truncate(MAX_CHARACTER_CONTEXT_REFERENCES);
+    keep_recent(
+        &mut event.event.source_chapters,
+        MAX_CHARACTER_CONTEXT_SOURCE_CHAPTERS,
+    );
+    event
+}
+
+fn bounded_character_ids(ids: &[Uuid], character_id: Uuid) -> Vec<Uuid> {
+    let mut selected = Vec::with_capacity(MAX_CHARACTER_CONTEXT_REFERENCES);
+    if ids.contains(&character_id) {
+        selected.push(character_id);
+    }
+    let remaining = MAX_CHARACTER_CONTEXT_REFERENCES.saturating_sub(selected.len());
+    selected.extend(
+        ids.iter()
+            .copied()
+            .filter(|id| *id != character_id)
+            .take(remaining),
+    );
+    selected
+}
+
+fn keep_recent<T>(values: &mut Vec<T>, maximum: usize) {
+    let discard = values.len().saturating_sub(maximum);
+    values.drain(..discard);
+}
+
+fn leading_chars(value: &str, maximum: usize) -> String {
+    value.chars().take(maximum).collect()
+}
+
+fn serialized_chars(context: &CharacterWorldContext) -> usize {
+    serde_json::to_string(context)
+        .map(|value| value.chars().count())
+        .unwrap_or(usize::MAX)
+}
+
+pub(crate) fn fit_character_world_context(
+    mut context: CharacterWorldContext,
+) -> CharacterWorldContext {
+    while serialized_chars(&context) > MAX_CHARACTER_WORLD_CONTEXT_CHARS {
+        if context.recent_player_events.len() > 1 {
+            context.recent_player_events.remove(0);
+            continue;
+        }
+        if context.recent_actions.len() > 1 {
+            context.recent_actions.remove(0);
+            continue;
+        }
+        if context.perception_of_player.take().is_some() {
+            continue;
+        }
+        if context.relationship.take().is_some() {
+            continue;
+        }
+        if context.active_threads.pop().is_some() {
+            continue;
+        }
+        if context.goals.pop().is_some() {
+            continue;
+        }
+        if context.current_canonical_event.take().is_some() {
+            continue;
+        }
+        if context.recent_player_events.pop().is_some() {
+            continue;
+        }
+        if context.recent_actions.pop().is_some() {
+            continue;
+        }
+        break;
+    }
+    debug_assert!(serialized_chars(&context) <= MAX_CHARACTER_WORLD_CONTEXT_CHARS);
+    context
+}
+
 fn relationship_section(
     state: &mut serde_json::Value,
 ) -> Result<&mut serde_json::Map<String, serde_json::Value>, WorldStateError> {
@@ -830,4 +1053,31 @@ fn object_section<'a>(
     root.get_mut(key)
         .and_then(serde_json::Value::as_object_mut)
         .ok_or(WorldStateError::InvalidObject(key))
+}
+
+#[cfg(test)]
+mod causality_tests {
+    use super::*;
+
+    #[test]
+    fn fingerprint_is_stable_and_changes_with_prompt_visible_state() {
+        let mut state = WorldState::new(Uuid::new_v4(), Uuid::new_v4());
+        let original = state.fingerprint();
+        assert_eq!(state.fingerprint(), original);
+
+        state.state["reader_reputation"]["watch"] = serde_json::json!(1);
+        assert_ne!(state.fingerprint(), original);
+    }
+
+    #[test]
+    fn source_high_water_tracks_the_latest_committed_choice() {
+        let mut state = WorldState::new(Uuid::new_v4(), Uuid::new_v4());
+        state.state["choices"] = serde_json::json!([
+            {"chapter": 1},
+            {"chapter": 4}
+        ]);
+
+        assert_eq!(state.latest_choice_chapter().unwrap(), Some(4));
+        assert_eq!(state.source_chapter_high_water().unwrap(), Some(4));
+    }
 }

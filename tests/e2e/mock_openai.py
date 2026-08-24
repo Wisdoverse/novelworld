@@ -143,7 +143,13 @@ class Handler(BaseHTTPRequestHandler):
             assert request.get("stream_options") == {"include_usage": True}
             reply = (
                 "林岚知道你已经改变了两回合的世界，也会依照自己的目标继续调查。"
-                if "## 已提交开放世界上下文" in prompt and '"turn_number":2' in prompt
+                if (
+                    "## 已提交开放世界上下文" in prompt
+                    and '"turn_number":2' in prompt
+                    and '"recent_actions"' in prompt
+                    and "与林岚立即前往北塔" in prompt
+                    and "绘制地下回廊并寻找守门人的踪迹" in prompt
+                )
                 else "林岚记得你，也愿意继续同行。"
             )
             self.send_response(200)
@@ -307,7 +313,10 @@ class Handler(BaseHTTPRequestHandler):
                 ),
                 "events": [{
                     "summary": "云舟调查北塔换防" if first_turn else "云舟整理地下回廊线索",
-                    "actor_character_ids": [],
+                    # 林岚在两段叙事中都有明确、独立的见证/行动；this
+                    # explicit provenance is what permits her chat context to
+                    # receive the correlated player action.
+                    "actor_character_ids": [context["characters"][0]["id"]],
                     "location_id": context["locations"][0]["id"],
                 }],
                 "relationship_changes": ([{
