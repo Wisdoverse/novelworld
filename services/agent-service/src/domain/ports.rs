@@ -29,8 +29,13 @@ pub type ChatStream = Pin<Box<dyn futures::Stream<Item = Result<ChatCompletionEv
 
 #[async_trait]
 pub trait ChatCompletion: Send + Sync {
-    async fn chat_stream(&self, messages: Vec<(String, String)>) -> Result<ChatStream>;
-    async fn chat_messages(&self, messages: Vec<(String, String)>) -> Result<String>;
+    async fn chat_stream(
+        &self,
+        user_id: Uuid,
+        messages: Vec<(String, String)>,
+    ) -> Result<ChatStream>;
+    async fn chat_messages(&self, user_id: Uuid, messages: Vec<(String, String)>)
+        -> Result<String>;
 }
 
 /// Port for short-term message caching (Redis or similar).
@@ -68,7 +73,7 @@ pub trait MessageCache: Send + Sync {
 /// Domain services depend on this trait, not on concrete LLM clients.
 #[async_trait]
 pub trait TextSummarizer: Send + Sync {
-    async fn summarize(&self, system: &str, text: &str) -> Result<String>;
+    async fn summarize(&self, user_id: Uuid, system: &str, text: &str) -> Result<String>;
 }
 
 /// Port for generating vector embeddings from text.

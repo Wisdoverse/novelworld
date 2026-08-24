@@ -397,6 +397,7 @@ impl LlmClient {
         let labels = RequestLabels::new(
             &provider_name,
             &model_name,
+            api_key,
             request.operation,
             "sync",
             request.effective_max_output_tokens().unwrap(),
@@ -481,6 +482,7 @@ impl LlmClient {
         let labels = RequestLabels::new(
             &provider_name,
             &model_name,
+            api_key,
             request.operation,
             "stream",
             request.effective_max_output_tokens().unwrap(),

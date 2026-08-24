@@ -1,24 +1,34 @@
 import { useQuery } from '@tanstack/react-query';
 import { BarChart3, Loader2, RefreshCw } from 'lucide-react';
-import { getLlmUsage } from '@/entities/llm-usage';
+import {
+  getLlmUsage,
+  llmUsageKeys,
+  type LlmUsageScope,
+} from '@/entities/llm-usage';
 import {
   currencyForLanguage,
   formatCurrencyMicros,
   formatTokenCount,
 } from '@/shared/lib/currency';
 
-export function LlmUsageCard() {
+type LlmUsageCardProps = {
+  principalId: string;
+  scope: LlmUsageScope;
+};
+
+export function LlmUsageCard({ principalId, scope }: LlmUsageCardProps) {
   const language = document.documentElement.lang || navigator.language || 'en-US';
   const currency = currencyForLanguage(language);
+  const title = scope === 'platform' ? '平台 Key 消耗' : '我的 Key 消耗';
   const usage = useQuery({
-    queryKey: ['llm-usage'],
+    queryKey: llmUsageKeys.summary(principalId, scope),
     queryFn: getLlmUsage,
     staleTime: 60_000,
   });
 
   if (usage.isPending) {
     return (
-      <section className="surface-card mt-6 flex items-center justify-center p-10" aria-label="正在加载 LLM 消耗">
+      <section className="surface-card mt-6 flex items-center justify-center p-10" aria-label={`正在加载${title}`}>
         <Loader2 className="animate-spin text-[#0b57d0]" />
       </section>
     );
@@ -27,7 +37,7 @@ export function LlmUsageCard() {
   if (usage.isError) {
     return (
       <section className="surface-card mt-6 p-6 sm:p-8" aria-labelledby="llm-usage-heading">
-        <h2 id="llm-usage-heading" className="text-xl font-semibold text-[#1f1f1f]">LLM 消耗</h2>
+        <h2 id="llm-usage-heading" className="text-xl font-semibold text-[#1f1f1f]">{title}</h2>
         <p className="mt-2 text-sm text-[#5f6368]">统计服务暂时不可用；token 计数仍由各微服务持续记录。</p>
         <button type="button" onClick={() => usage.refetch()} className="tonal-action mt-5">
           <RefreshCw size={16} /> 重试
@@ -47,7 +57,7 @@ export function LlmUsageCard() {
           <BarChart3 size={20} />
         </div>
         <div>
-          <h2 id="llm-usage-heading" className="text-xl font-semibold text-[#1f1f1f]">LLM 消耗</h2>
+          <h2 id="llm-usage-heading" className="text-xl font-semibold text-[#1f1f1f]">{title}</h2>
           <p className="text-sm text-[#5f6368]">近 {summary.window_days} 天 · 按 provider 实际 usage 汇总</p>
         </div>
       </div>

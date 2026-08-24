@@ -212,6 +212,7 @@ struct LlmSettingsResponse {
     model: String,
     thinking_enabled: bool,
     api_key_configured: bool,
+    scope: &'static str,
 }
 
 #[derive(Debug, Deserialize)]
@@ -226,6 +227,7 @@ struct UpdateLlmSettingsRequest {
 #[derive(Debug, Serialize)]
 struct LlmUsageResponse {
     contract: u8,
+    scope: &'static str,
     window_days: u16,
     tokens: LlmUsageTokensResponse,
     costs: LlmUsageCostsResponse,
@@ -345,10 +347,10 @@ fn auth_error_response(error: AuthError) -> axum::response::Response {
 
 fn llm_usage_error_response(error: LlmUsageError) -> axum::response::Response {
     let (status, code, message): (StatusCode, &'static str, &'static str) = match error {
-        LlmUsageError::Forbidden => (
+        LlmUsageError::PersonalKeyRequired => (
             StatusCode::FORBIDDEN,
-            "forbidden",
-            "Administrator access is required",
+            "personal_llm_key_required",
+            "Configure a personal LLM API key to view its usage",
         ),
         LlmUsageError::Unavailable => (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -518,7 +520,19 @@ async fn runtime_llm_config(
         .into_response();
     }
 
-    match state.handler.runtime_llm_config().await {
+    let user_id = match extract_optional_user_id(&headers) {
+        Ok(user_id) => user_id,
+        Err(()) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_user_context",
+                "X-User-Id must be a valid UUID when provided",
+            )
+            .into_response()
+        }
+    };
+
+    match state.handler.runtime_llm_config_for(user_id).await {
         Ok(config) => (
             StatusCode::OK,
             [(CACHE_CONTROL, "no-store")],
@@ -552,14 +566,15 @@ async fn get_llm_settings(State(state): State<AppState>, headers: HeaderMap) -> 
         None => return auth_error_response(AuthError::InvalidCredentials),
     };
     match state.handler.llm_settings(user_id).await {
-        Ok(config) => (
+        Ok(settings) => (
             StatusCode::OK,
             [(CACHE_CONTROL, "no-store")],
             Json(LlmSettingsResponse {
-                provider: config.provider,
-                model: config.model,
-                thinking_enabled: config.thinking_enabled,
-                api_key_configured: !config.api_key.is_empty(),
+                provider: settings.config.provider,
+                model: settings.config.model,
+                thinking_enabled: settings.config.thinking_enabled,
+                api_key_configured: settings.api_key_configured,
+                scope: settings.scope.as_str(),
             }),
         )
             .into_response(),
@@ -573,11 +588,12 @@ async fn get_llm_usage(State(state): State<AppState>, headers: HeaderMap) -> imp
         None => return auth_error_response(AuthError::InvalidCredentials),
     };
     match state.llm_usage_handler.summary(user_id).await {
-        Ok(summary) => (
+        Ok((summary, scope)) => (
             StatusCode::OK,
             [(CACHE_CONTROL, "no-store")],
             Json(LlmUsageResponse {
                 contract: 1,
+                scope: scope.as_str(),
                 window_days: summary.window_days,
                 tokens: LlmUsageTokensResponse {
                     input: summary.input_tokens().to_string(),
@@ -618,11 +634,12 @@ async fn update_llm_settings(
         )
         .await
     {
-        Ok(config) => Json(LlmSettingsResponse {
-            provider: config.provider,
-            model: config.model,
-            thinking_enabled: config.thinking_enabled,
-            api_key_configured: true,
+        Ok(settings) => Json(LlmSettingsResponse {
+            provider: settings.config.provider,
+            model: settings.config.model,
+            thinking_enabled: settings.config.thinking_enabled,
+            api_key_configured: settings.api_key_configured,
+            scope: settings.scope.as_str(),
         })
         .into_response(),
         Err(error) => auth_error_response(error),
@@ -672,6 +689,19 @@ fn extract_user_id(headers: &HeaderMap) -> Option<Uuid> {
         .and_then(|v| Uuid::parse_str(v).ok())
 }
 
+fn extract_optional_user_id(headers: &HeaderMap) -> Result<Option<Uuid>, ()> {
+    headers
+        .get("X-User-Id")
+        .map(|value| {
+            value
+                .to_str()
+                .ok()
+                .and_then(|value| Uuid::parse_str(value).ok())
+                .ok_or(())
+        })
+        .transpose()
+}
+
 #[cfg(test)]
 mod readiness_tests {
     use super::*;
@@ -706,6 +736,17 @@ mod readiness_tests {
             "expected-token".parse().unwrap(),
         );
         assert!(internal_token_authorized(&headers, "expected-token"));
+    }
+
+    #[test]
+    fn optional_internal_user_context_is_strict_when_present() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(extract_optional_user_id(&headers), Ok(None));
+        let user_id = Uuid::new_v4();
+        headers.insert("X-User-Id", user_id.to_string().parse().unwrap());
+        assert_eq!(extract_optional_user_id(&headers), Ok(Some(user_id)));
+        headers.insert("X-User-Id", "not-a-uuid".parse().unwrap());
+        assert_eq!(extract_optional_user_id(&headers), Err(()));
     }
 
     #[test]

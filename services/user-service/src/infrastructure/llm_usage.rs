@@ -8,6 +8,7 @@ use crate::domain::{
     entities::llm_usage::{
         BillableTokenClass, BillableTokenUsage, LlmPricingCatalog, LlmUsageSnapshot, TokenPrices,
     },
+    entities::runtime_config::RuntimeLlmConfig,
     ports::LlmUsageReader,
 };
 
@@ -46,11 +47,8 @@ impl PrometheusLlmUsageReader {
 
 #[async_trait]
 impl LlmUsageReader for PrometheusLlmUsageReader {
-    async fn read(&self) -> Result<LlmUsageSnapshot> {
-        let query = format!(
-            "round(sum by (provider, model, class) (increase(novelworld_llm_billable_tokens_total[{}d])))",
-            self.window_days
-        );
+    async fn read(&self, config: &RuntimeLlmConfig) -> Result<LlmUsageSnapshot> {
+        let query = usage_query(self.window_days, &config.api_key);
         let mut query_url = self.query_url.clone();
         query_url.query_pairs_mut().append_pair("query", &query);
         let response = self
@@ -61,6 +59,13 @@ impl LlmUsageReader for PrometheusLlmUsageReader {
             .error_for_status()?;
         parse_snapshot(response.json().await?, self.window_days)
     }
+}
+
+fn usage_query(window_days: u16, api_key: &str) -> String {
+    let usage_key = llm_client::usage_key_fingerprint(api_key);
+    format!(
+        "round(sum by (provider, model, class) (increase(novelworld_llm_billable_tokens_total{{usage_key=\"{usage_key}\"}}[{window_days}d])))"
+    )
 }
 
 #[derive(Deserialize)]
@@ -213,5 +218,12 @@ mod tests {
         let snapshot = parse_snapshot(response, 30).unwrap();
         assert_eq!(snapshot.usage[0].tokens, 42);
         assert_eq!(snapshot.usage[0].class, BillableTokenClass::Output);
+    }
+
+    #[test]
+    fn usage_query_filters_by_a_non_secret_key_fingerprint() {
+        let query = usage_query(30, "top-secret-api-key");
+        assert!(query.contains("usage_key=\""));
+        assert!(!query.contains("top-secret-api-key"));
     }
 }

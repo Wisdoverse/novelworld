@@ -18,8 +18,13 @@ pub trait AccountExportPort: Send + Sync {
 
 #[async_trait]
 pub trait LlmPort: Send + Sync {
-    async fn chat_longform(&self, system: &str, user: &str) -> Result<String>;
-    async fn chat_json(&self, task: NarrativeLlmTask, prompt: &str) -> Result<String>;
+    async fn chat_longform(&self, user_id: Uuid, system: &str, user: &str) -> Result<String>;
+    async fn chat_json(
+        &self,
+        user_id: Uuid,
+        task: NarrativeLlmTask,
+        prompt: &str,
+    ) -> Result<String>;
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -19,12 +19,12 @@ pub trait AccountExportPort: Send + Sync {
 
 #[async_trait]
 pub trait LlmPort: Send + Sync {
-    async fn chat_json(&self, task: NovelLlmTask, prompt: &str) -> Result<String>;
+    async fn chat_json(&self, user_id: Uuid, task: NovelLlmTask, prompt: &str) -> Result<String>;
 }
 
 #[async_trait]
 pub trait TextTranslator: Send + Sync {
-    async fn to_simplified_chinese(&self, source: &str) -> Result<String>;
+    async fn to_simplified_chinese(&self, user_id: Uuid, source: &str) -> Result<String>;
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -286,7 +286,7 @@ data, and generated secrets stay on the player's computer in the operating
 system's per-user application data directory. AI features still require
 Internet access to the configured model provider and an API key on first launch.
 Desktop startup stops its named embedded database, refuses occupied service
-ports, applies every embedded migration through 0020, and only then starts the
+ports, applies every embedded migration through 0023, and only then starts the
 five services; the migration therefore runs without an old local writer.
 
 The current artifacts are unsigned engineering builds. Windows SmartScreen and
@@ -303,7 +303,10 @@ code-signing certificates and macOS notarization.
 No default application account is installed. A key entered in the setup page is
 sent only to your server, encrypted before PostgreSQL persistence, and never
 written to browser storage. Advanced operators can still use `LLM_API_*` in
-`.env`; environment configuration takes precedence over the web setup.
+`.env`; environment configuration takes precedence over the platform web setup.
+Signed-in readers may optionally store their own encrypted provider key; their
+requests and visible usage then follow that key, while readers without one use
+the platform key without seeing its aggregate cost.
 
 ### Development mode
 
