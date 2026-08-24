@@ -1,12 +1,12 @@
-import React, { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { BrowserRouter, HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
 import './styles/globals.css';
 
+import { useSetupStatus } from '@/entities/runtime-config';
 import { useAuthStore } from '@/features/auth';
 import { useChatStore } from '@/features/character-chat';
-import { apiClient } from '@/shared/api/client';
 import { clearPrivateQueryCache, queryClient } from '@/shared/api/queryClient';
 import { isDesktopClient } from '@/shared/config/runtime';
 
@@ -54,8 +54,7 @@ export function handleAuthTokenStorageChange(
 function AppRouteContent() {
   const { user, fetchMe } = useAuthStore();
   const previousPrincipal = useRef<string | null>(null);
-  const [setupStatus, setSetupStatus] = useState<'loading' | 'needed' | 'done' | 'error'>('loading');
-  const [llmConfigured, setLlmConfigured] = useState(false);
+  const setupStatus = useSetupStatus();
   const [authReady, setAuthReady] = useState(false);
 
   useLayoutEffect(() => {
@@ -65,28 +64,8 @@ function AppRouteContent() {
     );
   }, [user?.id]);
 
-  const loadSetupStatus = useCallback(() => {
-    setSetupStatus('loading');
-    apiClient.get('/setup/status')
-      .then(res => {
-        if (res.data?.contract !== 3) {
-          setSetupStatus('error');
-          return;
-        }
-        setLlmConfigured(res.data.llm_configured === true);
-        setSetupStatus(res.data.configured ? 'done' : 'needed');
-      })
-      .catch(() => {
-        setSetupStatus('error');
-      });
-  }, []);
-
   useEffect(() => {
-    loadSetupStatus();
-  }, [loadSetupStatus]);
-
-  useEffect(() => {
-    if (setupStatus === 'done') {
+    if (setupStatus.data?.configured) {
       let active = true;
       setAuthReady(false);
       fetchMe().finally(() => {
@@ -97,22 +76,13 @@ function AppRouteContent() {
       };
     }
     setAuthReady(false);
-  }, [setupStatus, fetchMe]);
+  }, [setupStatus.data?.configured, fetchMe]);
 
-  if (setupStatus === 'loading' || (setupStatus === 'done' && !authReady)) {
+  if (setupStatus.isPending || (setupStatus.data?.configured && !authReady)) {
     return <AppLoadingScreen />;
   }
 
-  if (setupStatus === 'needed') {
-    return (
-      <SetupPage
-        llmConfigured={llmConfigured}
-        onComplete={() => setSetupStatus('done')}
-      />
-    );
-  }
-
-  if (setupStatus === 'error') {
+  if (setupStatus.isError) {
     return (
       <div className="app-surface flex min-h-screen items-center justify-center px-4">
         <div role="alert" className="surface-card max-w-md p-8 text-center text-[#5f6368]">
@@ -121,13 +91,21 @@ function AppRouteContent() {
           </h1>
           <p className="mb-5 text-sm leading-6">NovelWorld 暂时无法连接到配置服务，请检查服务状态后重试。</p>
           <button
-            onClick={loadSetupStatus}
+            onClick={() => { void setupStatus.refetch(); }}
             className="primary-action"
           >
             重试
           </button>
         </div>
       </div>
+    );
+  }
+
+  if (setupStatus.data && !setupStatus.data.configured) {
+    return (
+      <SetupPage
+        onComplete={() => { void setupStatus.refetch(); }}
+      />
     );
   }
 

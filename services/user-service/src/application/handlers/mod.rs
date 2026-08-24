@@ -154,12 +154,6 @@ impl LlmUsageHandler {
     }
 }
 
-impl SetupStatus {
-    pub fn configured(&self) -> bool {
-        self.admin_configured && self.llm_configured
-    }
-}
-
 impl AuthHandler {
     #[tracing::instrument(skip(self, password))]
     pub async fn register(
@@ -208,14 +202,12 @@ impl AuthHandler {
         Ok((user, access_token, refresh_token.token))
     }
 
-    #[tracing::instrument(skip(self, password, api_key))]
+    #[tracing::instrument(skip(self, password))]
     pub async fn setup(
         &self,
         email: &str,
         password: &str,
         name: Option<String>,
-        provider: Option<&str>,
-        api_key: Option<&str>,
     ) -> AuthResult<(User, String, String)> {
         let (email, name) = validate_registration(email, password, name)?;
         if self
@@ -227,28 +219,13 @@ impl AuthHandler {
             return Err(AuthError::AlreadyConfigured);
         }
 
-        let runtime_config = if self.environment_llm_config.is_some() {
-            None
-        } else {
-            let config = RuntimeLlmConfig::for_provider(
-                provider.unwrap_or_default(),
-                api_key.unwrap_or_default(),
-            )
-            .map_err(AuthError::Validation)?;
-            if let Err(error) = self.llm_tester.test(&config).await {
-                tracing::warn!(error = ?error, provider = %config.provider, "setup LLM connection test failed");
-                return Err(AuthError::LlmUnavailable);
-            }
-            Some(config)
-        };
-
         let password_hash = self.password_hasher.hash(password).await?;
         let user = User::new_admin(email, password_hash, name);
         let (access_token, refresh_token) = self.issue_tokens(&user)?;
 
         if !self
             .user_repo
-            .save_initial_setup(&user, &refresh_token, runtime_config.as_ref())
+            .save_initial_setup(&user, &refresh_token)
             .await
             .map_err(AuthError::Internal)?
         {
@@ -353,7 +330,10 @@ impl AuthHandler {
             ));
         }
         let current = if is_admin {
-            Some(self.runtime_llm_config().await?)
+            self.user_repo
+                .find_runtime_llm_config()
+                .await
+                .map_err(AuthError::Internal)?
         } else {
             self.user_repo
                 .find_user_llm_config(user_id)

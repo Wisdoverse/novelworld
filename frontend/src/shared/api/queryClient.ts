@@ -1,5 +1,7 @@
 import { QueryClient } from '@tanstack/react-query';
 
+export const PUBLIC_QUERY_SCOPE = 'public';
+
 export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
@@ -10,6 +12,10 @@ export const queryClient = new QueryClient({
 });
 
 export function clearPrivateQueryCache() {
-  void queryClient.cancelQueries();
-  queryClient.clear();
+  const isPrivate = (query: { queryKey: readonly unknown[] }) => (
+    query.queryKey[0] !== PUBLIC_QUERY_SCOPE
+  );
+  void queryClient.cancelQueries({ predicate: isPrivate });
+  queryClient.removeQueries({ predicate: isPrivate });
+  queryClient.getMutationCache().clear();
 }

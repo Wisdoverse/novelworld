@@ -52,7 +52,7 @@ export async function installStubs(page: Page, opts: StubOptions = {}): Promise<
   type ResponseSpec = ReturnType<typeof json> | ReturnType<typeof sse> | { status: number };
   const table: Array<[string, RegExp, (req: Request) => ResponseSpec]> = [
     ['GET', /^\/setup\/status$/, () => json(200, setupNeeded
-      ? { ...SETUP_STATUS, configured: false, llm_configured: false }
+      ? { ...SETUP_STATUS, configured: false, admin_configured: false, llm_configured: false }
       : SETUP_STATUS)],
     ['GET', /^\/auth\/me$/, () => json(200, USER)],
     ['POST', /^\/auth\/login$/, () => json(200, AUTH_TOKENS)],

@@ -255,12 +255,16 @@ The drill covers ordering and process-crash recovery with fake dependencies;
 real Linux filesystem power-loss injection and live registry/image health are
 still release evidence gaps.
 
-The server startup scripts check Docker, generate secrets, run `docker compose
-down` without `--volumes`, then build and start all services. This preserves
+The server startup scripts check Docker, generate only the PostgreSQL/JWT/runtime
+encryption/internal-service bootstrap roots, run `docker compose down` without
+`--volumes`, then build and start the selected profile with `--wait`. This preserves
 named-volume data while stopping old writers and removing the old one-shot
 migration container so every local pull/restart reapplies migrations before
-services start. They then open `http://localhost` and guide the operator through
-model and first-admin setup.
+services start. A fresh install persists `CACHE_MODE=postgres`, starts no Redis,
+and opens `http://localhost` only after readiness. The operator creates the first
+administrator immediately and may configure the model later in Settings. Redis
+projection is an explicit opt-in: persist `CACHE_MODE=redis` plus a non-placeholder
+`REDIS_PASSWORD`, then rerun the launcher so it derives the profile and URL together.
 
 ### 2. Portable desktop — no Docker or external NovelWorld server
 
@@ -283,8 +287,8 @@ The workflow can also be run manually to produce temporary Actions artifacts.
 The player does not install Docker, PostgreSQL, Redis, Node.js, or Rust, and the
 app never connects to an external NovelWorld server. All application services,
 data, and generated secrets stay on the player's computer in the operating
-system's per-user application data directory. AI features still require
-Internet access to the configured model provider and an API key on first launch.
+system's per-user application data directory. AI features require Internet
+access to the configured model provider and an API key only when they are used.
 Desktop startup stops its named embedded database, refuses occupied service
 ports, applies every embedded migration through 0023, and only then starts the
 five services; the migration therefore runs without an old local writer.
@@ -300,10 +304,10 @@ code-signing certificates and macOS notarization.
 | Docker server | `start.cmd` | `./start.sh` | Not qualified |
 | Portable desktop | x64 engineering build | x64 AppImage engineering build | Apple Silicon and Intel engineering builds |
 
-No default application account is installed. A key entered in the setup page is
+No default application account is installed. A key entered later in protected Settings is
 sent only to your server, encrypted before PostgreSQL persistence, and never
 written to browser storage. Advanced operators can still use `LLM_API_*` in
-`.env`; environment configuration takes precedence over the platform web setup.
+`.env`; environment configuration takes precedence over protected platform Settings.
 Signed-in readers may optionally store their own encrypted provider key; their
 requests and visible usage then follow that key, while readers without one use
 the platform key without seeing its aggregate cost.
@@ -317,15 +321,17 @@ the platform key without seeing its aggregate cost.
 - Current stable [Rust](https://rustup.rs/) (the locked dependency graph currently requires ≥ 1.94.1)
 - [Docker](https://docs.docker.com/get-docker/)
 - [Node.js](https://nodejs.org/) 22+ & [pnpm](https://pnpm.io/)
-- OpenAI-compatible API key
+- OpenAI-compatible API key (optional until an AI-backed operation is used)
 
 ```bash
 # 1. Configure
 cp .env.example .env
 # Set the generated server secrets. LLM_API_KEY is optional when using web setup.
 
-# 2. Start databases
-docker compose up -d postgres redis
+# 2. Start the minimum database profile
+docker compose up -d postgres
+# Optional Redis projection: use the supported launcher, or explicitly select
+# CACHE_MODE=redis + REDIS_PASSWORD + REDIS_URL and --profile redis together.
 
 # 3. Start backend (5 services)
 cargo build --workspace
@@ -373,7 +379,7 @@ Sign up → Upload novel → Wait for parsing → Start reading
 └──┬───┘  └──┬───┘  └───┬──┘  └───┬────────┘
    │         │          │         │
 ┌──▼─────────▼──────────▼─────────▼──────────┐
-│       PostgreSQL 18 + pgvector + Redis      │
+│ PostgreSQL 18 + pgvector · optional Redis   │
 └─────────────────────────────────────────────┘
 ```
 
@@ -381,10 +387,10 @@ Sign up → Upload novel → Wait for parsing → Start reading
 |-------|-------|---------|
 | Backend | Rust / Axum | 5 async microservices |
 | Database | PostgreSQL 18 | pgvector semantic search, pg_trgm fuzzy matching |
-| Cache | Redis | Reconstructable recent-message projection |
+| Cache | Optional Redis | Reconstructable recent-message projection; PostgreSQL is the base profile |
 | AI | Operator-configured provider | Structured output + streaming, bounded retry |
 | Frontend | React + TypeScript | Tailwind CSS, Feature-Sliced Design |
-| Server deploy | Docker Compose | 9 long-running containers plus a migration job |
+| Server deploy | Docker Compose | 8 base containers, optional Redis, plus a migration job |
 | Desktop deploy | Tauri portable bundle | Same five services on loopback + bundled pg0; no Docker |
 
 The five Rust runtimes have statically enforced DDD, HTTP, and relation-owner

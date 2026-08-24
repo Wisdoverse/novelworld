@@ -69,6 +69,7 @@ export async function expectNoA11yViolations(page: Page): Promise<void> {
 
 export interface FocusState {
   tag: string;
+  identity: string;
   cls: string;
   text: string;
   role: string | null;
@@ -86,6 +87,11 @@ export async function currentFocus(page: Page): Promise<FocusState | null> {
     const hasShadow = cs.boxShadow !== 'none';
     return {
       tag: el.tagName.toLowerCase(),
+      identity: el.getAttribute('id')
+        ?? el.getAttribute('aria-label')
+        ?? el.getAttribute('name')
+        ?? el.getAttribute('placeholder')
+        ?? ((el as HTMLElement).textContent ?? '').trim().slice(0, 40),
       cls: (el as HTMLElement).className?.slice(0, 80) ?? '',
       text: ((el as HTMLElement).textContent ?? '').trim().slice(0, 40),
       role: el.getAttribute('role'),
@@ -114,10 +120,10 @@ export async function tabWalk(page: Page, maxStops = 120): Promise<FocusState[]>
       state = await currentFocus(page);
       if (!state) break;
     }
-    const key = state.tag + '|' + state.text;
+    const key = state.tag + '|' + state.identity;
     if (stops.length > 0) {
       const first = stops[0];
-      if (first.tag + '|' + first.text === key) break; // full cycle: walk done
+      if (first.tag + '|' + first.identity === key) break; // full cycle: walk done
     }
     stops.push(state);
     await page.keyboard.press('Tab');

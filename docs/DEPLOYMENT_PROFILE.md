@@ -34,8 +34,9 @@ decisions for that profile and approves nothing beyond it.
    must not be assumed (PRODUCT_CONTRACT responsibility boundary). Reopens
    only for a public profile.
 4. **Provider boundary — operator-configured.** Any OpenAI-compatible
-   provider URL/model/key may be configured by the operator; the first-run
-   setup offers preset providers. Per-principal quotas, global spend
+   provider URL/model/key may be configured by the operator after the
+   administrator-only first run. The protected settings flow offers preset
+   providers; an environment override remains read-only. Per-principal quotas, global spend
    ceilings, and kill switches are deferred to a public profile and are not
    built for the private one.
 5. **Privacy, consent, retention — operator duty with implemented

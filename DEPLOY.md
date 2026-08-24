@@ -51,16 +51,18 @@ Windows 在命令提示符运行，或在资源管理器中双击：
 start.cmd
 ```
 
-脚本会生成数据库、Redis、JWT、配置加密和服务间鉴权密钥，构建并启动
-全部容器，然后打开 `http://localhost`。请在网页中选择 DeepSeek 或
-OpenAI、填写 API Key，并创建第一个管理员。API Key 不会保存在浏览器中。
+脚本只生成 PostgreSQL、JWT、配置加密和服务间鉴权所需的启动根。
+新安装默认持久化 `CACHE_MODE=postgres`，不生成 Redis 密码，也不启动 Redis。
+脚本使用 Compose `--wait`，只在整个选定 profile 达到 readiness 后才打开
+`http://localhost`。先创建唯一的首位管理员；DeepSeek/OpenAI 可稍后在设置页
+配置，API Key 不会保存在浏览器中。
 
 首次构建约需 5-15 分钟（Rust 编译较慢）。
 
 ### 第 4 步：验证部署
 
 ```bash
-# 检查所有服务状态
+# 检查基础 profile 状态
 docker compose ps
 
 # 通过公开 Nginx 入口检查聚合健康
@@ -69,11 +71,24 @@ curl --fail http://localhost/ready
 
 # 查看日志
 docker compose logs -f gateway
+
+# 按 .env 中的 CACHE_MODE 检查；Redis 仅在 redis 模式中是必需健康项
+./infra/ops/health-checks.sh
 ```
 
 默认仅在本机通过 `http://localhost` 访问；非本机访问必须先增加加密传输边界。
-首次访问会要求配置模型并创建唯一的首位管理员。生产 schema 不再安装默认应用
-账号；LLM 密钥由服务端加密保存或从环境变量读取，浏览器不会保存密钥。
+首次访问只需创建唯一的首位管理员。未配置 LLM 时基础服务仍可 ready，
+AI 操作返回明确的 `503 llm_not_configured`。LLM 密钥由 User Service 加密保存
+或从环境变量读取，浏览器不会保存密钥。
+
+### 显式启用 Redis 投影
+
+在 `.env` 中同时设置 `CACHE_MODE=redis` 和至少 16 位、包含至少 8 种字符的
+URL-safe `REDIS_PASSWORD`（`A-Z a-z 0-9 . _ ~ -`），再重新运行 `start.sh` 或
+`start.cmd`。脚本会由该唯一 mode 同时派生 Redis profile 和 `REDIS_URL`；
+缺密码、占位值、未知 mode 或只选中一半都会拒绝启动。旧版启动器已
+生成 Redis 密码但没有 `CACHE_MODE` 的安装，首次运行新脚本会一次性持久化
+`redis`，避免升级后静默切换适配器。
 
 ---
 
@@ -86,7 +101,8 @@ docker compose logs -f gateway
 基础镜像 digest；不要部署单个镜像或使用 `latest`。
 
 PostgreSQL、Redis、Nginx 的 digest 固定在 `docker-compose.yml`。普通应用发布
-要求候选与当前 release 的三个 digest 完全一致，只检查 PostgreSQL/Redis 健康，
+要求候选与当前 release 的三个 digest 完全一致，总是检查 PostgreSQL，
+只在 `CACHE_MODE=redis` 时检查 Redis，
 不会重建或降级它们。基础镜像变更必须作为独立基础设施变更，先完成数据库备份、
 格式兼容与恢复演练；本脚本会拒绝把它混入应用发布。
 
@@ -137,6 +153,11 @@ UUID v4 `Idempotency-Key` 后，输入脚本
 ./infra/docker/release.sh rollback <previous-release-git-sha>
 ```
 
+回滚到本最小启动决策之前的 release 会在替换任何服务前拒绝，除非：
+`CACHE_MODE=redis`、Redis 密码能认证健康容器；并且有有效的 LLM 环境覆盖，
+或仍运行且未使用环境覆盖的当前 User Service 能以内部身份访问既有运行时 LLM
+端点。守卫只检查 HTTP 状态并丢弃响应体，不读取或输出密钥/密文。
+
 ---
 
 ## 服务端口说明
@@ -150,7 +171,7 @@ UUID v4 `Idempotency-Key` 后，输入脚本
 | agent-service | 8003 | ❌ 内部 | 角色对话 |
 | narrative-service | 8004 | ❌ 内部 | 分支叙事 |
 | postgres | 5432 | ❌ 默认关闭（可选 5432） | 数据库 |
-| redis | 6379 | ❌ 默认关闭（可选 6379） | 缓存 |
+| redis | 6379 | ❌ 默认不启动（`redis` profile） | 可选重建投影 |
 
 **生产环境建议**：关闭 postgres 和 redis 的对外端口映射，仅通过内部网络访问。
 
@@ -204,9 +225,9 @@ docker pull rust:1.82-slim-bookworm
 
 **Q: 如何更换 LLM 提供商？**
 
-A: 新安装可在网页向导选择 DeepSeek 或 OpenAI。高级部署可在启动前设置
-`.env` 中的 `LLM_API_URL`、`LLM_API_KEY` 和 `LLM_MODEL`，然后重建三个
-LLM 服务；环境配置优先于网页设置。
+A: 创建首位管理员后，可在受保护的设置页选择 DeepSeek 或 OpenAI。高级部署
+可在启动前设置 `.env` 中的 `LLM_API_URL`、`LLM_API_KEY` 和 `LLM_MODEL`，
+然后重新运行启动器；环境配置优先于数据库设置并在网页中只读显示。
 
 **Q: pgvector 扩展安装失败？**
 

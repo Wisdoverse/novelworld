@@ -18,6 +18,7 @@ vi.mock('sonner', () => ({ toast: { error: mocks.error, success: mocks.success }
 
 vi.mock('@/shared/api/client', () => ({
   apiClient: { delete: mocks.delete, get: mocks.get, put: mocks.put },
+  getApiErrorCode: (error: { code?: string }) => error?.code,
   getApiErrorMessage: (_error: unknown, fallback: string) => fallback,
 }));
 
@@ -87,6 +88,33 @@ describe('SettingsPage', () => {
       model: 'deepseek-v4-pro',
       thinking_enabled: true,
       api_key: undefined,
+    }));
+  });
+
+  it('lets the first administrator create platform settings after deferred setup', async () => {
+    mocks.get.mockRejectedValueOnce({ code: 'setup_required' });
+    mocks.put.mockResolvedValue({
+      data: {
+        scope: 'platform',
+        provider: 'deepseek',
+        model: 'deepseek-v4-flash',
+        thinking_enabled: false,
+        api_key_configured: true,
+      },
+    });
+    render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+
+    await screen.findByRole('heading', { name: '平台模型设置' });
+    const key = screen.getByLabelText('平台 API Key');
+    expect(key).toHaveAttribute('required');
+    fireEvent.change(key, { target: { value: 'first-platform-key' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存平台设置' }));
+
+    await waitFor(() => expect(mocks.put).toHaveBeenCalledWith('/settings/llm', {
+      provider: 'deepseek',
+      model: 'deepseek-v4-flash',
+      thinking_enabled: false,
+      api_key: 'first-platform-key',
     }));
   });
 

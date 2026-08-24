@@ -140,12 +140,18 @@ jobs:
             record_image "$key" "$image"
           done
 
-          compose_json=$(POSTGRES_PASSWORD=manifest-placeholder \
-            REDIS_PASSWORD=manifest-placeholder \
-            JWT_SECRET=manifest-placeholder-secret-at-least-32-characters \
-            RUNTIME_CONFIG_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
-            INTERNAL_SERVICE_TOKEN=manifest-placeholder-internal-token-at-least-32-characters \
-            LLM_API_KEY=manifest-placeholder docker compose config --format json)
+          compose_postgres_password=$(openssl rand -hex 16)
+          compose_redis_password="Aa0._~-Z$(openssl rand -hex 16)"
+          compose_jwt_secret=$(openssl rand -hex 32)
+          compose_runtime_key=$(openssl rand -hex 32)
+          compose_internal_token=$(openssl rand -hex 32)
+          compose_llm_key="sk-$(openssl rand -hex 24)"
+          compose_json=$(POSTGRES_PASSWORD="$compose_postgres_password" \
+            CACHE_MODE=redis REDIS_PASSWORD="$compose_redis_password" \
+            REDIS_URL="redis://:$compose_redis_password@redis:6379" \
+            JWT_SECRET="$compose_jwt_secret" RUNTIME_CONFIG_KEY="$compose_runtime_key" \
+            INTERNAL_SERVICE_TOKEN="$compose_internal_token" LLM_API_KEY="$compose_llm_key" \
+            docker compose --profile redis config --format json)
           postgres_image=$(jq -r '.services.postgres.image' <<<"$compose_json")
           [[ $(jq -r '.services["postgres-migrate"].image' <<<"$compose_json") = "$postgres_image" ]]
           record_pinned_image POSTGRES_IMAGE "$postgres_image"

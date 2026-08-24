@@ -18,6 +18,7 @@ image_keys=(
   NARRATIVE_SERVICE_IMAGE FRONTEND_IMAGE POSTGRES_IMAGE REDIS_IMAGE NGINX_IMAGE
 )
 world_memory_projection_migration=infra/postgres/migrations/0021_world_turn_memory_projection.sql
+minimal_bootstrap_adr=docs/adr/0002-minimal-bootstrap-and-deferred-runtime-configuration.md
 
 die() {
   printf 'release: %s\n' "$*" >&2
@@ -34,6 +35,90 @@ acquire_release_lock() {
 require_clean_worktree() {
   [[ -z "$(git status --porcelain=v1 --untracked-files=normal)" ]] \
     || die "working tree is not clean"
+}
+
+secret_value() {
+  local wanted=$1 key value count=0 found=
+  [[ -r "$secrets_file" ]] || die "production secrets file not found: $secrets_file"
+  while IFS='=' read -r key value || [[ -n "$key$value" ]]; do
+    if [[ "$key" == "$wanted" ]]; then
+      count=$((count + 1))
+      found=$value
+    fi
+  done < "$secrets_file"
+  [[ "$count" -le 1 ]] || die "duplicate $wanted in production secrets"
+  [[ "$count" -eq 1 ]] || return 1
+  printf '%s\n' "$found"
+}
+
+set_secret_value() {
+  local key=$1 value=$2 count
+  count=$(grep -c "^${key}=" "$secrets_file" || true)
+  [[ "$count" -le 1 ]] || die "duplicate $key in production secrets"
+  if [[ "$count" -eq 1 ]]; then
+    sed -i "s|^${key}=.*$|${key}=${value}|" "$secrets_file"
+  else
+    printf '\n%s=%s\n' "$key" "$value" >> "$secrets_file"
+  fi
+}
+
+valid_redis_password() {
+  local value=$1 lowered distinct
+  lowered=$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')
+  distinct=$(printf '%s' "$value" | fold -w1 | sort -u | wc -l | tr -d ' ')
+  [[ "$value" =~ ^[A-Za-z0-9._~-]{16,}$ ]] \
+    && [[ "$distinct" -ge 8 ]] \
+    && [[ "$lowered" != *placeholder* ]] \
+    && [[ "$lowered" != *change_me* ]] \
+    && [[ "$lowered" != your_redis_password_here ]] \
+    && [[ "$lowered" != runtime-redis-only ]]
+}
+
+cache_mode=
+cache_redis_password=
+cache_redis_url=
+compose_profile_args=()
+
+load_cache_mode() {
+  local mode_count
+  [[ -r "$secrets_file" ]] || die "production secrets file not found: $secrets_file"
+  mode_count=$(grep -c '^CACHE_MODE=' "$secrets_file" || true)
+  [[ "$mode_count" -le 1 ]] || die "duplicate CACHE_MODE in production secrets"
+  cache_redis_password=$(secret_value REDIS_PASSWORD || true)
+
+  if [[ "$mode_count" -eq 0 ]]; then
+    if [[ -n "$cache_redis_password" \
+      && "$cache_redis_password" != your_redis_password_here ]]; then
+      cache_mode=redis
+    else
+      cache_mode=postgres
+      if [[ "$cache_redis_password" == your_redis_password_here ]]; then
+        set_secret_value REDIS_PASSWORD ''
+        cache_redis_password=
+      fi
+    fi
+    set_secret_value CACHE_MODE "$cache_mode"
+    chmod 600 "$secrets_file"
+    sync
+  else
+    cache_mode=$(secret_value CACHE_MODE)
+  fi
+
+  compose_profile_args=()
+  case "$cache_mode" in
+    postgres)
+      cache_redis_url=memory://
+      ;;
+    redis)
+      valid_redis_password "$cache_redis_password" \
+        || die "CACHE_MODE=redis requires a URL-safe, non-placeholder REDIS_PASSWORD of at least 16 characters with 8 distinct characters"
+      cache_redis_url="redis://:${cache_redis_password}@redis:6379"
+      compose_profile_args=(--profile redis)
+      ;;
+    *) die "CACHE_MODE must be exactly postgres or redis" ;;
+  esac
+  readonly cache_mode cache_redis_password cache_redis_url
+  readonly -a compose_profile_args
 }
 
 validate_manifest() {
@@ -130,16 +215,76 @@ require_schema_safe_rollback() {
   fi
 }
 
+valid_llm_environment_override() {
+  local value
+  if [[ -n "${LLM_API_KEY+x}" ]]; then
+    value=$LLM_API_KEY
+  else
+    value=$(secret_value LLM_API_KEY || true)
+  fi
+  [[ -n "$value" ]] \
+    && [[ "$value" != sk-your-api-key ]] \
+    && [[ "$value" != *placeholder* ]] \
+    && [[ "$value" != change_me* ]]
+}
+
+current_user_service_proves_database_llm_configured() {
+  docker exec novel-user-service sh -ec '
+    test -z "${LLM_API_KEY:-}" || exit 1
+    code=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" \
+      --max-time 15 -H "X-Internal-Service-Token: ${INTERNAL_SERVICE_TOKEN:?}" \
+      http://127.0.0.1:8001/internal/runtime/llm)
+    test "$code" = 200
+  '
+}
+
+redis_accepts_persisted_password() {
+  printf '%s\n' "$cache_redis_password" \
+    | docker exec -i novel-redis sh -ec '
+        IFS= read -r persisted_password
+        REDISCLI_AUTH="$persisted_password" exec redis-cli --no-auth-warning ping
+      ' >/dev/null 2>&1
+}
+
+require_pre_minimum_rollback_ready() {
+  local from=$1 to=$2 redis_health
+  if ! manifest_contains_path "$from" "$minimal_bootstrap_adr" \
+    || manifest_contains_path "$to" "$minimal_bootstrap_adr"; then
+    return 0
+  fi
+
+  load_cache_mode
+  [[ "$cache_mode" == redis ]] \
+    || die "rollback target predates minimal bootstrap and requires CACHE_MODE=redis"
+  redis_health=$(docker inspect --format '{{.State.Health.Status}}' novel-redis 2>/dev/null || true)
+  [[ "$redis_health" == healthy ]] \
+    || die "rollback target predates minimal bootstrap and requires healthy Redis"
+  redis_accepts_persisted_password \
+    || die "rollback target predates minimal bootstrap and requires the persisted Redis credential to authenticate"
+
+  if valid_llm_environment_override; then
+    return 0
+  fi
+  current_user_service_proves_database_llm_configured \
+    || die "rollback target predates minimal bootstrap and current User Service did not prove a decryptable database LLM configuration"
+}
+
 active_manifest=
-compose() {
+compose() (
+  [[ -n "$cache_mode" ]] || die "cache mode was not initialized"
+  export CACHE_MODE="$cache_mode"
+  export REDIS_PASSWORD="$cache_redis_password"
+  export REDIS_URL="$cache_redis_url"
   env \
+    -u COMPOSE_PROFILES \
     -u RELEASE_VERSION -u RELEASE_GIT_SHA \
     -u GATEWAY_IMAGE -u USER_SERVICE_IMAGE -u NOVEL_SERVICE_IMAGE \
     -u AGENT_SERVICE_IMAGE -u NARRATIVE_SERVICE_IMAGE -u FRONTEND_IMAGE \
     -u POSTGRES_IMAGE -u REDIS_IMAGE -u NGINX_IMAGE \
     docker compose --project-directory "$repo_root" -f "$repo_root/docker-compose.yml" \
-      --env-file "$secrets_file" --env-file "$active_manifest" "$@"
-}
+      --env-file "$secrets_file" --env-file "$active_manifest" \
+      "${compose_profile_args[@]}" "$@"
+)
 
 fail_stop_client() {
   local reason="$1" nginx_stopped=true frontend_stopped=true
@@ -174,6 +319,9 @@ deploy_manifest() {
   local manifest="$1" require_client_gate="$2" release_sha confirmation transition_tmp
   validate_manifest "$manifest"
   [[ -f "$secrets_file" ]] || die "production secrets file not found: $secrets_file"
+  if [[ -z "$cache_mode" ]]; then
+    load_cache_mode
+  fi
   active_manifest="$manifest"
   release_sha=$(manifest_value "$manifest" RELEASE_GIT_SHA)
 
@@ -187,8 +335,15 @@ deploy_manifest() {
     narrative-service gateway
   [[ "$(docker inspect --format '{{.State.Health.Status}}' novel-postgres)" == healthy ]] \
     || die "PostgreSQL is not healthy"
-  [[ "$(docker inspect --format '{{.State.Health.Status}}' novel-redis)" == healthy ]] \
-    || die "Redis is not healthy"
+  if [[ "$cache_mode" == redis ]]; then
+    [[ "$(docker inspect --format '{{.State.Health.Status}}' novel-redis 2>/dev/null || true)" == healthy ]] \
+      || die "Redis is not healthy"
+    redis_accepts_persisted_password \
+      || die "the persisted Redis credential cannot authenticate"
+  else
+    [[ "$(docker inspect --format '{{.State.Status}}' novel-redis 2>/dev/null || true)" != running ]] \
+      || die "Redis is running while CACHE_MODE=postgres"
+  fi
 
   # The candidate client and the previous Narrative API are not assumed to be
   # wire-compatible. Quiesce the world-turn producer before exposing candidate
@@ -395,6 +550,7 @@ case "$command" in
     require_same_infrastructure "$current_manifest" "$previous_manifest"
     fetch_release_history "$current_manifest" "$previous_manifest"
     require_schema_safe_rollback "$current_manifest" "$previous_manifest"
+    require_pre_minimum_rollback_ready "$current_manifest" "$previous_manifest"
     rm -f "$candidate_manifest" # discard unmarked stale candidate before rollback
     deploy_manifest "$previous_manifest" false
     # deploy_manifest made the rollback target the exact durable schema marker;
