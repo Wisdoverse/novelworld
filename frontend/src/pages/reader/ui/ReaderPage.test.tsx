@@ -132,7 +132,7 @@ vi.mock('@/features/chapter-translation', () => ({
   }) => (
     <>
       <button onClick={onToggle}>{active ? '显示原文' : '翻译成中文'}</button>
-      {active && isError ? <span role="alert">翻译失败，当前显示原文。</span> : null}
+      {isError ? <span role="alert">翻译失败，当前显示原文。</span> : null}
     </>
   ),
 }));

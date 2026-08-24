@@ -107,6 +107,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0021_world_turn_memory_projection.sql",
         include_str!("../../../infra/postgres/migrations/0021_world_turn_memory_projection.sql"),
     ),
+    (
+        "0022_chapter_translations.sql",
+        include_str!("../../../infra/postgres/migrations/0022_chapter_translations.sql"),
+    ),
 ];
 
 #[derive(Serialize, Deserialize)]
@@ -459,9 +463,27 @@ mod tests {
         assert_eq!(MIGRATIONS.first().unwrap().0, "0001_runtime_contract.sql");
         assert_eq!(
             MIGRATIONS.last().unwrap().0,
-            "0021_world_turn_memory_projection.sql"
+            "0022_chapter_translations.sql"
         );
         assert!(MIGRATIONS.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    }
+
+    #[test]
+    fn embedded_chapter_translation_migration_keeps_its_cache_fences() {
+        let migration = MIGRATIONS
+            .iter()
+            .find(|(name, _)| *name == "0022_chapter_translations.sql")
+            .unwrap()
+            .1;
+        for required in [
+            "public.chapter_translations",
+            "PRIMARY KEY (chapter_id, source_sha256, profile)",
+            "pg_catalog.octet_length(source_sha256) = 32",
+            "retry_after_at IS NOT NULL",
+            "chapter_translations_state_check",
+        ] {
+            assert!(migration.contains(required), "missing: {required}");
+        }
     }
 
     #[test]

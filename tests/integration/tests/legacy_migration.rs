@@ -55,6 +55,8 @@ const ADVANCED_GAME_RULES_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0020_advanced_game_rules.sql");
 const WORLD_TURN_MEMORY_PROJECTION_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0021_world_turn_memory_projection.sql");
+const CHAPTER_TRANSLATIONS_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0022_chapter_translations.sql");
 
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
@@ -298,6 +300,10 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
             .await
             .unwrap();
         sqlx::raw_sql(WORLD_TURN_MEMORY_PROJECTION_MIGRATION)
+            .execute(&fresh)
+            .await
+            .unwrap();
+        sqlx::raw_sql(CHAPTER_TRANSLATIONS_MIGRATION)
             .execute(&fresh)
             .await
             .unwrap();
@@ -921,6 +927,36 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
         .unwrap();
 
     sqlx::query(
+        "ALTER TABLE public.chapter_translations \
+         DROP CONSTRAINT chapter_translations_pkey, \
+         ADD CONSTRAINT chapter_translations_pkey \
+             PRIMARY KEY (chapter_id, source_sha256, profile) \
+             DEFERRABLE INITIALLY IMMEDIATE",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    assert!(!novel_readiness.is_ready().await);
+    let translation_contract_error = sqlx::raw_sql(CHAPTER_TRANSLATIONS_MIGRATION)
+        .execute(&fresh)
+        .await
+        .unwrap_err();
+    assert!(translation_contract_error
+        .to_string()
+        .contains("chapter translations primary key has an unexpected definition"));
+    sqlx::query("ROLLBACK").execute(&fresh).await.unwrap();
+    sqlx::query(
+        "ALTER TABLE public.chapter_translations \
+         DROP CONSTRAINT chapter_translations_pkey, \
+         ADD CONSTRAINT chapter_translations_pkey \
+         PRIMARY KEY (chapter_id, source_sha256, profile)",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    assert!(novel_readiness.is_ready().await);
+
+    sqlx::query(
         "ALTER TABLE public.novel_import_jobs \
          DROP CONSTRAINT novel_import_jobs_stage_check, \
          ADD CONSTRAINT novel_import_jobs_stage_check CHECK (TRUE)",
@@ -1339,6 +1375,7 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
         "0019_share_novels_across_user_shelves.sql",
         "0020_advanced_game_rules.sql",
         "0021_world_turn_memory_projection.sql",
+        "0022_chapter_translations.sql",
     ] {
         let migration_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../infra/postgres/migrations")
@@ -1443,6 +1480,10 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
             .await
             .unwrap();
         sqlx::raw_sql(WORLD_TURN_MEMORY_PROJECTION_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
+        sqlx::raw_sql(CHAPTER_TRANSLATIONS_MIGRATION)
             .execute(&mut *non_default_path)
             .await
             .unwrap();

@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::{Duration as ChronoDuration, Utc};
 use futures::{stream, StreamExt};
 use serde::de::DeserializeOwned;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
@@ -9,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{oneshot, watch, OwnedSemaphorePermit, Semaphore};
-use tracing::{error, info, Instrument};
+use tracing::{error, info, warn, Instrument};
 use uuid::Uuid;
 
 use crate::application::commands::ImportNovelCommand;
@@ -24,9 +25,10 @@ use crate::domain::ports::{
     TextTranslator,
 };
 use crate::domain::repositories::{
-    BeginGameRuleGeneration, CanonExtractionCheckpoint, CanonStoryModelRepository,
-    ChapterRepository, CharacterRelationshipRecord, CharacterRepository, ImportClaim, LoreExcerpt,
-    NovelRepository, ReadingProgressRecord, ReadingProgressRepository,
+    BeginChapterTranslation, BeginGameRuleGeneration, CanonExtractionCheckpoint,
+    CanonStoryModelRepository, ChapterRepository, ChapterTranslationKey,
+    ChapterTranslationRepository, CharacterRelationshipRecord, CharacterRepository, ImportClaim,
+    LoreExcerpt, NovelRepository, ReadingProgressRecord, ReadingProgressRepository,
     SourceFileDeletionRepository, IMPORT_BUDGET_EXHAUSTED_MESSAGE,
 };
 use crate::domain::services::{
@@ -205,6 +207,7 @@ pub struct SourceFileStorageUnavailable(#[source] pub anyhow::Error);
 const MAX_TRANSLATION_BYTES: usize = 48_000;
 const TRANSLATION_CHUNK_BYTES: usize = 12_000;
 const TRANSLATION_TIMEOUT: Duration = Duration::from_secs(180);
+const TRANSLATION_PROFILE: &str = "zh-cn-v1";
 
 #[derive(Debug, thiserror::Error)]
 pub enum TranslationError {
@@ -212,6 +215,8 @@ pub enum TranslationError {
     Validation,
     #[error("Translation capacity is busy")]
     Capacity,
+    #[error("Translation is already in progress")]
+    InProgress { retry_after_seconds: u64 },
     #[error("Chapter not found")]
     ChapterNotFound,
     #[error("Translation source does not match the chapter")]
@@ -226,6 +231,7 @@ pub enum TranslationError {
 
 pub struct TranslateChapterHandler {
     pub chapter_repo: Arc<dyn ChapterRepository>,
+    pub translation_repo: Arc<dyn ChapterTranslationRepository>,
     pub translator: Arc<dyn TextTranslator>,
     pub permits: Arc<Semaphore>,
 }
@@ -249,13 +255,89 @@ impl TranslateChapterHandler {
         if !chapter.content.starts_with(source) {
             return Err(TranslationError::SourceMismatch);
         }
+        let source_hash = Sha256::digest(source.as_bytes()).to_vec();
+        let key = ChapterTranslationKey {
+            chapter_id: chapter.id,
+            source_sha256: &source_hash,
+            profile: TRANSLATION_PROFILE,
+        };
+        if let Some(content) = self
+            .translation_repo
+            .find_ready(key)
+            .await
+            .map_err(TranslationError::Repository)?
+        {
+            return Ok(content);
+        }
         let _permit = self
             .permits
             .try_acquire()
             .map_err(|_| TranslationError::Capacity)?;
-        tokio::time::timeout(TRANSLATION_TIMEOUT, self.translate_chunks(source))
+        let attempt = match self
+            .translation_repo
+            .begin(key)
             .await
-            .map_err(|_| TranslationError::Timeout)?
+            .map_err(TranslationError::Repository)?
+        {
+            BeginChapterTranslation::Ready(content) => return Ok(content),
+            BeginChapterTranslation::Acquired { attempt } => attempt,
+            BeginChapterTranslation::InProgress {
+                retry_after_seconds,
+            } => {
+                return Err(TranslationError::InProgress {
+                    retry_after_seconds,
+                })
+            }
+        };
+
+        let translated =
+            match tokio::time::timeout(TRANSLATION_TIMEOUT, self.translate_chunks(source)).await {
+                Ok(Ok(content)) => content,
+                Ok(Err(error)) => {
+                    self.fail_translation(key, attempt, "provider").await;
+                    return Err(error);
+                }
+                Err(_) => {
+                    self.fail_translation(key, attempt, "timeout").await;
+                    return Err(TranslationError::Timeout);
+                }
+            };
+
+        let completed = self
+            .translation_repo
+            .complete(key, attempt, &translated)
+            .await
+            .map_err(TranslationError::Repository)?;
+        if completed {
+            return Ok(translated);
+        }
+        if let Some(content) = self
+            .translation_repo
+            .find_ready(key)
+            .await
+            .map_err(TranslationError::Repository)?
+        {
+            return Ok(content);
+        }
+        Err(TranslationError::Repository(anyhow::anyhow!(
+            "translation cache lease was lost before completion"
+        )))
+    }
+
+    async fn fail_translation(
+        &self,
+        key: ChapterTranslationKey<'_>,
+        attempt: i64,
+        failure_code: &str,
+    ) {
+        match self.translation_repo.fail(key, attempt, failure_code).await {
+            Ok(true) => {}
+            Ok(false) => warn!(attempt, "translation cache lease was lost before failure"),
+            Err(error) => warn!(
+                ?error,
+                attempt, "translation cache failure could not be recorded"
+            ),
+        }
     }
 
     async fn translate_chunks(
@@ -312,11 +394,121 @@ fn split_translation_chunks(source: &str, limit: usize) -> Vec<&str> {
 #[cfg(test)]
 mod translation_tests {
     use super::*;
+    use std::collections::hash_map::Entry;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    struct EchoTranslator(AtomicUsize);
+    struct EchoTranslator {
+        calls: AtomicUsize,
+        delay: Duration,
+    }
 
-    struct FixedChapterRepository(String);
+    struct FixedChapterRepository {
+        id: Uuid,
+        content: String,
+    }
+
+    impl FixedChapterRepository {
+        fn new(content: String) -> Self {
+            Self {
+                id: Uuid::new_v4(),
+                content,
+            }
+        }
+    }
+
+    enum CachedTranslationState {
+        Translating { attempt: i64 },
+        Ready(String),
+    }
+
+    type OwnedTranslationKey = (Uuid, Vec<u8>, String);
+
+    #[derive(Default)]
+    struct MemoryTranslationRepository {
+        values: Mutex<HashMap<OwnedTranslationKey, CachedTranslationState>>,
+    }
+
+    impl MemoryTranslationRepository {
+        fn owned_key(key: ChapterTranslationKey<'_>) -> OwnedTranslationKey {
+            (
+                key.chapter_id,
+                key.source_sha256.to_vec(),
+                key.profile.to_owned(),
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ChapterTranslationRepository for MemoryTranslationRepository {
+        async fn find_ready(&self, key: ChapterTranslationKey<'_>) -> Result<Option<String>> {
+            let values = self.values.lock().unwrap();
+            Ok(match values.get(&Self::owned_key(key)) {
+                Some(CachedTranslationState::Ready(content)) => Some(content.clone()),
+                _ => None,
+            })
+        }
+
+        async fn begin(&self, key: ChapterTranslationKey<'_>) -> Result<BeginChapterTranslation> {
+            let mut values = self.values.lock().unwrap();
+            Ok(match values.entry(Self::owned_key(key)) {
+                Entry::Vacant(entry) => {
+                    entry.insert(CachedTranslationState::Translating { attempt: 1 });
+                    BeginChapterTranslation::Acquired { attempt: 1 }
+                }
+                Entry::Occupied(entry) => match entry.get() {
+                    CachedTranslationState::Ready(content) => {
+                        BeginChapterTranslation::Ready(content.clone())
+                    }
+                    CachedTranslationState::Translating { .. } => {
+                        BeginChapterTranslation::InProgress {
+                            retry_after_seconds: 1,
+                        }
+                    }
+                },
+            })
+        }
+
+        async fn complete(
+            &self,
+            key: ChapterTranslationKey<'_>,
+            attempt: i64,
+            translated_content: &str,
+        ) -> Result<bool> {
+            let mut values = self.values.lock().unwrap();
+            let Some(state) = values.get_mut(&Self::owned_key(key)) else {
+                return Ok(false);
+            };
+            match state {
+                CachedTranslationState::Translating {
+                    attempt: current_attempt,
+                } if *current_attempt == attempt => {
+                    *state = CachedTranslationState::Ready(translated_content.to_owned());
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
+        }
+
+        async fn fail(
+            &self,
+            key: ChapterTranslationKey<'_>,
+            attempt: i64,
+            _failure_code: &str,
+        ) -> Result<bool> {
+            let mut values = self.values.lock().unwrap();
+            let owned_key = Self::owned_key(key);
+            let matches_attempt = matches!(
+                values.get(&owned_key),
+                Some(CachedTranslationState::Translating {
+                    attempt: current_attempt
+                }) if *current_attempt == attempt
+            );
+            if matches_attempt {
+                values.remove(&owned_key);
+            }
+            Ok(matches_attempt)
+        }
+    }
 
     #[async_trait::async_trait]
     impl ChapterRepository for FixedChapterRepository {
@@ -334,7 +526,9 @@ mod translation_tests {
         }
 
         async fn find_by_number(&self, novel_id: Uuid, number: i32) -> Result<Option<Chapter>> {
-            Ok(Some(Chapter::new(novel_id, number, None, self.0.clone())))
+            let mut chapter = Chapter::new(novel_id, number, None, self.content.clone());
+            chapter.id = self.id;
+            Ok(Some(chapter))
         }
 
         async fn search_lore(
@@ -351,7 +545,8 @@ mod translation_tests {
     #[async_trait::async_trait]
     impl TextTranslator for EchoTranslator {
         async fn to_simplified_chinese(&self, source: &str) -> Result<String> {
-            self.0.fetch_add(1, Ordering::Relaxed);
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            tokio::time::sleep(self.delay).await;
             Ok(format!("译：{source}"))
         }
     }
@@ -371,9 +566,13 @@ mod translation_tests {
     #[tokio::test]
     async fn translation_is_bounded_and_chunks_large_chapters() {
         let source = "English paragraph. ".repeat(900);
-        let translator = Arc::new(EchoTranslator(AtomicUsize::new(0)));
+        let translator = Arc::new(EchoTranslator {
+            calls: AtomicUsize::new(0),
+            delay: Duration::ZERO,
+        });
         let handler = TranslateChapterHandler {
-            chapter_repo: Arc::new(FixedChapterRepository(source.clone())),
+            chapter_repo: Arc::new(FixedChapterRepository::new(source.clone())),
+            translation_repo: Arc::new(MemoryTranslationRepository::default()),
             translator: translator.clone(),
             permits: Arc::new(Semaphore::new(1)),
         };
@@ -389,7 +588,66 @@ mod translation_tests {
         let translated = handler.translate(Uuid::nil(), 1, &source).await.unwrap();
 
         assert!(translated.starts_with("译："));
-        assert!(translator.0.load(Ordering::Relaxed) > 1);
+        assert!(translator.calls.load(Ordering::Relaxed) > 1);
+    }
+
+    #[tokio::test]
+    async fn completed_translation_is_reused_and_source_changes_miss() {
+        let chapter = "Chapter one continues.".to_owned();
+        let translator = Arc::new(EchoTranslator {
+            calls: AtomicUsize::new(0),
+            delay: Duration::ZERO,
+        });
+        let handler = TranslateChapterHandler {
+            chapter_repo: Arc::new(FixedChapterRepository::new(chapter.clone())),
+            translation_repo: Arc::new(MemoryTranslationRepository::default()),
+            translator: translator.clone(),
+            permits: Arc::new(Semaphore::new(2)),
+        };
+
+        let first = handler
+            .translate(Uuid::nil(), 1, "Chapter one")
+            .await
+            .unwrap();
+        let cached = handler
+            .translate(Uuid::nil(), 1, "Chapter one")
+            .await
+            .unwrap();
+        let changed = handler.translate(Uuid::nil(), 1, &chapter).await.unwrap();
+
+        assert_eq!(first, cached);
+        assert_ne!(first, changed);
+        assert_eq!(translator.calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_cold_requests_have_one_translation_owner() {
+        let source = "Concurrent chapter".to_owned();
+        let translator = Arc::new(EchoTranslator {
+            calls: AtomicUsize::new(0),
+            delay: Duration::from_millis(25),
+        });
+        let handler = TranslateChapterHandler {
+            chapter_repo: Arc::new(FixedChapterRepository::new(source.clone())),
+            translation_repo: Arc::new(MemoryTranslationRepository::default()),
+            translator: translator.clone(),
+            permits: Arc::new(Semaphore::new(2)),
+        };
+
+        let (first, second) = tokio::join!(
+            handler.translate(Uuid::nil(), 1, &source),
+            handler.translate(Uuid::nil(), 1, &source),
+        );
+        assert_eq!(first.is_ok() as u8 + second.is_ok() as u8, 1);
+        assert!(matches!(
+            first.as_ref().err().or_else(|| second.as_ref().err()),
+            Some(TranslationError::InProgress { .. })
+        ));
+        assert_eq!(translator.calls.load(Ordering::Relaxed), 1);
+
+        let cached = handler.translate(Uuid::nil(), 1, &source).await.unwrap();
+        assert!(cached.starts_with("译："));
+        assert_eq!(translator.calls.load(Ordering::Relaxed), 1);
     }
 }
 

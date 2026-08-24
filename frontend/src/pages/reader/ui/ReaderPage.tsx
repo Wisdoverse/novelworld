@@ -308,6 +308,9 @@ export function ReaderPage() {
   const readerContent = translationEnabled && canTranslate && translation.data
     ? translation.data.content
     : sourceContent;
+  const isShowingTranslation = Boolean(
+    translationEnabled && canTranslate && translation.data,
+  );
   const branchChoiceRequired = Boolean(
     activeBranchNode && selectedChoiceIndex === undefined && !openWorld,
   );
@@ -554,10 +557,16 @@ export function ReaderPage() {
               ) : null}
               {canTranslate ? (
                 <TranslationControls
-                  active={translationEnabled}
+                  active={isShowingTranslation}
                   isLoading={translation.isFetching}
                   isError={translation.isError}
-                  onToggle={() => setTranslationEnabled(enabled => !enabled)}
+                  onToggle={() => {
+                    if (translation.isError) {
+                      void translation.refetch();
+                    } else {
+                      setTranslationEnabled(enabled => !enabled);
+                    }
+                  }}
                   onRetry={() => { void translation.refetch(); }}
                 />
               ) : null}

@@ -187,6 +187,38 @@ pub trait ChapterRepository: Send + Sync {
     ) -> Result<Vec<LoreExcerpt>>;
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ChapterTranslationKey<'a> {
+    pub chapter_id: Uuid,
+    pub source_sha256: &'a [u8],
+    pub profile: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BeginChapterTranslation {
+    Acquired { attempt: i64 },
+    Ready(String),
+    InProgress { retry_after_seconds: u64 },
+}
+
+#[async_trait]
+pub trait ChapterTranslationRepository: Send + Sync {
+    async fn find_ready(&self, key: ChapterTranslationKey<'_>) -> Result<Option<String>>;
+    async fn begin(&self, key: ChapterTranslationKey<'_>) -> Result<BeginChapterTranslation>;
+    async fn complete(
+        &self,
+        key: ChapterTranslationKey<'_>,
+        attempt: i64,
+        translated_content: &str,
+    ) -> Result<bool>;
+    async fn fail(
+        &self,
+        key: ChapterTranslationKey<'_>,
+        attempt: i64,
+        failure_code: &str,
+    ) -> Result<bool>;
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LoreExcerpt {
     pub chapter_number: i32,

@@ -1164,6 +1164,16 @@ async fn translate_chapter_text(
                 .insert("Retry-After", HeaderValue::from_static("5"));
             response
         }
+        Err(TranslationError::InProgress {
+            retry_after_seconds,
+        }) => {
+            let mut response =
+                api_error(StatusCode::CONFLICT, "Translation is already in progress");
+            if let Ok(value) = HeaderValue::try_from(retry_after_seconds.to_string()) {
+                response.headers_mut().insert("Retry-After", value);
+            }
+            response
+        }
         Err(TranslationError::ChapterNotFound) => {
             api_error(StatusCode::NOT_FOUND, "Chapter not found")
         }

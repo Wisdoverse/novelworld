@@ -25,10 +25,10 @@ export function TranslationControls({
         onClick={onToggle}
       >
         <Languages size={15} aria-hidden="true" />
-        {active ? '显示原文' : '翻译成中文'}
+        {isLoading ? '翻译中…' : active ? '显示原文' : isError ? '重新翻译' : '翻译成中文'}
       </button>
       {isLoading ? <span role="status" className="text-[#5f6368]">正在翻译正文…</span> : null}
-      {active && isError ? (
+      {isError ? (
         <span role="alert" className="text-[#b3261e]">
           翻译失败，当前显示原文。
           <button type="button" className="ml-2 underline" onClick={onRetry}>重试</button>
