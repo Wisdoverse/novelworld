@@ -1,4 +1,4 @@
-import { test } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 import { installStubs } from './stubs';
 import { expectNoHorizontalOverflow } from './helpers';
 
@@ -15,6 +15,12 @@ const PAGES: Array<[string, string, (page: import('@playwright/test').Page) => P
   ['reader with open world', '/reader/novel-1/1', async (page) => {
     await page.getByText('第一章 北塔来信').first().waitFor();
     await page.getByText(/的开放世界/).first().waitFor();
+    const choice = page.getByText(/长选择起点/);
+    const projection = page.getByText(/长行动投影起点/);
+    await expect(choice).toHaveCSS('white-space', 'pre-wrap');
+    await expect(choice).toHaveCSS('overflow-wrap', 'anywhere');
+    await expect(projection).toHaveCSS('white-space', 'pre-wrap');
+    await expect(projection).toHaveCSS('overflow-wrap', 'anywhere');
   }],
   ['characters', '/characters/novel-1', async (page) => {
     await page.getByRole('button', { name: /对话/ }).first().waitFor();

@@ -6,13 +6,16 @@ import { describe, expect, it, vi } from 'vitest';
 import { useAuthStore } from '@/features/auth/model/useAuthStore';
 import { useChatStore } from '@/features/character-chat/model/useChatStore';
 import { apiClient } from '@/shared/api/client';
-import { AppRoutes, resetPrivateClientStateForPrincipalChange } from './App';
+import { queryClient } from '@/shared/api/queryClient';
+import {
+  AppRoutes,
+  handleAuthTokenStorageChange,
+  resetPrivateClientStateForPrincipalChange,
+} from './App';
 
 describe('principal-scoped query cache', () => {
-  it('clears cached tenant data before a different principal can use it', () => {
-    const client = new QueryClient();
+  it('clears private chat state before a different principal can use it', () => {
     const cancel = vi.fn();
-    client.setQueryData(['reading-progress', 'novel'], { reader_identity: 'Alice' });
     useChatStore.setState({
       messages: {
         character: [{
@@ -25,15 +28,72 @@ describe('principal-scoped query cache', () => {
       },
       cancelStream: { character: cancel },
     });
-    const clear = vi.spyOn(client, 'clear');
-
-    expect(resetPrivateClientStateForPrincipalChange(client, 'user-a', 'user-a')).toBe('user-a');
-    expect(clear).not.toHaveBeenCalled();
-    expect(resetPrivateClientStateForPrincipalChange(client, 'user-a', 'user-b')).toBe('user-b');
-    expect(clear).toHaveBeenCalledOnce();
+    expect(resetPrivateClientStateForPrincipalChange('user-a', 'user-a')).toBe('user-a');
+    expect(resetPrivateClientStateForPrincipalChange('user-a', 'user-b')).toBe('user-b');
     expect(cancel).toHaveBeenCalledOnce();
-    expect(client.getQueryData(['reading-progress', 'novel'])).toBeUndefined();
     expect(useChatStore.getState().messages).toEqual({});
+  });
+
+  it('clears private cache and chat before reloading on a cross-tab token change', () => {
+    const cancel = vi.fn();
+    const reload = vi.fn();
+    queryClient.setQueryData(['private'], 'principal-a');
+    useChatStore.setState({
+      messages: {
+        character: [{
+          id: 'message',
+          role: 'user',
+          content: 'principal A private chat',
+          character_id: 'character',
+          created_at: new Date(0).toISOString(),
+        }],
+      },
+      cancelStream: { character: cancel },
+    });
+
+    expect(handleAuthTokenStorageChange({
+      key: 'auth_token',
+      oldValue: 'access-a',
+      newValue: 'access-b',
+    }, reload)).toBe(true);
+
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(queryClient.getQueryData(['private'])).toBeUndefined();
+    expect(useChatStore.getState().messages).toEqual({});
+    expect(reload).toHaveBeenCalledOnce();
+  });
+
+  it('ignores refresh-token events and unchanged access tokens', () => {
+    const reload = vi.fn();
+    queryClient.setQueryData(['private'], 'keep');
+    useChatStore.setState({
+      messages: {
+        character: [{
+          id: 'message',
+          role: 'user',
+          content: 'keep',
+          character_id: 'character',
+          created_at: new Date(0).toISOString(),
+        }],
+      },
+    });
+
+    expect(handleAuthTokenStorageChange({
+      key: 'refresh_token',
+      oldValue: 'refresh-a',
+      newValue: 'refresh-b',
+    }, reload)).toBe(false);
+    expect(handleAuthTokenStorageChange({
+      key: 'auth_token',
+      oldValue: 'same',
+      newValue: 'same',
+    }, reload)).toBe(false);
+
+    expect(queryClient.getQueryData(['private'])).toBe('keep');
+    expect(useChatStore.getState().messages.character[0].content).toBe('keep');
+    expect(reload).not.toHaveBeenCalled();
+    queryClient.clear();
+    useChatStore.getState().reset();
   });
 });
 

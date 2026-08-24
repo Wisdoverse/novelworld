@@ -103,6 +103,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0020_advanced_game_rules.sql",
         include_str!("../../../infra/postgres/migrations/0020_advanced_game_rules.sql"),
     ),
+    (
+        "0021_world_turn_memory_projection.sql",
+        include_str!("../../../infra/postgres/migrations/0021_world_turn_memory_projection.sql"),
+    ),
 ];
 
 #[derive(Serialize, Deserialize)]
@@ -453,7 +457,29 @@ mod tests {
     #[test]
     fn embedded_migrations_are_complete_and_ordered() {
         assert_eq!(MIGRATIONS.first().unwrap().0, "0001_runtime_contract.sql");
-        assert_eq!(MIGRATIONS.last().unwrap().0, "0020_advanced_game_rules.sql");
+        assert_eq!(
+            MIGRATIONS.last().unwrap().0,
+            "0021_world_turn_memory_projection.sql"
+        );
         assert!(MIGRATIONS.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    }
+
+    #[test]
+    fn embedded_world_turn_projection_migration_keeps_its_authority_fences() {
+        let migration = MIGRATIONS
+            .iter()
+            .find(|(name, _)| *name == "0021_world_turn_memory_projection.sql")
+            .unwrap()
+            .1;
+        for required in [
+            "IF NOT projection_status_exists THEN",
+            "WHEN status = 'completed' THEN 'skipped'",
+            "world_turns_memory_projection_status_check",
+            "world_turns_memory_projection_state_check",
+            "CREATE UNIQUE INDEX idx_world_turns_one_in_progress",
+            "OR (status = 'completed' AND memory_projection_status = 'pending')",
+        ] {
+            assert!(migration.contains(required), "missing: {required}");
+        }
     }
 }

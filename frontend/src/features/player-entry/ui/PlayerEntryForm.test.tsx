@@ -45,6 +45,7 @@ describe('PlayerEntryForm advanced rules', () => {
         unlockedThroughChapter={2}
         locations={[{ id: 'temple', name: '破庙' }]}
         isPending={false}
+        isTimelineLocked={false}
         onCheckpointChange={vi.fn()}
         onSubmit={onSubmit}
       />,

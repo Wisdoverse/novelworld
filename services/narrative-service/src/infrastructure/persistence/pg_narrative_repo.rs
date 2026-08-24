@@ -5,12 +5,16 @@ use sqlx::prelude::FromRow;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::domain::entities::narrative_node::{NarrativeChoice, NarrativeNode, WorldState};
+use crate::domain::entities::narrative_node::{
+    NarrativeChoice, NarrativeNode, WorldState, WorldStateError,
+};
 use crate::domain::repositories::{
     ChoiceCommit, ChoiceCommitResult, NarrativeNodeRepository, PlayerChapter, PlayerChapterOrigin,
     PlayerChapterRepository, UserChoiceRecord, UserChoiceRepository,
 };
 use crate::domain::services::narrative_transition::NarrativeTransition;
+
+use super::ensure_choice_projection_consistent;
 
 // ─── NarrativeNode persistence ──────────────────────────────────────────────
 
@@ -61,20 +65,14 @@ impl NarrativeNodeRepository for PgNarrativeNodeRepository {
             INSERT INTO narrative_nodes (
                 id, user_id, novel_id, chapter_number, description, anchor_quote, choices, created_at
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            ON CONFLICT (user_id, novel_id, chapter_number) WHERE user_id IS NOT NULL DO UPDATE SET
-                description = EXCLUDED.description,
-                anchor_quote = EXCLUDED.anchor_quote,
-                choices = EXCLUDED.choices
+            ON CONFLICT (user_id, novel_id, chapter_number) WHERE user_id IS NOT NULL DO NOTHING
             "#
         } else {
             r#"
             INSERT INTO narrative_nodes (
                 id, user_id, novel_id, chapter_number, description, anchor_quote, choices, created_at
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            ON CONFLICT (novel_id, chapter_number) WHERE user_id IS NULL DO UPDATE SET
-                description = EXCLUDED.description,
-                anchor_quote = EXCLUDED.anchor_quote,
-                choices = EXCLUDED.choices
+            ON CONFLICT (novel_id, chapter_number) WHERE user_id IS NULL DO NOTHING
             "#
         };
         sqlx::query(query)
@@ -216,6 +214,8 @@ impl UserChoiceRepository for PgUserChoiceRepository {
         .fetch_one(&mut *transaction)
         .await?;
         let mut world_state = WorldState::from(state_row);
+        ensure_choice_projection_consistent(&mut *transaction, draft.user_id, draft.novel_id)
+            .await?;
 
         let inserted = sqlx::query_as::<_, UserChoiceRow>(
             r#"
@@ -241,6 +241,7 @@ impl UserChoiceRepository for PgUserChoiceRepository {
         .fetch_optional(&mut *transaction)
         .await?;
 
+        let inserted_new = inserted.is_some();
         let choice = match inserted {
             Some(row) => UserChoiceRecord::try_from(row)?,
             None => sqlx::query_as::<_, UserChoiceRow>(
@@ -259,6 +260,39 @@ impl UserChoiceRepository for PgUserChoiceRepository {
             .try_into()?,
         };
 
+        if inserted_new {
+            if world_state.open_world()?.is_some() {
+                return Err(WorldStateError::TimelineConflict(
+                    "branch choices are frozen after open-world entry".into(),
+                )
+                .into());
+            }
+            if world_state
+                .player_entity()?
+                .is_some_and(|player| draft.chapter_number > player.canonical_checkpoint_chapter)
+            {
+                return Err(WorldStateError::TimelineConflict(
+                    "branch choice exceeds the PlayerEntity checkpoint".into(),
+                )
+                .into());
+            }
+            if world_state.fingerprint() != draft.expected_world_state_fingerprint {
+                return Err(WorldStateError::TimelineConflict(
+                    "world state advanced while the branch consequence was generated".into(),
+                )
+                .into());
+            }
+            if world_state
+                .latest_choice_chapter()?
+                .is_some_and(|chapter| draft.chapter_number <= chapter)
+            {
+                return Err(WorldStateError::TimelineConflict(
+                    "branch choices must be committed in chapter order".into(),
+                )
+                .into());
+            }
+        }
+
         if world_state.apply_choice_transition(
             choice.node_id,
             choice.chapter_number,
@@ -276,13 +310,27 @@ impl UserChoiceRepository for PgUserChoiceRepository {
             .execute(&mut *transaction)
             .await?;
         }
+        ensure_choice_projection_consistent(&mut *transaction, draft.user_id, draft.novel_id)
+            .await?;
 
-        sqlx::query(
+        let player_chapter_content: Option<String> = sqlx::query_scalar(
             r#"
             INSERT INTO player_chapters (
                 id, user_id, novel_id, chapter_number, content, origin, created_at, updated_at
             ) VALUES ($1, $2, $3, $4, $5, 'choice', $6, $6)
-            ON CONFLICT (user_id, novel_id, chapter_number) DO NOTHING
+            ON CONFLICT (user_id, novel_id, chapter_number) DO UPDATE SET
+                content = EXCLUDED.content,
+                origin = EXCLUDED.origin,
+                updated_at = CASE
+                    WHEN player_chapters.origin = 'continuation' THEN EXCLUDED.updated_at
+                    ELSE player_chapters.updated_at
+                END
+            WHERE player_chapters.origin = 'continuation'
+               OR (
+                    player_chapters.origin = 'choice'
+                    AND player_chapters.content = EXCLUDED.content
+               )
+            RETURNING content
             "#,
         )
         .bind(Uuid::new_v4())
@@ -291,20 +339,15 @@ impl UserChoiceRepository for PgUserChoiceRepository {
         .bind(draft.chapter_number)
         .bind(&draft.rewritten_chapter_content)
         .bind(Utc::now())
-        .execute(&mut *transaction)
+        .fetch_optional(&mut *transaction)
         .await?;
 
-        let player_chapter_content: String = sqlx::query_scalar(
-            r#"
-            SELECT content FROM player_chapters
-            WHERE user_id = $1 AND novel_id = $2 AND chapter_number = $3
-            "#,
-        )
-        .bind(draft.user_id)
-        .bind(draft.novel_id)
-        .bind(draft.chapter_number)
-        .fetch_one(&mut *transaction)
-        .await?;
+        let Some(player_chapter_content) = player_chapter_content else {
+            return Err(WorldStateError::TimelineConflict(
+                "player chapter conflicts with the committed choice".into(),
+            )
+            .into());
+        };
 
         transaction.commit().await?;
         Ok(ChoiceCommitResult {

@@ -10,16 +10,20 @@ interface ChatHistoryResponse {
 export function useChatHistory(
   characterId: string,
   currentChapter: number,
+  readerIdentityScope: string,
   enabled: boolean,
 ) {
   return useQuery({
-    queryKey: ['chat-history', characterId, currentChapter],
+    queryKey: ['chat-history', characterId, currentChapter, readerIdentityScope],
     queryFn: () => apiClient
       .get<ChatHistoryResponse>(`/chat/${characterId}/history`, {
         params: { limit: 50, offset: 0 },
       })
       .then(response => response.data.messages.slice().reverse()),
-    enabled: enabled && !!characterId && currentChapter >= 1,
+    enabled: enabled
+      && !!characterId
+      && currentChapter >= 1
+      && readerIdentityScope !== 'unresolved',
     retry: false,
     staleTime: Infinity,
   });

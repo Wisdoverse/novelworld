@@ -12,6 +12,7 @@ import {
   useAttachNovel,
   validateNovelFile,
 } from '@/entities/novel/api';
+import { useAuthStore } from '@/features/auth/model/useAuthStore';
 import type { Novel } from '@/shared/types';
 import { getApiErrorMessage } from '@/shared/api/client';
 import { toast } from 'sonner';
@@ -449,8 +450,9 @@ function ImportModal({ onClose }: { onClose: () => void }) {
 
 export function ShelfPage() {
   const navigate = useNavigate();
+  const user = useAuthStore(state => state.user);
   const { data: novels, isLoading } = useNovels();
-  const deleteNovel = useDeleteNovel();
+  const deleteNovel = useDeleteNovel(user?.id);
   const retryNovel = useRetryNovel();
   const processingCount = novels?.filter(
     novel => novel.status === 'pending' || novel.status === 'parsing',

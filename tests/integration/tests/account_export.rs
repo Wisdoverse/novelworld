@@ -267,18 +267,32 @@ async fn production_account_exports_are_complete_scoped_deterministic_and_secret
     .execute(&pool)
     .await
     .unwrap();
+    let failed_resolution = json!({
+        "schema_version": 1,
+        "canon_model_version": 1,
+        "template_prompt_version": "novel-game-rules-v1",
+        "attribute_key": "insight",
+        "attribute_label": "洞察",
+        "score": 12,
+        "modifier": 1,
+        "roll": 7,
+        "difficulty_class": 13,
+        "total": 8,
+        "succeeded": false
+    });
     sqlx::query(
         "INSERT INTO world_turns \
          (id, user_id, novel_id, request_fingerprint, action, expected_turn_number, \
-          status, failure_code) \
-         VALUES ($1, $2, $3, $4, $5, 0, 'failed', 'test_failure'), \
-                ($6, $7, $8, $9, $10, 0, 'failed', 'test_failure')",
+          resolution, status, failure_code) \
+         VALUES ($1, $2, $3, $4, $5, 0, $6, 'failed', 'test_failure'), \
+                ($7, $8, $9, $10, $11, 0, NULL, 'failed', 'test_failure')",
     )
     .bind(Uuid::new_v4())
     .bind(user_id)
     .bind(novel_id)
     .bind(vec![0x11_u8; 32])
     .bind(json!({"kind": "investigate", "target_id": "thread", "intent": "Portable world action"}))
+    .bind(failed_resolution.clone())
     .bind(Uuid::new_v4())
     .bind(other_user_id)
     .bind(other_novel_id)
@@ -291,8 +305,9 @@ async fn production_account_exports_are_complete_scoped_deterministic_and_secret
     sqlx::query(
         "INSERT INTO world_turns \
          (id, user_id, novel_id, request_fingerprint, action, expected_turn_number, \
-          status, transition, result, completed_at) \
-         VALUES ($1, $2, $3, $4, $5, 1, 'completed', $6, $7, NOW())",
+          status, transition, result, completed_at, memory_projection_status, \
+          memory_projection_completed_at) \
+         VALUES ($1, $2, $3, $4, $5, 1, 'completed', $6, $7, NOW(), 'saved', NOW())",
     )
     .bind(Uuid::new_v4())
     .bind(user_id)
@@ -510,10 +525,15 @@ async fn production_account_exports_are_complete_scoped_deterministic_and_secret
                 )
             }
             // The seeded failed turns have no transition: reader-only.
-            ("world_turn", "reader") => assert!(description.contains("Portable world action")),
+            ("world_turn", "reader") => {
+                assert!(description.contains("Portable world action"));
+                assert_eq!(record["data"]["resolution"], failed_resolution);
+            }
             // The seeded completed turn carries generated prose: mixed.
             ("world_turn", "mixed") => {
                 assert_eq!(description, "Portable completed action");
+                assert_eq!(record["data"]["memory_projection_status"], "saved");
+                assert!(record["data"]["memory_projection_completed_at"].is_string());
                 assert_eq!(
                     record["data"]["transition"]["rendered_narrative"]
                         .as_str()

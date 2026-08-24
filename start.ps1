@@ -79,6 +79,20 @@ function Test-EnvironmentInitialization {
         if ($content -notmatch '(?m)^LLM_API_KEY=\r?$') {
             throw 'The default LLM key must remain empty for browser setup'
         }
+
+        $windowsLauncher = [System.IO.File]::ReadAllLines((Join-Path $scriptRoot 'start.ps1'))
+        $windowsDown = [array]::IndexOf($windowsLauncher, '& docker compose down')
+        $windowsUp = [array]::IndexOf($windowsLauncher, '& docker compose up -d --build')
+        if ($windowsDown -lt 0 -or $windowsUp -lt 0 -or $windowsDown -ge $windowsUp) {
+            throw 'Windows launcher must stop old writers before starting the migrated stack'
+        }
+
+        $unixLauncher = [System.IO.File]::ReadAllLines((Join-Path $scriptRoot 'start.sh'))
+        $unixDown = [array]::IndexOf($unixLauncher, 'docker compose down')
+        $unixUp = [array]::IndexOf($unixLauncher, 'docker compose up -d --build 2>&1 | tail -5')
+        if ($unixDown -lt 0 -or $unixUp -lt 0 -or $unixDown -ge $unixUp) {
+            throw 'Unix launcher must stop old writers before starting the migrated stack'
+        }
     }
     finally {
         Remove-Item $temporaryEnv -Force -ErrorAction SilentlyContinue
@@ -105,6 +119,12 @@ if (-not (Test-Path $envPath)) {
     Copy-Item (Join-Path $scriptRoot '.env.example') $envPath
 }
 Initialize-Environment $envPath
+
+Write-Host 'Stopping any existing NovelWorld stack before migrations...' -ForegroundColor Cyan
+& docker compose down
+if ($LASTEXITCODE -ne 0) {
+    throw 'Docker Compose failed to stop the existing NovelWorld stack.'
+}
 
 Write-Host 'Starting NovelWorld...' -ForegroundColor Cyan
 & docker compose up -d --build

@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from '@/shared/api/client';
+import { removeWorldTurnPendingRequest } from '@/shared/lib/worldTurnStorage';
 import type { Novel, Chapter, Character } from '@/shared/types';
 
 // ─── Query Keys ───────────────────────────────────────────────────────────────
@@ -146,11 +147,12 @@ export function useUploadNovel() {
   });
 }
 
-export function useDeleteNovel() {
+export function useDeleteNovel(userId?: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => apiClient.delete(`/novels/${id}`),
-    onSuccess: () => {
+    onSuccess: (_response, novelId) => {
+      if (userId) removeWorldTurnPendingRequest(userId, novelId);
       queryClient.invalidateQueries({ queryKey: novelKeys.list() });
       queryClient.invalidateQueries({ queryKey: novelKeys.catalog() });
     },

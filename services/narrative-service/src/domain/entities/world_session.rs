@@ -17,6 +17,13 @@ pub const WORLD_TURN_PROMPT_VERSION: &str = "world-turn-v2";
 const LEGACY_WORLD_TURN_PROMPT_VERSION: &str = "world-turn-v1";
 pub const MAX_RECENT_WORLD_TURNS: usize = 4;
 pub const MAX_RECENT_WORLD_NARRATIVE_CHARS: usize = 2_000;
+pub const MAX_CHARACTER_WORLD_CONTEXT_CHARS: usize = 7_000;
+pub const MAX_CHARACTER_RECENT_ACTIONS: usize = 4;
+pub const MAX_CHARACTER_GOALS: usize = 4;
+pub const MAX_CHARACTER_RECENT_EVENTS: usize = 4;
+pub const MAX_CHARACTER_CONTEXT_TEXT_CHARS: usize = 256;
+pub const MAX_CHARACTER_CONTEXT_REFERENCES: usize = 4;
+pub const MAX_CHARACTER_CONTEXT_SOURCE_CHAPTERS: usize = 8;
 const MAX_CONTEXT_ITEMS: usize = 256;
 const MAX_PLAYER_CHANGES: usize = 16;
 const MAX_PROMPT_WORLD_HISTORY_ITEMS: usize = 8;
@@ -595,6 +602,7 @@ pub fn build_world_turn_prompt_with_check(
             .validate()
             .map_err(|error| WorldSessionError(error.to_string()))?;
     }
+    validate_world_state_checkpoint(world_state, session.entry_context.checkpoint_chapter)?;
     let player = serde_json::to_string(player)
         .map_err(|error| WorldSessionError(format!("player serialization failed: {error}")))?;
     let action = serde_json::to_string(action)
@@ -649,6 +657,7 @@ pub fn build_world_turn_prompt_with_check(
                         "turn_id"
                             | "turn_number"
                             | "world_time"
+                            | "chapter"
                             | "summary"
                             | "actor_character_ids"
                             | "location_id"
@@ -945,6 +954,7 @@ pub struct CharacterWorldContext {
     pub character_alive: bool,
     pub canon_model_version: i32,
     pub checkpoint_chapter: i32,
+    pub source_chapter_high_water: i32,
     pub turn_number: i64,
     pub world_time: i64,
     pub player_id: Uuid,
@@ -954,8 +964,64 @@ pub struct CharacterWorldContext {
     pub goals: Vec<CharacterGoalRef>,
     pub perception_of_player: Option<String>,
     pub current_canonical_event: Option<CanonicalEventState>,
+    #[serde(default)]
+    pub recent_actions: Vec<RecentWorldActionContext>,
     pub recent_player_events: Vec<WorldHistoryItem>,
     pub active_threads: Vec<ActiveThread>,
+}
+
+fn validate_world_state_checkpoint(
+    world_state: &serde_json::Value,
+    checkpoint_chapter: i32,
+) -> Result<(), WorldSessionError> {
+    let root = world_state
+        .as_object()
+        .ok_or_else(|| WorldSessionError("world state must be an object".into()))?;
+    let choices = root
+        .get("choices")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| WorldSessionError("world state choices must be an array".into()))?;
+    for choice in choices {
+        let chapter = choice
+            .get("chapter")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|chapter| i32::try_from(chapter).ok())
+            .ok_or_else(|| WorldSessionError("world choice chapter is invalid".into()))?;
+        if !(1..=checkpoint_chapter).contains(&chapter) {
+            return invalid("world state contains a choice beyond the session checkpoint");
+        }
+    }
+    if let Some(events) = root
+        .get("world_events")
+        .and_then(serde_json::Value::as_array)
+    {
+        for event in events {
+            let Some(chapter) = event.get("chapter").and_then(serde_json::Value::as_i64) else {
+                continue;
+            };
+            let chapter = i32::try_from(chapter)
+                .map_err(|_| WorldSessionError("world event chapter is invalid".into()))?;
+            if !(1..=checkpoint_chapter).contains(&chapter) {
+                return invalid("world state contains an event beyond the session checkpoint");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservedWorldAction {
+    pub kind: WorldActionKind,
+    pub target_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecentWorldActionContext {
+    pub turn_id: Uuid,
+    pub turn_number: i64,
+    pub action: ObservedWorldAction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1786,8 +1852,8 @@ mod tests {
                 .map(|index| {
                     serde_json::json!({
                         "node_id": Uuid::new_v4(),
-                        "chapter": index + 1,
-                        "choice_index": 0,
+                        "chapter": 1,
+                        "choice_index": index,
                         "choice": "选择".repeat(1_000),
                         "consequence": "后果".repeat(4_000),
                     })
@@ -1800,12 +1866,223 @@ mod tests {
                 .collect(),
         );
 
+        let mut future_state = world_state.clone();
+        future_state["choices"][7]["chapter"] = serde_json::json!(2);
+        assert!(build_world_turn_prompt(
+            "测试小说",
+            &player,
+            &action,
+            &session,
+            &future_state,
+            &[],
+        )
+        .is_err());
+        let mut future_event_state = world_state.clone();
+        future_event_state["world_events"][7] = serde_json::json!({
+            "chapter": 2,
+            "summary": "未来事件",
+        });
+        assert!(build_world_turn_prompt(
+            "测试小说",
+            &player,
+            &action,
+            &session,
+            &future_event_state,
+            &[],
+        )
+        .is_err());
+
         let prompt =
             build_world_turn_prompt("测试小说", &player, &action, &session, &world_state, &[])
                 .unwrap();
 
         assert!(prompt.chars().count() <= 32_000);
         assert!(prompt.len() <= 64 * 1024);
+    }
+
+    #[test]
+    fn character_context_omits_choices_without_witness_provenance() {
+        let character_id = Uuid::new_v4();
+        let mut context = context(character_id);
+        context
+            .character_goals
+            .extend((0..8).map(|index| CharacterGoalRef {
+                id: format!("goal-{index}"),
+                character_id,
+                description: "目标".repeat(500),
+                source_chapters: vec![1],
+            }));
+        context.threads.extend((0..8).map(|index| WorldEntityRef {
+            id: format!("thread-{index}"),
+            name: format!("线索-{index}"),
+        }));
+
+        // These choices represent the committed branch prefix. Character world
+        // context remains unavailable until the living world starts and does not
+        // expose them afterward without explicit witness provenance.
+        let user_id = Uuid::new_v4();
+        let novel_id = Uuid::new_v4();
+        let mut world_state = WorldState::new(user_id, novel_id);
+        let node_ids = (0..7).map(|_| Uuid::new_v4()).collect::<Vec<_>>();
+        world_state.state["choices"] = serde_json::Value::Array(
+            node_ids
+                .iter()
+                .enumerate()
+                .map(|(index, node_id)| {
+                    serde_json::json!({
+                        "node_id": node_id,
+                        "chapter": if index < 6 { 1 } else { 2 },
+                        "choice_index": index,
+                        "choice": format!("选择-{index}-{}", "选".repeat(300)),
+                        "consequence": format!("{}-结果-{index}", "果".repeat(700)),
+                    })
+                })
+                .collect(),
+        );
+        assert!(world_state
+            .character_world_context(character_id)
+            .unwrap()
+            .is_none());
+
+        let player = PlayerEntity::new(
+            user_id,
+            novel_id,
+            context.checkpoint_chapter,
+            "云舟".into(),
+            "来自边城的地图学徒。".into(),
+            vec!["识图".into()],
+            "gate".into(),
+            vec![],
+        )
+        .unwrap();
+        world_state.state["player_entity"] = serde_json::to_value(player).unwrap();
+        assert!(world_state.start_open_world(&context).is_err());
+        world_state.state["choices"].as_array_mut().unwrap().pop();
+        world_state.start_open_world(&context).unwrap();
+        for thread in world_state.state["threads"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+        {
+            thread["description"] = serde_json::Value::String("线索".repeat(500));
+        }
+        world_state.state["world_events"] = serde_json::Value::Array(
+            (1..=8)
+                .map(|turn_number| {
+                    serde_json::json!({
+                        "id": format!("event-{turn_number}"),
+                        "origin": "player",
+                        "turn_id": Uuid::new_v4(),
+                        "turn_number": turn_number,
+                        "world_time": turn_number,
+                        "summary": "事件".repeat(500),
+                        "actor_character_ids": [character_id],
+                        "location_id": "gate",
+                    })
+                })
+                .collect(),
+        );
+        world_state.state["world_events"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "private-event",
+                "origin": "player",
+                "turn_id": Uuid::new_v4(),
+                "turn_number": 9,
+                "world_time": 9,
+                "summary": "另一角色在异地秘密行动",
+                "actor_character_ids": [Uuid::new_v4()],
+                "location_id": "elsewhere",
+            }));
+        let mut session = world_state.open_world().unwrap().unwrap();
+        session.turn_number = 9;
+        session.world_time = 9;
+        world_state.state["open_world"] = serde_json::to_value(session).unwrap();
+
+        let mut character_context = world_state
+            .character_world_context(character_id)
+            .unwrap()
+            .unwrap();
+        character_context.recent_actions = (5..=8)
+            .map(|turn_number| RecentWorldActionContext {
+                turn_id: Uuid::new_v4(),
+                turn_number,
+                action: ObservedWorldAction {
+                    kind: WorldActionKind::Investigate,
+                    target_id: Some("gate".into()),
+                },
+            })
+            .collect();
+        let character_context =
+            crate::domain::entities::narrative_node::fit_character_world_context(character_context);
+        assert_eq!(character_context.goals.len(), MAX_CHARACTER_GOALS);
+        assert!(character_context.recent_player_events.len() <= MAX_CHARACTER_RECENT_EVENTS);
+        assert!(character_context.active_threads.is_empty());
+        assert_eq!(
+            character_context
+                .recent_player_events
+                .last()
+                .unwrap()
+                .turn_number,
+            8
+        );
+        assert_eq!(
+            character_context.recent_actions.last().unwrap().turn_number,
+            8
+        );
+        assert!(character_context.recent_actions.iter().all(|action| action
+            .action
+            .target_id
+            .as_deref()
+            == Some("gate")));
+        assert!(!serde_json::to_string(&character_context.recent_actions)
+            .unwrap()
+            .contains("intent"));
+        assert!(
+            serde_json::to_string(&character_context)
+                .unwrap()
+                .chars()
+                .count()
+                <= MAX_CHARACTER_WORLD_CONTEXT_CHARS
+        );
+
+        // A session created by an older binary must not leak later branch
+        // state through character context after this checkpoint guard lands.
+        world_state.state["choices"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "node_id": Uuid::new_v4(),
+                "chapter": context.checkpoint_chapter + 1,
+                "choice_index": 0,
+                "choice": "未来选择",
+                "consequence": "未来投影",
+            }));
+        assert!(world_state.character_world_context(character_id).is_err());
+    }
+
+    #[test]
+    fn character_context_omits_open_threads_without_witness_provenance() {
+        let first_character_id = Uuid::new_v4();
+        let second_character_id = Uuid::new_v4();
+        let mut entry_context = context(first_character_id);
+        entry_context.characters.push(WorldCharacterRef {
+            id: second_character_id,
+            name: "巡夜人".into(),
+        });
+        let mut world_state = state(&entry_context);
+        let secret = "只有玩家知道的内应身份";
+        world_state.state["threads"]["spy"]["description"] = secret.into();
+
+        for character_id in [first_character_id, second_character_id] {
+            let context = world_state
+                .character_world_context(character_id)
+                .unwrap()
+                .unwrap();
+            assert!(context.active_threads.is_empty());
+            assert!(!serde_json::to_string(&context).unwrap().contains(secret));
+        }
     }
 
     #[test]

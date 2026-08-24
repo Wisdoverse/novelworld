@@ -37,10 +37,12 @@ pub enum BeginChatTurn {
 
 #[async_trait]
 pub trait MemoryRepository: Send + Sync {
+    /// Atomically reserve a memory id with its durable fact. Returns false
+    /// when the id already exists; callers must then validate the existing row
+    /// before treating the operation as an idempotent replay.
+    async fn insert_if_absent(&self, memory: &Memory) -> Result<bool>;
+    async fn find_by_id(&self, id: Uuid) -> Result<Option<Memory>>;
     async fn save(&self, memory: &Memory) -> Result<()>;
-    /// True when a memory with this id is already durable. Idempotency
-    /// fast-path: a completed-key replay must not re-embed or re-write.
-    async fn exists(&self, id: Uuid) -> Result<bool>;
     #[allow(clippy::too_many_arguments)]
     async fn find_by_layer(
         &self,
@@ -51,6 +53,19 @@ pub trait MemoryRepository: Send + Sync {
         max_chapter: i32,
         limit: i64,
         offset: i64,
+    ) -> Result<Vec<Memory>>;
+    /// Return two independently bounded permanent-memory buckets: UUIDv5
+    /// journey candidates and legacy rows ranked by importance/recency. UUID
+    /// version is only a cheap candidate filter; the domain parser remains the
+    /// authority for the complete structured-fact contract.
+    async fn find_permanent_candidates(
+        &self,
+        character_id: Uuid,
+        user_id: Uuid,
+        novel_id: Uuid,
+        max_chapter: i32,
+        journey_limit: i64,
+        legacy_limit: i64,
     ) -> Result<Vec<Memory>>;
     /// Search for memories similar to the given embedding vector using pgvector cosine distance.
     async fn search_similar(
@@ -81,15 +96,24 @@ pub trait ChatRepository: Send + Sync {
         character_id: Uuid,
         user_id: Uuid,
         novel_id: Uuid,
+        reader_character_id: Option<Uuid>,
         max_chapter: i32,
         limit: usize,
     ) -> Result<Vec<ChatMessage>>;
-    async fn count(&self, character_id: Uuid, user_id: Uuid, novel_id: Uuid) -> Result<usize>;
+    async fn count(
+        &self,
+        character_id: Uuid,
+        user_id: Uuid,
+        novel_id: Uuid,
+        reader_character_id: Option<Uuid>,
+    ) -> Result<usize>;
+    #[allow(clippy::too_many_arguments)]
     async fn find_by_character_user(
         &self,
         character_id: Uuid,
         user_id: Uuid,
         novel_id: Uuid,
+        reader_character_id: Option<Uuid>,
         max_chapter: i32,
         limit: i64,
         offset: i64,

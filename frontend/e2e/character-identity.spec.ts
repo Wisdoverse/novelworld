@@ -2,16 +2,16 @@ import { test, expect } from '@playwright/test';
 import { installStubs } from './stubs';
 import { expectNoA11yViolations, settleAnimations } from './helpers';
 
-// H4 identity boundary: a character-identity reader keeps conversation and
-// branch choices, sees NO player-entry or open-world agency, and scans clean
-// under the full rule set.
+// H4 identity boundary: a character-identity reader keeps conversation and an
+// exact committed branch read, sees NO new-branch/player/open-world agency, and
+// scans clean under the full rule set.
 
 test.describe('character-identity boundary (SPEC §8.2)', () => {
-  test('reader page: chat + branch only, no open-world or player-entry agency', async ({ page }) => {
+  test('reader page: chat + committed branch only, no open-world or player-entry agency', async ({ page }) => {
     await installStubs(page, { characterIdentity: true });
     await page.goto('/reader/novel-1/1');
     await expect(page.getByText('第一章 北塔来信').first()).toBeVisible();
-    // Branch choices remain available in character mode.
+    // Only the already committed branch is visible in character mode.
     await expect(page.getByRole('button', { name: /收下信/ })).toBeVisible();
     // Negative assertions: the open-world and player-entry agency MUST be absent.
     await expect(page.getByRole('button', { name: /进入开放世界/ })).toHaveCount(0);
@@ -27,12 +27,11 @@ test.describe('character-identity boundary (SPEC §8.2)', () => {
     await expectNoA11yViolations(page);
   });
 
-  test('branch choice commits in character mode', async ({ page }) => {
+  test('committed branch is read-only in character mode', async ({ page }) => {
     await installStubs(page, { characterIdentity: true });
     await page.goto('/reader/novel-1/1');
     const choice = page.getByRole('button', { name: /收下信/ }).first();
-    await choice.focus();
-    await page.keyboard.press('Space');
+    await expect(choice).toBeDisabled();
     await expect(page.getByText('旅人收下信，约定黎明出海。').first()).toBeVisible();
     await expect(choice).toHaveAttribute('aria-pressed', 'true');
   });

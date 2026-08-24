@@ -31,6 +31,8 @@ describe('SettingsPage', () => {
     mocks.delete.mockReset();
     mocks.error.mockReset();
     mocks.success.mockReset();
+    localStorage.clear();
+    sessionStorage.clear();
     useAuthStore.setState({
       user: { id: 'admin', email: 'admin@example.com', role: 'admin' },
       loading: false,
@@ -176,5 +178,77 @@ describe('SettingsPage', () => {
     expect(mocks.error).toHaveBeenCalledWith('账号导出未完整完成，请重试');
     expect(useAuthStore.getState().user?.id).toBe('reader');
     expect(localStorage.getItem('auth_token')).toBe('access');
+  });
+
+  it('discards a completed A export after principal B logs in', async () => {
+    let resolveExport!: (value: unknown) => void;
+    useAuthStore.setState({
+      user: { id: 'user-a', email: 'a@example.com', role: 'user' },
+    });
+    localStorage.setItem('auth_token', 'access-a');
+    mocks.get.mockImplementationOnce(
+      () => new Promise(resolve => { resolveExport = resolve; }),
+    );
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+
+    render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: '导出账号数据' }));
+    await waitFor(() => expect(mocks.get).toHaveBeenCalledWith('/account/export', {
+      responseType: 'blob',
+      timeout: 16 * 60 * 1000,
+    }));
+    localStorage.setItem('auth_token', 'access-b');
+    useAuthStore.setState({
+      user: { id: 'user-b', email: 'b@example.com', role: 'user' },
+    });
+    resolveExport({
+      data: new Blob([
+        '{"type":"manifest","schema":"account-export-v1"}\n',
+        '{"type":"complete","schema":"account-export-v1"}\n',
+      ]),
+    });
+
+    await waitFor(() => expect(
+      screen.getByRole('button', { name: '导出账号数据' }).hasAttribute('disabled'),
+    ).toBe(false));
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
+    expect(click).not.toHaveBeenCalled();
+    expect(mocks.success).not.toHaveBeenCalled();
+    expect(mocks.error).not.toHaveBeenCalled();
+    expect(useAuthStore.getState().user?.id).toBe('user-b');
+    expect(localStorage.getItem('auth_token')).toBe('access-b');
+    click.mockRestore();
+  });
+
+  it('does not toast or navigate when an A deletion completes after B logs in', async () => {
+    let resolveDelete!: (value: unknown) => void;
+    useAuthStore.setState({
+      user: { id: 'user-a', email: 'a@example.com', role: 'user' },
+    });
+    localStorage.setItem('auth_token', 'access-a');
+    localStorage.setItem('refresh_token', 'refresh-a');
+    mocks.delete.mockImplementationOnce(
+      () => new Promise(resolve => { resolveDelete = resolve; }),
+    );
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: '删除账号' }));
+    await waitFor(() => expect(mocks.delete).toHaveBeenCalledWith('/auth/me'));
+    localStorage.setItem('auth_token', 'access-b');
+    localStorage.setItem('refresh_token', 'refresh-b');
+    useAuthStore.setState({
+      user: { id: 'user-b', email: 'b@example.com', role: 'user' },
+    });
+    resolveDelete({ data: undefined });
+
+    await waitFor(() => expect(
+      screen.getByRole('button', { name: '删除账号' }).hasAttribute('disabled'),
+    ).toBe(false));
+    expect(mocks.success).not.toHaveBeenCalled();
+    expect(useAuthStore.getState().user?.id).toBe('user-b');
+    expect(localStorage.getItem('auth_token')).toBe('access-b');
+    expect(localStorage.getItem('refresh_token')).toBe('refresh-b');
+    confirm.mockRestore();
   });
 });

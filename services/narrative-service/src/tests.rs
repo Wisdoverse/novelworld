@@ -1,10 +1,16 @@
-use crate::application::handlers::{record_world_journey_memory, resolve_protagonist};
+use crate::application::handlers::{
+    journey_memory_id, record_world_journey_memory, resolve_protagonist,
+};
 use crate::domain::entities::game_rules::GameRuleTemplate;
 use crate::domain::entities::narrative_node::{NarrativeChoice, NarrativeNode, WorldState};
-use crate::domain::entities::world_session::WorldEntryContext;
+use crate::domain::entities::player_entity::PlayerEntity;
+use crate::domain::entities::world_session::{
+    WorldAction, WorldActionKind, WorldEntryContext, WorldSession, WorldTurnTransition,
+};
 use crate::domain::ports::AgentMemoryPort;
 use crate::domain::repositories::{
     ChapterInfo, ChapterReadRepository, CharacterBrief, NovelInfo, PlayerEntryContext,
+    WorldTurnResult,
 };
 use crate::domain::services::narrative_transition::{
     CanonContext, NarrativeTransition, RelationshipChange, ThreadChange, ThreadStatus,
@@ -64,6 +70,57 @@ struct FixedChapterRepo {
     characters: Vec<CharacterBrief>,
 }
 
+fn journey_result(
+    user_id: Uuid,
+    novel_id: Uuid,
+    witness_character_id: Option<Uuid>,
+    source_chapter_high_water: i32,
+) -> WorldTurnResult {
+    let mut world_state = WorldState::new(user_id, novel_id);
+    let entry_context = WorldEntryContext {
+        model_version: 1,
+        checkpoint_chapter: 1,
+        unlocked_through_chapter: source_chapter_high_water,
+        characters: vec![],
+        locations: vec![],
+        factions: vec![],
+        hard_rules: vec![],
+        dead_character_ids: vec![],
+        threads: vec![],
+        scheduled_events: vec![],
+        character_goals: vec![],
+    };
+    world_state.state["open_world"] =
+        serde_json::to_value(WorldSession::from_context(&entry_context).unwrap()).unwrap();
+    WorldTurnResult {
+        turn_id: Uuid::new_v4(),
+        action: WorldAction {
+            kind: WorldActionKind::Converse,
+            target_id: witness_character_id.map(|id| id.to_string()),
+            intent: "主角踏上了北境之路".into(),
+        },
+        resolution: None,
+        transition: WorldTurnTransition {
+            schema_version: 1,
+            prompt_version: "world-turn-v2".into(),
+            canon_model_version: 1,
+            canonical_checkpoint_chapter: 1,
+            rendered_narrative: "生成叙事".into(),
+            events: vec![],
+            relationship_changes: vec![],
+            location_changes: vec![],
+            thread_changes: vec![],
+            player_location_id: None,
+            inventory_additions: vec![],
+            inventory_removals: vec![],
+            knowledge_discoveries: vec![],
+            faction_changes: vec![],
+            canonical_event_change: None,
+        },
+        world_state,
+    }
+}
+
 #[async_trait]
 impl ChapterReadRepository for FixedChapterRepo {
     async fn get_chapter(
@@ -88,6 +145,10 @@ impl ChapterReadRepository for FixedChapterRepo {
         Ok(None)
     }
 
+    async fn get_current_chapter(&self, _novel_id: Uuid, _user_id: Uuid) -> Result<i32> {
+        Ok(i32::MAX)
+    }
+
     async fn list_characters(
         &self,
         _novel_id: Uuid,
@@ -106,7 +167,7 @@ impl ChapterReadRepository for FixedChapterRepo {
         Ok(None)
     }
 
-    async fn uses_original_player_identity(&self, _novel_id: Uuid, _user_id: Uuid) -> Result<bool> {
+    async fn reader_identity_is_self(&self, _novel_id: Uuid, _user_id: Uuid) -> Result<bool> {
         Ok(false)
     }
 
@@ -200,8 +261,89 @@ fn protagonist_tie_breaks_on_stable_id() {
     assert_eq!(resolve_protagonist(&reversed), Some(lower_id));
 }
 
+#[test]
+fn protagonist_with_known_first_appearance_precedes_unknown() {
+    let known = CharacterBrief {
+        id: Uuid::new_v4(),
+        role: "protagonist".into(),
+        first_appearance_chapter: Some(7),
+    };
+    let unknown = CharacterBrief {
+        id: Uuid::new_v4(),
+        role: "protagonist".into(),
+        first_appearance_chapter: None,
+    };
+
+    assert_eq!(
+        resolve_protagonist(&[unknown.clone(), known.clone()]),
+        Some(known.id)
+    );
+    assert_eq!(
+        resolve_protagonist(&[known.clone(), unknown.clone()]),
+        Some(known.id)
+    );
+    assert_eq!(
+        resolve_protagonist(std::slice::from_ref(&unknown)),
+        Some(unknown.id)
+    );
+}
+
+#[test]
+fn journey_memory_uses_a_stable_private_uuid_namespace() {
+    let turn_id = Uuid::parse_str("00000000-0000-0000-0000-000000000042").unwrap();
+    let memory_id = journey_memory_id(turn_id);
+    assert_eq!(
+        memory_id,
+        Uuid::parse_str("edb805be-a358-580f-bc45-e2d98473ac11").unwrap()
+    );
+    assert_eq!(memory_id.get_version_num(), 5);
+    assert_ne!(memory_id, turn_id);
+}
+
+#[test]
+fn open_world_start_is_first_writer_wins_and_later_calls_resume() {
+    let user_id = Uuid::new_v4();
+    let novel_id = Uuid::new_v4();
+    let mut state = WorldState::new(user_id, novel_id);
+    let player = PlayerEntity::new(
+        user_id,
+        novel_id,
+        1,
+        "云舟".into(),
+        "远行者".into(),
+        vec!["观察".into()],
+        "gate".into(),
+        vec![],
+    )
+    .unwrap();
+    state.state["player_entity"] = serde_json::to_value(player).unwrap();
+    let context = WorldEntryContext {
+        model_version: 1,
+        checkpoint_chapter: 1,
+        unlocked_through_chapter: 1,
+        characters: vec![],
+        locations: vec![],
+        factions: vec![],
+        hard_rules: vec![],
+        dead_character_ids: vec![],
+        threads: vec![],
+        scheduled_events: vec![],
+        character_goals: vec![],
+    };
+    let started = state.start_open_world(&context).unwrap();
+    let committed_state = state.state.clone();
+    let mut fresh_candidate = context;
+    fresh_candidate.model_version = 2;
+
+    let resumed = state.start_open_world(&fresh_candidate).unwrap();
+
+    assert_eq!(resumed, started);
+    assert_eq!(resumed.entry_context.model_version, 1);
+    assert_eq!(state.state, committed_state);
+}
+
 #[tokio::test]
-async fn journey_memory_records_on_the_protagonist_with_checkpoint_chapter() {
+async fn journey_memory_records_on_the_protagonist_with_source_high_water() {
     let agent = RecordingAgentMemory {
         calls: Mutex::new(vec![]),
         failures_remaining: AtomicUsize::new(0),
@@ -215,16 +357,11 @@ async fn journey_memory_records_on_the_protagonist_with_checkpoint_chapter() {
         }],
     };
     let (turn_id, user_id, novel_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
-    record_world_journey_memory(
-        &agent,
-        &repo,
-        turn_id,
-        user_id,
-        novel_id,
-        7,
-        "主角踏上了北境之路",
-    )
-    .await;
+    let result = journey_result(user_id, novel_id, Some(protagonist), 7);
+    let projected = record_world_journey_memory(&agent, &repo, turn_id, user_id, novel_id, &result)
+        .await
+        .unwrap();
+    assert!(projected);
     let calls = agent.calls.lock().unwrap().clone();
     assert_eq!(calls.len(), 1);
     let call = &calls[0];
@@ -234,7 +371,11 @@ async fn journey_memory_records_on_the_protagonist_with_checkpoint_chapter() {
     assert_eq!(call.novel_id, novel_id);
     assert_eq!(call.chapter_number, 7);
     assert_eq!(call.importance, 7);
-    assert!(call.event.contains("北境"));
+    let fact: serde_json::Value = serde_json::from_str(&call.event).unwrap();
+    assert_eq!(fact["reader_action"]["kind"], "converse");
+    assert_eq!(fact["reader_action"]["target_id"], protagonist.to_string());
+    assert!(fact["reader_action"].get("intent").is_none());
+    assert!(!call.event.contains("北境"));
 }
 
 #[tokio::test]
@@ -243,23 +384,22 @@ async fn journey_memory_retries_boundedly_and_never_panics_on_failure() {
         calls: Mutex::new(vec![]),
         failures_remaining: AtomicUsize::new(2),
     };
+    let protagonist = Uuid::new_v4();
     let repo = FixedChapterRepo {
         characters: vec![CharacterBrief {
-            id: Uuid::new_v4(),
+            id: protagonist,
             role: "protagonist".into(),
             first_appearance_chapter: None,
         }],
     };
-    record_world_journey_memory(
-        &agent,
-        &repo,
-        Uuid::new_v4(),
-        Uuid::new_v4(),
-        Uuid::new_v4(),
-        3,
-        "事件",
-    )
-    .await;
+    let user_id = Uuid::new_v4();
+    let novel_id = Uuid::new_v4();
+    let result = journey_result(user_id, novel_id, Some(protagonist), 3);
+    let projected =
+        record_world_journey_memory(&agent, &repo, Uuid::new_v4(), user_id, novel_id, &result)
+            .await
+            .unwrap();
+    assert!(projected);
     // 2 failures then success within the bounded retry budget (0..=2).
     assert_eq!(agent.calls.lock().unwrap().len(), 1);
 }
@@ -277,16 +417,41 @@ async fn journey_memory_skips_without_a_protagonist() {
             first_appearance_chapter: Some(1),
         }],
     };
-    record_world_journey_memory(
-        &agent,
-        &repo,
-        Uuid::new_v4(),
-        Uuid::new_v4(),
-        Uuid::new_v4(),
-        3,
-        "事件",
-    )
-    .await;
+    let user_id = Uuid::new_v4();
+    let novel_id = Uuid::new_v4();
+    let result = journey_result(user_id, novel_id, Some(Uuid::new_v4()), 3);
+    let projected =
+        record_world_journey_memory(&agent, &repo, Uuid::new_v4(), user_id, novel_id, &result)
+            .await
+            .unwrap();
+    assert!(!projected);
+    assert!(agent.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn journey_memory_skips_when_the_protagonist_did_not_witness_the_turn() {
+    let agent = RecordingAgentMemory {
+        calls: Mutex::new(vec![]),
+        failures_remaining: AtomicUsize::new(0),
+    };
+    let protagonist = Uuid::new_v4();
+    let repo = FixedChapterRepo {
+        characters: vec![CharacterBrief {
+            id: protagonist,
+            role: "protagonist".into(),
+            first_appearance_chapter: Some(1),
+        }],
+    };
+    let user_id = Uuid::new_v4();
+    let novel_id = Uuid::new_v4();
+    let result = journey_result(user_id, novel_id, Some(Uuid::new_v4()), 3);
+
+    let projected =
+        record_world_journey_memory(&agent, &repo, Uuid::new_v4(), user_id, novel_id, &result)
+            .await
+            .unwrap();
+
+    assert!(!projected);
     assert!(agent.calls.lock().unwrap().is_empty());
 }
 

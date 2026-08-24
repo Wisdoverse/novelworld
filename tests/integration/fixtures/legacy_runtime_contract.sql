@@ -1,3 +1,6 @@
+-- This fixture is intentionally column-minimal, not a complete historical
+-- schema snapshot. Columns exercised by later migrations retain their earliest
+-- production definitions so the fixture does not invent unsupported shapes.
 CREATE TYPE public.identity_type AS ENUM ('self', 'character');
 CREATE TYPE public.deviation_mode AS ENUM ('canon', 'creative', 'remix');
 
@@ -10,6 +13,10 @@ CREATE TABLE public.users (
 CREATE TABLE public.novels (
     id UUID PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES public.users(id),
+    title VARCHAR(500) NOT NULL,
+    author VARCHAR(200),
+    cover_url TEXT,
+    genre VARCHAR(100),
     total_chapters INTEGER NOT NULL DEFAULT 0,
     deviation_mode public.deviation_mode NOT NULL DEFAULT 'canon'
 );
@@ -47,7 +54,8 @@ CREATE TABLE public.character_memories (
     character_id UUID NOT NULL REFERENCES public.characters(id),
     user_id UUID NOT NULL REFERENCES public.users(id),
     layer TEXT NOT NULL,
-    content TEXT NOT NULL
+    content TEXT NOT NULL,
+    importance SMALLINT NOT NULL DEFAULT 5 CHECK (importance BETWEEN 1 AND 10)
 );
 
 CREATE TABLE public.chat_messages (
@@ -110,16 +118,18 @@ INSERT INTO public.users (id, email, password_hash) VALUES
     ('00000000-0000-0000-0000-000000000001', 'legacy-one@test.invalid', 'changed-password'),
     ('00000000-0000-0000-0000-000000000009', 'legacy-two@test.invalid', 'changed-password');
 
-INSERT INTO public.novels (id, user_id, total_chapters, deviation_mode) VALUES
+INSERT INTO public.novels (id, user_id, title, total_chapters, deviation_mode) VALUES
     (
         '00000000-0000-0000-0000-000000000002',
         '00000000-0000-0000-0000-000000000001',
+        'Legacy Novel',
         7,
         'creative'
     ),
     (
         '00000000-0000-0000-0000-000000000010',
         '00000000-0000-0000-0000-000000000009',
+        'Second Legacy Novel',
         5,
         'canon'
     );

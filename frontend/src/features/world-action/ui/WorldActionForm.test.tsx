@@ -113,4 +113,21 @@ describe('WorldActionForm', () => {
     expect(screen.getByText(/D20 \+ 轻功 \+1，难度 13/)).toBeTruthy();
     expect(screen.getByText(/骰点由服务器在提交时生成/)).toBeTruthy();
   });
+
+  it('disables every editable control while an exact request is locked', () => {
+    const onSubmit = vi.fn();
+    const { container } = render(<WorldActionForm
+      view={view}
+      isPending={false}
+      isLocked
+      onSubmit={onSubmit}
+    />);
+
+    for (const label of ['行动', '目标', '你的意图']) {
+      expect(screen.getByLabelText(label).hasAttribute('disabled')).toBe(true);
+    }
+    expect(screen.getByRole('button', { name: '执行行动' }).hasAttribute('disabled')).toBe(true);
+    fireEvent.submit(container.querySelector('form')!);
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
 });

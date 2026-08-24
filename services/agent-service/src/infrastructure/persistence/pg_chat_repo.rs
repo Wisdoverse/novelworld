@@ -394,23 +394,50 @@ impl ChatRepository for PgChatRepository {
         character_id: Uuid,
         user_id: Uuid,
         novel_id: Uuid,
+        reader_character_id: Option<Uuid>,
         max_chapter: i32,
         limit: usize,
     ) -> Result<Vec<ChatMessage>> {
         let rows = sqlx::query_as::<_, ChatMessageRow>(
             r#"
-            SELECT id, turn_id, user_id, character_id, novel_id,
-                   role, content, reader_identity, chapter_context, created_at
-            FROM chat_messages
-            WHERE character_id = $1 AND user_id = $2 AND novel_id = $3
-              AND chapter_context IS NOT NULL AND chapter_context <= $4
-            ORDER BY created_at DESC
-            LIMIT $5
+            SELECT message.id, message.turn_id, message.user_id,
+                   message.character_id, message.novel_id, message.role,
+                   message.content, message.reader_identity,
+                   message.chapter_context, message.created_at
+            FROM chat_messages AS message
+            LEFT JOIN chat_turns AS turn ON turn.id = message.turn_id
+            WHERE message.character_id = $1
+              AND message.user_id = $2
+              AND message.novel_id = $3
+              AND (
+                    ($4::uuid IS NULL AND (
+                        turn.id IS NULL
+                        OR (turn.status = 'completed'
+                            AND turn.reader_identity_type = 'self'
+                            AND turn.reader_character_id IS NULL)
+                    ))
+                    OR ($4::uuid IS NOT NULL
+                        AND turn.status = 'completed'
+                        AND turn.reader_identity_type = 'character'
+                        AND turn.reader_character_id = $4)
+              )
+              AND message.chapter_context IS NOT NULL
+              AND message.chapter_context <= $5
+            ORDER BY message.created_at DESC,
+                     message.turn_id DESC NULLS LAST,
+                     CASE message.role
+                         WHEN 'character' THEN 0
+                         WHEN 'user' THEN 1
+                         ELSE 2
+                     END,
+                     message.id DESC
+            LIMIT $6
             "#,
         )
         .bind(character_id)
         .bind(user_id)
         .bind(novel_id)
+        .bind(reader_character_id)
         .bind(max_chapter)
         .bind(limit as i64)
         .fetch_all(&self.pool)
@@ -422,45 +449,96 @@ impl ChatRepository for PgChatRepository {
         Ok(messages)
     }
 
-    async fn count(&self, character_id: Uuid, user_id: Uuid, novel_id: Uuid) -> Result<usize> {
+    async fn count(
+        &self,
+        character_id: Uuid,
+        user_id: Uuid,
+        novel_id: Uuid,
+        reader_character_id: Option<Uuid>,
+    ) -> Result<usize> {
         let row: (i64,) = sqlx::query_as(
             r#"
-            SELECT COUNT(*) FROM chat_messages
-            WHERE character_id = $1 AND user_id = $2 AND novel_id = $3
+            SELECT COUNT(*)
+            FROM chat_messages AS message
+            LEFT JOIN chat_turns AS turn ON turn.id = message.turn_id
+            WHERE message.character_id = $1
+              AND message.user_id = $2
+              AND message.novel_id = $3
+              AND (
+                    ($4::uuid IS NULL AND (
+                        turn.id IS NULL
+                        OR (turn.status = 'completed'
+                            AND turn.reader_identity_type = 'self'
+                            AND turn.reader_character_id IS NULL)
+                    ))
+                    OR ($4::uuid IS NOT NULL
+                        AND turn.status = 'completed'
+                        AND turn.reader_identity_type = 'character'
+                        AND turn.reader_character_id = $4)
+              )
             "#,
         )
         .bind(character_id)
         .bind(user_id)
         .bind(novel_id)
+        .bind(reader_character_id)
         .fetch_one(&self.pool)
         .await?;
 
         Ok(row.0 as usize)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn find_by_character_user(
         &self,
         character_id: Uuid,
         user_id: Uuid,
         novel_id: Uuid,
+        reader_character_id: Option<Uuid>,
         max_chapter: i32,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<ChatMessage>> {
         let rows = sqlx::query_as::<_, ChatMessageRow>(
             r#"
-            SELECT id, turn_id, user_id, character_id, novel_id,
-                   role, content, reader_identity, chapter_context, created_at
-            FROM chat_messages
-            WHERE character_id = $1 AND user_id = $2 AND novel_id = $3
-              AND chapter_context IS NOT NULL AND chapter_context <= $4
-            ORDER BY created_at DESC
-            LIMIT $5 OFFSET $6
+            SELECT message.id, message.turn_id, message.user_id,
+                   message.character_id, message.novel_id, message.role,
+                   message.content, message.reader_identity,
+                   message.chapter_context, message.created_at
+            FROM chat_messages AS message
+            LEFT JOIN chat_turns AS turn ON turn.id = message.turn_id
+            WHERE message.character_id = $1
+              AND message.user_id = $2
+              AND message.novel_id = $3
+              AND (
+                    ($4::uuid IS NULL AND (
+                        turn.id IS NULL
+                        OR (turn.status = 'completed'
+                            AND turn.reader_identity_type = 'self'
+                            AND turn.reader_character_id IS NULL)
+                    ))
+                    OR ($4::uuid IS NOT NULL
+                        AND turn.status = 'completed'
+                        AND turn.reader_identity_type = 'character'
+                        AND turn.reader_character_id = $4)
+              )
+              AND message.chapter_context IS NOT NULL
+              AND message.chapter_context <= $5
+            ORDER BY message.created_at DESC,
+                     message.turn_id DESC NULLS LAST,
+                     CASE message.role
+                         WHEN 'character' THEN 0
+                         WHEN 'user' THEN 1
+                         ELSE 2
+                     END,
+                     message.id DESC
+            LIMIT $6 OFFSET $7
             "#,
         )
         .bind(character_id)
         .bind(user_id)
         .bind(novel_id)
+        .bind(reader_character_id)
         .bind(max_chapter)
         .bind(limit)
         .bind(offset)
