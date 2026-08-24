@@ -691,7 +691,7 @@ impl DiceRollerPort for ToctouFixture {
 
 #[async_trait]
 impl LlmPort for ToctouFixture {
-    async fn chat_longform(&self, _system: &str, prompt: &str) -> Result<String> {
+    async fn chat_longform(&self, _user_id: Uuid, _system: &str, prompt: &str) -> Result<String> {
         self.provider_calls.fetch_add(1, Ordering::SeqCst);
         self.provider_prompts.lock().unwrap().push(prompt.into());
         self.provider_entered.notify_one();
@@ -699,7 +699,12 @@ impl LlmPort for ToctouFixture {
         Ok("生成的玩家时间线续章在城门外展开，远处的火光映亮了归途。".into())
     }
 
-    async fn chat_json(&self, task: NarrativeLlmTask, prompt: &str) -> Result<String> {
+    async fn chat_json(
+        &self,
+        _user_id: Uuid,
+        task: NarrativeLlmTask,
+        prompt: &str,
+    ) -> Result<String> {
         self.provider_calls.fetch_add(1, Ordering::SeqCst);
         self.provider_prompts.lock().unwrap().push(prompt.into());
         self.provider_entered.notify_one();

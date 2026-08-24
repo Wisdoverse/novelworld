@@ -26,7 +26,7 @@ const PAGES: Array<[string, string, (page: import('@playwright/test').Page) => P
     await page.getByRole('button', { name: /对话/ }).first().waitFor();
   }],
   ['settings', '/settings', async (page) => {
-    await page.getByText('模型设置').first().waitFor();
+    await page.getByRole('heading', { name: '平台模型设置' }).waitFor();
   }],
   ['setup', '/', async (page) => {
     await page.getByText('欢迎使用 NovelWorld').first().waitFor();

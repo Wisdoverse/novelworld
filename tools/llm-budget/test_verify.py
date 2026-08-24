@@ -88,6 +88,11 @@ class BudgetVerifierTest(unittest.TestCase):
                 1,
             ),
             self.sample.replace('class="output"', 'class="unbounded-new-class"', 1),
+            self.sample.replace(
+                'usage_key="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"',
+                'usage_key="not-a-fingerprint"',
+                1,
+            ),
         ]:
             with self.assertRaises(BudgetError):
                 self.run_verify(sample=sample)

@@ -319,9 +319,29 @@ export const CHOICE_RESULT = {
 };
 
 export const LLM_SETTINGS = {
+  scope: 'platform',
   provider: 'deepseek',
-  model: 'deepseek-chat',
+  model: 'deepseek-v4-flash',
   thinking_enabled: false,
+  api_key_configured: true,
+};
+
+export const LLM_USAGE = {
+  contract: 1,
+  scope: 'platform',
+  window_days: 30,
+  tokens: {
+    input: '3000',
+    cached_input: '1000',
+    uncached_input: '2000',
+    output: '500',
+    total: '3500',
+  },
+  costs: {
+    usd_micros: '450000',
+    cny_micros: '3240000',
+  },
+  unpriced_tokens: '0',
 };
 
 export const AUTH_TOKENS = {

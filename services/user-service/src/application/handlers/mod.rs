@@ -49,8 +49,8 @@ pub type AuthResult<T> = std::result::Result<T, AuthError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LlmUsageError {
-    #[error("Administrator access is required")]
-    Forbidden,
+    #[error("A personal LLM API key is required")]
+    PersonalKeyRequired,
     #[error("LLM usage statistics are temporarily unavailable")]
     Unavailable,
     #[error("User not found")]
@@ -78,27 +78,69 @@ pub struct LlmUsageHandler {
     pub user_repo: Arc<dyn UserRepository>,
     pub usage_reader: Arc<dyn LlmUsageReader>,
     pub pricing: LlmPricingCatalog,
+    pub environment_llm_config: Option<RuntimeLlmConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmSettingsScope {
+    Platform,
+    User,
+}
+
+impl LlmSettingsScope {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Platform => "platform",
+            Self::User => "user",
+        }
+    }
+}
+
+pub struct LlmSettings {
+    pub config: RuntimeLlmConfig,
+    pub scope: LlmSettingsScope,
+    pub api_key_configured: bool,
 }
 
 impl LlmUsageHandler {
     pub async fn summary(
         &self,
         user_id: Uuid,
-    ) -> std::result::Result<LlmUsageSummary, LlmUsageError> {
+    ) -> std::result::Result<(LlmUsageSummary, LlmSettingsScope), LlmUsageError> {
         let user = self
             .user_repo
             .find_by_id(user_id)
             .await
             .map_err(LlmUsageError::Internal)?
             .ok_or(LlmUsageError::NotFound)?;
-        if user.role != UserRole::Admin {
-            return Err(LlmUsageError::Forbidden);
-        }
-        let snapshot = self.usage_reader.read().await.map_err(|error| {
+        let (config, scope) = if user.role == UserRole::Admin {
+            if let Some(config) = &self.environment_llm_config {
+                (config.clone(), LlmSettingsScope::Platform)
+            } else {
+                (
+                    self.user_repo
+                        .find_runtime_llm_config()
+                        .await
+                        .map_err(LlmUsageError::Internal)?
+                        .ok_or(LlmUsageError::Unavailable)?,
+                    LlmSettingsScope::Platform,
+                )
+            }
+        } else {
+            (
+                self.user_repo
+                    .find_user_llm_config(user_id)
+                    .await
+                    .map_err(LlmUsageError::Internal)?
+                    .ok_or(LlmUsageError::PersonalKeyRequired)?,
+                LlmSettingsScope::User,
+            )
+        };
+        let snapshot = self.usage_reader.read(&config).await.map_err(|error| {
             tracing::warn!(error = ?error, "LLM usage metrics query failed");
             LlmUsageError::Unavailable
         })?;
-        Ok(self.pricing.summarize(snapshot))
+        Ok((self.pricing.summarize(snapshot), scope))
     }
 }
 
@@ -270,9 +312,52 @@ impl AuthHandler {
             .ok_or(AuthError::SetupRequired)
     }
 
-    pub async fn llm_settings(&self, user_id: Uuid) -> AuthResult<RuntimeLlmConfig> {
-        self.require_admin(user_id).await?;
+    pub async fn runtime_llm_config_for(
+        &self,
+        user_id: Option<Uuid>,
+    ) -> AuthResult<RuntimeLlmConfig> {
+        if let Some(user_id) = user_id {
+            let user = self.require_user(user_id).await?;
+            if user.role != UserRole::Admin {
+                if let Some(config) = self
+                    .user_repo
+                    .find_user_llm_config(user_id)
+                    .await
+                    .map_err(AuthError::Internal)?
+                {
+                    return Ok(config);
+                }
+            }
+        }
         self.runtime_llm_config().await
+    }
+
+    pub async fn llm_settings(&self, user_id: Uuid) -> AuthResult<LlmSettings> {
+        let user = self.require_user(user_id).await?;
+        if user.role == UserRole::Admin {
+            return Ok(LlmSettings {
+                config: self.runtime_llm_config().await?,
+                scope: LlmSettingsScope::Platform,
+                api_key_configured: true,
+            });
+        }
+        if let Some(config) = self
+            .user_repo
+            .find_user_llm_config(user_id)
+            .await
+            .map_err(AuthError::Internal)?
+        {
+            return Ok(LlmSettings {
+                config,
+                scope: LlmSettingsScope::User,
+                api_key_configured: true,
+            });
+        }
+        Ok(LlmSettings {
+            config: self.runtime_llm_config().await?,
+            scope: LlmSettingsScope::Platform,
+            api_key_configured: false,
+        })
     }
 
     pub async fn update_llm_settings(
@@ -282,18 +367,27 @@ impl AuthHandler {
         model: &str,
         api_key: Option<&str>,
         thinking_enabled: bool,
-    ) -> AuthResult<RuntimeLlmConfig> {
-        self.require_admin(user_id).await?;
-        if self.environment_llm_config.is_some() {
+    ) -> AuthResult<LlmSettings> {
+        let user = self.require_user(user_id).await?;
+        let is_admin = user.role == UserRole::Admin;
+        if is_admin && self.environment_llm_config.is_some() {
             return Err(AuthError::Validation(
                 "LLM settings are managed by environment variables".into(),
             ));
         }
-        let current = self.runtime_llm_config().await?;
+        let current = if is_admin {
+            Some(self.runtime_llm_config().await?)
+        } else {
+            self.user_repo
+                .find_user_llm_config(user_id)
+                .await
+                .map_err(AuthError::Internal)?
+        };
         let key = api_key
             .map(str::trim)
             .filter(|key| !key.is_empty())
-            .unwrap_or(&current.api_key);
+            .or_else(|| current.as_ref().map(|config| config.api_key.as_str()))
+            .unwrap_or_default();
         let config = RuntimeLlmConfig::for_settings(provider, model, key, thinking_enabled)
             .map_err(AuthError::Validation)?;
         self.llm_tester
@@ -303,26 +397,34 @@ impl AuthHandler {
                 tracing::warn!(error = ?error, provider = %config.provider, model = %config.model, "settings LLM connection test failed");
                 AuthError::LlmUnavailable
             })?;
-        self.user_repo
-            .save_runtime_llm_config(&config)
-            .await
-            .map_err(AuthError::Internal)?;
-        Ok(config)
+        if is_admin {
+            self.user_repo
+                .save_runtime_llm_config(&config)
+                .await
+                .map_err(AuthError::Internal)?;
+        } else {
+            self.user_repo
+                .save_user_llm_config(user_id, &config)
+                .await
+                .map_err(AuthError::Internal)?;
+        }
+        Ok(LlmSettings {
+            config,
+            scope: if is_admin {
+                LlmSettingsScope::Platform
+            } else {
+                LlmSettingsScope::User
+            },
+            api_key_configured: true,
+        })
     }
 
-    async fn require_admin(&self, user_id: Uuid) -> AuthResult<User> {
-        let user = self
-            .user_repo
+    async fn require_user(&self, user_id: Uuid) -> AuthResult<User> {
+        self.user_repo
             .find_by_id(user_id)
             .await
             .map_err(AuthError::Internal)?
-            .ok_or(AuthError::NotFound)?;
-        if user.role != UserRole::Admin {
-            return Err(AuthError::Validation(
-                "Administrator access is required".into(),
-            ));
-        }
-        Ok(user)
+            .ok_or(AuthError::NotFound)
     }
 
     #[tracing::instrument(skip(self, password))]

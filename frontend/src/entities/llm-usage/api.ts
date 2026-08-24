@@ -1,7 +1,10 @@
 import { apiClient } from '@/shared/api/client';
 
+export type LlmUsageScope = 'platform' | 'user';
+
 export type LlmUsageSummary = {
   contract: 1;
+  scope: LlmUsageScope;
   window_days: number;
   tokens: {
     input: string;
@@ -15,6 +18,12 @@ export type LlmUsageSummary = {
     cny_micros: string | null;
   };
   unpriced_tokens: string;
+};
+
+export const llmUsageKeys = {
+  summary: (principalId: string, scope: LlmUsageScope) => (
+    ['llm-usage', principalId, scope] as const
+  ),
 };
 
 export async function getLlmUsage(): Promise<LlmUsageSummary> {

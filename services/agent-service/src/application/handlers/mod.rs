@@ -746,7 +746,7 @@ impl AgentCommandHandler {
                 .into());
             }
         };
-        let upstream = match lease.run(self.llm.chat_stream(context)).await {
+        let upstream = match lease.run(self.llm.chat_stream(user_id, context)).await {
             Some(Ok(stream)) => stream,
             Some(Err(error)) => {
                 self.fail_claim(&turn, "llm_preflight_error").await;
@@ -955,7 +955,7 @@ impl AgentCommandHandler {
                 .into());
             }
         };
-        let response = match lease.run(self.llm.chat_messages(context)).await {
+        let response = match lease.run(self.llm.chat_messages(user_id, context)).await {
             Some(Ok(response))
                 if !response.trim().is_empty()
                     && response.len() <= MAX_RESPONSE_BYTES
@@ -1489,7 +1489,7 @@ mod tests {
 
     #[async_trait]
     impl TextSummarizer for UnusedSummarizer {
-        async fn summarize(&self, _system: &str, _text: &str) -> Result<String> {
+        async fn summarize(&self, _user_id: Uuid, _system: &str, _text: &str) -> Result<String> {
             panic!("summarization should not run in this test")
         }
     }
@@ -1497,11 +1497,17 @@ mod tests {
     #[derive(Default)]
     struct RecordingLlm {
         prompts: Mutex<Vec<Vec<(String, String)>>>,
+        user_ids: Mutex<Vec<Uuid>>,
     }
 
     #[async_trait]
     impl ChatCompletion for RecordingLlm {
-        async fn chat_stream(&self, messages: Vec<(String, String)>) -> Result<ChatStream> {
+        async fn chat_stream(
+            &self,
+            user_id: Uuid,
+            messages: Vec<(String, String)>,
+        ) -> Result<ChatStream> {
+            self.user_ids.lock().unwrap().push(user_id);
             self.prompts.lock().unwrap().push(messages);
             Ok(Box::pin(futures::stream::iter([
                 Ok(ChatCompletionEvent::Delta("Trusted response".into())),
@@ -1509,7 +1515,12 @@ mod tests {
             ])))
         }
 
-        async fn chat_messages(&self, messages: Vec<(String, String)>) -> Result<String> {
+        async fn chat_messages(
+            &self,
+            user_id: Uuid,
+            messages: Vec<(String, String)>,
+        ) -> Result<String> {
+            self.user_ids.lock().unwrap().push(user_id);
             self.prompts.lock().unwrap().push(messages);
             Ok("Trusted response".into())
         }
@@ -1519,13 +1530,21 @@ mod tests {
 
     #[async_trait]
     impl ChatCompletion for MissingTerminalLlm {
-        async fn chat_stream(&self, _messages: Vec<(String, String)>) -> Result<ChatStream> {
+        async fn chat_stream(
+            &self,
+            _user_id: Uuid,
+            _messages: Vec<(String, String)>,
+        ) -> Result<ChatStream> {
             Ok(Box::pin(futures::stream::iter([Ok(
                 ChatCompletionEvent::Delta("partial".into()),
             )])))
         }
 
-        async fn chat_messages(&self, _messages: Vec<(String, String)>) -> Result<String> {
+        async fn chat_messages(
+            &self,
+            _user_id: Uuid,
+            _messages: Vec<(String, String)>,
+        ) -> Result<String> {
             panic!("non-streaming completion should not run in this test")
         }
     }
@@ -1534,11 +1553,19 @@ mod tests {
 
     #[async_trait]
     impl ChatCompletion for OversizedLlm {
-        async fn chat_stream(&self, _messages: Vec<(String, String)>) -> Result<ChatStream> {
+        async fn chat_stream(
+            &self,
+            _user_id: Uuid,
+            _messages: Vec<(String, String)>,
+        ) -> Result<ChatStream> {
             panic!("streaming completion should not run in this test")
         }
 
-        async fn chat_messages(&self, _messages: Vec<(String, String)>) -> Result<String> {
+        async fn chat_messages(
+            &self,
+            _user_id: Uuid,
+            _messages: Vec<(String, String)>,
+        ) -> Result<String> {
             Ok("x".repeat(MAX_RESPONSE_BYTES + 1))
         }
     }
@@ -1547,11 +1574,19 @@ mod tests {
 
     #[async_trait]
     impl ChatCompletion for SlowLlm {
-        async fn chat_stream(&self, _messages: Vec<(String, String)>) -> Result<ChatStream> {
+        async fn chat_stream(
+            &self,
+            _user_id: Uuid,
+            _messages: Vec<(String, String)>,
+        ) -> Result<ChatStream> {
             panic!("streaming completion should not run in this test")
         }
 
-        async fn chat_messages(&self, _messages: Vec<(String, String)>) -> Result<String> {
+        async fn chat_messages(
+            &self,
+            _user_id: Uuid,
+            _messages: Vec<(String, String)>,
+        ) -> Result<String> {
             tokio::time::sleep(Duration::from_millis(35)).await;
             Ok("Slow response".into())
         }
@@ -2062,6 +2097,7 @@ mod tests {
 
         assert_eq!(response.message, "Trusted response");
         assert!(!response.replayed);
+        assert_eq!(*llm.user_ids.lock().unwrap(), vec![user_id]);
         assert_eq!(*memory_repo.layer_chapters.lock().unwrap(), vec![3, 3]);
         assert_eq!(*memory_repo.semantic_chapters.lock().unwrap(), vec![3]);
         assert!(cache.chapters.lock().unwrap().is_empty());

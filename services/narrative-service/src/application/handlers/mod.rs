@@ -1457,7 +1457,7 @@ impl NarrativeCommandHandler {
         let raw = match lease
             .run(
                 self.llm
-                    .chat_json(NarrativeLlmTask::NarrativeTransition, &prompt),
+                    .chat_json(user_id, NarrativeLlmTask::NarrativeTransition, &prompt),
             )
             .await
         {
@@ -1678,7 +1678,7 @@ impl NarrativeCommandHandler {
         }
         let generated = self
             .llm
-            .chat_json(NarrativeLlmTask::BranchGeneration, &prompt)
+            .chat_json(user_id, NarrativeLlmTask::BranchGeneration, &prompt)
             .await
             .map_err(NarrativeError::Llm)
             .and_then(|json| {
@@ -2023,7 +2023,7 @@ impl NarrativeCommandHandler {
         for attempt in 0..3 {
             let raw_transition = self
                 .llm
-                .chat_json(NarrativeLlmTask::NarrativeTransition, &prompt)
+                .chat_json(user_id, NarrativeLlmTask::NarrativeTransition, &prompt)
                 .await
                 .map_err(NarrativeError::Llm)?;
             if raw_transition.len() > MAX_TRANSITION_BYTES {
@@ -2366,6 +2366,7 @@ impl NarrativeCommandHandler {
         let content = self
             .llm
             .chat_longform(
+                user_id,
                 "你是互动小说的玩家时间线主笔。只输出自然的简体中文小说正文。",
                 &prompt,
             )

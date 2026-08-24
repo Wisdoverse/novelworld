@@ -97,6 +97,7 @@ fn try_import_admission(
 
 async fn validated_json<T>(
     llm: &dyn LlmPort,
+    user_id: Uuid,
     task: NovelLlmTask,
     prompt: &str,
     validate: impl Fn(&T) -> Result<()>,
@@ -109,7 +110,7 @@ where
     for attempt in 1..=3 {
         // Transport retries already live in the shared client. This loop is
         // only for a fresh model response after JSON/schema validation fails.
-        let raw = llm.chat_json(task, &current_prompt).await?;
+        let raw = llm.chat_json(user_id, task, &current_prompt).await?;
         let result = serde_json::from_str::<T>(json_object_payload(&raw))
             .map_err(anyhow::Error::from)
             .and_then(|value| {
@@ -148,7 +149,12 @@ mod validated_json_tests {
 
     #[async_trait::async_trait]
     impl LlmPort for InvalidThenValid {
-        async fn chat_json(&self, _task: NovelLlmTask, prompt: &str) -> Result<String> {
+        async fn chat_json(
+            &self,
+            _user_id: Uuid,
+            _task: NovelLlmTask,
+            prompt: &str,
+        ) -> Result<String> {
             self.saw_correction
                 .fetch_or(prompt.contains("CORRECTION REQUIRED"), Ordering::Relaxed);
             Ok(if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
@@ -167,6 +173,7 @@ mod validated_json_tests {
         };
         let value: serde_json::Value = validated_json(
             &llm,
+            Uuid::nil(),
             NovelLlmTask::CharacterExtraction,
             "prompt",
             |_| Ok(()),
@@ -239,6 +246,7 @@ pub struct TranslateChapterHandler {
 impl TranslateChapterHandler {
     pub async fn translate(
         &self,
+        user_id: Uuid,
         novel_id: Uuid,
         chapter_number: i32,
         source: &str,
@@ -291,7 +299,9 @@ impl TranslateChapterHandler {
         };
 
         let translated =
-            match tokio::time::timeout(TRANSLATION_TIMEOUT, self.translate_chunks(source)).await {
+            match tokio::time::timeout(TRANSLATION_TIMEOUT, self.translate_chunks(user_id, source))
+                .await
+            {
                 Ok(Ok(content)) => content,
                 Ok(Err(error)) => {
                     self.fail_translation(key, attempt, "provider").await;
@@ -342,13 +352,14 @@ impl TranslateChapterHandler {
 
     async fn translate_chunks(
         &self,
+        user_id: Uuid,
         source: &str,
     ) -> std::result::Result<String, TranslationError> {
         let mut translated = Vec::new();
         for chunk in split_translation_chunks(source, TRANSLATION_CHUNK_BYTES) {
             let value = self
                 .translator
-                .to_simplified_chinese(chunk)
+                .to_simplified_chinese(user_id, chunk)
                 .await
                 .map_err(TranslationError::Provider)?;
             let value = value.trim();
@@ -544,7 +555,7 @@ mod translation_tests {
 
     #[async_trait::async_trait]
     impl TextTranslator for EchoTranslator {
-        async fn to_simplified_chinese(&self, source: &str) -> Result<String> {
+        async fn to_simplified_chinese(&self, _user_id: Uuid, source: &str) -> Result<String> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             tokio::time::sleep(self.delay).await;
             Ok(format!("译：{source}"))
@@ -578,14 +589,19 @@ mod translation_tests {
         };
 
         assert!(matches!(
-            handler.translate(Uuid::nil(), 1, " \n ").await,
+            handler.translate(Uuid::nil(), Uuid::nil(), 1, " \n ").await,
             Err(TranslationError::Validation)
         ));
         assert!(matches!(
-            handler.translate(Uuid::nil(), 1, "other text").await,
+            handler
+                .translate(Uuid::nil(), Uuid::nil(), 1, "other text")
+                .await,
             Err(TranslationError::SourceMismatch)
         ));
-        let translated = handler.translate(Uuid::nil(), 1, &source).await.unwrap();
+        let translated = handler
+            .translate(Uuid::nil(), Uuid::nil(), 1, &source)
+            .await
+            .unwrap();
 
         assert!(translated.starts_with("译："));
         assert!(translator.calls.load(Ordering::Relaxed) > 1);
@@ -606,14 +622,17 @@ mod translation_tests {
         };
 
         let first = handler
-            .translate(Uuid::nil(), 1, "Chapter one")
+            .translate(Uuid::nil(), Uuid::nil(), 1, "Chapter one")
             .await
             .unwrap();
         let cached = handler
-            .translate(Uuid::nil(), 1, "Chapter one")
+            .translate(Uuid::nil(), Uuid::nil(), 1, "Chapter one")
             .await
             .unwrap();
-        let changed = handler.translate(Uuid::nil(), 1, &chapter).await.unwrap();
+        let changed = handler
+            .translate(Uuid::nil(), Uuid::nil(), 1, &chapter)
+            .await
+            .unwrap();
 
         assert_eq!(first, cached);
         assert_ne!(first, changed);
@@ -635,8 +654,8 @@ mod translation_tests {
         };
 
         let (first, second) = tokio::join!(
-            handler.translate(Uuid::nil(), 1, &source),
-            handler.translate(Uuid::nil(), 1, &source),
+            handler.translate(Uuid::nil(), Uuid::nil(), 1, &source),
+            handler.translate(Uuid::nil(), Uuid::nil(), 1, &source),
         );
         assert_eq!(first.is_ok() as u8 + second.is_ok() as u8, 1);
         assert!(matches!(
@@ -645,7 +664,10 @@ mod translation_tests {
         ));
         assert_eq!(translator.calls.load(Ordering::Relaxed), 1);
 
-        let cached = handler.translate(Uuid::nil(), 1, &source).await.unwrap();
+        let cached = handler
+            .translate(Uuid::nil(), Uuid::nil(), 1, &source)
+            .await
+            .unwrap();
         assert!(cached.starts_with("译："));
         assert_eq!(translator.calls.load(Ordering::Relaxed), 1);
     }
@@ -951,6 +973,7 @@ impl NovelCommandHandler {
 
     pub async fn request_game_rule_template(
         self: &Arc<Self>,
+        user_id: Uuid,
         novel_id: Uuid,
     ) -> std::result::Result<GameRuleTemplateRequest, GameRuleTemplateRequestError> {
         let novel = self
@@ -987,7 +1010,7 @@ impl NovelCommandHandler {
             BeginGameRuleGeneration::Acquired { attempt } => attempt,
         };
 
-        self.spawn_game_rule_generation(novel, model, attempt);
+        self.spawn_game_rule_generation(user_id, novel, model, attempt);
         Ok(GameRuleTemplateRequest::InProgress {
             retry_after_seconds: 2,
         })
@@ -995,6 +1018,7 @@ impl NovelCommandHandler {
 
     fn spawn_game_rule_generation(
         self: &Arc<Self>,
+        user_id: Uuid,
         novel: Novel,
         model: crate::domain::entities::canon_story_model::CanonStoryModel,
         attempt: i64,
@@ -1004,7 +1028,7 @@ impl NovelCommandHandler {
         tokio::spawn(
             async move {
                 handler
-                    .finish_claimed_game_rule_generation(novel, model, attempt)
+                    .finish_claimed_game_rule_generation(user_id, novel, model, attempt)
                     .await;
             }
             .instrument(current_span),
@@ -1013,6 +1037,7 @@ impl NovelCommandHandler {
 
     async fn finish_claimed_game_rule_generation(
         &self,
+        user_id: Uuid,
         novel: Novel,
         model: crate::domain::entities::canon_story_model::CanonStoryModel,
         attempt: i64,
@@ -1020,7 +1045,7 @@ impl NovelCommandHandler {
         let novel_id = novel.id;
         let generation_started = Instant::now();
         match self
-            .generate_claimed_game_rule_template(&novel, &model, attempt)
+            .generate_claimed_game_rule_template(user_id, &novel, &model, attempt)
             .await
         {
             Ok(_) => {
@@ -1065,6 +1090,7 @@ impl NovelCommandHandler {
 
     async fn generate_claimed_game_rule_template(
         &self,
+        user_id: Uuid,
         novel: &Novel,
         model: &crate::domain::entities::canon_story_model::CanonStoryModel,
         attempt: i64,
@@ -1084,7 +1110,7 @@ impl NovelCommandHandler {
         let raw = lease
             .run(
                 self.llm
-                    .chat_json(NovelLlmTask::GameRuleGeneration, &prompt),
+                    .chat_json(user_id, NovelLlmTask::GameRuleGeneration, &prompt),
             )
             .await
             .ok_or_else(|| anyhow::anyhow!("game rule generation lease was lost"))??;
@@ -1458,6 +1484,7 @@ impl NovelCommandHandler {
                 segments = indexes.len(),
                 "repairing suspicious chapter boundaries"
             );
+            let user_id = claim.user_id;
             let results = stream::iter(indexes)
                 .map(|index| {
                     let llm = self.llm.clone();
@@ -1470,6 +1497,7 @@ impl NovelCommandHandler {
                         let detection: chapter_boundary_detector::ChapterBoundaryDetection =
                             validated_json(
                                 llm.as_ref(),
+                                user_id,
                                 NovelLlmTask::ChapterBoundaryDetection,
                                 &prompt,
                                 |result| {
@@ -1546,6 +1574,7 @@ impl NovelCommandHandler {
         let prompt = build_extraction_prompt(&title, &sample_text);
         let mut base_extraction: ExtractionResult = validated_json(
             self.llm.as_ref(),
+            claim.user_id,
             NovelLlmTask::CharacterExtraction,
             &prompt,
             |result| validate_extraction(result).map_err(Into::into),
@@ -1555,6 +1584,7 @@ impl NovelCommandHandler {
         let mut chunk_extractions = Vec::new();
         if needs_chunk_scan(chapters) {
             let scans = build_scan_plan(chapters);
+            let user_id = claim.user_id;
             let results = stream::iter(scans.into_iter().enumerate())
                 .map(|(index, chunk)| {
                     let llm = self.llm.clone();
@@ -1563,6 +1593,7 @@ impl NovelCommandHandler {
                         let prompt = build_chunk_extraction_prompt(&title, &chunk, index);
                         let result: ChunkExtractionResult = validated_json(
                             llm.as_ref(),
+                            user_id,
                             NovelLlmTask::CharacterExtraction,
                             &prompt,
                             |result| validate_chunk_extraction(result).map_err(Into::into),
@@ -1659,6 +1690,7 @@ impl NovelCommandHandler {
             .collect::<Vec<_>>();
         let detection: node_detector::NodeDetectionResult = validated_json(
             self.llm.as_ref(),
+            claim.user_id,
             NovelLlmTask::NarrativeNodeDetection,
             &node_prompt,
             |result| {
@@ -1716,6 +1748,7 @@ impl NovelCommandHandler {
         if self.canon_repo.find_latest(novel.id).await?.is_none() {
             info!(novel_id = %novel.id, "Extracting canonical story model");
             let chunks = canon_story_extractor::build_scan_plan(chapters)?;
+            let user_id = claim.user_id;
             let results = stream::iter(chunks.into_iter().enumerate())
                 .map(|(position, chunk)| {
                     let llm = self.llm.clone();
@@ -1778,7 +1811,7 @@ impl NovelCommandHandler {
                         let mut prompt = base_prompt.clone();
                         for attempt in 0..3 {
                             let raw = llm
-                                .chat_json(NovelLlmTask::CanonExtraction, &prompt)
+                                .chat_json(user_id, NovelLlmTask::CanonExtraction, &prompt)
                                 .await?;
                             match canon_story_extractor::parse_chunk(&raw, &chunk).and_then(
                                 |mut extraction| {

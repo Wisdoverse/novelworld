@@ -76,7 +76,7 @@ test.describe('critical journey — full axe rule set', () => {
   test('settings page', async ({ page }) => {
     await installStubs(page);
     await page.goto('/settings');
-    await expect(page.getByText('模型设置').first()).toBeVisible();
+    await expect(page.getByRole('heading', { name: '平台模型设置' })).toBeVisible();
     await page.waitForLoadState('networkidle');
     await expectNoA11yViolations(page);
   });

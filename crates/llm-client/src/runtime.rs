@@ -45,22 +45,11 @@ struct RemoteConfig {
 
 impl RuntimeLlmClient {
     pub fn from_env() -> Result<Self> {
-        let api_key = std::env::var("LLM_API_KEY").unwrap_or_default();
-        if !api_key.trim().is_empty() && api_key.trim() != "sk-your-api-key" {
-            return Ok(Self::static_config(
-                std::env::var("LLM_API_URL").unwrap_or_else(|_| "https://api.openai.com".into()),
-                std::env::var("LLM_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into()),
-                api_key,
-                std::env::var("LLM_THINKING_ENABLED")
-                    .ok()
-                    .is_some_and(|value| value.eq_ignore_ascii_case("true")),
-            ));
-        }
-
         let user_service_url =
             std::env::var("USER_SERVICE_URL").unwrap_or_else(|_| "http://127.0.0.1:8001".into());
-        let token = std::env::var("INTERNAL_SERVICE_TOKEN")
-            .map_err(|_| anyhow!("INTERNAL_SERVICE_TOKEN is required when LLM_API_KEY is empty"))?;
+        let token = std::env::var("INTERNAL_SERVICE_TOKEN").map_err(|_| {
+            anyhow!("INTERNAL_SERVICE_TOKEN is required for runtime LLM configuration")
+        })?;
         if token.len() < 32 {
             return Err(anyhow!(
                 "INTERNAL_SERVICE_TOKEN must be at least 32 characters"
@@ -98,17 +87,14 @@ impl RuntimeLlmClient {
         }
     }
 
-    async fn resolved(&self) -> Result<Arc<ResolvedClient>> {
+    async fn resolved(&self, runtime_user_id: Option<&str>) -> Result<Arc<ResolvedClient>> {
         if let ConfigSource::Remote {
             client,
             user_service_url,
             token,
         } = &self.source
         {
-            let response = client
-                .get(format!("{user_service_url}/internal/runtime/llm"))
-                .header("X-Internal-Service-Token", token)
-                .timeout(Duration::from_secs(5))
+            let response = remote_config_request(client, user_service_url, token, runtime_user_id)
                 .send()
                 .await?;
             if !response.status().is_success() {
@@ -141,7 +127,7 @@ impl RuntimeLlmClient {
     }
 
     pub async fn chat(&self, mut request: ChatRequest) -> Result<ChatResponse> {
-        let resolved = self.resolved().await?;
+        let resolved = self.resolved(request.runtime_user_id.as_deref()).await?;
         request.model.clone_from(&resolved.model);
         if request.thinking.is_none() {
             request.thinking = Some(resolved.thinking_enabled);
@@ -150,7 +136,7 @@ impl RuntimeLlmClient {
     }
 
     pub async fn chat_stream(&self, mut request: ChatRequest) -> Result<ChatStream> {
-        let resolved = self.resolved().await?;
+        let resolved = self.resolved(request.runtime_user_id.as_deref()).await?;
         request.model.clone_from(&resolved.model);
         if request.thinking.is_none() {
             request.thinking = Some(resolved.thinking_enabled);
@@ -185,35 +171,77 @@ impl RuntimeLlmClient {
         system: &str,
         user: &str,
     ) -> Result<String> {
-        self.chat(
-            ChatRequest::new(operation, "")
-                .message("system", system)
-                .message("user", user)
-                .temperature(0.8)
-                .max_tokens(8_192)
-                .thinking(false),
-        )
-        .await
-        .map(|response| response.content)
+        self.chat(longform_request(operation, system, user))
+            .await
+            .map(|response| response.content)
+    }
+
+    pub async fn longform_chat_for_user(
+        &self,
+        runtime_user_id: impl Into<String>,
+        operation: crate::LlmOperation,
+        system: &str,
+        user: &str,
+    ) -> Result<String> {
+        self.chat(longform_request(operation, system, user).runtime_user_id(runtime_user_id))
+            .await
+            .map(|response| response.content)
     }
 
     pub async fn json_chat(&self, operation: crate::LlmOperation, prompt: &str) -> Result<String> {
-        let max_output_tokens = operation.max_output_tokens();
-        self.chat(
-            ChatRequest::new(operation, "")
-                .message(
-                    "system",
-                    "You are a helpful assistant that always responds with a non-empty valid JSON object. Output JSON only.",
-                )
-                .message("user", prompt)
-                .temperature(0.3)
-                .max_tokens(max_output_tokens)
-                .thinking(false)
-                .json(),
-        )
-        .await
-        .map(|response| response.content)
+        self.chat(json_request(operation, prompt))
+            .await
+            .map(|response| response.content)
     }
+
+    pub async fn json_chat_for_user(
+        &self,
+        runtime_user_id: impl Into<String>,
+        operation: crate::LlmOperation,
+        prompt: &str,
+    ) -> Result<String> {
+        self.chat(json_request(operation, prompt).runtime_user_id(runtime_user_id))
+            .await
+            .map(|response| response.content)
+    }
+}
+
+fn remote_config_request(
+    client: &reqwest::Client,
+    user_service_url: &str,
+    token: &str,
+    runtime_user_id: Option<&str>,
+) -> reqwest::RequestBuilder {
+    let mut request = client
+        .get(format!("{user_service_url}/internal/runtime/llm"))
+        .header("X-Internal-Service-Token", token)
+        .timeout(Duration::from_secs(5));
+    if let Some(user_id) = runtime_user_id {
+        request = request.header("X-User-Id", user_id);
+    }
+    request
+}
+
+fn longform_request(operation: crate::LlmOperation, system: &str, user: &str) -> ChatRequest {
+    ChatRequest::new(operation, "")
+        .message("system", system)
+        .message("user", user)
+        .temperature(0.8)
+        .max_tokens(8_192)
+        .thinking(false)
+}
+
+fn json_request(operation: crate::LlmOperation, prompt: &str) -> ChatRequest {
+    ChatRequest::new(operation, "")
+        .message(
+            "system",
+            "You are a helpful assistant that always responds with a non-empty valid JSON object. Output JSON only.",
+        )
+        .message("user", prompt)
+        .temperature(0.3)
+        .max_tokens(operation.max_output_tokens())
+        .thinking(false)
+        .json()
 }
 
 fn build_resolved(config: RuntimeConfig) -> ResolvedClient {
@@ -273,5 +301,37 @@ mod tests {
             thinking_enabled: false,
         })
         .is_err());
+    }
+
+    #[test]
+    fn remote_configuration_request_forwards_only_explicit_user_context() {
+        let client = reqwest::Client::new();
+        let user_request = remote_config_request(
+            &client,
+            "https://user-service.example",
+            "internal-token",
+            Some("123e4567-e89b-12d3-a456-426614174000"),
+        )
+        .build()
+        .unwrap();
+        assert_eq!(
+            user_request
+                .headers()
+                .get("X-User-Id")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "123e4567-e89b-12d3-a456-426614174000"
+        );
+
+        let platform_request = remote_config_request(
+            &client,
+            "https://user-service.example",
+            "internal-token",
+            None,
+        )
+        .build()
+        .unwrap();
+        assert!(!platform_request.headers().contains_key("X-User-Id"));
     }
 }
