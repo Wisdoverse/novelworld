@@ -22,7 +22,7 @@ Compose.
 ```bash
 git clone https://github.com/<you>/novelworld.git
 cd novelworld
-docker compose up -d postgres redis
+docker compose up -d postgres
 cargo build --workspace
 cd frontend
 pnpm install --frozen-lockfile
@@ -162,6 +162,13 @@ docker compose -f docker-compose.test.yml run --rm test-migrate
 cargo test -p integration-tests
 docker compose -f docker-compose.test.yml down -v
 ```
+
+The production-shaped development base uses PostgreSQL-backed cache mode and
+does not start Redis. To exercise the optional production Redis projection,
+set `CACHE_MODE=redis`, a strong URL-safe `REDIS_PASSWORD`, and the matching
+`REDIS_URL`, then add `--profile redis`; the root launchers derive these
+together and are the supported path. The independent integration Compose file
+above always starts its isolated unauthenticated test Redis.
 
 The authoritative required gate is [CI](./.github/workflows/ci.yml). To dispatch
 that exact workflow for a clean, pushed commit and wait for the result, run:

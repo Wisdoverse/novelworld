@@ -2,11 +2,13 @@ mod client;
 mod providers;
 pub(crate) mod retry;
 mod runtime;
+mod security;
 mod telemetry;
 pub mod types;
 
 pub use client::LlmClient;
-pub use runtime::RuntimeLlmClient;
+pub use runtime::{NotConfigured, RuntimeLlmClient};
+pub use security::{validate_internal_service_token, validate_jwt_secret};
 pub use telemetry::{install_metrics, usage_key_fingerprint, MetricsHandle};
 pub use types::*;
 

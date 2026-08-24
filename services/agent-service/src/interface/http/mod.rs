@@ -275,6 +275,9 @@ fn application_error_response(
     error: anyhow::Error,
     fallback_status: StatusCode,
 ) -> axum::response::Response {
+    let llm_not_configured = error
+        .chain()
+        .any(|cause| cause.is::<llm_client::NotConfigured>());
     let retry_after = match error.downcast_ref::<AgentRequestError>() {
         Some(AgentRequestError::TurnInProgress {
             retry_after_seconds,
@@ -309,6 +312,11 @@ fn application_error_response(
             StatusCode::CONFLICT,
             "idempotency_conflict",
             "Idempotency key conflicts with an existing chat turn".to_string(),
+        ),
+        Some(AgentRequestError::Llm(_)) if llm_not_configured => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "llm_not_configured",
+            "Configure the language model before retrying the request".to_string(),
         ),
         Some(AgentRequestError::Llm(_)) => (
             StatusCode::BAD_GATEWAY,
@@ -941,6 +949,28 @@ mod principal_contract_tests {
         );
         assert_eq!(response.status(), StatusCode::CONFLICT);
         assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "117");
+    }
+
+    #[tokio::test]
+    async fn synchronous_llm_errors_distinguish_missing_configuration_from_provider_outage() {
+        let not_configured = application_error_response(
+            AgentRequestError::Llm(llm_client::NotConfigured.into()).into(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        );
+        assert_eq!(not_configured.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(not_configured.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"]["code"],
+            "llm_not_configured"
+        );
+
+        let outage = application_error_response(
+            AgentRequestError::Llm(anyhow::anyhow!("provider timeout")).into(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        );
+        assert_eq!(outage.status(), StatusCode::BAD_GATEWAY);
     }
 
     #[test]

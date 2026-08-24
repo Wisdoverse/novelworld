@@ -604,7 +604,7 @@ printf 'restore:   JWT_SECRET        rotated in %s (previous file kept as %s)\n'
 printf 'restore:   refresh tokens    deleted; no pre-restore session survives\n'
 if [ -n "$missing_secrets" ]; then
   printf 'restore: WARNING:%s missing from %s.\n' "$missing_secrets" "$env_file" >&2
-  printf 'restore: a regenerated RUNTIME_CONFIG_KEY cannot decrypt the stored LLM key (redo first-run setup);\n' >&2
+  printf 'restore: a regenerated RUNTIME_CONFIG_KEY cannot decrypt the stored LLM key (restore the key or reconfigure protected Settings);\n' >&2
   printf 'restore: INTERNAL_SERVICE_TOKEN must be identical across every service.\n' >&2
 fi
-printf 'restore: start the deployment with: docker compose up -d\n'
+printf 'restore: start the mode-aware deployment with: ./start.sh\n'

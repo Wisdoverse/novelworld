@@ -10,15 +10,6 @@ pub struct RuntimeLlmConfig {
 }
 
 impl RuntimeLlmConfig {
-    pub fn for_provider(provider: &str, api_key: &str) -> Result<Self, String> {
-        let default_model = match provider.trim().to_lowercase().as_str() {
-            "deepseek" => "deepseek-v4-flash",
-            "openai" => "gpt-4o-mini",
-            _ => return Err("Choose a supported AI provider".into()),
-        };
-        Self::for_settings(provider, default_model, api_key, false)
-    }
-
     pub fn for_settings(
         provider: &str,
         model: &str,
@@ -76,7 +67,9 @@ mod tests {
 
     #[test]
     fn provider_presets_cannot_be_used_for_ssrf() {
-        let deepseek = RuntimeLlmConfig::for_provider("deepseek", "secret").unwrap();
+        let deepseek =
+            RuntimeLlmConfig::for_settings("deepseek", "deepseek-v4-flash", "secret", false)
+                .unwrap();
         assert_eq!(deepseek.api_url, "https://api.deepseek.com");
         assert_eq!(deepseek.model, "deepseek-v4-flash");
         assert!(!deepseek.thinking_enabled);
@@ -85,7 +78,13 @@ mod tests {
                 .unwrap()
                 .thinking_enabled
         );
-        assert!(RuntimeLlmConfig::for_provider("http://127.0.0.1", "secret").is_err());
+        assert!(RuntimeLlmConfig::for_settings(
+            "http://127.0.0.1",
+            "deepseek-v4-flash",
+            "secret",
+            false,
+        )
+        .is_err());
     }
 
     #[test]

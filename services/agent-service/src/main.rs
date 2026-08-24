@@ -72,9 +72,7 @@ async fn run_body() -> Result<()> {
         let metrics = llm_client::install_metrics("agent-service")?;
         let internal_service_token =
             std::env::var("INTERNAL_SERVICE_TOKEN").expect("INTERNAL_SERVICE_TOKEN must be set");
-        if internal_service_token.len() < 32 {
-            anyhow::bail!("INTERNAL_SERVICE_TOKEN must be at least 32 characters");
-        }
+        llm_client::validate_internal_service_token(&internal_service_token)?;
 
         // PostgreSQL connection pool
         let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
@@ -85,25 +83,30 @@ async fn run_body() -> Result<()> {
 
         tracing::info!("Connected to PostgreSQL");
 
-        // Redis is a reconstructable projection. The portable desktop runtime
-        // uses the domain-port no-op adapter instead of shipping another daemon.
-        let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://redis:6379".into());
+        // Redis is a reconstructable projection. PostgreSQL mode deliberately
+        // never inspects REDIS_URL, so an optional cache cannot block startup.
         let (cache, redis_readiness): (
             Arc<dyn domain::ports::MessageCache>,
             Arc<dyn domain::ports::ReadinessProbe>,
-        ) = if redis_url == "memory://" {
-            tracing::info!("Redis disabled; using PostgreSQL-backed desktop memory path");
-            (Arc::new(NoopMessageCache), Arc::new(AlwaysReadyProbe))
-        } else {
-            let redis_cfg = deadpool_redis::Config::from_url(&redis_url);
-            let redis_pool = redis_cfg
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("Failed to create Redis pool");
-            tracing::info!("Redis pool created");
-            (
-                Arc::new(RedisCache::new(redis_pool.clone())),
-                Arc::new(RedisReadinessProbe::new(redis_pool)),
-            )
+        ) = match parse_cache_mode(std::env::var("CACHE_MODE").ok().as_deref())? {
+            CacheMode::Postgres => {
+                tracing::info!("Redis disabled; PostgreSQL remains the authoritative memory path");
+                (Arc::new(NoopMessageCache), Arc::new(AlwaysReadyProbe))
+            }
+            CacheMode::Redis => {
+                let redis_url = std::env::var("REDIS_URL")
+                    .map_err(|_| anyhow::anyhow!("REDIS_URL is required when CACHE_MODE=redis"))?;
+                validate_redis_url(&redis_url)?;
+                let redis_cfg = deadpool_redis::Config::from_url(&redis_url);
+                let redis_pool = redis_cfg
+                    .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                    .map_err(|error| anyhow::anyhow!("failed to create Redis pool: {error}"))?;
+                tracing::info!("Redis projection pool created");
+                (
+                    Arc::new(RedisCache::new(redis_pool.clone())),
+                    Arc::new(RedisReadinessProbe::new(redis_pool)),
+                )
+            }
         };
 
         // Shared LLM client (from llm-client workspace crate)
@@ -227,6 +230,72 @@ async fn run_body() -> Result<()> {
     .await
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheMode {
+    Postgres,
+    Redis,
+}
+
+fn parse_cache_mode(value: Option<&str>) -> Result<CacheMode> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("postgres") => Ok(CacheMode::Postgres),
+        Some("redis") => Ok(CacheMode::Redis),
+        Some(_) => anyhow::bail!("CACHE_MODE must be postgres or redis"),
+    }
+}
+
+fn validate_redis_url(value: &str) -> Result<()> {
+    let url = reqwest::Url::parse(value)
+        .map_err(|_| anyhow::anyhow!("REDIS_URL must be an absolute redis:// or rediss:// URL"))?;
+    if !matches!(url.scheme(), "redis" | "rediss") || url.host_str().is_none() {
+        anyhow::bail!("REDIS_URL must be an absolute redis:// or rediss:// URL");
+    }
+    let password = url
+        .password()
+        .filter(|password| !password.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("REDIS_URL must include a password"))?;
+    let lowered = password.to_ascii_lowercase();
+    let mut seen = [false; 256];
+    for byte in password.bytes() {
+        seen[usize::from(byte)] = true;
+    }
+    if password.len() < 16
+        || seen.into_iter().filter(|value| *value).count() < 8
+        || lowered.contains("placeholder")
+        || lowered.contains("change_me")
+        || matches!(
+            lowered.as_str(),
+            "your_redis_password_here" | "runtime-redis-only"
+        )
+    {
+        anyhow::bail!("REDIS_URL must include a strong non-placeholder password");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod bootstrap_tests {
+    use super::*;
+
+    #[test]
+    fn cache_mode_is_explicit_and_postgres_is_the_default() {
+        assert_eq!(parse_cache_mode(None).unwrap(), CacheMode::Postgres);
+        assert_eq!(
+            parse_cache_mode(Some("postgres")).unwrap(),
+            CacheMode::Postgres
+        );
+        assert_eq!(parse_cache_mode(Some("redis")).unwrap(), CacheMode::Redis);
+        assert!(parse_cache_mode(Some("memory")).is_err());
+    }
+
+    #[test]
+    fn redis_mode_requires_an_authenticated_non_placeholder_url() {
+        assert!(validate_redis_url("memory://").is_err());
+        assert!(validate_redis_url("redis://redis:6379").is_err());
+        assert!(validate_redis_url("redis://:your_redis_password_here@redis:6379").is_err());
+        assert!(validate_redis_url("redis://:0123456789abcdef0123456789abcdef@redis:6379").is_ok());
+    }
+}
 async fn shutdown_signal() {
     use tokio::signal;
     let ctrl_c = signal::ctrl_c();

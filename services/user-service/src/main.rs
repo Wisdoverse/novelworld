@@ -9,7 +9,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use user_service::{
     application::handlers::{AuthHandler, LlmUsageHandler},
-    domain::{self, entities::runtime_config::RuntimeLlmConfig},
+    domain::{self, entities::runtime_config::RuntimeLlmConfig, repositories::UserRepository},
     infrastructure::{
         auth::{jwt::JwtService, password::BcryptPasswordHasher},
         http::privacy::AgentPrivacyClient,
@@ -72,6 +72,7 @@ async fn run_body() -> Result<()> {
         tracing::info!("Connected to PostgreSQL");
 
         let jwt_secret = std::env::var("JWT_SECRET").expect("JWT_SECRET must be set");
+        llm_client::validate_jwt_secret(&jwt_secret)?;
         let access_token_expiry: i64 = std::env::var("AUTH_ACCESS_TOKEN_EXPIRY")
             .unwrap_or_else(|_| "3600".into())
             .parse()
@@ -85,9 +86,7 @@ async fn run_body() -> Result<()> {
             .expect("RUNTIME_CONFIG_KEY must be set to 64 hexadecimal characters");
         let internal_service_token =
             std::env::var("INTERNAL_SERVICE_TOKEN").expect("INTERNAL_SERVICE_TOKEN must be set");
-        if internal_service_token.len() < 32 {
-            anyhow::bail!("INTERNAL_SERVICE_TOKEN must be at least 32 characters");
-        }
+        llm_client::validate_internal_service_token(&internal_service_token)?;
         let environment_llm_config = RuntimeLlmConfig::from_environment(
             std::env::var("LLM_API_URL").unwrap_or_else(|_| "https://api.openai.com".into()),
             std::env::var("LLM_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into()),
@@ -96,6 +95,9 @@ async fn run_body() -> Result<()> {
 
         let jwt = Arc::new(JwtService::new(&jwt_secret, access_token_expiry));
         let user_repo = Arc::new(PgUserRepository::new(pool.clone(), &runtime_config_key)?);
+        // Prove the root key can decrypt retained configuration before this
+        // process advertises readiness or accepts traffic.
+        user_repo.find_runtime_llm_config().await?;
         let agent_service_url = std::env::var("AGENT_SERVICE_URL")
             .unwrap_or_else(|_| "http://agent-service:8003".into());
         let privacy_cleanup = Arc::new(AgentPrivacyClient::new(

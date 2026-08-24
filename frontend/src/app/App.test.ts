@@ -12,6 +12,19 @@ import {
   handleAuthTokenStorageChange,
   resetPrivateClientStateForPrincipalChange,
 } from './App';
+import { runtimeConfigKeys } from '@/entities/runtime-config';
+
+function renderAppRoutes(initialEntries = ['/']) {
+  return render(React.createElement(
+    QueryClientProvider,
+    { client: new QueryClient() },
+    React.createElement(
+      MemoryRouter,
+      { initialEntries },
+      React.createElement(AppRoutes),
+    ),
+  ));
+}
 
 describe('principal-scoped query cache', () => {
   it('clears private chat state before a different principal can use it', () => {
@@ -38,6 +51,12 @@ describe('principal-scoped query cache', () => {
     const cancel = vi.fn();
     const reload = vi.fn();
     queryClient.setQueryData(['private'], 'principal-a');
+    queryClient.setQueryData(runtimeConfigKeys.setup, {
+      contract: 4,
+      configured: true,
+      admin_configured: true,
+      llm_configured: false,
+    });
     useChatStore.setState({
       messages: {
         character: [{
@@ -59,6 +78,10 @@ describe('principal-scoped query cache', () => {
 
     expect(cancel).toHaveBeenCalledOnce();
     expect(queryClient.getQueryData(['private'])).toBeUndefined();
+    expect(queryClient.getQueryData(runtimeConfigKeys.setup)).toMatchObject({
+      configured: true,
+      llm_configured: false,
+    });
     expect(useChatStore.getState().messages).toEqual({});
     expect(reload).toHaveBeenCalledOnce();
   });
@@ -103,7 +126,7 @@ describe('setup status', () => {
       .spyOn(apiClient, 'get')
       .mockRejectedValueOnce(new Error('offline'))
       .mockImplementationOnce(() => new Promise(() => undefined));
-    render(React.createElement(MemoryRouter, null, React.createElement(AppRoutes)));
+    renderAppRoutes();
 
     expect((await screen.findByRole('alert')).textContent).toContain('无法检查服务配置');
     fireEvent.click(screen.getByRole('button', { name: '重试' }));
@@ -113,9 +136,9 @@ describe('setup status', () => {
 
   it('does not trust the retired setup contract during rollout', async () => {
     const request = vi.spyOn(apiClient, 'get').mockResolvedValueOnce({
-      data: { contract: 2, configured: false },
+      data: { contract: 3, configured: false, llm_configured: false },
     });
-    render(React.createElement(MemoryRouter, null, React.createElement(AppRoutes)));
+    renderAppRoutes();
 
     expect((await screen.findByRole('alert')).textContent).toContain('无法检查服务配置');
     request.mockRestore();
@@ -123,15 +146,9 @@ describe('setup status', () => {
 
   it('routes the journey registration destination to registration mode', async () => {
     const request = vi.spyOn(apiClient, 'get').mockResolvedValue({
-      data: { contract: 3, configured: true, llm_configured: true },
+      data: { contract: 4, configured: true, admin_configured: true, llm_configured: false },
     });
-    render(
-      React.createElement(
-        MemoryRouter,
-        { initialEntries: ['/'] },
-        React.createElement(AppRoutes),
-      ),
-    );
+    renderAppRoutes();
 
     expect(await screen.findByRole('heading', { name: /进入故事.*成为其中的玩家/ })).toBeTruthy();
     fireEvent.click(await screen.findByRole('button', { name: /开始你的旅程/ }));
@@ -144,7 +161,14 @@ describe('setup status', () => {
     useAuthStore.setState({ user: null });
     const request = vi.spyOn(apiClient, 'get').mockImplementation(async (url) => {
       if (url === '/setup/status') {
-        return { data: { contract: 3, configured: true, llm_configured: true } };
+        return {
+          data: {
+            contract: 4,
+            configured: true,
+            admin_configured: true,
+            llm_configured: false,
+          },
+        };
       }
       if (url === '/auth/me') {
         return {
