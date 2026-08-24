@@ -171,7 +171,7 @@ describe('setup status', () => {
       ),
     );
 
-    expect(await screen.findByText('我的书架')).toBeTruthy();
+    expect(await screen.findByText('我的书架', {}, { timeout: 10_000 })).toBeTruthy();
     expect(screen.queryByRole('heading', { name: '登录' })).toBeNull();
     localStorage.removeItem('auth_token');
     useAuthStore.setState({ user: null });

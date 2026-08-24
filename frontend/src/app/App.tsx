@@ -1,21 +1,34 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { BrowserRouter, HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
 import './styles/globals.css';
 
-import { HomePage } from '@/pages/home/ui/HomePage';
-import { LoginPage } from '@/pages/login/ui/LoginPage';
-import { ShelfPage } from '@/pages/shelf/ui/ShelfPage';
-import { ReaderPage } from '@/pages/reader/ui/ReaderPage';
-import { CharactersPage } from '@/pages/characters/ui/CharactersPage';
-import { SetupPage } from '@/pages/setup/ui/SetupPage';
-import { SettingsPage } from '@/pages/settings/ui/SettingsPage';
 import { useAuthStore } from '@/features/auth/model/useAuthStore';
 import { useChatStore } from '@/features/character-chat/model/useChatStore';
 import { apiClient } from '@/shared/api/client';
 import { clearPrivateQueryCache, queryClient } from '@/shared/api/queryClient';
 import { isDesktopClient } from '@/shared/config/runtime';
+
+const HomePage = lazy(() => import('@/pages/home'));
+const LoginPage = lazy(() => import('@/pages/login'));
+const ShelfPage = lazy(() => import('@/pages/shelf'));
+const ReaderPage = lazy(() => import('@/pages/reader'));
+const CharactersPage = lazy(() => import('@/pages/characters'));
+const SetupPage = lazy(() => import('@/pages/setup'));
+const SettingsPage = lazy(() => import('@/pages/settings'));
+
+function AppLoadingScreen() {
+  return (
+    <div className="app-surface flex min-h-screen items-center justify-center">
+      <div className="text-center">
+        <div className="w-8 h-8 border-2 border-t-transparent rounded-full animate-spin mx-auto mb-4"
+             style={{ borderColor: '#0b57d0', borderTopColor: 'transparent' }} />
+        <p className="text-sm text-[#5f6368]">正在加载…</p>
+      </div>
+    </div>
+  );
+}
 
 export function resetPrivateClientStateForPrincipalChange(
   previousPrincipal: string | null,
@@ -38,7 +51,7 @@ export function handleAuthTokenStorageChange(
   return true;
 }
 
-export function AppRoutes() {
+function AppRouteContent() {
   const { user, fetchMe } = useAuthStore();
   const previousPrincipal = useRef<string | null>(null);
   const [setupStatus, setSetupStatus] = useState<'loading' | 'needed' | 'done' | 'error'>('loading');
@@ -87,15 +100,7 @@ export function AppRoutes() {
   }, [setupStatus, fetchMe]);
 
   if (setupStatus === 'loading' || (setupStatus === 'done' && !authReady)) {
-    return (
-      <div className="app-surface flex min-h-screen items-center justify-center">
-        <div className="text-center">
-          <div className="w-8 h-8 border-2 border-t-transparent rounded-full animate-spin mx-auto mb-4"
-               style={{ borderColor: '#0b57d0', borderTopColor: 'transparent' }} />
-          <p className="text-sm text-[#5f6368]">正在加载…</p>
-        </div>
-      </div>
-    );
+    return <AppLoadingScreen />;
   }
 
   if (setupStatus === 'needed') {
@@ -138,6 +143,14 @@ export function AppRoutes() {
       <Route path="/settings" element={user ? <SettingsPage /> : <Navigate to="/login" replace />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+  );
+}
+
+export function AppRoutes() {
+  return (
+    <Suspense fallback={<AppLoadingScreen />}>
+      <AppRouteContent />
+    </Suspense>
   );
 }
 
