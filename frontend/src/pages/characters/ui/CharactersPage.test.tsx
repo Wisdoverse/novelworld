@@ -11,10 +11,10 @@ vi.mock('react-router-dom', () => ({
   useNavigate: () => vi.fn(),
   useParams: () => ({ novelId: 'novel' }),
 }));
-vi.mock('@/features/auth/model/useAuthStore', () => ({
+vi.mock('@/features/auth', () => ({
   useAuthStore: () => ({ user: { id: 'user' } }),
 }));
-vi.mock('@/entities/reading-progress/api', () => ({
+vi.mock('@/entities/reading-progress', () => ({
   useReadingProgress: () => ({
     data: { current_chapter: 2, reader_identity_type: 'self' },
     isLoading: false,
@@ -22,16 +22,16 @@ vi.mock('@/entities/reading-progress/api', () => ({
     refetch: vi.fn(),
   }),
 }));
-vi.mock('@/entities/novel/api', () => ({
+vi.mock('@/entities/novel', () => ({
   useCharacters: () => ({ data: mocks.characters, isLoading: false }),
 }));
-vi.mock('@/widgets/character-card/ui/CharacterCard', () => ({
+vi.mock('@/widgets/character-card', () => ({
   CharacterCard: ({ character, onTalk }: {
     character: { name: string };
     onTalk: (character: unknown) => void;
   }) => <button onClick={() => onTalk(character)}>Talk {character.name}</button>,
 }));
-vi.mock('@/widgets/chat-panel/ui/ChatPanel', () => ({
+vi.mock('@/widgets/chat-panel', () => ({
   ChatPanel: ({ character }: { character: { name: string } }) => (
     <div data-testid="chat-panel">{character.name}</div>
   ),

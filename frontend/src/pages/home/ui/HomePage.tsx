@@ -9,7 +9,7 @@ import {
   UserRound,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { useAuthStore } from '@/features/auth/model/useAuthStore';
+import { useAuthStore } from '@/features/auth';
 
 const capabilities = [
   {

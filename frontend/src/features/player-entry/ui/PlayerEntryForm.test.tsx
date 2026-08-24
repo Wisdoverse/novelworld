@@ -21,7 +21,7 @@ const template: GameRuleTemplate = {
 
 const mocks = vi.hoisted(() => ({ mutate: vi.fn() }));
 
-vi.mock('@/entities/narrative/api', () => ({
+vi.mock('@/entities/narrative', () => ({
   useGenerateGameRules: () => ({
     mutate: mocks.mutate,
     isPending: false,

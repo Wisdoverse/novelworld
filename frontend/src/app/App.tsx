@@ -4,8 +4,8 @@ import { QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
 import './styles/globals.css';
 
-import { useAuthStore } from '@/features/auth/model/useAuthStore';
-import { useChatStore } from '@/features/character-chat/model/useChatStore';
+import { useAuthStore } from '@/features/auth';
+import { useChatStore } from '@/features/character-chat';
 import { apiClient } from '@/shared/api/client';
 import { clearPrivateQueryCache, queryClient } from '@/shared/api/queryClient';
 import { isDesktopClient } from '@/shared/config/runtime';

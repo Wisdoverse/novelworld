@@ -1,10 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { useCharacters } from '@/entities/novel/api';
-import { useReadingProgress } from '@/entities/reading-progress/api';
-import { CharacterCard } from '@/widgets/character-card/ui/CharacterCard';
-import { ChatPanel } from '@/widgets/chat-panel/ui/ChatPanel';
-import { useAuthStore } from '@/features/auth/model/useAuthStore';
+import { useCharacters } from '@/entities/novel';
+import { useReadingProgress } from '@/entities/reading-progress';
+import { CharacterCard } from '@/widgets/character-card';
+import { ChatPanel } from '@/widgets/chat-panel';
+import { useAuthStore } from '@/features/auth';
 import type { Character } from '@/shared/types';
 import { getReaderIdentityScope } from '@/shared/lib/readerIdentityScope';
 import { AlertCircle, ArrowLeft, Users } from 'lucide-react';

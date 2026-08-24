@@ -3,8 +3,8 @@ import { ArrowLeft, Brain, Download, Key, Loader2, Save, Settings, Trash2 } from
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { apiClient, getApiErrorMessage } from '@/shared/api/client';
-import { useAuthStore } from '@/features/auth/model/useAuthStore';
-import { LlmUsageCard } from '@/features/llm-usage/ui/LlmUsageCard';
+import { useAuthStore } from '@/features/auth';
+import { LlmUsageCard } from '@/features/llm-usage';
 
 type LlmSettings = {
   provider: 'deepseek' | 'openai';

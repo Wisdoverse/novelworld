@@ -3,8 +3,8 @@ import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
-import { useAuthStore } from '@/features/auth/model/useAuthStore';
-import { useChatStore } from '@/features/character-chat/model/useChatStore';
+import { useAuthStore } from '@/features/auth';
+import { useChatStore } from '@/features/character-chat';
 import { apiClient } from '@/shared/api/client';
 import { queryClient } from '@/shared/api/queryClient';
 import {
