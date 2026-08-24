@@ -184,6 +184,7 @@ Schema lives in `infra/postgres/init.sql`. Key tables:
 | `novel_import_jobs` | Durable import stage, attempt, lease, and terminal state |
 | `chapters` | Split chapter content |
 | `chapter_chunks` | Derived chunks for spoiler-bounded lore retrieval |
+| `chapter_translations` | Source-bound, lease-fenced Simplified Chinese chapter translations |
 | `characters` | Extracted characters with system prompts |
 | `character_memories` | Layered memory records + optional pgvector embeddings |
 | `character_relationships` | Entity relationship graph between characters |

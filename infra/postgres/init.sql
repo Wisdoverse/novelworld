@@ -259,6 +259,58 @@ CREATE TABLE chapters (
 CREATE INDEX idx_chapters_novel_id ON chapters(novel_id);
 CREATE INDEX idx_chapters_key_node ON chapters(novel_id, is_key_node) WHERE is_key_node = TRUE;
 
+-- 章节译文按原文摘要和翻译配置共享；租约防止多个副本重复调用模型。
+CREATE TABLE chapter_translations (
+    chapter_id          UUID NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+    source_sha256       BYTEA NOT NULL,
+    profile             VARCHAR(64) NOT NULL,
+    status              VARCHAR(16) NOT NULL,
+    attempt             BIGINT NOT NULL DEFAULT 1,
+    lease_expires_at    TIMESTAMPTZ,
+    retry_after_at      TIMESTAMPTZ,
+    translated_content  TEXT,
+    failure_code        VARCHAR(64),
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at        TIMESTAMPTZ,
+    PRIMARY KEY (chapter_id, source_sha256, profile),
+    CONSTRAINT chapter_translations_source_sha256_check
+        CHECK (octet_length(source_sha256) = 32),
+    CONSTRAINT chapter_translations_profile_check
+        CHECK (char_length(profile) BETWEEN 1 AND 64),
+    CONSTRAINT chapter_translations_status_check
+        CHECK (status IN ('translating', 'ready', 'failed')),
+    CONSTRAINT chapter_translations_attempt_check CHECK (attempt >= 1),
+    CONSTRAINT chapter_translations_state_check CHECK (
+        (
+            status = 'translating'
+            AND lease_expires_at IS NOT NULL
+            AND retry_after_at IS NULL
+            AND translated_content IS NULL
+            AND failure_code IS NULL
+            AND completed_at IS NULL
+        )
+        OR (
+            status = 'ready'
+            AND lease_expires_at IS NULL
+            AND retry_after_at IS NULL
+            AND translated_content IS NOT NULL
+            AND translated_content <> ''
+            AND failure_code IS NULL
+            AND completed_at IS NOT NULL
+        )
+        OR (
+            status = 'failed'
+            AND lease_expires_at IS NULL
+            AND retry_after_at IS NOT NULL
+            AND translated_content IS NULL
+            AND failure_code IS NOT NULL
+            AND failure_code <> ''
+            AND completed_at IS NULL
+        )
+    )
+);
+
 -- 章节检索投影：小块比整章更适合相关性排序，也为以后可选的向量检索保留清晰边界。
 CREATE TABLE chapter_chunks (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
