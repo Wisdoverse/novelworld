@@ -45,16 +45,18 @@ use novel_service::domain::{
     entities::novel::Novel,
     ports::{ImagePort, LlmPort, NovelLlmTask, PrivacyCleanupPort, SourceFileStorage},
     repositories::{
-        BeginGameRuleGeneration, CanonExtractionCheckpoint, CanonStoryModelRepository,
-        ChapterRepository, CharacterRelationshipRecord, CharacterRepository, NovelRepository,
-        ReadingProgressRepository, SourceFileDeletionRepository, IMPORT_BUDGET_EXHAUSTED_MESSAGE,
-        MAX_IMPORT_ATTEMPTS,
+        BeginChapterTranslation, BeginGameRuleGeneration, CanonExtractionCheckpoint,
+        CanonStoryModelRepository, ChapterRepository, ChapterTranslationKey,
+        ChapterTranslationRepository, CharacterRelationshipRecord, CharacterRepository,
+        NovelRepository, ReadingProgressRepository, SourceFileDeletionRepository,
+        IMPORT_BUDGET_EXHAUSTED_MESSAGE, MAX_IMPORT_ATTEMPTS,
     },
     value_objects::{CharacterRole, DeviationMode, ImportStage},
 };
 use novel_service::infrastructure::document::EbookTextExtractor;
 use novel_service::infrastructure::persistence::{
     canon_story_model_pg_repo::PgCanonStoryModelRepository, chapter_pg_repo::ChapterPgRepository,
+    chapter_translation_pg_repo::PgChapterTranslationRepository,
     character_pg_repo::CharacterPgRepository, novel_pg_repo::NovelPgRepository,
     pg_progress_repo::PgReadingProgressRepository,
     source_file_deletion_pg_repo::PgSourceFileDeletionRepository,
@@ -804,6 +806,190 @@ async fn insert_test_user(pool: &PgPool, label: &str) -> Uuid {
         .await
         .unwrap();
     user_id
+}
+
+#[tokio::test]
+async fn chapter_translation_cache_is_durable_single_owner_fenced_and_cascades() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let user_id = insert_test_user(&pool, "chapter-translation-cache").await;
+    let novel_id = Uuid::new_v4();
+    let chapter_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO novels (id, user_id, title, total_chapters, status) \
+         VALUES ($1, $2, 'Translation cache contract', 1, 'ready')",
+    )
+    .bind(novel_id)
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO chapters (id, novel_id, chapter_number, content) \
+         VALUES ($1, $2, 1, 'English source')",
+    )
+    .bind(chapter_id)
+    .bind(novel_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let repository = PgChapterTranslationRepository::new(pool.clone());
+    let second_instance = PgChapterTranslationRepository::new(pool.clone());
+    let source_hash = vec![7_u8; 32];
+    let key = ChapterTranslationKey {
+        chapter_id,
+        source_sha256: &source_hash,
+        profile: "zh-cn-v1",
+    };
+    let (first, second) = tokio::join!(repository.begin(key), second_instance.begin(key));
+    let outcomes = [first.unwrap(), second.unwrap()];
+    let attempt = outcomes
+        .iter()
+        .find_map(|outcome| match outcome {
+            BeginChapterTranslation::Acquired { attempt } => Some(*attempt),
+            _ => None,
+        })
+        .expect("one concurrent request must own the translation lease");
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, BeginChapterTranslation::Acquired { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, BeginChapterTranslation::InProgress { .. }))
+            .count(),
+        1
+    );
+    assert!(!repository
+        .complete(key, attempt + 1, "错误的旧 owner")
+        .await
+        .unwrap());
+    assert!(repository
+        .complete(key, attempt, "持久化译文")
+        .await
+        .unwrap());
+    assert_eq!(
+        second_instance.find_ready(key).await.unwrap().as_deref(),
+        Some("持久化译文")
+    );
+    assert!(matches!(
+        second_instance.begin(key).await.unwrap(),
+        BeginChapterTranslation::Ready(content) if content == "持久化译文"
+    ));
+
+    let retry_hash = vec![8_u8; 32];
+    let retry_key = ChapterTranslationKey {
+        chapter_id,
+        source_sha256: &retry_hash,
+        profile: "zh-cn-v1",
+    };
+    let retry_attempt = match repository.begin(retry_key).await.unwrap() {
+        BeginChapterTranslation::Acquired { attempt } => attempt,
+        outcome => panic!("unexpected first retry-key outcome: {outcome:?}"),
+    };
+    assert!(repository
+        .fail(retry_key, retry_attempt, "provider")
+        .await
+        .unwrap());
+    assert!(matches!(
+        repository.begin(retry_key).await.unwrap(),
+        BeginChapterTranslation::InProgress { .. }
+    ));
+    sqlx::query(
+        "UPDATE chapter_translations SET retry_after_at = NOW() - INTERVAL '1 second' \
+         WHERE chapter_id = $1 AND source_sha256 = $2 AND profile = $3",
+    )
+    .bind(chapter_id)
+    .bind(&retry_hash)
+    .bind("zh-cn-v1")
+    .execute(&pool)
+    .await
+    .unwrap();
+    let reclaimed_attempt = match second_instance.begin(retry_key).await.unwrap() {
+        BeginChapterTranslation::Acquired { attempt } => attempt,
+        outcome => panic!("unexpected reclaimed outcome: {outcome:?}"),
+    };
+    assert_eq!(reclaimed_attempt, retry_attempt + 1);
+    assert!(!repository
+        .complete(retry_key, retry_attempt, "stale result")
+        .await
+        .unwrap());
+    assert!(second_instance
+        .complete(retry_key, reclaimed_attempt, "fresh result")
+        .await
+        .unwrap());
+
+    let orphan_hash = vec![9_u8; 32];
+    let orphan_key = ChapterTranslationKey {
+        chapter_id,
+        source_sha256: &orphan_hash,
+        profile: "zh-cn-v1",
+    };
+    let orphan_attempt = match repository.begin(orphan_key).await.unwrap() {
+        BeginChapterTranslation::Acquired { attempt } => attempt,
+        outcome => panic!("unexpected orphan-key outcome: {outcome:?}"),
+    };
+    assert!(matches!(
+        second_instance.begin(orphan_key).await.unwrap(),
+        BeginChapterTranslation::InProgress { .. }
+    ));
+    sqlx::query(
+        "UPDATE chapter_translations SET lease_expires_at = NOW() - INTERVAL '1 second' \
+         WHERE chapter_id = $1 AND source_sha256 = $2 AND profile = $3",
+    )
+    .bind(chapter_id)
+    .bind(&orphan_hash)
+    .bind("zh-cn-v1")
+    .execute(&pool)
+    .await
+    .unwrap();
+    let orphan_reclaimed_attempt = match second_instance.begin(orphan_key).await.unwrap() {
+        BeginChapterTranslation::Acquired { attempt } => attempt,
+        outcome => panic!("unexpected orphan reclaim outcome: {outcome:?}"),
+    };
+    assert_eq!(orphan_reclaimed_attempt, orphan_attempt + 1);
+    assert!(!repository
+        .complete(orphan_key, orphan_attempt, "stale orphan result")
+        .await
+        .unwrap());
+    assert!(second_instance
+        .complete(
+            orphan_key,
+            orphan_reclaimed_attempt,
+            "reclaimed orphan result",
+        )
+        .await
+        .unwrap());
+
+    sqlx::query("DELETE FROM chapters WHERE id = $1")
+        .bind(chapter_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(repository.find_ready(key).await.unwrap().is_none());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM chapter_translations WHERE chapter_id = $1",
+        )
+        .bind(chapter_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

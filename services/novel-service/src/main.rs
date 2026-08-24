@@ -27,8 +27,10 @@ use novel_service::{
         persistence::{
             account_export::PgAccountExport,
             canon_story_model_pg_repo::PgCanonStoryModelRepository,
-            chapter_pg_repo::ChapterPgRepository, character_pg_repo::CharacterPgRepository,
-            novel_pg_repo::NovelPgRepository, pg_progress_repo::PgReadingProgressRepository,
+            chapter_pg_repo::ChapterPgRepository,
+            chapter_translation_pg_repo::PgChapterTranslationRepository,
+            character_pg_repo::CharacterPgRepository, novel_pg_repo::NovelPgRepository,
+            pg_progress_repo::PgReadingProgressRepository,
             source_file_deletion_pg_repo::PgSourceFileDeletionRepository, PgReadinessProbe,
         },
         privacy::AgentPrivacyClient,
@@ -105,6 +107,7 @@ async fn run_body() -> Result<()> {
 
         let novel_repo = Arc::new(NovelPgRepository::new(pool.clone()));
         let chapter_repo = Arc::new(ChapterPgRepository::new(pool.clone()));
+        let translation_repo = Arc::new(PgChapterTranslationRepository::new(pool.clone()));
         let character_repo = Arc::new(CharacterPgRepository::new(pool.clone()));
         let canon_repo = Arc::new(PgCanonStoryModelRepository::new(pool.clone()));
         let progress_repo = Arc::new(PgReadingProgressRepository::new(pool.clone()));
@@ -167,6 +170,7 @@ async fn run_body() -> Result<()> {
         });
         let translation_handler = Arc::new(TranslateChapterHandler {
             chapter_repo: chapter_repo.clone(),
+            translation_repo,
             translator,
             // ponytail: process-local admission matches the single-node runtime contract.
             permits: Arc::new(Semaphore::new(2)),
