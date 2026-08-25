@@ -60,10 +60,18 @@ pub struct NovelCommandHandler {
     pub active_import_users: Arc<Mutex<HashSet<Uuid>>>,
 }
 
+pub const MAX_BATCH_IMPORTS: usize = 5;
+
 struct ImportAdmission {
     _permit: OwnedSemaphorePermit,
     active_users: Arc<Mutex<HashSet<Uuid>>>,
     user_id: Uuid,
+}
+
+struct PreparedImport {
+    novel: Novel,
+    chapters: Vec<Chapter>,
+    source_bytes: Option<bytes::Bytes>,
 }
 
 impl Drop for ImportAdmission {
@@ -912,6 +920,32 @@ fn ensure_import_budget(chapters: &[Chapter]) -> std::result::Result<(), ImportB
         .ok_or(ImportBudgetExceeded)
 }
 
+fn prepare_import_command(
+    cmd: ImportNovelCommand,
+    source_retention_enabled: bool,
+) -> Result<PreparedImport> {
+    let raw_text = cmd
+        .raw_content
+        .ok_or_else(|| anyhow::anyhow!("Novel content is required"))?;
+    let mut novel = Novel::create(cmd.user_id, cmd.title, cmd.author);
+    if let Some(mode) = cmd.deviation_mode {
+        novel.set_deviation_mode(mode);
+    }
+    let source_stage = cmd.source_bytes.is_some() && source_retention_enabled;
+    let chapters = if source_stage {
+        Vec::new()
+    } else {
+        let chapters = NovelParserService::parse_chapters(novel.id, &raw_text)?;
+        ensure_import_budget(&chapters)?;
+        chapters
+    };
+    Ok(PreparedImport {
+        novel,
+        chapters,
+        source_bytes: cmd.source_bytes,
+    })
+}
+
 impl NovelCommandHandler {
     fn try_admit_import(
         &self,
@@ -1181,56 +1215,68 @@ impl NovelCommandHandler {
         fields(user_id = %cmd.user_id, title = %cmd.title)
     )]
     pub async fn handle_import(self: &Arc<Self>, cmd: ImportNovelCommand) -> Result<Uuid> {
-        info!("Importing novel: {}", cmd.title);
+        let mut ids = self.handle_import_batch(vec![cmd]).await?;
+        Ok(ids.pop().expect("a non-empty import batch returns one id"))
+    }
 
-        let raw_text = cmd
-            .raw_content
-            .ok_or_else(|| anyhow::anyhow!("Novel content is required"))?;
-        let admission = self.try_admit_import(cmd.user_id)?;
+    /// Atomically accept a bounded set of independent Novel aggregates while
+    /// consuming one admission slot. Only the first durable job is claimed
+    /// here; the existing recovery loop claims the remaining pending jobs.
+    pub async fn handle_import_batch(
+        self: &Arc<Self>,
+        commands: Vec<ImportNovelCommand>,
+    ) -> Result<Vec<Uuid>> {
+        anyhow::ensure!(
+            !commands.is_empty() && commands.len() <= MAX_BATCH_IMPORTS,
+            "import batch must contain 1-{MAX_BATCH_IMPORTS} novels"
+        );
+        let user_id = commands[0].user_id;
+        anyhow::ensure!(
+            commands.iter().all(|command| command.user_id == user_id),
+            "import batch must belong to one user"
+        );
+        info!(batch_size = commands.len(), %user_id, "accepting novel import batch");
+        let admission = self.try_admit_import(user_id)?;
+        let source_retention_enabled = self.source_storage.is_some();
+        let mut prepared = tokio::task::spawn_blocking(move || {
+            commands
+                .into_iter()
+                .map(|command| prepare_import_command(command, source_retention_enabled))
+                .collect::<Result<Vec<_>>>()
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("chapter parser task failed: {error}"))??;
 
-        let mut novel = Novel::create(cmd.user_id, cmd.title.clone(), cmd.author.clone());
-        if let Some(mode) = cmd.deviation_mode {
-            novel.set_deviation_mode(mode);
+        for import in &mut prepared {
+            retain_source_file(
+                &mut import.novel,
+                import.source_bytes.take(),
+                self.source_storage.as_deref(),
+                self.source_deletions.as_ref(),
+            )
+            .await?;
         }
-        let novel_id = novel.id;
-        // With source retention, acceptance commits at the `source` stage and
-        // the claimed worker rebuilds deterministic chapters from the retained
-        // object; the request-time extraction above only validates the input.
-        let source_stage = cmd.source_bytes.is_some() && self.source_storage.is_some();
-        let (chapters, admission) = if source_stage {
-            (Vec::new(), admission)
-        } else {
-            tokio::task::spawn_blocking(move || {
-                let chapters = NovelParserService::parse_chapters(novel_id, &raw_text)?;
-                ensure_import_budget(&chapters)?;
-                Ok::<_, anyhow::Error>((chapters, admission))
-            })
-            .await
-            .map_err(|error| anyhow::anyhow!("chapter parser task failed: {error}"))??
-        };
-        retain_source_file(
-            &mut novel,
-            cmd.source_bytes,
-            self.source_storage.as_deref(),
-            self.source_deletions.as_ref(),
-        )
-        .await?;
-        if source_stage {
-            self.novel_repo.create_source_import(&novel).await?;
-        } else {
-            self.novel_repo.create_import(&novel, &chapters).await?;
-        }
-        match self.novel_repo.claim_import(novel_id, cmd.user_id).await {
+        let imports = prepared
+            .into_iter()
+            .map(|prepared| (prepared.novel, prepared.chapters))
+            .collect::<Vec<_>>();
+        let novel_ids = imports
+            .iter()
+            .map(|(novel, _)| novel.id)
+            .collect::<Vec<_>>();
+        self.novel_repo.create_import_batch(&imports).await?;
+
+        let first_novel_id = novel_ids[0];
+        match self.novel_repo.claim_import(first_novel_id, user_id).await {
             Ok(Some(claim)) => self.spawn_claimed_import(claim, admission),
             Ok(None) => {
-                info!(%novel_id, "durable novel import was claimed by another worker");
+                info!(novel_id = %first_novel_id, "durable novel import was claimed by another worker");
             }
             Err(error) => {
-                error!(error = ?error, %novel_id, "durable novel import awaits recovery");
+                error!(error = ?error, novel_id = %first_novel_id, "durable novel import awaits recovery");
             }
         }
-
-        Ok(novel_id)
+        Ok(novel_ids)
     }
 
     /// Retry enrichment for an owned failed import using the chapters that were

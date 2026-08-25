@@ -1,6 +1,10 @@
 export {
+  buildNovelBatchUploadFormData,
   buildNovelUploadFormData,
   isCharacterAvailable,
+  MAX_NOVEL_BATCH_BYTES,
+  MAX_NOVEL_BATCH_FILES,
+  novelTitleFromFile,
   novelKeys,
   shouldPollNovelList,
   useAttachNovel,
@@ -15,6 +19,8 @@ export {
   useNovelStatus,
   useRetryNovel,
   useUploadNovel,
+  useUploadNovelsBatch,
+  validateNovelBatchFiles,
   validateNovelFile,
 } from './api';
-export type { NovelUploadInput } from './api';
+export type { NovelBatchUploadInput, NovelImportAccepted, NovelUploadInput } from './api';

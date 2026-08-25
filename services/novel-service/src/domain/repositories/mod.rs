@@ -37,6 +37,10 @@ pub struct RecoverableImport {
 #[async_trait]
 pub trait NovelRepository: Send + Sync {
     async fn create_import(&self, novel: &Novel, chapters: &[Chapter]) -> Result<()>;
+    /// Atomically accept multiple independent Novel aggregates and their
+    /// durable import jobs. An empty chapter list denotes a retained-source
+    /// import; every other item must contain importable chapters.
+    async fn create_import_batch(&self, imports: &[(Novel, Vec<Chapter>)]) -> Result<()>;
     /// Commit a Novel plus a stage-`source` job without chapters. Only used
     /// when source retention is enabled; the claimed worker rebuilds chapters
     /// from the retained object before any provider work.
