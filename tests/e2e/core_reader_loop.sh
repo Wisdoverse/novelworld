@@ -333,7 +333,7 @@ rewind_replay_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-e
   -H 'Content-Type: application/json' -H "Idempotency-Key: $world_turn_one_id" \
   --data "$world_action_one" "$api/narrative/$novel_id/world/turns")
 [ "$rewind_replay_status" = 409 ]
-python3 -c "import json,sys; value=json.load(sys.stdin); assert value['error']['code']=='turn_outcome_unknown'; assert not ({'turn_id','transition','world_state'} & value.keys())" \
+python3 -c "import json,sys; value=json.load(sys.stdin); assert value['error']['code']=='reading_progress_behind_world'; assert not ({'turn_id','transition','world_state'} & value.keys())" \
   <"$rewind_response_file"
 
 rewind_turn_count_before=$(docker exec novel-postgres psql \
