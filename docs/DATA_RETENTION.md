@@ -45,8 +45,9 @@ on that bucket for readiness and `s3:PutObject`/`s3:DeleteObject` only on the
 - The only administrator cannot delete their account while other users remain,
   because that would leave the installation without an operator. A sole final
   account can delete itself and return the installation to first-run setup.
-- A required Redis cleanup failure returns `503` before an account deletion or
-  shelf removal.
+- When `CACHE_MODE=redis`, a required Redis cleanup failure returns `503` before
+  an account deletion or shelf removal. PostgreSQL mode has no Redis cleanup
+  dependency.
   The tombstone atomically rejects delayed cache and derived-memory projections,
   closing the concurrent-chat window without a second scan. Repeating deletion
   is state-idempotent; a deleted account returns `204`, while a novel removed
