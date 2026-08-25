@@ -15,7 +15,10 @@ use agent_service::{
     application::handlers::AgentCommandHandler,
     domain::{self, ports::AccountExportPort, services::memory_manager::MemoryManager},
     infrastructure::{
-        cache::{AlwaysReadyProbe, NoopMessageCache, RedisCache, RedisReadinessProbe},
+        cache::{
+            parse_cache_mode, validate_redis_url, AlwaysReadyProbe, CacheMode, NoopMessageCache,
+            RedisCache, RedisReadinessProbe,
+        },
         embedding::{default_model_for_api, EmbeddingAdapter, NoopEmbeddingGenerator},
         http::{narrative_client::NarrativeServiceClient, novel_client::NovelServiceClient},
         llm::LlmAdapter,
@@ -230,72 +233,6 @@ async fn run_body() -> Result<()> {
     .await
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CacheMode {
-    Postgres,
-    Redis,
-}
-
-fn parse_cache_mode(value: Option<&str>) -> Result<CacheMode> {
-    match value.map(str::trim).filter(|value| !value.is_empty()) {
-        None | Some("postgres") => Ok(CacheMode::Postgres),
-        Some("redis") => Ok(CacheMode::Redis),
-        Some(_) => anyhow::bail!("CACHE_MODE must be postgres or redis"),
-    }
-}
-
-fn validate_redis_url(value: &str) -> Result<()> {
-    let url = reqwest::Url::parse(value)
-        .map_err(|_| anyhow::anyhow!("REDIS_URL must be an absolute redis:// or rediss:// URL"))?;
-    if !matches!(url.scheme(), "redis" | "rediss") || url.host_str().is_none() {
-        anyhow::bail!("REDIS_URL must be an absolute redis:// or rediss:// URL");
-    }
-    let password = url
-        .password()
-        .filter(|password| !password.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("REDIS_URL must include a password"))?;
-    let lowered = password.to_ascii_lowercase();
-    let mut seen = [false; 256];
-    for byte in password.bytes() {
-        seen[usize::from(byte)] = true;
-    }
-    if password.len() < 16
-        || seen.into_iter().filter(|value| *value).count() < 8
-        || lowered.contains("placeholder")
-        || lowered.contains("change_me")
-        || matches!(
-            lowered.as_str(),
-            "your_redis_password_here" | "runtime-redis-only"
-        )
-    {
-        anyhow::bail!("REDIS_URL must include a strong non-placeholder password");
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod bootstrap_tests {
-    use super::*;
-
-    #[test]
-    fn cache_mode_is_explicit_and_postgres_is_the_default() {
-        assert_eq!(parse_cache_mode(None).unwrap(), CacheMode::Postgres);
-        assert_eq!(
-            parse_cache_mode(Some("postgres")).unwrap(),
-            CacheMode::Postgres
-        );
-        assert_eq!(parse_cache_mode(Some("redis")).unwrap(), CacheMode::Redis);
-        assert!(parse_cache_mode(Some("memory")).is_err());
-    }
-
-    #[test]
-    fn redis_mode_requires_an_authenticated_non_placeholder_url() {
-        assert!(validate_redis_url("memory://").is_err());
-        assert!(validate_redis_url("redis://redis:6379").is_err());
-        assert!(validate_redis_url("redis://:your_redis_password_here@redis:6379").is_err());
-        assert!(validate_redis_url("redis://:0123456789abcdef0123456789abcdef@redis:6379").is_ok());
-    }
-}
 async fn shutdown_signal() {
     use tokio::signal;
     let ctrl_c = signal::ctrl_c();

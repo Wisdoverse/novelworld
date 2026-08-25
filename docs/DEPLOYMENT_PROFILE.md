@@ -17,6 +17,12 @@ decisions for that profile and approves nothing beyond it.
 
 ## Boundary decisions
 
+0. **L0 bootstrap — launcher duty.** Before any Compose process starts, a fresh
+   interactive launcher guides the bundled PostgreSQL role and database names,
+   generates the database password, commits the local completion marker last,
+   and restarts itself once. Existing valid or automation-preseeded values
+   migrate without a prompt; unconfigured non-interactive execution fails
+   closed. This is not a browser endpoint and does not expose Docker control.
 1. **TLS — operator duty.** The deployment terminates TLS at an
    operator-provided edge in front of the compose stack (PRODUCT_CONTRACT
    responsibility boundary). The shipped nginx profile serves plain HTTP

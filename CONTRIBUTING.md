@@ -29,8 +29,10 @@ pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-Copy `.env.example` to `.env` when running services locally. Never commit the
-resulting secrets or provider credentials.
+Copy `.env.example` to `.env` when running individual services locally and
+preseed valid PostgreSQL values plus `BOOTSTRAP_L0_COMPLETE=true`. The root
+server launchers perform that L0 guide for interactive installs. Never commit
+the resulting secrets or provider credentials.
 
 ## Change workflow
 

@@ -51,7 +51,12 @@ Windows 在命令提示符运行，或在资源管理器中双击：
 start.cmd
 ```
 
-脚本只生成 PostgreSQL、JWT、配置加密和服务间鉴权所需的启动根。
+首次交互启动会引导确认 L0 所需的 PostgreSQL 用户名和数据库名，自动生成数据库
+密码，最后写入 `BOOTSTRAP_L0_COMPLETE=true`，并在任何容器启动前自动重启
+启动器一次。有效的旧版或预配置 `.env` 会无提示迁移；未完成配置的非交互启动
+会明确失败并要求预置 `POSTGRES_USER`、`POSTGRES_DB` 和强密码。
+
+重启后脚本只自动生成 JWT、配置加密和服务间鉴权所需的 L1 启动根。
 新安装默认持久化 `CACHE_MODE=postgres`，不生成 Redis 密码，也不启动 Redis。
 脚本使用 Compose `--wait`，只在整个选定 profile 达到 readiness 后才打开
 `http://localhost`。先创建唯一的首位管理员；DeepSeek/OpenAI 可稍后在设置页

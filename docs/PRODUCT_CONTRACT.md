@@ -31,10 +31,29 @@ accessibility slice is currently release-qualified.
 | Platforms | Linux shell and Windows 10/11 launchers with Docker Compose | Local launchers stop the old project without removing named volumes before rebuild/start, forcing the one-shot migration container to rerun with old writers quiesced; the exact down-before-up order is pinned by `start.ps1 -Check`. Desktop startup stops pg0, refuses occupied service ports, embeds migrations through 0023, and applies them before spawning services. Linux paths run in CI; portable Windows/Linux/macOS GitHub Release assets remain experimental until their version-matched artifacts pass the required journey and signing gates. This is not a qualified OS/browser matrix. |
 | Input | Direct UTF-8 text paste up to 5 MiB; UTF-8, BOM-marked UTF-16, or GBK TXT up to 10 MiB; EPUB or text-extractable PDF up to 20 MiB; extracted text up to 20 MiB | Parsers and limits are tested. Scanned/image-only PDFs, DRM, malformed archives, and successful semantic extraction are not promised. |
 | Language | Simplified Chinese and English have deterministic chapter-splitting and lore-retrieval fixtures; authenticated readers can request a provider-backed, on-demand Simplified Chinese rendering of the visible chapter body without changing the stored source; completed translations are durably shared by exact source hash across readers of the same canonical chapter, and a PostgreSQL lease prevents concurrent cold requests from duplicating provider work; generated narrative transitions require Chinese text (English is rejected fail-closed by the validator); the UI locale is Simplified Chinese (`lang=zh-CN`, Chinese copy — residual non-normative English artifacts like `Loading...` are recorded, no English UI locale is promised) | Translation request bounds, source-bound reuse, concurrent claim fencing, source/translation switching, and failure fallback are structurally tested; a provider success followed by a database write failure can still require a later provider retry because the two systems cannot commit atomically. Translation quality is provider-dependent and has not passed a representative live-provider gate. “Any language” is unsupported. |
-| Models | Operator-managed platform configuration through web setup or environment variables, with optional per-user encrypted provider configuration for signed-in readers | Adapter compatibility, encrypted-at-rest storage, and recorded fixtures do not qualify a provider/model/version combination. Provider behavior, prices, retention, and safety can change independently. |
+| Models | Operator-managed platform configuration through protected Settings after administrator bootstrap or environment variables, with optional per-user encrypted provider configuration for signed-in readers | First run does not require or test a provider. Adapter compatibility, encrypted-at-rest storage, and recorded fixtures do not qualify a provider/model/version combination. Provider behavior, prices, retention, and safety can change independently. |
 | Architecture | Static Cloud Native, DDD, and microservice source boundaries for the private `single-node-v1` topology | The versioned Rust architecture gate checks five runtime packages, reviewed local helpers and transport capabilities, layer/package edges, HTTP adapter placement, analyzable SQL and routine ownership, canonical relation/routine/view/trigger inventory, declared FK/trigger debt, and static process hooks. It does not prove database grants or isolation: one role/schema remains shared, with 20 cross-owner cascading FKs, two lifecycle-trigger accesses, five cross-owner trigger/routine bindings, ten exact historical migration audit hashes, and narrow readiness dependencies. It also does not exhaust unknown external crates or generated code, or qualify drain/timeout completeness, recovery, monitoring/alerting, replicas, horizontal scaling, or public-cloud operation. |
 | Scale | `single-node-v1` is a deterministic capacity policy | It is a small CI profile, not an Internet-scale or sustained-load claim. |
 | Accessibility | Basic semantic status/error controls exist in the React UI | No browser, keyboard-only, screen-reader, contrast, zoom, or user-journey matrix has been qualified. |
+
+### L0 installation bootstrap and deferred configuration
+
+The supported interactive server launcher requires the bundled PostgreSQL
+identity at L0: it guides the role and database names, generates the database
+password, writes `BOOTSTRAP_L0_COMPLETE=true` only after validation, and
+automatically restarts before Docker or any business service starts. Valid
+preseeded or older environments migrate without prompting; an unconfigured
+non-interactive launch fails closed. PostgreSQL remains a hard readiness
+dependency. The L1 JWT, runtime-encryption, and internal-service roots are
+generated after restart.
+
+The base Compose profile then persists `CACHE_MODE=postgres`, reaches readiness
+without Redis or an LLM key, and elects the unique first administrator without
+a provider call. The administrator configures the platform model later through
+protected Settings. AI-backed operations remain unavailable with typed
+`503 llm_not_configured` failures until then. Redis, per-user model keys,
+monitoring, embeddings, image generation, and initially disabled S3 remain
+deferred or explicit capabilities under their own contracts.
 
 NovelWorld is not a minor-directed service. The operator is solely responsible
 for restricting or authorizing access. NovelWorld does not currently provide
@@ -67,7 +86,7 @@ provider-hosted image bytes, operator logs, or backups.
 
 | Product claim | State now | Evidence or gap | Owner |
 |---|---|---|---|
-| First-run administrator and model setup | Structurally verified | The first administrator is a single durable winner; web-supplied provider keys are encrypted before PostgreSQL storage and environment configuration takes precedence | H2 |
+| L0 installation and first-run administrator/model setup | Structurally verified | Required PostgreSQL identity is validated and committed before one launcher restart; the first administrator is a single durable winner without a provider call; later settings keys are encrypted before PostgreSQL storage and environment configuration takes precedence | H2 |
 | One-click and bounded batch import | Accepted and structurally verified inside the input limits | A request accepts one novel, or up to five uploaded files whose source bytes total at most 40 MiB. Batch acceptance commits every independent Novel, shelf/progress row, chapters or retained-source boundary, and pending durable job in one PostgreSQL transaction; it claims one job immediately and leaves the others to the existing leased recovery path. No batch aggregate, pause, cancel, or per-file metadata editor is claimed. Single-import fenced leases resume `source`/`chapters`/`enriched` work; live kill drills at the `chapters` and `enriched` boundaries pass in CI, and the S3 `source`-boundary drill passes in required CI ([PR #135](https://github.com/Wisdoverse/novelworld/pull/135)); cross-attempt provider calls stay inside `import-provider-budget-v1` (3-claim ceiling, terminal `budget_exhausted`); live semantic quality remains unqualified | H1 |
 | Shared parsed novels with private user worlds | Structurally verified | A ready canonical novel can be attached from the shared catalog without uploading or parsing it again; shelf authorization, reading progress, identity, deviation mode, choices, chat/memory, and world state remain user-scoped. Deleting the uploader preserves the canonical asset for other shelves. Automatic same-content detection is not claimed; reuse is an explicit catalog action. | H1, H4 |
 | Canonical world model and relationship graph | Structurally verified | Source coverage exists in deterministic tests; representative live quality is not qualified | H1, H3 |

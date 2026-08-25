@@ -16,6 +16,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  unix-launcher:
+    name: Unix Launcher
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Self-check
+        run: ./start.sh --check
+
   windows-launcher:
     name: Windows Launcher
     runs-on: windows-latest

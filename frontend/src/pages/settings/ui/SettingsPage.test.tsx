@@ -106,7 +106,7 @@ describe('SettingsPage', () => {
 
     await screen.findByRole('heading', { name: '平台模型设置' });
     const key = screen.getByLabelText('平台 API Key');
-    expect(key).toHaveAttribute('required');
+    expect((key as HTMLInputElement).required).toBe(true);
     fireEvent.change(key, { target: { value: 'first-platform-key' } });
     fireEvent.click(screen.getByRole('button', { name: '保存平台设置' }));
 
