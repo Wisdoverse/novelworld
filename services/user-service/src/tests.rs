@@ -1,4 +1,8 @@
-use crate::infrastructure::auth::jwt::JwtService;
+use crate::{
+    application::handlers::DUMMY_PASSWORD_HASH,
+    domain::ports::PasswordHasher,
+    infrastructure::auth::{jwt::JwtService, password::BcryptPasswordHasher},
+};
 
 #[test]
 fn test_email_validation() {
@@ -143,13 +147,21 @@ fn test_jwt_wrong_secret() {
     assert!(result.is_err());
 }
 
-#[test]
-fn test_bcrypt_hash_verify() {
-    let password = "my_secure_password";
-    let hash = bcrypt::hash(password, 12).unwrap();
+#[tokio::test]
+async fn test_bcrypt_hash_verify() {
+    let password = format!("test-password-{}", uuid::Uuid::new_v4());
+    let wrong_password = format!("{password}-wrong");
+    let dummy_probe = format!("{password}-dummy-probe");
+    let hasher = BcryptPasswordHasher::new(1);
+    let hash = hasher.hash(&password).await.unwrap();
 
-    assert!(bcrypt::verify(password, &hash).unwrap());
-    assert!(!bcrypt::verify("wrong_password", &hash).unwrap());
+    assert!(hash.starts_with("$2b$12$"));
+    assert!(hasher.verify(&password, &hash).await.unwrap());
+    assert!(!hasher.verify(&wrong_password, &hash).await.unwrap());
+    assert!(!hasher
+        .verify(&dummy_probe, DUMMY_PASSWORD_HASH)
+        .await
+        .unwrap());
 }
 
 #[test]

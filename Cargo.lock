@@ -133,6 +133,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "architecture-check"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "proc-macro2",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "arcstr"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

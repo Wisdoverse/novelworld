@@ -28,6 +28,10 @@ itself.
 When these disagree, do not silently implement the document or rewrite history.
 Record the conflict, decide the intended contract, then change the specification
 and implementation together. `SPEC.md` is a contract, not proof of compliance.
+Static architecture gates are regression evidence under the current private
+`single-node-v1` contract, not proof that runtime or database-isolation gaps are
+closed. Promote one of those gaps into Project work only as a scoped outcome
+with its own qualification evidence.
 
 ## North-star outcome
 

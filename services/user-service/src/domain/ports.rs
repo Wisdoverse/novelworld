@@ -8,6 +8,24 @@ pub trait AccessTokenIssuer: Send + Sync {
     fn generate_token(&self, user_id: Uuid, email: &str, role: &str) -> Result<String>;
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum PasswordHasherError {
+    #[error("Password hashing capacity is busy")]
+    Capacity,
+    #[error("Password operation failed")]
+    Internal(#[source] anyhow::Error),
+}
+
+#[async_trait]
+pub trait PasswordHasher: Send + Sync {
+    async fn hash(&self, password: &str) -> std::result::Result<String, PasswordHasherError>;
+    async fn verify(
+        &self,
+        password: &str,
+        hash: &str,
+    ) -> std::result::Result<bool, PasswordHasherError>;
+}
+
 #[async_trait]
 pub trait ReadinessProbe: Send + Sync {
     async fn is_ready(&self) -> bool;

@@ -16,7 +16,7 @@ use agent_service::{
     domain::{self, ports::AccountExportPort, services::memory_manager::MemoryManager},
     infrastructure::{
         cache::{AlwaysReadyProbe, NoopMessageCache, RedisCache, RedisReadinessProbe},
-        embedding::EmbeddingAdapter,
+        embedding::{default_model_for_api, EmbeddingAdapter, NoopEmbeddingGenerator},
         http::{narrative_client::NarrativeServiceClient, novel_client::NovelServiceClient},
         llm::LlmAdapter,
         persistence::{
@@ -145,7 +145,7 @@ async fn run_body() -> Result<()> {
         let embed_model = std::env::var("EMBEDDING_MODEL")
             .ok()
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| auto_detect_embedding_model(&embed_api_url));
+            .unwrap_or_else(|| default_model_for_api(&embed_api_url));
 
         let embedding: Arc<dyn domain::ports::EmbeddingGenerator> =
             if embed_api_key.is_empty() && !embed_api_url.contains("localhost") {
@@ -225,40 +225,6 @@ async fn run_body() -> Result<()> {
     }
     .instrument(service_span)
     .await
-}
-
-fn auto_detect_embedding_model(api_url: &str) -> String {
-    let url = api_url.to_lowercase();
-    if url.contains("openai.com") {
-        "text-embedding-3-small".into()
-    } else if url.contains("dashscope") {
-        "text-embedding-v3".into()
-    } else if url.contains("bigmodel.cn") || url.contains("bigmodel.com") {
-        "embedding-3".into()
-    } else if url.contains("siliconflow") {
-        "BAAI/bge-m3".into()
-    } else if url.contains("localhost") || url.contains("127.0.0.1") {
-        "nomic-embed-text".into()
-    } else if url.contains("mistral") {
-        "mistral-embed".into()
-    } else if url.contains("baichuan") {
-        "Baichuan-Text-Embedding".into()
-    } else if url.contains("volces.com") {
-        "doubao-embedding".into()
-    } else {
-        "text-embedding-3-small".into()
-    }
-}
-
-struct NoopEmbeddingGenerator;
-
-#[async_trait::async_trait]
-impl domain::ports::EmbeddingGenerator for NoopEmbeddingGenerator {
-    async fn generate_embedding(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
-        Err(anyhow::anyhow!(
-            "Embedding not configured — semantic search disabled"
-        ))
-    }
 }
 
 async fn shutdown_signal() {

@@ -59,10 +59,27 @@ public-service qualification.
 - **Narrative Service** owns narrative nodes, player entities/timelines, world
   state, choices, and the world-turn audit/replay ledger.
 
-Services communicate over HTTP and never read another service's tables. A
-single PostgreSQL instance is a deployment choice, not shared data ownership.
-External databases, Redis, object storage, model providers, and HTTP services
-are reached through domain ports and infrastructure adapters.
+Services communicate over HTTP; inter-service clients live under
+`infrastructure/http/`. Runtime business SQL is restricted to the relation
+owner declared in `tools/architecture/table-ownership-v1.json`. A single
+PostgreSQL instance is a deployment choice, not shared business ownership.
+External databases, Redis, object storage, model providers, password hashing,
+and HTTP services are reached through domain ports and infrastructure adapters.
+
+The shared schema still contains 20 cross-owner `ON DELETE CASCADE` foreign
+keys. The user and novel deletion triggers also make two exact writes into the
+platform-owned erasure journal; five cross-owner trigger/routine bindings cover
+those hooks and the shared row-local timestamp routine. Novel Service readiness
+has exact, declared checks against platform lineage/erasure relations and the
+User Service deletion trigger. Ten historical migrations with executable `DO`
+bodies are pinned by normalized full-file hashes because their effects are not
+claimed as semantically parsed. These are single-node migration/audit debt, not
+proof of database isolation. The static gate pins FK identities,
+trigger/function/relation/access/body/definition hashes, and readiness SQL
+fingerprints. It rejects undeclared additions and
+stale entries; declaring new debt changes the versioned policy and remains a
+blocking review decision. Removing debt requires a separately reviewed ownership migration,
+deletion/lifecycle design, and recovery evidence.
 
 ## Authoritative state
 
@@ -99,9 +116,45 @@ change in the same pull request as the failure behavior they describe.
 
 ## Code boundaries
 
-Rust services use `domain -> application -> infrastructure/interface` ports and
-adapters. Domain code cannot import infrastructure or HTTP types. Cross-service
-reads use HTTP adapters.
+Rust services use ports and adapters with the enforced dependency matrix:
+
+```text
+domain         -> domain
+application    -> application, domain
+infrastructure -> infrastructure, domain
+interface      -> interface, application, domain
+main/lib/root  -> composition only
+```
+
+`cargo run --locked -p architecture-check -- check` parses all five runtime
+packages with Rust syntax awareness, checks package and layer edges, confines
+service HTTP clients to infrastructure adapters, evaluates fail-closed SQL and
+known routine calls against the owner manifest, reconciles canonical
+relation/view/routine/trigger/FK dependencies, and checks each runtime's static
+liveness, readiness, JSON tracing, metrics, and graceful-signal hooks. Tests
+nested inside a DDD layer retain layer and SQL checks; root `cfg(test)`
+composition modules remain SQL-scanned but have no DDD layer assignment.
+Test-only or unreachable files cannot satisfy a runtime hook.
+
+### Backend verification contract
+
+| Invariant | Blocking evidence | Evidence limit |
+|---|---|---|
+| Domain and application purity | The architecture checker follows each crate's reachable module graph, enforces the layer matrix, rejects unknown production layers, and allows only reviewed pure/orchestration crates in domain/application code. | Static source structure does not prove that a domain rule is behaviorally correct. |
+| HTTP and data ownership | Cargo graph checks reject runtime-to-runtime dependencies and unreviewed local/path helpers; source checks constrain reviewed raw/non-HTTP transports and keep service HTTP clients in `infrastructure/http/`; SQL and known routine calls are resolved against the owner manifest; views and routine-call closures are checked transitively; relation/routine inventory, trigger bindings, and cross-owner FK/trigger debt must match exactly. | One PostgreSQL role/schema, 20 acknowledged cascading FKs, two lifecycle-trigger accesses, five cross-owner trigger/routine bindings, ten full-file historical migration audit debts, and the exact readiness exceptions remain. Unknown external crates, proc-macro expansion, generated code, and runtime behavior are not exhaustively proven by source scanning. |
+| External configuration | Each production runtime must contain the policy's environment-backed configuration markers; launcher validation and the production Compose smoke exercise required values. | This does not prove secret-manager integration, rotation, or every optional provider combination. |
+| Liveness and readiness | Static checks require distinct handlers and local/dependency response semantics; the required Production Compose Smoke starts the topology and verifies dependency-failure transitions. | Probe presence does not prove every dependency failure mode or long-running degradation path. |
+| Graceful termination | Static checks require Axum graceful shutdown wired to SIGINT and SIGTERM. | Readiness draining, background-task joins, bounded drain deadlines, and forced-termination drills are not yet qualified. |
+| Observability | Static checks require JSON tracing, request trace propagation, and `/metrics`; the main-branch runtime drill validates the structured log contract. | A supported collector, dashboards, alerts, paging ownership, and cardinality budgets are not yet qualified. |
+| Durable state and retry safety | Authoritative facts must live in PostgreSQL or configured object storage. A changed retried side effect must carry an idempotency/lease/non-retry contract and a failure/replay test named in its pull request. Existing turn, ingestion, and recovery suites are the scoped evidence. | No static scan can prove that every process-local value is disposable or that every external side effect is exactly-once. |
+| Scale | `single-node-v1` capacity and recovery gates are the only current qualification. | Multi-replica safety, horizontal scaling, public-cloud operation, and Internet exposure are unsupported until separately measured and reviewed. |
+
+The result is static structural evidence only. It does not prove database
+roles/grants, long-request or background-task drain, complete upstream/SQL
+timeouts, metrics collection/alerting, fault recovery, load capacity,
+multi-replica correctness, horizontal scaling, or public-cloud readiness. The
+supported topology remains one instance of each process in private
+`single-node-v1` Compose.
 
 The frontend follows Feature-Sliced Design:
 

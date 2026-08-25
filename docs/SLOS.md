@@ -54,6 +54,11 @@ A passing report keeps the current architecture. It does not justify a durable
 queue, physical database split, replicas, partitioning, CDN/object storage, or
 orchestration.
 
+Likewise, a passing static architecture check prevents known source-boundary
+regressions; it does not qualify database isolation, graceful drain, timeout
+coverage, monitoring/alerting, replicas, or horizontal scaling. Those outcomes
+need separate runtime or migration evidence.
+
 A failure must name the failed predicate and retain the report. Open a narrow
 follow-up only after reproducing it. Prefer tuning or removing work inside the
 current component first. Any infrastructure proposal must state the measured

@@ -106,6 +106,8 @@ Rust:
 cargo build --workspace
 cargo check --workspace
 cargo test --workspace
+cargo run --locked -p architecture-check -- self-test
+cargo run --locked -p architecture-check -- check
 cargo run -p gateway
 cargo run -p user-service
 cargo run -p novel-service
@@ -137,11 +139,38 @@ docker compose -f docker-compose.yml up -d    # production
 
 ## Architecture Constraints
 
-- **Backend: DDD + Microservice architecture is mandatory.** Every change must respect:
-  - Domain layer has zero dependencies on infrastructure or interface layers.
-  - All external integrations (DB, Redis, LLM, HTTP) accessed through domain port traits.
-  - Services communicate via HTTP, never via shared database tables.
-  - Each service owns its data; cross-service reads use HTTP adapters in `infrastructure/http/`.
+- **Backend: Cloud Native + DDD + Microservice architecture is mandatory within
+  the current private `single-node-v1` contract.** Every change must respect:
+  - Domain code depends only on domain code and pure data types. Application
+    code orchestrates domain ports; database, Redis, object storage, model,
+    password, and outbound HTTP implementations live in infrastructure.
+  - Services communicate over HTTP. Inter-service clients live under
+    `infrastructure/http/`; runtime packages never depend on another runtime
+    package.
+  - Each relation has one owner in
+    `tools/architecture/table-ownership-v1.json`. Runtime SQL may access only
+    owner relations or an exact, fingerprinted readiness exception. The shared
+    schema's 20 cross-owner foreign keys, two lifecycle-trigger accesses, and
+    five cross-owner trigger/routine bindings are declared migration debt. Ten
+    historical migrations with executable `DO` bodies are locked by normalized
+    full-file hashes rather than claimed as semantically parsed. The gate blocks
+    undeclared or stale debt; any declared growth changes the versioned policy
+    and must be justified in review. It does not claim database-level isolation.
+    Views, routines, and trigger bindings are checked transitively against the
+    same ownership policy.
+  - Authoritative state is externalized. Process-local state is limited to
+    disposable caches, projections, readiness caches, and bounded admission;
+    it must not become the only copy of a committed fact.
+  - Runtime configuration and secrets are externalized. Every process exposes
+    separate liveness/readiness, structured JSON tracing, a metrics endpoint,
+    and graceful SIGINT/SIGTERM handling. Every new or changed dependency call
+    states its deadline and retry contract; existing unqualified timeout/drain
+    paths remain documented gaps, not precedent. Retried side effects require
+    idempotency, a durable claim/lease, or an explicit non-retry contract.
+  - `cargo run --locked -p architecture-check -- check` is the blocking static
+    gate. Passing it proves only the rules it scans; it does not prove drain
+    completion, timeout coverage, recovery, alerting, database privileges,
+    multi-replica correctness, horizontal scaling, or public-cloud readiness.
 - **Frontend: Feature-Sliced Design (FSD) is mandatory.** Import rules:
   - `app` → `pages` → `widgets` → `features` → `entities` → `shared`.
   - `pages`, `widgets`, `features`, and `entities` are sliced layers. Every
@@ -278,10 +307,14 @@ CI remains the authoritative required gate.
 
 ## DDD Rules
 
-- Domain layer (`domain/`) must never import from `infrastructure/` or `interface/`.
+- Domain layer (`domain/`) must never import from `application/`,
+  `infrastructure/`, or `interface/`, or a concrete external adapter crate.
 - Application handlers hold `Arc<dyn Port>`, not `Arc<ConcreteType>`.
 - Port traits live in `domain/ports.rs`. Infra types implement them.
-- Services must NOT share database tables. Use HTTP adapters (`infrastructure/http/`) for cross-service queries.
+- Services must not query another service's owned business relations. Use HTTP
+  adapters (`infrastructure/http/`) for cross-service behavior. The current
+  shared-schema foreign keys, lifecycle triggers, and exact readiness exceptions
+  are explicit debt, not permission for new coupling.
 - `NOVEL_SERVICE_URL` env var for agent-service and narrative-service to call novel-service.
 - Value object serialization (`to_str`/`from_str`) belongs in `domain/value_objects/`, not in persistence layer.
 
