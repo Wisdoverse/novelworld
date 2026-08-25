@@ -131,11 +131,11 @@ jobs:
           set -euo pipefail
           python3 tools/llm-budget/test_verify.py
           python3 tools/llm-budget/verify.py \
-            --policy tools/llm-budget/policy-v1.json \
+            --policy tools/llm-budget/policy-v2.json \
             --metrics tools/llm-budget/recorded-release.prom \
             --commit "$GITHUB_SHA" > /tmp/llm-budget-a.json
           python3 tools/llm-budget/verify.py \
-            --policy tools/llm-budget/policy-v1.json \
+            --policy tools/llm-budget/policy-v2.json \
             --metrics tools/llm-budget/recorded-release.prom \
             --commit "$GITHUB_SHA" > /tmp/llm-budget-b.json
           cmp /tmp/llm-budget-a.json /tmp/llm-budget-b.json

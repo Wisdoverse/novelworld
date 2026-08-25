@@ -302,3 +302,38 @@ impl ProviderConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::LlmOperation;
+
+    #[test]
+    fn budget_policy_operations_and_ceilings_match_runtime() {
+        let policy: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tools/llm-budget/policy-v2.json"))
+                .expect("LLM budget policy must be valid JSON");
+        let policy_operations = policy["operations"]
+            .as_object()
+            .expect("LLM budget policy must contain an operations object");
+
+        let runtime = LlmOperation::ALL
+            .into_iter()
+            .map(|operation| (operation.to_str(), u64::from(operation.max_output_tokens())))
+            .collect::<BTreeMap<_, _>>();
+        let budget = policy_operations
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str(),
+                    value["output_token_ceiling"]
+                        .as_u64()
+                        .expect("each operation must have an integer output-token ceiling"),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(runtime, budget);
+    }
+}

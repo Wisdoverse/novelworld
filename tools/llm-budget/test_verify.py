@@ -14,7 +14,7 @@ COMMIT = "0" * 40
 class BudgetVerifierTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.policy = (HERE / "policy-v1.json").read_text()
+        cls.policy = (HERE / "policy-v2.json").read_text()
         cls.sample = (HERE / "recorded-release.prom").read_text()
 
     def run_verify(self, sample=None, policy=None):
@@ -78,6 +78,19 @@ class BudgetVerifierTest(unittest.TestCase):
             with self.subTest(name=name):
                 report = self.run_verify(sample=sample)
                 self.assertFalse(report["passed"], report)
+
+    def test_started_operation_with_expired_summary_fails_closed(self):
+        branch = 'operation="branch_generation"'
+        sample = self.sample.replace(
+            f'novelworld_llm_output_token_limit{{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",{branch},mode="sync",quantile="1"}} 4096',
+            f'novelworld_llm_output_token_limit{{contract="llm-observability-v1",service="narrative-service",provider="environment",model="e2e",{branch},mode="sync",quantile="1"}} 0',
+        )
+        report = self.run_verify(sample=sample)
+        self.assertFalse(report["passed"], report)
+        self.assertIn(
+            "branch_generation: missing or expired output-token-limit samples",
+            report["failures"],
+        )
 
     def test_malformed_or_sensitive_samples_are_rejected(self):
         for sample in [
