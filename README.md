@@ -255,8 +255,14 @@ The drill covers ordering and process-crash recovery with fake dependencies;
 real Linux filesystem power-loss injection and live registry/image health are
 still release evidence gaps.
 
-The server startup scripts check Docker, generate only the PostgreSQL/JWT/runtime
-encryption/internal-service bootstrap roots, run `docker compose down` without
+On the first interactive launch, the script guides the required L0 PostgreSQL
+user and database name, generates the database password, writes the completion
+marker last, and automatically restarts itself before Docker or any business
+service starts. Valid preseeded or existing `.env` files migrate without a
+prompt; an unconfigured non-interactive launch fails with preseed instructions.
+
+After L0, the server startup scripts check Docker, generate the JWT/runtime
+encryption/internal-service L1 roots, run `docker compose down` without
 `--volumes`, then build and start the selected profile with `--wait`. This preserves
 named-volume data while stopping old writers and removing the old one-shot
 migration container so every local pull/restart reapplies migrations before

@@ -58,8 +58,9 @@ impl RuntimeLlmClient {
     pub fn from_env() -> Result<Self> {
         let user_service_url =
             std::env::var("USER_SERVICE_URL").unwrap_or_else(|_| "http://127.0.0.1:8001".into());
-        let token = std::env::var("INTERNAL_SERVICE_TOKEN")
-            .map_err(|_| anyhow!("INTERNAL_SERVICE_TOKEN is required for runtime LLM configuration"))?;
+        let token = std::env::var("INTERNAL_SERVICE_TOKEN").map_err(|_| {
+            anyhow!("INTERNAL_SERVICE_TOKEN is required for runtime LLM configuration")
+        })?;
         crate::validate_internal_service_token(&token)?;
         Ok(Self::remote(user_service_url, token))
     }

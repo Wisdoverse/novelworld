@@ -10,6 +10,50 @@ use deadpool_redis::Pool;
 use std::time::Duration;
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheMode {
+    Postgres,
+    Redis,
+}
+
+pub fn parse_cache_mode(value: Option<&str>) -> anyhow::Result<CacheMode> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("postgres") => Ok(CacheMode::Postgres),
+        Some("redis") => Ok(CacheMode::Redis),
+        Some(_) => anyhow::bail!("CACHE_MODE must be postgres or redis"),
+    }
+}
+
+pub fn validate_redis_url(value: &str) -> anyhow::Result<()> {
+    let url = redis::parse_redis_url(value).ok_or_else(|| {
+        anyhow::anyhow!("REDIS_URL must be an absolute redis:// or rediss:// URL")
+    })?;
+    if url.host_str().is_none() {
+        anyhow::bail!("REDIS_URL must include a host");
+    }
+    let password = url
+        .password()
+        .filter(|password| !password.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("REDIS_URL must include a password"))?;
+    let lowered = password.to_ascii_lowercase();
+    let mut seen = [false; 256];
+    for byte in password.bytes() {
+        seen[usize::from(byte)] = true;
+    }
+    if password.len() < 16
+        || seen.into_iter().filter(|value| *value).count() < 8
+        || lowered.contains("placeholder")
+        || lowered.contains("change_me")
+        || matches!(
+            lowered.as_str(),
+            "your_redis_password_here" | "runtime-redis-only"
+        )
+    {
+        anyhow::bail!("REDIS_URL must include a strong non-placeholder password");
+    }
+    Ok(())
+}
+
 /// Desktop adapter: PostgreSQL remains authoritative, so skipping the
 /// reconstructable recent-message projection is safe when Redis is absent.
 pub struct NoopMessageCache;
@@ -93,7 +137,9 @@ impl ReadinessProbe for RedisReadinessProbe {
 
 #[cfg(test)]
 mod tests {
-    use super::{AlwaysReadyProbe, NoopMessageCache};
+    use super::{
+        parse_cache_mode, validate_redis_url, AlwaysReadyProbe, CacheMode, NoopMessageCache,
+    };
     use crate::domain::{
         entities::memory::ChatMessage,
         ports::{MessageCache, ReadinessProbe},
@@ -111,5 +157,24 @@ mod tests {
             .is_empty());
         assert!(AlwaysReadyProbe.is_ready().await);
         let _type_check: Option<ChatMessage> = None;
+    }
+
+    #[test]
+    fn cache_mode_is_explicit_and_postgres_is_the_default() {
+        assert_eq!(parse_cache_mode(None).unwrap(), CacheMode::Postgres);
+        assert_eq!(
+            parse_cache_mode(Some("postgres")).unwrap(),
+            CacheMode::Postgres
+        );
+        assert_eq!(parse_cache_mode(Some("redis")).unwrap(), CacheMode::Redis);
+        assert!(parse_cache_mode(Some("memory")).is_err());
+    }
+
+    #[test]
+    fn redis_mode_requires_an_authenticated_non_placeholder_url() {
+        assert!(validate_redis_url("memory://").is_err());
+        assert!(validate_redis_url("redis://redis:6379").is_err());
+        assert!(validate_redis_url("redis://:your_redis_password_here@redis:6379").is_err());
+        assert!(validate_redis_url("redis://:0123456789abcdef0123456789abcdef@redis:6379").is_ok());
     }
 }

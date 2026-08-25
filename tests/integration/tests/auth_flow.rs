@@ -107,32 +107,22 @@ async fn initial_admin_is_durable_and_single_winner() {
     );
     let left_token = RefreshToken::new(left_user.id, "a".repeat(64), 60);
     let right_token = RefreshToken::new(right_user.id, "b".repeat(64), 60);
-    let left_config = RuntimeLlmConfig::for_provider("deepseek", "left-secret").unwrap();
-    let right_config = RuntimeLlmConfig::for_provider("openai", "right-secret").unwrap();
     let left_repo = PgUserRepository::new(pool.clone(), CONFIG_KEY).unwrap();
     let right_repo = PgUserRepository::new(pool.clone(), CONFIG_KEY).unwrap();
     let (left, right) = tokio::join!(
-        left_repo.save_initial_setup(&left_user, &left_token, Some(&left_config)),
-        right_repo.save_initial_setup(&right_user, &right_token, Some(&right_config))
+        left_repo.save_initial_setup(&left_user, &left_token),
+        right_repo.save_initial_setup(&right_user, &right_token)
     );
     let left_won = left.unwrap();
     assert_ne!(left_won, right.unwrap());
 
     let restarted_repo = PgUserRepository::new(pool.clone(), CONFIG_KEY).unwrap();
     assert!(restarted_repo.has_any().await.unwrap());
-    let saved_config = restarted_repo
+    assert!(restarted_repo
         .find_runtime_llm_config()
         .await
         .unwrap()
-        .unwrap();
-    assert_eq!(
-        saved_config.api_key,
-        if left_won {
-            "left-secret"
-        } else {
-            "right-secret"
-        }
-    );
+        .is_none());
     let winner: (Uuid, String) = sqlx::query_as("SELECT id, role::text FROM users")
         .fetch_one(&pool)
         .await
@@ -206,13 +196,14 @@ async fn account_erasure_fails_closed_cascades_owned_data_and_resets_final_setup
     assert_eq!(repo.save(&target).await.unwrap(), UserSave::Saved);
     assert_eq!(repo.save(&remaining).await.unwrap(), UserSave::Saved);
     repo.save_runtime_llm_config(
-        &RuntimeLlmConfig::for_provider("deepseek", "privacy-secret").unwrap(),
+        &RuntimeLlmConfig::for_settings("deepseek", "deepseek-v4-flash", "privacy-secret", false)
+            .unwrap(),
     )
     .await
     .unwrap();
     repo.save_user_llm_config(
         target.id,
-        &RuntimeLlmConfig::for_provider("openai", "target-secret").unwrap(),
+        &RuntimeLlmConfig::for_settings("openai", "gpt-4o-mini", "target-secret", false).unwrap(),
     )
     .await
     .unwrap();

@@ -12,15 +12,15 @@ NC='\033[0m'
 
 printf '%b\n' "${CYAN}NovelWorld — One-Click Start${NC}"
 
-if ! command -v docker >/dev/null 2>&1; then
-  printf '%b\n' "${RED}Docker is not installed. See https://docs.docker.com/get-docker/${NC}" >&2
-  exit 1
-fi
-if ! docker compose version >/dev/null 2>&1; then
-  printf '%b\n' "${RED}Docker Compose v2 is not available.${NC}" >&2
-  exit 1
-fi
-printf '%b\n' "${GREEN}Docker detected${NC}"
+CHECK_MODE=false
+RESUME_AFTER_L0=false
+case "${1:-}" in
+  '') ;;
+  --check) CHECK_MODE=true ;;
+  --l0-resume) RESUME_AFTER_L0=true ;;
+  *) printf 'Usage: %s [--check]\n' "$0" >&2; exit 2 ;;
+esac
+[[ "$#" -le 1 ]] || { printf 'Usage: %s [--check]\n' "$0" >&2; exit 2; }
 
 random_hex() {
   openssl rand -hex "$1" 2>/dev/null \
@@ -43,6 +43,92 @@ set_env_value() {
   else
     printf '\n%s=%s\n' "$key" "$value" >>"$file"
   fi
+}
+
+valid_postgres_identifier() {
+  [[ "$1" =~ ^[a-z_][a-z0-9_]{0,62}$ ]]
+}
+
+valid_postgres_password() {
+  local value=$1 lowered distinct
+  lowered=$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')
+  distinct=$(printf '%s' "$value" | fold -w1 | sort -u | wc -l | tr -d ' ')
+  [[ "$value" =~ ^[A-Za-z0-9._~-]{16,}$ ]] \
+    && [[ "$distinct" -ge 8 ]] \
+    && [[ "$lowered" != *placeholder* ]] \
+    && [[ "$lowered" != *change_me* ]] \
+    && [[ "$lowered" != your_strong_password_here ]]
+}
+
+assert_l0_configuration() {
+  local file=$1 user database password
+  user=$(env_value "$file" POSTGRES_USER)
+  database=$(env_value "$file" POSTGRES_DB)
+  password=$(env_value "$file" POSTGRES_PASSWORD)
+  valid_postgres_identifier "$user" || {
+    printf 'POSTGRES_USER must be a lowercase PostgreSQL identifier (1-63 characters).\n' >&2
+    return 1
+  }
+  valid_postgres_identifier "$database" || {
+    printf 'POSTGRES_DB must be a lowercase PostgreSQL identifier (1-63 characters).\n' >&2
+    return 1
+  }
+  valid_postgres_password "$password" || {
+    printf 'POSTGRES_PASSWORD must be URL-safe, non-placeholder, at least 16 characters, and contain at least 8 distinct characters.\n' >&2
+    return 1
+  }
+}
+
+initialize_l0_configuration() {
+  local file=$1 allow_prompt=$2 marker user database password default_user default_database
+  L0_CONFIGURED_NOW=0
+  marker=$(env_value "$file" BOOTSTRAP_L0_COMPLETE)
+  case "$marker" in
+    true) assert_l0_configuration "$file"; return ;;
+    ''|false) ;;
+    *) printf 'BOOTSTRAP_L0_COMPLETE must be exactly true or false.\n' >&2; return 1 ;;
+  esac
+
+  user=$(env_value "$file" POSTGRES_USER)
+  database=$(env_value "$file" POSTGRES_DB)
+  password=$(env_value "$file" POSTGRES_PASSWORD)
+  if valid_postgres_identifier "$user" \
+    && valid_postgres_identifier "$database" \
+    && valid_postgres_password "$password"; then
+    # Existing and automation-preseeded installations migrate without a prompt.
+    set_env_value "$file" BOOTSTRAP_L0_COMPLETE true
+    return
+  fi
+
+  if [[ "$allow_prompt" != true || ! -t 0 ]]; then
+    printf 'L0 database setup is incomplete. Run ./start.sh interactively, or preseed POSTGRES_USER, POSTGRES_DB, and a strong POSTGRES_PASSWORD in .env.\n' >&2
+    return 1
+  fi
+
+  printf '\n%b\n' "${CYAN}首次启动：配置必需的本地 PostgreSQL（L0）${NC}"
+  printf '%s\n' '数据库密码将自动生成；模型、Redis 和对象存储可稍后配置。'
+  if valid_postgres_identifier "$user"; then default_user=$user; else default_user=novel; fi
+  if valid_postgres_identifier "$database"; then default_database=$database; else default_database=novel_world; fi
+  read -r -p "PostgreSQL 用户名 [${default_user}]: " user
+  read -r -p "PostgreSQL 数据库名 [${default_database}]: " database
+  user=${user:-$default_user}
+  database=${database:-$default_database}
+  valid_postgres_identifier "$user" || {
+    printf 'PostgreSQL 用户名必须是 1-63 位小写字母、数字或下划线，且不能以数字开头。\n' >&2
+    return 1
+  }
+  valid_postgres_identifier "$database" || {
+    printf 'PostgreSQL 数据库名必须是 1-63 位小写字母、数字或下划线，且不能以数字开头。\n' >&2
+    return 1
+  }
+
+  set_env_value "$file" POSTGRES_USER "$user"
+  set_env_value "$file" POSTGRES_DB "$database"
+  set_env_value "$file" POSTGRES_PASSWORD "$(random_hex 16)"
+  # Commit point: never mark L0 complete until every hard database value is persisted.
+  set_env_value "$file" BOOTSTRAP_L0_COMPLETE true
+  assert_l0_configuration "$file"
+  L0_CONFIGURED_NOW=1
 }
 
 valid_redis_password() {
@@ -99,12 +185,64 @@ ensure_secret() {
   fi
 }
 
+if [[ "$CHECK_MODE" == true ]]; then
+  temporary_directory=$(mktemp -d)
+  trap 'rm -rf -- "$temporary_directory"' EXIT
+  fresh_env="$temporary_directory/fresh.env"
+  cp .env.example "$fresh_env"
+  if initialize_l0_configuration "$fresh_env" false 2>/dev/null; then
+    printf 'An unconfigured non-interactive L0 launch was accepted.\n' >&2
+    exit 1
+  fi
+  seeded_password=0123456789abcdef0123456789abcdef
+  set_env_value "$fresh_env" POSTGRES_USER novel
+  set_env_value "$fresh_env" POSTGRES_DB novel_world
+  set_env_value "$fresh_env" POSTGRES_PASSWORD "$seeded_password"
+  initialize_l0_configuration "$fresh_env" false
+  [[ "$(env_value "$fresh_env" BOOTSTRAP_L0_COMPLETE)" == true ]]
+  [[ "$(env_value "$fresh_env" POSTGRES_PASSWORD)" == "$seeded_password" ]]
+
+  invalid_env="$temporary_directory/invalid.env"
+  cp .env.example "$invalid_env"
+  set_env_value "$invalid_env" BOOTSTRAP_L0_COMPLETE true
+  if initialize_l0_configuration "$invalid_env" false 2>/dev/null; then
+    printf 'A committed L0 marker bypassed database validation.\n' >&2
+    exit 1
+  fi
+  grep -Fq 'exec bash "$0" --l0-resume' start.sh || {
+    printf 'Unix launcher must commit L0 and automatically restart itself.\n' >&2
+    exit 1
+  }
+  printf '%b\n' "${GREEN}Unix launcher self-check passed.${NC}"
+  exit 0
+fi
+
 [[ -f .env ]] || cp .env.example .env
+chmod 600 .env
+initialize_l0_configuration .env true
+if [[ "$L0_CONFIGURED_NOW" -eq 1 ]]; then
+  [[ "$RESUME_AFTER_L0" == false ]] || {
+    printf 'L0 setup restart loop detected.\n' >&2
+    exit 1
+  }
+  printf '%b\n' "${GREEN}L0 数据库设置已保存，正在自动重启启动器…${NC}"
+  exec bash "$0" --l0-resume
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+  printf '%b\n' "${RED}Docker is not installed. See https://docs.docker.com/get-docker/${NC}" >&2
+  exit 1
+fi
+if ! docker compose version >/dev/null 2>&1; then
+  printf '%b\n' "${RED}Docker Compose v2 is not available.${NC}" >&2
+  exit 1
+fi
+printf '%b\n' "${GREEN}Docker detected${NC}"
+
 resolve_cache_mode
 
 # Generate L1/root values only. Redis credentials are never invented.
 ensure_secret JWT_SECRET change_me_to_a_random_32_char_string 32
-ensure_secret POSTGRES_PASSWORD your_strong_password_here 16
 ensure_secret RUNTIME_CONFIG_KEY change_me_to_a_random_64_char_hex_string 32
 ensure_secret INTERNAL_SERVICE_TOKEN change_me_to_a_random_internal_service_token 32
 sed -i 's|^LLM_API_KEY=sk-your-api-key$|LLM_API_KEY=|' .env
