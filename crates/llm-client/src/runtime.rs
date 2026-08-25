@@ -6,6 +6,17 @@ use tokio::sync::OnceCell;
 
 use crate::{ChatRequest, ChatResponse, ChatStream, LlmClient};
 
+#[derive(Debug)]
+pub struct NotConfigured;
+
+impl std::fmt::Display for NotConfigured {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("runtime LLM configuration is not configured")
+    }
+}
+
+impl std::error::Error for NotConfigured {}
+
 pub struct RuntimeLlmClient {
     source: ConfigSource,
     resolved: OnceCell<Arc<ResolvedClient>>,
@@ -50,11 +61,7 @@ impl RuntimeLlmClient {
         let token = std::env::var("INTERNAL_SERVICE_TOKEN").map_err(|_| {
             anyhow!("INTERNAL_SERVICE_TOKEN is required for runtime LLM configuration")
         })?;
-        if token.len() < 32 {
-            return Err(anyhow!(
-                "INTERNAL_SERVICE_TOKEN must be at least 32 characters"
-            ));
-        }
+        crate::validate_internal_service_token(&token)?;
         Ok(Self::remote(user_service_url, token))
     }
 
@@ -97,12 +104,7 @@ impl RuntimeLlmClient {
             let response = remote_config_request(client, user_service_url, token, runtime_user_id)
                 .send()
                 .await?;
-            if !response.status().is_success() {
-                return Err(anyhow!(
-                    "runtime LLM configuration is unavailable ({})",
-                    response.status()
-                ));
-            }
+            validate_remote_status(response.status())?;
             return Ok(Arc::new(build_resolved(validate_remote_config(
                 response.json().await?,
             )?)));
@@ -275,6 +277,18 @@ fn validate_remote_config(config: RemoteConfig) -> Result<RuntimeConfig> {
     })
 }
 
+fn validate_remote_status(status: reqwest::StatusCode) -> Result<()> {
+    if status == reqwest::StatusCode::CONFLICT {
+        return Err(NotConfigured.into());
+    }
+    if !status.is_success() {
+        return Err(anyhow!(
+            "runtime LLM configuration is unavailable ({status})"
+        ));
+    }
+    Ok(())
+}
+
 fn provider_for_url(api_url: &str) -> &'static str {
     match reqwest::Url::parse(api_url)
         .ok()
@@ -333,5 +347,15 @@ mod tests {
         .build()
         .unwrap();
         assert!(!platform_request.headers().contains_key("X-User-Id"));
+    }
+
+    #[test]
+    fn not_configured_remains_downcastable_through_anyhow() {
+        let error = validate_remote_status(reqwest::StatusCode::CONFLICT).unwrap_err();
+        assert!(error.downcast_ref::<NotConfigured>().is_some());
+        assert!(validate_remote_status(reqwest::StatusCode::BAD_GATEWAY)
+            .unwrap_err()
+            .downcast_ref::<NotConfigured>()
+            .is_none());
     }
 }

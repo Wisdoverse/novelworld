@@ -82,9 +82,7 @@ async fn run_body() -> Result<()> {
         let metrics = llm_client::install_metrics("novel-service")?;
         let internal_service_token =
             std::env::var("INTERNAL_SERVICE_TOKEN").expect("INTERNAL_SERVICE_TOKEN must be set");
-        if internal_service_token.len() < 32 {
-            anyhow::bail!("INTERNAL_SERVICE_TOKEN must be at least 32 characters");
-        }
+        llm_client::validate_internal_service_token(&internal_service_token)?;
 
         let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
         let pool = PgPoolOptions::new()

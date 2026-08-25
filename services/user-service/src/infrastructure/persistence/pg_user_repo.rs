@@ -152,15 +152,7 @@ impl UserRepository for PgUserRepository {
         })
     }
 
-    async fn save_initial_setup(
-        &self,
-        user: &User,
-        token: &RefreshToken,
-        llm: Option<&RuntimeLlmConfig>,
-    ) -> Result<bool> {
-        let encrypted_key = llm
-            .map(|config| self.encrypt_api_key(&config.api_key))
-            .transpose()?;
+    async fn save_initial_setup(&self, user: &User, token: &RefreshToken) -> Result<bool> {
         let mut transaction = self.pool.begin().await?;
         // ponytail: one global lock for the one-time bootstrap; revisit only if setup throughput matters.
         sqlx::query("LOCK TABLE users IN EXCLUSIVE MODE")
@@ -199,29 +191,6 @@ impl UserRepository for PgUserRepository {
         .bind(token.created_at)
         .execute(&mut *transaction)
         .await?;
-        if let (Some(config), Some((nonce, ciphertext))) = (llm, encrypted_key) {
-            sqlx::query(
-                r#"INSERT INTO runtime_llm_config
-                   (singleton, provider, api_url, model, thinking_enabled, api_key_nonce, api_key_ciphertext)
-                   VALUES (TRUE, $1, $2, $3, $4, $5, $6)
-                   ON CONFLICT (singleton) DO UPDATE SET
-                     provider = EXCLUDED.provider,
-                     api_url = EXCLUDED.api_url,
-                     model = EXCLUDED.model,
-                     thinking_enabled = EXCLUDED.thinking_enabled,
-                     api_key_nonce = EXCLUDED.api_key_nonce,
-                     api_key_ciphertext = EXCLUDED.api_key_ciphertext,
-                     updated_at = NOW()"#,
-            )
-            .bind(&config.provider)
-            .bind(&config.api_url)
-            .bind(&config.model)
-            .bind(config.thinking_enabled)
-            .bind(nonce)
-            .bind(ciphertext)
-            .execute(&mut *transaction)
-            .await?;
-        }
         transaction.commit().await?;
         Ok(true)
     }

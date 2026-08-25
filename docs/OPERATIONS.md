@@ -14,12 +14,15 @@ SLO/error budget, and alert notification routing/paging — is explicitly
 | Gateway | `/live`, `/ready`, `/health` on the gateway port; `/metrics` (Prometheus text, internal only) |
 | Edge | nginx `/nginx-health` |
 | Services | per-service `/health` + `/ready` (see each `interface/http`), docker healthchecks |
-| Data | `docker inspect … novel-postgres`, `novel-redis` healthchecks |
+| Data | PostgreSQL health always; Redis health only when persisted `CACHE_MODE=redis` |
 
-`infra/ops/health-checks.sh` probes the gateway and edge endpoints
-(through the published nginx edge) and every container's health, fails
+`infra/ops/health-checks.sh` reads the persisted cache mode, derives the same
+Compose profile/URL selection as the launch and release tools, probes the gateway
+and edge endpoints (through the published nginx edge) and every required container's health, fails
 non-zero naming each failing check, and prints a bounded tail of recent
 ERROR log lines (structured stdout via `docker compose logs`). The
+PostgreSQL mode fails if Redis is unexpectedly running; Redis mode fails on a
+missing/placeholder credential or an unhealthy Redis container. No credential is logged. The
 per-service `/health` and `/metrics` endpoints are the hand-debugging
 surface, not scripted probes. Cron example:
 

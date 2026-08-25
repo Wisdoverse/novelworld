@@ -280,6 +280,18 @@ fn narrative_error_response(error: NarrativeError) -> axum::response::Response {
                 "Novel service is unavailable",
             )
         }
+        NarrativeError::Llm(error)
+            if error
+                .chain()
+                .any(|cause| cause.is::<llm_client::NotConfigured>()) =>
+        {
+            tracing::warn!("narrative LLM configuration is missing");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "llm_not_configured",
+                "Configure the language model before retrying the request",
+            )
+        }
         NarrativeError::Llm(error) => {
             tracing::error!(error = ?error, "narrative LLM operation failed");
             (
@@ -747,6 +759,24 @@ mod principal_contract_tests {
                 }
             })
         );
+    }
+
+    #[tokio::test]
+    async fn llm_errors_distinguish_missing_configuration_from_provider_outage() {
+        let not_configured =
+            narrative_error_response(NarrativeError::Llm(llm_client::NotConfigured.into()));
+        assert_eq!(not_configured.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(not_configured.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"]["code"],
+            "llm_not_configured"
+        );
+
+        let outage =
+            narrative_error_response(NarrativeError::Llm(anyhow::anyhow!("provider timeout")));
+        assert_eq!(outage.status(), StatusCode::BAD_GATEWAY);
     }
 
     #[test]

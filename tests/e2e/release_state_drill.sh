@@ -105,6 +105,7 @@ current_install_line=$(grep -nF 'install -m 600 "$schema_transition_manifest" "$
 promotion_inputs_durable_line=$(grep -nF 'sync # promotion inputs must be durable before current promotion' "$release" | cut -d: -f1)
 current_promotion_line=$(grep -nF 'mv -f "$current_tmp" "$current_manifest"' "$release" | head -n 1 | cut -d: -f1)
 rollback_guard_line=$(grep -nF 'require_schema_safe_rollback "$current_manifest" "$previous_manifest"' "$release" | cut -d: -f1)
+minimum_rollback_guard_line=$(grep -nF 'require_pre_minimum_rollback_ready "$current_manifest" "$previous_manifest"' "$release" | cut -d: -f1)
 rollback_fetch_line=$(grep -nF 'fetch_release_history "$current_manifest" "$previous_manifest"' "$release" | cut -d: -f1)
 rollback_deploy_line=$(grep -nF 'deploy_manifest "$previous_manifest" false' "$release" | cut -d: -f1)
 rollback_candidate_clear_line=$(grep -nF 'rm -f "$candidate_manifest" # discard unmarked stale candidate before rollback' "$release" | cut -d: -f1)
@@ -175,6 +176,9 @@ fail_stop_die_line=$(grep -nF 'die "$reason; client was stopped (fail-stopped)"'
   || { printf 'drill: FAIL normal restore can retain a stale candidate or pending marker\n' >&2; exit 1; }
 [ -n "$rollback_guard_line" ] \
   && [ "$rollback_guard_line" -lt "$rollback_candidate_clear_line" ] \
+  && [ -n "$minimum_rollback_guard_line" ] \
+  && [ "$rollback_guard_line" -lt "$minimum_rollback_guard_line" ] \
+  && [ "$minimum_rollback_guard_line" -lt "$rollback_candidate_clear_line" ] \
   && [ "$rollback_candidate_clear_line" -lt "$rollback_deploy_line" ] \
   && [ "$rollback_deploy_line" -lt "$rollback_promote_line" ] \
   && [ "$rollback_promote_line" -lt "$rollback_finalize_line" ] \
@@ -374,15 +378,26 @@ git -C "$roll_repo" add infra/postgres/migrations/0021_world_turn_memory_project
 git -C "$roll_repo" commit -m 'initial roll-forward fixture' >/dev/null
 roll_sha=$(git -C "$roll_repo" rev-parse HEAD)
 printf '%s\n' 'post-0020 release fixture' >"$roll_repo/release-fixture.txt"
-git -C "$roll_repo" add release-fixture.txt
+mkdir -p "$roll_repo/docs/adr"
+printf '%s\n' '# Minimal bootstrap decision fixture' \
+  >"$roll_repo/docs/adr/0002-minimal-bootstrap-and-deferred-runtime-configuration.md"
+git -C "$roll_repo" add release-fixture.txt \
+  docs/adr/0002-minimal-bootstrap-and-deferred-runtime-configuration.md
 git -C "$roll_repo" commit -m 'post-0020 rollback fixture' >/dev/null
 roll_new_sha=$(git -C "$roll_repo" rev-parse HEAD)
-printf '%s\n' 'fixture secrets' >"$roll_repo/.env"
+printf '%s\n' \
+  'REDIS_PASSWORD=0123456789abcdef0123456789abcdef' \
+  'LLM_API_KEY=' >"$roll_repo/.env"
 
 cat >"$roll_bin/docker" <<'EOF'
 #!/usr/bin/env bash
 if [ "${1:-}" = inspect ]; then
-  printf 'healthy\n'
+  printf '%s\n' "${MOCK_REDIS_HEALTH:-healthy}"
+elif [ "${1:-}" = exec ]; then
+  case " $* " in
+    *" novel-redis "*) [ "${MOCK_REDIS_AUTH:-ok}" = ok ] || exit 1 ;;
+    *" novel-user-service "*) [ "${MOCK_LLM_CONFIGURED:-false}" = true ] || exit 1 ;;
+  esac
 fi
 exit 0
 EOF
@@ -412,6 +427,8 @@ test ! -e "$roll_state/candidate.env" \
   || { printf 'drill: FAIL initial roll-forward left a candidate\n' >&2; exit 1; }
 test ! -e "$roll_state/previous.env" \
   || { printf 'drill: FAIL initial roll-forward invented a previous release\n' >&2; exit 1; }
+grep -qx 'CACHE_MODE=redis' "$roll_repo/.env" \
+  || { printf 'drill: FAIL legacy Redis environment did not persist redis mode\n' >&2; exit 1; }
 printf 'drill: ok   interrupted initial adoption rolls exact marker forward and promotes atomically\n'
 
 roll_base_manifest=$(mktemp "$work/roll-base.XXXXXX")
@@ -474,13 +491,73 @@ printf 'drill: ok   normal restore clears stale candidate and exact schema marke
 # A healthy rollback uses the schema-transition promotion protocol itself: the
 # target becomes current, the former current becomes previous, and no recovery
 # authority or staged file remains.
+roll_guard_state=$(new_state)
+cp "$roll_new_manifest" "$roll_guard_state/current.env"
+cp "$roll_marker" "$roll_guard_state/previous.env"
+sed -i 's/^CACHE_MODE=.*/CACHE_MODE=postgres/' "$roll_repo/.env"
+(
+  cd "$roll_repo"
+  PATH="$roll_bin:$PATH" RELEASE_STATE_DIR="$roll_guard_state" \
+    expect_fail 'pre-minimum rollback rejects PostgreSQL cache mode before replacement' \
+      'rollback target predates minimal bootstrap and requires CACHE_MODE=redis' \
+      "$release" rollback "$roll_sha"
+)
+sed -i 's/^CACHE_MODE=.*/CACHE_MODE=redis/' "$roll_repo/.env"
+sed -i 's/^REDIS_PASSWORD=.*/REDIS_PASSWORD=/' "$roll_repo/.env"
+(
+  cd "$roll_repo"
+  PATH="$roll_bin:$PATH" RELEASE_STATE_DIR="$roll_guard_state" \
+    expect_fail 'pre-minimum rollback rejects a half-selected Redis mode' \
+      'CACHE_MODE=redis requires a URL-safe, non-placeholder REDIS_PASSWORD' \
+      "$release" rollback "$roll_sha"
+)
+sed -i 's/^REDIS_PASSWORD=.*/REDIS_PASSWORD=0123456789abcdef0123456789abcdef/' "$roll_repo/.env"
+(
+  cd "$roll_repo"
+  PATH="$roll_bin:$PATH" MOCK_REDIS_HEALTH=starting \
+    RELEASE_STATE_DIR="$roll_guard_state" \
+    expect_fail 'pre-minimum rollback requires healthy Redis' \
+      'rollback target predates minimal bootstrap and requires healthy Redis' \
+      "$release" rollback "$roll_sha"
+)
+(
+  cd "$roll_repo"
+  PATH="$roll_bin:$PATH" MOCK_REDIS_AUTH=fail \
+    RELEASE_STATE_DIR="$roll_guard_state" \
+    expect_fail 'pre-minimum rollback authenticates with the persisted Redis credential' \
+      'persisted Redis credential to authenticate' \
+      "$release" rollback "$roll_sha"
+)
+(
+  cd "$roll_repo"
+  PATH="$roll_bin:$PATH" RELEASE_STATE_DIR="$roll_guard_state" \
+    expect_fail 'pre-minimum rollback requires an effective LLM configuration' \
+      'current User Service did not prove a decryptable database LLM configuration' \
+      "$release" rollback "$roll_sha"
+)
+test ! -e "$roll_guard_state/schema-transition.pending" \
+  || { printf 'drill: FAIL rejected compatibility guard replaced services\n' >&2; exit 1; }
+
+roll_override_state=$(new_state)
+cp "$roll_new_manifest" "$roll_override_state/current.env"
+cp "$roll_marker" "$roll_override_state/previous.env"
+sed -i 's/^LLM_API_KEY=.*/LLM_API_KEY=sk-0123456789abcdef0123456789abcdef/' "$roll_repo/.env"
+(
+  cd "$roll_repo"
+  PATH="$roll_bin:$PATH" RELEASE_STATE_DIR="$roll_override_state" \
+    "$release" rollback "$roll_sha"
+)
+cmp -s "$roll_marker" "$roll_override_state/current.env" \
+  || { printf 'drill: FAIL valid LLM environment override did not permit guarded rollback\n' >&2; exit 1; }
+sed -i 's/^LLM_API_KEY=.*/LLM_API_KEY=/' "$roll_repo/.env"
+
 roll_rollback_state=$(new_state)
 cp "$roll_new_manifest" "$roll_rollback_state/current.env"
 cp "$roll_marker" "$roll_rollback_state/previous.env"
 cp "$roll_base_manifest" "$roll_rollback_state/candidate.env"
 (
   cd "$roll_repo"
-  PATH="$roll_bin:$PATH" RELEASE_STATE_DIR="$roll_rollback_state" \
+  PATH="$roll_bin:$PATH" MOCK_LLM_CONFIGURED=true RELEASE_STATE_DIR="$roll_rollback_state" \
     "$release" rollback "$roll_sha"
 )
 cmp -s "$roll_marker" "$roll_rollback_state/current.env" \

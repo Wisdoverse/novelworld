@@ -69,10 +69,13 @@ def positive_number(value, where):
 
 
 def validate_policy(policy):
-    require_keys(policy, {"version", "topology", "workload", "objectives"}, "policy")
+    require_keys(
+        policy,
+        {"version", "topology", "workload", "objectives"},
+        "policy",
+    )
     if policy["version"] != "single-node-v1":
         raise ValueError("unsupported capacity policy version")
-
     topology_keys = {
         "gateway_instances",
         "user_service_instances",
@@ -369,9 +372,7 @@ def pg_scalar(sql):
 
 def redis_scalar(*arguments):
     environment = os.environ.copy()
-    environment["REDISCLI_AUTH"] = os.environ.get(
-        "REDIS_PASSWORD", "runtime-redis-only"
-    )
+    environment["REDISCLI_AUTH"] = os.environ["REDIS_PASSWORD"]
     command = [
         "docker",
         "exec",
@@ -444,6 +445,7 @@ class CapacityProfile:
         self.report = {
             "schema": "novelworld-capacity-report-v1",
             "policy_version": policy["version"],
+            "cache_mode": os.environ.get("CACHE_MODE", "unknown"),
             "commit": git_sha,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "environment": environment_snapshot(),
@@ -1226,6 +1228,13 @@ def main():
     if args.self_test:
         self_test(policy)
         return 0
+
+    if os.environ.get("CACHE_MODE") != "redis":
+        raise ProfileError(
+            "single-node-v1 requires an explicitly selected CACHE_MODE=redis deployment"
+        )
+    if not os.environ.get("REDIS_PASSWORD"):
+        raise ProfileError("single-node-v1 requires the active Redis credential")
 
     profile = CapacityProfile(
         policy, args.api_url, args.provider_url, git_sha(args.git_sha)

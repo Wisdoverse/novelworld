@@ -15,7 +15,10 @@ use agent_service::{
     application::handlers::AgentCommandHandler,
     domain::{self, ports::AccountExportPort, services::memory_manager::MemoryManager},
     infrastructure::{
-        cache::{AlwaysReadyProbe, NoopMessageCache, RedisCache, RedisReadinessProbe},
+        cache::{
+            parse_cache_mode, validate_redis_url, AlwaysReadyProbe, CacheMode, NoopMessageCache,
+            RedisCache, RedisReadinessProbe,
+        },
         embedding::{default_model_for_api, EmbeddingAdapter, NoopEmbeddingGenerator},
         http::{narrative_client::NarrativeServiceClient, novel_client::NovelServiceClient},
         llm::LlmAdapter,
@@ -72,9 +75,7 @@ async fn run_body() -> Result<()> {
         let metrics = llm_client::install_metrics("agent-service")?;
         let internal_service_token =
             std::env::var("INTERNAL_SERVICE_TOKEN").expect("INTERNAL_SERVICE_TOKEN must be set");
-        if internal_service_token.len() < 32 {
-            anyhow::bail!("INTERNAL_SERVICE_TOKEN must be at least 32 characters");
-        }
+        llm_client::validate_internal_service_token(&internal_service_token)?;
 
         // PostgreSQL connection pool
         let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
@@ -85,25 +86,30 @@ async fn run_body() -> Result<()> {
 
         tracing::info!("Connected to PostgreSQL");
 
-        // Redis is a reconstructable projection. The portable desktop runtime
-        // uses the domain-port no-op adapter instead of shipping another daemon.
-        let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://redis:6379".into());
+        // Redis is a reconstructable projection. PostgreSQL mode deliberately
+        // never inspects REDIS_URL, so an optional cache cannot block startup.
         let (cache, redis_readiness): (
             Arc<dyn domain::ports::MessageCache>,
             Arc<dyn domain::ports::ReadinessProbe>,
-        ) = if redis_url == "memory://" {
-            tracing::info!("Redis disabled; using PostgreSQL-backed desktop memory path");
-            (Arc::new(NoopMessageCache), Arc::new(AlwaysReadyProbe))
-        } else {
-            let redis_cfg = deadpool_redis::Config::from_url(&redis_url);
-            let redis_pool = redis_cfg
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("Failed to create Redis pool");
-            tracing::info!("Redis pool created");
-            (
-                Arc::new(RedisCache::new(redis_pool.clone())),
-                Arc::new(RedisReadinessProbe::new(redis_pool)),
-            )
+        ) = match parse_cache_mode(std::env::var("CACHE_MODE").ok().as_deref())? {
+            CacheMode::Postgres => {
+                tracing::info!("Redis disabled; PostgreSQL remains the authoritative memory path");
+                (Arc::new(NoopMessageCache), Arc::new(AlwaysReadyProbe))
+            }
+            CacheMode::Redis => {
+                let redis_url = std::env::var("REDIS_URL")
+                    .map_err(|_| anyhow::anyhow!("REDIS_URL is required when CACHE_MODE=redis"))?;
+                validate_redis_url(&redis_url)?;
+                let redis_cfg = deadpool_redis::Config::from_url(&redis_url);
+                let redis_pool = redis_cfg
+                    .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                    .map_err(|error| anyhow::anyhow!("failed to create Redis pool: {error}"))?;
+                tracing::info!("Redis projection pool created");
+                (
+                    Arc::new(RedisCache::new(redis_pool.clone())),
+                    Arc::new(RedisReadinessProbe::new(redis_pool)),
+                )
+            }
         };
 
         // Shared LLM client (from llm-client workspace crate)

@@ -7,6 +7,8 @@ useDefault = true
 [allowlist]
 description = "NovelWorld test-only fixtures and non-secret model identifiers"
 regexes = [
+    # Fixed launcher self-check database password; generated production values are random.
+    "0123456789abcdef0123456789abcdef",
     # Fixed smoke-test encryption key; never accepted as a production secret.
     "0123456789abcdef(0123456789abcdef){3}",
     # Provider model identifiers, not credentials.
