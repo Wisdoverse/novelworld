@@ -129,7 +129,6 @@ player=$("${curl_cmd[@]}" "${auth[@]}" \
   --data "$player_definition" \
   "$api/narrative/$novel_id/player-entry")
 player_id=$(json_get "value['player']['id']" <<<"$player")
-player_entity_hash=$(python3 -c 'import hashlib,json,sys; value=json.load(sys.stdin); print(hashlib.sha256(json.dumps(value["player"],ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()).hexdigest())' <<<"$player")
 python3 -c "import json,sys; value=json.load(sys.stdin); player=value['player']; assert value['checkpoint_chapter']==1; assert player['name']=='云舟'; assert player['location_id']=='$location_id'; assert player['relationships']=={}" <<<"$player"
 
 pause
@@ -276,6 +275,7 @@ pause
 world_view=$("${curl_cmd[@]}" "${auth[@]}" "$api/narrative/$novel_id/world")
 python3 -c "import json,sys; value=json.load(sys.stdin); state=value['world_state']['state']; assert value['session']['turn_number']==2; assert value['session']['canonical_events'][0]['status']=='obstructed'; assert [entry['turn_number'] for entry in value['journal']]==[1,2]; assert len([event for event in state['world_events'] if isinstance(event,dict) and event.get('origin')=='player'])==2" <<<"$world_view"
 world_view_hash=$(printf '%s' "$world_view" | sha256sum | cut -d' ' -f1)
+player_entity_hash=$(python3 -c 'import hashlib,json,sys; value=json.load(sys.stdin); print(hashlib.sha256(json.dumps(value["player"],ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()).hexdigest())' <<<"$world_view")
 player_snapshot=$(docker exec novel-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT md5((state -> 'player_entity')::text) FROM world_states WHERE user_id = (SELECT id FROM users WHERE email = '$email') AND novel_id = '$novel_id'")
