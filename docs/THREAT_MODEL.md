@@ -256,11 +256,13 @@ for cross-service table reads or unscoped records.
 and PDF and bounds uploaded and extracted bytes. EPUB processing limits entry
 count, container/package/chapter sizes, follows the package spine, and reads ZIP
 entries into memory without writing archive paths to disk. The HTTP layer limits
-the complete request and metadata. Accepted files are written to S3 only after
-format validation, under a key that never includes the attacker-controlled
-filename. A delayed cleanup intent covers crashes between S3 and PostgreSQL;
-novel/account deletion uses a durable outbox so database cascades cannot orphan
-objects.
+the complete request and metadata. The batch route additionally caps file count
+at five and combined source bytes at 40 MiB, validates every file before durable
+acceptance, and commits all independent import jobs in one transaction. Accepted
+files are written to S3 only after format validation, under a key that never
+includes the attacker-controlled filename. A delayed cleanup intent covers
+crashes between S3 and PostgreSQL; novel/account deletion uses a durable outbox
+so database cascades cannot orphan objects.
 
 Relevant stories are ZIP bombs with misleading declared sizes, duplicate or
 path-like ZIP names, XML/HTML parser edge cases, PDFs that consume excessive CPU

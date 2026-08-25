@@ -17,7 +17,7 @@ use crate::application::handlers::{
     GameRuleTemplateRequest, GameRuleTemplateRequestError, ImportBudgetExceeded,
     ImportCapacityUnavailable, ImportRetryConflict, NovelCommandHandler, ReadingProgressError,
     ReadingProgressHandler, ShelfMutationError, SourceFileStorageUnavailable,
-    TranslateChapterHandler, TranslationError,
+    TranslateChapterHandler, TranslationError, MAX_BATCH_IMPORTS,
 };
 use crate::domain::entities::novel::Novel;
 use crate::domain::ports::{
@@ -58,6 +58,10 @@ fn routes() -> Router<AppState> {
     Router::new()
         .route("/novels", post(import_novel))
         .route("/novels/upload", post(upload_novel))
+        .route(
+            "/novels/upload/batch",
+            post(upload_novel_batch).layer(DefaultBodyLimit::max(MAX_BATCH_REQUEST_SIZE)),
+        )
         .route("/novels", get(list_novels))
         .route("/novels/catalog", get(list_catalog))
         .route("/novels/{id}", get(get_novel))
@@ -514,6 +518,18 @@ pub struct ImportNovelResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct BatchImportItemResponse {
+    novel_id: Uuid,
+    status: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct BatchImportResponse {
+    novels: Vec<BatchImportItemResponse>,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ApiError {
     pub error: String,
 }
@@ -623,6 +639,8 @@ async fn import_novel(
 const MAX_PASTE_SIZE: usize = 5 * 1024 * 1024;
 const MAX_FILE_SIZE: usize = 20 * 1024 * 1024;
 const MAX_REQUEST_SIZE: usize = MAX_FILE_SIZE + 1024 * 1024;
+const MAX_BATCH_FILE_BYTES: usize = 40 * 1024 * 1024;
+const MAX_BATCH_REQUEST_SIZE: usize = MAX_BATCH_FILE_BYTES + 1024 * 1024;
 const MAX_TITLE_CHARS: usize = 500;
 const MAX_AUTHOR_CHARS: usize = 200;
 type ValidatedMetadata = (
@@ -754,6 +772,56 @@ fn document_error_response(error: DocumentExtractionError) -> Response {
     api_error(status, error.to_string())
 }
 
+async fn extract_uploaded_document(
+    state: &AppState,
+    file_name: Option<String>,
+    content_type: Option<String>,
+    data: bytes::Bytes,
+) -> Result<(String, bytes::Bytes), Box<Response>> {
+    let permit = state
+        .document_parse_permits
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            let mut response = api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Document parser capacity is busy; retry the request",
+            );
+            response
+                .headers_mut()
+                .insert("Retry-After", HeaderValue::from_static("1"));
+            Box::new(response)
+        })?;
+    let extractor = state.document_extractor.clone();
+    match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        extractor
+            .extract_text(file_name.as_deref(), content_type.as_deref(), &data)
+            .map(|text| (text, data))
+    })
+    .await
+    {
+        Err(error) => {
+            tracing::error!(%error, "document parser task failed");
+            Err(Box::new(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error",
+            )))
+        }
+        Ok(Ok(extracted)) => Ok(extracted),
+        Ok(Err(error)) => Err(Box::new(document_error_response(error))),
+    }
+}
+
+fn title_from_file_name(file_name: &str) -> Option<String> {
+    let name = file_name.rsplit(['/', '\\']).next()?.trim();
+    let stem = name
+        .rsplit_once('.')
+        .map_or(name, |(stem, _extension)| stem)
+        .trim();
+    (!stem.is_empty()).then(|| stem.to_string())
+}
+
 /// POST /novels/upload -- multipart file upload (TXT, EPUB, or PDF).
 async fn upload_novel(
     State(state): State<AppState>,
@@ -833,40 +901,12 @@ async fn upload_novel(
                     Ok(d) => d,
                     Err(_) => return api_error(StatusCode::BAD_REQUEST, "Invalid file upload"),
                 };
-                let permit = match state.document_parse_permits.clone().try_acquire_owned() {
-                    Ok(permit) => permit,
-                    Err(_) => {
-                        let mut response = api_error(
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "Document parser capacity is busy; retry the request",
-                        );
-                        response
-                            .headers_mut()
-                            .insert("Retry-After", HeaderValue::from_static("1"));
-                        return response;
-                    }
-                };
-                let extractor = state.document_extractor.clone();
-                let extracted = tokio::task::spawn_blocking(move || {
-                    let _permit = permit;
-                    extractor
-                        .extract_text(file_name.as_deref(), content_type.as_deref(), &data)
-                        .map(|text| (text, data))
-                })
-                .await;
-                match extracted {
-                    Err(error) => {
-                        tracing::error!(%error, "document parser task failed");
-                        return api_error(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "Internal server error",
-                        );
-                    }
-                    Ok(Ok((text, data))) => {
+                match extract_uploaded_document(&state, file_name, content_type, data).await {
+                    Ok((text, data)) => {
                         content = Some(text);
                         source_bytes = Some(data);
                     }
-                    Ok(Err(error)) => return document_error_response(error),
+                    Err(response) => return *response,
                 }
             }
             _ => {
@@ -926,6 +966,154 @@ async fn upload_novel(
                 message:
                     "Novel file uploaded and import started. Poll /novels/:id/status for progress."
                         .into(),
+            }),
+        )
+            .into_response(),
+        Err(error) => import_error_response(error),
+    }
+}
+
+struct BatchUploadFile {
+    title: String,
+    content: String,
+    source_bytes: bytes::Bytes,
+}
+
+/// POST /novels/upload/batch -- atomically accept a bounded set of files.
+async fn upload_novel_batch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    multipart: Result<Multipart, MultipartRejection>,
+) -> Response {
+    let Some(user_id) = extract_user_id(&headers) else {
+        return api_error(
+            StatusCode::UNAUTHORIZED,
+            "Missing or invalid X-User-Id header",
+        );
+    };
+    let mut multipart = match multipart {
+        Ok(multipart) => multipart,
+        Err(error) => {
+            tracing::warn!(error = ?error, "batch multipart upload rejected");
+            return api_error(StatusCode::BAD_REQUEST, "Invalid multipart upload");
+        }
+    };
+    let mut author: Option<String> = None;
+    let mut deviation_mode: Option<String> = None;
+    let mut uploads = Vec::new();
+    let mut total_file_bytes = 0usize;
+
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(error) => {
+                tracing::warn!(error = ?error, "invalid batch multipart upload");
+                return api_error(StatusCode::BAD_REQUEST, "Invalid multipart upload");
+            }
+        };
+        match field.name().unwrap_or("") {
+            "author" => {
+                author = match field.text().await {
+                    Ok(value) => Some(value),
+                    Err(_) => return api_error(StatusCode::BAD_REQUEST, "Invalid author field"),
+                };
+            }
+            "deviation_mode" => {
+                deviation_mode = match field.text().await {
+                    Ok(value) => Some(value),
+                    Err(_) => {
+                        return api_error(StatusCode::BAD_REQUEST, "Invalid deviation mode field")
+                    }
+                };
+            }
+            "file" => {
+                if uploads.len() >= MAX_BATCH_IMPORTS {
+                    return api_error(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        format!("A batch can contain at most {MAX_BATCH_IMPORTS} novels"),
+                    );
+                }
+                let Some(file_name) = field.file_name().map(str::to_owned) else {
+                    return api_error(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "Every batch file must have a file name",
+                    );
+                };
+                let Some(title) = title_from_file_name(&file_name) else {
+                    return api_error(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "Every batch file name must contain a title",
+                    );
+                };
+                let content_type = field.content_type().map(str::to_owned);
+                let data = match field.bytes().await {
+                    Ok(data) => data,
+                    Err(_) => return api_error(StatusCode::BAD_REQUEST, "Invalid file upload"),
+                };
+                total_file_bytes = match total_file_bytes.checked_add(data.len()) {
+                    Some(total) if total <= MAX_BATCH_FILE_BYTES => total,
+                    _ => {
+                        return api_error(
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "Batch files exceed the 40 MiB combined limit",
+                        )
+                    }
+                };
+                let (content, source_bytes) =
+                    match extract_uploaded_document(&state, Some(file_name), content_type, data)
+                        .await
+                    {
+                        Ok(extracted) => extracted,
+                        Err(response) => return *response,
+                    };
+                uploads.push(BatchUploadFile {
+                    title,
+                    content,
+                    source_bytes,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    if uploads.is_empty() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "At least one file must be uploaded",
+        );
+    }
+    let batch_size = uploads.len();
+    let mut commands = Vec::with_capacity(batch_size);
+    for upload in uploads {
+        let (title, author, deviation_mode) =
+            match validate_metadata(upload.title, author.clone(), deviation_mode.clone()) {
+                Ok(metadata) => metadata,
+                Err((status, message)) => return api_error(status, message),
+            };
+        commands.push(ImportNovelCommand {
+            user_id,
+            title,
+            author,
+            raw_content: Some(upload.content),
+            source_bytes: Some(upload.source_bytes),
+            deviation_mode,
+        });
+    }
+
+    match state.handler.handle_import_batch(commands).await {
+        Ok(novel_ids) => (
+            StatusCode::ACCEPTED,
+            Json(BatchImportResponse {
+                novels: novel_ids
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, novel_id)| BatchImportItemResponse {
+                        novel_id,
+                        status: if index == 0 { "parsing" } else { "pending" },
+                    })
+                    .collect(),
+                message: format!("{batch_size} novel imports accepted. Poll /novels for progress."),
             }),
         )
             .into_response(),
@@ -1611,6 +1799,19 @@ mod ownership_tests {
                 .0,
             StatusCode::UNPROCESSABLE_ENTITY
         );
+    }
+
+    #[test]
+    fn batch_titles_use_only_the_file_stem() {
+        assert_eq!(
+            title_from_file_name(r"C:\fakepath\三体.epub").as_deref(),
+            Some("三体")
+        );
+        assert_eq!(
+            title_from_file_name("archive/story.part.pdf").as_deref(),
+            Some("story.part")
+        );
+        assert_eq!(title_from_file_name(".epub"), None);
     }
 
     #[tokio::test]

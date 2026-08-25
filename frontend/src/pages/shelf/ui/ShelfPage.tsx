@@ -1,18 +1,16 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Plus, BookOpen, Clock, BookMinus, Loader2, CheckCircle, AlertCircle, Upload, RotateCcw, Settings, Library } from 'lucide-react';
+import { Plus, BookOpen, Clock, BookMinus, Loader2, CheckCircle, AlertCircle, RotateCcw, Settings, Library } from 'lucide-react';
 import {
   useNovels,
-  useImportNovel,
-  useUploadNovel,
   useDeleteNovel,
   useRetryNovel,
   useNovelCatalog,
   useAttachNovel,
-  validateNovelFile,
 } from '@/entities/novel';
 import { useAuthStore } from '@/features/auth';
+import { NovelImportModal } from '@/features/novel-import';
 import type { Novel } from '@/shared/types';
 import { getApiErrorMessage } from '@/shared/api/client';
 import { toast } from 'sonner';
@@ -241,213 +239,6 @@ function SharedLibraryModal({ onClose }: { onClose: () => void }) {
   );
 }
 
-function ImportModal({ onClose }: { onClose: () => void }) {
-  const [title, setTitle] = useState('');
-  const [author, setAuthor] = useState('');
-  const [content, setContent] = useState('');
-  const [file, setFile] = useState<File | null>(null);
-  const [deviationMode, setDeviationMode] = useState('canon');
-  const importNovel = useImportNovel();
-  const uploadNovel = useUploadNovel();
-  const isPending = importNovel.isPending || uploadNovel.isPending;
-
-  const selectFile = (selected: File | undefined) => {
-    if (!selected) return;
-    const error = validateNovelFile(selected);
-    if (error) {
-      toast.error(error);
-      return;
-    }
-    setFile(selected);
-    setContent('');
-    if (!title.trim()) {
-      setTitle(selected.name.replace(/\.(txt|epub|pdf)$/i, ''));
-    }
-  };
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!title.trim() || (!file && !content.trim())) return;
-    try {
-      if (file) {
-        await uploadNovel.mutateAsync({
-          title,
-          author: author || undefined,
-          deviationMode,
-          file,
-        });
-      } else {
-        await importNovel.mutateAsync({
-          title,
-          author: author || undefined,
-          content,
-          deviation_mode: deviationMode,
-        });
-      }
-      toast.success('小说导入已开始');
-      onClose();
-    } catch (error) {
-      toast.error(getApiErrorMessage(error, '小说导入失败'));
-    }
-  };
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: 'rgba(32,33,36,0.42)', backdropFilter: 'blur(8px)' }}
-      onClick={(e) => e.target === e.currentTarget && onClose()}
-    >
-      <motion.div
-        initial={{ opacity: 0, scale: 0.95, y: 20 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.95, y: 20 }}
-        className="surface-card flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden"
-      >
-        <div className="shrink-0 px-6 pt-6 sm:px-8 sm:pt-8">
-          <h2 className="mb-2 text-2xl font-medium text-[#1f1f1f]">
-            导入小说
-          </h2>
-          <p className="text-sm text-[#5f6368]">上传文件或粘贴正文，系统会自动拆分章节并提取角色。</p>
-        </div>
-
-        <form onSubmit={handleSubmit} className="flex min-h-0 flex-col">
-          <div className="space-y-5 overflow-y-auto px-6 py-6 sm:px-8">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <label className="mb-1.5 block text-sm font-medium text-[#3c4043]">
-                  书名 *
-                </label>
-                <input
-                  value={title}
-                  onChange={(e) => setTitle(e.target.value)}
-                  placeholder="输入小说名称"
-                  required
-                  className="field-control text-sm"
-                />
-              </div>
-              <div>
-                <label className="mb-1.5 block text-sm font-medium text-[#3c4043]">
-                  作者
-                </label>
-                <input
-                  value={author}
-                  onChange={(e) => setAuthor(e.target.value)}
-                  placeholder="可选"
-                  className="field-control text-sm"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="mb-2 block text-sm font-medium text-[#3c4043]">
-                故事偏离度
-              </label>
-              <div className="grid gap-2 sm:grid-cols-3">
-                {[
-                  { value: 'canon', label: '忠实原著', desc: '严格遵循原著' },
-                  { value: 'creative', label: '创意扩展', desc: '在原著基础上发挥' },
-                  { value: 'remix', label: '自由改写', desc: '大胆改变走向' },
-                ].map((opt) => (
-                  <button
-                    key={opt.value}
-                    type="button"
-                    onClick={() => setDeviationMode(opt.value)}
-                    className="rounded-xl p-3 text-left transition-colors"
-                    style={{
-                      background: deviationMode === opt.value ? '#e8f0fe' : '#fff',
-                      border: `1px solid ${deviationMode === opt.value ? '#0b57d0' : '#dadce0'}`,
-                    }}
-                  >
-                    <div className="text-xs font-semibold text-[#1f1f1f]">{opt.label}</div>
-                    <div className="mt-1 text-xs text-[#5f6368]">{opt.desc}</div>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <label className="mb-2 block text-sm font-medium text-[#3c4043]">
-                小说文件
-              </label>
-              <label
-                className="flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl px-4 py-6 text-sm transition-colors"
-                style={{
-                  background: file ? '#e6f4ea' : '#f8fafd',
-                  border: `1px dashed ${file ? '#188038' : '#9aa0a6'}`,
-                  color: file ? '#188038' : '#5f6368',
-                }}
-              >
-                <Upload size={16} />
-                {file ? file.name : '选择 TXT、EPUB 或 PDF 文件'}
-                <input
-                  type="file"
-                  accept=".txt,.epub,.pdf,text/plain,application/epub+zip,application/pdf"
-                  className="sr-only"
-                  onChange={(event) => selectFile(event.target.files?.[0])}
-                />
-              </label>
-              <p className="mt-1.5 text-xs text-[#5f6368]">
-                TXT 最大 10 MiB；EPUB/PDF 最大 20 MiB
-              </p>
-            </div>
-
-            <div className="flex items-center gap-3" aria-hidden="true">
-              <div className="h-px flex-1 bg-[#dadce0]" />
-              <span className="text-xs text-[#5f6368]">或粘贴正文</span>
-              <div className="h-px flex-1 bg-[#dadce0]" />
-            </div>
-
-            <div>
-              <label className="mb-1.5 block text-sm font-medium text-[#3c4043]">
-                小说内容 {!file && '*'}
-              </label>
-              <textarea
-                value={content}
-                onChange={(e) => {
-                  setContent(e.target.value);
-                  if (e.target.value) setFile(null);
-                }}
-                placeholder="粘贴小说全文内容（支持中英文，建议至少粘贴前3章用于角色提取）"
-                rows={6}
-                required={!file}
-                className="field-control resize-none text-sm"
-                style={{
-                  fontFamily: 'var(--font-reading)',
-                  lineHeight: '1.8',
-                }}
-              />
-              <p className="mt-1 text-xs text-[#5f6368]">
-                字数：{content.length.toLocaleString()} 字
-              </p>
-            </div>
-          </div>
-
-          <div className="flex shrink-0 justify-end gap-3 border-t border-[#e8eaed] px-6 py-4 sm:px-8">
-              <button
-                type="button"
-                onClick={onClose}
-                className="tonal-action text-sm"
-              >
-                取消
-              </button>
-              <button
-                type="submit"
-                disabled={isPending || !title.trim() || (!file && !content.trim())}
-                className="primary-action text-sm"
-              >
-                {isPending ? (
-                  <><Loader2 size={14} className="animate-spin" /> 导入中...</>
-                ) : (
-                  <><Upload size={14} /> 开始导入</>
-                )}
-              </button>
-          </div>
-        </form>
-      </motion.div>
-    </div>
-  );
-}
-
 export function ShelfPage() {
   const navigate = useNavigate();
   const user = useAuthStore(state => state.user);
@@ -564,7 +355,7 @@ export function ShelfPage() {
       </main>
 
       <AnimatePresence>
-        {showImport && <ImportModal onClose={() => setShowImport(false)} />}
+        {showImport && <NovelImportModal onClose={() => setShowImport(false)} />}
         {showSharedLibrary && <SharedLibraryModal onClose={() => setShowSharedLibrary(false)} />}
       </AnimatePresence>
     </div>
