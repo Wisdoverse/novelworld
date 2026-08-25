@@ -113,7 +113,6 @@ impl AgentMemoryPort for AgentServiceClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::handlers::journey_memory_id;
     use axum::{
         extract::State,
         http::{HeaderMap, StatusCode},
@@ -139,7 +138,7 @@ mod tests {
         let character_id = Uuid::parse_str("20000000-0000-4000-8000-000000000002").unwrap();
         let user_id = Uuid::parse_str("30000000-0000-4000-8000-000000000003").unwrap();
         let novel_id = Uuid::parse_str("40000000-0000-4000-8000-000000000004").unwrap();
-        let memory_id = journey_memory_id(source_turn_id);
+        let memory_id = Uuid::parse_str("50000000-0000-4000-8000-000000000005").unwrap();
         let event = serde_json::json!({
             "schema_version": 2,
             "source": "committed_world_turn",

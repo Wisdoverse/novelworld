@@ -121,7 +121,8 @@ pub trait ChatRepository: Send + Sync {
 }
 
 /// Lightweight character info used by agent-service.
-/// Queried from the shared characters table (owned by novel-service).
+/// Fetched from novel-service through this domain port; agent-service never
+/// reads novel-service-owned tables directly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CharacterInfo {
     pub id: Uuid,

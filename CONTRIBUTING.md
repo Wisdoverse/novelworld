@@ -15,8 +15,9 @@ and [agent instructions](./AGENTS.md) before changing behavior.
 
 ## Development setup
 
-Prerequisites are Rust 1.78 or newer, Node.js 22 or newer, pnpm, Docker, and
-Docker Compose.
+Prerequisites are current stable Rust (the locked dependency graph currently
+requires Rust 1.94.1 or newer), Node.js 22 or newer, pnpm, Docker, and Docker
+Compose.
 
 ```bash
 git clone https://github.com/<you>/novelworld.git
@@ -50,14 +51,41 @@ implementation choices stay in the pull request.
 
 ## Engineering constraints
 
-Backend changes must preserve DDD and service ownership:
+Backend changes must preserve the private `single-node-v1` Cloud Native, DDD,
+and microservice contract:
 
-- Domain layers do not import infrastructure or interface types.
+- Domain layers do not import application, infrastructure, interface, or
+  concrete adapter types. Application code depends on ports, not adapters.
 - External systems are reached through domain ports and infrastructure
   adapters.
-- Services communicate over HTTP and never read another service's tables.
+- Services communicate over HTTP adapters and runtime packages do not depend
+  on one another. Runtime SQL is checked against the versioned relation-owner
+  manifest.
+- Authoritative facts are externalized; process-local state is disposable
+  cache/projection/admission only. Each runtime keeps external configuration,
+  separate liveness/readiness, JSON tracing, metrics, and graceful signals.
+- New or changed dependency calls define their deadline and retry behavior;
+  existing unqualified timeout/drain paths are gaps, not reusable defaults.
 - SQL uses parameterized bindings; LLM calls use the shared bounded retry
   contract.
+
+`cargo run --locked -p architecture-check -- check` scans the reachable module
+graph of all five runtime packages. Production modules and tests nested inside
+a DDD layer are checked for layer and SQL violations. Root `cfg(test)`
+composition modules are still SQL-scanned but have no DDD layer assignment;
+runtime-hook evidence must come from reachable non-test code. The gate blocks
+layer inversions, unreviewed domain/application crates and local helpers,
+concrete adapter leakage, reviewed non-HTTP/raw transport patterns,
+unanalyzable SQL, owner violations, relation/routine inventory drift, cross-owner
+view/routine/trigger dependencies, undeclared cross-owner foreign keys, and
+missing static runtime hooks. Existing shared-schema debt is exact and visible,
+not a general allowlist; adding declared debt is a versioned policy change that
+must be justified in review.
+
+Ten existing migrations contain executable `DO` bodies that the conservative
+parser intentionally does not interpret. Each is an exact normalized full-file
+hash debt; any edit reopens the blocker. New or changed migrations must pass the
+strict statement, ownership, view, routine, trigger, and foreign-key audit.
 
 Frontend changes must preserve Feature-Sliced Design:
 
@@ -95,10 +123,17 @@ review.
 
 ```bash
 cargo fmt --all -- --check
+cargo run --locked -p architecture-check -- self-test
+cargo run --locked -p architecture-check -- check
 cargo check --workspace --exclude integration-tests
 cargo test --workspace --exclude integration-tests
 cargo clippy --workspace --exclude integration-tests --all-targets -- -D warnings
 ```
+
+The backend architecture gate is static source evidence. It does not prove
+database grants, complete timeout/drain behavior, recovery drills, alerting,
+capacity, multi-replica safety, horizontal scaling, or public deployment.
+Those claims require their own runtime or migration evidence.
 
 ### Frontend
 

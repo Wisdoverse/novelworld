@@ -314,7 +314,7 @@ the platform key without seeing its aggregate cost.
 <summary>Click to expand</summary>
 
 **Prerequisites:**
-- [Rust](https://rustup.rs/) ≥ 1.78
+- Current stable [Rust](https://rustup.rs/) (the locked dependency graph currently requires ≥ 1.94.1)
 - [Docker](https://docs.docker.com/get-docker/)
 - [Node.js](https://nodejs.org/) 22+ & [pnpm](https://pnpm.io/)
 - OpenAI-compatible API key
@@ -386,6 +386,14 @@ Sign up → Upload novel → Wait for parsing → Start reading
 | Frontend | React + TypeScript | Tailwind CSS, Feature-Sliced Design |
 | Server deploy | Docker Compose | 9 long-running containers plus a migration job |
 | Desktop deploy | Tauri portable bundle | Same five services on loopback + bundled pg0; no Docker |
+
+The five Rust runtimes have statically enforced DDD, HTTP, and relation-owner
+boundaries, but the current private `single-node-v1` deployment still uses one
+PostgreSQL schema/role, 20 declared cross-owner foreign keys, two exact
+lifecycle-trigger accesses, five cross-owner trigger/routine bindings, and ten
+full-file-hash debts for historical executable migrations. This is not a claim
+of physical database isolation, replica safety, or horizontal scaling; see the
+[architecture evidence limits](./docs/ARCHITECTURE.md#code-boundaries).
 
 ---
 

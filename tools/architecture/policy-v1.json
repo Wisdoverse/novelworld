@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "deployment_profile": "private-single-node-v1",
+  "runtimes": [
+    {
+      "package": "gateway",
+      "root": "gateway",
+      "liveness_path": "/live",
+      "readiness_path": "/ready",
+      "required_env": ["RUST_LOG", "BIND_ADDR", "PORT", "JWT_SECRET", "INTERNAL_SERVICE_TOKEN"],
+      "allowed_workspace_helpers": []
+    },
+    {
+      "package": "user-service",
+      "root": "services/user-service",
+      "liveness_path": "/health",
+      "readiness_path": "/ready",
+      "required_env": ["RUST_LOG", "BIND_ADDR", "PORT", "DATABASE_URL", "JWT_SECRET", "RUNTIME_CONFIG_KEY", "INTERNAL_SERVICE_TOKEN"],
+      "allowed_workspace_helpers": ["llm-client"]
+    },
+    {
+      "package": "novel-service",
+      "root": "services/novel-service",
+      "liveness_path": "/health",
+      "readiness_path": "/ready",
+      "required_env": ["RUST_LOG", "BIND_ADDR", "PORT", "DATABASE_URL", "INTERNAL_SERVICE_TOKEN"],
+      "allowed_workspace_helpers": ["llm-client"]
+    },
+    {
+      "package": "agent-service",
+      "root": "services/agent-service",
+      "liveness_path": "/health",
+      "readiness_path": "/ready",
+      "required_env": ["RUST_LOG", "BIND_ADDR", "PORT", "DATABASE_URL", "INTERNAL_SERVICE_TOKEN"],
+      "allowed_workspace_helpers": ["llm-client"]
+    },
+    {
+      "package": "narrative-service",
+      "root": "services/narrative-service",
+      "liveness_path": "/health",
+      "readiness_path": "/ready",
+      "required_env": ["RUST_LOG", "BIND_ADDR", "PORT", "DATABASE_URL", "INTERNAL_SERVICE_TOKEN"],
+      "allowed_workspace_helpers": ["llm-client"]
+    }
+  ]
+}

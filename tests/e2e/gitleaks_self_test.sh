@@ -16,7 +16,7 @@ export GITLEAKS_WORK
 if [ -x .tools-bin/gitleaks ]; then
   scan() {
     .tools-bin/gitleaks detect --no-banner --exit-code 42 \
-      --config .gitleaks.toml --source "$1"
+      --config .gitleaks.toml --log-opts HEAD --source "$1"
   }
 else
   repo_mount=$PWD
@@ -33,12 +33,12 @@ else
     esac
     docker run --rm -v "$repo_mount:/repo" -v "$work_mount:/plant" \
       ghcr.io/gitleaks/gitleaks:v8.24.3 detect --no-banner \
-      --exit-code 42 --config /repo/.gitleaks.toml --source "$src"
+      --exit-code 42 --config /repo/.gitleaks.toml --log-opts HEAD --source "$src"
   }
 fi
 
 # The planted token is generated at runtime: a committed ghp_-shaped literal
-# would trip the repository's own delta scan in CI.
+# would trip the repository's current-history scan in CI.
 plant_token="ghp_$(python3 -c 'import secrets,string; print("".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(36)))')"
 plant="$GITLEAKS_WORK/plant"
 mkdir -p "$plant"
@@ -67,6 +67,20 @@ if [ "$plant_status" -ne 42 ]; then
   exit 1
 fi
 printf 'self-test: ok   a planted GitHub token fails the gate\n'
+
+# A full-depth checkout contains remote refs that are not part of the change
+# under test. Keep the planted leak reachable from the original branch, then
+# prove that a clean HEAD is not poisoned by that unrelated ref.
+(
+  cd "$plant"
+  git checkout -qb clean HEAD~1
+)
+if ! scan "$plant" >"$GITLEAKS_WORK/unrelated-ref.out" 2>&1; then
+  printf 'self-test: FAIL an unrelated ref poisoned the clean HEAD scan\n' >&2
+  cat "$GITLEAKS_WORK/unrelated-ref.out" >&2
+  exit 1
+fi
+printf 'self-test: ok   unrelated refs do not poison the clean HEAD scan\n'
 
 if ! scan "$PWD" >"$GITLEAKS_WORK/repo.out" 2>&1; then
   printf 'self-test: FAIL the repository is not clean under the committed config\n' >&2

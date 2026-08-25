@@ -97,6 +97,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all -- --check
+      - name: Self-test backend architecture policy
+        run: cargo run --locked -p architecture-check -- self-test
+      - name: Enforce backend architecture boundaries
+        run: cargo run --locked -p architecture-check -- check
       - name: Check
         run: cargo check --workspace --exclude integration-tests
       - name: Horizon 3 offline evaluation gate
@@ -154,7 +158,8 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/repo" \
             ghcr.io/gitleaks/gitleaks:v8.24.3 \
-            detect --no-banner --config /repo/.gitleaks.toml --exit-code 2 --source /repo
+            detect --no-banner --config /repo/.gitleaks.toml --exit-code 2 \
+            --log-opts HEAD --source /repo
       - name: Self-test the secret-scanning gate
         run: tests/e2e/gitleaks_self_test.sh
 
