@@ -70,6 +70,18 @@ def control_snapshot():
         }
 
 
+def committed_world_context(request):
+    marker = "## 已提交开放世界上下文\n"
+    for message in request.get("messages", []):
+        content = message.get("content", "")
+        if message.get("role") == "system" and content.startswith(marker):
+            try:
+                return json.loads(content.rsplit("\n", 1)[1])
+            except (json.JSONDecodeError, TypeError):
+                return None
+    return None
+
+
 def reset_control(request):
     delays = request.get("delays_ms", {})
     failures = request.get("failures_remaining", {})
@@ -141,14 +153,27 @@ class Handler(BaseHTTPRequestHandler):
             return self.json_response({"error": {"message": "not found"}}, 404)
         if request.get("stream"):
             assert request.get("stream_options") == {"include_usage": True}
+            world_context = committed_world_context(request)
             reply = (
                 "林岚知道你已经改变了两回合的世界，也会依照自己的目标继续调查。"
                 if (
-                    "## 已提交开放世界上下文" in prompt
-                    and '"turn_number":2' in prompt
-                    and '"recent_actions"' in prompt
-                    and "与林岚立即前往北塔" in prompt
-                    and "绘制地下回廊并寻找守门人的踪迹" in prompt
+                    world_context is not None
+                    and world_context.get("turn_number") == 2
+                    and world_context.get("world_time") == 2
+                    and world_context.get("recent_actions") == []
+                    and world_context.get("recent_player_events")
+                    == [
+                        {
+                            "turn_number": 1,
+                            "world_time": 1,
+                            "summary": "云舟调查北塔换防",
+                        },
+                        {
+                            "turn_number": 2,
+                            "world_time": 2,
+                            "summary": "云舟整理地下回廊线索",
+                        },
+                    ]
                 )
                 else "林岚记得你，也愿意继续同行。"
             )
@@ -319,8 +344,8 @@ class Handler(BaseHTTPRequestHandler):
                 "events": [{
                     "summary": "云舟调查北塔换防" if first_turn else "云舟整理地下回廊线索",
                     # 林岚在两段叙事中都有明确、独立的见证/行动；this
-                    # explicit provenance is what permits her chat context to
-                    # receive the correlated player action.
+                    # explicit provenance permits the event summaries, not the
+                    # player's private action intent, to enter her chat context.
                     "actor_character_ids": [context["characters"][0]["id"]],
                     "location_id": context["locations"][0]["id"],
                 }],
