@@ -84,12 +84,13 @@ for _ in $(seq 1 45); do
   fi
 done
 [ "$state" = ready ] || { printf 'novel did not become ready: %s\n' "$status" >&2; exit 1; }
-[ "$retried" = true ]
+[ "$retried" = false ]
+[ "$("${curl_cmd[@]}" "$stub/__control__/stats" | json_get "value['failures_remaining']['canon']")" = 0 ]
 
 canon_snapshot=$(docker exec novel-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT model_version || ':' || schema_version || ':' || prompt_version || ':' || md5(content::text) FROM canon_story_models WHERE novel_id = '$novel_id'")
-[[ "$canon_snapshot" == 1:1:canon-chunk-v1:* ]]
+[[ "$canon_snapshot" == 1:1:canon-chunk-v3:* ]]
 
 pause
 chapters=$("${curl_cmd[@]}" "${auth[@]}" "$api/novels/$novel_id/chapters")
@@ -183,6 +184,7 @@ failed_choice_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-e
   --data "{\"novel_id\":\"$novel_id\",\"node_id\":\"$node_id\",\"choice_index\":0}" \
   "$api/narrative/choose")
 [ "$failed_choice_status" = 502 ]
+[ "$(json_get "value['error']['code']" <"$failed_choice_file")" = llm_error ]
 failed_writes=$(docker exec novel-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT (SELECT COUNT(*) FROM user_choices WHERE user_id = (SELECT id FROM users WHERE email = '$email') AND node_id = '$node_id') || ':' || (SELECT COUNT(*) FROM player_chapters WHERE user_id = (SELECT id FROM users WHERE email = '$email') AND novel_id = '$novel_id' AND chapter_number = 1) || ':' || (SELECT jsonb_array_length(state -> 'choices') FROM world_states WHERE user_id = (SELECT id FROM users WHERE email = '$email') AND novel_id = '$novel_id')")

@@ -9,7 +9,7 @@ ANCHOR = "林岚握紧手中的旧地图，望向被风暴笼罩的北塔，决�
 ENDING = "北塔的石门布满潮湿苔痕，林岚在门边发现守门人留下的铜铃。"
 CONTROL_LOCK = threading.Lock()
 DELAYS_MS = {}
-FAILURES_REMAINING = {"canon": 1, "narrative_transition": 1, "world_turn": 0}
+FAILURES_REMAINING = {"canon": 1, "narrative_transition": 3, "world_turn": 0}
 CALLS = {}
 ACTIVE = {}
 PEAK = {}
@@ -179,8 +179,6 @@ class Handler(BaseHTTPRequestHandler):
             final_chunk = "FINAL_CHUNK: true" in prompt
             excerpt = ENDING if final_chunk else ANCHOR
             return json.dumps({
-                "coverage_summary": "林岚调查北塔与守门人失踪事件。",
-                "coverage_evidence": {"excerpt": excerpt, "confidence": 1.0},
                 "arc": {
                     "key": "north-tower-investigation",
                     "title": "北塔调查",
@@ -270,6 +268,13 @@ class Handler(BaseHTTPRequestHandler):
                 "choices": [
                     {"text": "与林岚立即前往北塔", "hint": "风暴中藏着线索……"},
                     {"text": "先向边城居民调查", "hint": "旧传闻可能并非虚构……"},
+                ],
+            }, {
+                "chapter_number": 2,
+                "description": "北塔石门缓缓开启，玩家必须决定如何回应塔内的异动。",
+                "choices": [
+                    {"text": "跟随林岚进入回廊", "hint": "铜铃标记着一条隐秘路线……"},
+                    {"text": "留在塔门观察足迹", "hint": "来者或许仍藏在风暴之中……"},
                 ],
             }]}, ensure_ascii=False)
         if "anchor_quote" in prompt:
