@@ -588,7 +588,7 @@ delete_character_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
 delete_message_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
 docker exec novel-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -v ON_ERROR_STOP=1 \
-  -c "INSERT INTO novels (id, user_id, title, status) VALUES ('$delete_novel_id', '$user_id', 'Deletion contract', 'ready'); INSERT INTO characters (id, novel_id, name) VALUES ('$delete_character_id', '$delete_novel_id', 'Deletion witness');" >/dev/null
+  -c "INSERT INTO novels (id, user_id, title, status) VALUES ('$delete_novel_id', '$user_id', 'Deletion contract', 'ready'); INSERT INTO user_novels (user_id, novel_id) VALUES ('$user_id', '$delete_novel_id'); INSERT INTO characters (id, novel_id, name) VALUES ('$delete_character_id', '$delete_novel_id', 'Deletion witness');" >/dev/null
 delete_cache_message=$(python3 -c "import json; print(json.dumps({'id':'$delete_message_id','turn_id':None,'user_id':'$user_id','character_id':'$delete_character_id','novel_id':'$delete_novel_id','role':'user','content':'delete this projection','reader_identity':None,'chapter_context':1,'created_at':'2026-01-01T00:00:00Z'}, separators=(',',':')))")
 docker exec novel-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD:-runtime-redis-only}" \
   LPUSH "chat:$delete_character_id:$user_id" "$delete_cache_message" >/dev/null
@@ -600,7 +600,7 @@ test "$(docker exec novel-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD
 test "$(docker exec novel-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD:-runtime-redis-only}" EXISTS "chat:$character_id:$user_id")" = 1
 test "$(docker exec novel-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
-  -c "SELECT (SELECT COUNT(*) FROM novels WHERE id = '$delete_novel_id') || ':' || (SELECT COUNT(*) FROM characters WHERE id = '$delete_character_id')")" = 0:0
+  -c "SELECT (SELECT COUNT(*) FROM novels WHERE id = '$delete_novel_id') || ':' || (SELECT COUNT(*) FROM characters WHERE id = '$delete_character_id') || ':' || (SELECT COUNT(*) FROM user_novels WHERE user_id = '$user_id' AND novel_id = '$delete_novel_id')")" = 1:1:0
 pause
 test "$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   --output /dev/null --write-out '%{http_code}' "${auth[@]}" \
@@ -627,10 +627,21 @@ test "$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   -X DELETE "$api/auth/me")" = 204
 test "$(docker exec novel-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD:-runtime-redis-only}" EXISTS "chat:$character_id:$user_id")" = 0
 
-erased_counts=$(docker exec novel-postgres psql \
+erased_private_counts=$(docker exec novel-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
-  -c "SELECT (SELECT COUNT(*) FROM users) || ':' || (SELECT COUNT(*) FROM novels) || ':' || (SELECT COUNT(*) FROM chapters) || ':' || (SELECT COUNT(*) FROM chapter_chunks) || ':' || (SELECT COUNT(*) FROM characters) || ':' || (SELECT COUNT(*) FROM character_relationships) || ':' || (SELECT COUNT(*) FROM character_memories) || ':' || (SELECT COUNT(*) FROM chat_turns) || ':' || (SELECT COUNT(*) FROM chat_messages) || ':' || (SELECT COUNT(*) FROM narrative_nodes) || ':' || (SELECT COUNT(*) FROM user_choices) || ':' || (SELECT COUNT(*) FROM world_states) || ':' || (SELECT COUNT(*) FROM world_turns) || ':' || (SELECT COUNT(*) FROM player_chapters) || ':' || (SELECT COUNT(*) FROM canon_story_models) || ':' || (SELECT COUNT(*) FROM reading_progress) || ':' || (SELECT COUNT(*) FROM refresh_tokens) || ':' || (SELECT COUNT(*) FROM runtime_llm_config)")
-[ "$erased_counts" = 0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0 ]
+  -c "SELECT (SELECT COUNT(*) FROM users WHERE id = '$user_id') || ':' || (SELECT COUNT(*) FROM user_novels WHERE user_id = '$user_id') || ':' || (SELECT COUNT(*) FROM character_memories WHERE user_id = '$user_id') || ':' || (SELECT COUNT(*) FROM chat_turns WHERE user_id = '$user_id') || ':' || (SELECT COUNT(*) FROM chat_messages WHERE user_id = '$user_id') || ':' || (SELECT COUNT(*) FROM narrative_nodes WHERE user_id = '$user_id') || ':' || (SELECT COUNT(*) FROM user_choices WHERE user_id = '$user_id') || ':' || (SELECT COUNT(*) FROM world_states WHERE user_id = '$user_id') || ':' || (SELECT COUNT(*) FROM world_turns WHERE user_id = '$user_id') || ':' || (SELECT COUNT(*) FROM player_chapters WHERE user_id = '$user_id') || ':' || (SELECT COUNT(*) FROM reading_progress WHERE user_id = '$user_id') || ':' || (SELECT COUNT(*) FROM refresh_tokens WHERE user_id = '$user_id') || ':' || (SELECT COUNT(*) FROM user_llm_configs WHERE user_id = '$user_id')")
+[ "$erased_private_counts" = 0:0:0:0:0:0:0:0:0:0:0:0:0 ]
+test "$(docker exec novel-postgres psql \
+  -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
+  -c "SELECT COUNT(*) FROM runtime_llm_config")" = 0
+retained_canonical_counts=$(docker exec novel-postgres psql \
+  -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
+  -c "SELECT (SELECT COUNT(*) FROM novels WHERE id IN ('$novel_id', '$delete_novel_id')) || ':' || (SELECT COUNT(*) FROM novel_import_jobs WHERE novel_id = '$novel_id') || ':' || (SELECT COUNT(*) FROM chapters WHERE novel_id = '$novel_id') || ':' || (SELECT COUNT(*) FROM chapter_chunks AS chunk JOIN chapters AS chapter ON chapter.id = chunk.chapter_id WHERE chapter.novel_id = '$novel_id') || ':' || (SELECT COUNT(*) FROM characters WHERE novel_id IN ('$novel_id', '$delete_novel_id')) || ':' || (SELECT COUNT(*) FROM character_relationships WHERE novel_id = '$novel_id') || ':' || (SELECT COUNT(*) FROM canon_story_models WHERE novel_id = '$novel_id')")
+[ "$retained_canonical_counts" = 2:1:2:2:2:1:1 ]
+erasure_counts=$(docker exec novel-postgres psql \
+  -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
+  -c "SELECT (SELECT COUNT(*) FROM erasure_records WHERE subject_type = 'user' AND subject_id = '$user_id') || ':' || (SELECT COUNT(*) FROM erasure_records WHERE subject_type = 'novel' AND subject_id IN ('$novel_id', '$delete_novel_id'))")
+[ "$erasure_counts" = 1:0 ]
 
 pause
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
