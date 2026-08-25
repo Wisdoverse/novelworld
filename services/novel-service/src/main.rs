@@ -22,6 +22,7 @@ use novel_service::{
     },
     infrastructure::{
         document::EbookTextExtractor,
+        http::privacy::AgentPrivacyClient,
         llm::{image::ImageClient, LlmAdapter},
         object_storage::{S3SourceFileStorage, S3StorageConfig},
         persistence::{
@@ -33,7 +34,6 @@ use novel_service::{
             pg_progress_repo::PgReadingProgressRepository,
             source_file_deletion_pg_repo::PgSourceFileDeletionRepository, PgReadinessProbe,
         },
-        privacy::AgentPrivacyClient,
     },
     interface::http::{router, AppState},
 };

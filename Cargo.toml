@@ -11,6 +11,7 @@ members = [
     "tests/integration",
     "tools/h3-eval",
     "tools/h1-eval",
+    "tools/architecture",
 ]
 
 [workspace.dependencies]

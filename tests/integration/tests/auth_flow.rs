@@ -4,7 +4,6 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
-use tokio::sync::Semaphore;
 use user_service::{
     application::handlers::{AuthError, AuthHandler, LlmSettingsScope},
     domain::{
@@ -16,7 +15,9 @@ use user_service::{
         repositories::{AccountDeletion, UserRepository, UserSave},
     },
     infrastructure::{
-        auth::jwt::JwtService, llm::LlmClientTester, persistence::pg_user_repo::PgUserRepository,
+        auth::{jwt::JwtService, password::BcryptPasswordHasher},
+        llm::LlmClientTester,
+        persistence::pg_user_repo::PgUserRepository,
     },
 };
 use uuid::Uuid;
@@ -85,7 +86,7 @@ async fn initial_admin_is_durable_and_single_winner() {
         privacy_cleanup: Arc::new(RecordingPrivacyCleanup::default()),
         environment_llm_config: None,
         refresh_token_expiry: 60,
-        password_work: Arc::new(Semaphore::new(1)),
+        password_hasher: Arc::new(BcryptPasswordHasher::new(0)),
     };
     assert!(matches!(
         empty_handler
@@ -149,12 +150,6 @@ async fn initial_admin_is_durable_and_single_winner() {
             .unwrap(),
         1
     );
-    let _held = empty_handler
-        .password_work
-        .clone()
-        .acquire_owned()
-        .await
-        .unwrap();
     assert!(matches!(
         empty_handler
             .register("capacity@test.invalid", "password123", None)
@@ -363,7 +358,7 @@ async fn account_erasure_fails_closed_cascades_owned_data_and_resets_final_setup
         privacy_cleanup,
         environment_llm_config: None,
         refresh_token_expiry: 60,
-        password_work: Arc::new(Semaphore::new(2)),
+        password_hasher: Arc::new(BcryptPasswordHasher::new(2)),
     };
     let admin_settings = handler(Arc::new(RecordingPrivacyCleanup::default()))
         .llm_settings(admin.id)

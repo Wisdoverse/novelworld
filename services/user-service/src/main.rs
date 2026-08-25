@@ -3,7 +3,6 @@ use anyhow::Result;
 use axum::{extract::Request, middleware, middleware::Next, response::Response};
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
-use tokio::sync::Semaphore;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::Instrument;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -12,11 +11,11 @@ use user_service::{
     application::handlers::{AuthHandler, LlmUsageHandler},
     domain::{self, entities::runtime_config::RuntimeLlmConfig},
     infrastructure::{
-        auth::jwt::JwtService,
+        auth::{jwt::JwtService, password::BcryptPasswordHasher},
+        http::privacy::AgentPrivacyClient,
         llm::LlmClientTester,
         llm_usage::{pricing_from_config, PrometheusLlmUsageReader},
         persistence::{pg_user_repo::PgUserRepository, PgReadinessProbe},
-        privacy::AgentPrivacyClient,
     },
     interface::http::{router, AppState},
 };
@@ -112,7 +111,7 @@ async fn run_body() -> Result<()> {
             privacy_cleanup,
             environment_llm_config: environment_llm_config.clone(),
             refresh_token_expiry,
-            password_work: Arc::new(Semaphore::new(2)),
+            password_hasher: Arc::new(BcryptPasswordHasher::new(2)),
         });
         let llm_usage_handler = Arc::new(LlmUsageHandler {
             user_repo,

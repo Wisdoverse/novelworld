@@ -1,0 +1,235 @@
+{
+  "version": 1,
+  "schema": "public",
+  "relations": [
+    { "name": "users", "kind": "table", "owner": "user-service" },
+    { "name": "refresh_tokens", "kind": "table", "owner": "user-service" },
+    { "name": "runtime_llm_config", "kind": "table", "owner": "user-service" },
+    { "name": "user_llm_configs", "kind": "table", "owner": "user-service" },
+
+    { "name": "novels", "kind": "table", "owner": "novel-service" },
+    { "name": "user_novels", "kind": "table", "owner": "novel-service" },
+    { "name": "novel_import_jobs", "kind": "table", "owner": "novel-service" },
+    { "name": "source_file_deletions", "kind": "table", "owner": "novel-service" },
+    { "name": "chapters", "kind": "table", "owner": "novel-service" },
+    { "name": "chapter_translations", "kind": "table", "owner": "novel-service" },
+    { "name": "chapter_chunks", "kind": "table", "owner": "novel-service" },
+    { "name": "characters", "kind": "table", "owner": "novel-service" },
+    { "name": "canon_story_models", "kind": "table", "owner": "novel-service" },
+    { "name": "canon_extraction_checkpoints", "kind": "table", "owner": "novel-service" },
+    { "name": "novel_game_rule_templates", "kind": "table", "owner": "novel-service" },
+    { "name": "reading_progress", "kind": "table", "owner": "novel-service" },
+    { "name": "character_relationships", "kind": "table", "owner": "novel-service" },
+    { "name": "user_shelf", "kind": "view", "owner": "novel-service" },
+
+    { "name": "character_memories", "kind": "table", "owner": "agent-service" },
+    { "name": "chat_turns", "kind": "table", "owner": "agent-service" },
+    { "name": "chat_messages", "kind": "table", "owner": "agent-service" },
+
+    { "name": "narrative_nodes", "kind": "table", "owner": "narrative-service" },
+    { "name": "user_choices", "kind": "table", "owner": "narrative-service" },
+    { "name": "world_states", "kind": "table", "owner": "narrative-service" },
+    { "name": "player_chapters", "kind": "table", "owner": "narrative-service" },
+    { "name": "world_turns", "kind": "table", "owner": "narrative-service" },
+
+    { "name": "erasure_records", "kind": "table", "owner": "platform" },
+    { "name": "database_lineage", "kind": "table", "owner": "platform" },
+    { "name": "restore_attestations", "kind": "table", "owner": "platform" }
+  ],
+  "routines": [
+    { "name": "queue_source_file_deletion", "owner": "novel-service" },
+    { "name": "record_user_erasure", "owner": "platform" },
+    { "name": "record_novel_erasure", "owner": "platform" },
+    { "name": "reject_canon_story_model_update", "owner": "novel-service" },
+    { "name": "reject_ready_game_rule_template_update", "owner": "novel-service" },
+    { "name": "update_updated_at", "owner": "platform" },
+    { "name": "search_memories", "owner": "agent-service" }
+  ],
+  "acknowledged_cross_owner_foreign_keys": [
+    { "child": "user_novels", "child_columns": ["user_id"], "parent": "users", "parent_columns": ["id"], "on_delete": "cascade" },
+    { "child": "character_memories", "child_columns": ["character_id"], "parent": "characters", "parent_columns": ["id"], "on_delete": "cascade" },
+    { "child": "character_memories", "child_columns": ["user_id"], "parent": "users", "parent_columns": ["id"], "on_delete": "cascade" },
+    { "child": "character_memories", "child_columns": ["novel_id"], "parent": "novels", "parent_columns": ["id"], "on_delete": "cascade" },
+    { "child": "chat_turns", "child_columns": ["user_id"], "parent": "users", "parent_columns": ["id"], "on_delete": "cascade" },
+    { "child": "chat_turns", "child_columns": ["character_id"], "parent": "characters", "parent_columns": ["id"], "on_delete": "cascade" },
+    { "child": "chat_turns", "child_columns": ["novel_id"], "parent": "novels", "parent_columns": ["id"], "on_delete": "cascade" },
+    { "child": "chat_turns", "child_columns": ["reader_character_id"], "parent": "characters", "parent_columns": ["id"], "on_delete": "cascade" },
+    { "child": "chat_messages", "child_columns": ["character_id"], "parent": "characters", "parent_columns": ["id"], "on_delete": "cascade" },
+    { "child": "chat_messages", "child_columns": ["user_id"], "parent": "users", "parent_columns": ["id"], "on_delete": "cascade" },
+    { "child": "chat_messages", "child_columns": ["novel_id"], "parent": "novels", "parent_columns": ["id"], "on_delete": "cascade" },
+    { "child": "narrative_nodes", "child_columns": ["user_id"], "parent": "users", "parent_columns": ["id"], "on_delete": "cascade" },
+    { "child": "narrative_nodes", "child_columns": ["novel_id"], "parent": "novels", "parent_columns": ["id"], "on_delete": "cascade" },
+    { "child": "user_choices", "child_columns": ["user_id"], "parent": "users", "parent_columns": ["id"], "on_delete": "cascade" },
+    { "child": "user_choices", "child_columns": ["novel_id"], "parent": "novels", "parent_columns": ["id"], "on_delete": "cascade" },
+    { "child": "world_states", "child_columns": ["user_id"], "parent": "users", "parent_columns": ["id"], "on_delete": "cascade" },
+    { "child": "world_states", "child_columns": ["novel_id"], "parent": "novels", "parent_columns": ["id"], "on_delete": "cascade" },
+    { "child": "player_chapters", "child_columns": ["user_id"], "parent": "users", "parent_columns": ["id"], "on_delete": "cascade" },
+    { "child": "player_chapters", "child_columns": ["novel_id"], "parent": "novels", "parent_columns": ["id"], "on_delete": "cascade" },
+    { "child": "reading_progress", "child_columns": ["user_id"], "parent": "users", "parent_columns": ["id"], "on_delete": "cascade" }
+  ],
+  "acknowledged_cross_owner_trigger_bindings": [
+    {
+      "id": "user-erasure-platform-routine-binding",
+      "trigger": "record_user_erasure",
+      "on_relation": "users",
+      "function": "record_user_erasure",
+      "trigger_definition_sha256": "b859ebb0e74c4aed4a8df77aaa22ed5398c41cac059c6563df11d57d364e1a85",
+      "body_sha256": "eaaed236741dcf6e5352d8a562cbbf0b9006f3ea4448bc6de4fc7c9632f77b14",
+      "reason": "the user delete trigger is intentionally attached to an exact platform-owned erasure journal routine; changing either definition requires an explicit lifecycle migration"
+    },
+    {
+      "id": "novel-erasure-platform-routine-binding",
+      "trigger": "record_novel_erasure",
+      "on_relation": "novels",
+      "function": "record_novel_erasure",
+      "trigger_definition_sha256": "47bb11397affe0e8264613c92c21c9c07ff00e0d75c9dc8c76934bd460a6904d",
+      "body_sha256": "d114736c39986b72a2c39c93dfaca08ce0381d5e83d104e27afe5f40efa1c27f",
+      "reason": "the novel delete trigger is intentionally attached to an exact platform-owned erasure journal routine; changing either definition requires an explicit lifecycle migration"
+    },
+    {
+      "id": "users-platform-updated-at-binding",
+      "trigger": "trg_users_updated_at",
+      "on_relation": "users",
+      "function": "update_updated_at",
+      "trigger_definition_sha256": "db83e37270840d9babb0ea52232db90f523d5c4e24f0e6a8d0704348f5bbdd26",
+      "body_sha256": "e84f52883005dca8e13753f06f804548f8a12603f59a1f1aa588f7d94cc0b5c8",
+      "reason": "the shared timestamp trigger routine is platform-owned and this exact users binding is retained as explicit single-database legacy debt"
+    },
+    {
+      "id": "novels-platform-updated-at-binding",
+      "trigger": "trg_novels_updated_at",
+      "on_relation": "novels",
+      "function": "update_updated_at",
+      "trigger_definition_sha256": "e02274e3c1f2a2b1c2938692acf60a1b02f76b44dc2761511caa2a922acd5608",
+      "body_sha256": "e84f52883005dca8e13753f06f804548f8a12603f59a1f1aa588f7d94cc0b5c8",
+      "reason": "the shared timestamp trigger routine is platform-owned and this exact novels binding is retained as explicit single-database legacy debt"
+    },
+    {
+      "id": "characters-platform-updated-at-binding",
+      "trigger": "trg_characters_updated_at",
+      "on_relation": "characters",
+      "function": "update_updated_at",
+      "trigger_definition_sha256": "f9c8f6f70db59ec2e53a785508fa1645eccfccd6565431331c8fc099850c9ed5",
+      "body_sha256": "e84f52883005dca8e13753f06f804548f8a12603f59a1f1aa588f7d94cc0b5c8",
+      "reason": "the shared timestamp trigger routine is platform-owned and this exact characters binding is retained as explicit single-database legacy debt"
+    }
+  ],
+  "acknowledged_cross_owner_trigger_accesses": [
+    {
+      "id": "user-erasure-trigger-platform-journal",
+      "trigger": "record_user_erasure",
+      "on_relation": "users",
+      "function": "record_user_erasure",
+      "relation": "erasure_records",
+      "access": "write",
+      "trigger_definition_sha256": "b859ebb0e74c4aed4a8df77aaa22ed5398c41cac059c6563df11d57d364e1a85",
+      "body_sha256": "eaaed236741dcf6e5352d8a562cbbf0b9006f3ea4448bc6de4fc7c9632f77b14",
+      "reason": "single-node-v1 records durable user erasure in the platform journal from the user-owned delete trigger; replacing it requires a lifecycle migration with equivalent fail-closed evidence"
+    },
+    {
+      "id": "novel-erasure-trigger-platform-journal",
+      "trigger": "record_novel_erasure",
+      "on_relation": "novels",
+      "function": "record_novel_erasure",
+      "relation": "erasure_records",
+      "access": "write",
+      "trigger_definition_sha256": "47bb11397affe0e8264613c92c21c9c07ff00e0d75c9dc8c76934bd460a6904d",
+      "body_sha256": "d114736c39986b72a2c39c93dfaca08ce0381d5e83d104e27afe5f40efa1c27f",
+      "reason": "single-node-v1 records durable novel erasure in the platform journal from the novel-owned delete trigger; replacing it requires a lifecycle migration with equivalent fail-closed evidence"
+    }
+  ],
+  "acknowledged_migration_audit_debts": [
+    {
+      "path": "infra/postgres/migrations/0001_runtime_contract.sql",
+      "source_sha256": "d48c137ac24e82fa582528ff87c12f96cdace47ec3cb701587297af3f5b277cc",
+      "reason": "this historical migration embeds catalog SELECTs and repair DML in PL/pgSQL DO guards; the complete normalized source is pinned because executable DO bodies are no longer treated as statically safe"
+    },
+    {
+      "path": "infra/postgres/migrations/0002_reading_progress_contract.sql",
+      "source_sha256": "5c8fca1d95c065212c08239942d0f497efdc7117091a9cff714bbbb856c6b65f",
+      "reason": "this historical migration embeds repair queries in PL/pgSQL DO guards; the complete normalized source is pinned because executable DO bodies are no longer treated as statically safe"
+    },
+    {
+      "path": "infra/postgres/migrations/0003_chat_turn_contract.sql",
+      "source_sha256": "6b83bd6e8c620b98bff26154c3ebe419fd53a62c53b252d05b81785bb46eda96",
+      "reason": "this historical migration embeds PERFORM and catalog-driven repair logic in PL/pgSQL DO guards; the complete normalized source is pinned because executable DO bodies are no longer treated as statically safe"
+    },
+    {
+      "path": "infra/postgres/migrations/0004_narrative_choice_contract.sql",
+      "source_sha256": "ffdfc1b510ab4489440b5d6fe4414b7a646a60208ccc441d1a82f526183c1339",
+      "reason": "this historical migration embeds PERFORM and catalog-driven repair logic in PL/pgSQL DO guards; the complete normalized source is pinned because executable DO bodies are no longer treated as statically safe"
+    },
+    {
+      "path": "infra/postgres/migrations/0005_remove_default_seed.sql",
+      "source_sha256": "dd76cfa03dba5fdff04a8d7c090f0d52f8da5e6674732a0501ba4a7bc0b4196b",
+      "reason": "this historical seed-removal migration executes SELECT and DELETE inside a PL/pgSQL DO guard; the complete normalized source is pinned because executable DO bodies are no longer treated as statically safe"
+    },
+    {
+      "path": "infra/postgres/migrations/0009_narrative_inline_anchor.sql",
+      "source_sha256": "3c675920e61735cfee311f03a1ece582ef60e003eb6c64d517f9de1a3c513ef8",
+      "reason": "this historical migration embeds PERFORM-based contract validation in a PL/pgSQL DO guard; the complete normalized source is pinned because executable DO bodies are no longer treated as statically safe"
+    },
+    {
+      "path": "infra/postgres/migrations/0015_durable_import_jobs.sql",
+      "source_sha256": "e0a9283846c7a93d4a573361bee618d414976a82ac46f5c7e9b2085fb2ba82c5",
+      "reason": "this historical migration repairs a fixed deletion-graph FK inventory with two dynamic pg_catalog.format EXECUTEs; the complete normalized source is pinned until the migration can be replaced by static DDL"
+    },
+    {
+      "path": "infra/postgres/migrations/0020_advanced_game_rules.sql",
+      "source_sha256": "6687f55c1710fcd01dd002aa6910c54cb50f74e508a0ea2bb49761271a07a670",
+      "reason": "this historical migration embeds catalog SELECT validation in a PL/pgSQL DO guard; the complete normalized source is pinned because executable DO bodies are no longer treated as statically safe"
+    },
+    {
+      "path": "infra/postgres/migrations/0021_world_turn_memory_projection.sql",
+      "source_sha256": "addb76b39dd1b8da8f04a4335e1a7b8f231d34e605020b7dc5474f803ffe2ca9",
+      "reason": "this historical migration embeds PERFORM and repair DML in a PL/pgSQL DO guard; the complete normalized source is pinned because executable DO bodies are no longer treated as statically safe"
+    },
+    {
+      "path": "infra/postgres/migrations/0022_chapter_translations.sql",
+      "source_sha256": "6f8616a88fe9fdc24c8f61e30b871d0b4be12207087f91e77f251fafc42e807d",
+      "reason": "this historical migration embeds catalog SELECT validation in a PL/pgSQL DO guard; the complete normalized source is pinned because executable DO bodies are no longer treated as statically safe"
+    }
+  ],
+  "access_exceptions": [
+    {
+      "id": "novel-readiness-erasure-records-read",
+      "service": "novel-service",
+      "path": "services/novel-service/src/infrastructure/persistence/mod.rs",
+      "function": "is_ready",
+      "relation": "erasure_records",
+      "access": "read",
+      "sql_sha256": "11d786f5137358a5ff027e21b56cfd81ebb56d335d457b3ec1e200083b899d66",
+      "reason": "single-node-v1 readiness verifies the platform erasure journal shape; moving this probe requires a separate runtime ownership migration"
+    },
+    {
+      "id": "novel-readiness-erasure-records-metadata",
+      "service": "novel-service",
+      "path": "services/novel-service/src/infrastructure/persistence/mod.rs",
+      "function": "is_ready",
+      "relation": "erasure_records",
+      "access": "metadata",
+      "sql_sha256": "11d786f5137358a5ff027e21b56cfd81ebb56d335d457b3ec1e200083b899d66",
+      "reason": "single-node-v1 readiness verifies the platform erasure journal constraints; moving this probe requires a separate runtime ownership migration"
+    },
+    {
+      "id": "novel-readiness-database-lineage-read",
+      "service": "novel-service",
+      "path": "services/novel-service/src/infrastructure/persistence/mod.rs",
+      "function": "is_ready",
+      "relation": "database_lineage",
+      "access": "read",
+      "sql_sha256": "11d786f5137358a5ff027e21b56cfd81ebb56d335d457b3ec1e200083b899d66",
+      "reason": "single-node-v1 restore readiness validates the platform lineage token; moving this probe requires a separate runtime ownership migration"
+    },
+    {
+      "id": "novel-readiness-users-trigger-metadata",
+      "service": "novel-service",
+      "path": "services/novel-service/src/infrastructure/persistence/mod.rs",
+      "function": "is_ready",
+      "relation": "users",
+      "access": "metadata",
+      "sql_sha256": "11d786f5137358a5ff027e21b56cfd81ebb56d335d457b3ec1e200083b899d66",
+      "reason": "single-node-v1 readiness verifies the user erasure trigger; moving this probe to user-service requires a separate runtime contract change"
+    }
+  ]
+}
