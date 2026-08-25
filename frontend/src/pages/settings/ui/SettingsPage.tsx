@@ -6,7 +6,7 @@ import {
   llmUsageKeys,
   type LlmUsageScope,
 } from '@/entities/llm-usage';
-import { apiClient, getApiErrorMessage } from '@/shared/api/client';
+import { apiClient, getApiErrorCode, getApiErrorMessage } from '@/shared/api/client';
 import { queryClient } from '@/shared/api/queryClient';
 import { useAuthStore } from '@/features/auth';
 import { LlmUsageCard } from '@/features/llm-usage';
@@ -67,12 +67,22 @@ export function SettingsPage() {
         : response.data);
     } catch (error) {
       if (useAuthStore.getState().user?.id !== principalId) return;
+      if (isAdmin && getApiErrorCode(error) === 'setup_required') {
+        setSettings({
+          scope: 'platform',
+          provider: 'deepseek',
+          model: MODELS.deepseek[0].id,
+          thinking_enabled: false,
+          api_key_configured: false,
+        });
+        return;
+      }
       setSettingsError(true);
       toast.error(getApiErrorMessage(error, '模型设置加载失败'));
     } finally {
       if (useAuthStore.getState().user?.id === principalId) setSettingsLoading(false);
     }
-  }, [user?.id]);
+  }, [isAdmin, user?.id]);
 
   useEffect(() => {
     void loadSettings();
@@ -96,8 +106,8 @@ export function SettingsPage() {
     const principalId = user?.id;
     if (!settings || !principalId || settings.provider === 'environment') return;
     const trimmedApiKey = apiKey.trim();
-    if (!isAdmin && !settings.api_key_configured && !trimmedApiKey) {
-      toast.error('请输入个人 API Key');
+    if (!settings.api_key_configured && !trimmedApiKey) {
+      toast.error(`请输入${isAdmin ? '平台' : '个人'} API Key`);
       return;
     }
     setSaving(true);
@@ -273,7 +283,9 @@ export function SettingsPage() {
                 <span className="flex items-center gap-2">
                   <Key size={15} />
                   {isAdmin
-                    ? '平台 API Key（留空则保持现有 Key）'
+                    ? settings.api_key_configured
+                      ? '平台 API Key（留空则保持现有 Key）'
+                      : '平台 API Key'
                     : settings.api_key_configured
                       ? '个人 API Key（留空则保持现有 Key）'
                       : '个人 API Key'}
@@ -285,14 +297,16 @@ export function SettingsPage() {
                 value={apiKey}
                 onChange={event => setApiKey(event.target.value)}
                 autoComplete="off"
-                required={!isAdmin && !settings.api_key_configured}
-                aria-describedby={!isAdmin && !settings.api_key_configured ? 'llm-api-key-help' : undefined}
+                required={!settings.api_key_configured}
+                aria-describedby={!settings.api_key_configured ? 'llm-api-key-help' : undefined}
                 placeholder={settings.api_key_configured ? '已配置' : '请输入 API Key'}
                 className="field-control mt-2"
               />
-              {!isAdmin && !settings.api_key_configured && (
+              {!settings.api_key_configured && (
                 <p id="llm-api-key-help" className="mt-2 text-xs font-normal leading-5 text-[#5f6368]">
-                  配置个人 Key 后，可查看该 Key 的消耗；配置前继续使用平台模型。
+                  {isAdmin
+                    ? '首次配置平台模型需要 API Key；保存前会验证连接。'
+                    : '配置个人 Key 后，可查看该 Key 的消耗；配置前继续使用平台模型。'}
                 </p>
               )}
             </div>

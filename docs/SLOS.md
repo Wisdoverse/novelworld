@@ -6,8 +6,10 @@ authorize infrastructure merely because a test is green.
 
 ## Applicability
 
-`single-node-v1` runs one production Compose instance of Gateway, each Rust
-service, PostgreSQL, Redis, Nginx, and the deterministic test-only LLM provider.
+`single-node-v1` explicitly selects `cache_mode=redis` and runs one production
+Compose instance of Gateway, each Rust service, PostgreSQL, Redis, Nginx, and the
+deterministic test-only LLM provider. It is not evidence for the minimum
+`CACHE_MODE=postgres` profile.
 The capacity load enters through Gateway's loopback port so Nginx's intentional
 20 requests/second per-client abuse limit is not mistaken for application
 capacity. Existing production smoke checks continue to verify Nginx itself.
@@ -73,7 +75,11 @@ same contract.
 From an empty test topology:
 
 ```bash
-RATE_LIMIT_RPS=500 docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d --build
+export CACHE_MODE=redis
+export REDIS_PASSWORD="Aa0._~-Z$(openssl rand -hex 16)"
+export REDIS_URL="redis://:${REDIS_PASSWORD}@redis:6379"
+RATE_LIMIT_RPS=500 docker compose -f docker-compose.yml -f docker-compose.e2e.yml \
+  --profile redis up -d --build --wait
 python3 tools/capacity/run.py \
   --policy tools/capacity/policy-v1.json \
   --report /tmp/novelworld-capacity-report.json

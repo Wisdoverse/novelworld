@@ -16,6 +16,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  unix-launcher:
+    name: Unix Launcher
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Self-check
+        run: ./start.sh --check
+
   windows-launcher:
     name: Windows Launcher
     runs-on: windows-latest
@@ -235,27 +243,30 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      LLM_API_KEY: validation-placeholder
-      POSTGRES_PASSWORD: runtime-postgres-only
-      REDIS_PASSWORD: runtime-redis-only
-      JWT_SECRET: runtime-smoke-secret-at-least-32-characters
-      RUNTIME_CONFIG_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-      INTERNAL_SERVICE_TOKEN: runtime-smoke-internal-token-at-least-32-characters
+      CACHE_MODE: postgres
+      REDIS_URL: memory://
+      LLM_API_KEY: ''
       RATE_LIMIT_RPS: 1
     steps:
       - uses: actions/checkout@v7.0.1
-      - name: Build and start production topology
-        run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d --build
-      - name: Wait for gateway readiness
+      - name: Generate minimum-profile bootstrap roots
         run: |
-          for attempt in $(seq 1 90); do
-            if [ "$(docker inspect --format '{{.State.Health.Status}}' novel-gateway 2>/dev/null)" = healthy ]; then
-              exit 0
-            fi
-            sleep 2
+          postgres_password=$(openssl rand -hex 16)
+          jwt_secret=$(openssl rand -hex 32)
+          runtime_key=$(openssl rand -hex 32)
+          internal_token=$(openssl rand -hex 32)
+          for value in "$postgres_password" "$jwt_secret" "$runtime_key" "$internal_token"; do
+            echo "::add-mask::$value"
           done
-          docker compose -f docker-compose.yml -f docker-compose.e2e.yml ps --all
-          exit 1
+          echo "POSTGRES_PASSWORD=$postgres_password" >> "$GITHUB_ENV"
+          echo "JWT_SECRET=$jwt_secret" >> "$GITHUB_ENV"
+          echo "RUNTIME_CONFIG_KEY=$runtime_key" >> "$GITHUB_ENV"
+          echo "INTERNAL_SERVICE_TOKEN=$internal_token" >> "$GITHUB_ENV"
+      - name: Build and wait for the minimum production topology
+        run: |
+          docker compose -f docker-compose.yml up -d --build --wait --wait-timeout 180
+          test -z "$(docker ps -a --filter name=^/novel-redis$ --format '{{.Names}}')"
+          test "$(docker exec novel-agent-service printenv CACHE_MODE)" = postgres
       - name: Verify public probes and rate-limit exemption
         run: |
           docker exec novel-nginx nginx -T 2>&1 | grep -F 'limit_req_zone $binary_remote_addr zone=api_per_client:'
@@ -284,6 +295,8 @@ jobs:
         run: |
           test "$(curl --silent --output /tmp/setup-status.json --write-out '%{http_code}' http://127.0.0.1/api/setup/status)" = 200
           grep -q '"configured":false' /tmp/setup-status.json
+          grep -q '"llm_configured":false' /tmp/setup-status.json
+          grep -q '"contract":4' /tmp/setup-status.json
           sleep 2
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
             -H 'Content-Type: application/json' \
@@ -309,14 +322,33 @@ jobs:
           sleep 1
           test "$(curl --silent --output /tmp/setup-status.json --write-out '%{http_code}' http://127.0.0.1/api/setup/status)" = 200
           grep -q '"configured":true' /tmp/setup-status.json
+          grep -q '"llm_configured":false' /tmp/setup-status.json
           sleep 2
           token=$(python3 -c 'import json; print(json.load(open("/tmp/setup-init.json"))["access_token"])')
           for attempt in 1 2 3; do
             test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
-              -H 'Authorization: Bearer invalid' http://127.0.0.1:18081/api/auth/me)" = 401
+              -H 'Authorization: Bearer invalid' http://127.0.0.1/api/auth/me)" = 401
           done
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
-            -H "Authorization: Bearer $token" http://127.0.0.1:18081/api/auth/me)" = 200
+            -H "Authorization: Bearer $token" http://127.0.0.1/api/auth/me)" = 200
+      - name: Switch atomically to the explicit Redis and LLM profile
+        run: |
+          redis_password="Aa0._~-Z$(openssl rand -hex 16)"
+          llm_api_key="sk-$(openssl rand -hex 24)"
+          echo "::add-mask::$redis_password"
+          echo "::add-mask::$llm_api_key"
+          echo "CACHE_MODE=redis" >> "$GITHUB_ENV"
+          echo "REDIS_PASSWORD=$redis_password" >> "$GITHUB_ENV"
+          echo "REDIS_URL=redis://:$redis_password@redis:6379" >> "$GITHUB_ENV"
+          echo "LLM_API_KEY=$llm_api_key" >> "$GITHUB_ENV"
+          echo "COMPOSE_PROFILES=redis" >> "$GITHUB_ENV"
+          export CACHE_MODE=redis REDIS_PASSWORD="$redis_password"
+          export REDIS_URL="redis://:$redis_password@redis:6379" LLM_API_KEY="$llm_api_key"
+          export COMPOSE_PROFILES=redis
+          docker compose -f docker-compose.yml -f docker-compose.e2e.yml --profile redis \
+            up -d --wait --wait-timeout 180
+          test "$(docker inspect --format '{{.State.Health.Status}}' novel-redis)" = healthy
+          test "$(docker exec novel-agent-service printenv CACHE_MODE)" = redis
       - name: Verify dependency failure semantics
         run: |
           docker stop novel-redis
@@ -399,15 +431,15 @@ jobs:
       - name: Start the S3 source-retention topology
         if: github.event_name != 'pull_request'
         run: |
-          docker compose -f docker-compose.yml -f docker-compose.e2e.yml down -v
-          docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml up -d
+          docker compose -f docker-compose.yml -f docker-compose.e2e.yml --profile redis down -v
+          docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml --profile redis up -d
           for attempt in $(seq 1 60); do
             if [ "$(docker inspect --format '{{.State.Health.Status}}' novel-gateway 2>/dev/null)" = healthy ]; then
               exit 0
             fi
             sleep 2
           done
-          docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml ps --all
+          docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml --profile redis ps --all
           exit 1
       - name: Verify the S3 source-boundary kill/restart drill
         if: github.event_name != 'pull_request'
@@ -425,17 +457,17 @@ jobs:
         run: tests/e2e/bad_release_drill.sh
       - name: Show S3 topology logs on failure
         if: failure() && github.event_name != 'pull_request'
-        run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml logs --no-color || true
+        run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml --profile redis logs --no-color || true
       - name: Stop the S3 source-retention topology
         if: always() && github.event_name != 'pull_request'
-        run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml down -v
+        run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml --profile redis down -v
       - name: Reset production topology for the capacity profile
         if: github.event_name != 'pull_request'
         env:
           RATE_LIMIT_RPS: 500
         run: |
-          docker compose -f docker-compose.yml -f docker-compose.e2e.yml down -v
-          docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d
+          docker compose -f docker-compose.yml -f docker-compose.e2e.yml --profile redis down -v
+          docker compose -f docker-compose.yml -f docker-compose.e2e.yml --profile redis up -d
           for attempt in $(seq 1 30); do
             if [ "$(docker inspect --format '{{.State.Health.Status}}' novel-gateway 2>/dev/null)" = healthy ]; then
               exit 0
@@ -460,7 +492,7 @@ jobs:
           retention-days: 14
       - name: Show logs on failure
         if: failure()
-        run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml logs --no-color || true
+        run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml --profile redis logs --no-color || true
       - name: Stop production topology
         if: always()
-        run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml down -v
+        run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml --profile redis down -v

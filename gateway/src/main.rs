@@ -43,7 +43,6 @@ pub struct AppState {
 }
 
 const READINESS_CACHE_TTL: Duration = Duration::from_secs(1);
-
 #[derive(Clone, Copy)]
 struct ReadinessSnapshot {
     checked_at: Instant,
@@ -104,12 +103,12 @@ async fn run_body() -> anyhow::Result<()> {
         let metrics_handle = metrics::init_metrics();
 
         let jwt_secret = std::env::var("JWT_SECRET").expect("JWT_SECRET must be set");
+        validate_startup_secret("JWT_SECRET", &jwt_secret)?;
         let jwt = Arc::new(JwtMiddleware::new(&jwt_secret));
         let internal_service_token =
             std::env::var("INTERNAL_SERVICE_TOKEN").expect("INTERNAL_SERVICE_TOKEN must be set");
-        if internal_service_token.len() < 32 {
-            anyhow::bail!("INTERNAL_SERVICE_TOKEN must be at least 32 characters");
-        }
+        validate_startup_secret("INTERNAL_SERVICE_TOKEN", &internal_service_token)?;
+        validate_internal_service_token(&internal_service_token)?;
 
         let proxy = Arc::new(ServiceProxy {
             novel_service_url: std::env::var("NOVEL_SERVICE_URL")
@@ -169,6 +168,32 @@ async fn run_body() -> anyhow::Result<()> {
     }
     .instrument(service_span)
     .await
+}
+
+fn validate_startup_secret(name: &str, value: &str) -> AnyResult<()> {
+    let mut seen = [false; 256];
+    for byte in value.bytes() {
+        seen[usize::from(byte)] = true;
+    }
+    let lowered = value.to_ascii_lowercase();
+    if value.len() < 32
+        || value.trim() != value
+        || value.bytes().any(|byte| byte.is_ascii_control())
+        || seen.into_iter().filter(|seen| *seen).count() < 8
+        || lowered.contains("placeholder")
+        || lowered.contains("change_me")
+        || lowered.contains("runtime-smoke")
+    {
+        bail!("{name} must be a strong non-placeholder value of at least 32 characters");
+    }
+    Ok(())
+}
+
+fn validate_internal_service_token(value: &str) -> AnyResult<()> {
+    if !value.bytes().all(|byte| byte.is_ascii_graphic()) {
+        bail!("INTERNAL_SERVICE_TOKEN must contain visible ASCII characters only");
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -864,5 +889,30 @@ mod observability_tests {
             assert!(task.await.unwrap().user);
         }
         assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod startup_secret_tests {
+    use super::{validate_internal_service_token, validate_startup_secret};
+
+    #[test]
+    fn startup_secrets_reject_weak_and_repository_placeholder_values() {
+        assert!(validate_startup_secret("JWT_SECRET", "short").is_err());
+        assert!(validate_startup_secret("INTERNAL_SERVICE_TOKEN", &"a".repeat(64)).is_err());
+        for value in [
+            "change_me_to_a_random_32_char_string",
+            "runtime-smoke-secret-at-least-32-characters",
+            "manifest-placeholder-internal-token-at-least-32-characters",
+        ] {
+            assert!(validate_startup_secret("runtime secret", value).is_err());
+        }
+        assert!(validate_startup_secret(
+            "JWT_SECRET",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .is_ok());
+        assert!(validate_internal_service_token("0123456789abcdef0123456789abcde🙂").is_err());
+        assert!(validate_internal_service_token("0123456789abcdef 0123456789abcdef").is_err());
     }
 }

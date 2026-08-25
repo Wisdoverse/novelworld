@@ -193,8 +193,6 @@ struct SetupRequest {
     email: String,
     password: String,
     name: Option<String>,
-    provider: Option<String>,
-    api_key: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -468,10 +466,10 @@ async fn setup_status(State(state): State<AppState>) -> impl IntoResponse {
         Ok(status) => (
             StatusCode::OK,
             Json(SetupStatus {
-                configured: status.configured(),
+                configured: status.admin_configured,
                 admin_configured: status.admin_configured,
                 llm_configured: status.llm_configured,
-                contract: 3,
+                contract: 4,
             }),
         )
             .into_response(),
@@ -485,13 +483,7 @@ async fn setup_init(
 ) -> impl IntoResponse {
     match state
         .handler
-        .setup(
-            &req.email,
-            &req.password,
-            req.name,
-            req.provider.as_deref(),
-            req.api_key.as_deref(),
-        )
+        .setup(&req.email, &req.password, req.name)
         .await
     {
         Ok((user, access_token, refresh_token)) => (
@@ -722,6 +714,35 @@ mod readiness_tests {
         assert_eq!(
             readiness_status(&FixedProbe(false)).await,
             StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn setup_contract_separates_admin_bootstrap_from_llm_configuration() {
+        let status = crate::application::handlers::SetupStatus {
+            admin_configured: true,
+            llm_configured: false,
+        };
+        assert!(status.admin_configured);
+        assert!(serde_json::from_value::<SetupRequest>(serde_json::json!({
+            "email": "admin@test.invalid",
+            "password": "password123",
+            "name": null,
+            "provider": "openai"
+        }))
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn missing_llm_settings_keep_the_setup_required_envelope() {
+        let response = auth_error_response(AuthError::SetupRequired);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"]["code"],
+            "setup_required"
         );
     }
 

@@ -352,7 +352,8 @@ export const AUTH_TOKENS = {
 };
 
 export const SETUP_STATUS = {
-  contract: 3,
+  contract: 4,
   configured: true,
+  admin_configured: true,
   llm_configured: true,
 };

@@ -22,12 +22,7 @@ pub enum UserSave {
 #[async_trait]
 pub trait UserRepository: Send + Sync {
     async fn save(&self, user: &User) -> Result<UserSave>;
-    async fn save_initial_setup(
-        &self,
-        user: &User,
-        token: &RefreshToken,
-        llm: Option<&RuntimeLlmConfig>,
-    ) -> Result<bool>;
+    async fn save_initial_setup(&self, user: &User, token: &RefreshToken) -> Result<bool>;
     async fn has_any(&self) -> Result<bool>;
     async fn find_runtime_llm_config(&self) -> Result<Option<RuntimeLlmConfig>>;
     async fn save_runtime_llm_config(&self, config: &RuntimeLlmConfig) -> Result<()>;
