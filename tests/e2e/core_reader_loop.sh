@@ -204,6 +204,7 @@ transition_snapshot=$(docker exec novel-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT md5(transition::text) || ':' || md5((SELECT state::text FROM world_states WHERE user_id = user_choices.user_id AND novel_id = user_choices.novel_id)) FROM user_choices WHERE node_id = '$node_id'")
 
+pause
 transition_calls_before=$(curl --silent "$stub/__control__/stats" |
   json_get "value['calls'].get('narrative_transition', 0)")
 choice_conflict_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
@@ -287,6 +288,7 @@ pause
   -X PUT -H 'Content-Type: application/json' --data '{"current_chapter":1}' \
   "$api/progress/$novel_id"
 
+pause
 rewind_world_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   --output "$rewind_response_file" --write-out '%{http_code}' "${auth[@]}" \
   "$api/narrative/$novel_id/world")
@@ -294,6 +296,7 @@ rewind_world_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-er
 python3 -c "import json,sys; value=json.load(sys.stdin); assert value['error']['code']=='reading_progress_behind_world'; assert not ({'session','journal','world_state'} & value.keys())" \
   <"$rewind_response_file"
 
+pause
 rewind_state_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   --output "$rewind_response_file" --write-out '%{http_code}' "${auth[@]}" \
   "$api/narrative/$novel_id/world-state")
@@ -301,6 +304,7 @@ rewind_state_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-er
 python3 -c "import json,sys; value=json.load(sys.stdin); assert value['error']['code']=='reading_progress_behind_world'; assert 'state' not in value" \
   <"$rewind_response_file"
 
+pause
 rewind_player_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   --output "$rewind_response_file" --write-out '%{http_code}' "${auth[@]}" \
   "$api/narrative/$novel_id/player-entry")
@@ -308,6 +312,7 @@ rewind_player_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-e
 python3 -c "import json,sys; value=json.load(sys.stdin); assert value['error']['code']=='reading_progress_behind_world'; assert not ({'player','locations','checkpoint_chapter'} & value.keys())" \
   <"$rewind_response_file"
 
+pause
 rewind_player_replay_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   --output "$rewind_response_file" --write-out '%{http_code}' "${auth[@]}" \
   -X PUT -H 'Content-Type: application/json' --data "$player_definition" \
@@ -316,11 +321,13 @@ rewind_player_replay_status=$(curl --connect-timeout 5 --max-time 120 --silent -
 python3 -c "import json,sys; value=json.load(sys.stdin); assert value['error']['code']=='reading_progress_behind_world'; assert not ({'player','locations','checkpoint_chapter'} & value.keys())" \
   <"$rewind_response_file"
 
+pause
 rewind_effective_chapter=$("${curl_cmd[@]}" "${auth[@]}" \
   "$api/narrative/$novel_id/chapters/2")
 python3 -c "import json,sys; value=json.load(sys.stdin); assert value['generated'] is False; assert '北塔深处' not in value['content']" \
   <<<"$rewind_effective_chapter"
 
+pause
 rewind_replay_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   --output "$rewind_response_file" --write-out '%{http_code}' "${auth[@]}" \
   -H 'Content-Type: application/json' -H "Idempotency-Key: $world_turn_one_id" \
@@ -335,6 +342,7 @@ rewind_turn_count_before=$(docker exec novel-postgres psql \
 rewind_llm_calls_before=$(curl --silent "$stub/__control__/stats" |
   json_get "value['calls'].get('world_turn', 0)")
 rewind_new_turn_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
+pause
 rewind_new_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   --output "$rewind_response_file" --write-out '%{http_code}' "${auth[@]}" \
   -H 'Content-Type: application/json' -H "Idempotency-Key: $rewind_new_turn_id" \
@@ -355,15 +363,19 @@ pause
 "${curl_cmd[@]}" --output /dev/null "${auth[@]}" \
   -X PUT -H 'Content-Type: application/json' --data '{"current_chapter":2}' \
   "$api/progress/$novel_id"
+pause
 restored_player=$("${curl_cmd[@]}" "${auth[@]}" "$api/narrative/$novel_id/player-entry")
 [ "$(python3 -c 'import hashlib,json,sys; value=json.load(sys.stdin); print(hashlib.sha256(json.dumps(value["player"],ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()).hexdigest())' <<<"$restored_player")" = "$player_entity_hash" ]
+pause
 restored_player_replay=$("${curl_cmd[@]}" "${auth[@]}" \
   -X PUT -H 'Content-Type: application/json' --data "$player_definition" \
   "$api/narrative/$novel_id/player-entry")
 [ "$(python3 -c 'import hashlib,json,sys; value=json.load(sys.stdin); print(hashlib.sha256(json.dumps(value["player"],ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()).hexdigest())' <<<"$restored_player_replay")" = "$player_entity_hash" ]
+pause
 restored_effective_chapter=$("${curl_cmd[@]}" "${auth[@]}" \
   "$api/narrative/$novel_id/chapters/2")
 [ "$(printf '%s' "$restored_effective_chapter" | sha256sum | cut -d' ' -f1)" = "$chapter_hash" ]
+pause
 restored_world_turn_one=$("${curl_cmd[@]}" "${auth[@]}" \
   -H 'Content-Type: application/json' -H "Idempotency-Key: $world_turn_one_id" \
   --data "$world_action_one" "$api/narrative/$novel_id/world/turns")
