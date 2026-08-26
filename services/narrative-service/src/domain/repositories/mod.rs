@@ -182,6 +182,12 @@ pub struct CharacterBrief {
     pub first_appearance_chapter: Option<i32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadingProgressSnapshot {
+    pub current_chapter: i32,
+    pub reader_identity_is_self: bool,
+}
+
 /// Read-only access to novel-service data through its HTTP API.
 #[async_trait]
 pub trait ChapterReadRepository: Send + Sync {
@@ -199,6 +205,11 @@ pub trait ChapterReadRepository: Send + Sync {
         user_id: Uuid,
     ) -> Result<Option<CanonContext>>;
     async fn get_current_chapter(&self, novel_id: Uuid, user_id: Uuid) -> Result<i32>;
+    async fn get_reading_progress(
+        &self,
+        novel_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<ReadingProgressSnapshot>;
     async fn list_characters(&self, novel_id: Uuid, user_id: Uuid) -> Result<Vec<CharacterBrief>>;
     async fn get_player_entry_context(
         &self,

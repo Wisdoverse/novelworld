@@ -23,9 +23,9 @@ use crate::domain::ports::{AgentMemoryPort, DiceRollerPort, LlmPort, NarrativeLl
 use crate::domain::repositories::{
     BeginWorldTurn, ChapterInfo, ChapterReadRepository, CharacterBrief, ChoiceCommit,
     ChoiceCommitResult, MemoryProjectionStatus, NarrativeNodeRepository, NovelInfo, PlayerChapter,
-    PlayerChapterOrigin, PlayerChapterRepository, PlayerEntryContext, UserChoiceRecord,
-    UserChoiceRepository, WorldStateRepository, WorldTurnClaim, WorldTurnJournalEntry,
-    WorldTurnRepository, WorldTurnResult,
+    PlayerChapterOrigin, PlayerChapterRepository, PlayerEntryContext, ReadingProgressSnapshot,
+    UserChoiceRecord, UserChoiceRepository, WorldStateRepository, WorldTurnClaim,
+    WorldTurnJournalEntry, WorldTurnRepository, WorldTurnResult,
 };
 use crate::domain::services::narrative_transition::{
     CanonContext, CanonEntityRef, NarrativeTransition, TransitionEvent,
@@ -41,6 +41,10 @@ struct ToctouFixture {
     available_chapters: Mutex<Vec<i32>>,
     current_chapter: AtomicI32,
     self_identity: AtomicBool,
+    progress_snapshot_calls: AtomicUsize,
+    block_progress_snapshot_on_call: AtomicUsize,
+    progress_snapshot_entered: Notify,
+    progress_snapshot_release: Notify,
     block_next_character_list: AtomicBool,
     character_list_entered: Notify,
     character_list_release: Notify,
@@ -158,6 +162,10 @@ impl ToctouFixture {
             available_chapters: Mutex::new(vec![source_chapter]),
             current_chapter: AtomicI32::new(source_chapter),
             self_identity: AtomicBool::new(true),
+            progress_snapshot_calls: AtomicUsize::new(0),
+            block_progress_snapshot_on_call: AtomicUsize::new(0),
+            progress_snapshot_entered: Notify::new(),
+            progress_snapshot_release: Notify::new(),
             block_next_character_list: AtomicBool::new(false),
             character_list_entered: Notify::new(),
             character_list_release: Notify::new(),
@@ -679,6 +687,22 @@ impl ChapterReadRepository for ToctouFixture {
 
     async fn get_current_chapter(&self, _novel_id: Uuid, _user_id: Uuid) -> Result<i32> {
         Ok(self.current_chapter.load(Ordering::SeqCst))
+    }
+
+    async fn get_reading_progress(
+        &self,
+        _novel_id: Uuid,
+        _user_id: Uuid,
+    ) -> Result<ReadingProgressSnapshot> {
+        let call = self.progress_snapshot_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.block_progress_snapshot_on_call.load(Ordering::SeqCst) == call {
+            self.progress_snapshot_entered.notify_one();
+            self.progress_snapshot_release.notified().await;
+        }
+        Ok(ReadingProgressSnapshot {
+            current_chapter: self.current_chapter.load(Ordering::SeqCst),
+            reader_identity_is_self: self.self_identity.load(Ordering::SeqCst),
+        })
     }
 
     async fn list_characters(
@@ -2493,6 +2517,58 @@ async fn projection_stays_pending_when_progress_rewinds_during_agent_write() {
     assert_eq!(fixture.saved_memory_ids.lock().unwrap().len(), 1);
     assert_eq!(fixture.complete_turn_calls.load(Ordering::SeqCst), 0);
     assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn projection_rechecks_identity_and_chapter_in_one_post_agent_snapshot() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    let (turn_id, _) = fixture.prepare_pending_witnessed_turn();
+    fixture
+        .block_progress_snapshot_on_call
+        .store(2, Ordering::SeqCst);
+    let handler = Arc::new(fixture.handler());
+    let recovery_handler = handler.clone();
+    let recovery = tokio::spawn(async move {
+        recovery_handler
+            .reconcile_pending_memory_projections_once()
+            .await
+    });
+
+    fixture.progress_snapshot_entered.notified().await;
+    assert_eq!(fixture.agent_memory_calls.load(Ordering::SeqCst), 1);
+    fixture.current_chapter.store(1, Ordering::SeqCst);
+    fixture.progress_snapshot_release.notify_one();
+
+    assert_eq!(recovery.await.unwrap().unwrap(), 0);
+    assert_eq!(fixture.progress_snapshot_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        *fixture.memory_projection_status.lock().unwrap(),
+        MemoryProjectionStatus::Pending
+    );
+    assert_eq!(fixture.finish_projection_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        *fixture.saved_memory_ids.lock().unwrap(),
+        vec![journey_memory_id(turn_id)]
+    );
+
+    fixture
+        .current_chapter
+        .store(fixture.source_chapter, Ordering::SeqCst);
+    fixture
+        .block_progress_snapshot_on_call
+        .store(0, Ordering::SeqCst);
+    assert_eq!(
+        handler
+            .reconcile_pending_memory_projections_once()
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        *fixture.memory_projection_status.lock().unwrap(),
+        MemoryProjectionStatus::Saved
+    );
+    assert_eq!(fixture.saved_memory_ids.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]

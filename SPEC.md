@@ -808,7 +808,8 @@ Steps:
    replay the committed result without an Agent Service call. After projection
    returns either terminal candidate but before acknowledging it on the turn
    row, Narrative MUST recheck both persisted `self` identity and the committed
-   world's source high-water against current server-owned progress. A concurrent rewind MUST return the content-free
+   world's source high-water from one current server-owned progress snapshot.
+   A concurrent rewind MUST return the content-free
    `reading_progress_behind_world` error and leave the row `pending`; restoring
    progress allows the same key or a later recovery pass to compensate without
    another world generation or commit.
@@ -1145,7 +1146,8 @@ boundary MUST refuse every different logical-turn key for the same user and
 novel; the unresolved turn and an in-progress turn share one database-
 serialized authority slot. Before contacting Agent and again before changing
 `pending` to a terminal status, Narrative MUST recheck persisted `self` identity
-and the committed result's source high-water. If progress concurrently
+and the committed result's source high-water from one server-owned progress
+snapshot. If progress concurrently
 falls behind, the request MUST return content-free
 `reading_progress_behind_world`, keep the row `pending`, and allow the same key
 or a later recovery pass to finish after progress is restored without

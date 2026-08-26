@@ -1,7 +1,7 @@
 use crate::domain::entities::{game_rules::GameRuleTemplate, world_session::WorldEntryContext};
 use crate::domain::repositories::{
     ChapterInfo, ChapterReadRepository, CharacterBrief, GameRuleTemplateRequestError, NovelInfo,
-    PlayerEntryContext,
+    PlayerEntryContext, ReadingProgressSnapshot,
 };
 use crate::domain::services::narrative_transition::CanonContext;
 use anyhow::{anyhow, Result};
@@ -37,7 +37,7 @@ impl NovelServiceClient {
         &self,
         novel_id: Uuid,
         user_id: Uuid,
-    ) -> Result<ReadingProgressResponse> {
+    ) -> Result<ReadingProgressSnapshot> {
         let response = self
             .client
             .get(format!("{}/progress/{}", self.base_url, novel_id))
@@ -47,10 +47,26 @@ impl NovelServiceClient {
         if !response.status().is_success() {
             return Err(anyhow!("Novel service returned {}", response.status()));
         }
-        response
+        let progress = response
             .json::<ReadingProgressResponse>()
             .await
-            .map_err(Into::into)
+            .map_err(anyhow::Error::from)?;
+        if progress.current_chapter < 1 {
+            return Err(anyhow!("Novel service returned an invalid current chapter"));
+        }
+        let reader_identity_is_self = match progress.reader_identity_type.as_str() {
+            "self" => true,
+            "character" => false,
+            value => {
+                return Err(anyhow!(
+                    "Novel service returned invalid reader identity type {value}"
+                ))
+            }
+        };
+        Ok(ReadingProgressSnapshot {
+            current_chapter: progress.current_chapter,
+            reader_identity_is_self,
+        })
     }
 }
 
@@ -205,11 +221,18 @@ impl ChapterReadRepository for NovelServiceClient {
     }
 
     async fn get_current_chapter(&self, novel_id: Uuid, user_id: Uuid) -> Result<i32> {
-        let progress = self.reading_progress(novel_id, user_id).await?;
-        if progress.current_chapter < 1 {
-            return Err(anyhow!("Novel service returned an invalid current chapter"));
-        }
-        Ok(progress.current_chapter)
+        Ok(self
+            .reading_progress(novel_id, user_id)
+            .await?
+            .current_chapter)
+    }
+
+    async fn get_reading_progress(
+        &self,
+        novel_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<ReadingProgressSnapshot> {
+        self.reading_progress(novel_id, user_id).await
     }
 
     async fn get_player_entry_context(
@@ -260,18 +283,10 @@ impl ChapterReadRepository for NovelServiceClient {
     }
 
     async fn reader_identity_is_self(&self, novel_id: Uuid, user_id: Uuid) -> Result<bool> {
-        match self
+        Ok(self
             .reading_progress(novel_id, user_id)
             .await?
-            .reader_identity_type
-            .as_str()
-        {
-            "self" => Ok(true),
-            "character" => Ok(false),
-            value => Err(anyhow!(
-                "Novel service returned invalid reader identity type {value}"
-            )),
-        }
+            .reader_identity_is_self)
     }
 
     async fn get_world_entry_context(
