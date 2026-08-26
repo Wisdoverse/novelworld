@@ -208,12 +208,15 @@ H3 发布样本使用版本化策略校验：
 
 ```bash
 python3 tools/llm-budget/verify.py \
-  --policy tools/llm-budget/policy-v1.json \
+  --policy tools/llm-budget/policy-v2.json \
   --metrics release-sample.prom \
   --commit "$(git rev-parse HEAD)"
 ```
 
 样本必须来自一个完成的、有边界的发布测试窗口；进程重启会重置计数器。
+`h3-llm-budget-v2` 使用 3 个 30 分钟 summary 分桶，使任一样本至少保留 60 分钟
+（最多 90 分钟），覆盖 45 分钟发布任务上限；
+若已启动 operation 的 output-token-limit 窗口为空，校验器会失败而不是把零当作优秀结果。
 校验器会拒绝缺服务、缺 operation、usage 缺失、未完成请求、未知/敏感标签、
 超出重试/错误/延迟/首 token/计费 token 预算或 provider 实际 token 上限的样本。
 

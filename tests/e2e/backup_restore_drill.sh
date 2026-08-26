@@ -6,8 +6,10 @@
 # with the deployment left in first-run state, and seeds its own drill dataset
 # through the real import path:
 # three accounts — the third exists to be deleted after the artifact and covered
-# by a collected erasure record — five novels with two durable chapters each,
-# three retained-source keys, committed chat history and a committed world turn.
+# by a collected erasure record — five fixture novels with two durable chapters
+# each, three retained-source keys, committed chat history and a committed world
+# turn. Shared canonical novels retained by earlier drills are valid background
+# state and must survive every backup/restore phase.
 #
 # Under v2 every restore regenerates the database's lineage token, so an
 # artifact can establish continuation only against the lineage that produced it:
@@ -119,7 +121,7 @@ drain_outbox() {
   psql -c "UPDATE novels SET original_file_key = NULL WHERE original_file_key LIKE 'source-files/%'" >/dev/null
 }
 
-# Every drill novel goes through the real upload path, so the dataset is four
+# Every drill novel goes through the real upload path, so the fixture is five
 # imported novels with durable chapters, characters and canon models.
 import_novel() { # import_novel TOKEN TITLE -> novel id on stdout
   local token=$1 title=$2 novel state
@@ -194,6 +196,9 @@ novel_a2=$(import_novel "$admin_token" '风暴之塔 II')
 novel_b1=$(import_novel "$reader_token" '边城旧事')
 novel_b2=$(import_novel "$reader_token" '边城旧事 II')
 novel_c1=$(import_novel "$third_token" '第三账户的书')
+fixture_novel_ids="'$novel_a1','$novel_a2','$novel_b1','$novel_b2','$novel_c1'"
+fixture_user_ids="'$admin_id','$reader_id','$third_id'"
+background_novel_count=$(psql -c "SELECT COUNT(*) FROM novels WHERE id NOT IN ($fixture_novel_ids)")
 
 pause
 "${curl_cmd[@]}" --output /dev/null "${admin_auth[@]}" -X PUT \
@@ -237,22 +242,30 @@ grep -Fq 'event: done' <<<"$chat"
 psql -c "INSERT INTO world_states (user_id, novel_id)
          VALUES ('$reader_id', '$novel_b1')" >/dev/null
 
-check 'dataset accounts' 3 "$(psql -c "SELECT COUNT(*) FROM users")"
-check 'dataset novels' 5 "$(psql -c "SELECT COUNT(*) FROM novels")"
-check 'dataset chapters' 10 "$(psql -c "SELECT COUNT(*) FROM chapters")"
+check 'dataset accounts' 3 \
+  "$(psql -c "SELECT COUNT(*) FROM users WHERE id IN ($fixture_user_ids)")"
+check 'dataset novels' 5 \
+  "$(psql -c "SELECT COUNT(*) FROM novels WHERE id IN ($fixture_novel_ids)")"
+check 'dataset chapters' 10 \
+  "$(psql -c "SELECT COUNT(*) FROM chapters WHERE novel_id IN ($fixture_novel_ids)")"
 check 'dataset imports are complete' 5 \
-  "$(psql -c "SELECT COUNT(*) FROM novel_import_jobs WHERE status = 'completed'")"
+  "$(psql -c "SELECT COUNT(*) FROM novel_import_jobs
+                WHERE novel_id IN ($fixture_novel_ids) AND status = 'completed'")"
 check 'dataset has one lineage token' 1 \
   "$(psql -c "SELECT COUNT(*) FROM database_lineage WHERE parent IS NULL")"
-check 'dataset chat messages' 2 "$(psql -c "SELECT COUNT(*) FROM chat_messages")"
+check 'dataset chat messages' 2 \
+  "$(psql -c "SELECT COUNT(*) FROM chat_messages WHERE user_id IN ($fixture_user_ids)")"
 check 'dataset world turns' 1 \
-  "$(psql -c "SELECT COUNT(*) FROM world_turns WHERE status = 'completed'")"
+  "$(psql -c "SELECT COUNT(*) FROM world_turns
+                WHERE user_id IN ($fixture_user_ids) AND status = 'completed'")"
 
 # Retained-source keys, set after the services started: novel-service refuses to
 # start with S3 disabled while any source key or outbox row exists.
 set_source_keys
 check 'retained source keys' 3 \
-  "$(psql -c "SELECT COUNT(*) FROM novels WHERE original_file_key LIKE 'source-files/%'")"
+  "$(psql -c "SELECT COUNT(*) FROM novels
+                WHERE id IN ($fixture_novel_ids)
+                  AND original_file_key LIKE 'source-files/%'")"
 
 # ─── Backup ────────────────────────────────────────────────────────────────
 
@@ -319,11 +332,7 @@ sampled_before=$(psql -c "
          (SELECT COUNT(*) FROM novels WHERE original_file_key LIKE 'source-files/%')")
 stale_token=$admin_token
 docker compose down -v >/dev/null 2>&1
-docker compose up -d postgres >/dev/null 2>&1
-for _ in $(seq 1 60); do
-  docker exec novel-postgres pg_isready -U "${POSTGRES_USER:-novel}" >/dev/null 2>&1 && break
-  sleep 2
-done
+docker compose up -d --wait --wait-timeout 180 postgres >/dev/null
 
 # Destroying the volumes leaves no lineage to match, so drill A is a disaster
 # restore under v2 and must carry a complete decision set.
@@ -462,7 +471,7 @@ check 'B erased subjects stay deleted and shared novels survive' '0:0:1:1:0' \
                      (SELECT COUNT(*) FROM novels WHERE id = '$novel_b1') || ':' ||
                      (SELECT COUNT(*) FROM novels WHERE id = '$novel_b2') || ':' ||
                      (SELECT COUNT(*) FROM world_states WHERE user_id = '$reader_id')")"
-check 'B surviving canonical novels intact' 4 \
+check 'B surviving canonical novels intact' "$((background_novel_count + 4))" \
   "$(psql -c "SELECT COUNT(*) FROM novels")"
 check 'B primary journey novel intact' 1 \
   "$(psql -c "SELECT COUNT(*) FROM novels WHERE id = '$novel_a1'")"
@@ -558,11 +567,7 @@ refusal_says 'conflicting erasure records'
 printf 'drill: C — restoring with no lineage-matching reachable database\n'
 fresh_postgres() {
   docker compose down -v >/dev/null 2>&1
-  docker compose up -d postgres >/dev/null 2>&1
-  for _ in $(seq 1 60); do
-    docker exec novel-postgres pg_isready -U "${POSTGRES_USER:-novel}" >/dev/null 2>&1 && break
-    sleep 2
-  done
+  docker compose up -d --wait --wait-timeout 180 postgres >/dev/null
 }
 fresh_postgres
 
@@ -820,7 +825,8 @@ erase $third_id
 EOF
 infra/backup/restore.sh --manifest "$manifest_one" --decisions "$work/decisions-erase-all" \
   --env-file "$env_file" >/dev/null
-check 'C erase-all leaves no account' '0:0:0' \
+check 'C erase-all removes accounts but retains shared canonical novels' \
+  "0:$((background_novel_count + 5)):0" \
   "$(psql -c "SELECT (SELECT COUNT(*) FROM users) || ':' ||
                      (SELECT COUNT(*) FROM novels) || ':' ||
                      (SELECT COUNT(*) FROM runtime_llm_config)")"

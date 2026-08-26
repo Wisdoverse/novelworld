@@ -304,6 +304,8 @@ def verify(policy_path, sample_path, commit):
             "max_observed_output_tokens": output,
             "average_billable_tokens": average_billable,
         })
+        if limit <= 0:
+            failures.append(f"{operation}: missing or expired output-token-limit samples")
         if p95 > budget["max_p95_seconds"]:
             failures.append(f"{operation}: latency budget exceeded")
         if limit > expected_ceiling or output > expected_ceiling:

@@ -402,7 +402,7 @@ for target in \
 done
 grep -Fq 'type="cached_input"' "$metrics_file"
 python3 tools/llm-budget/verify.py \
-  --policy tools/llm-budget/policy-v1.json \
+  --policy tools/llm-budget/policy-v2.json \
   --metrics "$metrics_file" \
   --commit "$(git rev-parse HEAD)"
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' "$public_url/metrics")" = 404
