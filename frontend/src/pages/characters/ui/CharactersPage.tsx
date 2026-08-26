@@ -1,11 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useCharacters } from '@/entities/novel';
-import { useReadingProgress } from '@/entities/reading-progress';
+import { useReadingProgress, useResetReaderIdentity } from '@/entities/reading-progress';
 import { CharacterCard } from '@/widgets/character-card';
 import { ChatPanel } from '@/widgets/chat-panel';
 import { useAuthStore } from '@/features/auth';
-import type { Character } from '@/shared/types';
+import { getApiErrorCode } from '@/shared/api/client';
 import { getReaderIdentityScope } from '@/shared/lib/readerIdentityScope';
 import { AlertCircle, ArrowLeft, Users } from 'lucide-react';
 
@@ -17,23 +17,28 @@ export function CharactersPage() {
     data: readingProgress,
     isLoading: isProgressLoading,
     isError: isProgressError,
+    error: progressError,
     refetch: refetchProgress,
   } = useReadingProgress(novelId || '');
+  const resetReaderIdentity = useResetReaderIdentity(novelId || '');
+  const readerIdentityUnavailable = getApiErrorCode(progressError)
+    === 'reader_identity_unavailable';
   const { data: characters, isLoading } = useCharacters(
     novelId || '',
     readingProgress?.current_chapter ?? 0,
   );
-  const [chatCharacter, setChatCharacter] = useState<Character | null>(null);
-  const chatCharacterIsAvailable = Boolean(
-    chatCharacter && characters?.some(character => character.id === chatCharacter.id),
-  );
+  const [chatCharacterId, setChatCharacterId] = useState<string | null>(null);
+  const chatCharacter = chatCharacterId
+    ? characters?.find(character => character.id === chatCharacterId) ?? null
+    : null;
+  const chatCharacterIsAvailable = Boolean(chatCharacter);
   const readerIdentityScope = getReaderIdentityScope(readingProgress);
 
   useEffect(() => {
-    if (chatCharacter && characters && !chatCharacterIsAvailable) {
-      setChatCharacter(null);
+    if (chatCharacterId && characters && !chatCharacterIsAvailable) {
+      setChatCharacterId(null);
     }
-  }, [characters, chatCharacter, chatCharacterIsAvailable]);
+  }, [characters, chatCharacterId, chatCharacterIsAvailable]);
 
   if (!novelId || !user) return null;
 
@@ -66,7 +71,17 @@ export function CharactersPage() {
             </span>
             <h2 className="mt-5 text-xl font-semibold text-[#1f1f1f]">暂时无法加载角色</h2>
             <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-[#5f6368]">阅读上下文没有成功恢复。你的数据不会丢失，可以稍后重试。</p>
-            <button className="primary-action mt-6" onClick={() => refetchProgress()}>重试</button>
+            {readerIdentityUnavailable ? (
+              <button
+                className="primary-action mt-6"
+                disabled={resetReaderIdentity.isPending}
+                onClick={() => resetReaderIdentity.mutate()}
+              >
+                以本人身份继续
+              </button>
+            ) : (
+              <button className="primary-action mt-6" onClick={() => refetchProgress()}>重试</button>
+            )}
           </div>
         ) : !characters?.length ? (
           <div className="surface-card px-6 py-16 text-center">
@@ -81,7 +96,7 @@ export function CharactersPage() {
                 key={char.id}
                 character={char}
                 onTalk={(c) => {
-                  if (readingProgress) setChatCharacter(c);
+                  if (readingProgress) setChatCharacterId(c.id);
                 }}
               />
             ))}
@@ -98,7 +113,7 @@ export function CharactersPage() {
           readerIdentityScope={readerIdentityScope}
           canChat={readerIdentityScope !== 'unresolved' && chatCharacterIsAvailable}
           isOpen={!!chatCharacter}
-          onClose={() => setChatCharacter(null)}
+          onClose={() => setChatCharacterId(null)}
         />
       )}
     </div>

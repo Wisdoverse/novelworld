@@ -8,6 +8,7 @@ import {
 import { useChapter, useCharacters, useNovel } from '@/entities/novel';
 import {
   useReadingProgress,
+  useResetReaderIdentity,
   useUpdateReadingProgress,
 } from '@/entities/reading-progress';
 import {
@@ -29,9 +30,9 @@ import {
   TranslationControls,
   useChapterTranslation,
 } from '@/features/chapter-translation';
-import { getApiErrorMessage } from '@/shared/api/client';
+import { getApiErrorCode, getApiErrorMessage } from '@/shared/api/client';
 import { getReaderIdentityScope } from '@/shared/lib/readerIdentityScope';
-import type { Character, NarrativeChoice } from '@/shared/types';
+import type { NarrativeChoice } from '@/shared/types';
 
 export function splitChapterAtAnchor(content: string, anchorQuote?: string) {
   if (!anchorQuote) return { before: content, after: '', anchored: false };
@@ -58,6 +59,7 @@ export function ReaderPage() {
     data: readingProgress,
     isLoading: isProgressLoading,
     isError: isProgressError,
+    error: progressError,
     refetch: refetchProgress,
   } = useReadingProgress(novelId || '');
   const {
@@ -66,6 +68,9 @@ export function ReaderPage() {
     isError: isProgressSaveError,
     reset: resetProgressUpdate,
   } = useUpdateReadingProgress(novelId || '');
+  const resetReaderIdentity = useResetReaderIdentity(novelId || '');
+  const readerIdentityUnavailable = getApiErrorCode(progressError)
+    === 'reader_identity_unavailable';
   const parsedChapter = chapterNum === undefined ? undefined : Number(chapterNum);
   const routeChapter = parsedChapter !== undefined
     && Number.isInteger(parsedChapter)
@@ -97,10 +102,12 @@ export function ReaderPage() {
     progressBoundary,
     Boolean(chapter && readingProgress && !timelineMutationLocked),
   );
-  const { data: characters } = useCharacters(
+  const { data: loadedCharacters } = useCharacters(
     novelId || '',
     visibleChapterBoundary,
+    Boolean(routeChapter !== undefined && readingProgress && !timelineMutationLocked),
   );
+  const characters = timelineMutationLocked ? undefined : loadedCharacters;
   const [entryCheckpoint, setEntryCheckpoint] = useState<number>();
   const requestedEntryCheckpoint = readingProgress
     ? Math.min(entryCheckpoint ?? readingProgress.current_chapter, readingProgress.current_chapter, currentChapter)
@@ -159,7 +166,7 @@ export function ReaderPage() {
     location => location.id === playerEntry.player?.location_id,
   );
 
-  const [activeChatCharacter, setActiveChatCharacter] = useState<Character | null>(null);
+  const [activeChatCharacterId, setActiveChatCharacterId] = useState<string | null>(null);
   const [showCharacterList, setShowCharacterList] = useState(false);
   const [choiceError, setChoiceError] = useState<string | undefined>();
   const [choiceRecoveryLocked, setChoiceRecoveryLocked] = useState(false);
@@ -251,18 +258,25 @@ export function ReaderPage() {
       && readingProgress.current_chapter === currentChapter
       && !isProgressSaving,
   );
+  const activeChatCharacter = activeChatCharacterId
+    ? characters?.find(character => character.id === activeChatCharacterId) ?? null
+    : null;
   const activeCharacterIsAvailable = Boolean(
     activeChatCharacter
-      && characters?.some(character => character.id === activeChatCharacter.id)
       && !openWorld?.session.dead_character_ids.includes(activeChatCharacter.id),
   );
 
   useEffect(() => {
-    if (activeChatCharacter && !activeCharacterIsAvailable) {
-      setActiveChatCharacter(null);
+    if (activeChatCharacterId && characters && !activeCharacterIsAvailable) {
+      setActiveChatCharacterId(null);
     }
     if (timelineMutationLocked) setShowCharacterList(false);
-  }, [activeChatCharacter, activeCharacterIsAvailable, timelineMutationLocked]);
+  }, [
+    activeCharacterIsAvailable,
+    activeChatCharacterId,
+    characters,
+    timelineMutationLocked,
+  ]);
 
   useEffect(() => {
     setChoiceError(undefined);
@@ -388,7 +402,17 @@ export function ReaderPage() {
           <p className="mt-3 text-sm leading-6 text-[#5f6368]" role="alert">阅读进度没有成功恢复。你的阅读记录不会丢失，可以重新加载或返回书架。</p>
           <div className="mt-7 flex flex-col-reverse justify-center gap-3 sm:flex-row">
             <button className="tonal-action" onClick={() => navigate('/shelf')}>返回书架</button>
-            <button className="primary-action" onClick={() => refetchProgress()}>重新加载</button>
+            {readerIdentityUnavailable ? (
+              <button
+                className="primary-action"
+                disabled={resetReaderIdentity.isPending}
+                onClick={() => resetReaderIdentity.mutate()}
+              >
+                以本人身份继续
+              </button>
+            ) : (
+              <button className="primary-action" onClick={() => refetchProgress()}>重试</button>
+            )}
           </div>
         </div>
       </main>
@@ -760,7 +784,7 @@ export function ReaderPage() {
                   disabled={!isChatReady || isDead}
                   onClick={() => {
                     if (!isChatReady || isDead) return;
-                    setActiveChatCharacter(char);
+                    setActiveChatCharacterId(char.id);
                     setShowCharacterList(false);
                   }}
                   className="flex w-full items-center gap-3 rounded-xl border border-[#e1e3e8] bg-white p-3 text-left transition-colors hover:bg-[#f8faff] disabled:opacity-50"
@@ -779,7 +803,15 @@ export function ReaderPage() {
                   <div className="min-w-0">
                     <div className="truncate text-sm font-medium text-[#1f1f1f]">{char.name}</div>
                     <div className="truncate text-xs text-[#5f6368]">
-                      {isDead ? '当前时间线已死亡' : char.role === 'protagonist' ? '主角' : char.role === 'antagonist' ? '反派' : '配角'}
+                      {isDead
+                        ? '当前时间线已死亡'
+                        : char.role === 'protagonist'
+                          ? '主角'
+                          : char.role === 'antagonist'
+                            ? '反派'
+                            : char.role
+                              ? '配角'
+                              : '角色'}
                     </div>
                   </div>
                   <MessageCircle size={14} className="ml-auto flex-shrink-0 text-[#0b57d0]" />
@@ -801,7 +833,7 @@ export function ReaderPage() {
           readerIdentityScope={readerIdentityScope}
           canChat={isChatReady && activeCharacterIsAvailable}
           isOpen={!!activeChatCharacter}
-          onClose={() => setActiveChatCharacter(null)}
+          onClose={() => setActiveChatCharacterId(null)}
         />
       )}
     </div>

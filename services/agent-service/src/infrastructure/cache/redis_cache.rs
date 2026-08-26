@@ -92,36 +92,6 @@ impl RedisCache {
 
 #[async_trait]
 impl MessageCache for RedisCache {
-    /// Retrieve the most recent `limit` messages from Redis cache.
-    async fn get_recent_messages(
-        &self,
-        character_id: Uuid,
-        user_id: Uuid,
-        max_chapter: i32,
-        limit: usize,
-    ) -> Result<Vec<ChatMessage>> {
-        let mut conn = self.pool.get().await?;
-        let key = Self::cache_key(character_id, user_id);
-
-        let raw: Vec<String> = conn.lrange(&key, 0, MAX_CACHED_MESSAGES - 1).await?;
-
-        let messages: Vec<ChatMessage> = raw
-            .into_iter()
-            .filter_map(|s| serde_json::from_str(&s).ok())
-            .filter(|message: &ChatMessage| {
-                message
-                    .chapter_context
-                    .is_some_and(|chapter| chapter <= max_chapter)
-            })
-            .take(limit)
-            .collect();
-
-        // Redis stores most-recent first (LPUSH), but we want chronological order
-        let mut messages = messages;
-        messages.reverse();
-        Ok(messages)
-    }
-
     /// Project one committed turn atomically, newest message first.
     async fn push_turn(
         &self,

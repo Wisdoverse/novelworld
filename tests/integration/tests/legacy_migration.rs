@@ -59,6 +59,8 @@ const CHAPTER_TRANSLATIONS_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0022_chapter_translations.sql");
 const USER_LLM_CONFIG_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0023_user_llm_config.sql");
+const PERSONA_PROVENANCE_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0024_persona_provenance.sql");
 
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
@@ -89,6 +91,7 @@ const ALL_MIGRATIONS: &[&str] = &[
     WORLD_TURN_MEMORY_PROJECTION_MIGRATION,
     CHAPTER_TRANSLATIONS_MIGRATION,
     USER_LLM_CONFIG_MIGRATION,
+    PERSONA_PROVENANCE_MIGRATION,
 ];
 
 #[tokio::test]
@@ -527,6 +530,10 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
             .await
             .unwrap();
         sqlx::raw_sql(USER_LLM_CONFIG_MIGRATION)
+            .execute(&fresh)
+            .await
+            .unwrap();
+        sqlx::raw_sql(PERSONA_PROVENANCE_MIGRATION)
             .execute(&fresh)
             .await
             .unwrap();
@@ -1054,6 +1061,44 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
         .await
         .unwrap();
     assert!(narrative_readiness.is_ready().await);
+
+    sqlx::raw_sql(
+        "ALTER TABLE public.chat_turns \
+         DROP CONSTRAINT chat_turns_persona_source_chapter_high_water_check; \
+         ALTER TABLE public.chat_turns \
+         ADD CONSTRAINT chat_turns_persona_source_chapter_high_water_check \
+         CHECK (persona_source_chapter_high_water IS NULL \
+                OR persona_source_chapter_high_water >= 1)",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    assert!(!readiness.is_ready().await);
+    sqlx::raw_sql(PERSONA_PROVENANCE_MIGRATION)
+        .execute(&fresh)
+        .await
+        .unwrap();
+    assert!(readiness.is_ready().await);
+
+    sqlx::raw_sql(
+        "ALTER TABLE public.character_memories \
+         DROP CONSTRAINT character_memories_persona_source_chapter_high_water_check; \
+         ALTER TABLE public.character_memories \
+         ADD CONSTRAINT character_memories_persona_source_chapter_high_water_check \
+         CHECK (persona_source_chapter_high_water IS NULL \
+                OR (chapter_number IS NOT NULL \
+                    AND persona_source_chapter_high_water >= 1 \
+                    AND persona_source_chapter_high_water <= chapter_number))",
+    )
+    .execute(&fresh)
+    .await
+    .unwrap();
+    assert!(!readiness.is_ready().await);
+    sqlx::raw_sql(PERSONA_PROVENANCE_MIGRATION)
+        .execute(&fresh)
+        .await
+        .unwrap();
+    assert!(readiness.is_ready().await);
 
     sqlx::raw_sql(
         "DROP INDEX public.idx_chat_turns_one_in_progress; \
@@ -1600,6 +1645,7 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
         "0021_world_turn_memory_projection.sql",
         "0022_chapter_translations.sql",
         "0023_user_llm_config.sql",
+        "0024_persona_provenance.sql",
     ] {
         let migration_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../infra/postgres/migrations")
@@ -1619,6 +1665,22 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
             "psql migration {migration} failed: {}",
             String::from_utf8_lossy(&psql.stderr)
         );
+        if migration == "0003_chat_turn_contract.sql" {
+            sqlx::query(
+                "INSERT INTO public.chat_turns (\
+                     id, user_id, character_id, novel_id, request_fingerprint, \
+                     chapter_context, reader_identity_type, deviation_mode, status, failure_code) \
+                 VALUES ('00000000-0000-0000-0000-000000000024', \
+                         '00000000-0000-0000-0000-000000000001', \
+                         '00000000-0000-0000-0000-000000000003', \
+                         '00000000-0000-0000-0000-000000000002', $1, 7, \
+                         'self', 'canon', 'failed', 'legacy_unproven')",
+            )
+            .bind(vec![24_u8; 32])
+            .execute(&legacy)
+            .await
+            .unwrap();
+        }
     }
 
     let mut non_default_path = legacy.acquire().await.unwrap();
@@ -1715,6 +1777,10 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
             .execute(&mut *non_default_path)
             .await
             .unwrap();
+        sqlx::raw_sql(PERSONA_PROVENANCE_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
     }
     sqlx::query("RESET search_path")
         .execute(&mut *non_default_path)
@@ -1722,8 +1788,16 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
         .unwrap();
     drop(non_default_path);
 
-    let legacy_memory: (uuid::Uuid, uuid::Uuid, String, i16, Option<i32>) = sqlx::query_as(
-        "SELECT id, novel_id, content, importance, chapter_number \
+    let legacy_memory: (
+        uuid::Uuid,
+        uuid::Uuid,
+        String,
+        i16,
+        Option<i32>,
+        Option<i32>,
+    ) = sqlx::query_as(
+        "SELECT id, novel_id, content, importance, chapter_number, \
+                persona_source_chapter_high_water \
          FROM public.character_memories WHERE content = 'legacy memory'",
     )
     .fetch_one(&legacy)
@@ -1736,6 +1810,7 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
             uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
             "legacy memory".into(),
             5,
+            None,
             None,
         )
     );
@@ -1775,11 +1850,14 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
     .unwrap();
     assert!(legacy_turn_id.is_none());
 
-    let turn_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM public.chat_turns")
-        .fetch_one(&legacy)
-        .await
-        .unwrap();
-    assert_eq!(turn_count, 0);
+    let turn_contract: (i64, Option<i32>) = sqlx::query_as(
+        "SELECT COUNT(*), MAX(persona_source_chapter_high_water) \
+         FROM public.chat_turns",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    assert_eq!(turn_contract, (1, None));
 
     let legacy_column_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM information_schema.columns \

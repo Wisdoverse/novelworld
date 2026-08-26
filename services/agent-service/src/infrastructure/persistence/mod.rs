@@ -23,11 +23,83 @@ impl ReadinessProbe for PgReadinessProbe {
         matches!(
             tokio::time::timeout(
                 Duration::from_secs(2),
-                sqlx::query_as::<_, (Option<uuid::Uuid>, Option<uuid::Uuid>, bool, bool)>(
+                sqlx::query_as::<
+                    _,
+                    (
+                        Option<uuid::Uuid>,
+                        Option<uuid::Uuid>,
+                        bool,
+                        bool,
+                        bool,
+                        bool,
+                        bool,
+                        bool,
+                    ),
+                >(
                     r#"
                     SELECT
                         (SELECT id FROM public.chat_turns LIMIT 1),
                         (SELECT turn_id FROM public.chat_messages LIMIT 1),
+                        EXISTS (
+                            SELECT 1
+                            FROM pg_catalog.pg_attribute AS attribute
+                            LEFT JOIN pg_catalog.pg_attrdef AS default_definition
+                              ON default_definition.adrelid = attribute.attrelid
+                             AND default_definition.adnum = attribute.attnum
+                            WHERE attribute.attrelid =
+                                      'public.chat_turns'::pg_catalog.regclass
+                              AND attribute.attname =
+                                      'persona_source_chapter_high_water'
+                              AND attribute.attnum > 0
+                              AND NOT attribute.attisdropped
+                              AND attribute.atttypid = 'pg_catalog.int4'::pg_catalog.regtype
+                              AND attribute.atttypmod = -1
+                              AND NOT attribute.attnotnull
+                              AND default_definition.oid IS NULL
+                        ),
+                        EXISTS (
+                            SELECT 1
+                            FROM pg_catalog.pg_constraint AS constraint_definition
+                            WHERE constraint_definition.conrelid =
+                                      'public.chat_turns'::pg_catalog.regclass
+                              AND constraint_definition.conname =
+                                      'chat_turns_persona_source_chapter_high_water_check'
+                              AND constraint_definition.contype::pg_catalog.text = 'c'
+                              AND constraint_definition.convalidated
+                              AND pg_catalog.pg_get_constraintdef(
+                                      constraint_definition.oid, FALSE
+                                  ) = 'CHECK (((persona_source_chapter_high_water IS NULL) OR ((persona_source_chapter_high_water >= 1) AND (persona_source_chapter_high_water <= chapter_context))))'
+                        ),
+                        EXISTS (
+                            SELECT 1
+                            FROM pg_catalog.pg_attribute AS attribute
+                            LEFT JOIN pg_catalog.pg_attrdef AS default_definition
+                              ON default_definition.adrelid = attribute.attrelid
+                             AND default_definition.adnum = attribute.attnum
+                            WHERE attribute.attrelid =
+                                      'public.character_memories'::pg_catalog.regclass
+                              AND attribute.attname =
+                                      'persona_source_chapter_high_water'
+                              AND attribute.attnum > 0
+                              AND NOT attribute.attisdropped
+                              AND attribute.atttypid = 'pg_catalog.int4'::pg_catalog.regtype
+                              AND attribute.atttypmod = -1
+                              AND NOT attribute.attnotnull
+                              AND default_definition.oid IS NULL
+                        ),
+                        EXISTS (
+                            SELECT 1
+                            FROM pg_catalog.pg_constraint AS constraint_definition
+                            WHERE constraint_definition.conrelid =
+                                      'public.character_memories'::pg_catalog.regclass
+                              AND constraint_definition.conname =
+                                      'character_memories_persona_source_chapter_high_water_check'
+                              AND constraint_definition.contype::pg_catalog.text = 'c'
+                              AND constraint_definition.convalidated
+                              AND pg_catalog.pg_get_constraintdef(
+                                      constraint_definition.oid, FALSE
+                                  ) = 'CHECK (((persona_source_chapter_high_water IS NULL) OR ((((layer)::text = ''mid''::text) OR ((layer)::text = ''long''::text)) AND (chapter_number IS NOT NULL) AND (persona_source_chapter_high_water >= 1) AND (persona_source_chapter_high_water <= chapter_number))))'
+                        ),
                         EXISTS (
                             SELECT 1
                             FROM pg_catalog.pg_index AS index_definition
@@ -96,7 +168,7 @@ impl ReadinessProbe for PgReadinessProbe {
                 .fetch_one(&self.pool),
             )
             .await,
-            Ok(Ok((_, _, true, true)))
+            Ok(Ok((_, _, true, true, true, true, true, true)))
         )
     }
 }

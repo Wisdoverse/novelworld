@@ -1,30 +1,21 @@
 import React, { type PropsWithChildren } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { act, renderHook } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { apiClient } from '@/shared/api/client';
 import { worldTurnPendingStorageKey } from '@/shared/lib/worldTurnStorage';
-import type { Character } from '@/shared/types';
 import {
   buildNovelBatchUploadFormData,
   buildNovelUploadFormData,
-  isCharacterAvailable,
+  novelKeys,
   novelTitleFromFile,
+  sanitizeCharacterPersona,
   shouldPollNovelList,
+  useCharacters,
   useDeleteNovel,
   validateNovelBatchFiles,
   validateNovelFile,
 } from './api';
-
-const character = (firstAppearance?: number): Character => ({
-  id: crypto.randomUUID(),
-  novel_id: 'novel',
-  name: 'Character',
-  role: 'supporting',
-  aliases: [],
-  avatar_status: 'pending',
-  first_appearance_chapter: firstAppearance,
-});
 
 describe('novel file uploads', () => {
   it('accepts TXT and EPUB within their size limits', () => {
@@ -101,13 +92,121 @@ describe('novel ingestion status', () => {
   });
 });
 
-describe('character visibility', () => {
-  it('fails closed and follows forward and rewind progress', () => {
-    expect(isCharacterAvailable(character(undefined), 5)).toBe(false);
-    expect(isCharacterAvailable(character(0), 5)).toBe(false);
-    expect(isCharacterAvailable(character(5), 4)).toBe(false);
-    expect(isCharacterAvailable(character(5), 5)).toBe(true);
-    expect(isCharacterAvailable(character(5), 1)).toBe(false);
+describe('character persona boundary', () => {
+  const fullCharacter = {
+    id: 'character',
+    novel_id: 'novel',
+    name: 'Character',
+    aliases: ['Future Alias'],
+    role: 'protagonist' as const,
+    description: 'Future description',
+    personality: 'Future personality',
+    background: 'Future background',
+    speaking_style: 'Future speaking style',
+    appearance: 'Future appearance',
+    avatar_url: 'https://example.invalid/future.png',
+    avatar_status: 'ready' as const,
+    first_appearance_chapter: 1,
+  };
+
+  it.each([
+    ['missing', undefined],
+    ['zero', 0],
+    ['fractional', 1.5],
+    ['ahead of progress', 3],
+  ])('fails closed for a %s high-water marker', (_label, highWater) => {
+    const sanitized = sanitizeCharacterPersona({
+      ...fullCharacter,
+      persona_source_chapter_high_water: highWater,
+    }, 2);
+
+    expect(sanitized).toBeNull();
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['zero', 0],
+    ['fractional', 1.5],
+    ['ahead of progress', 3],
+  ])('drops a character with a %s first appearance', (_label, firstAppearance) => {
+    expect(sanitizeCharacterPersona({
+      ...fullCharacter,
+      first_appearance_chapter: firstAppearance,
+      persona_source_chapter_high_water: 2,
+    }, 2)).toBeNull();
+  });
+
+  it('allowlists a bounded full persona', () => {
+    const full = { ...fullCharacter, persona_source_chapter_high_water: 2 };
+    const response = {
+      ...full,
+      created_at: '2026-08-27T00:00:00Z',
+      updated_at: '2026-08-27T00:00:00Z',
+      system_prompt: 'never public',
+      future_secret: 'future spoiler',
+    };
+    const sanitized = sanitizeCharacterPersona(response, 2);
+
+    expect(sanitized).toEqual(full);
+    expect(sanitized).not.toHaveProperty('created_at');
+    expect(sanitized).not.toHaveProperty('updated_at');
+    expect(sanitized).not.toHaveProperty('system_prompt');
+    expect(sanitized).not.toHaveProperty('future_secret');
+  });
+
+  it('accepts only the exact four-field partial response', () => {
+    const partial = {
+      id: 'partial',
+      novel_id: 'novel',
+      name: 'Partial',
+      first_appearance_chapter: 1,
+    };
+    const unknownPartial = { ...partial, future_secret: 'spoiler' };
+    expect(sanitizeCharacterPersona(partial, 2)).toEqual(partial);
+    expect(sanitizeCharacterPersona({ ...partial, aliases: ['Alias'] }, 2)).toBeNull();
+    expect(sanitizeCharacterPersona(unknownPartial, 2)).toBeNull();
+    expect(sanitizeCharacterPersona(fullCharacter, 2)).toBeNull();
+    expect(sanitizeCharacterPersona(partial, 1.5)).toBeNull();
+  });
+
+  it('does not request while locked and filters stale complete responses after unlock', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const wrapper = ({ children }: PropsWithChildren) => React.createElement(
+      QueryClientProvider,
+      { client: queryClient },
+      children,
+    );
+    const partial = {
+      id: 'partial',
+      novel_id: 'novel',
+      name: 'Partial',
+      first_appearance_chapter: 1,
+    };
+    const get = vi.spyOn(apiClient, 'get').mockResolvedValue({
+      data: [
+        fullCharacter,
+        { ...fullCharacter, persona_source_chapter_high_water: 5 },
+        { ...partial, id: 'future', name: 'Future', first_appearance_chapter: 5 },
+        { ...partial, id: 'alias-only', aliases: ['Future Alias'] },
+        partial,
+      ],
+    });
+
+    const { result, rerender } = renderHook(
+      ({ enabled }) => useCharacters('novel', 2, enabled),
+      { initialProps: { enabled: false }, wrapper },
+    );
+
+    expect(get).not.toHaveBeenCalled();
+    expect(result.current.data).toBeUndefined();
+    expect(queryClient.getQueryData(novelKeys.characters('novel', 2))).toBeUndefined();
+
+    rerender({ enabled: true });
+    await waitFor(() => expect(result.current.data).toEqual([partial]));
+    expect(queryClient.getQueryData(novelKeys.characters('novel', 2))).toEqual([partial]);
+    get.mockRestore();
   });
 });
 

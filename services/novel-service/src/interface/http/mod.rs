@@ -1398,38 +1398,50 @@ async fn list_characters(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(novel_id): Path<Uuid>,
-) -> impl IntoResponse {
+) -> Response {
     let user_id = match extract_user_id(&headers) {
         Some(user_id) => user_id,
-        None => return StatusCode::UNAUTHORIZED.into_response(),
+        None => return private_no_store(StatusCode::UNAUTHORIZED.into_response()),
     };
-    match state
-        .progress_handler
-        .list_available_characters(user_id, novel_id)
-        .await
-    {
-        Ok(chars) => (StatusCode::OK, Json(chars)).into_response(),
-        Err(error) => progress_error_response(error),
-    }
+    character_read_response(
+        state
+            .progress_handler
+            .list_available_characters(user_id, novel_id)
+            .await,
+    )
 }
 
 async fn get_character_by_id(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> impl IntoResponse {
+) -> Response {
     let user_id = match extract_user_id(&headers) {
         Some(user_id) => user_id,
-        None => return StatusCode::UNAUTHORIZED.into_response(),
+        None => return private_no_store(StatusCode::UNAUTHORIZED.into_response()),
     };
-    match state
-        .progress_handler
-        .get_available_character(user_id, id)
-        .await
-    {
+    character_read_response(
+        state
+            .progress_handler
+            .get_available_character(user_id, id)
+            .await,
+    )
+}
+
+fn character_read_response<T: Serialize>(
+    result: std::result::Result<T, ReadingProgressError>,
+) -> Response {
+    private_no_store(match result {
         Ok(character) => (StatusCode::OK, Json(character)).into_response(),
         Err(error) => progress_error_response(error),
-    }
+    })
+}
+
+fn private_no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
+    response
 }
 
 async fn list_relationships(
@@ -1564,6 +1576,11 @@ fn progress_error_response(error: ReadingProgressError) -> Response {
             StatusCode::NOT_FOUND,
             "not_found",
             "Character not found".into(),
+        ),
+        ReadingProgressError::IdentityUnavailable => (
+            StatusCode::CONFLICT,
+            "reader_identity_unavailable",
+            "Reader identity is unavailable at current progress".into(),
         ),
         ReadingProgressError::Validation(message) => (
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1771,6 +1788,80 @@ mod ownership_tests {
     #[test]
     fn routes_construct_with_axum_08_syntax() {
         let _ = routes();
+    }
+
+    #[tokio::test]
+    async fn list_and_detail_character_response_paths_are_private_and_typed() {
+        use crate::application::handlers::ProgressBoundCharacter;
+        use crate::domain::value_objects::{AvatarStatus, CharacterRole};
+
+        let now = chrono::Utc::now();
+        let partial = ProgressBoundCharacter {
+            id: Uuid::new_v4(),
+            novel_id: Uuid::new_v4(),
+            name: "沈知微".into(),
+            first_appearance_chapter: 1,
+            aliases: None,
+            role: None,
+            description: None,
+            personality: None,
+            background: None,
+            speaking_style: None,
+            appearance: None,
+            avatar_url: None,
+            avatar_status: None,
+            persona_source_chapter_high_water: None,
+            created_at: None,
+            updated_at: None,
+        };
+        let full = ProgressBoundCharacter {
+            aliases: Some(vec!["沈姑娘".into()]),
+            role: Some(CharacterRole::Protagonist),
+            description: Some("完整角色资料".into()),
+            avatar_status: Some(AvatarStatus::Ready),
+            persona_source_chapter_high_water: Some(2),
+            created_at: Some(now),
+            updated_at: Some(now),
+            ..partial.clone()
+        };
+        let responses = [
+            character_read_response(Ok(vec![partial])),
+            character_read_response(Ok(full)),
+            character_read_response(Err::<ProgressBoundCharacter, _>(
+                ReadingProgressError::CharacterNotFound,
+            )),
+            character_read_response(Err::<ProgressBoundCharacter, _>(
+                ReadingProgressError::IdentityUnavailable,
+            )),
+        ];
+        let expected = [
+            (StatusCode::OK, None),
+            (StatusCode::OK, None),
+            (StatusCode::NOT_FOUND, Some("not_found")),
+            (StatusCode::CONFLICT, Some("reader_identity_unavailable")),
+        ];
+
+        for (index, (response, (status, error_code))) in
+            responses.into_iter().zip(expected).enumerate()
+        {
+            assert_eq!(response.status(), status);
+            assert_eq!(
+                response.headers().get(CACHE_CONTROL),
+                Some(&HeaderValue::from_static("private, no-store"))
+            );
+            let body = axum::body::to_bytes(response.into_body(), 4_096)
+                .await
+                .unwrap();
+            let body = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+            match index {
+                0 => assert!(body[0].get("role").is_none()),
+                1 => {
+                    assert_eq!(body["role"], "protagonist");
+                    assert_eq!(body["persona_source_chapter_high_water"], 2);
+                }
+                _ => assert_eq!(body["error"]["code"], error_code.unwrap()),
+            }
+        }
     }
 
     #[test]

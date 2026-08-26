@@ -130,6 +130,24 @@ describe('ChatPanel history', () => {
     expect(mocks.historyEnabled).toBe(false);
   });
 
+  it('uses generic role and avatar fallbacks for a progress-redacted character', () => {
+    const { container } = render(
+      <ChatPanel
+        character={{ id: 'partial', novel_id: 'novel', name: 'Partial' }}
+        novelId="novel"
+        currentChapter={1}
+        readerIdentityScope="self"
+        canChat
+        isOpen
+        onClose={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText('角色')).toBeTruthy();
+    expect(screen.queryByText('主角')).toBeNull();
+    expect(container.querySelector('img')).toBeNull();
+  });
+
   it('does not render cached messages for a character from another novel', () => {
     const oldMessage: ChatMessage = {
       id: 'old-message',
