@@ -25,6 +25,7 @@ services:
   novel-service:
     environment:
       LLM_API_URL: http://llm-stub:18080
+      LLM_ALLOW_INSECURE_HTTP: "true"
       IMAGE_GEN_API_URL: http://llm-stub:18080
     depends_on:
       llm-stub:
@@ -33,6 +34,7 @@ services:
   agent-service:
     environment:
       LLM_API_URL: http://llm-stub:18080
+      LLM_ALLOW_INSECURE_HTTP: "true"
       EMBEDDING_API_URL: http://llm-stub:18080
     depends_on:
       llm-stub:
@@ -41,6 +43,7 @@ services:
   narrative-service:
     environment:
       LLM_API_URL: http://llm-stub:18080
+      LLM_ALLOW_INSECURE_HTTP: "true"
     depends_on:
       llm-stub:
         condition: service_healthy

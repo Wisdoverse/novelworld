@@ -9,7 +9,7 @@ ANCHOR = "林岚握紧手中的旧地图，望向被风暴笼罩的北塔，决�
 ENDING = "北塔的石门布满潮湿苔痕，林岚在门边发现守门人留下的铜铃。"
 CONTROL_LOCK = threading.Lock()
 DELAYS_MS = {}
-FAILURES_REMAINING = {"canon": 1, "narrative_transition": 1, "world_turn": 0}
+FAILURES_REMAINING = {"canon": 1, "narrative_transition": 3, "world_turn": 0}
 CALLS = {}
 ACTIVE = {}
 PEAK = {}
@@ -68,6 +68,18 @@ def control_snapshot():
             "delays_ms": dict(DELAYS_MS),
             "failures_remaining": dict(FAILURES_REMAINING),
         }
+
+
+def committed_world_context(request):
+    marker = "## 已提交开放世界上下文\n"
+    for message in request.get("messages", []):
+        content = message.get("content", "")
+        if message.get("role") == "system" and content.startswith(marker):
+            try:
+                return json.loads(content.rsplit("\n", 1)[1])
+            except (json.JSONDecodeError, TypeError):
+                return None
+    return None
 
 
 def reset_control(request):
@@ -141,14 +153,27 @@ class Handler(BaseHTTPRequestHandler):
             return self.json_response({"error": {"message": "not found"}}, 404)
         if request.get("stream"):
             assert request.get("stream_options") == {"include_usage": True}
+            world_context = committed_world_context(request)
             reply = (
                 "林岚知道你已经改变了两回合的世界，也会依照自己的目标继续调查。"
                 if (
-                    "## 已提交开放世界上下文" in prompt
-                    and '"turn_number":2' in prompt
-                    and '"recent_actions"' in prompt
-                    and "与林岚立即前往北塔" in prompt
-                    and "绘制地下回廊并寻找守门人的踪迹" in prompt
+                    world_context is not None
+                    and world_context.get("turn_number") == 2
+                    and world_context.get("world_time") == 2
+                    and world_context.get("recent_actions") == []
+                    and world_context.get("recent_player_events")
+                    == [
+                        {
+                            "turn_number": 1,
+                            "world_time": 1,
+                            "summary": "云舟调查北塔换防",
+                        },
+                        {
+                            "turn_number": 2,
+                            "world_time": 2,
+                            "summary": "云舟整理地下回廊线索",
+                        },
+                    ]
                 )
                 else "林岚记得你，也愿意继续同行。"
             )
@@ -179,8 +204,6 @@ class Handler(BaseHTTPRequestHandler):
             final_chunk = "FINAL_CHUNK: true" in prompt
             excerpt = ENDING if final_chunk else ANCHOR
             return json.dumps({
-                "coverage_summary": "林岚调查北塔与守门人失踪事件。",
-                "coverage_evidence": {"excerpt": excerpt, "confidence": 1.0},
                 "arc": {
                     "key": "north-tower-investigation",
                     "title": "北塔调查",
@@ -271,6 +294,13 @@ class Handler(BaseHTTPRequestHandler):
                     {"text": "与林岚立即前往北塔", "hint": "风暴中藏着线索……"},
                     {"text": "先向边城居民调查", "hint": "旧传闻可能并非虚构……"},
                 ],
+            }, {
+                "chapter_number": 2,
+                "description": "北塔石门缓缓开启，玩家必须决定如何回应塔内的异动。",
+                "choices": [
+                    {"text": "跟随林岚进入回廊", "hint": "铜铃标记着一条隐秘路线……"},
+                    {"text": "留在塔门观察足迹", "hint": "来者或许仍藏在风暴之中……"},
+                ],
             }]}, ensure_ascii=False)
         if "anchor_quote" in prompt:
             return json.dumps({
@@ -298,9 +328,15 @@ class Handler(BaseHTTPRequestHandler):
                 previous = recent_turns[-1] if recent_turns else {}
                 if (
                     previous.get("turn_number") != session["turn_number"]
-                    or previous.get("action", {}).get("intent") != "查清北塔换防并阻止伏击"
-                    or not previous.get("rendered_narrative", "").endswith(
-                        "林岚仍按自己的目标追查守门人，原定围堵因此受阻。"
+                    or (
+                        session["turn_number"] == 1
+                        and (
+                            previous.get("action", {}).get("intent")
+                            != "查清北塔换防并阻止伏击"
+                            or not previous.get("rendered_narrative", "").endswith(
+                                "林岚仍按自己的目标追查守门人，原定围堵因此受阻。"
+                            )
+                        )
                     )
                 ):
                     return "{}"
@@ -314,8 +350,8 @@ class Handler(BaseHTTPRequestHandler):
                 "events": [{
                     "summary": "云舟调查北塔换防" if first_turn else "云舟整理地下回廊线索",
                     # 林岚在两段叙事中都有明确、独立的见证/行动；this
-                    # explicit provenance is what permits her chat context to
-                    # receive the correlated player action.
+                    # explicit provenance permits the event summaries, not the
+                    # player's private action intent, to enter her chat context.
                     "actor_character_ids": [context["characters"][0]["id"]],
                     "location_id": context["locations"][0]["id"],
                 }],
