@@ -90,7 +90,7 @@ state in two places.
 | §6.1 — voice, identity, memory, and anti-spoiler prompt instructions | Intended gap | H3, H4 | E0, E3; prompt wording is not a behavioral guarantee |
 | §6.2.3 — embedded long-term records and semantic retrieval | Intended gap | H3 | E0, E3; the production mid-summary path attempts embedded long-term promotion and the prompt performs bounded semantic retrieval, but live relevance and lifecycle quality remain unqualified |
 | §6.2.4 — durable direct permanent retrieval plus optional embedding and no maintenance eviction | Intended gap | H3 | E0, E3, E4; deterministic tests cover authenticated fact-first insertion, exact replay, mismatch rejection, zero-call independence from slow embedding, restart and chapter scope, fixed UUIDv5, de-duplication, explicit witness filtering, strict counts/shapes, independent journey/legacy candidate buckets, whole-entry budget, and causal display order. Direct and semantic prompt paths admit journey facts only for a persisted `self` identity snapshot. Character mode omits all unprovenanced mid/long/permanent/semantic memory and projection, keeping only exact same-character recent committed chat; legacy/unclaimed chat remains self-only. First-adoption migration terminal-skips unverifiable pre-contract completed turns and retains old memory rows; both paths quarantine the former permanent/importance-7/UUID-v4 producer class, which can hide a legitimate legacy row in that narrow class. Permanent semantic enrichment, historical fact backfill, continuous late-compensation selection, and live lifecycle value remain unqualified |
-| §6.2.4/§7.6 — committed-world-turn projection reaches durable `saved`/`skipped`, while `pending` same-key replay compensates | Verified | H3, H4 | E1, E3, E4; readiness verifies exact columns, constraints, and the one-unresolved-turn unique authority slot. A new row starts `pending`; another key for the same user+novel cannot advance until explicit-witness `saved` or conclusive `skipped`, while same-key replay compensates and terminal replay avoids Agent. Source-high-water, identity, and visibility races after commit return a content-free unknown/conflict without clearing authority. No autonomous pending-row scan is claimed |
+| §6.2.4/§7.6 — committed-world-turn projection reaches durable `saved`/`skipped`, while `pending` replay/recovery compensates | Verified | H3, H4 | E1, E3, E4; readiness verifies exact columns, constraints, and the one-unresolved-turn unique authority slot. A new row starts `pending`; another key for the same user+novel cannot advance until explicit-witness `saved` or conclusive `skipped`. Same-key replay and Narrative's bounded durably rotating scan reuse one identity/source-visibility progress snapshot before and after the deterministic UUIDv5 Agent write, followed by terminal CAS; terminal replay avoids Agent, while scan rotation prevents an unresolved batch from starving later rows. Source-high-water, identity, and visibility races after commit preserve `pending` and return a content-free unknown/conflict |
 | §6.2.4 — account/novel deletion erases permanent memory | Verified | H2, H5 | E6 |
 | §6.4 — bounded four-layer prompt composition, explicit character visibility, current-progress recheck, and total prompt budget | Intended gap | H3, H4 | E0, E3, E4; deterministic tests cover source bounds, de-duplication, fail-closed aggregate size, selection of the latest four directly targeted `converse`/`ally`/`oppose` actions from a bounded 100-turn journal scan, independent Narrative/Agent action kind+target rejection, and producer/Agent-consumer event exclusion unless its actor list names the character. The provider prompt is a tested allowlist: choices, unscoped threads, player name/location, routing UUIDs, and technical metadata are excluded; character-specific state/actions/events remain. All derived context is omitted when its source high-water is absent or exceeds rewound progress. Inferred visibility, visibility beyond that scan, live relevance, and complete lifecycle quality remain unqualified |
 | §6.5 — idempotency key, fencing, commit-before-done, replay, and failure semantics | Verified | H3, H5 | E1, E3 |
@@ -162,13 +162,15 @@ state in two places.
   Legacy/unclaimed chat remains available only in self mode. Self mode
   creates a mid-term summary every twenty committed messages, attempts
   best-effort mid-to-long promotion, and gives every committed open-world turn
-  a durable memory-projection state. `pending` is compensated only by replaying
-  the same turn key; a different key cannot acquire the same user+novel
-  authority slot, and `saved`/`skipped` are terminal. Projection eligibility
-  is followed by a source-high-water recheck before terminal acknowledgement,
-  so a concurrent rewind returns a content-free conflict and preserves
-  `pending` until the same key is retried after restoration. No autonomous pending-
-  row scan is implemented. Authenticated facts receive whole-entry budget
+  a durable memory-projection state. `pending` is compensated by exact-key
+  replay or a bounded durably rotating Narrative scan; a different key cannot
+  acquire the same user+novel authority slot, and `saved`/`skipped` are
+  terminal. Both paths reuse the existing deterministic Agent write and
+  terminal CAS. Projection eligibility is followed by source-high-water and
+  self-identity rechecks before terminal acknowledgement, so a concurrent
+  rewind or identity change returns a content-free conflict and preserves
+  `pending` until a later safe scan or exact replay. Authenticated facts receive
+  whole-entry budget
   before legacy prose and are then shown in causal order. A late-compensated
   early turn can still fall outside the ten-row journey-candidate window, so
   this is not a continuous long-trajectory guarantee.

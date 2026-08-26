@@ -5086,6 +5086,18 @@ async fn seed_world_turn(pool: &PgPool) -> (Uuid, Uuid, WorldEntryContext) {
     (user_id, novel_id, context)
 }
 
+const PENDING_PROJECTION_SCAN_TEST_LOCK: i64 = 0x4E57_5052_4F4A;
+
+async fn pending_projection_scan_guard(pool: &PgPool) -> sqlx::Transaction<'_, sqlx::Postgres> {
+    let mut guard = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(PENDING_PROJECTION_SCAN_TEST_LOCK)
+        .execute(&mut *guard)
+        .await
+        .unwrap();
+    guard
+}
+
 fn world_turn_transition() -> WorldTurnTransition {
     WorldTurnTransition {
         schema_version: WORLD_TURN_SCHEMA_VERSION,
@@ -5261,14 +5273,29 @@ async fn world_turn_pending_projection_blocks_only_new_keys_until_terminal() {
             .connect(&db_url())
             .await
             .unwrap();
+        let scan_guard = pending_projection_scan_guard(&pool).await;
         let (user_id, novel_id, context) = seed_world_turn(&pool).await;
         let repo = PgWorldTurnRepository::new(pool.clone());
         let original = world_turn_claim(user_id, novel_id);
         let attempt = world_turn_acquire(&repo, &original).await;
+        assert!(
+            !repo
+                .rotate_pending_memory_projections(100)
+                .await
+                .unwrap()
+                .iter()
+                .any(|result| result.turn_id == original.id),
+            "an in-progress turn must not be a projection candidate"
+        );
         let completed = repo
             .complete_turn(&original, attempt, &world_turn_transition(), &context)
             .await
             .unwrap();
+        assert!(repo
+            .rotate_pending_memory_projections(100)
+            .await
+            .unwrap()
+            .contains(&completed));
         let successor = world_turn_claim_at(user_id, novel_id, 1);
         let stale_successor = world_turn_claim_at(user_id, novel_id, 0);
 
@@ -5315,6 +5342,15 @@ async fn world_turn_pending_projection_blocks_only_new_keys_until_terminal() {
             .finish_memory_projection(original.id, user_id, novel_id, terminal)
             .await
             .unwrap());
+        assert!(
+            !repo
+                .rotate_pending_memory_projections(100)
+                .await
+                .unwrap()
+                .iter()
+                .any(|result| result.turn_id == original.id),
+            "a terminal projection must not be scanned again"
+        );
         assert!(matches!(
             repo.begin_turn(&stale_successor).await.unwrap(),
             BeginWorldTurn::Stale
@@ -5324,13 +5360,160 @@ async fn world_turn_pending_projection_blocks_only_new_keys_until_terminal() {
             .fail_turn(successor.id, successor_attempt, "test_cleanup")
             .await
             .unwrap());
+        assert!(
+            !repo
+                .rotate_pending_memory_projections(100)
+                .await
+                .unwrap()
+                .iter()
+                .any(|result| result.turn_id == successor.id),
+            "a failed turn must not be a projection candidate"
+        );
 
         sqlx::query("DELETE FROM users WHERE id = $1")
             .bind(user_id)
             .execute(&pool)
             .await
             .unwrap();
+        scan_guard.rollback().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn pending_projection_scan_rotates_past_an_unresolved_batch() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let scan_guard = pending_projection_scan_guard(&pool).await;
+    let repo = PgWorldTurnRepository::new(pool.clone());
+    let mut turns = Vec::new();
+
+    for ordinal in 0..3 {
+        let (user_id, novel_id, context) = seed_world_turn(&pool).await;
+        let claim = world_turn_claim(user_id, novel_id);
+        let attempt = world_turn_acquire(&repo, &claim).await;
+        repo.complete_turn(&claim, attempt, &world_turn_transition(), &context)
+            .await
+            .unwrap();
+        let scan_position = chrono::DateTime::from_timestamp(-2_208_988_800 + ordinal, 0).unwrap();
+        sqlx::query("UPDATE world_turns SET updated_at = $2 WHERE id = $1")
+            .bind(claim.id)
+            .bind(scan_position)
+            .execute(&pool)
+            .await
+            .unwrap();
+        turns.push((claim.id, user_id, novel_id));
+    }
+
+    let turn_ids = turns.iter().map(|turn| turn.0).collect::<Vec<_>>();
+    let mut observed = Vec::new();
+    for _ in 0..20 {
+        let batch = repo.rotate_pending_memory_projections(2).await.unwrap();
+        assert!(batch.len() <= 2);
+        for result in batch {
+            if turn_ids.contains(&result.turn_id) && !observed.contains(&result.turn_id) {
+                observed.push(result.turn_id);
+            }
+        }
+        if observed.len() == turn_ids.len() {
+            break;
+        }
+    }
+    assert_eq!(
+        observed, turn_ids,
+        "bounded rotation must preserve scan order and prevent unresolved rows from starving the tail"
+    );
+
+    for (turn_id, user_id, novel_id) in turns {
+        assert!(repo
+            .finish_memory_projection(turn_id, user_id, novel_id, MemoryProjectionStatus::Skipped,)
+            .await
+            .unwrap());
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    scan_guard.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn malformed_pending_projection_does_not_block_a_valid_candidate() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let scan_guard = pending_projection_scan_guard(&pool).await;
+    let repo = PgWorldTurnRepository::new(pool.clone());
+    let mut turns = Vec::new();
+
+    for ordinal in 0..2 {
+        let (user_id, novel_id, context) = seed_world_turn(&pool).await;
+        let claim = world_turn_claim(user_id, novel_id);
+        let attempt = world_turn_acquire(&repo, &claim).await;
+        repo.complete_turn(&claim, attempt, &world_turn_transition(), &context)
+            .await
+            .unwrap();
+        let scan_position = chrono::DateTime::from_timestamp(-5_364_662_400 + ordinal, 0).unwrap();
+        sqlx::query("UPDATE world_turns SET updated_at = $2 WHERE id = $1")
+            .bind(claim.id)
+            .bind(scan_position)
+            .execute(&pool)
+            .await
+            .unwrap();
+        turns.push((claim.id, user_id, novel_id));
+    }
+    sqlx::query("UPDATE world_turns SET result = '{}'::jsonb WHERE id = $1")
+        .bind(turns[0].0)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut valid_seen = false;
+    for _ in 0..20 {
+        valid_seen |= repo
+            .rotate_pending_memory_projections(2)
+            .await
+            .unwrap()
+            .iter()
+            .any(|result| result.turn_id == turns[1].0);
+        if valid_seen {
+            break;
+        }
+    }
+    assert!(
+        valid_seen,
+        "an invalid row must not poison the valid candidate"
+    );
+    let malformed_status: String =
+        sqlx::query_scalar("SELECT memory_projection_status FROM world_turns WHERE id = $1")
+            .bind(turns[0].0)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(malformed_status, "pending");
+
+    assert!(repo
+        .finish_memory_projection(
+            turns[1].0,
+            turns[1].1,
+            turns[1].2,
+            MemoryProjectionStatus::Skipped,
+        )
+        .await
+        .unwrap());
+    for (_, user_id, _) in turns {
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    scan_guard.rollback().await.unwrap();
 }
 
 #[tokio::test]

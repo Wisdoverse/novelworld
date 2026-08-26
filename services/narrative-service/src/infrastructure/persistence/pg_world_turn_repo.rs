@@ -321,6 +321,58 @@ impl WorldTurnRepository for PgWorldTurnRepository {
         })
     }
 
+    async fn rotate_pending_memory_projections(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<WorldTurnResult>> {
+        ensure!(
+            (1..=100).contains(&limit),
+            "memory projection recovery limit must be 1-100"
+        );
+        let rows = sqlx::query_as::<_, WorldTurnRow>(
+            r#"
+            WITH candidates AS (
+                SELECT id, updated_at AS scan_position
+                FROM world_turns
+                WHERE status = 'completed' AND memory_projection_status = 'pending'
+                ORDER BY updated_at ASC, id ASC
+                LIMIT $1
+                FOR UPDATE SKIP LOCKED
+            ), rotated AS (
+                UPDATE world_turns AS turn
+                SET updated_at = NOW()
+                FROM candidates
+                WHERE turn.id = candidates.id
+                RETURNING turn.id, turn.user_id, turn.novel_id,
+                          turn.request_fingerprint, turn.action, turn.resolution,
+                          turn.expected_turn_number, turn.status, turn.attempt,
+                          turn.failure_code, turn.memory_projection_status,
+                          turn.result, candidates.scan_position
+            )
+            SELECT id, user_id, novel_id, request_fingerprint, action, resolution,
+                   expected_turn_number, status, attempt, failure_code,
+                   memory_projection_status, FALSE AS lease_expired, result
+            FROM rotated
+            ORDER BY scan_position ASC, id ASC
+            "#,
+        )
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut results = Vec::with_capacity(rows.len());
+        for row in rows {
+            match Self::completed_result(&row) {
+                Ok(result) => results.push(result),
+                Err(error) => tracing::error!(
+                    turn_id = %row.id,
+                    error = ?error,
+                    "pending world turn has an invalid committed result"
+                ),
+            }
+        }
+        Ok(results)
+    }
+
     async fn renew_turn(&self, turn_id: Uuid, attempt: i64) -> Result<bool> {
         let result = sqlx::query(
             r#"

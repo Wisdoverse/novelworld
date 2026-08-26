@@ -692,6 +692,7 @@ export function ReaderPage() {
             novelId={novelId || ''}
             view={openWorld}
             actionsDisabled={isOpenWorldError || timelineMutationLocked}
+            onRefresh={refetchOpenWorld}
           />
         ) : null}
       </div>
