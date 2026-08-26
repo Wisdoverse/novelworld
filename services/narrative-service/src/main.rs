@@ -124,6 +124,7 @@ async fn run_body() -> Result<()> {
             agent_memory,
             dice_roller,
         });
+        let _memory_projection_recovery = handler.spawn_memory_projection_recovery();
 
         let state = AppState {
             handler,

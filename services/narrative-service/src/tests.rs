@@ -10,7 +10,7 @@ use crate::domain::entities::world_session::{
 use crate::domain::ports::AgentMemoryPort;
 use crate::domain::repositories::{
     ChapterInfo, ChapterReadRepository, CharacterBrief, NovelInfo, PlayerEntryContext,
-    WorldTurnResult,
+    ReadingProgressSnapshot, WorldTurnResult,
 };
 use crate::domain::services::narrative_transition::{
     CanonContext, NarrativeTransition, RelationshipChange, ThreadChange, ThreadStatus,
@@ -147,6 +147,17 @@ impl ChapterReadRepository for FixedChapterRepo {
 
     async fn get_current_chapter(&self, _novel_id: Uuid, _user_id: Uuid) -> Result<i32> {
         Ok(i32::MAX)
+    }
+
+    async fn get_reading_progress(
+        &self,
+        _novel_id: Uuid,
+        _user_id: Uuid,
+    ) -> Result<ReadingProgressSnapshot> {
+        Ok(ReadingProgressSnapshot {
+            current_chapter: i32::MAX,
+            reader_identity_is_self: false,
+        })
     }
 
     async fn list_characters(
