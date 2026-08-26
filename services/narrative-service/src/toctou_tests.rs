@@ -10,7 +10,7 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 use crate::application::handlers::{
-    CreatePlayerEntityCommand, NarrativeCommandHandler, NarrativeError,
+    journey_memory_id, CreatePlayerEntityCommand, NarrativeCommandHandler, NarrativeError,
 };
 use crate::domain::entities::{
     narrative_node::{NarrativeChoice, NarrativeNode, WorldState},
@@ -44,6 +44,7 @@ struct ToctouFixture {
     block_next_character_list: AtomicBool,
     character_list_entered: Notify,
     character_list_release: Notify,
+    characters: Mutex<Vec<CharacterBrief>>,
     world_state: Mutex<WorldState>,
     other_world_state: Mutex<WorldState>,
     nodes: Mutex<Vec<NarrativeNode>>,
@@ -83,6 +84,12 @@ struct ToctouFixture {
     begin_turn_calls: AtomicUsize,
     complete_turn_calls: AtomicUsize,
     finish_projection_calls: AtomicUsize,
+    agent_memory_available: AtomicBool,
+    agent_memory_calls: AtomicUsize,
+    saved_memory_ids: Mutex<Vec<Uuid>>,
+    block_next_agent_memory: AtomicBool,
+    agent_memory_entered: Notify,
+    agent_memory_release: Notify,
 }
 
 impl ToctouFixture {
@@ -154,6 +161,7 @@ impl ToctouFixture {
             block_next_character_list: AtomicBool::new(false),
             character_list_entered: Notify::new(),
             character_list_release: Notify::new(),
+            characters: Mutex::new(vec![]),
             world_state: Mutex::new(world_state),
             other_world_state: Mutex::new(other_world_state),
             nodes: Mutex::new(node.into_iter().collect()),
@@ -193,6 +201,12 @@ impl ToctouFixture {
             begin_turn_calls: AtomicUsize::new(0),
             complete_turn_calls: AtomicUsize::new(0),
             finish_projection_calls: AtomicUsize::new(0),
+            agent_memory_available: AtomicBool::new(true),
+            agent_memory_calls: AtomicUsize::new(0),
+            saved_memory_ids: Mutex::new(vec![]),
+            block_next_agent_memory: AtomicBool::new(false),
+            agent_memory_entered: Notify::new(),
+            agent_memory_release: Notify::new(),
         }
     }
 
@@ -263,6 +277,12 @@ impl ToctouFixture {
         .expect("player-entry context was not requested");
     }
 
+    async fn wait_for_agent_memory(&self) {
+        tokio::time::timeout(Duration::from_secs(2), self.agent_memory_entered.notified())
+            .await
+            .expect("agent memory was not called");
+    }
+
     async fn block_node_read_if_requested(&self) {
         if self.block_next_node_read.swap(false, Ordering::SeqCst) {
             self.node_read_entered.notify_one();
@@ -299,6 +319,57 @@ impl ToctouFixture {
             scheduled_events: vec![],
             character_goals: vec![],
         }
+    }
+
+    fn prepare_pending_witnessed_turn(&self) -> (Uuid, WorldAction) {
+        let character_id = Uuid::new_v4();
+        *self.characters.lock().unwrap() = vec![CharacterBrief {
+            id: character_id,
+            role: "protagonist".into(),
+            first_appearance_chapter: Some(1),
+        }];
+        let entry_context = self.entry_context(self.source_chapter, Some(character_id));
+        let turn_id = Uuid::new_v4();
+        let action = WorldAction {
+            kind: WorldActionKind::Converse,
+            target_id: Some(character_id.to_string()),
+            intent: "向守门人确认城门发生了什么".into(),
+        };
+        let transition = WorldTurnTransition {
+            schema_version: 1,
+            prompt_version: "world-turn-v2".into(),
+            canon_model_version: 1,
+            canonical_checkpoint_chapter: self.source_chapter,
+            rendered_narrative: "守门人确认城门已经关闭。".into(),
+            events: vec![TransitionEvent {
+                summary: "守门人确认城门已经关闭".into(),
+                actor_character_ids: vec![character_id],
+                location_id: None,
+            }],
+            relationship_changes: vec![],
+            location_changes: vec![],
+            thread_changes: vec![],
+            player_location_id: None,
+            inventory_additions: vec![],
+            inventory_removals: vec![],
+            knowledge_discoveries: vec![],
+            faction_changes: vec![],
+            canonical_event_change: None,
+        };
+        let mut committed_state = self.world_state.lock().unwrap().clone();
+        committed_state.start_open_world(&entry_context).unwrap();
+        committed_state
+            .apply_world_turn(turn_id, &action, &transition, &entry_context)
+            .unwrap();
+        *self.world_state.lock().unwrap() = committed_state.clone();
+        *self.completed_world_turn.lock().unwrap() = Some(WorldTurnResult {
+            turn_id,
+            action: action.clone(),
+            resolution: None,
+            transition,
+            world_state: committed_state,
+        });
+        (turn_id, action)
     }
 
     fn journal_entry(turn_number: i64) -> WorldTurnJournalEntry {
@@ -619,7 +690,7 @@ impl ChapterReadRepository for ToctouFixture {
             self.character_list_entered.notify_one();
             self.character_list_release.notified().await;
         }
-        Ok(vec![])
+        Ok(self.characters.lock().unwrap().clone())
     }
 
     async fn get_player_entry_context(
@@ -756,7 +827,7 @@ impl LlmPort for ToctouFixture {
 impl AgentMemoryPort for ToctouFixture {
     async fn save_permanent_memory(
         &self,
-        _memory_id: Uuid,
+        memory_id: Uuid,
         _character_id: Uuid,
         _user_id: Uuid,
         _novel_id: Uuid,
@@ -764,7 +835,19 @@ impl AgentMemoryPort for ToctouFixture {
         _event: &str,
         _importance: i32,
     ) -> Result<()> {
-        bail!("unused")
+        self.agent_memory_calls.fetch_add(1, Ordering::SeqCst);
+        if self.block_next_agent_memory.swap(false, Ordering::SeqCst) {
+            self.agent_memory_entered.notify_one();
+            self.agent_memory_release.notified().await;
+        }
+        if !self.agent_memory_available.load(Ordering::SeqCst) {
+            bail!("agent memory unavailable");
+        }
+        let mut saved = self.saved_memory_ids.lock().unwrap();
+        if !saved.contains(&memory_id) {
+            saved.push(memory_id);
+        }
+        Ok(())
     }
 }
 
@@ -807,6 +890,22 @@ impl WorldTurnRepository for ToctouFixture {
             result: Box::new(result),
             memory_projection: *self.memory_projection_status.lock().unwrap(),
         })
+    }
+
+    async fn rotate_pending_memory_projections(
+        &self,
+        _limit: usize,
+    ) -> Result<Vec<WorldTurnResult>> {
+        if *self.memory_projection_status.lock().unwrap() != MemoryProjectionStatus::Pending {
+            return Ok(vec![]);
+        }
+        Ok(self
+            .completed_world_turn
+            .lock()
+            .unwrap()
+            .clone()
+            .into_iter()
+            .collect())
     }
 
     async fn renew_turn(&self, _turn_id: Uuid, _attempt: i64) -> Result<bool> {
@@ -2201,14 +2300,33 @@ async fn pending_projection_stays_pending_if_progress_rewinds_before_acknowledge
     fixture.character_list_release.notify_one();
 
     let error = in_flight.await.unwrap().unwrap_err();
-    assert!(matches!(error, NarrativeError::TurnOutcomeUnknown));
+    assert!(matches!(error, NarrativeError::ReadingProgressBehindWorld));
     assert_eq!(
         *fixture.memory_projection_status.lock().unwrap(),
         MemoryProjectionStatus::Pending
     );
     assert_eq!(fixture.finish_projection_calls.load(Ordering::SeqCst), 0);
 
+    assert_eq!(
+        handler
+            .reconcile_pending_memory_projections_once()
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        *fixture.memory_projection_status.lock().unwrap(),
+        MemoryProjectionStatus::Pending
+    );
+
     fixture.current_chapter.store(2, Ordering::SeqCst);
+    assert_eq!(
+        handler
+            .reconcile_pending_memory_projections_once()
+            .await
+            .unwrap(),
+        1
+    );
     let replay = handler
         .submit_world_turn(turn_id, user_id, novel_id, 0, action)
         .await
@@ -2223,6 +2341,229 @@ async fn pending_projection_stays_pending_if_progress_rewinds_before_acknowledge
         MemoryProjectionStatus::Skipped
     );
     assert_eq!(fixture.begin_turn_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(fixture.finish_projection_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.complete_turn_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn rewound_exact_replay_stops_before_agent_for_a_witnessed_turn() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    let (turn_id, action) = fixture.prepare_pending_witnessed_turn();
+    fixture.current_chapter.store(1, Ordering::SeqCst);
+    let error = fixture
+        .handler()
+        .submit_world_turn(turn_id, fixture.user_id, fixture.novel_id, 0, action)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, NarrativeError::ReadingProgressBehindWorld));
+    assert_eq!(fixture.agent_memory_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.begin_turn_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.finish_projection_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        *fixture.memory_projection_status.lock().unwrap(),
+        MemoryProjectionStatus::Pending
+    );
+}
+
+#[tokio::test]
+async fn pending_projection_recovers_after_agent_returns_without_replaying_the_turn() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    let (turn_id, _) = fixture.prepare_pending_witnessed_turn();
+    let handler = fixture.handler();
+
+    fixture.self_identity.store(false, Ordering::SeqCst);
+    assert_eq!(
+        handler
+            .reconcile_pending_memory_projections_once()
+            .await
+            .unwrap(),
+        0
+    );
+    fixture.self_identity.store(true, Ordering::SeqCst);
+    fixture.current_chapter.store(1, Ordering::SeqCst);
+    assert_eq!(
+        handler
+            .reconcile_pending_memory_projections_once()
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(fixture.agent_memory_calls.load(Ordering::SeqCst), 0);
+
+    fixture
+        .current_chapter
+        .store(fixture.source_chapter, Ordering::SeqCst);
+    fixture
+        .agent_memory_available
+        .store(false, Ordering::SeqCst);
+
+    assert_eq!(
+        handler
+            .reconcile_pending_memory_projections_once()
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        *fixture.memory_projection_status.lock().unwrap(),
+        MemoryProjectionStatus::Pending
+    );
+    assert_eq!(fixture.agent_memory_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(fixture.finish_projection_calls.load(Ordering::SeqCst), 0);
+
+    fixture.agent_memory_available.store(true, Ordering::SeqCst);
+    assert_eq!(
+        handler
+            .reconcile_pending_memory_projections_once()
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        *fixture.memory_projection_status.lock().unwrap(),
+        MemoryProjectionStatus::Saved
+    );
+    assert_eq!(fixture.agent_memory_calls.load(Ordering::SeqCst), 4);
+    assert_eq!(fixture.finish_projection_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *fixture.saved_memory_ids.lock().unwrap(),
+        vec![journey_memory_id(turn_id)]
+    );
+
+    assert_eq!(
+        handler
+            .reconcile_pending_memory_projections_once()
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(fixture.agent_memory_calls.load(Ordering::SeqCst), 4);
+    assert_eq!(fixture.begin_turn_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.complete_turn_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn projection_stays_pending_when_progress_rewinds_during_agent_write() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    let (turn_id, _) = fixture.prepare_pending_witnessed_turn();
+    fixture
+        .block_next_agent_memory
+        .store(true, Ordering::SeqCst);
+    let handler = Arc::new(fixture.handler());
+    let recovery_handler = handler.clone();
+    let recovery = tokio::spawn(async move {
+        recovery_handler
+            .reconcile_pending_memory_projections_once()
+            .await
+    });
+
+    fixture.wait_for_agent_memory().await;
+    fixture.current_chapter.store(1, Ordering::SeqCst);
+    fixture.agent_memory_release.notify_one();
+    assert_eq!(recovery.await.unwrap().unwrap(), 0);
+    assert_eq!(
+        *fixture.memory_projection_status.lock().unwrap(),
+        MemoryProjectionStatus::Pending
+    );
+    assert_eq!(fixture.finish_projection_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        *fixture.saved_memory_ids.lock().unwrap(),
+        vec![journey_memory_id(turn_id)]
+    );
+
+    fixture
+        .current_chapter
+        .store(fixture.source_chapter, Ordering::SeqCst);
+    assert_eq!(
+        handler
+            .reconcile_pending_memory_projections_once()
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        *fixture.memory_projection_status.lock().unwrap(),
+        MemoryProjectionStatus::Saved
+    );
+    assert_eq!(fixture.agent_memory_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(fixture.saved_memory_ids.lock().unwrap().len(), 1);
+    assert_eq!(fixture.complete_turn_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn autonomous_projection_and_exact_replay_race_idempotently() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    let (turn_id, action) = fixture.prepare_pending_witnessed_turn();
+    fixture
+        .block_next_agent_memory
+        .store(true, Ordering::SeqCst);
+    let handler = Arc::new(fixture.handler());
+    let recovery_handler = handler.clone();
+    let recovery = tokio::spawn(async move {
+        recovery_handler
+            .reconcile_pending_memory_projections_once()
+            .await
+    });
+
+    fixture.wait_for_agent_memory().await;
+    let replay = handler
+        .submit_world_turn(turn_id, fixture.user_id, fixture.novel_id, 0, action)
+        .await
+        .unwrap();
+    assert_eq!(
+        replay.memory_projection_status,
+        MemoryProjectionStatus::Saved
+    );
+    fixture.agent_memory_release.notify_one();
+    assert_eq!(recovery.await.unwrap().unwrap(), 1);
+
+    assert_eq!(
+        *fixture.memory_projection_status.lock().unwrap(),
+        MemoryProjectionStatus::Saved
+    );
+    assert_eq!(fixture.agent_memory_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(fixture.finish_projection_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        *fixture.saved_memory_ids.lock().unwrap(),
+        vec![journey_memory_id(turn_id)]
+    );
+    assert_eq!(fixture.begin_turn_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.complete_turn_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn spawned_projection_recovery_runs_an_immediate_pass() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    let (turn_id, _) = fixture.prepare_pending_witnessed_turn();
+    fixture
+        .block_next_agent_memory
+        .store(true, Ordering::SeqCst);
+    let handler = Arc::new(fixture.handler());
+    let worker = handler.spawn_memory_projection_recovery();
+
+    fixture.wait_for_agent_memory().await;
+    fixture.agent_memory_release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while *fixture.memory_projection_status.lock().unwrap() != MemoryProjectionStatus::Saved {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the immediate recovery pass did not finish");
+    worker.abort();
+    let _ = worker.await;
+
+    assert_eq!(
+        *fixture.saved_memory_ids.lock().unwrap(),
+        vec![journey_memory_id(turn_id)]
+    );
+    assert_eq!(fixture.agent_memory_calls.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.finish_projection_calls.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.complete_turn_calls.load(Ordering::SeqCst), 0);
     assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);

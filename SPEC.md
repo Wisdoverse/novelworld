@@ -797,19 +797,21 @@ Steps:
    Separately, every committed open-world turn stores a durable projection
    status on its `world_turns` row: `pending` until a protagonist-scoped
    permanent fact is acknowledged as `saved`, or eligibility is conclusively
-   recorded as `skipped`. A same-key replay MUST compensate `pending` using the
-   same deterministic memory ID. Narrative may record `saved` only after Agent
+   recorded as `skipped`. A same-key replay or autonomous recovery pass MUST
+   attempt to compensate eligible `pending` rows using the same deterministic memory ID. Narrative MUST
+   scan a bounded batch periodically and durably rotate attempted rows so a
+   persistently ineligible or unavailable oldest batch cannot starve later
+   pending turns. Narrative may record `saved` only after Agent
    returns success for a fully authenticated insert or exact durable replay;
    parsing a JSON-shaped payload or reserving an unauthenticated row is not an
    acknowledgement. `saved` and `skipped` are terminal and MUST
    replay the committed result without an Agent Service call. After projection
    returns either terminal candidate but before acknowledging it on the turn
-   row, Narrative MUST recheck the committed world's source high-water against
-   current server-owned progress. A concurrent rewind MUST return the content-free
+   row, Narrative MUST recheck both persisted `self` identity and the committed
+   world's source high-water against current server-owned progress. A concurrent rewind MUST return the content-free
    `reading_progress_behind_world` error and leave the row `pending`; restoring
-   progress allows the same key to compensate without another world generation
-   or commit. There is no
-   current autonomous reconciliation scan for an abandoned `pending` row.
+   progress allows the same key or a later recovery pass to compensate without
+   another world generation or commit.
 
 ### 6.4 Prompt Construction
 
@@ -1134,18 +1136,22 @@ The `world_turns` row MUST durably record `memory_projection_status` as
 `pending`, `saved`, or `skipped`. A fresh committed turn does not return success
 until its projection reaches a terminal state; failure after the authoritative
 turn commit is an unknown outcome, not a rollback of that turn. Replaying the
-same logical-turn key MUST compensate `pending` idempotently. Replaying
+same logical-turn key MUST attempt to compensate eligible `pending` rows idempotently. Replaying
 `saved`/`skipped` MUST return the exact committed result without recontacting
-the Agent Service. While a committed turn remains `pending`, the persistence
+the Agent Service. Narrative MUST also run bounded autonomous compensation for
+committed `pending` rows and durably rotate attempted scan positions so one
+unrecoverable batch cannot starve later turns. While a committed turn remains `pending`, the persistence
 boundary MUST refuse every different logical-turn key for the same user and
 novel; the unresolved turn and an in-progress turn share one database-
-serialized authority slot. Before changing `pending` to a terminal status, Narrative
-MUST recheck the committed result's source high-water. If progress concurrently
+serialized authority slot. Before contacting Agent and again before changing
+`pending` to a terminal status, Narrative MUST recheck persisted `self` identity
+and the committed result's source high-water. If progress concurrently
 falls behind, the request MUST return content-free
 `reading_progress_behind_world`, keep the row `pending`, and allow the same key
-to finish after progress is restored without regenerating or recommitting the
-world turn. This is request-driven compensation, not a background
-reconciliation guarantee.
+or a later recovery pass to finish after progress is restored without
+regenerating or recommitting the world turn. Dependency failure, identity
+change, ambiguous acknowledgement, and invalid persisted data MUST also leave
+the row `pending` rather than discard a committed fact.
 The successful world-turn POST MUST include its terminal
 `memory_projection_status`. A browser that receives that terminal response MAY
 clear the pending request immediately; compatibility with an older response
@@ -1167,7 +1173,8 @@ compensation. A failed
 confirmation refresh after a successful POST remains ambiguous regardless of
 that refresh response's status. `sessionStorage` covers the interval before a
 commit becomes journal-visible; committed-pending recovery does not depend on
-the original tab. This remains user-driven recovery, not an autonomous scan.
+the original tab. This client path remains a user-driven compatibility fallback
+alongside the autonomous server scan.
 When first-run setup, login, registration, or session confirmation establishes the authenticated
 principal, the browser MUST remove NovelWorld pending world-turn records for
 every other principal while retaining exact recovery records for the confirmed

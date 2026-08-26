@@ -145,6 +145,11 @@ pub struct WorldTurnJournalEntry {
 #[async_trait]
 pub trait WorldTurnRepository: Send + Sync {
     async fn begin_turn(&self, claim: &WorldTurnClaim) -> Result<BeginWorldTurn>;
+    /// Return the next bounded recovery batch and durably rotate its scan
+    /// position. This is not an exclusive lease; projection writes remain
+    /// idempotent and terminal acknowledgement remains compare-and-set.
+    async fn rotate_pending_memory_projections(&self, limit: usize)
+        -> Result<Vec<WorldTurnResult>>;
     async fn renew_turn(&self, turn_id: Uuid, attempt: i64) -> Result<bool>;
     async fn complete_turn(
         &self,

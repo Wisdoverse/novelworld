@@ -55,6 +55,8 @@ const MAX_JOURNEY_MEMORY_LOCATION_CHARS: usize = 200;
 const WORLD_TURN_MEMORY_IMPORTANCE: i32 = 7;
 const JOURNEY_MEMORY_RETRIES: usize = 2;
 const MAX_WORLD_JOURNAL_ENTRIES: usize = 100;
+const MEMORY_PROJECTION_RECOVERY_BATCH: usize = 10;
+const MEMORY_PROJECTION_RECOVERY_INTERVAL: Duration = Duration::from_secs(30);
 const JOURNEY_MEMORY_NAMESPACE: Uuid = Uuid::from_u128(0x4d5f_215d_111c_5f25_8614_71e8_5f8a_3e63);
 
 pub(crate) fn journey_memory_id(turn_id: Uuid) -> Uuid {
@@ -132,7 +134,7 @@ pub(crate) fn resolve_protagonist(characters: &[CharacterBrief]) -> Option<Uuid>
 
 /// Idempotently project a committed world-turn fact into permanent memory.
 /// Eligible turns are acknowledged before the caller receives success; a
-/// failed acknowledgement stays inside the same-key replay boundary.
+/// failed acknowledgement remains pending for exact replay or bounded recovery.
 #[allow(clippy::too_many_arguments)] // Explicit projection scope.
 pub(crate) async fn record_world_journey_memory(
     agent_memory: &dyn AgentMemoryPort,
@@ -1197,8 +1199,8 @@ impl NarrativeCommandHandler {
     }
 
     /// A successful response implies that the eligible permanent fact reached
-    /// Agent. If projection is ambiguous after the world commit, the client
-    /// keeps the same turn key and the completed replay retries idempotently.
+    /// Agent. Ambiguous post-commit projection remains pending for the same-key
+    /// replay path and the bounded recovery scan.
     async fn project_journey_memory(
         &self,
         user_id: Uuid,
@@ -1241,10 +1243,17 @@ impl NarrativeCommandHandler {
         novel_id: Uuid,
         result: &WorldTurnResult,
     ) -> NarrativeResult<MemoryProjectionStatus> {
+        self.require_self_reader_identity(user_id, novel_id)
+            .await
+            .map_err(|_| NarrativeError::TurnOutcomeUnknown)?;
+        self.require_world_source_visible(user_id, novel_id, &result.world_state)
+            .await?;
         let status = self
             .project_journey_memory(user_id, novel_id, result)
             .await?;
         self.require_world_source_visible(user_id, novel_id, &result.world_state)
+            .await?;
+        self.require_self_reader_identity(user_id, novel_id)
             .await
             .map_err(|_| NarrativeError::TurnOutcomeUnknown)?;
         match self
@@ -1271,6 +1280,61 @@ impl NarrativeCommandHandler {
                 Err(NarrativeError::TurnOutcomeUnknown)
             }
         }
+    }
+
+    pub(crate) async fn reconcile_pending_memory_projections_once(&self) -> Result<usize> {
+        let candidates = self
+            .world_turn_repo
+            .rotate_pending_memory_projections(MEMORY_PROJECTION_RECOVERY_BATCH)
+            .await?;
+        let mut reconciled = 0;
+        for result in candidates {
+            let turn_id = result.turn_id;
+            let user_id = result.world_state.user_id;
+            let novel_id = result.world_state.novel_id;
+            match self
+                .finish_journey_memory_projection(user_id, novel_id, &result)
+                .await
+            {
+                Ok(status) => {
+                    reconciled += 1;
+                    info!(
+                        %turn_id,
+                        %novel_id,
+                        ?status,
+                        "reconciled pending world turn memory projection"
+                    );
+                }
+                Err(error) => warn!(
+                    %turn_id,
+                    %novel_id,
+                    %error,
+                    "pending world turn memory projection remains unresolved"
+                ),
+            }
+        }
+        Ok(reconciled)
+    }
+
+    pub fn spawn_memory_projection_recovery(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let handler = self.clone();
+        let current_span = tracing::Span::current();
+        tokio::spawn(
+            async move {
+                let mut interval = tokio::time::interval(MEMORY_PROJECTION_RECOVERY_INTERVAL);
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    interval.tick().await;
+                    if let Err(error) = handler.reconcile_pending_memory_projections_once().await {
+                        warn!(
+                            error = ?error,
+                            "pending world turn memory projection scan failed"
+                        );
+                    }
+                }
+            }
+            .instrument(current_span),
+        )
     }
 
     #[tracing::instrument(skip(self, action), fields(turn_id = %turn_id))]
