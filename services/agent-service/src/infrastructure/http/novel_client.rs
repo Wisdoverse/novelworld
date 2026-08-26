@@ -39,6 +39,8 @@ struct CharacterResponse {
     #[serde(default)]
     speaking_style: Option<String>,
     #[serde(default)]
+    persona_source_chapter_high_water: Option<i32>,
+    #[serde(default)]
     first_appearance_chapter: Option<i32>,
 }
 
@@ -114,6 +116,7 @@ impl CharacterInfoRepository for NovelServiceClient {
             personality: ch.personality,
             background: ch.background,
             speaking_style: ch.speaking_style,
+            persona_source_chapter_high_water: ch.persona_source_chapter_high_water,
             first_appearance_chapter: ch.first_appearance_chapter,
         }))
     }

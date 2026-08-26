@@ -224,15 +224,16 @@ Keep the default preview on localhost. Remote access requires an
 operator-managed encrypted tunnel or TLS boundary; the current stack is not
 qualified for direct public-Internet hosting.
 
-Migration 0021 uses a maintenance window: the managed release path stops the
-old Narrative producer before exposing candidate client assets, verifies that
-world actions fail with a retryable `5xx` while preserving their recovery key,
-then drains Agent before migrating. Zero-downtime world actions are not claimed.
+Application-semantic migrations 0021 and 0024 use a maintenance window: the
+managed release path stops the old Narrative producer before exposing candidate
+client assets, verifies that world actions fail with a retryable `5xx` while
+preserving their recovery key, then stops old Novel and Agent processes before
+migrating. Zero-downtime world actions are not claimed.
 An installation running older release tooling must first activate a
-control-only release containing the new release script but not 0020, then use
-that script for the migration release. New-script adoption requires a target
-that already contains 0020; upgrade, restore, and rollback refuse a schema
-downgrade to older writers. A durable schema-transition manifest is written
+control-only release containing the new release script but neither barrier,
+then use that script for the migration release. New-script adoption requires a
+target containing both barriers; upgrade, marked restore, and rollback refuse a
+schema downgrade across either one. A durable schema-transition manifest is written
 only immediately before the migrator runs and is cleared only after release
 state promotion. Normal restore and healthy rollback discard any unmarked
 candidate before writing that exact marker, then use the same finalization
@@ -246,8 +247,8 @@ directory entry. A legacy `rollback.pending` pair is still recovered for
 compatibility, but new rollback operations use the schema-transition protocol.
 Merely
 downloading a candidate cannot block restoration of the current release. Any
-marked transition rolls the exact marked manifest forward; a 0020 transition
-therefore never revives the older writer. Recovery is idempotent even when the
+marked transition rolls the exact marked manifest forward; a 0021/0024
+transition therefore never revives the older writer or reader. Recovery is idempotent even when the
 downloaded candidate file is gone, and promotes it only after health succeeds.
 An interrupted upgrade preserves the former
 `current` as `previous`; initial adoption creates no fictitious predecessor.
@@ -296,8 +297,11 @@ data, and generated secrets stay on the player's computer in the operating
 system's per-user application data directory. AI features require Internet
 access to the configured model provider and an API key only when they are used.
 Desktop startup stops its named embedded database, refuses occupied service
-ports, applies every embedded migration through 0023, and only then starts the
+ports, applies every embedded migration through 0024, and only then starts the
 five services; the migration therefore runs without an old local writer.
+Desktop archives are experimental and forward-migration-only: do not reuse a
+post-0024 application-data directory with an older archive. Older binaries do
+not contain the current downgrade guard.
 
 The current artifacts are unsigned engineering builds. Windows SmartScreen and
 macOS Gatekeeper may warn on first launch; public distribution requires platform

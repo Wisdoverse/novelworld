@@ -22,6 +22,8 @@ const roleLabels: Record<string, string> = {
 };
 
 export function CharacterCard({ character, onTalk }: Props) {
+  const role = character.role;
+
   return (
     <div
       className="surface-card overflow-hidden transition-transform hover:-translate-y-1"
@@ -38,23 +40,25 @@ export function CharacterCard({ character, onTalk }: Props) {
             <User size={48} style={{ color: '#7b8db7' }} />
           </div>
         )}
-        <span
-          className="absolute top-2 right-2 px-2 py-0.5 rounded-full text-xs font-medium text-white"
-          style={{ background: roleBadgeColors[character.role] || '#475569' }}
-        >
-          {roleLabels[character.role] || character.role}
-        </span>
+        {role ? (
+          <span
+            className="absolute top-2 right-2 px-2 py-0.5 rounded-full text-xs font-medium text-white"
+            style={{ background: roleBadgeColors[role] || '#475569' }}
+          >
+            {roleLabels[role] || role}
+          </span>
+        ) : null}
       </div>
 
       <div className="p-4">
         <h3 className="font-semibold text-lg mb-1 text-[#1f1f1f]">
           {character.name}
         </h3>
-        {character.aliases.length > 0 && (
+        {character.aliases?.length ? (
           <p className="text-xs mb-2 text-[#5f6368]">
             别名：{character.aliases.join('、')}
           </p>
-        )}
+        ) : null}
         <p className="text-sm line-clamp-2 mb-3 text-[#5f6368]">
           {character.description || '暂无描述'}
         </p>

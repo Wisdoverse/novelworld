@@ -1,7 +1,7 @@
 use anyhow::Result;
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures::{stream, StreamExt};
-use serde::de::DeserializeOwned;
+use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
@@ -38,12 +38,14 @@ use crate::domain::services::{
     character_extractor::{
         build_chunk_extraction_prompt, build_extraction_prompt, build_representative_sample,
         build_scan_plan, find_first_appearance, json_object_payload, merge_extractions,
-        needs_chunk_scan, validate_chunk_extraction, validate_extraction, ChunkExtractionResult,
-        ExtractionResult,
+        needs_chunk_scan, text_contains_name, validate_chunk_extraction, validate_extraction,
+        ChunkExtractionResult, ExtractionResult,
     },
     novel_parser::NovelParserService,
 };
-use crate::domain::value_objects::{DeviationMode, ImportStage, NovelStatus, ReaderIdentityType};
+use crate::domain::value_objects::{
+    AvatarStatus, CharacterRole, DeviationMode, ImportStage, NovelStatus, ReaderIdentityType,
+};
 
 pub struct NovelCommandHandler {
     pub novel_repo: Arc<dyn NovelRepository>,
@@ -2175,10 +2177,145 @@ pub enum ReadingProgressError {
     NotFound,
     #[error("Character not found")]
     CharacterNotFound,
+    #[error("Reader identity is unavailable at current progress")]
+    IdentityUnavailable,
     #[error("{0}")]
     Validation(String),
     #[error("Reading progress operation failed")]
     Internal(#[source] anyhow::Error),
+}
+
+/// Public character contract bounded by the caller's persisted reading progress.
+/// The stored `Character` remains canonical; this DTO is the only shape exposed
+/// by progress-aware character reads.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProgressBoundCharacter {
+    pub id: Uuid,
+    pub novel_id: Uuid,
+    pub name: String,
+    pub first_appearance_chapter: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aliases: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<CharacterRole>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub personality: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speaking_style: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub appearance: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_status: Option<AvatarStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persona_source_chapter_high_water: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+impl ProgressBoundCharacter {
+    fn partial(character: &Character, first_appearance_chapter: i32) -> Self {
+        Self {
+            id: character.id,
+            novel_id: character.novel_id,
+            name: character.name.clone(),
+            first_appearance_chapter,
+            aliases: None,
+            role: None,
+            description: None,
+            personality: None,
+            background: None,
+            speaking_style: None,
+            appearance: None,
+            avatar_url: None,
+            avatar_status: None,
+            persona_source_chapter_high_water: None,
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
+    fn full(character: &Character, first_appearance_chapter: i32, total_chapters: i32) -> Self {
+        Self {
+            id: character.id,
+            novel_id: character.novel_id,
+            name: character.name.clone(),
+            first_appearance_chapter,
+            aliases: Some(character.aliases.clone()),
+            role: Some(character.role.clone()),
+            description: character.description.clone(),
+            personality: character.personality.clone(),
+            background: character.background.clone(),
+            speaking_style: character.speaking_style.clone(),
+            appearance: character.appearance.clone(),
+            avatar_url: character.avatar_url.clone(),
+            avatar_status: Some(character.avatar_status.clone()),
+            persona_source_chapter_high_water: Some(total_chapters),
+            created_at: Some(character.created_at),
+            updated_at: Some(character.updated_at),
+        }
+    }
+}
+
+fn persona_is_complete(novel: &Novel, current_chapter: i32) -> bool {
+    novel.status == NovelStatus::Ready
+        && novel.total_chapters > 0
+        && current_chapter == novel.total_chapters
+}
+
+fn progress_bound_character(
+    character: &Character,
+    novel: &Novel,
+    current_chapter: i32,
+    canonical_name_source_proven: bool,
+) -> Option<ProgressBoundCharacter> {
+    if !character_name_is_canonical(&character.name) {
+        return None;
+    }
+    let first_appearance_chapter = character
+        .first_appearance_chapter
+        .filter(|chapter| (1..=current_chapter).contains(chapter))?;
+
+    if persona_is_complete(novel, current_chapter) {
+        Some(ProgressBoundCharacter::full(
+            character,
+            first_appearance_chapter,
+            novel.total_chapters,
+        ))
+    } else {
+        canonical_name_source_proven
+            .then(|| ProgressBoundCharacter::partial(character, first_appearance_chapter))
+    }
+}
+
+fn known_character_names(characters: &[Character]) -> HashSet<&str> {
+    characters
+        .iter()
+        .flat_map(|character| {
+            std::iter::once(character.name.as_str())
+                .chain(character.aliases.iter().map(String::as_str))
+        })
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+fn canonical_name_is_source_proven(
+    character: &Character,
+    known_names: &HashSet<&str>,
+    source_chapters: &HashMap<i32, Chapter>,
+) -> bool {
+    character
+        .first_appearance_chapter
+        .and_then(|chapter| source_chapters.get(&chapter))
+        .is_some_and(|chapter| text_contains_name(&chapter.content, &character.name, known_names))
 }
 
 fn validate_chapter_number(
@@ -2291,6 +2428,26 @@ impl ReadingProgressHandler {
         user_id: Uuid,
         novel: &Novel,
     ) -> std::result::Result<ReadingProgressRecord, ReadingProgressError> {
+        let progress = self.persisted_progress_for_novel(user_id, novel).await?;
+        if self
+            .chapter_repo
+            .find_by_number(novel.id, progress.current_chapter)
+            .await
+            .map_err(ReadingProgressError::Internal)?
+            .is_none()
+        {
+            return Err(ReadingProgressError::Internal(anyhow::anyhow!(
+                "persisted reading progress points to a missing chapter"
+            )));
+        }
+        Ok(progress)
+    }
+
+    async fn persisted_progress_for_novel(
+        &self,
+        user_id: Uuid,
+        novel: &Novel,
+    ) -> std::result::Result<ReadingProgressRecord, ReadingProgressError> {
         if novel.total_chapters < 1 {
             return Err(ReadingProgressError::Validation(
                 "novel has no readable chapters".into(),
@@ -2306,18 +2463,28 @@ impl ReadingProgressHandler {
                 "persisted reading progress points outside the novel"
             ))
         })?;
-        if self
-            .chapter_repo
-            .find_by_number(novel.id, progress.current_chapter)
-            .await
-            .map_err(ReadingProgressError::Internal)?
-            .is_none()
-        {
-            return Err(ReadingProgressError::Internal(anyhow::anyhow!(
-                "persisted reading progress points to a missing chapter"
-            )));
-        }
         Ok(progress)
+    }
+
+    async fn source_chapters_for(
+        &self,
+        novel_id: Uuid,
+        chapter_numbers: HashSet<i32>,
+    ) -> std::result::Result<HashMap<i32, Chapter>, ReadingProgressError> {
+        let mut chapter_numbers = chapter_numbers.into_iter().collect::<Vec<_>>();
+        chapter_numbers.sort_unstable();
+        let mut chapters = HashMap::with_capacity(chapter_numbers.len());
+        for chapter_number in chapter_numbers {
+            if let Some(chapter) = self
+                .chapter_repo
+                .find_by_number(novel_id, chapter_number)
+                .await
+                .map_err(ReadingProgressError::Internal)?
+            {
+                chapters.insert(chapter_number, chapter);
+            }
+        }
+        Ok(chapters)
     }
 
     pub async fn get(
@@ -2326,57 +2493,90 @@ impl ReadingProgressHandler {
         novel_id: Uuid,
     ) -> std::result::Result<ReadingProgressRecord, ReadingProgressError> {
         let novel = self.owned_novel(user_id, novel_id).await?;
-        let progress = self.progress_for_novel(user_id, &novel).await?;
+        let initial_progress = self.progress_for_novel(user_id, &novel).await?;
+        let identity_source = if let Some(character_id) = initial_progress.reader_character_id {
+            let characters = self
+                .character_repo
+                .find_by_novel(novel_id)
+                .await
+                .map_err(ReadingProgressError::Internal)?;
+            let chapters = if persona_is_complete(&novel, initial_progress.current_chapter) {
+                HashMap::new()
+            } else {
+                let chapter_numbers = characters
+                    .iter()
+                    .find(|character| character.id == character_id)
+                    .and_then(|character| character.first_appearance_chapter)
+                    .filter(|chapter| (1..=initial_progress.current_chapter).contains(chapter))
+                    .into_iter()
+                    .collect();
+                self.source_chapters_for(novel_id, chapter_numbers).await?
+            };
+            Some((character_id, characters, chapters))
+        } else {
+            None
+        };
+
+        // This is deliberately the final await. The response is projected only
+        // from this persisted snapshot and the source evidence loaded above.
+        let progress = self.persisted_progress_for_novel(user_id, &novel).await?;
+        if progress.current_chapter != initial_progress.current_chapter
+            || progress.reader_identity != initial_progress.reader_identity
+            || progress.reader_identity_type != initial_progress.reader_identity_type
+            || progress.reader_character_id != initial_progress.reader_character_id
+        {
+            return Err(ReadingProgressError::Internal(anyhow::anyhow!(
+                "persisted reading progress changed during validation"
+            )));
+        }
 
         let persisted_identity = normalize_identity_name(progress.reader_identity.clone())
-            .map_err(|_| {
-                ReadingProgressError::Internal(anyhow::anyhow!(
-                    "persisted reader identity is invalid"
-                ))
-            })?;
+            .map_err(|_| ReadingProgressError::IdentityUnavailable)?;
         if persisted_identity != progress.reader_identity {
-            return Err(ReadingProgressError::Internal(anyhow::anyhow!(
-                "persisted reader identity is not normalized"
-            )));
+            return Err(ReadingProgressError::IdentityUnavailable);
         }
         match ReaderIdentityType::from_str(&progress.reader_identity_type) {
             Some(ReaderIdentityType::Self_) if progress.reader_character_id.is_none() => {}
             Some(ReaderIdentityType::Character) => {
-                let character_id = progress.reader_character_id.ok_or_else(|| {
-                    ReadingProgressError::Internal(anyhow::anyhow!(
-                        "persisted character identity has no character"
-                    ))
-                })?;
-                let character = self
-                    .character_repo
-                    .find_by_id(character_id)
-                    .await
-                    .map_err(ReadingProgressError::Internal)?
-                    .filter(|character| character.novel_id == novel_id)
-                    .ok_or_else(|| {
-                        ReadingProgressError::Internal(anyhow::anyhow!(
-                            "persisted reader character does not belong to the novel"
-                        ))
-                    })?;
-                validate_character_appearance(
-                    character.first_appearance_chapter,
-                    progress.current_chapter,
-                )
-                .map_err(|_| {
-                    ReadingProgressError::Internal(anyhow::anyhow!(
-                        "persisted reader character has not appeared yet"
-                    ))
-                })?;
+                let character_id = progress
+                    .reader_character_id
+                    .ok_or(ReadingProgressError::IdentityUnavailable)?;
+                let Some((loaded_id, characters, source_chapters)) = identity_source.as_ref()
+                else {
+                    return Err(ReadingProgressError::IdentityUnavailable);
+                };
+                let Some(character) = (*loaded_id == character_id)
+                    .then(|| {
+                        characters
+                            .iter()
+                            .find(|character| character.id == character_id)
+                    })
+                    .flatten()
+                else {
+                    return Err(ReadingProgressError::IdentityUnavailable);
+                };
+                if character.novel_id != novel_id
+                    || validate_character_appearance(
+                        character.first_appearance_chapter,
+                        progress.current_chapter,
+                    )
+                    .is_err()
+                    || !character_name_is_canonical(&character.name)
+                {
+                    return Err(ReadingProgressError::IdentityUnavailable);
+                }
+                let known_names = known_character_names(characters);
+                if !persona_is_complete(&novel, progress.current_chapter)
+                    && !canonical_name_is_source_proven(character, &known_names, source_chapters)
+                {
+                    return Err(ReadingProgressError::IdentityUnavailable);
+                }
                 if progress.reader_identity.as_deref() != Some(character.name.as_str()) {
-                    return Err(ReadingProgressError::Internal(anyhow::anyhow!(
-                        "persisted reader character name is invalid"
-                    )));
+                    return Err(ReadingProgressError::IdentityUnavailable);
                 }
             }
             _ => {
-                return Err(ReadingProgressError::Internal(anyhow::anyhow!(
-                    "persisted reader identity fields are inconsistent"
-                )));
+                return Err(ReadingProgressError::IdentityUnavailable);
             }
         }
         Ok(progress)
@@ -2437,23 +2637,42 @@ impl ReadingProgressHandler {
         &self,
         user_id: Uuid,
         novel_id: Uuid,
-    ) -> std::result::Result<Vec<Character>, ReadingProgressError> {
+    ) -> std::result::Result<Vec<ProgressBoundCharacter>, ReadingProgressError> {
         let novel = self.owned_novel(user_id, novel_id).await?;
-        let progress = self.progress_for_novel(user_id, &novel).await?;
         let characters = self
             .character_repo
             .find_by_novel(novel_id)
             .await
             .map_err(ReadingProgressError::Internal)?;
+        let validated_progress = self.progress_for_novel(user_id, &novel).await?;
+        let source_chapters = if persona_is_complete(&novel, validated_progress.current_chapter) {
+            HashMap::new()
+        } else {
+            let chapter_numbers = characters
+                .iter()
+                .filter_map(|character| character.first_appearance_chapter)
+                .filter(|chapter| (1..=validated_progress.current_chapter).contains(chapter))
+                .collect();
+            self.source_chapters_for(novel_id, chapter_numbers).await?
+        };
+        // Keep this as the final await so a concurrent rewind cannot reuse an
+        // earlier complete snapshot after persona/source IO finishes.
+        let progress = self.persisted_progress_for_novel(user_id, &novel).await?;
+        if progress.current_chapter != validated_progress.current_chapter {
+            return Err(ReadingProgressError::Internal(anyhow::anyhow!(
+                "persisted reading progress changed during character validation"
+            )));
+        }
+        let known_names = known_character_names(&characters);
         Ok(characters
-            .into_iter()
-            .filter(|character| {
-                character_name_is_canonical(&character.name)
-                    && validate_character_appearance(
-                        character.first_appearance_chapter,
-                        progress.current_chapter,
-                    )
-                    .is_ok()
+            .iter()
+            .filter_map(|character| {
+                progress_bound_character(
+                    character,
+                    &novel,
+                    progress.current_chapter,
+                    canonical_name_is_source_proven(character, &known_names, &source_chapters),
+                )
             })
             .collect())
     }
@@ -2462,21 +2681,50 @@ impl ReadingProgressHandler {
         &self,
         user_id: Uuid,
         character_id: Uuid,
-    ) -> std::result::Result<Character, ReadingProgressError> {
-        let character = self
+    ) -> std::result::Result<ProgressBoundCharacter, ReadingProgressError> {
+        let requested = self
             .character_repo
             .find_by_id(character_id)
             .await
             .map_err(ReadingProgressError::Internal)?
             .ok_or(ReadingProgressError::CharacterNotFound)?;
-        let novel = self.owned_novel(user_id, character.novel_id).await?;
-        let progress = self.progress_for_novel(user_id, &novel).await?;
-        validate_character_appearance(character.first_appearance_chapter, progress.current_chapter)
-            .map_err(|_| ReadingProgressError::CharacterNotFound)?;
-        if !character_name_is_canonical(&character.name) {
-            return Err(ReadingProgressError::CharacterNotFound);
+        let novel = self.owned_novel(user_id, requested.novel_id).await?;
+        let characters = self
+            .character_repo
+            .find_by_novel(requested.novel_id)
+            .await
+            .map_err(ReadingProgressError::Internal)?;
+        let character = characters
+            .iter()
+            .find(|character| character.id == character_id)
+            .ok_or(ReadingProgressError::CharacterNotFound)?;
+        let validated_progress = self.progress_for_novel(user_id, &novel).await?;
+        let source_chapters = if persona_is_complete(&novel, validated_progress.current_chapter) {
+            HashMap::new()
+        } else {
+            let chapter_numbers = character
+                .first_appearance_chapter
+                .filter(|chapter| (1..=validated_progress.current_chapter).contains(chapter))
+                .into_iter()
+                .collect();
+            self.source_chapters_for(novel.id, chapter_numbers).await?
+        };
+        // Character and source reads are complete; this persisted progress
+        // snapshot is the sole authority used by the pure response projection.
+        let progress = self.persisted_progress_for_novel(user_id, &novel).await?;
+        if progress.current_chapter != validated_progress.current_chapter {
+            return Err(ReadingProgressError::Internal(anyhow::anyhow!(
+                "persisted reading progress changed during character validation"
+            )));
         }
-        Ok(character)
+        let known_names = known_character_names(&characters);
+        progress_bound_character(
+            character,
+            &novel,
+            progress.current_chapter,
+            canonical_name_is_source_proven(character, &known_names, &source_chapters),
+        )
+        .ok_or(ReadingProgressError::CharacterNotFound)
     }
 
     pub async fn set_identity(
@@ -2512,12 +2760,14 @@ impl ReadingProgressHandler {
                         "character identity requires character_id".into(),
                     )
                 })?;
-                let character = self
+                let characters = self
                     .character_repo
-                    .find_by_id(character_id)
+                    .find_by_novel(novel_id)
                     .await
-                    .map_err(ReadingProgressError::Internal)?
-                    .filter(|character| character.novel_id == novel_id)
+                    .map_err(ReadingProgressError::Internal)?;
+                let character = characters
+                    .iter()
+                    .find(|character| character.id == character_id)
                     .ok_or_else(|| {
                         ReadingProgressError::Validation(
                             "reader character must belong to the novel".into(),
@@ -2532,8 +2782,20 @@ impl ReadingProgressHandler {
                         "reader character name is invalid".into(),
                     ));
                 }
+                let chapter_numbers = character
+                    .first_appearance_chapter
+                    .filter(|chapter| (1..=novel.total_chapters).contains(chapter))
+                    .into_iter()
+                    .collect();
+                let source_chapters = self.source_chapters_for(novel_id, chapter_numbers).await?;
+                let known_names = known_character_names(&characters);
+                if !canonical_name_is_source_proven(character, &known_names, &source_chapters) {
+                    return Err(ReadingProgressError::Validation(
+                        "reader character name is not source-proven".into(),
+                    ));
+                }
                 (
-                    normalize_identity_name(Some(character.name))?,
+                    normalize_identity_name(Some(character.name.clone()))?,
                     Some(character_id),
                 )
             }
@@ -2555,6 +2817,29 @@ impl ReadingProgressHandler {
 #[cfg(test)]
 mod reading_progress_validation_tests {
     use super::*;
+
+    fn persona_character() -> Character {
+        let mut character =
+            Character::new(Uuid::new_v4(), "沈知微".into(), CharacterRole::Protagonist);
+        character.aliases = vec!["沈姑娘".into()];
+        character.description = Some("她在第二章继承王位。".into());
+        character.personality = Some("冷静".into());
+        character.background = Some("失落王族".into());
+        character.speaking_style = Some("言简意赅".into());
+        character.appearance = Some("银色长发".into());
+        character.avatar_url = Some("https://example.invalid/avatar.png".into());
+        character.avatar_status = AvatarStatus::Ready;
+        character.system_prompt = Some("never-public".into());
+        character.first_appearance_chapter = Some(1);
+        character
+    }
+
+    fn ready_novel(novel_id: Uuid, total_chapters: i32) -> Novel {
+        let mut novel = Novel::create(Uuid::new_v4(), "故事".into(), None);
+        novel.id = novel_id;
+        novel.mark_ready(total_chapters, "世界".into(), "奇幻".into());
+        novel
+    }
 
     #[test]
     fn chapter_must_exist_inside_the_novel_range() {
@@ -2588,6 +2873,91 @@ mod reading_progress_validation_tests {
     }
 
     #[test]
+    fn partial_character_json_contains_only_source_proven_identity() {
+        let character = persona_character();
+        let novel = ready_novel(character.novel_id, 2);
+
+        let partial = progress_bound_character(&character, &novel, 1, true).unwrap();
+        assert_eq!(
+            serde_json::to_value(partial).unwrap(),
+            serde_json::json!({
+                "id": character.id,
+                "novel_id": character.novel_id,
+                "name": "沈知微",
+                "first_appearance_chapter": 1,
+            })
+        );
+    }
+
+    #[test]
+    fn full_character_json_restores_public_persona_but_never_system_prompt() {
+        let character = persona_character();
+        let novel = ready_novel(character.novel_id, 2);
+
+        let full = progress_bound_character(&character, &novel, 2, false).unwrap();
+        let json = serde_json::to_value(full).unwrap();
+
+        assert_eq!(json["aliases"], serde_json::json!(["沈姑娘"]));
+        assert_eq!(json["role"], "protagonist");
+        assert_eq!(json["description"], "她在第二章继承王位。");
+        assert_eq!(json["avatar_status"], "ready");
+        assert_eq!(json["persona_source_chapter_high_water"], 2);
+        assert!(json.get("system_prompt").is_none());
+        assert!(json.get("created_at").is_some());
+        assert!(json.get("updated_at").is_some());
+    }
+
+    #[test]
+    fn full_persona_requires_ready_final_progress_and_rewind_redacts_again() {
+        let character = persona_character();
+        let mut novel = Novel::create(Uuid::new_v4(), "故事".into(), None);
+        novel.id = character.novel_id;
+        novel.start_parsing();
+        novel.record_enrichment(2, "世界".into(), "奇幻".into());
+
+        assert!(!persona_is_complete(&novel, 2));
+        let parsing_final = progress_bound_character(&character, &novel, 2, true).unwrap();
+        assert!(serde_json::to_value(parsing_final)
+            .unwrap()
+            .get("role")
+            .is_none());
+
+        novel.mark_ready(2, "世界".into(), "奇幻".into());
+        assert!(!persona_is_complete(&novel, 1));
+        assert!(persona_is_complete(&novel, 2));
+        let full =
+            serde_json::to_value(progress_bound_character(&character, &novel, 2, true).unwrap())
+                .unwrap();
+        assert!(full.get("role").is_some());
+
+        let rewound =
+            serde_json::to_value(progress_bound_character(&character, &novel, 1, true).unwrap())
+                .unwrap();
+        assert!(rewound.get("role").is_none());
+        assert!(rewound.get("persona_source_chapter_high_water").is_none());
+    }
+
+    #[test]
+    fn partial_character_requires_canonical_name_source_proof() {
+        let character = persona_character();
+        let novel = ready_novel(character.novel_id, 2);
+
+        assert!(progress_bound_character(&character, &novel, 1, false).is_none());
+
+        let characters = vec![character.clone()];
+        let known_names = known_character_names(&characters);
+        let alias_only = HashMap::from([(
+            1,
+            Chapter::new(character.novel_id, 1, None, "沈姑娘在门外等候。".into()),
+        )]);
+        assert!(!canonical_name_is_source_proven(
+            &character,
+            &known_names,
+            &alias_only
+        ));
+    }
+
+    #[test]
     fn lore_queries_are_normalized_and_bounded() {
         assert_eq!(normalize_lore_query("  密室\n蛇怪  ").unwrap(), "密室 蛇怪");
         assert!(normalize_lore_query(" \n ").is_err());
@@ -2595,5 +2965,568 @@ mod reading_progress_validation_tests {
         assert_eq!(lore_chapter_limit(7, 3).unwrap(), 3);
         assert_eq!(lore_chapter_limit(2, 3).unwrap(), 2);
         assert!(lore_chapter_limit(0, 3).is_err());
+    }
+}
+
+#[cfg(test)]
+mod reading_progress_handler_tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    #[derive(Clone, Default)]
+    struct CallLog(Arc<Mutex<Vec<String>>>);
+
+    impl CallLog {
+        fn push(&self, call: impl Into<String>) {
+            self.0.lock().unwrap().push(call.into());
+        }
+
+        fn clear(&self) {
+            self.0.lock().unwrap().clear();
+        }
+
+        fn assert_eq(&self, expected: &[&str]) {
+            let calls = self.0.lock().unwrap();
+            assert_eq!(
+                calls.iter().map(String::as_str).collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+
+    struct TestNovelRepository {
+        novel: Novel,
+        readers: HashSet<Uuid>,
+        calls: CallLog,
+    }
+
+    #[async_trait::async_trait]
+    impl NovelRepository for TestNovelRepository {
+        async fn create_import(&self, _novel: &Novel, _chapters: &[Chapter]) -> Result<()> {
+            unreachable!("unused test repository method")
+        }
+
+        async fn create_import_batch(&self, _imports: &[(Novel, Vec<Chapter>)]) -> Result<()> {
+            unreachable!("unused test repository method")
+        }
+
+        async fn create_source_import(&self, _novel: &Novel) -> Result<()> {
+            unreachable!("unused test repository method")
+        }
+
+        async fn claim_import(
+            &self,
+            _novel_id: Uuid,
+            _user_id: Uuid,
+        ) -> Result<Option<ImportClaim>> {
+            unreachable!("unused test repository method")
+        }
+
+        async fn recoverable_imports(
+            &self,
+            _limit: i64,
+        ) -> Result<Vec<crate::domain::repositories::RecoverableImport>> {
+            unreachable!("unused test repository method")
+        }
+
+        async fn renew_import(&self, _novel_id: Uuid, _attempt: i64) -> Result<bool> {
+            unreachable!("unused test repository method")
+        }
+
+        async fn replace_import_chapters(
+            &self,
+            _novel_id: Uuid,
+            _attempt: i64,
+            _chapters: &[Chapter],
+        ) -> Result<bool> {
+            unreachable!("unused test repository method")
+        }
+
+        async fn record_import_enrichment(
+            &self,
+            _novel_id: Uuid,
+            _attempt: i64,
+            _total_chapters: i32,
+            _world_summary: &str,
+            _genre: &str,
+        ) -> Result<bool> {
+            unreachable!("unused test repository method")
+        }
+
+        async fn complete_import(&self, _novel_id: Uuid, _attempt: i64) -> Result<bool> {
+            unreachable!("unused test repository method")
+        }
+
+        async fn fail_import(
+            &self,
+            _novel_id: Uuid,
+            _attempt: i64,
+            _failure_code: &str,
+            _public_error: &str,
+        ) -> Result<bool> {
+            unreachable!("unused test repository method")
+        }
+
+        async fn find_by_id(&self, _id: Uuid) -> Result<Option<Novel>> {
+            unreachable!("unused test repository method")
+        }
+
+        async fn find_for_user(&self, user_id: Uuid, novel_id: Uuid) -> Result<Option<Novel>> {
+            self.calls.push("novel");
+            Ok(
+                (self.readers.contains(&user_id) && self.novel.id == novel_id)
+                    .then(|| self.novel.clone()),
+            )
+        }
+
+        async fn find_by_user(&self, _user_id: Uuid) -> Result<Vec<Novel>> {
+            unreachable!("unused test repository method")
+        }
+
+        async fn find_available_to_user(&self, _user_id: Uuid) -> Result<Vec<Novel>> {
+            unreachable!("unused test repository method")
+        }
+
+        async fn attach_to_user(
+            &self,
+            _user_id: Uuid,
+            _novel_id: Uuid,
+            _deviation_mode: DeviationMode,
+        ) -> Result<bool> {
+            unreachable!("unused test repository method")
+        }
+
+        async fn detach_from_user(&self, _user_id: Uuid, _novel_id: Uuid) -> Result<bool> {
+            unreachable!("unused test repository method")
+        }
+    }
+
+    struct TestChapterRepository {
+        chapters: HashMap<i32, Chapter>,
+        calls: CallLog,
+    }
+
+    #[async_trait::async_trait]
+    impl ChapterRepository for TestChapterRepository {
+        async fn replace_import_nodes(
+            &self,
+            _novel_id: Uuid,
+            _attempt: i64,
+            _nodes: &[(i32, String)],
+        ) -> Result<bool> {
+            unreachable!("unused test repository method")
+        }
+
+        async fn find_by_novel(&self, _novel_id: Uuid) -> Result<Vec<Chapter>> {
+            unreachable!("unused test repository method")
+        }
+
+        async fn find_by_number(&self, novel_id: Uuid, number: i32) -> Result<Option<Chapter>> {
+            self.calls.push(format!("chapter:{number}"));
+            Ok(self
+                .chapters
+                .get(&number)
+                .filter(|chapter| chapter.novel_id == novel_id)
+                .cloned())
+        }
+
+        async fn search_lore(
+            &self,
+            _novel_id: Uuid,
+            _max_chapter: i32,
+            _query: &str,
+            _limit: usize,
+        ) -> Result<Vec<LoreExcerpt>> {
+            unreachable!("unused test repository method")
+        }
+    }
+
+    struct TestCharacterRepository {
+        novel_id: Uuid,
+        characters: Vec<Character>,
+        calls: CallLog,
+    }
+
+    #[async_trait::async_trait]
+    impl CharacterRepository for TestCharacterRepository {
+        async fn replace_import(
+            &self,
+            _novel_id: Uuid,
+            _attempt: i64,
+            _characters: &[Character],
+            _relationships: &[CharacterRelationshipRecord],
+        ) -> Result<bool> {
+            unreachable!("unused test repository method")
+        }
+
+        async fn find_by_novel(&self, novel_id: Uuid) -> Result<Vec<Character>> {
+            self.calls.push("characters");
+            Ok(if novel_id == self.novel_id {
+                self.characters.clone()
+            } else {
+                Vec::new()
+            })
+        }
+
+        async fn find_by_id(&self, id: Uuid) -> Result<Option<Character>> {
+            self.calls.push("character");
+            Ok(self
+                .characters
+                .iter()
+                .find(|character| character.id == id)
+                .cloned())
+        }
+
+        async fn set_avatar(&self, _character_id: Uuid, _avatar_url: &str) -> Result<()> {
+            unreachable!("unused test repository method")
+        }
+
+        async fn find_relationships(
+            &self,
+            _novel_id: Uuid,
+        ) -> Result<Vec<CharacterRelationshipRecord>> {
+            unreachable!("unused test repository method")
+        }
+    }
+
+    struct TestProgressRepository {
+        scripts: Mutex<HashMap<Uuid, VecDeque<ReadingProgressRecord>>>,
+        calls: CallLog,
+    }
+
+    impl TestProgressRepository {
+        fn set_script(&self, user_id: Uuid, records: Vec<ReadingProgressRecord>) {
+            self.scripts.lock().unwrap().insert(user_id, records.into());
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ReadingProgressRepository for TestProgressRepository {
+        async fn get_or_create(
+            &self,
+            user_id: Uuid,
+            novel_id: Uuid,
+            _deviation_mode: &str,
+        ) -> Result<ReadingProgressRecord> {
+            let mut scripts = self.scripts.lock().unwrap();
+            let records = scripts
+                .get_mut(&user_id)
+                .ok_or_else(|| anyhow::anyhow!("missing progress script"))?;
+            let record = if records.len() > 1 {
+                records.pop_front()
+            } else {
+                records.front().cloned()
+            }
+            .ok_or_else(|| anyhow::anyhow!("empty progress script"))?;
+            anyhow::ensure!(record.novel_id == novel_id, "progress novel mismatch");
+            self.calls
+                .push(format!("progress:{}", record.current_chapter));
+            Ok(record)
+        }
+
+        async fn update_chapter(
+            &self,
+            _user_id: Uuid,
+            _novel_id: Uuid,
+            _chapter: i32,
+        ) -> Result<()> {
+            unreachable!("unused test repository method")
+        }
+
+        async fn set_identity(
+            &self,
+            _user_id: Uuid,
+            _novel_id: Uuid,
+            _identity_type: &str,
+            _identity_name: Option<&str>,
+            _character_id: Option<Uuid>,
+        ) -> Result<()> {
+            unreachable!("unused test repository method")
+        }
+    }
+
+    fn persona_character(novel_id: Uuid) -> Character {
+        let mut character = Character::new(novel_id, "沈知微".into(), CharacterRole::Protagonist);
+        character.aliases = vec!["沈姑娘".into()];
+        character.description = Some("她在第二章继承王位。".into());
+        character.personality = Some("冷静".into());
+        character.background = Some("失落王族".into());
+        character.speaking_style = Some("言简意赅".into());
+        character.appearance = Some("银色长发".into());
+        character.avatar_url = Some("https://example.invalid/avatar.png".into());
+        character.avatar_status = AvatarStatus::Ready;
+        character.system_prompt = Some("never-public".into());
+        character.first_appearance_chapter = Some(1);
+        character
+    }
+
+    fn progress(
+        user_id: Uuid,
+        novel_id: Uuid,
+        current_chapter: i32,
+        character: Option<&Character>,
+    ) -> ReadingProgressRecord {
+        let now = Utc::now();
+        ReadingProgressRecord {
+            id: Uuid::new_v4(),
+            user_id,
+            novel_id,
+            current_chapter,
+            reader_identity: character.map(|character| character.name.clone()),
+            reader_identity_type: if character.is_some() {
+                "character".into()
+            } else {
+                "self".into()
+            },
+            reader_character_id: character.map(|character| character.id),
+            deviation_mode: "canon".into(),
+            last_read_at: now,
+            created_at: now,
+        }
+    }
+
+    fn handler(
+        novel: Novel,
+        readers: &[Uuid],
+        characters: Vec<Character>,
+        chapters: Vec<Chapter>,
+        progress_records: Vec<ReadingProgressRecord>,
+    ) -> (
+        ReadingProgressHandler,
+        CallLog,
+        Arc<TestCharacterRepository>,
+        Arc<TestProgressRepository>,
+    ) {
+        let calls = CallLog::default();
+        let novel_repo = Arc::new(TestNovelRepository {
+            novel: novel.clone(),
+            readers: readers.iter().copied().collect(),
+            calls: calls.clone(),
+        });
+        let chapter_repo = Arc::new(TestChapterRepository {
+            chapters: chapters
+                .into_iter()
+                .map(|chapter| (chapter.chapter_number, chapter))
+                .collect(),
+            calls: calls.clone(),
+        });
+        let character_repo = Arc::new(TestCharacterRepository {
+            novel_id: novel.id,
+            characters,
+            calls: calls.clone(),
+        });
+        let progress_repo = Arc::new(TestProgressRepository {
+            scripts: Mutex::new(progress_records.into_iter().fold(
+                HashMap::<Uuid, VecDeque<ReadingProgressRecord>>::new(),
+                |mut scripts, record| {
+                    scripts.entry(record.user_id).or_default().push_back(record);
+                    scripts
+                },
+            )),
+            calls: calls.clone(),
+        });
+        (
+            ReadingProgressHandler {
+                novel_repo,
+                chapter_repo,
+                character_repo: character_repo.clone(),
+                progress_repo: progress_repo.clone(),
+            },
+            calls,
+            character_repo,
+            progress_repo,
+        )
+    }
+
+    fn ready_novel(novel_id: Uuid, total_chapters: i32) -> Novel {
+        let mut novel = Novel::create(Uuid::new_v4(), "故事".into(), None);
+        novel.id = novel_id;
+        novel.mark_ready(total_chapters, "世界".into(), "奇幻".into());
+        novel
+    }
+
+    #[tokio::test]
+    async fn list_and_detail_are_progress_bound_per_user_without_mutating_characters() {
+        let novel_id = Uuid::new_v4();
+        let character = persona_character(novel_id);
+        let mut future = Character::new(novel_id, "顾远".into(), CharacterRole::Supporting);
+        future.description = Some("第二章才揭示的角色。".into());
+        future.first_appearance_chapter = Some(2);
+        let novel = ready_novel(novel_id, 2);
+        let full_user = Uuid::new_v4();
+        let partial_user = Uuid::new_v4();
+        let (handler, calls, character_repo, _) = handler(
+            novel,
+            &[full_user, partial_user],
+            vec![character.clone(), future],
+            vec![
+                Chapter::new(novel_id, 1, None, "沈知微在庭院里。".into()),
+                Chapter::new(novel_id, 2, None, "顾远走进大厅。".into()),
+            ],
+            vec![
+                progress(full_user, novel_id, 2, None),
+                progress(partial_user, novel_id, 1, None),
+            ],
+        );
+
+        let full_list = handler
+            .list_available_characters(full_user, novel_id)
+            .await
+            .unwrap();
+        calls.assert_eq(&[
+            "novel",
+            "characters",
+            "progress:2",
+            "chapter:2",
+            "progress:2",
+        ]);
+        let full_json = serde_json::to_value(
+            full_list
+                .iter()
+                .find(|candidate| candidate.id == character.id)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(full_json["role"], "protagonist");
+        assert_eq!(full_json["persona_source_chapter_high_water"], 2);
+        assert!(full_json.get("system_prompt").is_none());
+
+        calls.clear();
+        let partial_list = handler
+            .list_available_characters(partial_user, novel_id)
+            .await
+            .unwrap();
+        calls.assert_eq(&[
+            "novel",
+            "characters",
+            "progress:1",
+            "chapter:1",
+            "chapter:1",
+            "progress:1",
+        ]);
+        assert_eq!(partial_list.len(), 1);
+        let partial_json = serde_json::to_value(&partial_list[0]).unwrap();
+        assert_eq!(
+            partial_json,
+            serde_json::json!({
+                "id": character.id,
+                "novel_id": novel_id,
+                "name": "沈知微",
+                "first_appearance_chapter": 1,
+            })
+        );
+
+        calls.clear();
+        let partial_detail = handler
+            .get_available_character(partial_user, character.id)
+            .await
+            .unwrap();
+        calls.assert_eq(&[
+            "character",
+            "novel",
+            "characters",
+            "progress:1",
+            "chapter:1",
+            "chapter:1",
+            "progress:1",
+        ]);
+        assert_eq!(serde_json::to_value(partial_detail).unwrap(), partial_json);
+
+        calls.clear();
+        let full_detail = handler
+            .get_available_character(full_user, character.id)
+            .await
+            .unwrap();
+        calls.assert_eq(&[
+            "character",
+            "novel",
+            "characters",
+            "progress:2",
+            "chapter:2",
+            "progress:2",
+        ]);
+        assert_eq!(serde_json::to_value(full_detail).unwrap(), full_json);
+        assert_eq!(
+            character_repo.characters[0].system_prompt.as_deref(),
+            Some("never-public")
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_to_rewind_race_never_returns_a_full_list_or_detail() {
+        let novel_id = Uuid::new_v4();
+        let character = persona_character(novel_id);
+        let novel = ready_novel(novel_id, 2);
+        let user_id = Uuid::new_v4();
+        let full = progress(user_id, novel_id, 2, None);
+        let rewound = progress(user_id, novel_id, 1, None);
+        let (handler, calls, _, progress_repo) = handler(
+            novel,
+            &[user_id],
+            vec![character.clone()],
+            vec![
+                Chapter::new(novel_id, 1, None, "沈知微在庭院里。".into()),
+                Chapter::new(novel_id, 2, None, "第二章。".into()),
+            ],
+            vec![full.clone(), rewound.clone()],
+        );
+
+        assert!(matches!(
+            handler.list_available_characters(user_id, novel_id).await,
+            Err(ReadingProgressError::Internal(_))
+        ));
+        calls.assert_eq(&[
+            "novel",
+            "characters",
+            "progress:2",
+            "chapter:2",
+            "progress:1",
+        ]);
+
+        progress_repo.set_script(user_id, vec![full, rewound]);
+        calls.clear();
+        assert!(matches!(
+            handler.get_available_character(user_id, character.id).await,
+            Err(ReadingProgressError::Internal(_))
+        ));
+        calls.assert_eq(&[
+            "character",
+            "novel",
+            "characters",
+            "progress:2",
+            "chapter:2",
+            "progress:1",
+        ]);
+    }
+
+    #[tokio::test]
+    async fn stable_alias_only_identity_after_rewind_is_typed_unavailable() {
+        let novel_id = Uuid::new_v4();
+        let character = persona_character(novel_id);
+        let novel = ready_novel(novel_id, 2);
+        let user_id = Uuid::new_v4();
+        let (handler, calls, _, _) = handler(
+            novel,
+            &[user_id],
+            vec![character.clone()],
+            vec![
+                Chapter::new(novel_id, 1, None, "沈姑娘在庭院里。".into()),
+                Chapter::new(novel_id, 2, None, "第二章。".into()),
+            ],
+            vec![progress(user_id, novel_id, 1, Some(&character))],
+        );
+
+        assert!(matches!(
+            handler.get(user_id, novel_id).await,
+            Err(ReadingProgressError::IdentityUnavailable)
+        ));
+        calls.assert_eq(&[
+            "novel",
+            "progress:1",
+            "chapter:1",
+            "characters",
+            "chapter:1",
+            "progress:1",
+        ]);
     }
 }

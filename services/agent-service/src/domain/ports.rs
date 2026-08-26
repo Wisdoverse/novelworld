@@ -42,14 +42,6 @@ pub trait ChatCompletion: Send + Sync {
 /// Domain services depend on this trait, not on concrete cache implementations.
 #[async_trait]
 pub trait MessageCache: Send + Sync {
-    async fn get_recent_messages(
-        &self,
-        character_id: Uuid,
-        user_id: Uuid,
-        max_chapter: i32,
-        limit: usize,
-    ) -> Result<Vec<ChatMessage>>;
-
     async fn push_turn(
         &self,
         character_id: Uuid,

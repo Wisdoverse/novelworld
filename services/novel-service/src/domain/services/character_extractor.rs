@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{borrow::Cow, collections::HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -610,28 +610,55 @@ fn first_chapter_containing(
         .map(|chapter| chapter.chapter_number)
 }
 
-fn text_contains_name(text: &str, name: &str, known_names: &HashSet<&str>) -> bool {
+pub(crate) fn text_contains_name(text: &str, name: &str, known_names: &HashSet<&str>) -> bool {
     if name.is_empty() {
         return false;
     }
-    if !name.is_ascii() {
-        return text.match_indices(name).any(|(start, _)| {
-            let end = start + name.len();
-            !known_names
-                .iter()
-                .filter(|known| known.len() > name.len())
-                .any(|known| {
-                    text.match_indices(known).any(|(known_start, _)| {
-                        known_start <= start && known_start + known.len() >= end
-                    })
-                })
-        });
+    let ascii = name.is_ascii();
+    // A single non-ASCII scalar has no reliable lexical boundary. Treating it
+    // as a source mention would, for example, expose a character named `安`
+    // from the ordinary word `平安`. Keep the pre-completion proof fail-closed;
+    // the complete-novel projection can still publish the canonical record.
+    if !ascii && name.chars().count() < 2 {
+        return false;
     }
+    let text = if ascii {
+        Cow::Owned(text.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(text)
+    };
+    let name = if ascii {
+        Cow::Owned(name.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(name)
+    };
+    let known_names = known_names
+        .iter()
+        .map(|known| {
+            if ascii {
+                Cow::Owned(known.to_ascii_lowercase())
+            } else {
+                Cow::Borrowed(*known)
+            }
+        })
+        .collect::<Vec<_>>();
 
-    let text = text.to_ascii_lowercase();
-    let name = name.to_ascii_lowercase();
-    text.match_indices(&name).any(|(start, _)| {
+    text.match_indices(name.as_ref()).any(|(start, _)| {
         let end = start + name.len();
+        if known_names
+            .iter()
+            .filter(|known| known.len() > name.len())
+            .any(|known| {
+                text.match_indices(known.as_ref()).any(|(known_start, _)| {
+                    known_start <= start && known_start + known.len() >= end
+                })
+            })
+        {
+            return false;
+        }
+        if !ascii {
+            return true;
+        }
         let before = text[..start].chars().next_back();
         let after = text[end..].chars().next();
         !before.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
@@ -880,6 +907,35 @@ mod tests {
             find_first_appearance(&zhang_yi, &characters, &chapters),
             Some(100)
         );
+    }
+
+    #[test]
+    fn source_proof_rejects_alias_only_and_longer_alias_mentions() {
+        let alias_only = HashSet::from(["沈知微", "姑娘"]);
+        assert!(!text_contains_name(
+            "姑娘在门外等候。",
+            "沈知微",
+            &alias_only
+        ));
+
+        let overlapping = HashSet::from(["张翼", "张翼德"]);
+        assert!(!text_contains_name(
+            "张翼德怒鞭督邮。",
+            "张翼",
+            &overlapping
+        ));
+        assert!(text_contains_name("张翼领兵出战。", "张翼", &overlapping));
+
+        let ascii = HashSet::from(["Ann", "Ann-Marie"]);
+        assert!(!text_contains_name("Ann-Marie arrived.", "Ann", &ascii));
+        assert!(text_contains_name("Ann arrived.", "Ann", &ascii));
+
+        let mixed = HashSet::from(["Li", "Li雷"]);
+        assert!(!text_contains_name("Li雷 arrived.", "Li", &mixed));
+
+        let single_scalar = HashSet::from(["安"]);
+        assert!(!text_contains_name("愿你平安。", "安", &single_scalar));
+        assert!(!text_contains_name("安说他会回来。", "安", &single_scalar));
     }
 
     #[test]

@@ -13,6 +13,7 @@ pub struct ChatTurnClaim {
     pub novel_id: Uuid,
     pub request_fingerprint: Vec<u8>,
     pub chapter_context: i32,
+    pub persona_source_chapter_high_water: Option<i32>,
     pub reader_identity: Option<String>,
     pub reader_identity_type: String,
     pub reader_character_id: Option<Uuid>,
@@ -106,6 +107,7 @@ pub trait ChatRepository: Send + Sync {
         user_id: Uuid,
         novel_id: Uuid,
         reader_character_id: Option<Uuid>,
+        max_chapter: i32,
     ) -> Result<usize>;
     #[allow(clippy::too_many_arguments)]
     async fn find_by_character_user(
@@ -134,6 +136,10 @@ pub struct CharacterInfo {
     pub personality: Option<String>,
     pub background: Option<String>,
     pub speaking_style: Option<String>,
+    /// Whole-novel persona is safe only when this server-issued boundary is
+    /// within the reading context captured for the chat turn.
+    #[serde(default)]
+    pub persona_source_chapter_high_water: Option<i32>,
     pub first_appearance_chapter: Option<i32>,
 }
 

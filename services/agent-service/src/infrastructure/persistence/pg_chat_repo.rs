@@ -25,6 +25,7 @@ struct ChatMessageRow {
     content: String,
     reader_identity: Option<String>,
     chapter_context: Option<i32>,
+    persona_source_chapter_high_water: Option<i32>,
     created_at: DateTime<Utc>,
 }
 
@@ -40,6 +41,7 @@ impl From<ChatMessageRow> for ChatMessage {
             content: r.content,
             reader_identity: r.reader_identity,
             chapter_context: r.chapter_context,
+            persona_source_chapter_high_water: r.persona_source_chapter_high_water,
             created_at: r.created_at,
         }
     }
@@ -52,6 +54,7 @@ struct ChatTurnRow {
     novel_id: Uuid,
     request_fingerprint: Vec<u8>,
     chapter_context: i32,
+    persona_source_chapter_high_water: Option<i32>,
     reader_identity: Option<String>,
     reader_identity_type: String,
     reader_character_id: Option<Uuid>,
@@ -79,6 +82,7 @@ impl ChatTurnRow {
             novel_id: self.novel_id,
             request_fingerprint: self.request_fingerprint.clone(),
             chapter_context: self.chapter_context,
+            persona_source_chapter_high_water: self.persona_source_chapter_high_water,
             reader_identity: self.reader_identity.clone(),
             reader_identity_type: self.reader_identity_type.clone(),
             reader_character_id: self.reader_character_id,
@@ -145,12 +149,13 @@ impl ChatRepository for PgChatRepository {
                 r#"
                 INSERT INTO chat_turns (
                     id, user_id, character_id, novel_id, request_fingerprint,
-                    chapter_context, reader_identity, reader_identity_type,
+                    chapter_context, persona_source_chapter_high_water,
+                    reader_identity, reader_identity_type,
                     reader_character_id, deviation_mode, status, attempt,
                     lease_expires_at
                 ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8::identity_type,
-                    $9, $10::deviation_mode, 'in_progress', 1,
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9::identity_type,
+                    $10, $11::deviation_mode, 'in_progress', 1,
                     NOW() + INTERVAL '2 minutes'
                 )
                 ON CONFLICT (id) DO NOTHING
@@ -162,6 +167,7 @@ impl ChatRepository for PgChatRepository {
             .bind(claim.novel_id)
             .bind(&claim.request_fingerprint)
             .bind(claim.chapter_context)
+            .bind(claim.persona_source_chapter_high_water)
             .bind(&claim.reader_identity)
             .bind(&claim.reader_identity_type)
             .bind(claim.reader_character_id)
@@ -201,6 +207,7 @@ impl ChatRepository for PgChatRepository {
                 r#"
                 SELECT turn.user_id, turn.character_id, turn.novel_id,
                        turn.request_fingerprint, turn.chapter_context,
+                       turn.persona_source_chapter_high_water,
                        turn.reader_identity, turn.reader_identity_type::text AS reader_identity_type,
                        turn.reader_character_id, turn.deviation_mode::text AS deviation_mode,
                        turn.status, turn.attempt, turn.failure_code,
@@ -307,6 +314,12 @@ impl ChatRepository for PgChatRepository {
         ensure!(character_message.turn_id == Some(claim.id));
         ensure!(user_message.role == "user");
         ensure!(character_message.role == "character");
+        ensure!(
+            claim
+                .persona_source_chapter_high_water
+                .is_some_and(|chapter| (1..=claim.chapter_context).contains(&chapter)),
+            "chat turn is missing safe persona provenance"
+        );
         for message in [user_message, character_message] {
             ensure!(message.user_id == claim.user_id);
             ensure!(message.character_id == claim.character_id);
@@ -328,6 +341,7 @@ impl ChatRepository for PgChatRepository {
               AND reader_identity_type = $9::identity_type
               AND reader_character_id IS NOT DISTINCT FROM $10
               AND deviation_mode = $11::deviation_mode
+              AND persona_source_chapter_high_water = $12
             "#,
         )
         .bind(claim.id)
@@ -341,6 +355,7 @@ impl ChatRepository for PgChatRepository {
         .bind(&claim.reader_identity_type)
         .bind(claim.reader_character_id)
         .bind(&claim.deviation_mode)
+        .bind(claim.persona_source_chapter_high_water)
         .execute(&mut *transaction)
         .await?;
         ensure!(claimed.rows_affected() == 1, "chat turn claim was fenced");
@@ -403,25 +418,27 @@ impl ChatRepository for PgChatRepository {
             SELECT message.id, message.turn_id, message.user_id,
                    message.character_id, message.novel_id, message.role,
                    message.content, message.reader_identity,
-                   message.chapter_context, message.created_at
+                   message.chapter_context, turn.persona_source_chapter_high_water,
+                   message.created_at
             FROM chat_messages AS message
-            LEFT JOIN chat_turns AS turn ON turn.id = message.turn_id
+            JOIN chat_turns AS turn ON turn.id = message.turn_id
             WHERE message.character_id = $1
               AND message.user_id = $2
               AND message.novel_id = $3
+              AND turn.status = 'completed'
+              AND turn.persona_source_chapter_high_water BETWEEN 1 AND $5
+              AND turn.persona_source_chapter_high_water <= turn.chapter_context
+              AND turn.chapter_context <= $5
               AND (
-                    ($4::uuid IS NULL AND (
-                        turn.id IS NULL
-                        OR (turn.status = 'completed'
-                            AND turn.reader_identity_type = 'self'
-                            AND turn.reader_character_id IS NULL)
-                    ))
+                    ($4::uuid IS NULL
+                        AND turn.reader_identity_type = 'self'
+                        AND turn.reader_character_id IS NULL)
                     OR ($4::uuid IS NOT NULL
-                        AND turn.status = 'completed'
                         AND turn.reader_identity_type = 'character'
                         AND turn.reader_character_id = $4)
               )
               AND message.chapter_context IS NOT NULL
+              AND message.chapter_context = turn.chapter_context
               AND message.chapter_context <= $5
             ORDER BY message.created_at DESC,
                      message.turn_id DESC NULLS LAST,
@@ -455,24 +472,28 @@ impl ChatRepository for PgChatRepository {
         user_id: Uuid,
         novel_id: Uuid,
         reader_character_id: Option<Uuid>,
+        max_chapter: i32,
     ) -> Result<usize> {
         let row: (i64,) = sqlx::query_as(
             r#"
             SELECT COUNT(*)
             FROM chat_messages AS message
-            LEFT JOIN chat_turns AS turn ON turn.id = message.turn_id
+            JOIN chat_turns AS turn ON turn.id = message.turn_id
             WHERE message.character_id = $1
               AND message.user_id = $2
               AND message.novel_id = $3
+              AND turn.status = 'completed'
+              AND turn.persona_source_chapter_high_water BETWEEN 1 AND $5
+              AND turn.persona_source_chapter_high_water <= turn.chapter_context
+              AND turn.chapter_context <= $5
+              AND message.chapter_context IS NOT NULL
+              AND message.chapter_context = turn.chapter_context
+              AND message.chapter_context <= $5
               AND (
-                    ($4::uuid IS NULL AND (
-                        turn.id IS NULL
-                        OR (turn.status = 'completed'
-                            AND turn.reader_identity_type = 'self'
-                            AND turn.reader_character_id IS NULL)
-                    ))
+                    ($4::uuid IS NULL
+                        AND turn.reader_identity_type = 'self'
+                        AND turn.reader_character_id IS NULL)
                     OR ($4::uuid IS NOT NULL
-                        AND turn.status = 'completed'
                         AND turn.reader_identity_type = 'character'
                         AND turn.reader_character_id = $4)
               )
@@ -482,6 +503,7 @@ impl ChatRepository for PgChatRepository {
         .bind(user_id)
         .bind(novel_id)
         .bind(reader_character_id)
+        .bind(max_chapter)
         .fetch_one(&self.pool)
         .await?;
 
@@ -504,25 +526,27 @@ impl ChatRepository for PgChatRepository {
             SELECT message.id, message.turn_id, message.user_id,
                    message.character_id, message.novel_id, message.role,
                    message.content, message.reader_identity,
-                   message.chapter_context, message.created_at
+                   message.chapter_context, turn.persona_source_chapter_high_water,
+                   message.created_at
             FROM chat_messages AS message
-            LEFT JOIN chat_turns AS turn ON turn.id = message.turn_id
+            JOIN chat_turns AS turn ON turn.id = message.turn_id
             WHERE message.character_id = $1
               AND message.user_id = $2
               AND message.novel_id = $3
+              AND turn.status = 'completed'
+              AND turn.persona_source_chapter_high_water BETWEEN 1 AND $5
+              AND turn.persona_source_chapter_high_water <= turn.chapter_context
+              AND turn.chapter_context <= $5
               AND (
-                    ($4::uuid IS NULL AND (
-                        turn.id IS NULL
-                        OR (turn.status = 'completed'
-                            AND turn.reader_identity_type = 'self'
-                            AND turn.reader_character_id IS NULL)
-                    ))
+                    ($4::uuid IS NULL
+                        AND turn.reader_identity_type = 'self'
+                        AND turn.reader_character_id IS NULL)
                     OR ($4::uuid IS NOT NULL
-                        AND turn.status = 'completed'
                         AND turn.reader_identity_type = 'character'
                         AND turn.reader_character_id = $4)
               )
               AND message.chapter_context IS NOT NULL
+              AND message.chapter_context = turn.chapter_context
               AND message.chapter_context <= $5
             ORDER BY message.created_at DESC,
                      message.turn_id DESC NULLS LAST,
