@@ -1431,6 +1431,94 @@ async fn character_choice_recovery_ignores_hidden_open_world_high_water_and_swit
 }
 
 #[tokio::test]
+async fn character_context_v3_returns_only_committed_branch_facts_before_open_world() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    fixture.clear_world_state();
+    let character_id = Uuid::new_v4();
+    let unrelated_character_id = Uuid::new_v4();
+    let uninvolved_character_id = Uuid::new_v4();
+    let handler = fixture.handler();
+
+    assert!(handler
+        .get_character_context_envelope(fixture.user_id, fixture.novel_id, character_id)
+        .await
+        .unwrap()
+        .is_none());
+
+    let transition = NarrativeTransition {
+        schema_version: 1,
+        prompt_version: "narrative-transition-v1".into(),
+        canon_model_version: 1,
+        canonical_checkpoint_chapter: fixture.source_chapter,
+        rendered_narrative: "PRIVATE_RENDERED_NARRATIVE 已提交。".into(),
+        events: vec![
+            TransitionEvent {
+                summary: "  角色亲眼见证城门关闭  ".into(),
+                actor_character_ids: vec![character_id],
+                location_id: Some("PRIVATE_LOCATION".into()),
+            },
+            TransitionEvent {
+                summary: "PRIVATE_UNRELATED_EVENT".into(),
+                actor_character_ids: vec![unrelated_character_id],
+                location_id: None,
+            },
+        ],
+        relationship_changes: vec![],
+        location_changes: vec![],
+        thread_changes: vec![],
+    };
+    *fixture.choice.lock().unwrap() = Some(UserChoiceRecord {
+        id: Uuid::new_v4(),
+        user_id: fixture.user_id,
+        novel_id: fixture.novel_id,
+        node_id: Uuid::new_v4(),
+        chapter_number: fixture.source_chapter,
+        choice_index: 0,
+        choice_text: "PRIVATE_CHOICE_TEXT".into(),
+        consequence: transition.rendered_narrative.clone(),
+        transition,
+        created_at: Utc::now(),
+    });
+
+    let envelope = handler
+        .get_character_context_envelope(fixture.user_id, fixture.novel_id, character_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let branch = envelope.branch_context.unwrap();
+    assert!(envelope.world_context.is_none());
+    assert_eq!(branch.source_chapter_high_water, fixture.source_chapter);
+    assert_eq!(branch.events.len(), 1);
+    assert_eq!(branch.events[0].chapter_number, fixture.source_chapter);
+    assert_eq!(branch.events[0].summary, "角色亲眼见证城门关闭");
+    assert_eq!(branch.events[0].actor_character_ids, vec![character_id]);
+    assert_eq!(fixture.journal_calls.load(Ordering::SeqCst), 0);
+    let encoded = serde_json::to_string(&branch).unwrap();
+    for private in [
+        "PRIVATE_RENDERED_NARRATIVE",
+        "PRIVATE_CHOICE_TEXT",
+        "PRIVATE_LOCATION",
+        "PRIVATE_UNRELATED_EVENT",
+    ] {
+        assert!(!encoded.contains(private));
+    }
+    assert!(handler
+        .get_character_context_envelope(fixture.user_id, fixture.novel_id, uninvolved_character_id,)
+        .await
+        .unwrap()
+        .is_none());
+
+    fixture
+        .current_chapter
+        .store(fixture.source_chapter - 1, Ordering::SeqCst);
+    assert!(handler
+        .get_character_context_envelope(fixture.user_id, fixture.novel_id, character_id)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
 async fn branch_nodes_are_private_to_player_world_and_deviation_mode() {
     let fixture = Arc::new(ToctouFixture::new(false));
     let handler = fixture.handler();
