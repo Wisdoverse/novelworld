@@ -1175,7 +1175,9 @@ compensation. A failed
 confirmation refresh after a successful POST remains ambiguous regardless of
 that refresh response's status. `sessionStorage` covers the interval before a
 commit becomes journal-visible; committed-pending recovery does not depend on
-the original tab. This client path remains a user-driven compatibility fallback
+the original tab. While a matching request remains pending, the current page
+MUST poll the authoritative view at a bounded fixed interval and stop after a
+terminal state. Same-key user confirmation remains a compatibility fallback
 alongside the autonomous server scan.
 When first-run setup, login, registration, or session confirmation establishes the authenticated
 principal, the browser MUST remove NovelWorld pending world-turn records for

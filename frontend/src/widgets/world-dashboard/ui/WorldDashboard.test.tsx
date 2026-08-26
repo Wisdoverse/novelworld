@@ -1,6 +1,6 @@
 import React from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { OpenWorldView } from '@/shared/types';
 import { WorldDashboard } from './WorldDashboard';
 
@@ -62,6 +62,10 @@ describe('WorldDashboard', () => {
   beforeEach(() => {
     mocks.submit.mockReset();
     window.sessionStorage.clear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('keeps canon provenance distinct and retries a failed turn with the same key', async () => {
@@ -211,6 +215,46 @@ describe('WorldDashboard', () => {
 
     await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
     expect(screen.getByRole('button', { name: '执行行动' }).hasAttribute('disabled')).toBe(false);
+    expect(window.sessionStorage.length).toBe(0);
+  });
+
+  it('refreshes a restored pending projection and stops after its terminal status', async () => {
+    vi.useFakeTimers();
+    const turnId = 'e3744cac-e557-4d78-9d91-9ba060e81c5f';
+    window.sessionStorage.setItem(
+      'novelworld:pending-world-turn:user:novel',
+      JSON.stringify({
+        action: { kind: 'travel', target_id: 'gate', intent: '穿过旧城门' },
+        idempotencyKey: turnId,
+        expectedTurnNumber: 1,
+      }),
+    );
+    const refresh = vi.fn();
+    const page = render(
+      <WorldDashboard novelId="novel" view={view} onRefresh={refresh} />,
+    );
+
+    await act(() => vi.advanceTimersByTimeAsync(10_000));
+    expect(refresh).toHaveBeenCalledOnce();
+
+    page.rerender(
+      <WorldDashboard
+        novelId="novel"
+        view={{
+          ...view,
+          journal: [{
+            ...view.journal[0],
+            turn_id: turnId,
+            turn_number: 2,
+            memory_projection_status: 'skipped',
+          }],
+        }}
+        onRefresh={refresh}
+      />,
+    );
+    await act(() => vi.advanceTimersByTimeAsync(30_000));
+
+    expect(refresh).toHaveBeenCalledOnce();
     expect(window.sessionStorage.length).toBe(0);
   });
 

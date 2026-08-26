@@ -51,23 +51,41 @@ impl NovelServiceClient {
             .json::<ReadingProgressResponse>()
             .await
             .map_err(anyhow::Error::from)?;
-        if progress.current_chapter < 1 {
-            return Err(anyhow!("Novel service returned an invalid current chapter"));
-        }
-        let reader_identity_is_self = match progress.reader_identity_type.as_str() {
-            "self" => true,
-            "character" => false,
-            value => {
-                return Err(anyhow!(
-                    "Novel service returned invalid reader identity type {value}"
-                ))
-            }
-        };
-        Ok(ReadingProgressSnapshot {
-            current_chapter: progress.current_chapter,
-            reader_identity_is_self,
-        })
+        validate_reading_progress(progress, novel_id, user_id)
     }
+}
+
+fn validate_reading_progress(
+    progress: ReadingProgressResponse,
+    expected_novel_id: Uuid,
+    expected_user_id: Uuid,
+) -> Result<ReadingProgressSnapshot> {
+    if progress.novel_id != expected_novel_id {
+        return Err(anyhow!(
+            "Novel service returned reading progress for another novel"
+        ));
+    }
+    if progress.user_id != expected_user_id {
+        return Err(anyhow!(
+            "Novel service returned reading progress for another user"
+        ));
+    }
+    if progress.current_chapter < 1 {
+        return Err(anyhow!("Novel service returned an invalid current chapter"));
+    }
+    let reader_identity_is_self = match progress.reader_identity_type.as_str() {
+        "self" => true,
+        "character" => false,
+        value => {
+            return Err(anyhow!(
+                "Novel service returned invalid reader identity type {value}"
+            ))
+        }
+    };
+    Ok(ReadingProgressSnapshot {
+        current_chapter: progress.current_chapter,
+        reader_identity_is_self,
+    })
 }
 
 #[async_trait]
@@ -100,6 +118,8 @@ struct NovelResponse {
 
 #[derive(serde::Deserialize)]
 struct ReadingProgressResponse {
+    user_id: Uuid,
+    novel_id: Uuid,
     current_chapter: i32,
     reader_identity_type: String,
 }
@@ -424,5 +444,70 @@ impl ChapterReadRepository for NovelServiceClient {
             ));
         }
         Ok(Some(template))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const USER_ID: Uuid = Uuid::from_u128(1);
+    const NOVEL_ID: Uuid = Uuid::from_u128(2);
+
+    fn progress() -> ReadingProgressResponse {
+        ReadingProgressResponse {
+            user_id: USER_ID,
+            novel_id: NOVEL_ID,
+            current_chapter: 3,
+            reader_identity_type: "self".into(),
+        }
+    }
+
+    #[test]
+    fn validates_reading_progress_for_requested_scope() {
+        let snapshot = validate_reading_progress(progress(), NOVEL_ID, USER_ID).unwrap();
+
+        assert_eq!(
+            snapshot,
+            ReadingProgressSnapshot {
+                current_chapter: 3,
+                reader_identity_is_self: true,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_reading_progress_for_another_user() {
+        let error =
+            validate_reading_progress(progress(), NOVEL_ID, Uuid::from_u128(3)).unwrap_err();
+
+        assert!(error.to_string().contains("another user"));
+    }
+
+    #[test]
+    fn rejects_reading_progress_for_another_novel() {
+        let error = validate_reading_progress(progress(), Uuid::from_u128(3), USER_ID).unwrap_err();
+
+        assert!(error.to_string().contains("another novel"));
+    }
+
+    #[test]
+    fn rejects_invalid_reading_progress_chapter() {
+        let mut progress = progress();
+        progress.current_chapter = 0;
+
+        let error = validate_reading_progress(progress, NOVEL_ID, USER_ID).unwrap_err();
+
+        assert!(error.to_string().contains("invalid current chapter"));
+    }
+
+    #[test]
+    fn rejects_invalid_reader_identity_type() {
+        let mut progress = progress();
+        progress.reader_identity_type = "unknown".into();
+
+        let error = validate_reading_progress(progress, NOVEL_ID, USER_ID).unwrap_err();
+
+        assert!(error.to_string().contains("invalid reader identity type"));
     }
 }

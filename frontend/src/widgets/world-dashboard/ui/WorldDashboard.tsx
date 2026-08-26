@@ -13,6 +13,7 @@ interface WorldDashboardProps {
   novelId: string;
   view: OpenWorldView;
   actionsDisabled?: boolean;
+  onRefresh?: () => void;
 }
 
 interface PendingRequest {
@@ -22,6 +23,7 @@ interface PendingRequest {
 }
 
 const maxStoredRequestLength = 4_096;
+const pendingRefreshIntervalMs = 10_000;
 const actionKinds: WorldAction['kind'][] = [
   'travel',
   'investigate',
@@ -114,7 +116,12 @@ const eventStatus = {
   prevented: '被阻止',
 };
 
-export function WorldDashboard({ novelId, view, actionsDisabled = false }: WorldDashboardProps) {
+export function WorldDashboard({
+  novelId,
+  view,
+  actionsDisabled = false,
+  onRefresh,
+}: WorldDashboardProps) {
   const turn = useSubmitWorldTurn(novelId);
   const storageKey = worldTurnPendingStorageKey(view.player.user_id, novelId);
   const journalPendingRequest = pendingRequestFromView(view);
@@ -187,6 +194,12 @@ export function WorldDashboard({ novelId, view, actionsDisabled = false }: World
       setError(undefined);
     }
   }, [pendingRequest, view.journal]);
+
+  useEffect(() => {
+    if (!pendingRequest?.idempotencyKey || !onRefresh) return;
+    const interval = window.setInterval(onRefresh, pendingRefreshIntervalMs);
+    return () => window.clearInterval(interval);
+  }, [onRefresh, pendingRequest?.idempotencyKey]);
 
   const run = async (request: PendingRequest) => {
     rememberPendingRequest(request);
