@@ -332,11 +332,7 @@ sampled_before=$(psql -c "
          (SELECT COUNT(*) FROM novels WHERE original_file_key LIKE 'source-files/%')")
 stale_token=$admin_token
 docker compose down -v >/dev/null 2>&1
-docker compose up -d postgres >/dev/null 2>&1
-for _ in $(seq 1 60); do
-  docker exec novel-postgres pg_isready -U "${POSTGRES_USER:-novel}" >/dev/null 2>&1 && break
-  sleep 2
-done
+docker compose up -d --wait --wait-timeout 180 postgres >/dev/null
 
 # Destroying the volumes leaves no lineage to match, so drill A is a disaster
 # restore under v2 and must carry a complete decision set.
@@ -571,11 +567,7 @@ refusal_says 'conflicting erasure records'
 printf 'drill: C — restoring with no lineage-matching reachable database\n'
 fresh_postgres() {
   docker compose down -v >/dev/null 2>&1
-  docker compose up -d postgres >/dev/null 2>&1
-  for _ in $(seq 1 60); do
-    docker exec novel-postgres pg_isready -U "${POSTGRES_USER:-novel}" >/dev/null 2>&1 && break
-    sleep 2
-  done
+  docker compose up -d --wait --wait-timeout 180 postgres >/dev/null
 }
 fresh_postgres
 
