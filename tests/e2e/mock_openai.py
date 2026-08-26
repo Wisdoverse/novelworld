@@ -328,9 +328,15 @@ class Handler(BaseHTTPRequestHandler):
                 previous = recent_turns[-1] if recent_turns else {}
                 if (
                     previous.get("turn_number") != session["turn_number"]
-                    or previous.get("action", {}).get("intent") != "查清北塔换防并阻止伏击"
-                    or not previous.get("rendered_narrative", "").endswith(
-                        "林岚仍按自己的目标追查守门人，原定围堵因此受阻。"
+                    or (
+                        session["turn_number"] == 1
+                        and (
+                            previous.get("action", {}).get("intent")
+                            != "查清北塔换防并阻止伏击"
+                            or not previous.get("rendered_narrative", "").endswith(
+                                "林岚仍按自己的目标追查守门人，原定围堵因此受阻。"
+                            )
+                        )
                     )
                 ):
                     return "{}"
