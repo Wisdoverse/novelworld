@@ -1,4 +1,8 @@
-use std::{fmt::Write, time::Instant};
+use std::{
+    fmt::Write,
+    num::NonZeroU32,
+    time::{Duration, Instant},
+};
 
 use metrics::{counter, gauge, histogram};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
@@ -8,6 +12,9 @@ use crate::{LlmOperation, Usage};
 
 const MAX_LABEL_CHARS: usize = 200;
 const USAGE_KEY_FINGERPRINT_DOMAIN: &[u8] = b"novelworld-llm-usage-v1\0";
+const LLM_SUMMARY_BUCKET_DURATION: Duration = Duration::from_secs(30 * 60);
+const LLM_SUMMARY_BUCKET_COUNT: NonZeroU32 = NonZeroU32::new(3).expect("non-zero bucket count");
+const LLM_QUANTILES: &[f64] = &[0.0, 0.5, 0.9, 0.95, 0.99, 0.999, 1.0];
 
 pub fn usage_key_fingerprint(api_key: &str) -> String {
     let mut digest = Sha256::new();
@@ -33,6 +40,11 @@ impl MetricsHandle {
 
 pub fn install_metrics(service: &'static str) -> anyhow::Result<MetricsHandle> {
     let handle = PrometheusBuilder::new()
+        // Three 30-minute buckets retain every sample for at least 60 minutes,
+        // covering the 45-minute release journey without changing the schema.
+        .set_quantiles(LLM_QUANTILES)?
+        .set_bucket_duration(LLM_SUMMARY_BUCKET_DURATION)?
+        .set_bucket_count(LLM_SUMMARY_BUCKET_COUNT)
         .add_global_label("service", service)
         .add_global_label("contract", "llm-observability-v1")
         .install_recorder()?;

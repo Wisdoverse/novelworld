@@ -141,8 +141,8 @@
   "acknowledged_migration_audit_debts": [
     {
       "path": "infra/postgres/migrations/0001_runtime_contract.sql",
-      "source_sha256": "d48c137ac24e82fa582528ff87c12f96cdace47ec3cb701587297af3f5b277cc",
-      "reason": "this historical migration embeds catalog SELECTs and repair DML in PL/pgSQL DO guards; the complete normalized source is pinned because executable DO bodies are no longer treated as statically safe"
+      "source_sha256": "bdaaf2294bad75ffdc3032d971692705646e3bd81a645a8f0883d0a5605784ab",
+      "reason": "this replayed historical migration embeds catalog SELECTs and repair DML in PL/pgSQL DO guards, including an explicit player-timeline schema marker that prevents restoration of its retired global narrative-node key; the complete normalized source is pinned because executable DO bodies are no longer treated as statically safe"
     },
     {
       "path": "infra/postgres/migrations/0002_reading_progress_contract.sql",
@@ -171,8 +171,8 @@
     },
     {
       "path": "infra/postgres/migrations/0015_durable_import_jobs.sql",
-      "source_sha256": "e0a9283846c7a93d4a573361bee618d414976a82ac46f5c7e9b2085fb2ba82c5",
-      "reason": "this historical migration repairs a fixed deletion-graph FK inventory with two dynamic pg_catalog.format EXECUTEs; the complete normalized source is pinned until the migration can be replaced by static DDL"
+      "source_sha256": "d4a1d7c610a3c9490df4effb293659ab27f57a4ee7f009d954798c6e96eeb414",
+      "reason": "this replayed historical migration repairs a fixed deletion-graph FK inventory with dynamic pg_catalog.format EXECUTEs, while the shared-shelf schema marker removes the retired uploader ownership key from current restores; the complete normalized source is pinned until the migration can be replaced by static DDL"
     },
     {
       "path": "infra/postgres/migrations/0020_advanced_game_rules.sql",

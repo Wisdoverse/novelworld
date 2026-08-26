@@ -238,6 +238,7 @@ print("ingestion recovery phase verified: " + record["phase"])
 PY
 }
 
+sleep 1.1
 login=$("${curl_cmd[@]}" \
   -H 'Content-Type: application/json' \
   --data "{\"email\":\"$email\",\"password\":\"$password\"}" \
@@ -310,10 +311,10 @@ retry_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   -X POST "$api/novels/$novel_a/retry")
 verify_phase "$(phase_record "$novel_a" completed - "$calls_before" "$calls_after" "$retry_status")"
 
-# Restore the stub's default failure injections: the golden reader loop that
-# runs next depends on the first canon call failing and one narrative
-# transition failing for its retry and 502 assertions.
-stub_reset '{"delays_ms":{},"failures_remaining":{"canon":1,"narrative_transition":1,"world_turn":0}}'
+# Restore the golden reader loop's failure injections: one canon response
+# exercises bounded validation recovery, while three narrative responses
+# exhaust validation retries and prove the atomic 502 path.
+stub_reset '{"delays_ms":{},"failures_remaining":{"canon":1,"narrative_transition":3,"world_turn":0}}'
 
 printf 'ingestion recovery drills passed: kill at chapters=%s enriched=%s, completed replay calls=%s->%s retry=%s\n' \
   "$novel_a" "$novel_b" "$calls_before" "$calls_after" "$retry_status"

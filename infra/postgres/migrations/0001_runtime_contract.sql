@@ -78,33 +78,44 @@ $migration$;
 
 DO $migration$
 BEGIN
+    -- Migration 0010 replaces this global key with canonical/player-scoped
+    -- indexes. Compose replays historical migrations against current restores,
+    -- so the later user_id column is the marker that this repair is obsolete.
     IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'narrative_nodes_novel_chapter_key'
-          AND conrelid = 'public.narrative_nodes'::regclass
+        SELECT 1
+        FROM pg_catalog.pg_attribute
+        WHERE attrelid = 'public.narrative_nodes'::pg_catalog.regclass
+          AND attname = 'user_id'
+          AND NOT attisdropped
     ) THEN
-        IF EXISTS (
-            SELECT 1
-            FROM public.narrative_nodes
-            GROUP BY novel_id, chapter_number
-            HAVING COUNT(*) > 1
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'narrative_nodes_novel_chapter_key'
+              AND conrelid = 'public.narrative_nodes'::regclass
         ) THEN
-            RAISE EXCEPTION
-                'cannot enforce narrative node uniqueness: duplicate novel/chapter rows exist';
+            IF EXISTS (
+                SELECT 1
+                FROM public.narrative_nodes
+                GROUP BY novel_id, chapter_number
+                HAVING COUNT(*) > 1
+            ) THEN
+                RAISE EXCEPTION
+                    'cannot enforce narrative node uniqueness: duplicate novel/chapter rows exist';
+            END IF;
+
+            ALTER TABLE public.narrative_nodes
+                ADD CONSTRAINT narrative_nodes_novel_chapter_key
+                UNIQUE (novel_id, chapter_number);
         END IF;
 
-        ALTER TABLE public.narrative_nodes
-            ADD CONSTRAINT narrative_nodes_novel_chapter_key
-            UNIQUE (novel_id, chapter_number);
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'narrative_nodes_novel_chapter_key'
-          AND conrelid = 'public.narrative_nodes'::regclass
-          AND pg_get_constraintdef(oid) = 'UNIQUE (novel_id, chapter_number)'
-    ) THEN
-        RAISE EXCEPTION 'narrative node uniqueness constraint has an unexpected definition';
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'narrative_nodes_novel_chapter_key'
+              AND conrelid = 'public.narrative_nodes'::regclass
+              AND pg_get_constraintdef(oid) = 'UNIQUE (novel_id, chapter_number)'
+        ) THEN
+            RAISE EXCEPTION 'narrative node uniqueness constraint has an unexpected definition';
+        END IF;
     END IF;
 END
 $migration$;

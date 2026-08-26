@@ -9,8 +9,9 @@
 #
 # Re-runnable on a first-run deployment or one whose admin is
 # admin@test.invalid (the CI-seeded account); the stub is reset first, and
-# the drill deletes its novels and its own admin, leaving the deployment in
-# first-run state for the next drill.
+# the drill removes its shelf entries and its own admin, leaving shared
+# canonical novels behind while returning account state to first-run for the
+# next drill.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 

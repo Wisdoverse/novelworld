@@ -131,11 +131,11 @@ jobs:
           set -euo pipefail
           python3 tools/llm-budget/test_verify.py
           python3 tools/llm-budget/verify.py \
-            --policy tools/llm-budget/policy-v1.json \
+            --policy tools/llm-budget/policy-v2.json \
             --metrics tools/llm-budget/recorded-release.prom \
             --commit "$GITHUB_SHA" > /tmp/llm-budget-a.json
           python3 tools/llm-budget/verify.py \
-            --policy tools/llm-budget/policy-v1.json \
+            --policy tools/llm-budget/policy-v2.json \
             --metrics tools/llm-budget/recorded-release.prom \
             --commit "$GITHUB_SHA" > /tmp/llm-budget-b.json
           cmp /tmp/llm-budget-a.json /tmp/llm-budget-b.json
@@ -347,6 +347,10 @@ jobs:
           export COMPOSE_PROFILES=redis
           docker compose -f docker-compose.yml -f docker-compose.e2e.yml --profile redis \
             up -d --wait --wait-timeout 180
+          docker exec novel-nginx nginx -s reload
+          curl --connect-timeout 2 --max-time 5 --retry 5 --retry-all-errors \
+            --retry-delay 1 --retry-max-time 15 --fail --silent --show-error \
+            http://127.0.0.1/ready >/dev/null
           test "$(docker inspect --format '{{.State.Health.Status}}' novel-redis)" = healthy
           test "$(docker exec novel-agent-service printenv CACHE_MODE)" = redis
       - name: Verify dependency failure semantics

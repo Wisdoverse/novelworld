@@ -300,6 +300,51 @@ BEGIN
             required_fk.child_column, required_fk.parent
         );
 
+        -- Migration 0019 turns novels.user_id into immutable uploader
+        -- attribution. Its shelf table marks the shared-canonical model, where
+        -- replay must remove, rather than recreate, an old ownership key.
+        IF required_fk.child = 'novels'
+           AND required_fk.child_column = 'user_id'
+           AND pg_catalog.to_regclass('public.user_novels') IS NOT NULL THEN
+            FOR existing_name IN
+                SELECT existing.conname
+                FROM pg_catalog.pg_constraint AS existing
+                WHERE existing.contype = 'f'
+                  AND existing.conrelid = 'public.novels'::pg_catalog.regclass
+                  AND existing.confrelid = 'public.users'::pg_catalog.regclass
+                  AND existing.conkey = ARRAY[(
+                          SELECT attribute.attnum
+                          FROM pg_catalog.pg_attribute AS attribute
+                          WHERE attribute.attrelid = existing.conrelid
+                            AND attribute.attname = 'user_id'
+                      )]
+            LOOP
+                EXECUTE pg_catalog.format(
+                    'ALTER TABLE public.novels DROP CONSTRAINT %I',
+                    existing_name
+                );
+            END LOOP;
+
+            IF EXISTS (
+                SELECT 1
+                FROM pg_catalog.pg_constraint AS remaining
+                WHERE remaining.contype = 'f'
+                  AND remaining.conrelid = 'public.novels'::pg_catalog.regclass
+                  AND remaining.confrelid = 'public.users'::pg_catalog.regclass
+                  AND remaining.conkey = ARRAY[(
+                          SELECT attribute.attnum
+                          FROM pg_catalog.pg_attribute AS attribute
+                          WHERE attribute.attrelid = remaining.conrelid
+                            AND attribute.attname = 'user_id'
+                      )]
+            ) THEN
+                RAISE EXCEPTION
+                    'shared novel uploader attribution still has an ownership foreign key';
+            END IF;
+
+            CONTINUE;
+        END IF;
+
         SELECT existing.conname, existing.confdeltype
           INTO existing_name, existing_delete_rule
         FROM pg_catalog.pg_constraint AS existing

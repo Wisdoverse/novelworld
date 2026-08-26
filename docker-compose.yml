@@ -33,7 +33,10 @@ services:
     networks:
       - novel-net
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-novel} -d ${POSTGRES_DB:-novel_world}"]
+      # pg_isready also succeeds against the temporary server used by the
+      # official entrypoint while init scripts are still running. PID 1 becomes
+      # postgres only after initialization completes.
+      test: ["CMD-SHELL", "test \"$$(cat /proc/1/comm)\" = postgres && pg_isready -U ${POSTGRES_USER:-novel} -d ${POSTGRES_DB:-novel_world}"]
       interval: 10s
       timeout: 5s
       retries: 5

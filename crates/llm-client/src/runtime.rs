@@ -28,6 +28,7 @@ enum ConfigSource {
         client: reqwest::Client,
         user_service_url: String,
         token: String,
+        allow_insecure_http: bool,
     },
 }
 
@@ -62,7 +63,14 @@ impl RuntimeLlmClient {
             anyhow!("INTERNAL_SERVICE_TOKEN is required for runtime LLM configuration")
         })?;
         crate::validate_internal_service_token(&token)?;
-        Ok(Self::remote(user_service_url, token))
+        let allow_insecure_http = std::env::var("LLM_ALLOW_INSECURE_HTTP")
+            .ok()
+            .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+        Ok(Self::remote_with_http_policy(
+            user_service_url,
+            token,
+            allow_insecure_http,
+        ))
     }
 
     pub fn static_config(
@@ -84,11 +92,20 @@ impl RuntimeLlmClient {
     }
 
     pub fn remote(user_service_url: String, token: String) -> Self {
+        Self::remote_with_http_policy(user_service_url, token, false)
+    }
+
+    fn remote_with_http_policy(
+        user_service_url: String,
+        token: String,
+        allow_insecure_http: bool,
+    ) -> Self {
         Self {
             source: ConfigSource::Remote {
                 client: reqwest::Client::new(),
                 user_service_url: user_service_url.trim_end_matches('/').into(),
                 token,
+                allow_insecure_http,
             },
             resolved: OnceCell::new(),
         }
@@ -99,6 +116,7 @@ impl RuntimeLlmClient {
             client,
             user_service_url,
             token,
+            allow_insecure_http,
         } = &self.source
         {
             let response = remote_config_request(client, user_service_url, token, runtime_user_id)
@@ -107,6 +125,7 @@ impl RuntimeLlmClient {
             validate_remote_status(response.status())?;
             return Ok(Arc::new(build_resolved(validate_remote_config(
                 response.json().await?,
+                *allow_insecure_http,
             )?)));
         }
 
@@ -257,9 +276,17 @@ fn build_resolved(config: RuntimeConfig) -> ResolvedClient {
     }
 }
 
-fn validate_remote_config(config: RemoteConfig) -> Result<RuntimeConfig> {
+fn validate_remote_config(
+    config: RemoteConfig,
+    allow_insecure_http: bool,
+) -> Result<RuntimeConfig> {
+    let transport_allowed = reqwest::Url::parse(&config.api_url)
+        .ok()
+        .is_some_and(|url| {
+            url.scheme() == "https" || (allow_insecure_http && url.scheme() == "http")
+        });
     if config.contract != 2
-        || !config.api_url.starts_with("https://")
+        || !transport_allowed
         || config.model.trim().is_empty()
         || config.model.len() > 200
         || config.api_key.trim().is_empty()
@@ -306,15 +333,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remote_configuration_fails_closed() {
-        assert!(validate_remote_config(RemoteConfig {
+    fn remote_configuration_transport_is_fail_closed_by_default() {
+        let config = |api_url: &str| RemoteConfig {
             contract: 2,
-            api_url: "http://127.0.0.1:11434".into(),
+            api_url: api_url.into(),
             model: "model".into(),
             api_key: "secret".into(),
             thinking_enabled: false,
-        })
-        .is_err());
+        };
+
+        assert!(validate_remote_config(config("http://llm-stub:18080"), false).is_err());
+        assert!(validate_remote_config(config("http://llm-stub:18080"), true).is_ok());
+        assert!(validate_remote_config(config("https://api.example.com"), false).is_ok());
     }
 
     #[test]

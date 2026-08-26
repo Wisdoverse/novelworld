@@ -65,6 +65,223 @@ fn db_url() -> String {
         .unwrap_or_else(|_| "postgres://test:test@localhost:25432/novelworld_test".into())
 }
 
+const ALL_MIGRATIONS: &[&str] = &[
+    RUNTIME_MIGRATION,
+    PROGRESS_MIGRATION,
+    CHAT_TURN_MIGRATION,
+    NARRATIVE_CHOICE_MIGRATION,
+    SEED_REMOVAL_MIGRATION,
+    RUNTIME_LLM_CONFIG_MIGRATION,
+    CHAPTER_LORE_MIGRATION,
+    LLM_THINKING_MIGRATION,
+    NARRATIVE_ANCHOR_MIGRATION,
+    PLAYER_TIMELINE_MIGRATION,
+    CANON_STORY_MODEL_MIGRATION,
+    NARRATIVE_TRANSITION_MIGRATION,
+    LIVING_WORLD_MIGRATION,
+    SOURCE_FILE_STORAGE_MIGRATION,
+    DURABLE_IMPORT_MIGRATION,
+    ERASURE_MIGRATION,
+    CANON_CHECKPOINT_MIGRATION,
+    CANON_CHECKPOINT_EXPANSION_MIGRATION,
+    SHARED_NOVEL_SHELVES_MIGRATION,
+    ADVANCED_GAME_RULES_MIGRATION,
+    WORLD_TURN_MEMORY_PROJECTION_MIGRATION,
+    CHAPTER_TRANSLATIONS_MIGRATION,
+    USER_LLM_CONFIG_MIGRATION,
+];
+
+#[tokio::test]
+async fn current_snapshot_replays_after_shared_uploader_deletion() {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    sqlx::query("DROP DATABASE IF EXISTS novelworld_restore_replay WITH (FORCE)")
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("CREATE DATABASE novelworld_restore_replay")
+        .execute(&admin)
+        .await
+        .unwrap();
+
+    let options = PgConnectOptions::from_str(&db_url())
+        .unwrap()
+        .database("novelworld_restore_replay");
+    let restored = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::raw_sql(FRESH_SCHEMA)
+        .execute(&restored)
+        .await
+        .unwrap();
+
+    let uploader = uuid::Uuid::new_v4();
+    let reader_a = uuid::Uuid::new_v4();
+    let reader_b = uuid::Uuid::new_v4();
+    let novel = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO users (id, email, password_hash) VALUES \
+             ($1, $2, 'test-hash'), ($3, $4, 'test-hash'), ($5, $6, 'test-hash')",
+    )
+    .bind(uploader)
+    .bind(format!("restore-uploader-{uploader}@test.invalid"))
+    .bind(reader_a)
+    .bind(format!("restore-reader-a-{reader_a}@test.invalid"))
+    .bind(reader_b)
+    .bind(format!("restore-reader-b-{reader_b}@test.invalid"))
+    .execute(&restored)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO novels \
+             (id, user_id, title, world_summary, genre, total_chapters, status) \
+         VALUES ($1, $2, 'Shared restore fixture', 'world', 'fantasy', 1, 'ready')",
+    )
+    .bind(novel)
+    .bind(uploader)
+    .execute(&restored)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO user_novels (user_id, novel_id) VALUES \
+             ($1, $4), ($2, $4), ($3, $4)",
+    )
+    .bind(uploader)
+    .bind(reader_a)
+    .bind(reader_b)
+    .bind(novel)
+    .execute(&restored)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO chapters (novel_id, chapter_number, content) \
+         VALUES ($1, 1, 'A durable chapter')",
+    )
+    .bind(novel)
+    .execute(&restored)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO characters (novel_id, name) VALUES ($1, 'Restore character')")
+        .bind(novel)
+        .execute(&restored)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO canon_story_models \
+             (novel_id, model_version, schema_version, prompt_version, content) \
+         VALUES ($1, 1, 1, 'restore-replay-v1', '{}'::jsonb)",
+    )
+    .bind(novel)
+    .execute(&restored)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO novel_import_jobs (novel_id, stage, status) \
+         VALUES ($1, 'completed', 'completed')",
+    )
+    .bind(novel)
+    .execute(&restored)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO narrative_nodes \
+             (id, user_id, novel_id, chapter_number, description) VALUES \
+             ($1, $2, $3, 1, 'Reader A node'), \
+             ($4, $5, $3, 1, 'Reader B node')",
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(reader_a)
+    .bind(novel)
+    .bind(uuid::Uuid::new_v4())
+    .bind(reader_b)
+    .execute(&restored)
+    .await
+    .unwrap();
+
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(uploader)
+        .execute(&restored)
+        .await
+        .unwrap();
+    // Simulate a drifted historical ownership key in a restored current
+    // snapshot. NOT VALID permits the already-orphaned attribution row.
+    sqlx::query(
+        "ALTER TABLE novels ADD CONSTRAINT restore_legacy_novels_user_id_fkey \
+         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE NOT VALID",
+    )
+    .execute(&restored)
+    .await
+    .unwrap();
+
+    for _ in 0..2 {
+        for migration in ALL_MIGRATIONS {
+            sqlx::raw_sql(*migration).execute(&restored).await.unwrap();
+        }
+    }
+
+    let uploader_attribution: uuid::Uuid =
+        sqlx::query_scalar("SELECT user_id FROM novels WHERE id = $1")
+            .bind(novel)
+            .fetch_one(&restored)
+            .await
+            .unwrap();
+    assert_eq!(uploader_attribution, uploader);
+    let counts: (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+            (SELECT COUNT(*) FROM users WHERE id = $1), \
+            (SELECT COUNT(*) FROM novels WHERE id = $2), \
+            (SELECT COUNT(*) FROM user_novels WHERE novel_id = $2), \
+            (SELECT COUNT(*) FROM chapters WHERE novel_id = $2), \
+            (SELECT COUNT(*) FROM characters WHERE novel_id = $2), \
+            (SELECT COUNT(*) FROM novel_import_jobs \
+             WHERE novel_id = $2 AND status = 'completed'), \
+            (SELECT COUNT(*) FROM canon_story_models WHERE novel_id = $2), \
+            (SELECT COUNT(*) FROM narrative_nodes WHERE novel_id = $2), \
+            (SELECT COUNT(*) FROM erasure_records \
+             WHERE subject_type = 'user' AND subject_id = $1), \
+            (SELECT COUNT(*) FROM erasure_records \
+             WHERE subject_type = 'novel' AND subject_id = $2)",
+    )
+    .bind(uploader)
+    .bind(novel)
+    .fetch_one(&restored)
+    .await
+    .unwrap();
+    assert_eq!(counts, (0, 1, 2, 1, 1, 1, 1, 2, 1, 0));
+
+    let retired_contracts: (i64, i64) = sqlx::query_as(
+        "SELECT \
+            (SELECT COUNT(*) FROM pg_catalog.pg_constraint \
+             WHERE conname = 'narrative_nodes_novel_chapter_key' \
+               AND conrelid = 'public.narrative_nodes'::pg_catalog.regclass), \
+            (SELECT COUNT(*) FROM pg_catalog.pg_constraint AS ownership \
+             WHERE ownership.contype = 'f' \
+               AND ownership.conrelid = 'public.novels'::pg_catalog.regclass \
+               AND ownership.confrelid = 'public.users'::pg_catalog.regclass \
+               AND ownership.conkey = ARRAY[( \
+                   SELECT attribute.attnum \
+                   FROM pg_catalog.pg_attribute AS attribute \
+                   WHERE attribute.attrelid = ownership.conrelid \
+                     AND attribute.attname = 'user_id' \
+               )])",
+    )
+    .fetch_one(&restored)
+    .await
+    .unwrap();
+    assert_eq!(retired_contracts, (0, 0));
+
+    restored.close().await;
+    sqlx::query("DROP DATABASE novelworld_restore_replay WITH (FORCE)")
+        .execute(&admin)
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn fresh_schema_matches_replayable_chat_turn_contract() {
     let admin = PgPoolOptions::new()
@@ -1710,6 +1927,24 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
         .execute(&legacy)
         .await
         .unwrap();
+    let uploader_ownership_fk_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS ( \
+             SELECT 1 FROM pg_catalog.pg_constraint AS ownership \
+             WHERE ownership.contype = 'f' \
+               AND ownership.conrelid = 'public.novels'::pg_catalog.regclass \
+               AND ownership.confrelid = 'public.users'::pg_catalog.regclass \
+               AND ownership.conkey = ARRAY[( \
+                   SELECT attribute.attnum \
+                   FROM pg_catalog.pg_attribute AS attribute \
+                   WHERE attribute.attrelid = ownership.conrelid \
+                     AND attribute.attname = 'user_id' \
+               )] \
+         )",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    assert!(!uploader_ownership_fk_exists);
     assert_eq!(
         sqlx::query_as::<_, (uuid::Uuid, chrono::DateTime<chrono::Utc>)>(
             "SELECT id, updated_at FROM public.novels ORDER BY id",
@@ -2158,36 +2393,111 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
     .execute(&legacy)
     .await
     .unwrap();
-    let duplicate_error = sqlx::raw_sql(RUNTIME_MIGRATION)
-        .execute(&legacy)
-        .await
-        .unwrap_err();
-    assert!(duplicate_error
-        .to_string()
-        .contains("duplicate novel/chapter rows exist"));
-
-    // Account deletion is the authority on the upgraded deletion graph: legacy
-    // foreign keys were created without ON DELETE CASCADE.
-    sqlx::query("DELETE FROM public.users")
+    sqlx::raw_sql(RUNTIME_MIGRATION)
         .execute(&legacy)
         .await
         .unwrap();
-    let remaining: (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
-        "SELECT (SELECT COUNT(*) FROM public.users), \
-                (SELECT COUNT(*) FROM public.novels), \
+    let duplicate_error = sqlx::raw_sql(PLAYER_TIMELINE_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        duplicate_error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .map(|code| code.into_owned()),
+        Some("23505".into())
+    );
+    sqlx::query(
+        "DELETE FROM public.narrative_nodes \
+         WHERE id = '00000000-0000-0000-0000-000000000007'",
+    )
+    .execute(&legacy)
+    .await
+    .unwrap();
+    sqlx::raw_sql(PLAYER_TIMELINE_MIGRATION)
+        .execute(&legacy)
+        .await
+        .unwrap();
+
+    // Account deletion removes private state and shelves, while canonical
+    // novels and their durable derived data survive with uploader attribution.
+    let account_count_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM public.users")
+        .fetch_one(&legacy)
+        .await
+        .unwrap();
+    let canonical_before: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM public.novels), \
                 (SELECT COUNT(*) FROM public.chapters), \
                 (SELECT COUNT(*) FROM public.characters), \
                 (SELECT COUNT(*) FROM public.novel_import_jobs), \
-                (SELECT COUNT(*) FROM public.reading_progress), \
-                (SELECT COUNT(*) FROM public.chat_messages), \
-                (SELECT COUNT(*) FROM public.character_memories), \
-                (SELECT COUNT(*) FROM public.user_choices), \
-                (SELECT COUNT(*) FROM public.world_states)",
+                (SELECT COUNT(*) FROM public.canon_story_models), \
+                (SELECT COUNT(*) FROM public.narrative_nodes WHERE user_id IS NULL)",
     )
     .fetch_one(&legacy)
     .await
     .unwrap();
-    assert_eq!(remaining, (0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+    let erasures_before: (i64, i64) = sqlx::query_as(
+        "SELECT \
+            (SELECT COUNT(*) FROM public.erasure_records WHERE subject_type = 'user'), \
+            (SELECT COUNT(*) FROM public.erasure_records WHERE subject_type = 'novel')",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM public.users")
+        .execute(&legacy)
+        .await
+        .unwrap();
+    let canonical_after: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM public.novels), \
+                (SELECT COUNT(*) FROM public.chapters), \
+                (SELECT COUNT(*) FROM public.characters), \
+                (SELECT COUNT(*) FROM public.novel_import_jobs), \
+                (SELECT COUNT(*) FROM public.canon_story_models), \
+                (SELECT COUNT(*) FROM public.narrative_nodes WHERE user_id IS NULL)",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    assert_eq!(canonical_after, canonical_before);
+    let remaining_private: (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM public.users), \
+                (SELECT COUNT(*) FROM public.user_novels), \
+                (SELECT COUNT(*) FROM public.reading_progress), \
+                (SELECT COUNT(*) FROM public.chat_messages), \
+                (SELECT COUNT(*) FROM public.character_memories), \
+                (SELECT COUNT(*) FROM public.user_choices), \
+                (SELECT COUNT(*) FROM public.world_states), \
+                (SELECT COUNT(*) FROM public.player_chapters), \
+                (SELECT COUNT(*) FROM public.world_turns), \
+                (SELECT COUNT(*) FROM public.narrative_nodes WHERE user_id IS NOT NULL)",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    assert_eq!(remaining_private, (0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+    let orphaned_attributions: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM public.novels AS novel \
+         LEFT JOIN public.users AS uploader ON uploader.id = novel.user_id \
+         WHERE uploader.id IS NULL",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    assert_eq!(orphaned_attributions, canonical_after.0);
+    let erasures_after: (i64, i64) = sqlx::query_as(
+        "SELECT \
+            (SELECT COUNT(*) FROM public.erasure_records WHERE subject_type = 'user'), \
+            (SELECT COUNT(*) FROM public.erasure_records WHERE subject_type = 'novel')",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    assert_eq!(
+        erasures_after,
+        (erasures_before.0 + account_count_before, erasures_before.1)
+    );
 
     legacy.close().await;
     sqlx::query("DROP DATABASE novelworld_legacy_contract WITH (FORCE)")

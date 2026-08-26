@@ -835,8 +835,13 @@ class CapacityProfile:
         return succeeded[0][0]
 
     @staticmethod
-    def world_action(intent="查清北塔换防并阻止伏击", target_id=None):
-        return {"kind": "investigate", "target_id": target_id, "intent": intent}
+    def world_action(expected_turn_number, intent="查清北塔换防并阻止伏击", target_id=None):
+        return {
+            "expected_turn_number": expected_turn_number,
+            "kind": "investigate",
+            "target_id": target_id,
+            "intent": intent,
+        }
 
     def submit_world_turn(self, fixture, turn_id, action, released_at=None):
         return http_request(
@@ -869,7 +874,7 @@ class CapacityProfile:
                 self.submit_world_turn(
                     participant[0],
                     participant[1],
-                    self.world_action(target_id=participant[0]["canon_event_id"]),
+                    self.world_action(0, target_id=participant[0]["canon_event_id"]),
                     released_at,
                 ),
             ),
@@ -934,7 +939,7 @@ class CapacityProfile:
             failures={"canon": 0, "narrative_transition": 0, "world_turn": 1},
         )
         turn_id = str(uuid.uuid4())
-        action = self.world_action(target_id=fixture["canon_event_id"])
+        action = self.world_action(0, target_id=fixture["canon_event_id"])
         failed = self.submit_world_turn(fixture, turn_id, action)
         self.check("world_failure_injected", failed.status == 502, status=failed.status)
         state = expect(
@@ -1015,6 +1020,7 @@ class CapacityProfile:
                     fixture,
                     str(uuid.uuid4()),
                     {
+                        "expected_turn_number": turn_number - 1,
                         "kind": "pursue_goal",
                         "target_id": None,
                         "intent": f"整理地下回廊线索 {turn_number}",
@@ -1182,6 +1188,7 @@ class CapacityProfile:
 
 def self_test(policy):
     validate_policy(policy)
+    assert CapacityProfile.world_action(3)["expected_turn_number"] == 3
     assert nearest_rank([8, 1, 2, 3, 4, 5, 6, 7]) == 8
     assert nearest_rank(list(range(1, 21))) == 19
     invalid = copy.deepcopy(policy)

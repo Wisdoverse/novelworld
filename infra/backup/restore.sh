@@ -256,8 +256,8 @@ fi
 [ -z "$running" ] ||
   fail "stop the application services before restoring; still running:$running"
 
-docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null | grep -qx true ||
-  fail "postgres container '$container' is not running; start it with: docker compose up -d postgres"
+docker inspect --format '{{.State.Health.Status}}' "$container" 2>/dev/null | grep -qx healthy ||
+  fail "postgres container '$container' is not ready; start it with: docker compose up -d --wait postgres"
 
 check_calendar "$covered_through" "the covered_through of $manifest"
 while IFS= read -r newer_covered; do

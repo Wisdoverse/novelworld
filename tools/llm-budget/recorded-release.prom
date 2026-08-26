@@ -3,8 +3,11 @@ novelworld_llm_observability_info{contract="llm-observability-v1",service="novel
 novelworld_llm_observability_info{contract="llm-observability-v1",service="agent-service"} 1
 novelworld_llm_observability_info{contract="llm-observability-v1",service="narrative-service"} 1
 novelworld_llm_operation_output_token_ceiling{contract="llm-observability-v1",service="user-service",operation="setup_connection"} 8
+novelworld_llm_operation_output_token_ceiling{contract="llm-observability-v1",service="user-service",operation="translation"} 8192
+novelworld_llm_operation_output_token_ceiling{contract="llm-observability-v1",service="user-service",operation="chapter_boundary_detection"} 2048
 novelworld_llm_operation_output_token_ceiling{contract="llm-observability-v1",service="user-service",operation="character_extraction"} 4096
-novelworld_llm_operation_output_token_ceiling{contract="llm-observability-v1",service="user-service",operation="canon_extraction"} 4096
+novelworld_llm_operation_output_token_ceiling{contract="llm-observability-v1",service="user-service",operation="canon_extraction"} 8192
+novelworld_llm_operation_output_token_ceiling{contract="llm-observability-v1",service="user-service",operation="game_rule_generation"} 8192
 novelworld_llm_operation_output_token_ceiling{contract="llm-observability-v1",service="user-service",operation="narrative_node_detection"} 4096
 novelworld_llm_operation_output_token_ceiling{contract="llm-observability-v1",service="user-service",operation="branch_generation"} 4096
 novelworld_llm_operation_output_token_ceiling{contract="llm-observability-v1",service="user-service",operation="narrative_transition"} 4096
@@ -28,7 +31,7 @@ novelworld_llm_attempts_total{contract="llm-observability-v1",service="novel-ser
 novelworld_llm_requests_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="canon_extraction",mode="sync",status="success"} 2
 novelworld_llm_usage_reports_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="canon_extraction",mode="sync",status="present"} 2
 novelworld_llm_request_duration_seconds{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="canon_extraction",mode="sync",status="success",quantile="0.95"} 0.3
-novelworld_llm_output_token_limit{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="canon_extraction",mode="sync",quantile="1"} 4096
+novelworld_llm_output_token_limit{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="canon_extraction",mode="sync",quantile="1"} 8192
 novelworld_llm_tokens_per_request{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="canon_extraction",type="output",quantile="1"} 40
 novelworld_llm_tokens_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="canon_extraction",type="input"} 360
 novelworld_llm_tokens_total{contract="llm-observability-v1",service="novel-service",provider="environment",model="e2e",operation="canon_extraction",type="output"} 80
