@@ -188,6 +188,38 @@ fn character_is_available(first_appearance_chapter: Option<i32>, current_chapter
     first_appearance_chapter.is_some_and(|chapter| (1..=current_chapter).contains(&chapter))
 }
 
+fn validate_persona_visibility(
+    character: &CharacterInfo,
+    current_chapter: i32,
+) -> std::result::Result<i32, AgentRequestError> {
+    let has_unsafe_persona = !character.aliases.is_empty()
+        || character.role.is_some()
+        || character.description.is_some()
+        || character.personality.is_some()
+        || character.background.is_some()
+        || character.speaking_style.is_some();
+    if !has_unsafe_persona {
+        return Ok(current_chapter);
+    }
+
+    if let Some(chapter) = character
+        .persona_source_chapter_high_water
+        .filter(|chapter| (1..=current_chapter).contains(chapter))
+    {
+        return Ok(chapter);
+    }
+
+    Err(AgentRequestError::Unavailable(anyhow::anyhow!(
+        "novel-service returned persona outside the server reading boundary"
+    )))
+}
+
+fn turn_has_safe_persona_provenance(claim: &ChatTurnClaim) -> bool {
+    claim
+        .persona_source_chapter_high_water
+        .is_some_and(|chapter| (1..=claim.chapter_context).contains(&chapter))
+}
+
 #[cfg(test)]
 mod availability_tests {
     use super::character_is_available;
@@ -309,7 +341,7 @@ impl AgentCommandHandler {
         character_id: Uuid,
         user_id: Uuid,
         claimed_novel_id: Option<Uuid>,
-    ) -> std::result::Result<(CharacterInfo, ReadingContext), AgentRequestError> {
+    ) -> std::result::Result<(CharacterInfo, ReadingContext, i32), AgentRequestError> {
         let character = self
             .owned_character(character_id, user_id, claimed_novel_id)
             .await?;
@@ -318,6 +350,8 @@ impl AgentCommandHandler {
         if !character_is_available(character.first_appearance_chapter, reading.current_chapter) {
             return Err(AgentRequestError::NotFound);
         }
+        let persona_source_chapter_high_water =
+            validate_persona_visibility(&character, reading.current_chapter)?;
         if reading.reader_identity_type == "character"
             && reading.reader_character_id == Some(character_id)
         {
@@ -326,7 +360,7 @@ impl AgentCommandHandler {
             ));
         }
 
-        Ok((character, reading))
+        Ok((character, reading, persona_source_chapter_high_water))
     }
 
     fn system_prompt(character: &CharacterInfo) -> String {
@@ -553,7 +587,7 @@ impl AgentCommandHandler {
         claimed_novel_id: Option<Uuid>,
         user_message: String,
     ) -> std::result::Result<TurnStart, AgentRequestError> {
-        let (character, reading) = self
+        let (character, reading, persona_source_chapter_high_water) = self
             .resolve_turn_context(character_id, user_id, claimed_novel_id)
             .await?;
         let claim = ChatTurnClaim {
@@ -563,6 +597,7 @@ impl AgentCommandHandler {
             novel_id: character.novel_id,
             request_fingerprint: Sha256::digest(user_message.as_bytes()).to_vec(),
             chapter_context: reading.current_chapter,
+            persona_source_chapter_high_water: Some(persona_source_chapter_high_water),
             reader_identity: reading.reader_identity.clone(),
             reader_identity_type: reading.reader_identity_type.clone(),
             reader_character_id: reading.reader_character_id,
@@ -592,6 +627,48 @@ impl AgentCommandHandler {
                     }
                     return Err(AgentRequestError::NotFound);
                 }
+                if !turn_has_safe_persona_provenance(&persisted) {
+                    let released = self
+                        .memory_manager
+                        .chat_repo
+                        .fail_turn(persisted.id, attempt, "superseded")
+                        .await
+                        .map_err(AgentRequestError::Unavailable)?;
+                    if !released {
+                        return Err(AgentRequestError::TurnConflict);
+                    }
+                    return Err(AgentRequestError::TurnConflict);
+                }
+                let current_persona_source_chapter_high_water =
+                    match validate_persona_visibility(&character, persisted.chapter_context) {
+                        Ok(chapter) => chapter,
+                        Err(error) => {
+                            let released = self
+                                .memory_manager
+                                .chat_repo
+                                .fail_turn(persisted.id, attempt, "superseded")
+                                .await
+                                .map_err(AgentRequestError::Unavailable)?;
+                            if !released {
+                                return Err(AgentRequestError::TurnConflict);
+                            }
+                            return Err(error);
+                        }
+                    };
+                if persisted.persona_source_chapter_high_water
+                    != Some(current_persona_source_chapter_high_water)
+                {
+                    let released = self
+                        .memory_manager
+                        .chat_repo
+                        .fail_turn(persisted.id, attempt, "superseded")
+                        .await
+                        .map_err(AgentRequestError::Unavailable)?;
+                    if !released {
+                        return Err(AgentRequestError::TurnConflict);
+                    }
+                    return Err(AgentRequestError::TurnConflict);
+                }
                 let reading = ReadingContext {
                     user_id: persisted.user_id,
                     novel_id: persisted.novel_id,
@@ -615,6 +692,9 @@ impl AgentCommandHandler {
             } => {
                 if persisted.chapter_context > reading.current_chapter {
                     return Err(AgentRequestError::NotFound);
+                }
+                if !turn_has_safe_persona_provenance(&persisted) {
+                    return Err(AgentRequestError::TurnConflict);
                 }
                 Ok(TurnStart::Completed(response))
             }
@@ -885,10 +965,8 @@ impl AgentCommandHandler {
                         .project_completed_turn(
                             user_message,
                             character_message,
-                            turn.claim.character_id,
-                            turn.claim.user_id,
-                            turn.claim.novel_id,
                             turn.claim.reader_character_id,
+                            turn.claim.persona_source_chapter_high_water,
                         )
                         .await
                     {
@@ -1042,10 +1120,8 @@ impl AgentCommandHandler {
                     .project_completed_turn(
                         user_message,
                         character_message,
-                        turn.claim.character_id,
-                        turn.claim.user_id,
-                        turn.claim.novel_id,
                         turn.claim.reader_character_id,
+                        turn.claim.persona_source_chapter_high_water,
                     )
                     .await
                 {
@@ -1308,6 +1384,8 @@ mod tests {
         history_reader_characters: Mutex<Vec<Option<Uuid>>>,
         completed_response: Option<String>,
         persisted_chapter: Option<i32>,
+        persisted_persona_source_chapter_high_water: Option<i32>,
+        legacy_persona_provenance: bool,
         completion_gate: Option<Arc<tokio::sync::Semaphore>>,
         renew_result: bool,
         renewals: AtomicUsize,
@@ -1323,6 +1401,8 @@ mod tests {
                 history_reader_characters: Mutex::new(Vec::new()),
                 completed_response: None,
                 persisted_chapter: None,
+                persisted_persona_source_chapter_high_water: None,
+                legacy_persona_provenance: false,
                 completion_gate: None,
                 renew_result: true,
                 renewals: AtomicUsize::new(0),
@@ -1333,15 +1413,21 @@ mod tests {
     #[async_trait]
     impl ChatRepository for RecordingChatRepository {
         async fn begin_turn(&self, claim: &ChatTurnClaim) -> Result<BeginChatTurn> {
-            if let Some(response) = &self.completed_response {
-                return Ok(BeginChatTurn::Completed {
-                    claim: claim.clone(),
-                    response: response.clone(),
-                });
-            }
             let mut persisted = claim.clone();
             if let Some(chapter) = self.persisted_chapter {
                 persisted.chapter_context = chapter;
+            }
+            if let Some(chapter) = self.persisted_persona_source_chapter_high_water {
+                persisted.persona_source_chapter_high_water = Some(chapter);
+            }
+            if self.legacy_persona_provenance {
+                persisted.persona_source_chapter_high_water = None;
+            }
+            if let Some(response) = &self.completed_response {
+                return Ok(BeginChatTurn::Completed {
+                    claim: persisted,
+                    response: response.clone(),
+                });
             }
             Ok(BeginChatTurn::Acquired {
                 claim: persisted,
@@ -1404,6 +1490,7 @@ mod tests {
             _user_id: Uuid,
             _novel_id: Uuid,
             _reader_character_id: Option<Uuid>,
+            _max_chapter: i32,
         ) -> Result<usize> {
             Ok(1)
         }
@@ -1427,24 +1514,10 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct RecordingCache {
-        chapters: Mutex<Vec<i32>>,
-    }
+    struct RecordingCache;
 
     #[async_trait]
     impl MessageCache for RecordingCache {
-        async fn get_recent_messages(
-            &self,
-            _character_id: Uuid,
-            _user_id: Uuid,
-            max_chapter: i32,
-            _limit: usize,
-        ) -> Result<Vec<ChatMessage>> {
-            self.chapters.lock().unwrap().push(max_chapter);
-            Ok(vec![])
-        }
-
         async fn push_turn(
             &self,
             _character_id: Uuid,
@@ -1607,7 +1680,7 @@ mod tests {
         let novel_id = Uuid::new_v4();
         let character_id = Uuid::new_v4();
         let memory_repo = Arc::new(RecordingMemoryRepository::default());
-        let cache = Arc::new(RecordingCache::default());
+        let cache = Arc::new(RecordingCache);
         let memory_manager = Arc::new(MemoryManager {
             memory_repo: memory_repo.clone(),
             chat_repo,
@@ -1627,6 +1700,7 @@ mod tests {
                 personality: Some("冷静、寡言、守信。".into()),
                 background: Some("曾在北方关隘服役十年。".into()),
                 speaking_style: Some("短句为主，用词克制。".into()),
+                persona_source_chapter_high_water: Some(3),
                 first_appearance_chapter: Some(1),
             })),
             reading_context: Arc::new(FixedReading(ReadingContext {
@@ -1658,6 +1732,7 @@ mod tests {
             personality: Some("冷静、寡言、守信。".into()),
             background: Some("曾在北方关隘服役十年。".into()),
             speaking_style: Some("短句为主，用词克制。".into()),
+            persona_source_chapter_high_water: Some(3),
             first_appearance_chapter: Some(1),
         }
     }
@@ -1730,6 +1805,38 @@ mod tests {
         let prompt = AgentCommandHandler::system_prompt(&bare);
         assert!(!prompt.contains("角色资料"));
         assert!(prompt.contains("你扮演名称为"));
+    }
+
+    #[test]
+    fn persona_visibility_requires_a_valid_server_high_water() {
+        let mut character = persona_character();
+        character.persona_source_chapter_high_water = None;
+        assert!(matches!(
+            validate_persona_visibility(&character, 2),
+            Err(AgentRequestError::Unavailable(_))
+        ));
+
+        character.persona_source_chapter_high_water = Some(0);
+        assert!(matches!(
+            validate_persona_visibility(&character, 2),
+            Err(AgentRequestError::Unavailable(_))
+        ));
+
+        character.persona_source_chapter_high_water = Some(2);
+        assert!(matches!(
+            validate_persona_visibility(&character, 1),
+            Err(AgentRequestError::Unavailable(_))
+        ));
+        assert!(validate_persona_visibility(&character, 2).is_ok());
+
+        character.aliases.clear();
+        character.role = None;
+        character.description = None;
+        character.personality = None;
+        character.background = None;
+        character.speaking_style = None;
+        character.persona_source_chapter_high_water = None;
+        assert!(validate_persona_visibility(&character, 1).is_ok());
     }
 
     #[test]
@@ -2002,6 +2109,7 @@ mod tests {
                 novel_id,
                 request_fingerprint: vec![7; 32],
                 chapter_context: 3,
+                persona_source_chapter_high_water: Some(3),
                 reader_identity: Some("Adopted Character".into()),
                 reader_identity_type: "character".into(),
                 reader_character_id: Some(reader_character_id),
@@ -2081,7 +2189,7 @@ mod tests {
     async fn chat_uses_server_reading_context_for_prompt_queries_and_snapshot() {
         let chat_repo = Arc::new(RecordingChatRepository::default());
         let llm = Arc::new(RecordingLlm::default());
-        let (handler, memory_repo, cache, user_id, novel_id, character_id) =
+        let (handler, memory_repo, _, user_id, novel_id, character_id) =
             test_handler(chat_repo.clone(), llm.clone());
 
         let response = handler
@@ -2100,7 +2208,6 @@ mod tests {
         assert_eq!(*llm.user_ids.lock().unwrap(), vec![user_id]);
         assert_eq!(*memory_repo.layer_chapters.lock().unwrap(), vec![3, 3]);
         assert_eq!(*memory_repo.semantic_chapters.lock().unwrap(), vec![3]);
-        assert!(cache.chapters.lock().unwrap().is_empty());
         assert_eq!(*chat_repo.recent_chapters.lock().unwrap(), vec![3]);
         assert_eq!(
             *chat_repo.recent_reader_characters.lock().unwrap(),
@@ -2123,6 +2230,78 @@ mod tests {
         assert!(!prompt.contains("第99章"));
         assert!(prompt.contains("Trusted source fact"));
         assert!(!prompt.contains("Future spoiler"));
+        assert!(prompt.contains("曾在北方关隘服役十年"));
+    }
+
+    #[tokio::test]
+    async fn chat_rejects_persona_above_rewound_progress_before_provider() {
+        let chat_repo = Arc::new(RecordingChatRepository::default());
+        let llm = Arc::new(RecordingLlm::default());
+        let (mut handler, _, _, user_id, novel_id, character_id) =
+            test_handler(chat_repo, llm.clone());
+        let mut character = persona_character();
+        character.id = character_id;
+        character.novel_id = novel_id;
+        character.persona_source_chapter_high_water = Some(2);
+        handler.character_repo = Arc::new(FixedCharacter(character));
+        handler.reading_context = Arc::new(FixedReading(ReadingContext {
+            user_id,
+            novel_id,
+            current_chapter: 1,
+            reader_identity: Some("Trusted Reader".into()),
+            reader_identity_type: "self".into(),
+            reader_character_id: None,
+            deviation_mode: "canon".into(),
+        }));
+
+        let error = handler
+            .chat(
+                Uuid::new_v4(),
+                character_id,
+                user_id,
+                Some(novel_id),
+                "What happens now?".into(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<AgentRequestError>(),
+            Some(AgentRequestError::Unavailable(_))
+        ));
+        assert!(llm.user_ids.lock().unwrap().is_empty());
+        assert!(llm.prompts.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn chat_rejects_unmarked_persona_before_provider() {
+        let chat_repo = Arc::new(RecordingChatRepository::default());
+        let llm = Arc::new(RecordingLlm::default());
+        let (mut handler, _, _, user_id, novel_id, character_id) =
+            test_handler(chat_repo, llm.clone());
+        let mut character = persona_character();
+        character.id = character_id;
+        character.novel_id = novel_id;
+        character.persona_source_chapter_high_water = None;
+        handler.character_repo = Arc::new(FixedCharacter(character));
+
+        let error = handler
+            .chat(
+                Uuid::new_v4(),
+                character_id,
+                user_id,
+                Some(novel_id),
+                "What happens now?".into(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<AgentRequestError>(),
+            Some(AgentRequestError::Unavailable(_))
+        ));
+        assert!(llm.user_ids.lock().unwrap().is_empty());
+        assert!(llm.prompts.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -2153,6 +2332,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_legacy_turn_does_not_replay_an_unproven_response() {
+        let chat_repo = Arc::new(RecordingChatRepository {
+            completed_response: Some("legacy unproven response".into()),
+            legacy_persona_provenance: true,
+            ..Default::default()
+        });
+        let llm = Arc::new(RecordingLlm::default());
+        let (handler, _, _, user_id, novel_id, character_id) =
+            test_handler(chat_repo.clone(), llm.clone());
+
+        let error = handler
+            .chat(
+                Uuid::new_v4(),
+                character_id,
+                user_id,
+                Some(novel_id),
+                "same legacy request".into(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<AgentRequestError>(),
+            Some(AgentRequestError::TurnConflict)
+        ));
+        assert!(llm.prompts.lock().unwrap().is_empty());
+        assert!(chat_repo.saved.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reclaimed_legacy_turn_is_superseded_before_provider_work() {
+        let chat_repo = Arc::new(RecordingChatRepository {
+            legacy_persona_provenance: true,
+            ..Default::default()
+        });
+        let llm = Arc::new(RecordingLlm::default());
+        let (handler, _, _, user_id, novel_id, character_id) =
+            test_handler(chat_repo.clone(), llm.clone());
+
+        let error = handler
+            .chat(
+                Uuid::new_v4(),
+                character_id,
+                user_id,
+                Some(novel_id),
+                "retry legacy turn".into(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<AgentRequestError>(),
+            Some(AgentRequestError::TurnConflict)
+        ));
+        assert_eq!(*chat_repo.failed.lock().unwrap(), vec!["superseded"]);
+        assert!(llm.prompts.lock().unwrap().is_empty());
+        assert!(chat_repo.saved.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn rewind_rejection_releases_the_reclaimed_turn() {
         let chat_repo = Arc::new(RecordingChatRepository {
             persisted_chapter: Some(5),
@@ -2177,6 +2416,69 @@ mod tests {
             Some(AgentRequestError::NotFound)
         ));
         assert_eq!(*chat_repo.failed.lock().unwrap(), vec!["superseded"]);
+    }
+
+    #[tokio::test]
+    async fn reclaimed_turn_revalidates_persona_against_its_persisted_chapter() {
+        let chat_repo = Arc::new(RecordingChatRepository {
+            persisted_chapter: Some(1),
+            persisted_persona_source_chapter_high_water: Some(1),
+            ..Default::default()
+        });
+        let llm = Arc::new(RecordingLlm::default());
+        let (handler, _, _, user_id, novel_id, character_id) =
+            test_handler(chat_repo.clone(), llm.clone());
+
+        let error = handler
+            .chat(
+                Uuid::new_v4(),
+                character_id,
+                user_id,
+                Some(novel_id),
+                "retry the old turn".into(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<AgentRequestError>(),
+            Some(AgentRequestError::Unavailable(_))
+        ));
+        assert_eq!(*chat_repo.failed.lock().unwrap(), vec!["superseded"]);
+        assert!(chat_repo.saved.lock().unwrap().is_empty());
+        assert!(llm.user_ids.lock().unwrap().is_empty());
+        assert!(llm.prompts.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reclaimed_turn_rejects_persona_marker_drift_before_provider_work() {
+        let chat_repo = Arc::new(RecordingChatRepository {
+            persisted_persona_source_chapter_high_water: Some(1),
+            ..Default::default()
+        });
+        let llm = Arc::new(RecordingLlm::default());
+        let (handler, _, _, user_id, novel_id, character_id) =
+            test_handler(chat_repo.clone(), llm.clone());
+
+        let error = handler
+            .chat(
+                Uuid::new_v4(),
+                character_id,
+                user_id,
+                Some(novel_id),
+                "retry after persona changed".into(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<AgentRequestError>(),
+            Some(AgentRequestError::TurnConflict)
+        ));
+        assert_eq!(*chat_repo.failed.lock().unwrap(), vec!["superseded"]);
+        assert!(chat_repo.saved.lock().unwrap().is_empty());
+        assert!(llm.user_ids.lock().unwrap().is_empty());
+        assert!(llm.prompts.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

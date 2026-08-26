@@ -2,7 +2,11 @@ import React, { type PropsWithChildren } from 'react';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { useReadingProgress, useUpdateReadingProgress } from './api';
+import {
+  useReadingProgress,
+  useResetReaderIdentity,
+  useUpdateReadingProgress,
+} from './api';
 
 const api = vi.hoisted(() => ({ get: vi.fn(), put: vi.fn() }));
 
@@ -59,6 +63,40 @@ describe('reading progress mutations', () => {
 
     await waitFor(() => expect(result.current.progress.data?.reader_identity_type).toBe('self'));
     expect(result.current.progress.data?.reader_identity).toBeUndefined();
+    expect(api.get).toHaveBeenCalledTimes(2);
+  });
+
+  it('resets an unavailable character identity and refetches active progress', async () => {
+    api.get
+      .mockRejectedValueOnce(new Error('reader identity unavailable'))
+      .mockResolvedValueOnce({
+        data: {
+          ...oldProgress,
+          reader_identity: undefined,
+          reader_identity_type: 'self',
+          reader_character_id: undefined,
+        },
+      });
+    api.put.mockResolvedValue({});
+
+    const { result } = renderHook(
+      () => ({
+        progress: useReadingProgress('novel'),
+        resetIdentity: useResetReaderIdentity('novel'),
+      }),
+      { wrapper },
+    );
+    await waitFor(() => expect(result.current.progress.isError).toBe(true));
+
+    await act(async () => result.current.resetIdentity.mutateAsync());
+
+    expect(api.put).toHaveBeenCalledWith('/progress/novel/identity', {
+      identity_type: 'self',
+      identity_name: null,
+      character_id: null,
+    });
+    await waitFor(() => expect(result.current.progress.data?.reader_identity_type).toBe('self'));
+    expect(result.current.progress.data?.reader_character_id).toBeUndefined();
     expect(api.get).toHaveBeenCalledTimes(2);
   });
 });

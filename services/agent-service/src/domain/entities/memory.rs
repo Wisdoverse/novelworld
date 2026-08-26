@@ -26,6 +26,10 @@ pub struct Memory {
     /// 重要程度 1-10，影响检索优先级
     pub importance: i32,
     pub chapter_number: Option<i32>,
+    /// Highest persona source chapter represented by a derived Mid/Long row.
+    /// Legacy rows are unmarked and must stay out of online prompt paths.
+    #[serde(default, skip_serializing)]
+    pub persona_source_chapter_high_water: Option<i32>,
     /// 长期记忆的向量嵌入（1536维，OpenAI text-embedding-3-small）
     pub embedding: Option<Vec<f32>>,
     pub created_at: DateTime<Utc>,
@@ -48,6 +52,7 @@ impl Memory {
             content,
             importance: 5,
             chapter_number,
+            persona_source_chapter_high_water: None,
             embedding: None,
             created_at: Utc::now(),
         }
@@ -70,6 +75,7 @@ impl Memory {
             content,
             importance,
             chapter_number: Some(chapter_number),
+            persona_source_chapter_high_water: None,
             embedding: None,
             created_at: Utc::now(),
         }
@@ -89,6 +95,9 @@ pub struct ChatMessage {
     pub content: String,
     pub reader_identity: Option<String>,
     pub chapter_context: Option<i32>,
+    /// Internal provenance projected from the owning durable chat turn.
+    #[serde(default, skip_serializing)]
+    pub persona_source_chapter_high_water: Option<i32>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -112,6 +121,7 @@ impl ChatMessage {
             content,
             reader_identity,
             chapter_context,
+            persona_source_chapter_high_water: None,
             created_at: Utc::now(),
         }
     }

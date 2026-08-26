@@ -60,16 +60,6 @@ pub struct NoopMessageCache;
 
 #[async_trait]
 impl MessageCache for NoopMessageCache {
-    async fn get_recent_messages(
-        &self,
-        _character_id: Uuid,
-        _user_id: Uuid,
-        _max_chapter: i32,
-        _limit: usize,
-    ) -> anyhow::Result<Vec<ChatMessage>> {
-        Ok(Vec::new())
-    }
-
     async fn push_turn(
         &self,
         _character_id: Uuid,
@@ -137,26 +127,12 @@ impl ReadinessProbe for RedisReadinessProbe {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        parse_cache_mode, validate_redis_url, AlwaysReadyProbe, CacheMode, NoopMessageCache,
-    };
-    use crate::domain::{
-        entities::memory::ChatMessage,
-        ports::{MessageCache, ReadinessProbe},
-    };
-    use uuid::Uuid;
+    use super::{parse_cache_mode, validate_redis_url, AlwaysReadyProbe, CacheMode};
+    use crate::domain::ports::ReadinessProbe;
 
     #[tokio::test]
-    async fn desktop_cache_falls_back_to_the_authoritative_store() {
-        let cache = NoopMessageCache;
-        let id = Uuid::new_v4();
-        assert!(cache
-            .get_recent_messages(id, id, 1, 10)
-            .await
-            .unwrap()
-            .is_empty());
+    async fn postgres_cache_mode_is_ready_without_redis() {
         assert!(AlwaysReadyProbe.is_ready().await);
-        let _type_check: Option<ChatMessage> = None;
     }
 
     #[test]

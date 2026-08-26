@@ -43,16 +43,17 @@ export interface Character {
   id: string;
   novel_id: string;
   name: string;
-  aliases: string[];
-  role: CharacterRole;
+  aliases?: string[];
+  role?: CharacterRole;
   description?: string;
   personality?: string;
   background?: string;
   speaking_style?: string;
   appearance?: string;
   avatar_url?: string;
-  avatar_status: AvatarStatus;
+  avatar_status?: AvatarStatus;
   first_appearance_chapter?: number;
+  persona_source_chapter_high_water?: number;
 }
 
 // ─── 对话 ─────────────────────────────────────────────────────────────────────

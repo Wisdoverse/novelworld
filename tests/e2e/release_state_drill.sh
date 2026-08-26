@@ -78,10 +78,12 @@ expect_fail() {
 narrative_quiesce_line=$(grep -nF 'compose stop --timeout 120 narrative-service' "$release" | cut -d: -f1)
 candidate_client_line=$(grep -nF '    frontend nginx' "$release" | tail -n 1 | cut -d: -f1)
 gate_fail_stop_line=$(grep -nF 'is fail-stopped with 5xx' "$release" | cut -d: -f1)
+novel_quiesce_line=$(grep -nF 'compose stop --timeout 120 novel-service' "$release" | cut -d: -f1)
 agent_quiesce_line=$(grep -nF 'compose stop --timeout 120 agent-service' "$release" | cut -d: -f1)
 schema_transition_line=$(grep -nF 'mv -f "$transition_tmp" "$schema_transition_manifest"' "$release" | cut -d: -f1)
 marker_sync_line=$(grep -nE '^  sync$' "$release" | head -n 1 | cut -d: -f1)
 migrate_line=$(grep -nF 'compose run --rm --no-deps postgres-migrate' "$release" | cut -d: -f1)
+candidate_novel_start_line=$(grep -nF 'compose up -d --wait --wait-timeout 120 --no-build --no-deps novel-service' "$release" | cut -d: -f1)
 upgrade_guard_line=$(grep -nF 'require_schema_safe_rollback "$current_manifest" "$candidate_tmp"' "$release" | cut -d: -f1)
 upgrade_fetch_line=$(grep -nF 'fetch_release_history "$current_manifest" "$candidate_tmp"' "$release" | cut -d: -f1)
 upgrade_install_line=$(grep -nF 'mv -f "$candidate_tmp" "$candidate_manifest"' "$release" | tail -n 1 | cut -d: -f1)
@@ -93,6 +95,7 @@ upgrade_restore_promote_line=$(grep -nF 'promote_schema_transition' "$release" |
 initial_restore_promote_line=$(grep -nF 'promote_schema_transition' "$release" | tail -n 2 | head -n 1 | cut -d: -f1)
 restore_candidate_validation_line=$(grep -nF 'validate_transition_candidate' "$release" | tail -n 1 | cut -d: -f1)
 restore_marker_fetch_line=$(grep -nF 'fetch_release_history "$current_manifest" "$schema_transition_manifest"' "$release" | cut -d: -f1)
+restore_schema_guard_line=$(grep -nF 'require_schema_safe_rollback "$current_manifest" "$schema_transition_manifest"' "$release" | cut -d: -f1)
 restore_initial_fetch_line=$(grep -nF 'fetch_release_history "$schema_transition_manifest"' "$release" | cut -d: -f1)
 marked_restore_finalize_line=$(grep -nF 'finalize_schema_transition # marked restore' "$release" | cut -d: -f1)
 current_restore_candidate_clear_line=$(grep -nF 'rm -f "$candidate_manifest" # discard unmarked stale candidate before restore' "$release" | cut -d: -f1)
@@ -121,7 +124,7 @@ rollback_marker_remove_line=$(grep -nF 'rm -f "$rollback_marker"' "$release" | c
 rollback_marker_remove_sync_line=$(grep -nF 'sync # rollback marker removal durable before staged cleanup' "$release" | cut -d: -f1)
 rollback_staged_remove_line=$(grep -nF 'rm -f "$rollback_current" "$rollback_previous"' "$release" | cut -d: -f1)
 rollback_staged_remove_sync_line=$(grep -nF 'sync # rollback staged cleanup durable' "$release" | cut -d: -f1)
-adopt_guard_line=$(grep -nF 'manifest_contains_path "$candidate_tmp" "$world_memory_projection_migration"' "$release" | cut -d: -f1)
+adopt_guard_line=$(grep -nF 'require_schema_barriers_present "$candidate_tmp" "adopt target"' "$release" | cut -d: -f1)
 adopt_fetch_line=$(grep -nF 'fetch_release_history "$candidate_tmp"' "$release" | cut -d: -f1)
 adopt_deploy_line=$(grep -nF 'deploy_manifest "$candidate_manifest" true' "$release" | head -n 1 | cut -d: -f1)
 gate_recovery_call_line=$(grep -nF '[[ "$confirmation" == "$release_sha" ]] || recover_client_after_gate_failure' "$release" | cut -d: -f1)
@@ -139,12 +142,14 @@ fail_stop_die_line=$(grep -nF 'die "$reason; client was stopped (fail-stopped)"'
   && [ -n "$gate_fail_stop_line" ] \
   && [ "$narrative_quiesce_line" -lt "$candidate_client_line" ] \
   && [ "$candidate_client_line" -lt "$gate_fail_stop_line" ] \
-  && [ "$gate_fail_stop_line" -lt "$agent_quiesce_line" ] \
+  && [ "$gate_fail_stop_line" -lt "$novel_quiesce_line" ] \
+  && [ "$novel_quiesce_line" -lt "$agent_quiesce_line" ] \
   && [ -n "$schema_transition_line" ] \
   && [ "$agent_quiesce_line" -lt "$schema_transition_line" ] \
   && [ "$schema_transition_line" -lt "$marker_sync_line" ] \
   && [ "$marker_sync_line" -lt "$migrate_line" ] \
   && [ "$agent_quiesce_line" -lt "$migrate_line" ] \
+  && [ "$migrate_line" -lt "$candidate_novel_start_line" ] \
   || { printf 'drill: FAIL candidate client is not fail-stopped from the old producer before migrations\n' >&2; exit 1; }
 [ -n "$upgrade_guard_line" ] && [ "$upgrade_guard_line" -lt "$upgrade_install_line" ] \
   || { printf 'drill: FAIL schema downgrade guard does not precede candidate installation\n' >&2; exit 1; }
@@ -165,7 +170,8 @@ fail_stop_die_line=$(grep -nF 'die "$reason; client was stopped (fail-stopped)"'
   && [ -n "$upgrade_restore_deploy_line" ] \
   && [ "$upgrade_restore_deploy_line" -lt "$upgrade_restore_promote_line" ] \
   && [ "$restore_candidate_validation_line" -lt "$upgrade_restore_deploy_line" ] \
-  && [ "$restore_marker_fetch_line" -lt "$upgrade_restore_deploy_line" ] \
+  && [ "$restore_marker_fetch_line" -lt "$restore_schema_guard_line" ] \
+  && [ "$restore_schema_guard_line" -lt "$upgrade_restore_deploy_line" ] \
   && [ "$restore_initial_fetch_line" -lt "$initial_restore_deploy_line" ] \
   && [ "$initial_restore_promote_line" -lt "$marked_restore_finalize_line" ] \
   && [ "$upgrade_restore_promote_line" -lt "$marked_restore_finalize_line" ] \
@@ -276,7 +282,11 @@ git clone "$fetch_origin" "$fetch_client" >/dev/null
 mkdir -p "$fetch_seed/infra/postgres/migrations"
 printf '%s\n' '-- remote-only migration contract' \
   >"$fetch_seed/infra/postgres/migrations/0021_world_turn_memory_projection.sql"
-git -C "$fetch_seed" add infra/postgres/migrations/0021_world_turn_memory_projection.sql
+printf '%s\n' '-- remote-only persona provenance contract' \
+  >"$fetch_seed/infra/postgres/migrations/0024_persona_provenance.sql"
+git -C "$fetch_seed" add \
+  infra/postgres/migrations/0021_world_turn_memory_projection.sql \
+  infra/postgres/migrations/0024_persona_provenance.sql
 git -C "$fetch_seed" commit -m candidate >/dev/null
 remote_candidate=$(git -C "$fetch_seed" rev-parse HEAD)
 git -C "$fetch_seed" push origin main >/dev/null
@@ -374,7 +384,11 @@ roll_base_sha=$(git -C "$roll_repo" rev-parse HEAD)
 mkdir -p "$roll_repo/infra/postgres/migrations"
 printf '%s\n' '-- initial roll-forward migration contract' \
   >"$roll_repo/infra/postgres/migrations/0021_world_turn_memory_projection.sql"
-git -C "$roll_repo" add infra/postgres/migrations/0021_world_turn_memory_projection.sql
+printf '%s\n' '-- initial persona provenance contract' \
+  >"$roll_repo/infra/postgres/migrations/0024_persona_provenance.sql"
+git -C "$roll_repo" add \
+  infra/postgres/migrations/0021_world_turn_memory_projection.sql \
+  infra/postgres/migrations/0024_persona_provenance.sql
 git -C "$roll_repo" commit -m 'initial roll-forward fixture' >/dev/null
 roll_sha=$(git -C "$roll_repo" rev-parse HEAD)
 printf '%s\n' 'post-0020 release fixture' >"$roll_repo/release-fixture.txt"
@@ -621,43 +635,57 @@ RELEASE_STATE_DIR=$state expect_fail 'upgrade rejects infrastructure changes' \
   'POSTGRES_IMAGE changed; use the separately approved infrastructure procedure' \
   "$release" upgrade "$candidate"
 
-# Once migration 0021 is committed, exercise every real-history downgrade path
-# using its direct ancestor. Before that commit exists (for example, in a local
-# uncommitted worktree), the static ordering assertions above still run.
-world_memory_projection_migration=infra/postgres/migrations/0021_world_turn_memory_projection.sql
-if git cat-file -e "HEAD:$world_memory_projection_migration" 2>/dev/null; then
-  introduced=$(git log --diff-filter=A --format=%H -- "$world_memory_projection_migration" | tail -n 1)
-  before_introduction=$(git rev-parse "$introduced^")
-  after_introduction=$(git rev-parse HEAD)
-  schema_error='rollback target predates the world-memory projection contract'
-  schema_current=$(mktemp "$work/schema-current.XXXXXX")
-  schema_candidate=$(mktemp "$work/schema-candidate.XXXXXX")
+# Exercise every committed application-semantic barrier against its direct
+# ancestor. In an uncommitted worktree, static ordering still runs and CI will
+# execute the real-history case after the migration enters the commit.
+while IFS='|' read -r barrier migration_number contract; do
+  if git cat-file -e "HEAD:$barrier" 2>/dev/null; then
+    introduced=$(git log --diff-filter=A --format=%H -- "$barrier" | tail -n 1)
+    before_introduction=$(git rev-parse "$introduced^")
+    after_introduction=$(git rev-parse HEAD)
+    schema_error="rollback target predates the $contract contract"
+    schema_current=$(mktemp "$work/schema-current.XXXXXX")
+    schema_candidate=$(mktemp "$work/schema-candidate.XXXXXX")
 
-  state_schema=$(new_state)
-  write_manifest "$schema_current" "$after_introduction"
-  write_manifest "$schema_candidate" "$before_introduction"
-  cp "$schema_current" "$state_schema/current.env"
-  RELEASE_STATE_DIR=$state_schema expect_fail 'upgrade cannot disguise a schema downgrade' \
-    "$schema_error" "$release" upgrade "$schema_candidate"
+    state_schema=$(new_state)
+    write_manifest "$schema_current" "$after_introduction"
+    write_manifest "$schema_candidate" "$before_introduction"
+    cp "$schema_current" "$state_schema/current.env"
+    RELEASE_STATE_DIR=$state_schema expect_fail "upgrade cannot cross migration $migration_number backwards" \
+      "$schema_error" "$release" upgrade "$schema_candidate"
 
-  state_schema_adopt=$(new_state)
-  RELEASE_STATE_DIR=$state_schema_adopt expect_fail 'adopt cannot activate a pre-0020 release' \
-    'adopt target predates the world-memory projection contract' \
-    "$release" adopt "$schema_candidate"
+    state_schema_adopt=$(new_state)
+    RELEASE_STATE_DIR=$state_schema_adopt expect_fail "adopt cannot predate migration $migration_number" \
+      "adopt target predates the $contract contract" \
+      "$release" adopt "$schema_candidate"
 
-  state_schema_rollback=$(new_state)
-  cp "$schema_current" "$state_schema_rollback/current.env"
-  cp "$schema_candidate" "$state_schema_rollback/previous.env"
-  RELEASE_STATE_DIR=$state_schema_rollback expect_fail 'rollback cannot cross migration 0021' \
-    "$schema_error" "$release" rollback "$before_introduction"
+    state_schema_rollback=$(new_state)
+    cp "$schema_current" "$state_schema_rollback/current.env"
+    cp "$schema_candidate" "$state_schema_rollback/previous.env"
+    RELEASE_STATE_DIR=$state_schema_rollback expect_fail "rollback cannot cross migration $migration_number" \
+      "$schema_error" "$release" rollback "$before_introduction"
 
+    state_schema_restore_backwards=$(new_state)
+    cp "$schema_current" "$state_schema_restore_backwards/current.env"
+    cp "$schema_candidate" "$state_schema_restore_backwards/schema-transition.pending"
+    RELEASE_STATE_DIR=$state_schema_restore_backwards expect_fail "marked restore cannot cross migration $migration_number backwards" \
+      "$schema_error" "$release" restore
+  else
+    printf 'drill: skip real-history barrier %s until it is committed\n' "$migration_number"
+  fi
+done <<'EOF'
+infra/postgres/migrations/0021_world_turn_memory_projection.sql|0021|world-memory projection
+infra/postgres/migrations/0024_persona_provenance.sql|0024|persona-provenance
+EOF
+
+if git cat-file -e "HEAD:infra/postgres/migrations/0021_world_turn_memory_projection.sql" 2>/dev/null; then
   state_schema_restore=$(new_state)
+  write_manifest "$schema_candidate" "$(git rev-parse "$(git log --diff-filter=A --format=%H -- infra/postgres/migrations/0021_world_turn_memory_projection.sql | tail -n 1)^")"
+  write_manifest "$schema_current" "$(git rev-parse HEAD)"
   cp "$schema_candidate" "$state_schema_restore/current.env"
   cp "$schema_current" "$state_schema_restore/schema-transition.pending"
-  RELEASE_STATE_DIR=$state_schema_restore expect_fail 'restore rolls marked migration forward rather than reviving pre-0020 current' \
+  RELEASE_STATE_DIR=$state_schema_restore expect_fail 'restore rolls a marked migration forward instead of reviving an older current' \
     'production secrets file not found' "$release" restore
-else
-  printf 'drill: skip real-history schema barriers until migration 0021 is committed\n'
 fi
 
 # --- rollback pre-flights ---

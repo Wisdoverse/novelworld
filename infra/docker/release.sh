@@ -17,7 +17,10 @@ image_keys=(
   GATEWAY_IMAGE USER_SERVICE_IMAGE NOVEL_SERVICE_IMAGE AGENT_SERVICE_IMAGE
   NARRATIVE_SERVICE_IMAGE FRONTEND_IMAGE POSTGRES_IMAGE REDIS_IMAGE NGINX_IMAGE
 )
-world_memory_projection_migration=infra/postgres/migrations/0021_world_turn_memory_projection.sql
+schema_barrier_migrations=(
+  infra/postgres/migrations/0021_world_turn_memory_projection.sql
+  infra/postgres/migrations/0024_persona_provenance.sql
+)
 minimal_bootstrap_adr=docs/adr/0002-minimal-bootstrap-and-deferred-runtime-configuration.md
 
 die() {
@@ -208,11 +211,30 @@ fetch_release_history() {
 }
 
 require_schema_safe_rollback() {
-  local from="$1" to="$2"
-  if manifest_contains_path "$from" "$world_memory_projection_migration" \
-    && ! manifest_contains_path "$to" "$world_memory_projection_migration"; then
-    die "rollback target predates the world-memory projection contract; use the separately approved database compatibility procedure"
-  fi
+  local from="$1" to="$2" migration contract
+  for migration in "${schema_barrier_migrations[@]}"; do
+    if manifest_contains_path "$from" "$migration" \
+      && ! manifest_contains_path "$to" "$migration"; then
+      case "$migration" in
+        *0021_world_turn_memory_projection.sql) contract='world-memory projection' ;;
+        *0024_persona_provenance.sql) contract='persona-provenance' ;;
+      esac
+      die "rollback target predates the $contract contract; use the separately approved database compatibility procedure"
+    fi
+  done
+}
+
+require_schema_barriers_present() {
+  local manifest="$1" context="$2" migration contract
+  for migration in "${schema_barrier_migrations[@]}"; do
+    if ! manifest_contains_path "$manifest" "$migration"; then
+      case "$migration" in
+        *0021_world_turn_memory_projection.sql) contract='world-memory projection' ;;
+        *0024_persona_provenance.sql) contract='persona-provenance' ;;
+      esac
+      die "$context predates the $contract contract"
+    fi
+  done
 }
 
 valid_llm_environment_override() {
@@ -359,11 +381,11 @@ deploy_manifest() {
     [[ "$confirmation" == "$release_sha" ]] || recover_client_after_gate_failure
   fi
 
-  # The world-turn producer is already stopped. Drain its memory consumer
-  # before migration 0021 installs the unresolved-turn journal and the new
-  # Agent image activates the lossless legacy-prompt quarantine. Once both
-  # stops return, every old write is either committed and covered by that
-  # release boundary or absent; requests receive a temporary 5xx.
+  # The world-turn producer is already stopped. Stop the old public persona
+  # reader and drain Agent before the 0021/0024 semantic migrations. Once all
+  # stops return, no pre-contract Novel or Agent process can serve or consume
+  # unprovenanced persona data while the schema crosses either barrier.
+  compose stop --timeout 120 novel-service
   compose stop --timeout 120 agent-service
   transition_tmp=$(mktemp "$state_dir/.schema-transition.XXXXXX")
   install -m 600 "$manifest" "$transition_tmp"
@@ -448,8 +470,7 @@ case "$command" in
     install -m 600 "$2" "$candidate_tmp"
     validate_manifest "$candidate_tmp"
     fetch_release_history "$candidate_tmp"
-    manifest_contains_path "$candidate_tmp" "$world_memory_projection_migration" \
-      || die "adopt target predates the world-memory projection contract"
+    require_schema_barriers_present "$candidate_tmp" "adopt target"
     mv -f "$candidate_tmp" "$candidate_manifest"
     release_sha=$(manifest_value "$candidate_manifest" RELEASE_GIT_SHA)
     printf 'Confirm the legacy source, exact images, and database backup can restore service, then enter ADOPT-%s: ' \
@@ -503,6 +524,7 @@ case "$command" in
         validate_manifest "$current_manifest"
         fetch_release_history "$current_manifest" "$schema_transition_manifest"
         require_same_infrastructure "$current_manifest" "$schema_transition_manifest"
+        require_schema_safe_rollback "$current_manifest" "$schema_transition_manifest"
         deploy_manifest "$schema_transition_manifest" false
         if manifests_equal "$current_manifest" "$schema_transition_manifest"; then
           # Promotion already reached current before the crash. Preserve its
@@ -515,9 +537,8 @@ case "$command" in
         [[ ! -e "$previous_manifest" ]] \
           || die "initial schema transition cannot coexist with a previous release"
         fetch_release_history "$schema_transition_manifest"
-        manifest_contains_path "$schema_transition_manifest" \
-          "$world_memory_projection_migration" \
-          || die "initial schema transition predates the world-memory projection contract"
+        require_schema_barriers_present "$schema_transition_manifest" \
+          "initial schema transition"
         deploy_manifest "$schema_transition_manifest" false
         promote_schema_transition
       fi

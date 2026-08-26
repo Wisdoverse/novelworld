@@ -71,95 +71,6 @@ async fn test_redis_json_roundtrip() {
 }
 
 #[tokio::test]
-async fn production_cache_filters_unknown_and_future_chapters() {
-    let config = deadpool_redis::Config::from_url(redis_url());
-    let pool = config
-        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-        .unwrap();
-    let cache = RedisCache::new(pool);
-    let user_id = Uuid::new_v4();
-    let character_id = Uuid::new_v4();
-    let novel_id = Uuid::new_v4();
-
-    for (user_message, character_message) in [
-        (
-            ChatMessage::new(
-                user_id,
-                character_id,
-                novel_id,
-                "user".into(),
-                "visible question".into(),
-                None,
-                Some(1),
-            ),
-            ChatMessage::new(
-                user_id,
-                character_id,
-                novel_id,
-                "character".into(),
-                "visible".into(),
-                None,
-                Some(1),
-            ),
-        ),
-        (
-            ChatMessage::new(
-                user_id,
-                character_id,
-                novel_id,
-                "user".into(),
-                "future question".into(),
-                None,
-                Some(3),
-            ),
-            ChatMessage::new(
-                user_id,
-                character_id,
-                novel_id,
-                "character".into(),
-                "future".into(),
-                None,
-                Some(3),
-            ),
-        ),
-        (
-            ChatMessage::new(
-                user_id,
-                character_id,
-                novel_id,
-                "user".into(),
-                "unknown question".into(),
-                None,
-                None,
-            ),
-            ChatMessage::new(
-                user_id,
-                character_id,
-                novel_id,
-                "character".into(),
-                "unknown".into(),
-                None,
-                None,
-            ),
-        ),
-    ] {
-        cache
-            .push_turn(character_id, user_id, &user_message, &character_message)
-            .await
-            .unwrap();
-    }
-
-    let visible = cache
-        .get_recent_messages(character_id, user_id, 1, 10)
-        .await
-        .unwrap();
-    assert_eq!(visible.len(), 2);
-    assert_eq!(visible[0].content, "visible question");
-    assert_eq!(visible[1].content, "visible");
-    cache.clear(character_id, user_id).await.unwrap();
-}
-
-#[tokio::test]
 async fn privacy_cleanup_is_scoped_to_the_requested_user_and_novel() {
     let config = deadpool_redis::Config::from_url(redis_url());
     let pool = config
@@ -173,6 +84,13 @@ async fn privacy_cleanup_is_scoped_to_the_requested_user_and_novel() {
     let character_id = Uuid::new_v4();
     let other_character_id = Uuid::new_v4();
     let other_user_character_id = Uuid::new_v4();
+    let deleted_key = format!("chat:{character_id}:{user_id}");
+    let same_user_key = format!("chat:{other_character_id}:{user_id}");
+    let other_user_key = format!("chat:{other_user_character_id}:{other_user_id}");
+    let novel_tombstone = format!("privacy:deleted:user:{user_id}:novel:{novel_id}");
+    let user_tombstone = format!("privacy:deleted:user:{user_id}");
+    let client = redis::Client::open(redis_url()).unwrap();
+    let mut connection = client.get_multiplexed_async_connection().await.unwrap();
 
     for (owner, character, novel, content) in [
         (user_id, character_id, novel_id, "delete this novel"),
@@ -212,13 +130,16 @@ async fn privacy_cleanup_is_scoped_to_the_requested_user_and_novel() {
             .await
             .unwrap());
     }
+    for key in [&deleted_key, &same_user_key, &other_user_key] {
+        assert_eq!(connection.llen::<_, usize>(key).await.unwrap(), 2);
+    }
 
     cache.clear_novel(user_id, novel_id).await.unwrap();
-    assert!(cache
-        .get_recent_messages(character_id, user_id, 1, 10)
+    assert_eq!(connection.llen::<_, usize>(&deleted_key).await.unwrap(), 0);
+    assert!(connection
+        .exists::<_, bool>(&novel_tombstone)
         .await
-        .unwrap()
-        .is_empty());
+        .unwrap());
     let late_user_message = ChatMessage::new(
         user_id,
         character_id,
@@ -246,28 +167,20 @@ async fn privacy_cleanup_is_scoped_to_the_requested_user_and_novel() {
         )
         .await
         .unwrap());
-    assert!(cache
-        .get_recent_messages(character_id, user_id, 1, 10)
-        .await
-        .unwrap()
-        .is_empty());
+    assert_eq!(connection.llen::<_, usize>(&deleted_key).await.unwrap(), 0);
     assert_eq!(
-        cache
-            .get_recent_messages(other_character_id, user_id, 1, 10)
-            .await
-            .unwrap()
-            .len(),
+        connection.llen::<_, usize>(&same_user_key).await.unwrap(),
         2
     );
     assert_eq!(
-        cache
-            .get_recent_messages(other_user_character_id, other_user_id, 1, 10)
-            .await
-            .unwrap()
-            .len(),
+        connection.llen::<_, usize>(&other_user_key).await.unwrap(),
         2
     );
     cache.allow_novel(user_id, novel_id).await.unwrap();
+    assert!(!connection
+        .exists::<_, bool>(&novel_tombstone)
+        .await
+        .unwrap());
     assert!(cache
         .push_turn(
             character_id,
@@ -277,21 +190,15 @@ async fn privacy_cleanup_is_scoped_to_the_requested_user_and_novel() {
         )
         .await
         .unwrap());
-    assert_eq!(
-        cache
-            .get_recent_messages(character_id, user_id, 1, 10)
-            .await
-            .unwrap()
-            .len(),
-        2
-    );
+    assert_eq!(connection.llen::<_, usize>(&deleted_key).await.unwrap(), 2);
 
     cache.clear_user(user_id).await.unwrap();
-    assert!(cache
-        .get_recent_messages(other_character_id, user_id, 1, 10)
-        .await
-        .unwrap()
-        .is_empty());
+    assert_eq!(connection.llen::<_, usize>(&deleted_key).await.unwrap(), 0);
+    assert_eq!(
+        connection.llen::<_, usize>(&same_user_key).await.unwrap(),
+        0
+    );
+    assert!(connection.exists::<_, bool>(&user_tombstone).await.unwrap());
     let late_user_message = ChatMessage::new(
         user_id,
         other_character_id,
@@ -319,20 +226,16 @@ async fn privacy_cleanup_is_scoped_to_the_requested_user_and_novel() {
         )
         .await
         .unwrap());
-    assert!(cache
-        .get_recent_messages(other_character_id, user_id, 1, 10)
-        .await
-        .unwrap()
-        .is_empty());
     assert_eq!(
-        cache
-            .get_recent_messages(other_user_character_id, other_user_id, 1, 10)
-            .await
-            .unwrap()
-            .len(),
+        connection.llen::<_, usize>(&same_user_key).await.unwrap(),
+        0
+    );
+    assert_eq!(
+        connection.llen::<_, usize>(&other_user_key).await.unwrap(),
         2
     );
     cache.allow_user(user_id).await.unwrap();
+    assert!(!connection.exists::<_, bool>(&user_tombstone).await.unwrap());
     assert!(cache
         .push_turn(
             other_character_id,
@@ -343,11 +246,7 @@ async fn privacy_cleanup_is_scoped_to_the_requested_user_and_novel() {
         .await
         .unwrap());
     assert_eq!(
-        cache
-            .get_recent_messages(other_character_id, user_id, 1, 10)
-            .await
-            .unwrap()
-            .len(),
+        connection.llen::<_, usize>(&same_user_key).await.unwrap(),
         2
     );
 

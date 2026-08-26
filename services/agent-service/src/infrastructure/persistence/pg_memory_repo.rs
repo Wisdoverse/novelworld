@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{ensure, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::prelude::FromRow;
@@ -18,6 +18,7 @@ struct MemoryRow {
     content: String,
     importance: i16,
     chapter_number: Option<i32>,
+    persona_source_chapter_high_water: Option<i32>,
     // embedding is stored as bytea or vector; omitted for basic queries
     created_at: DateTime<Utc>,
 }
@@ -40,6 +41,7 @@ impl From<MemoryRow> for Memory {
             content: r.content,
             importance: i32::from(r.importance),
             chapter_number: r.chapter_number,
+            persona_source_chapter_high_water: r.persona_source_chapter_high_water,
             embedding: None,
             created_at: r.created_at,
         }
@@ -53,6 +55,22 @@ fn layer_to_str(layer: &MemoryLayer) -> &'static str {
         MemoryLayer::Long => "long",
         MemoryLayer::Permanent => "permanent",
     }
+}
+
+fn validate_persona_provenance(memory: &Memory, chapter_number: i32) -> Result<()> {
+    match &memory.layer {
+        MemoryLayer::Mid | MemoryLayer::Long => ensure!(
+            memory
+                .persona_source_chapter_high_water
+                .is_some_and(|chapter| (1..=chapter_number).contains(&chapter)),
+            "derived memory is missing safe persona provenance"
+        ),
+        MemoryLayer::Short | MemoryLayer::Permanent => ensure!(
+            memory.persona_source_chapter_high_water.is_none(),
+            "non-derived memory cannot carry persona provenance"
+        ),
+    }
+    Ok(())
 }
 
 pub struct PgMemoryRepository {
@@ -71,12 +89,14 @@ impl MemoryRepository for PgMemoryRepository {
         let chapter_number = memory
             .chapter_number
             .ok_or_else(|| anyhow::anyhow!("memory chapter_number is required"))?;
+        validate_persona_provenance(memory, chapter_number)?;
         let result = sqlx::query(
             r#"
             INSERT INTO character_memories (
                 id, character_id, user_id, novel_id,
-                layer, content, importance, chapter_number, embedding, created_at
-            ) VALUES ($1, $2, $3, $4, $5::memory_layer, $6, $7, $8, NULL, $9)
+                layer, content, importance, chapter_number,
+                persona_source_chapter_high_water, embedding, created_at
+            ) VALUES ($1, $2, $3, $4, $5::memory_layer, $6, $7, $8, $9, NULL, $10)
             ON CONFLICT (id) DO NOTHING
             "#,
         )
@@ -88,6 +108,7 @@ impl MemoryRepository for PgMemoryRepository {
         .bind(&memory.content)
         .bind(i16::try_from(memory.importance)?)
         .bind(chapter_number)
+        .bind(memory.persona_source_chapter_high_water)
         .bind(memory.created_at)
         .execute(&self.pool)
         .await?;
@@ -98,7 +119,8 @@ impl MemoryRepository for PgMemoryRepository {
         let row = sqlx::query_as::<_, MemoryRow>(
             r#"
             SELECT id, character_id, user_id, novel_id,
-                   layer::text AS layer, content, importance, chapter_number, created_at
+                   layer::text AS layer, content, importance, chapter_number,
+                   persona_source_chapter_high_water, created_at
             FROM character_memories
             WHERE id = $1
             "#,
@@ -113,6 +135,7 @@ impl MemoryRepository for PgMemoryRepository {
         let chapter_number = memory
             .chapter_number
             .ok_or_else(|| anyhow::anyhow!("memory chapter_number is required"))?;
+        validate_persona_provenance(memory, chapter_number)?;
         // Format embedding as pgvector text literal when present
         let embedding_str: Option<String> = memory.embedding.as_ref().map(|emb| {
             format!(
@@ -128,11 +151,13 @@ impl MemoryRepository for PgMemoryRepository {
             r#"
             INSERT INTO character_memories (
                 id, character_id, user_id, novel_id,
-                layer, content, importance, chapter_number, embedding, created_at
-            ) VALUES ($1, $2, $3, $4, $5::memory_layer, $6, $7, $8, $9::vector, $10)
+                layer, content, importance, chapter_number,
+                persona_source_chapter_high_water, embedding, created_at
+            ) VALUES ($1, $2, $3, $4, $5::memory_layer, $6, $7, $8, $9, $10::vector, $11)
             ON CONFLICT (id) DO UPDATE SET
                 content = EXCLUDED.content,
                 importance = EXCLUDED.importance,
+                persona_source_chapter_high_water = EXCLUDED.persona_source_chapter_high_water,
                 embedding = EXCLUDED.embedding
             "#,
         )
@@ -144,6 +169,7 @@ impl MemoryRepository for PgMemoryRepository {
         .bind(&memory.content)
         .bind(i16::try_from(memory.importance)?)
         .bind(chapter_number)
+        .bind(memory.persona_source_chapter_high_water)
         .bind(embedding_str)
         .bind(memory.created_at)
         .execute(&self.pool)
@@ -165,11 +191,16 @@ impl MemoryRepository for PgMemoryRepository {
         let rows = sqlx::query_as::<_, MemoryRow>(
             r#"
             SELECT id, character_id, user_id, novel_id,
-                   layer::text AS layer, content, importance, chapter_number, created_at
+                   layer::text AS layer, content, importance, chapter_number,
+                   persona_source_chapter_high_water, created_at
             FROM character_memories
             WHERE character_id = $1 AND user_id = $2 AND novel_id = $3
               AND layer = $4::memory_layer
               AND chapter_number IS NOT NULL AND chapter_number <= $5
+              AND (
+                    layer NOT IN ('mid'::memory_layer, 'long'::memory_layer)
+                    OR persona_source_chapter_high_water BETWEEN 1 AND $5
+              )
             ORDER BY importance DESC, created_at DESC
             LIMIT $6 OFFSET $7
             "#,
@@ -200,7 +231,8 @@ impl MemoryRepository for PgMemoryRepository {
             r#"
             WITH journey_candidates AS (
                 SELECT id, character_id, user_id, novel_id,
-                       layer::text AS layer, content, importance, chapter_number, created_at,
+                       layer::text AS layer, content, importance, chapter_number,
+                       persona_source_chapter_high_water, created_at,
                        0 AS candidate_bucket
                 FROM character_memories
                 WHERE character_id = $1 AND user_id = $2 AND novel_id = $3
@@ -212,7 +244,8 @@ impl MemoryRepository for PgMemoryRepository {
             ),
             legacy_candidates AS (
                 SELECT id, character_id, user_id, novel_id,
-                       layer::text AS layer, content, importance, chapter_number, created_at,
+                       layer::text AS layer, content, importance, chapter_number,
+                       persona_source_chapter_high_water, created_at,
                        1 AS candidate_bucket
                 FROM character_memories
                 WHERE character_id = $1 AND user_id = $2 AND novel_id = $3
@@ -227,7 +260,8 @@ impl MemoryRepository for PgMemoryRepository {
                 LIMIT $6
             )
             SELECT id, character_id, user_id, novel_id,
-                   layer, content, importance, chapter_number, created_at
+                   layer, content, importance, chapter_number,
+                   persona_source_chapter_high_water, created_at
             FROM (
                 SELECT * FROM journey_candidates
                 UNION ALL
@@ -270,7 +304,8 @@ impl MemoryRepository for PgMemoryRepository {
         let rows = sqlx::query_as::<_, MemoryRow>(
             r#"
             SELECT id, character_id, user_id, novel_id,
-                   layer::text AS layer, content, importance, chapter_number, created_at
+                   layer::text AS layer, content, importance, chapter_number,
+                   persona_source_chapter_high_water, created_at
             FROM character_memories
             WHERE character_id = $1
               AND user_id = $2
@@ -279,6 +314,10 @@ impl MemoryRepository for PgMemoryRepository {
               AND chapter_number <= $5
               AND embedding IS NOT NULL
               AND layer IN ('long', 'permanent')
+              AND (
+                    layer = 'permanent'::memory_layer
+                    OR persona_source_chapter_high_water BETWEEN 1 AND $5
+              )
               AND NOT (
                   layer = 'permanent'::memory_layer
                   AND importance = 7

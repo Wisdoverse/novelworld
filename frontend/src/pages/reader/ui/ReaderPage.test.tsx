@@ -12,10 +12,15 @@ const mocks = vi.hoisted(() => ({
   routeChapter: '2',
   progressSaving: false,
   progressError: true,
+  progressLoadErrorCode: undefined as string | undefined,
+  refetchProgress: vi.fn(),
+  resetIdentity: vi.fn(),
+  resetIdentityPending: false,
   progressChapter: 1,
   identityType: 'self',
   readerIdentity: undefined as string | undefined,
   readerCharacterId: undefined as string | undefined,
+  totalChapters: 3,
   hasBranch: false,
   player: {
     id: 'player', name: '云舟', canonical_checkpoint_chapter: 1, location_id: 'tower',
@@ -33,6 +38,7 @@ const mocks = vi.hoisted(() => ({
   refetchOpenWorld: vi.fn(),
   characters: [] as Array<Record<string, unknown>>,
   charactersChapter: 0,
+  charactersEnabled: false,
   effectiveContent: 'Chapter two',
   effectiveGenerated: false,
   effectiveError: false,
@@ -66,7 +72,9 @@ vi.mock('react-router-dom', () => ({
 }));
 
 vi.mock('@/entities/novel', () => ({
-  useNovel: () => ({ data: { id: mocks.novelId, title: 'Novel', total_chapters: 3 } }),
+  useNovel: () => ({
+    data: { id: mocks.novelId, title: 'Novel', total_chapters: mocks.totalChapters },
+  }),
   useChapter: () => ({
     data: {
       chapter_number: 2,
@@ -77,9 +85,11 @@ vi.mock('@/entities/novel', () => ({
     },
     isLoading: false,
   }),
-  useCharacters: (_novelId: string, chapter: number) => {
+  useCharacters: (_novelId: string, chapter: number, enabled = true) => {
     mocks.charactersChapter = chapter;
+    mocks.charactersEnabled = enabled;
     return {
+      // Disabled TanStack queries may still expose an existing cache entry.
       data: mocks.characters.filter(character => (
         typeof character.first_appearance_chapter !== 'number'
           || character.first_appearance_chapter <= chapter
@@ -90,16 +100,28 @@ vi.mock('@/entities/novel', () => ({
 
 vi.mock('@/entities/reading-progress', () => ({
   useReadingProgress: () => ({
-    data: {
-      current_chapter: mocks.progressChapter,
-      reader_identity: mocks.readerIdentity,
-      reader_identity_type: mocks.identityType,
-      reader_character_id: mocks.readerCharacterId,
-      deviation_mode: 'canon',
-    },
+    data: mocks.progressLoadErrorCode
+      ? undefined
+      : {
+          current_chapter: mocks.progressChapter,
+          reader_identity: mocks.readerIdentity,
+          reader_identity_type: mocks.identityType,
+          reader_character_id: mocks.readerCharacterId,
+          deviation_mode: 'canon',
+        },
     isLoading: false,
-    isError: false,
-    refetch: vi.fn(),
+    isError: Boolean(mocks.progressLoadErrorCode),
+    error: mocks.progressLoadErrorCode
+      ? {
+          isAxiosError: true,
+          response: { data: { error: { code: mocks.progressLoadErrorCode } } },
+        }
+      : null,
+    refetch: mocks.refetchProgress,
+  }),
+  useResetReaderIdentity: () => ({
+    mutate: mocks.resetIdentity,
+    isPending: mocks.resetIdentityPending,
   }),
   useUpdateReadingProgress: () => ({
     mutate: mocks.mutate,
@@ -230,8 +252,12 @@ vi.mock('@/entities/narrative', () => ({
 }));
 
 vi.mock('@/widgets/chat-panel', () => ({
-  ChatPanel: ({ character }: { character: { name: string } }) => (
-    <div data-testid="chat-panel">{character.name}</div>
+  ChatPanel: ({ character }: {
+    character: { name: string; role?: string; avatar_url?: string };
+  }) => (
+    <div data-testid="chat-panel">
+      {character.name}|{character.role ?? '角色'}|{character.avatar_url ?? 'no-avatar'}
+    </div>
   ),
 }));
 vi.mock('@/widgets/branch-choice', () => ({
@@ -285,10 +311,13 @@ describe('ReaderPage progress gate', () => {
     mocks.routeChapter = '2';
     mocks.progressSaving = false;
     mocks.progressError = true;
+    mocks.progressLoadErrorCode = undefined;
+    mocks.resetIdentityPending = false;
     mocks.progressChapter = 1;
     mocks.identityType = 'self';
     mocks.readerIdentity = undefined;
     mocks.readerCharacterId = undefined;
+    mocks.totalChapters = 3;
     mocks.hasBranch = false;
     mocks.player = {
       id: 'player', name: '云舟', canonical_checkpoint_chapter: 1, location_id: 'tower',
@@ -302,6 +331,7 @@ describe('ReaderPage progress gate', () => {
     mocks.openWorldError = false;
     mocks.characters = [];
     mocks.charactersChapter = 0;
+    mocks.charactersEnabled = false;
     mocks.effectiveContent = 'Chapter two';
     mocks.effectiveGenerated = false;
     mocks.effectiveError = false;
@@ -315,11 +345,35 @@ describe('ReaderPage progress gate', () => {
     mocks.worldPlayerCheckpoint = undefined;
     mocks.worldOpenWorldCheckpoint = undefined;
     mocks.submitChoice.mockReset();
+    mocks.refetchProgress.mockReset();
+    mocks.resetIdentity.mockReset();
     mocks.refetchWorldState.mockReset();
     mocks.refetchOpenWorld.mockReset();
     mocks.refetchWorldState.mockImplementation(async () => ({
       data: { state: { choices: mocks.worldChoices } },
     }));
+  });
+
+  it('offers the explicit self-identity recovery for an unavailable reader identity', () => {
+    mocks.progressError = false;
+    mocks.progressLoadErrorCode = 'reader_identity_unavailable';
+    render(<ReaderPage />);
+
+    fireEvent.click(screen.getByRole('button', { name: '以本人身份继续' }));
+
+    expect(mocks.resetIdentity).toHaveBeenCalledOnce();
+    expect(screen.queryByRole('button', { name: '重试' })).toBeNull();
+  });
+
+  it('keeps ordinary progress failures on the existing retry path', () => {
+    mocks.progressError = false;
+    mocks.progressLoadErrorCode = 'progress_unavailable';
+    render(<ReaderPage />);
+
+    fireEvent.click(screen.getByRole('button', { name: '重试' }));
+
+    expect(mocks.refetchProgress).toHaveBeenCalledOnce();
+    expect(mocks.resetIdentity).not.toHaveBeenCalled();
   });
 
   it('offers an explicit retry after persistence fails', async () => {
@@ -388,7 +442,7 @@ describe('ReaderPage progress gate', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '角色' }));
     fireEvent.click(screen.getByRole('button', { name: /Future/ }));
-    expect(screen.getByTestId('chat-panel').textContent).toBe('Future');
+    expect(screen.getByTestId('chat-panel').textContent).toContain('Future');
 
     mocks.characters = [];
     view.rerender(<ReaderPage />);
@@ -413,7 +467,7 @@ describe('ReaderPage progress gate', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '角色' }));
     fireEvent.click(screen.getByRole('button', { name: /Future Five/ }));
-    expect(screen.getByTestId('chat-panel').textContent).toBe('Future Five');
+    expect(screen.getByTestId('chat-panel').textContent).toContain('Future Five');
 
     mocks.routeChapter = '2';
     mocks.progressSaving = true;
@@ -423,6 +477,85 @@ describe('ReaderPage progress gate', () => {
     expect(screen.queryByTestId('chat-panel')).toBeNull();
     expect(screen.queryByText('Future Five')).toBeNull();
     expect(screen.getByRole('button', { name: '角色' }).hasAttribute('disabled')).toBe(true);
+  });
+
+  it('does not consume or request characters until a rewind is committed', async () => {
+    mocks.totalChapters = 5;
+    mocks.routeChapter = '5';
+    mocks.progressChapter = 5;
+    mocks.progressError = false;
+    mocks.characters = [{
+      id: 'old-full',
+      novel_id: 'novel',
+      name: 'Old Full',
+      aliases: ['Future Alias'],
+      role: 'protagonist',
+      avatar_status: 'ready',
+      first_appearance_chapter: 1,
+      persona_source_chapter_high_water: 5,
+    }];
+    const view = render(<ReaderPage />);
+
+    expect(mocks.charactersEnabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: '角色' }));
+    fireEvent.click(screen.getByRole('button', { name: /Old Full/ }));
+    expect(screen.getByTestId('chat-panel').textContent).toContain('Old Full');
+
+    mocks.routeChapter = '2';
+    view.rerender(<ReaderPage />);
+
+    expect(mocks.charactersChapter).toBe(2);
+    expect(mocks.charactersEnabled).toBe(false);
+    expect(screen.queryByTestId('chat-panel')).toBeNull();
+    expect(screen.getByRole('button', { name: '角色' }).hasAttribute('disabled')).toBe(true);
+
+    mocks.progressChapter = 2;
+    mocks.characters = [{
+      id: 'safe-partial',
+      novel_id: 'novel',
+      name: 'Safe Partial',
+      first_appearance_chapter: 1,
+    }];
+    view.rerender(<ReaderPage />);
+
+    await waitFor(() => expect(mocks.charactersEnabled).toBe(true));
+    fireEvent.click(screen.getByRole('button', { name: '角色' }));
+    expect(screen.getByRole('button', { name: /Safe Partial/ })).toBeTruthy();
+    expect(screen.queryByText(/Old Full|Future Alias/)).toBeNull();
+  });
+
+  it('uses the latest partial persona for a selected character with the same id', () => {
+    mocks.progressChapter = 2;
+    mocks.progressError = false;
+    mocks.characters = [{
+      id: 'same',
+      novel_id: 'novel',
+      name: 'Same',
+      aliases: ['Future Alias'],
+      role: 'protagonist',
+      avatar_url: 'future-avatar',
+      avatar_status: 'ready',
+      first_appearance_chapter: 1,
+      persona_source_chapter_high_water: 2,
+    }];
+    const view = render(<ReaderPage />);
+
+    fireEvent.click(screen.getByRole('button', { name: '角色' }));
+    fireEvent.click(screen.getByRole('button', { name: /Same/ }));
+    expect(screen.getByTestId('chat-panel').textContent).toContain('future-avatar');
+
+    mocks.characters = [{
+      id: 'same',
+      novel_id: 'novel',
+      name: 'Same',
+      first_appearance_chapter: 1,
+    }];
+    view.rerender(<ReaderPage />);
+
+    expect(screen.getByTestId('chat-panel').textContent).toBe('Same|角色|no-avatar');
+    fireEvent.click(screen.getByRole('button', { name: '角色' }));
+    expect(screen.getByRole('button', { name: /Same/ }).textContent).toContain('角色');
+    expect(screen.getByRole('button', { name: /Same/ }).textContent).not.toContain('配角');
   });
 
   it('closes and disables chat when the committed timeline kills a character', async () => {

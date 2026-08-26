@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{ensure, Result};
 use std::{collections::HashSet, sync::Arc};
 use uuid::{Uuid, Variant, Version};
 
@@ -26,6 +26,25 @@ const JOURNEY_MEMORY_NAMESPACE: Uuid = Uuid::from_u128(0x4d5f_215d_111c_5f25_861
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
+}
+
+fn chat_has_safe_persona_provenance(message: &ChatMessage, current_chapter: i32) -> bool {
+    message.chapter_context.is_some_and(|chapter| {
+        (1..=current_chapter).contains(&chapter)
+            && message
+                .persona_source_chapter_high_water
+                .is_some_and(|high_water| (1..=chapter).contains(&high_water))
+    })
+}
+
+fn derived_memory_is_visible(memory: &Memory, current_chapter: i32) -> bool {
+    matches!(memory.layer, MemoryLayer::Mid | MemoryLayer::Long)
+        && memory.chapter_number.is_some_and(|chapter| {
+            (1..=current_chapter).contains(&chapter)
+                && memory
+                    .persona_source_chapter_high_water
+                    .is_some_and(|high_water| (1..=chapter).contains(&high_water))
+        })
 }
 
 fn bounded_untrusted_memory_values<'a>(
@@ -478,6 +497,9 @@ impl MemoryManager {
                     0,
                 )
                 .await?
+                .into_iter()
+                .filter(|memory| derived_memory_is_visible(memory, current_chapter))
+                .collect()
         } else {
             vec![]
         };
@@ -516,6 +538,11 @@ impl MemoryManager {
                     let mut semantic_contents = HashSet::new();
                     let similar = similar
                         .into_iter()
+                        .filter(|memory| match memory.layer {
+                            MemoryLayer::Long => derived_memory_is_visible(memory, current_chapter),
+                            MemoryLayer::Permanent => true,
+                            MemoryLayer::Short | MemoryLayer::Mid => false,
+                        })
                         .filter(|memory| !direct_permanent_ids.contains(&memory.id))
                         .filter_map(|memory| {
                             semantic_memory_content(&memory, true).filter(|content| {
@@ -560,7 +587,10 @@ impl MemoryManager {
                 SHORT_TERM_LIMIT,
             )
             .await?;
-        for msg in recent {
+        for msg in recent
+            .into_iter()
+            .filter(|message| chat_has_safe_persona_provenance(message, current_chapter))
+        {
             let role = if msg.role == "user" {
                 "user"
             } else {
@@ -580,14 +610,39 @@ impl MemoryManager {
         &self,
         user_msg: ChatMessage,
         char_msg: ChatMessage,
-        character_id: Uuid,
-        user_id: Uuid,
-        novel_id: Uuid,
         reader_character_id: Option<Uuid>,
+        committed_persona_source_chapter_high_water: Option<i32>,
     ) -> Result<()> {
         if reader_character_id.is_some() {
             return Ok(());
         }
+        ensure!(
+            user_msg.character_id == char_msg.character_id
+                && user_msg.user_id == char_msg.user_id
+                && user_msg.novel_id == char_msg.novel_id,
+            "committed chat messages have inconsistent scope"
+        );
+        let character_id = user_msg.character_id;
+        let user_id = user_msg.user_id;
+        let novel_id = user_msg.novel_id;
+        let chapter_context = user_msg
+            .chapter_context
+            .ok_or_else(|| anyhow::anyhow!("missing chapter context"))?;
+        ensure!(
+            char_msg.chapter_context == Some(chapter_context),
+            "committed chat messages have inconsistent chapter context"
+        );
+        let committed_turn_id = user_msg
+            .turn_id
+            .ok_or_else(|| anyhow::anyhow!("missing committed turn id"))?;
+        ensure!(
+            char_msg.turn_id == Some(committed_turn_id),
+            "committed chat messages have inconsistent turn id"
+        );
+        let committed_persona_source_chapter_high_water =
+            committed_persona_source_chapter_high_water
+                .filter(|high_water| (1..=chapter_context).contains(high_water))
+                .ok_or_else(|| anyhow::anyhow!("missing safe persona provenance"))?;
         // PostgreSQL is the durable source of truth. This projection runs only
         // after the atomic turn transaction commits.
         let projected = self
@@ -601,12 +656,19 @@ impl MemoryManager {
         // 检查是否需要触发中期记忆摘要
         let total_count = self
             .chat_repo
-            .count(character_id, user_id, novel_id, None)
+            .count(character_id, user_id, novel_id, None, chapter_context)
             .await?;
 
-        if total_count % MID_TERM_TRIGGER == 0 {
-            self.consolidate_to_mid_term(character_id, user_id, novel_id, char_msg.chapter_context)
-                .await?;
+        if total_count != 0 && total_count % MID_TERM_TRIGGER == 0 {
+            self.consolidate_to_mid_term(
+                character_id,
+                user_id,
+                novel_id,
+                chapter_context,
+                committed_turn_id,
+                committed_persona_source_chapter_high_water,
+            )
+            .await?;
         }
 
         Ok(())
@@ -618,7 +680,9 @@ impl MemoryManager {
         character_id: Uuid,
         user_id: Uuid,
         novel_id: Uuid,
-        chapter_context: Option<i32>,
+        chapter_context: i32,
+        committed_turn_id: Uuid,
+        committed_persona_source_chapter_high_water: i32,
     ) -> Result<()> {
         let recent = self
             .chat_repo
@@ -627,10 +691,30 @@ impl MemoryManager {
                 user_id,
                 novel_id,
                 None,
-                chapter_context.ok_or_else(|| anyhow::anyhow!("missing chapter context"))?,
+                chapter_context,
                 MID_TERM_TRIGGER,
             )
             .await?;
+        ensure!(!recent.is_empty(), "no committed chat to summarize");
+        ensure!(
+            recent
+                .iter()
+                .all(|message| chat_has_safe_persona_provenance(message, chapter_context)),
+            "chat summary source is missing safe persona provenance"
+        );
+        ensure!(
+            recent.iter().any(|message| {
+                message.turn_id == Some(committed_turn_id)
+                    && message.persona_source_chapter_high_water
+                        == Some(committed_persona_source_chapter_high_water)
+            }),
+            "committed chat turn is absent from summary source"
+        );
+        let persona_source_chapter_high_water = recent
+            .iter()
+            .filter_map(|message| message.persona_source_chapter_high_water)
+            .max()
+            .ok_or_else(|| anyhow::anyhow!("chat summary source is unproven"))?;
 
         let conversation = build_summary_input(&recent);
 
@@ -651,7 +735,8 @@ impl MemoryManager {
             layer: MemoryLayer::Mid,
             content: summary,
             importance: 6,
-            chapter_number: chapter_context,
+            chapter_number: Some(chapter_context),
+            persona_source_chapter_high_water: Some(persona_source_chapter_high_water),
             embedding: None,
             created_at: chrono::Utc::now(),
         };
@@ -684,7 +769,8 @@ impl MemoryManager {
             layer: MemoryLayer::Long,
             content: memory.content.clone(),
             importance: memory.importance,
-            chapter_number: chapter_context,
+            chapter_number: Some(chapter_context),
+            persona_source_chapter_high_water: memory.persona_source_chapter_high_water,
             embedding: Some(embedding),
             created_at: chrono::Utc::now(),
         };
@@ -948,12 +1034,48 @@ mod tests {
             user_id: Uuid,
             novel_id: Uuid,
             reader_character_id: Option<Uuid>,
-            _max_chapter: i32,
-            _limit: usize,
+            max_chapter: i32,
+            limit: usize,
         ) -> Result<Vec<ChatMessage>> {
+            if reader_character_id.is_none() && limit == MID_TERM_TRIGGER {
+                let mut message = ChatMessage::new(
+                    user_id,
+                    character_id,
+                    novel_id,
+                    "character".into(),
+                    "PROVEN-CONSOLIDATION-SOURCE".into(),
+                    Some("Reader".into()),
+                    Some(max_chapter),
+                )
+                .with_turn_id(Uuid::from_u128(1));
+                if self.count != usize::MAX {
+                    message.persona_source_chapter_high_water =
+                        Some(if self.count == usize::MAX - 1 {
+                            1
+                        } else {
+                            max_chapter
+                        });
+                }
+                let mut messages = vec![message];
+                if self.count == usize::MAX - 1 {
+                    let mut older = ChatMessage::new(
+                        user_id,
+                        character_id,
+                        novel_id,
+                        "character".into(),
+                        "OLDER-HIGHER-PERSONA-SOURCE".into(),
+                        Some("Reader".into()),
+                        Some(max_chapter),
+                    )
+                    .with_turn_id(Uuid::from_u128(2));
+                    older.persona_source_chapter_high_water = Some(max_chapter);
+                    messages.push(older);
+                }
+                return Ok(messages);
+            }
             Ok(reader_character_id
                 .map(|reader_character_id| {
-                    vec![ChatMessage::new(
+                    let mut message = ChatMessage::new(
                         user_id,
                         character_id,
                         novel_id,
@@ -961,7 +1083,9 @@ mod tests {
                         format!("SAME-CHARACTER-CONTINUITY-{reader_character_id}"),
                         Some("Adopted Character".into()),
                         Some(1),
-                    )]
+                    );
+                    message.persona_source_chapter_high_water = Some(1);
+                    vec![message]
                 })
                 .unwrap_or_default())
         }
@@ -972,6 +1096,7 @@ mod tests {
             _user_id: Uuid,
             _novel_id: Uuid,
             _reader_character_id: Option<Uuid>,
+            _max_chapter: i32,
         ) -> Result<usize> {
             Ok(self.count)
         }
@@ -1053,16 +1178,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl MessageCache for NoopCache {
-        async fn get_recent_messages(
-            &self,
-            _character_id: Uuid,
-            _user_id: Uuid,
-            _max_chapter: i32,
-            _limit: usize,
-        ) -> Result<Vec<ChatMessage>> {
-            Ok(vec![])
-        }
-
         async fn push_turn(
             &self,
             _character_id: Uuid,
@@ -1105,6 +1220,8 @@ mod tests {
     }
 
     fn memory(layer: MemoryLayer, content: &str) -> Memory {
+        let persona_source_chapter_high_water =
+            matches!(layer, MemoryLayer::Mid | MemoryLayer::Long).then_some(1);
         Memory {
             id: Uuid::new_v4(),
             character_id: Uuid::new_v4(),
@@ -1114,6 +1231,7 @@ mod tests {
             content: content.into(),
             importance: 5,
             chapter_number: Some(1),
+            persona_source_chapter_high_water,
             embedding: None,
             created_at: chrono::Utc::now(),
         }
@@ -1159,6 +1277,7 @@ mod tests {
             content,
             importance: WORLD_TURN_MEMORY_IMPORTANCE,
             chapter_number: Some(1),
+            persona_source_chapter_high_water: None,
             embedding: None,
             created_at: chrono::Utc::now(),
         }
@@ -1994,6 +2113,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prompt_rechecks_derived_memory_provenance_after_the_adapter() {
+        let mut unmarked_mid = memory(MemoryLayer::Mid, "UNMARKED-MID-SECRET");
+        unmarked_mid.persona_source_chapter_high_water = None;
+        let mut ahead_long = memory(MemoryLayer::Long, "AHEAD-LONG-SECRET");
+        ahead_long.persona_source_chapter_high_water = Some(2);
+        let manager = MemoryManager {
+            memory_repo: Arc::new(PromptMemoryRepo {
+                permanent: vec![],
+                mid: unmarked_mid,
+                semantic: vec![ahead_long],
+            }),
+            chat_repo: Arc::new(CountingChatRepo { count: 0 }),
+            cache: Arc::new(NoopCache),
+            llm: Arc::new(FakeSummarizer("unused".into())),
+            embedding: Arc::new(FakeEmbedding {
+                dims: EMBEDDING_DIMS,
+                fail: false,
+            }),
+        };
+
+        let prompt = manager
+            .build_context_with_semantic(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                None,
+                1,
+                "system",
+                "query",
+            )
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(_, content)| content)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(!prompt.contains("UNMARKED-MID-SECRET"));
+        assert!(!prompt.contains("AHEAD-LONG-SECRET"));
+    }
+
+    #[tokio::test]
     async fn character_turns_never_project_into_unscoped_memory() {
         let repo = Arc::new(RecordingMemoryRepo {
             saved: Mutex::new(vec![]),
@@ -2037,14 +2198,64 @@ mod tests {
             .project_completed_turn(
                 user_message,
                 character_message,
-                character_id,
-                user_id,
-                novel_id,
                 Some(reader_character_id),
+                None,
             )
             .await
             .unwrap();
 
+        assert!(repo.saved.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn completed_turn_projection_rejects_inconsistent_messages() {
+        let repo = Arc::new(RecordingMemoryRepo {
+            saved: Mutex::new(vec![]),
+        });
+        let manager = manager(
+            repo.clone(),
+            Arc::new(FakeEmbedding {
+                dims: EMBEDDING_DIMS,
+                fail: false,
+            }),
+        );
+        let user_id = Uuid::new_v4();
+        let character_id = Uuid::new_v4();
+        let novel_id = Uuid::new_v4();
+        let turn_id = Uuid::new_v4();
+        let user_message = ChatMessage::new(
+            user_id,
+            character_id,
+            novel_id,
+            "user".into(),
+            "question".into(),
+            None,
+            Some(1),
+        )
+        .with_turn_id(turn_id);
+        let character_message = ChatMessage::new(
+            user_id,
+            character_id,
+            novel_id,
+            "character".into(),
+            "answer".into(),
+            None,
+            Some(1),
+        )
+        .with_turn_id(turn_id);
+        let mut wrong_scope = character_message.clone();
+        wrong_scope.novel_id = Uuid::new_v4();
+        let mut wrong_turn = character_message.clone();
+        wrong_turn.turn_id = Some(Uuid::new_v4());
+        let mut wrong_chapter = character_message;
+        wrong_chapter.chapter_context = Some(2);
+
+        for invalid in [wrong_scope, wrong_turn, wrong_chapter] {
+            assert!(manager
+                .project_completed_turn(user_message.clone(), invalid, None, Some(1))
+                .await
+                .is_err());
+        }
         assert!(repo.saved.lock().unwrap().is_empty());
     }
 
@@ -2062,7 +2273,7 @@ mod tests {
         );
         let (character_id, user_id, novel_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
         manager
-            .consolidate_to_mid_term(character_id, user_id, novel_id, Some(3))
+            .consolidate_to_mid_term(character_id, user_id, novel_id, 3, Uuid::from_u128(1), 3)
             .await
             .unwrap();
         let saved = repo.saved.lock().unwrap().clone();
@@ -2075,9 +2286,80 @@ mod tests {
         let long = saved.iter().find(|m| m.layer == MemoryLayer::Long).unwrap();
         assert_eq!(mid.content, long.content);
         assert_eq!(mid.chapter_number, long.chapter_number);
+        assert_eq!(mid.persona_source_chapter_high_water, Some(3));
+        assert_eq!(long.persona_source_chapter_high_water, Some(3));
         assert_eq!(mid.importance, long.importance);
         assert_eq!(mid.embedding, None);
         assert_eq!(long.embedding.as_deref().map(|e| e.len()), Some(1536));
+    }
+
+    #[tokio::test]
+    async fn consolidation_uses_the_maximum_marker_from_its_proven_source_rows() {
+        let repo = Arc::new(RecordingMemoryRepo {
+            saved: Mutex::new(vec![]),
+        });
+        let manager = MemoryManager {
+            memory_repo: repo.clone(),
+            chat_repo: Arc::new(CountingChatRepo {
+                count: usize::MAX - 1,
+            }),
+            cache: Arc::new(NoopCache),
+            llm: Arc::new(FakeSummarizer("summary".into())),
+            embedding: Arc::new(FakeEmbedding {
+                dims: EMBEDDING_DIMS,
+                fail: true,
+            }),
+        };
+
+        manager
+            .consolidate_to_mid_term(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                3,
+                Uuid::from_u128(1),
+                1,
+            )
+            .await
+            .unwrap();
+
+        let saved = repo.saved.lock().unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].persona_source_chapter_high_water, Some(3));
+    }
+
+    #[tokio::test]
+    async fn consolidation_rejects_any_unproven_source_before_summary_write() {
+        let repo = Arc::new(RecordingMemoryRepo {
+            saved: Mutex::new(vec![]),
+        });
+        let manager = MemoryManager {
+            memory_repo: repo.clone(),
+            chat_repo: Arc::new(CountingChatRepo { count: usize::MAX }),
+            cache: Arc::new(NoopCache),
+            llm: Arc::new(FakeSummarizer("must not be saved".into())),
+            embedding: Arc::new(FakeEmbedding {
+                dims: EMBEDDING_DIMS,
+                fail: false,
+            }),
+        };
+
+        let error = manager
+            .consolidate_to_mid_term(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                3,
+                Uuid::from_u128(1),
+                3,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("chat summary source is missing safe persona provenance"));
+        assert!(repo.saved.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -2094,7 +2376,7 @@ mod tests {
         );
         let (character_id, user_id, novel_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
         manager
-            .consolidate_to_mid_term(character_id, user_id, novel_id, Some(3))
+            .consolidate_to_mid_term(character_id, user_id, novel_id, 3, Uuid::from_u128(1), 3)
             .await
             .unwrap();
         let saved = repo.saved.lock().unwrap().clone();
@@ -2102,6 +2384,7 @@ mod tests {
         // preserves continuity when embedding generation fails.
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].layer, MemoryLayer::Mid);
+        assert_eq!(saved[0].persona_source_chapter_high_water, Some(3));
         assert_eq!(saved[0].embedding, None);
     }
 
@@ -2342,11 +2625,12 @@ mod tests {
         );
         let (character_id, user_id, novel_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
         manager
-            .consolidate_to_mid_term(character_id, user_id, novel_id, Some(3))
+            .consolidate_to_mid_term(character_id, user_id, novel_id, 3, Uuid::from_u128(1), 3)
             .await
             .unwrap();
         let saved = repo.saved.lock().unwrap().clone();
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].layer, MemoryLayer::Mid);
+        assert_eq!(saved[0].persona_source_chapter_high_water, Some(3));
     }
 }

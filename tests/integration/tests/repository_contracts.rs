@@ -2764,6 +2764,7 @@ async fn chat_history_is_scoped_by_the_committed_reader_identity() {
             novel_id,
             request_fingerprint: vec![index; 32],
             chapter_context,
+            persona_source_chapter_high_water: Some(chapter_context),
             reader_identity: Some(match reader_character_id {
                 Some(id) if id == reader_a => "Reader A".into(),
                 Some(_) => "Reader B".into(),
@@ -2818,6 +2819,80 @@ async fn chat_history_is_scoped_by_the_committed_reader_identity() {
     .execute(&pool)
     .await
     .unwrap();
+    let legacy_turn_id = Uuid::new_v4();
+    let legacy_fingerprint = vec![91_u8; 32];
+    sqlx::query(
+        "INSERT INTO chat_turns (\
+             id, user_id, character_id, novel_id, request_fingerprint, chapter_context, \
+             reader_identity, reader_identity_type, deviation_mode, status, completed_at) \
+         VALUES ($1, $2, $3, $4, $5, 1, 'Self Reader', 'self', 'canon', \
+                 'completed', NOW())",
+    )
+    .bind(legacy_turn_id)
+    .bind(user_id)
+    .bind(conversation_character_id)
+    .bind(novel_id)
+    .bind(&legacy_fingerprint)
+    .execute(&pool)
+    .await
+    .unwrap();
+    for (role, content) in [
+        ("user", "LEGACY-UNPROVEN-TURN-MARKER"),
+        ("character", "LEGACY-UNPROVEN-RESPONSE-MARKER"),
+    ] {
+        sqlx::query(
+            "INSERT INTO chat_messages (\
+                 turn_id, character_id, user_id, novel_id, role, content, \
+                 reader_identity, chapter_context) \
+             VALUES ($1, $2, $3, $4, $5, $6, 'Self Reader', 1)",
+        )
+        .bind(legacy_turn_id)
+        .bind(conversation_character_id)
+        .bind(user_id)
+        .bind(novel_id)
+        .bind(role)
+        .bind(content)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let mismatched_turn_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO chat_turns (\
+             id, user_id, character_id, novel_id, request_fingerprint, chapter_context, \
+             persona_source_chapter_high_water, reader_identity, reader_identity_type, \
+             deviation_mode, status, completed_at) \
+         VALUES ($1, $2, $3, $4, $5, 2, 1, 'Self Reader', 'self', 'canon', \
+                 'completed', NOW())",
+    )
+    .bind(mismatched_turn_id)
+    .bind(user_id)
+    .bind(conversation_character_id)
+    .bind(novel_id)
+    .bind(vec![92_u8; 32])
+    .execute(&pool)
+    .await
+    .unwrap();
+    for (role, content) in [
+        ("user", "MISMATCHED-FUTURE-TURN-MARKER"),
+        ("character", "MISMATCHED-FUTURE-RESPONSE-MARKER"),
+    ] {
+        sqlx::query(
+            "INSERT INTO chat_messages (\
+                 turn_id, character_id, user_id, novel_id, role, content, \
+                 reader_identity, chapter_context) \
+             VALUES ($1, $2, $3, $4, $5, $6, 'Self Reader', 1)",
+        )
+        .bind(mismatched_turn_id)
+        .bind(conversation_character_id)
+        .bind(user_id)
+        .bind(novel_id)
+        .bind(role)
+        .bind(content)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
     sqlx::query(
         "INSERT INTO chat_messages (character_id, user_id, novel_id, role, content, chapter_context) VALUES ($1, $2, $3, 'user', $4, NULL)",
     )
@@ -2839,11 +2914,23 @@ async fn chat_history_is_scoped_by_the_committed_reader_identity() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(self_prompt.contains("SELF-HISTORY-MARKER"));
-    assert!(self_prompt.contains("LEGACY-NULL-TURN-MARKER"));
+    assert!(!self_prompt.contains("LEGACY-NULL-TURN-MARKER"));
+    assert!(!self_prompt.contains("LEGACY-UNPROVEN-TURN-MARKER"));
+    assert!(!self_prompt.contains("LEGACY-UNPROVEN-RESPONSE-MARKER"));
     assert!(!self_prompt.contains("SELF-FUTURE-CHAPTER-MARKER"));
+    assert!(!self_prompt.contains("MISMATCHED-FUTURE-TURN-MARKER"));
+    assert!(!self_prompt.contains("MISMATCHED-FUTURE-RESPONSE-MARKER"));
     assert!(!self_prompt.contains("LEGACY-NULL-CHAPTER-MARKER"));
     assert!(!self_prompt.contains("CHARACTER-A-FIRST-MARKER"));
     assert!(!self_prompt.contains("CHARACTER-B-MARKER"));
+    let self_direct_history = chat_repo
+        .find_by_character_user(conversation_character_id, user_id, novel_id, None, 1, 20, 0)
+        .await
+        .unwrap();
+    assert!(self_direct_history
+        .iter()
+        .all(|message| !message.content.contains("LEGACY-")
+            && !message.content.contains("MISMATCHED-FUTURE-")));
 
     let character_a_history = chat_repo
         .find_recent(
@@ -2954,11 +3041,47 @@ async fn chat_history_is_scoped_by_the_committed_reader_identity() {
 
     assert_eq!(
         chat_repo
-            .count(conversation_character_id, user_id, novel_id, Some(reader_b))
+            .count(
+                conversation_character_id,
+                user_id,
+                novel_id,
+                Some(reader_b),
+                1,
+            )
             .await
             .unwrap(),
         2
     );
+    assert_eq!(
+        chat_repo
+            .count(conversation_character_id, user_id, novel_id, None, 1)
+            .await
+            .unwrap(),
+        2
+    );
+
+    let legacy_replay = chat_repo
+        .begin_turn(&ChatTurnClaim {
+            id: legacy_turn_id,
+            user_id,
+            character_id: conversation_character_id,
+            novel_id,
+            request_fingerprint: legacy_fingerprint,
+            chapter_context: 1,
+            persona_source_chapter_high_water: Some(1),
+            reader_identity: Some("Self Reader".into()),
+            reader_identity_type: "self".into(),
+            reader_character_id: None,
+            deviation_mode: "canon".into(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        legacy_replay,
+        BeginChatTurn::Completed { claim, response }
+            if claim.persona_source_chapter_high_water.is_none()
+                && response == "LEGACY-UNPROVEN-RESPONSE-MARKER"
+    ));
 
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
@@ -3137,6 +3260,111 @@ async fn production_repositories_match_fresh_schema() {
         .iter()
         .all(|memory| memory.id != quarantined_precontract.id));
 
+    let mut unproven_mid = Memory::new_permanent(
+        character_id,
+        user_id,
+        novel_id,
+        "derived summary without a source marker".into(),
+        6,
+        1,
+    );
+    unproven_mid.layer = MemoryLayer::Mid;
+    assert!(restarted_memory_repo.save(&unproven_mid).await.is_err());
+
+    let mut proven_mid = unproven_mid.clone();
+    proven_mid.id = Uuid::new_v4();
+    proven_mid.content = "derived summary with proven persona sources".into();
+    proven_mid.persona_source_chapter_high_water = Some(1);
+    restarted_memory_repo.save(&proven_mid).await.unwrap();
+    sqlx::query(
+        "INSERT INTO character_memories (\
+             id, character_id, user_id, novel_id, layer, content, importance, chapter_number) \
+         VALUES ($1, $2, $3, $4, 'mid', $5, 6, 1)",
+    )
+    .bind(unproven_mid.id)
+    .bind(character_id)
+    .bind(user_id)
+    .bind(novel_id)
+    .bind(&unproven_mid.content)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mid_memories = restarted_memory_repo
+        .find_by_layer(character_id, user_id, novel_id, MemoryLayer::Mid, 1, 10, 0)
+        .await
+        .unwrap();
+    assert_eq!(mid_memories.len(), 1);
+    assert_eq!(mid_memories[0].id, proven_mid.id);
+
+    let mut proven_long = proven_mid.clone();
+    proven_long.id = Uuid::new_v4();
+    proven_long.layer = MemoryLayer::Long;
+    proven_long.content = "semantic memory with proven persona sources".into();
+    proven_long.embedding = Some(embedding.clone());
+    restarted_memory_repo.save(&proven_long).await.unwrap();
+    let legacy_long_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO character_memories (\
+             id, character_id, user_id, novel_id, layer, content, importance, \
+             chapter_number, embedding) \
+         SELECT $1, $2, $3, $4, 'long', $5, 6, 1, embedding \
+         FROM character_memories WHERE id = $6",
+    )
+    .bind(legacy_long_id)
+    .bind(character_id)
+    .bind(user_id)
+    .bind(novel_id)
+    .bind("legacy semantic memory without persona provenance")
+    .bind(memory.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let semantic = restarted_memory_repo
+        .search_similar(character_id, user_id, novel_id, &embedding, 1, 10)
+        .await
+        .unwrap();
+    assert!(semantic.iter().any(|memory| memory.id == proven_long.id));
+    assert!(semantic.iter().all(|memory| memory.id != legacy_long_id));
+
+    let mut invalid_permanent = Memory::new_permanent(
+        character_id,
+        user_id,
+        novel_id,
+        "permanent fact with an invalid derived marker".into(),
+        8,
+        1,
+    );
+    invalid_permanent.persona_source_chapter_high_water = Some(1);
+    assert!(restarted_memory_repo
+        .save(&invalid_permanent)
+        .await
+        .is_err());
+    assert!(restarted_memory_repo
+        .insert_if_absent(&invalid_permanent)
+        .await
+        .is_err());
+
+    let constraint_error = sqlx::query(
+        "INSERT INTO character_memories (\
+             id, character_id, user_id, novel_id, layer, content, importance, \
+             chapter_number, persona_source_chapter_high_water) \
+         VALUES ($1, $2, $3, $4, 'permanent', $5, 8, 1, 1)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(character_id)
+    .bind(user_id)
+    .bind(novel_id)
+    .bind("database constraint must reject a permanent provenance marker")
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    assert_eq!(
+        constraint_error
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some(std::borrow::Cow::Borrowed("23514")),
+    );
+
     let chat_repo = PgChatRepository::new(pool.clone());
     let claim = ChatTurnClaim {
         id: Uuid::new_v4(),
@@ -3145,6 +3373,7 @@ async fn production_repositories_match_fresh_schema() {
         novel_id,
         request_fingerprint: vec![1; 32],
         chapter_context: 1,
+        persona_source_chapter_high_water: Some(1),
         reader_identity: Some("Reader".into()),
         reader_identity_type: "self".into(),
         reader_character_id: None,

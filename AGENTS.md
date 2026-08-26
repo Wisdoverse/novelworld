@@ -294,7 +294,7 @@ CI remains the authoritative required gate.
 ## GitHub Project Governance
 
 - `docs/ROADMAP.md` owns product direction, invariants, horizon ordering, and
-  exit criteria. [NovelWorld Roadmap](https://github.com/users/schorsch888/projects/2)
+  exit criteria. [Wisdoverse repository Projects](https://github.com/Wisdoverse/novelworld/projects)
   owns execution status, horizon assignment, and priority.
 - Roadmap work starts from the roadmap Issue Form. One issue represents one
   independently mergeable outcome and records scope, non-goals, invariants,

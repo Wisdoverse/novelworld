@@ -76,18 +76,75 @@ export function useChapter(novelId: string, chapterNum: number) {
   });
 }
 
-export function isCharacterAvailable(character: Character, currentChapter: number) {
-  const appearance = character.first_appearance_chapter;
-  return appearance !== undefined && appearance >= 1 && appearance <= currentChapter;
+const PARTIAL_CHARACTER_KEYS = new Set([
+  'id',
+  'novel_id',
+  'name',
+  'first_appearance_chapter',
+]);
+
+export function sanitizeCharacterPersona(
+  character: Character,
+  currentChapter: number,
+): Character | null {
+  if (!Number.isSafeInteger(currentChapter) || currentChapter < 1) return null;
+
+  const firstAppearance = character.first_appearance_chapter;
+  if (
+    typeof firstAppearance !== 'number'
+    || !Number.isSafeInteger(firstAppearance)
+    || firstAppearance < 1
+    || firstAppearance > currentChapter
+  ) return null;
+
+  const highWater = character.persona_source_chapter_high_water;
+  if (
+    typeof highWater === 'number'
+    && Number.isSafeInteger(highWater)
+    && highWater >= 1
+    && highWater <= currentChapter
+  ) {
+    return {
+      id: character.id,
+      novel_id: character.novel_id,
+      name: character.name,
+      aliases: character.aliases,
+      role: character.role,
+      description: character.description,
+      personality: character.personality,
+      background: character.background,
+      speaking_style: character.speaking_style,
+      appearance: character.appearance,
+      avatar_url: character.avatar_url,
+      avatar_status: character.avatar_status,
+      first_appearance_chapter: firstAppearance,
+      persona_source_chapter_high_water: highWater,
+    };
+  }
+
+  const keys = Object.keys(character);
+  if (
+    keys.length !== PARTIAL_CHARACTER_KEYS.size
+    || keys.some(key => !PARTIAL_CHARACTER_KEYS.has(key))
+  ) return null;
+
+  return {
+    id: character.id,
+    novel_id: character.novel_id,
+    name: character.name,
+    first_appearance_chapter: firstAppearance,
+  };
 }
 
-export function useCharacters(novelId: string, currentChapter: number) {
+export function useCharacters(novelId: string, currentChapter: number, enabled = true) {
   return useQuery({
     queryKey: novelKeys.characters(novelId, currentChapter),
     queryFn: () => apiClient
       .get<Character[]>(`/novels/${novelId}/characters`)
-      .then(r => r.data.filter(character => isCharacterAvailable(character, currentChapter))),
-    enabled: !!novelId && currentChapter >= 1,
+      .then(r => r.data
+        .map(character => sanitizeCharacterPersona(character, currentChapter))
+        .filter((character): character is Character => character !== null)),
+    enabled: enabled && !!novelId && currentChapter >= 1,
   });
 }
 

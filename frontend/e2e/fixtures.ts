@@ -55,6 +55,7 @@ export const CHARACTERS = [
     appearance: '灰袍，腰间挂着铜灯。',
     avatar_status: 'ready',
     first_appearance_chapter: 1,
+    persona_source_chapter_high_water: 1,
   },
   {
     id: 'char-2',
@@ -65,6 +66,7 @@ export const CHARACTERS = [
     description: '往来海港与北塔的船长。',
     avatar_status: 'pending',
     first_appearance_chapter: 1,
+    persona_source_chapter_high_water: 1,
   },
 ];
 

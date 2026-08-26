@@ -1,7 +1,6 @@
 export {
   buildNovelBatchUploadFormData,
   buildNovelUploadFormData,
-  isCharacterAvailable,
   MAX_NOVEL_BATCH_BYTES,
   MAX_NOVEL_BATCH_FILES,
   novelTitleFromFile,

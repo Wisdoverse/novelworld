@@ -356,12 +356,25 @@ CREATE TABLE character_memories (
     content       TEXT NOT NULL,
     importance    SMALLINT NOT NULL DEFAULT 5 CHECK (importance BETWEEN 1 AND 10),
     chapter_number INTEGER,
+    persona_source_chapter_high_water INTEGER,
     -- pgvector 语义向量（1536维，OpenAI text-embedding-3-small）
     embedding     vector(1536),
     access_count  INTEGER NOT NULL DEFAULT 0,
     last_accessed TIMESTAMPTZ,
     expires_at    TIMESTAMPTZ,               -- 短期记忆有过期时间
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT character_memories_persona_source_chapter_high_water_check CHECK (
+        persona_source_chapter_high_water IS NULL
+        OR (
+            (
+                layer::pg_catalog.text = 'mid'::pg_catalog.text
+                OR layer::pg_catalog.text = 'long'::pg_catalog.text
+            )
+            AND chapter_number IS NOT NULL
+            AND persona_source_chapter_high_water >= 1
+            AND persona_source_chapter_high_water <= chapter_number
+        )
+    )
 );
 
 CREATE INDEX idx_memories_character_user ON character_memories(character_id, user_id);
@@ -382,6 +395,7 @@ CREATE TABLE chat_turns (
     novel_id               UUID NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
     request_fingerprint    BYTEA NOT NULL,
     chapter_context        INTEGER NOT NULL,
+    persona_source_chapter_high_water INTEGER,
     reader_identity        VARCHAR(200),
     reader_identity_type   identity_type NOT NULL,
     reader_character_id    UUID REFERENCES characters(id) ON DELETE CASCADE,
@@ -396,6 +410,13 @@ CREATE TABLE chat_turns (
     CONSTRAINT chat_turns_request_fingerprint_check
         CHECK (pg_catalog.octet_length(request_fingerprint) = 32),
     CONSTRAINT chat_turns_chapter_context_check CHECK (chapter_context >= 1),
+    CONSTRAINT chat_turns_persona_source_chapter_high_water_check CHECK (
+        persona_source_chapter_high_water IS NULL
+        OR (
+            persona_source_chapter_high_water >= 1
+            AND persona_source_chapter_high_water <= chapter_context
+        )
+    ),
     CONSTRAINT chat_turns_status_check
         CHECK (status IN ('in_progress', 'completed', 'failed')),
     CONSTRAINT chat_turns_attempt_check CHECK (attempt >= 1),

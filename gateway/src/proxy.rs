@@ -3,7 +3,7 @@ use axum::{
     extract::{Request, State},
     http::{
         header::{CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, RETRY_AFTER, WWW_AUTHENTICATE},
-        HeaderMap, StatusCode,
+        HeaderMap, HeaderValue, StatusCode,
     },
     response::{IntoResponse, Response},
 };
@@ -22,13 +22,17 @@ const ACCOUNT_EXPORT_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const ACCOUNT_EXPORT_CONTENT_TYPE: &str = "application/x-ndjson";
 
 pub fn api_error_response(status: StatusCode, code: &str, message: &str) -> Response {
-    (
+    let mut response = (
         status,
         axum::Json(serde_json::json!({
             "error": {"code": code, "message": message}
         })),
     )
-        .into_response()
+        .into_response();
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 /// The exhaustive mapping from upstream HTTP status to the stable public error
@@ -596,7 +600,7 @@ mod tests {
         body::{to_bytes, Body},
         extract::{Path, State},
         http::{
-            header::{CONTENT_TYPE, RETRY_AFTER, WWW_AUTHENTICATE},
+            header::{CACHE_CONTROL, CONTENT_TYPE, RETRY_AFTER, WWW_AUTHENTICATE},
             HeaderMap, HeaderValue, StatusCode,
         },
         response::{IntoResponse, Response},
@@ -822,6 +826,7 @@ mod tests {
             let response =
                 normalized_error_response(status, &HeaderMap::new(), b"not a json envelope");
             assert_eq!(response.status(), status, "status for {code}");
+            assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
             let body = to_bytes(response.into_body(), 4096).await.unwrap();
             assert!(has_stable_error_envelope(&body), "envelope for {code}");
             let body: serde_json::Value = serde_json::from_slice(&body).unwrap();

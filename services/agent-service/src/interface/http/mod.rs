@@ -544,41 +544,45 @@ async fn get_history(
     Path(character_id): Path<Uuid>,
     headers: HeaderMap,
     Query(params): Query<HistoryQuery>,
-) -> impl IntoResponse {
+) -> Response {
     let user_id = match extract_user_id(&headers) {
         Some(id) => id,
         None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({
-                    "error": "Missing or invalid X-User-Id header"
-                })),
+            return private_no_store(
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({
+                        "error": "Missing or invalid X-User-Id header"
+                    })),
+                )
+                    .into_response(),
             )
-                .into_response()
         }
     };
     if !(1..=MAX_HISTORY_LIMIT).contains(&params.limit)
         || !(0..=MAX_HISTORY_OFFSET).contains(&params.offset)
     {
-        return validation_error(format!(
+        return private_no_store(validation_error(format!(
             "limit must be between 1 and {MAX_HISTORY_LIMIT}; offset must be between 0 and {MAX_HISTORY_OFFSET}"
-        ));
+        )));
     }
-    match state
-        .handler
-        .get_history(character_id, user_id, params.limit, params.offset)
-        .await
-    {
-        Ok(messages) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "messages": messages,
-                "count": messages.len(),
-            })),
-        )
-            .into_response(),
-        Err(error) => application_error_response(error, StatusCode::INTERNAL_SERVER_ERROR),
-    }
+    private_no_store(
+        match state
+            .handler
+            .get_history(character_id, user_id, params.limit, params.offset)
+            .await
+        {
+            Ok(messages) => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "messages": messages,
+                    "count": messages.len(),
+                })),
+            )
+                .into_response(),
+            Err(error) => application_error_response(error, StatusCode::INTERNAL_SERVER_ERROR),
+        },
+    )
 }
 
 /// Query params for memory retrieval.
@@ -615,52 +619,67 @@ async fn get_memories(
     Path(character_id): Path<Uuid>,
     headers: HeaderMap,
     Query(params): Query<MemoryQuery>,
-) -> impl IntoResponse {
+) -> Response {
     let user_id = match extract_user_id(&headers) {
         Some(id) => id,
         None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({
-                    "error": "Missing or invalid X-User-Id header"
-                })),
+            return private_no_store(
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({
+                        "error": "Missing or invalid X-User-Id header"
+                    })),
+                )
+                    .into_response(),
             )
-                .into_response()
         }
     };
     let layer = match parse_layer(&params.layer) {
         Some(layer) => layer,
-        None => return validation_error("layer must be short, mid, long, or permanent"),
+        None => {
+            return private_no_store(validation_error(
+                "layer must be short, mid, long, or permanent",
+            ))
+        }
     };
     if !(1..=MAX_HISTORY_LIMIT).contains(&params.limit)
         || !(0..=MAX_HISTORY_OFFSET).contains(&params.offset)
     {
-        return validation_error(format!(
+        return private_no_store(validation_error(format!(
             "limit must be between 1 and {MAX_HISTORY_LIMIT}; offset must be between 0 and {MAX_HISTORY_OFFSET}"
-        ));
+        )));
     }
-    match state
-        .handler
-        .get_memories(
-            character_id,
-            user_id,
-            params.novel_id,
-            layer,
-            params.limit,
-            params.offset,
-        )
-        .await
-    {
-        Ok(memories) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "memories": memories,
-                "count": memories.len(),
-            })),
-        )
-            .into_response(),
-        Err(error) => application_error_response(error, StatusCode::INTERNAL_SERVER_ERROR),
-    }
+    private_no_store(
+        match state
+            .handler
+            .get_memories(
+                character_id,
+                user_id,
+                params.novel_id,
+                layer,
+                params.limit,
+                params.offset,
+            )
+            .await
+        {
+            Ok(memories) => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "memories": memories,
+                    "count": memories.len(),
+                })),
+            )
+                .into_response(),
+            Err(error) => application_error_response(error, StatusCode::INTERNAL_SERVER_ERROR),
+        },
+    )
+}
+
+fn private_no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
+    response
 }
 
 /// Query params for clearing short-term memory.
@@ -1022,6 +1041,15 @@ mod principal_contract_tests {
         assert_eq!(parse_layer("short"), Some(MemoryLayer::Short));
         assert_eq!(parse_layer("permanent"), Some(MemoryLayer::Permanent));
         assert_eq!(parse_layer("unknown"), None);
+    }
+
+    #[test]
+    fn progress_bound_reads_are_private_and_not_cacheable() {
+        let response = private_no_store(StatusCode::OK.into_response());
+        assert_eq!(
+            response.headers().get(CACHE_CONTROL),
+            Some(&HeaderValue::from_static("private, no-store"))
+        );
     }
 
     #[test]

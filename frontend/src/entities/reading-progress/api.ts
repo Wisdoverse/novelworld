@@ -25,3 +25,18 @@ export function useUpdateReadingProgress(novelId: string) {
     }),
   });
 }
+
+export function useResetReaderIdentity(novelId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => apiClient.put(`/progress/${novelId}/identity`, {
+      identity_type: 'self',
+      identity_name: null,
+      character_id: null,
+    }),
+    onSuccess: () => queryClient.refetchQueries({
+      queryKey: readingProgressKeys.detail(novelId),
+      type: 'active',
+    }),
+  });
+}
