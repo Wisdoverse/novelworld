@@ -4,8 +4,8 @@
   "evidence_class": "baseline",
   "baseline_only": true,
   "qualification_claim": false,
-  "evaluated_git_sha": "c13ffd9f9904c36ed3f7abf01d7d66160b7f15bd",
-  "evidence_commit": "65f835d4f15690d262548613e3b1af56cbfa60d8",
+  "evaluated_git_sha": "31e32d05ff41c4453892c9d3e599c07ad4c46fd3",
+  "evidence_commit": "pending",
   "provider": {
     "name": "deepseek",
     "configured_model": "deepseek-v4-flash",
@@ -31,12 +31,12 @@
     "docker_compose": "5.3.1",
     "compose_sha256": "d8e21c893a02d535dae34c07be7c22cf4558c79b6a1651f034130e51559b62db",
     "image_ids": {
-      "gateway": "sha256:5c800c299ac0f82bb977191c5fef3c26e6da7ef30ee6ec728958c43aa1327127",
-      "user_service": "sha256:b17fc0c64a218c16b99d2e85d5ea8960d7d6476c0434b95af5f03e512ef11b79",
-      "novel_service": "sha256:e1cc00f09da6adf9a0fc9569fafe755c6f6c03ee96ca1e8fbe18513e5c7f10b3",
-      "agent_service": "sha256:f6c0b16524a1ee6da4e3cc76998a9235f63b07da5f3a2ad8945bfb2d0e8907e6",
-      "narrative_service": "sha256:6f10a12ab8327afad32913b39121beac37304fe21c9a38fce65d54796347dd4b",
-      "frontend": "sha256:172267c64b7a8dab2d925b5db6067ac21f900b4d8e9c02682cc26d2894ed69da"
+      "gateway": "sha256:26731af82d0b0c2c853a229a80e2ed41da6328aa0ef89ecf4196796d4873ac37",
+      "user_service": "sha256:716e8bfefc7b98e0d296573ed3037d2276c1f830479910b6c7a51d3f828b4ba9",
+      "novel_service": "sha256:9c71d6d9dfb9db2107a5f6a376e0e9be00b26b729f29f6a01d0daa801545af85",
+      "agent_service": "sha256:69977617fa86081b6ffbe6ba4f569579a3287da142a8ab07bb44b523d5d152dc",
+      "narrative_service": "sha256:bbd8998688d308185c9f79f7a9366219b3df9eeac74d682e47f7cd9103861d65",
+      "frontend": "sha256:23a366577015114c27894d7ea88b56263b8986f9606b3dec5625f2c6b26a3fb9"
     },
     "isolated_cleanup_completed": true,
     "existing_user_stack_unchanged": true
@@ -143,6 +143,33 @@
       "metrics_retention": "complete_pre_and_post_restart",
       "reported_isolated_cleanup_completed": true,
       "existing_user_stack_unchanged": true
+    },
+    {
+      "attempt": 9,
+      "evaluated_git_sha": "31e32d05ff41c4453892c9d3e599c07ad4c46fd3",
+      "outcome": "failed",
+      "failure_stage": "branch_and_player_entry",
+      "failure_code": "http_502_llm_error",
+      "private_report_sha256": "fa5738c14dd76f7f28ab42cacae8e96e792f31f2f36a5a8153385d4f93940401",
+      "private_metrics_sha256": [
+        "4039e5a06152ef0424b8b0cf36438a78a3e9ff53cf0a1a999f656ec58bb9df82"
+      ],
+      "metrics_retention": "complete_for_failed_run",
+      "reported_isolated_cleanup_completed": true,
+      "existing_user_stack_unchanged": true
+    },
+    {
+      "attempt": 10,
+      "evaluated_git_sha": "31e32d05ff41c4453892c9d3e599c07ad4c46fd3",
+      "outcome": "completed",
+      "private_report_sha256": "c642e17a9ad295063685b7da5a48d02c0ad2a1de8e88f77191bf255c22a4a40a",
+      "private_metrics_sha256": [
+        "9af10a3b7e0e37e04798af6cd210f0f1379a976876ce8a1b07356ed3f1fc3dd9",
+        "63fc19aba38cba95135084d33b3281da0b59de2da36889ffc572032ef39f0a02"
+      ],
+      "metrics_retention": "complete_pre_and_post_restart",
+      "reported_isolated_cleanup_completed": true,
+      "existing_user_stack_unchanged": true
     }
   ],
   "prior_live_evaluations": [
@@ -168,10 +195,15 @@
       "h3_hard_failures": [
         "multi-turn-coherence-positive"
       ]
+    },
+    {
+      "evaluated_git_sha": "c13ffd9f9904c36ed3f7abf01d7d66160b7f15bd",
+      "h1_passed": false,
+      "h3_passed": true
     }
   ],
   "final_product_journey": {
-    "completed_at": "2026-08-27T08:20:03.053837Z",
+    "completed_at": "2026-08-27T09:38:56.619369Z",
     "outcome": "completed",
     "source": {
       "corpus_version": "h1-synthetic-v2",
@@ -206,19 +238,19 @@
       "world": "world-turn-v2"
     },
     "llm_observations": {
-      "requests_started": 36,
-      "requests_success": 36,
-      "usage_reports_present": 36,
-      "logical_submission_retries": 1,
-      "input_tokens": 107692,
-      "cached_input_tokens": 23424,
-      "uncached_input_tokens": 84268,
-      "output_tokens": 17022,
+      "requests_started": 35,
+      "requests_success": 35,
+      "usage_reports_present": 35,
+      "logical_submission_retries": 0,
+      "input_tokens": 99140,
+      "cached_input_tokens": 18944,
+      "uncached_input_tokens": 80196,
+      "output_tokens": 15694,
       "operations": {
         "character_chat": 13,
         "memory_summary": 1,
         "branch_generation": 1,
-        "narrative_transition": 14,
+        "narrative_transition": 13,
         "canon_extraction": 4,
         "character_extraction": 1,
         "narrative_node_detection": 1,
@@ -227,7 +259,7 @@
     }
   },
   "h1_live": {
-    "completed_at": "2026-08-27T08:33:12.9020762Z",
+    "completed_at": "2026-08-27T09:44:10.5820554Z",
     "corpus_version": "h1-synthetic-v2",
     "rubric_version": "h1-extraction-v1",
     "sample_count": 6,
@@ -242,7 +274,17 @@
       {
         "id": "zh-utf8",
         "passed": false,
-        "failure": "judge_explanation_contract"
+        "coverage_percent": {
+          "characters": 100,
+          "events": 0,
+          "relationships": 50,
+          "world_rules": 100
+        },
+        "precision_percent": 24,
+        "hallucination_percent": 76,
+        "chronology_violations": 0,
+        "provenance_percent": 100,
+        "failure": "extraction_quality_thresholds"
       },
       {
         "id": "zh-gbk",
@@ -250,11 +292,11 @@
         "coverage_percent": {
           "characters": 100,
           "events": 0,
-          "relationships": 50,
+          "relationships": 0,
           "world_rules": 100
         },
-        "precision_percent": 27,
-        "hallucination_percent": 73,
+        "precision_percent": 23,
+        "hallucination_percent": 77,
         "chronology_violations": 0,
         "provenance_percent": 100,
         "failure": "extraction_quality_thresholds"
@@ -278,8 +320,8 @@
           "relationships": 0,
           "world_rules": 0
         },
-        "precision_percent": 25,
-        "hallucination_percent": 75,
+        "precision_percent": 20,
+        "hallucination_percent": 80,
         "chronology_violations": 0,
         "provenance_percent": 100,
         "failure": "extraction_quality_thresholds"
@@ -300,20 +342,19 @@
       "requests_started": 28,
       "requests_success": 28,
       "usage_reports_present": 28,
-      "retry_events": 1,
-      "retry_reason": "json_mode_fallback",
-      "input_tokens": 32189,
-      "cached_input_tokens": 23296,
-      "uncached_input_tokens": 8893,
-      "output_tokens": 26843,
+      "retry_events": 0,
+      "input_tokens": 30431,
+      "cached_input_tokens": 24064,
+      "uncached_input_tokens": 6367,
+      "output_tokens": 24658,
       "request_duration_seconds_count": 28,
-      "request_duration_seconds_sum": 157.725115375
+      "request_duration_seconds_sum": 131.43258856
     },
-    "private_metrics_sha256": "97d42b4148258c152bdb6a0a8e3f725c3e86b5ec9087dc3bdf4fbef6655c75ed",
+    "private_metrics_sha256": "baa4e689ef9a7f24976e52af45f21916055479cc9b3d86b4c00a371089ca3174",
     "passed": false
   },
   "h3_live": {
-    "completed_at": "2026-08-27T08:40:12.6920482Z",
+    "completed_at": "2026-08-27T09:46:16.2271263Z",
     "corpus_version": "h3-synthetic-v1",
     "rubric_version": "h3-semantic-v1",
     "sample_count": 24,
@@ -349,14 +390,21 @@
       },
       "multi_turn_coherence": {
         "samples": 2,
-        "observed_accuracy_basis_points": 1000
+        "observed_accuracy_basis_points": 500
       },
       "replay_determinism": {
         "samples": 2,
         "observed_accuracy_basis_points": 1000
       }
     },
-    "hard_failures": [],
+    "hard_failures": [
+      {
+        "id": "multi-turn-coherence-positive",
+        "expected": true,
+        "observed": false,
+        "score_basis_points": 200
+      }
+    ],
     "llm_observations": {
       "requests_started": 8,
       "requests_success": 8,
@@ -365,12 +413,12 @@
       "input_tokens": 1944,
       "cached_input_tokens": 1024,
       "uncached_input_tokens": 920,
-      "output_tokens": 644,
+      "output_tokens": 624,
       "request_duration_seconds_count": 8,
-      "request_duration_seconds_sum": 12.125498938
+      "request_duration_seconds_sum": 8.019660003
     },
-    "private_metrics_sha256": "3ad57d95e919da39391a9a52eddbef7d9919cc6456f53a2a6819d4af33306645",
-    "passed": true
+    "private_metrics_sha256": "4dbba512eb517078dc8729bc42a33909a1a32397095469d1454b4a53c8e1e71c",
+    "passed": false
   },
   "privacy": {
     "raw_artifacts_remain_private": true,
@@ -384,7 +432,10 @@
     "human_quality_approval": false,
     "same_provider_automated_judgment_is_supporting_evidence_only": true,
     "disposition": "not_qualified",
-    "blocking_gate": "h1_live",
-    "blocking_reason": "Five of six H1 slices failed the frozen extraction-quality gate; three failed closed on the judge explanation contract and two missed extraction coverage, precision, and hallucination thresholds."
+    "blocking_gates": [
+      "h1_live",
+      "h3_live"
+    ],
+    "blocking_reason": "Five of six H1 slices failed the frozen extraction-quality gate: three missed extraction coverage, precision, and hallucination thresholds, and two failed closed on the judge explanation contract. H3 also failed one of 24 samples because the positive multi-turn-coherence case scored below its frozen threshold."
   }
 }
