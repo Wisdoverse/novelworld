@@ -5,14 +5,20 @@ use async_trait::async_trait;
 use reqwest::Client;
 use uuid::Uuid;
 
-use crate::domain::ports::{CharacterWorldContext, ReadinessProbe, WorldContextPort};
+use crate::domain::ports::{
+    CharacterBranchContext, CharacterContextEnvelope, CharacterWorldContext, ReadinessProbe,
+    WorldContextPort,
+};
 
 const NARRATIVE_SERVICE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_CONTEXT_BYTES: usize = 64 * 1024;
-const MAX_CONTEXT_CHARS: usize = 8_000;
+const MAX_CONTEXT_CHARS: usize = 12_000;
+const MAX_WORLD_CONTEXT_CHARS: usize = 8_000;
+const MAX_BRANCH_EVENTS: usize = 4;
+const MAX_BRANCH_EVENT_SUMMARY_CHARS: usize = 256;
 const MAX_RECENT_ACTIONS: usize = 4;
 const WORLD_CONTEXT_VERSION_HEADER: &str = "X-World-Context-Version";
-const WORLD_CONTEXT_VERSION: &str = "2";
+const WORLD_CONTEXT_VERSION: &str = "3";
 
 pub struct NarrativeServiceClient {
     client: Client,
@@ -48,7 +54,7 @@ impl WorldContextPort for NarrativeServiceClient {
         novel_id: Uuid,
         character_id: Uuid,
         user_id: Uuid,
-    ) -> Result<Option<CharacterWorldContext>> {
+    ) -> Result<Option<CharacterContextEnvelope>> {
         let url = format!(
             "{}/internal/narrative/{}/characters/{}/context",
             self.base_url, novel_id, character_id
@@ -90,22 +96,43 @@ fn decode_context(
     user_id: Uuid,
     novel_id: Uuid,
     character_id: Uuid,
-) -> Result<Option<CharacterWorldContext>> {
+) -> Result<Option<CharacterContextEnvelope>> {
     ensure!(
         body.len() <= MAX_CONTEXT_BYTES,
         "world context is oversized"
     );
-    let context = serde_json::from_slice::<CharacterWorldContext>(body)?;
-    validate_context_scope(&context, user_id, novel_id, character_id)?;
-    if context.source_chapter_high_water.is_none() {
+    let text = std::str::from_utf8(body)?;
+    ensure!(
+        text.chars().count() <= MAX_CONTEXT_CHARS,
+        "world context is oversized"
+    );
+    let mut envelope = serde_json::from_slice::<CharacterContextEnvelope>(body)?;
+    validate_envelope_scope(&envelope, user_id, novel_id, character_id)?;
+    if envelope
+        .world_context
+        .as_ref()
+        .is_some_and(|context| context.source_chapter_high_water.is_none())
+    {
         tracing::warn!("omitting legacy world context without a canonical source high-water mark");
-        return Ok(None);
+        envelope.world_context = None;
     }
-    validate_context(&context, user_id, novel_id, character_id)?;
-    Ok(Some(context))
+    validate_envelope(&envelope, user_id, novel_id, character_id)?;
+    Ok(Some(envelope))
 }
 
-fn validate_context_scope(
+fn validate_envelope_scope(
+    envelope: &CharacterContextEnvelope,
+    user_id: Uuid,
+    novel_id: Uuid,
+    character_id: Uuid,
+) -> Result<()> {
+    ensure!(envelope.user_id == user_id);
+    ensure!(envelope.novel_id == novel_id);
+    ensure!(envelope.character_id == character_id);
+    Ok(())
+}
+
+fn validate_world_context_scope(
     context: &CharacterWorldContext,
     user_id: Uuid,
     novel_id: Uuid,
@@ -117,13 +144,49 @@ fn validate_context_scope(
     Ok(())
 }
 
-fn validate_context(
+fn validate_envelope(
+    envelope: &CharacterContextEnvelope,
+    user_id: Uuid,
+    novel_id: Uuid,
+    character_id: Uuid,
+) -> Result<()> {
+    validate_envelope_scope(envelope, user_id, novel_id, character_id)?;
+    ensure!(envelope.branch_context.is_some() || envelope.world_context.is_some());
+    if let Some(branch) = &envelope.branch_context {
+        validate_branch_context(branch, character_id)?;
+    }
+    if let Some(world) = &envelope.world_context {
+        validate_world_context(world, user_id, novel_id, character_id)?;
+    }
+    Ok(())
+}
+
+fn validate_branch_context(context: &CharacterBranchContext, character_id: Uuid) -> Result<()> {
+    ensure!(context.source_chapter_high_water >= 1);
+    ensure!(!context.events.is_empty() && context.events.len() <= MAX_BRANCH_EVENTS);
+    ensure!(
+        context.events.last().map(|event| event.chapter_number)
+            == Some(context.source_chapter_high_water)
+    );
+    ensure!(context
+        .events
+        .windows(2)
+        .all(|events| events[0].chapter_number <= events[1].chapter_number));
+    for event in &context.events {
+        ensure!((1..=context.source_chapter_high_water).contains(&event.chapter_number));
+        bounded_text(&event.summary, MAX_BRANCH_EVENT_SUMMARY_CHARS)?;
+        ensure!(event.actor_character_ids.as_slice() == [character_id]);
+    }
+    Ok(())
+}
+
+fn validate_world_context(
     context: &CharacterWorldContext,
     user_id: Uuid,
     novel_id: Uuid,
     character_id: Uuid,
 ) -> Result<()> {
-    validate_context_scope(context, user_id, novel_id, character_id)?;
+    validate_world_context_scope(context, user_id, novel_id, character_id)?;
     ensure!(context.canon_model_version >= 1 && context.checkpoint_chapter >= 1);
     let source_chapter_high_water = context
         .source_chapter_high_water
@@ -131,7 +194,7 @@ fn validate_context(
     ensure!(source_chapter_high_water >= context.checkpoint_chapter);
     ensure!(context.turn_number >= 0 && context.world_time >= 0);
     ensure!(!context.player_id.is_nil());
-    ensure!(serde_json::to_string(context)?.chars().count() <= MAX_CONTEXT_CHARS);
+    ensure!(serde_json::to_string(context)?.chars().count() <= MAX_WORLD_CONTEXT_CHARS);
     bounded_token(&context.player_name, 100)?;
     bounded_token(&context.player_location_id, 200)?;
     // Preserve the pre-choice wire bounds during rolling deploys. The new
@@ -236,8 +299,8 @@ fn bounded_text(value: &str, maximum: usize) -> Result<()> {
 mod tests {
     use super::*;
     use crate::domain::ports::{
-        WorldActionContext, WorldActionData, WorldActiveThread, WorldCanonicalEvent,
-        WorldCharacterGoal, WorldHistoryItem,
+        CharacterBranchEvent, WorldActionContext, WorldActionData, WorldActiveThread,
+        WorldCanonicalEvent, WorldCharacterGoal, WorldHistoryItem,
     };
 
     #[test]
@@ -281,17 +344,227 @@ mod tests {
         }
     }
 
+    fn valid_branch(character_id: Uuid) -> CharacterBranchContext {
+        CharacterBranchContext {
+            source_chapter_high_water: 2,
+            events: vec![
+                CharacterBranchEvent {
+                    chapter_number: 1,
+                    summary: "角色亲历了第一章的选择".into(),
+                    actor_character_ids: vec![character_id],
+                },
+                CharacterBranchEvent {
+                    chapter_number: 2,
+                    summary: "角色见证了第二章的后果".into(),
+                    actor_character_ids: vec![character_id],
+                },
+            ],
+        }
+    }
+
+    fn valid_envelope(
+        user_id: Uuid,
+        novel_id: Uuid,
+        character_id: Uuid,
+    ) -> CharacterContextEnvelope {
+        CharacterContextEnvelope {
+            user_id,
+            novel_id,
+            character_id,
+            branch_context: Some(valid_branch(character_id)),
+            world_context: Some(valid_context(user_id, novel_id, character_id)),
+        }
+    }
+
+    #[test]
+    fn v3_envelope_decodes_bounded_branch_and_world_context() {
+        let user_id = Uuid::new_v4();
+        let novel_id = Uuid::new_v4();
+        let character_id = Uuid::new_v4();
+        let envelope = valid_envelope(user_id, novel_id, character_id);
+
+        let decoded = decode_context(
+            &serde_json::to_vec(&envelope).unwrap(),
+            user_id,
+            novel_id,
+            character_id,
+        )
+        .unwrap();
+
+        assert_eq!(decoded, Some(envelope));
+    }
+
+    #[test]
+    fn empty_or_legacy_only_v3_envelope_fails_closed() {
+        let user_id = Uuid::new_v4();
+        let novel_id = Uuid::new_v4();
+        let character_id = Uuid::new_v4();
+        let empty = CharacterContextEnvelope {
+            user_id,
+            novel_id,
+            character_id,
+            branch_context: None,
+            world_context: None,
+        };
+        assert!(decode_context(
+            &serde_json::to_vec(&empty).unwrap(),
+            user_id,
+            novel_id,
+            character_id,
+        )
+        .is_err());
+
+        let mut legacy_world = valid_context(user_id, novel_id, character_id);
+        legacy_world.source_chapter_high_water = None;
+        let legacy_only = CharacterContextEnvelope {
+            world_context: Some(legacy_world),
+            ..empty
+        };
+        assert!(decode_context(
+            &serde_json::to_vec(&legacy_only).unwrap(),
+            user_id,
+            novel_id,
+            character_id,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn envelope_scope_must_match_the_authenticated_route() {
+        let user_id = Uuid::new_v4();
+        let novel_id = Uuid::new_v4();
+        let character_id = Uuid::new_v4();
+
+        for envelope in [
+            valid_envelope(user_id, novel_id, character_id),
+            valid_envelope(user_id, novel_id, character_id),
+            valid_envelope(user_id, novel_id, character_id),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, mut envelope)| {
+            match index {
+                0 => envelope.user_id = Uuid::new_v4(),
+                1 => envelope.novel_id = Uuid::new_v4(),
+                _ => envelope.character_id = Uuid::new_v4(),
+            }
+            envelope
+        }) {
+            let body = serde_json::to_vec(&envelope).unwrap();
+            assert!(decode_context(&body, user_id, novel_id, character_id).is_err());
+        }
+
+        let mut inner_scope = valid_envelope(user_id, novel_id, character_id);
+        inner_scope.world_context.as_mut().unwrap().user_id = Uuid::new_v4();
+        assert!(decode_context(
+            &serde_json::to_vec(&inner_scope).unwrap(),
+            user_id,
+            novel_id,
+            character_id,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn branch_context_is_non_empty_bounded_ordered_and_character_witnessed() {
+        let character_id = Uuid::new_v4();
+        let mut branch = valid_branch(character_id);
+        validate_branch_context(&branch, character_id).unwrap();
+
+        branch.events[1].chapter_number = 1;
+        branch.source_chapter_high_water = 1;
+        validate_branch_context(&branch, character_id).unwrap();
+        branch.events[0].chapter_number = 2;
+        assert!(validate_branch_context(&branch, character_id).is_err());
+
+        let mut branch = valid_branch(character_id);
+        branch.source_chapter_high_water = 0;
+        assert!(validate_branch_context(&branch, character_id).is_err());
+        branch = valid_branch(character_id);
+        branch.events.clear();
+        assert!(validate_branch_context(&branch, character_id).is_err());
+        branch = valid_branch(character_id);
+        branch.events = vec![branch.events[0].clone(); MAX_BRANCH_EVENTS + 1];
+        assert!(validate_branch_context(&branch, character_id).is_err());
+        branch = valid_branch(character_id);
+        branch.events[0].chapter_number = 0;
+        assert!(validate_branch_context(&branch, character_id).is_err());
+        branch = valid_branch(character_id);
+        branch.events[1].chapter_number = branch.source_chapter_high_water + 1;
+        assert!(validate_branch_context(&branch, character_id).is_err());
+        branch = valid_branch(character_id);
+        branch.source_chapter_high_water += 1;
+        assert!(validate_branch_context(&branch, character_id).is_err());
+        branch = valid_branch(character_id);
+        branch.events[0].actor_character_ids = vec![Uuid::new_v4()];
+        assert!(validate_branch_context(&branch, character_id).is_err());
+        branch = valid_branch(character_id);
+        branch.events[0].actor_character_ids = vec![character_id, Uuid::new_v4()];
+        assert!(validate_branch_context(&branch, character_id).is_err());
+        branch = valid_branch(character_id);
+        branch.events[0].summary = " ".into();
+        assert!(validate_branch_context(&branch, character_id).is_err());
+        branch = valid_branch(character_id);
+        branch.events[0].summary = "事".repeat(MAX_BRANCH_EVENT_SUMMARY_CHARS + 1);
+        assert!(validate_branch_context(&branch, character_id).is_err());
+    }
+
+    #[test]
+    fn old_shape_and_unknown_branch_private_fields_fail_closed() {
+        let user_id = Uuid::new_v4();
+        let novel_id = Uuid::new_v4();
+        let character_id = Uuid::new_v4();
+        let legacy = valid_context(user_id, novel_id, character_id);
+        assert!(decode_context(
+            &serde_json::to_vec(&legacy).unwrap(),
+            user_id,
+            novel_id,
+            character_id,
+        )
+        .is_err());
+
+        let mut private =
+            serde_json::to_value(valid_envelope(user_id, novel_id, character_id)).unwrap();
+        private["branch_context"]["events"][0]["choice_text"] = "PRIVATE-CHOICE".into();
+        private["branch_context"]["events"][0]["consequence"] = "PRIVATE-CONSEQUENCE".into();
+        assert!(decode_context(
+            &serde_json::to_vec(&private).unwrap(),
+            user_id,
+            novel_id,
+            character_id,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn aggregate_envelope_size_is_bounded_before_deserialization() {
+        let user_id = Uuid::new_v4();
+        let novel_id = Uuid::new_v4();
+        let character_id = Uuid::new_v4();
+        let mut oversized =
+            serde_json::to_value(valid_envelope(user_id, novel_id, character_id)).unwrap();
+        oversized["padding"] = "密".repeat(MAX_CONTEXT_CHARS + 1).into();
+
+        assert!(decode_context(
+            &serde_json::to_vec(&oversized).unwrap(),
+            user_id,
+            novel_id,
+            character_id,
+        )
+        .is_err());
+    }
+
     #[test]
     fn world_context_scope_and_bounds_fail_closed() {
         let user_id = Uuid::new_v4();
         let novel_id = Uuid::new_v4();
         let character_id = Uuid::new_v4();
         let mut context = valid_context(user_id, novel_id, character_id);
-        validate_context(&context, user_id, novel_id, character_id).unwrap();
+        validate_world_context(&context, user_id, novel_id, character_id).unwrap();
         context.character_alive = false;
-        validate_context(&context, user_id, novel_id, character_id).unwrap();
+        validate_world_context(&context, user_id, novel_id, character_id).unwrap();
         context.character_id = Uuid::new_v4();
-        assert!(validate_context(&context, user_id, novel_id, character_id).is_err());
+        assert!(validate_world_context(&context, user_id, novel_id, character_id).is_err());
     }
 
     #[test]
@@ -309,10 +582,10 @@ mod tests {
             actor_character_ids: vec![Uuid::new_v4()],
             location_id: Some("elsewhere".into()),
         });
-        assert!(validate_context(&context, user_id, novel_id, character_id).is_err());
+        assert!(validate_world_context(&context, user_id, novel_id, character_id).is_err());
 
         context.recent_player_events[0].actor_character_ids = vec![character_id];
-        validate_context(&context, user_id, novel_id, character_id).unwrap();
+        validate_world_context(&context, user_id, novel_id, character_id).unwrap();
     }
 
     #[test]
@@ -328,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_context_with_unproven_future_fields_is_omitted() {
+    fn legacy_world_context_without_source_provenance_is_omitted_from_the_envelope() {
         let user_id = Uuid::new_v4();
         let novel_id = Uuid::new_v4();
         let character_id = Uuid::new_v4();
@@ -348,10 +621,19 @@ mod tests {
             reason: None,
         });
 
-        let body = serde_json::to_vec(&context).unwrap();
-        assert!(decode_context(&body, user_id, novel_id, character_id)
+        let envelope = CharacterContextEnvelope {
+            user_id,
+            novel_id,
+            character_id,
+            branch_context: Some(valid_branch(character_id)),
+            world_context: Some(context),
+        };
+        let body = serde_json::to_vec(&envelope).unwrap();
+        let decoded = decode_context(&body, user_id, novel_id, character_id)
             .unwrap()
-            .is_none());
+            .unwrap();
+        assert_eq!(decoded.branch_context, envelope.branch_context);
+        assert!(decoded.world_context.is_none());
     }
 
     #[test]
@@ -369,13 +651,13 @@ mod tests {
             },
         };
         context.recent_actions.push(action.clone());
-        validate_context(&context, user_id, novel_id, character_id).unwrap();
+        validate_world_context(&context, user_id, novel_id, character_id).unwrap();
 
         let private_intent = "PRIVATE-INTENT-PRETEND-TO-ALLY-THEN-BETRAY";
         let mut older_producer = serde_json::to_value(&context).unwrap();
         older_producer["recent_actions"][0]["action"]["intent"] = private_intent.into();
         let older_producer: CharacterWorldContext = serde_json::from_value(older_producer).unwrap();
-        validate_context(&older_producer, user_id, novel_id, character_id).unwrap();
+        validate_world_context(&older_producer, user_id, novel_id, character_id).unwrap();
         assert!(!serde_json::to_string(&older_producer)
             .unwrap()
             .contains(private_intent));
@@ -386,16 +668,16 @@ mod tests {
         assert!(legacy.recent_actions.is_empty());
 
         context.recent_actions = vec![action; MAX_RECENT_ACTIONS + 1];
-        assert!(validate_context(&context, user_id, novel_id, character_id).is_err());
+        assert!(validate_world_context(&context, user_id, novel_id, character_id).is_err());
         context.recent_actions.truncate(1);
         let duplicate = context.recent_actions[0].clone();
         context.recent_actions.push(duplicate.clone());
-        assert!(validate_context(&context, user_id, novel_id, character_id).is_err());
+        assert!(validate_world_context(&context, user_id, novel_id, character_id).is_err());
         context.recent_actions[1].turn_number = 2;
         context.turn_number = 2;
-        assert!(validate_context(&context, user_id, novel_id, character_id).is_err());
+        assert!(validate_world_context(&context, user_id, novel_id, character_id).is_err());
         context.recent_actions[1].turn_id = Uuid::new_v4();
-        validate_context(&context, user_id, novel_id, character_id).unwrap();
+        validate_world_context(&context, user_id, novel_id, character_id).unwrap();
     }
 
     #[test]
@@ -415,11 +697,11 @@ mod tests {
 
         for kind in ["converse", "ally", "oppose"] {
             context.recent_actions[0].action.kind = kind.into();
-            validate_context(&context, user_id, novel_id, character_id).unwrap();
+            validate_world_context(&context, user_id, novel_id, character_id).unwrap();
         }
 
         context.recent_actions[0].action.kind = "investigate".into();
-        assert!(validate_context(&context, user_id, novel_id, character_id).is_err());
+        assert!(validate_world_context(&context, user_id, novel_id, character_id).is_err());
         context.recent_actions[0].action.kind = "converse".into();
 
         for target_id in [
@@ -428,7 +710,7 @@ mod tests {
             Some(Uuid::from_u128(5).to_string()),
         ] {
             context.recent_actions[0].action.target_id = target_id;
-            assert!(validate_context(&context, user_id, novel_id, character_id).is_err());
+            assert!(validate_world_context(&context, user_id, novel_id, character_id).is_err());
         }
     }
 
@@ -468,7 +750,7 @@ mod tests {
                 origin: "canon".into(),
             })
             .collect();
-        assert!(serde_json::to_string(&context).unwrap().chars().count() > MAX_CONTEXT_CHARS);
-        assert!(validate_context(&context, user_id, novel_id, character_id).is_err());
+        assert!(serde_json::to_string(&context).unwrap().chars().count() > MAX_WORLD_CONTEXT_CHARS);
+        assert!(validate_world_context(&context, user_id, novel_id, character_id).is_err());
     }
 }

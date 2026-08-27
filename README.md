@@ -191,8 +191,12 @@ It is not autonomous server reconciliation.
 Successful removal of one novel from the current shelf clears only that
 user-and-novel pending record; a failed removal retains it, and records for
 other users or novels are untouched.
-Pre-open-world branch-to-chat continuity, exact chat/world revision provenance,
-visibility beyond explicit IDs, continuous-window selection under late memory compensation, live
+Before open-world entry, character chat now receives only the latest four committed
+branch-event summaries that explicitly list that character and remain inside the
+server reading boundary. The version-3 internal envelope keeps the existing
+version-2 world-context response compatible; unsupported peers add no branch
+context. Exact chat/world revision provenance, visibility beyond explicit IDs,
+continuous-window selection under late memory compensation, live
 provider/lifecycle evidence, and human accessibility qualification remain open
 H3/H4 work.
 

@@ -970,6 +970,31 @@ pub struct CharacterWorldContext {
     pub active_threads: Vec<ActiveThread>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CharacterBranchEvent {
+    pub chapter_number: i32,
+    pub summary: String,
+    pub actor_character_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CharacterBranchContext {
+    pub source_chapter_high_water: i32,
+    pub events: Vec<CharacterBranchEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CharacterContextEnvelope {
+    pub user_id: Uuid,
+    pub novel_id: Uuid,
+    pub character_id: Uuid,
+    pub branch_context: Option<CharacterBranchContext>,
+    pub world_context: Option<CharacterWorldContext>,
+}
+
 fn validate_world_state_checkpoint(
     world_state: &serde_json::Value,
     checkpoint_chapter: i32,

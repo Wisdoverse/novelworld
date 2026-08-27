@@ -16,9 +16,10 @@ use crate::domain::entities::narrative_node::{
 use crate::domain::entities::player_entity::PlayerEntity;
 use crate::domain::entities::world_session::{
     build_world_turn_prompt_with_check, parse_world_turn_transition_with_check, trailing_chars,
-    CharacterWorldContext, ObservedWorldAction, RecentWorldActionContext, RecentWorldTurnContext,
-    WorldAction, WorldActionKind, WorldSession, MAX_CHARACTER_RECENT_ACTIONS,
-    MAX_RECENT_WORLD_NARRATIVE_CHARS, MAX_RECENT_WORLD_TURNS,
+    CharacterBranchContext, CharacterBranchEvent, CharacterContextEnvelope, CharacterWorldContext,
+    ObservedWorldAction, RecentWorldActionContext, RecentWorldTurnContext, WorldAction,
+    WorldActionKind, WorldSession, MAX_CHARACTER_CONTEXT_TEXT_CHARS, MAX_CHARACTER_RECENT_ACTIONS,
+    MAX_CHARACTER_RECENT_EVENTS, MAX_RECENT_WORLD_NARRATIVE_CHARS, MAX_RECENT_WORLD_TURNS,
 };
 use crate::domain::ports::{AgentMemoryPort, DiceRollerPort, LlmPort, NarrativeLlmTask};
 use crate::domain::repositories::{
@@ -116,6 +117,58 @@ fn recent_character_actions(
     selected
 }
 
+fn recent_character_branch_context(
+    choices: &[UserChoiceRecord],
+    user_id: Uuid,
+    novel_id: Uuid,
+    character_id: Uuid,
+    current_chapter: i32,
+) -> Option<CharacterBranchContext> {
+    let mut visible = choices
+        .iter()
+        .filter(|choice| choice.user_id == user_id && choice.novel_id == novel_id)
+        .flat_map(|choice| {
+            choice
+                .transition
+                .events
+                .iter()
+                .enumerate()
+                .filter_map(move |(event_index, event)| {
+                    if !(1..=current_chapter).contains(&choice.chapter_number)
+                        || !event.actor_character_ids.contains(&character_id)
+                    {
+                        return None;
+                    }
+                    let summary =
+                        bounded_trimmed_chars(&event.summary, MAX_CHARACTER_CONTEXT_TEXT_CHARS)?;
+                    Some((choice.chapter_number, choice.id, event_index, summary))
+                })
+        })
+        .collect::<Vec<_>>();
+    visible.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    let discard = visible.len().saturating_sub(MAX_CHARACTER_RECENT_EVENTS);
+    visible.drain(..discard);
+
+    let source_chapter_high_water = visible.last().map(|event| event.0)?;
+    let events = visible
+        .into_iter()
+        .map(|(chapter_number, _, _, summary)| CharacterBranchEvent {
+            chapter_number,
+            summary,
+            actor_character_ids: vec![character_id],
+        })
+        .collect();
+    Some(CharacterBranchContext {
+        source_chapter_high_water,
+        events,
+    })
+}
+
 /// Deterministic protagonist pick: role 'protagonist', earliest first
 /// appearance, stable id tiebreak. Zero protagonists => None (caller skips).
 pub(crate) fn resolve_protagonist(characters: &[CharacterBrief]) -> Option<Uuid> {
@@ -186,9 +239,8 @@ fn leading_chars(value: &str, maximum: usize) -> String {
 }
 
 fn bounded_trimmed_chars(value: &str, maximum: usize) -> Option<String> {
-    let bounded = leading_chars(value, maximum);
-    let trimmed = bounded.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| leading_chars(trimmed, maximum))
 }
 
 fn add_journey_fact_section(
@@ -1185,6 +1237,75 @@ impl NarrativeCommandHandler {
             return Ok(None);
         }
         Ok(Some(fit_character_world_context(context)))
+    }
+
+    pub async fn get_character_context_envelope(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        character_id: Uuid,
+    ) -> NarrativeResult<Option<CharacterContextEnvelope>> {
+        self.owned_novel(novel_id, user_id).await?;
+        if !self.reader_identity_is_self(user_id, novel_id).await? {
+            return Ok(None);
+        }
+
+        let choices = self
+            .choice_repo
+            .find_by_novel(user_id, novel_id)
+            .await
+            .map_err(NarrativeError::Internal)?;
+        let state = self
+            .world_state_repo
+            .get_or_create(user_id, novel_id)
+            .await
+            .map_err(NarrativeError::Internal)?;
+        let mut world_context = state
+            .character_world_context(character_id)
+            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?;
+        if let Some(mut context) = world_context.take() {
+            let journal = self
+                .world_turn_repo
+                .journal(user_id, novel_id, MAX_WORLD_JOURNAL_ENTRIES)
+                .await
+                .map_err(NarrativeError::Internal)?;
+            context.recent_actions =
+                recent_character_actions(journal, character_id, context.turn_number);
+            world_context = Some(fit_character_world_context(context));
+        }
+
+        let progress = self
+            .chapter_repo
+            .get_reading_progress(novel_id, user_id)
+            .await
+            .map_err(NarrativeError::Unavailable)?;
+        if !progress.reader_identity_is_self {
+            return Ok(None);
+        }
+        if world_context
+            .as_ref()
+            .is_some_and(|context| context.source_chapter_high_water > progress.current_chapter)
+        {
+            world_context = None;
+        }
+        let branch_context = recent_character_branch_context(
+            &choices,
+            user_id,
+            novel_id,
+            character_id,
+            progress.current_chapter,
+        );
+        if branch_context.is_none() && world_context.is_none() {
+            return Ok(None);
+        }
+
+        Ok(Some(CharacterContextEnvelope {
+            user_id,
+            novel_id,
+            character_id,
+            branch_context,
+            world_context,
+        }))
     }
 
     async fn open_world_view(
@@ -2563,6 +2684,36 @@ mod timeline_tests {
         }
     }
 
+    fn branch_choice(
+        user_id: Uuid,
+        novel_id: Uuid,
+        chapter_number: i32,
+        events: Vec<crate::domain::services::narrative_transition::TransitionEvent>,
+    ) -> UserChoiceRecord {
+        UserChoiceRecord {
+            id: Uuid::new_v4(),
+            user_id,
+            novel_id,
+            node_id: Uuid::new_v4(),
+            chapter_number,
+            choice_index: 0,
+            choice_text: "PRIVATE_CHOICE_TEXT".into(),
+            consequence: "PRIVATE_CONSEQUENCE".into(),
+            transition: NarrativeTransition {
+                schema_version: 1,
+                prompt_version: "narrative-transition-v1".into(),
+                canon_model_version: 1,
+                canonical_checkpoint_chapter: chapter_number,
+                rendered_narrative: "PRIVATE_RENDERED_NARRATIVE".into(),
+                events,
+                relationship_changes: vec![],
+                location_changes: vec![],
+                thread_changes: vec![],
+            },
+            created_at: Utc::now(),
+        }
+    }
+
     fn assert_consumer_compatible_journey_fact(encoded: &str, character_id: Uuid) {
         assert!(encoded.chars().count() <= MAX_JOURNEY_MEMORY_EVENT_CHARS);
         let fact: serde_json::Value = serde_json::from_str(encoded).unwrap();
@@ -2633,6 +2784,130 @@ mod timeline_tests {
 
         let mapped = map_world_state_write_error(anyhow::anyhow!("database unavailable"));
         assert!(matches!(mapped, NarrativeError::Internal(_)));
+    }
+
+    #[test]
+    fn branch_context_is_scoped_bounded_and_explicit_actor_only() {
+        use crate::domain::services::narrative_transition::TransitionEvent;
+
+        let user_id = Uuid::new_v4();
+        let novel_id = Uuid::new_v4();
+        let character_id = Uuid::new_v4();
+        let unrelated_character_id = Uuid::new_v4();
+        let mut choices = (1..=6)
+            .map(|chapter_number| {
+                branch_choice(
+                    user_id,
+                    novel_id,
+                    chapter_number,
+                    vec![TransitionEvent {
+                        summary: if chapter_number == 6 {
+                            format!(
+                                "{}{}",
+                                " ".repeat(MAX_CHARACTER_CONTEXT_TEXT_CHARS + 20),
+                                "界".repeat(MAX_CHARACTER_CONTEXT_TEXT_CHARS + 20)
+                            )
+                        } else {
+                            format!("角色见证第 {chapter_number} 章")
+                        },
+                        actor_character_ids: vec![character_id, unrelated_character_id],
+                        location_id: Some("PRIVATE_LOCATION".into()),
+                    }],
+                )
+            })
+            .collect::<Vec<_>>();
+        choices.push(branch_choice(
+            user_id,
+            novel_id,
+            6,
+            vec![TransitionEvent {
+                summary: "PRIVATE_UNRELATED_EVENT".into(),
+                actor_character_ids: vec![unrelated_character_id],
+                location_id: None,
+            }],
+        ));
+        choices.push(branch_choice(
+            user_id,
+            novel_id,
+            7,
+            vec![TransitionEvent {
+                summary: "   \n\t".into(),
+                actor_character_ids: vec![character_id],
+                location_id: None,
+            }],
+        ));
+        choices.push(branch_choice(
+            Uuid::new_v4(),
+            novel_id,
+            7,
+            vec![TransitionEvent {
+                summary: "PRIVATE_OTHER_USER".into(),
+                actor_character_ids: vec![character_id],
+                location_id: None,
+            }],
+        ));
+
+        let context =
+            recent_character_branch_context(&choices, user_id, novel_id, character_id, 7).unwrap();
+
+        assert_eq!(context.source_chapter_high_water, 6);
+        assert_eq!(
+            context
+                .events
+                .iter()
+                .map(|event| event.chapter_number)
+                .collect::<Vec<_>>(),
+            vec![3, 4, 5, 6]
+        );
+        assert!(context.events.iter().all(|event| {
+            event.actor_character_ids == vec![character_id]
+                && event.summary.chars().count() <= MAX_CHARACTER_CONTEXT_TEXT_CHARS
+        }));
+        let encoded = serde_json::to_string(&context).unwrap();
+        for private in [
+            "PRIVATE_CHOICE_TEXT",
+            "PRIVATE_CONSEQUENCE",
+            "PRIVATE_RENDERED_NARRATIVE",
+            "PRIVATE_LOCATION",
+            "PRIVATE_UNRELATED_EVENT",
+            "PRIVATE_OTHER_USER",
+        ] {
+            assert!(!encoded.contains(private));
+        }
+    }
+
+    #[test]
+    fn branch_context_filters_future_events_using_final_progress() {
+        use crate::domain::services::narrative_transition::TransitionEvent;
+
+        let user_id = Uuid::new_v4();
+        let novel_id = Uuid::new_v4();
+        let character_id = Uuid::new_v4();
+        let choices = [2, 4]
+            .into_iter()
+            .map(|chapter_number| {
+                branch_choice(
+                    user_id,
+                    novel_id,
+                    chapter_number,
+                    vec![TransitionEvent {
+                        summary: format!("第 {chapter_number} 章事实"),
+                        actor_character_ids: vec![character_id],
+                        location_id: None,
+                    }],
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let rewound =
+            recent_character_branch_context(&choices, user_id, novel_id, character_id, 2).unwrap();
+        assert_eq!(rewound.source_chapter_high_water, 2);
+        assert_eq!(rewound.events.len(), 1);
+        assert_eq!(rewound.events[0].chapter_number, 2);
+        assert!(
+            recent_character_branch_context(&choices, user_id, novel_id, character_id, 1,)
+                .is_none()
+        );
     }
 
     #[test]

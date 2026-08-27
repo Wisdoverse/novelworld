@@ -18,11 +18,20 @@ use crate::application::handlers::{
     CreatePlayerEntityCommand, NarrativeCommandHandler, NarrativeError,
 };
 use crate::domain::entities::game_rules::PlayerRuleProfile;
-use crate::domain::entities::world_session::{CharacterWorldContext, WorldAction, WorldActionKind};
+use crate::domain::entities::world_session::{
+    CharacterContextEnvelope, CharacterWorldContext, WorldAction, WorldActionKind,
+};
 use crate::domain::ports::{AccountExportPort, ReadinessProbe};
 
 const WORLD_CONTEXT_VERSION_HEADER: &str = "X-World-Context-Version";
-const WORLD_CONTEXT_VERSION: &str = "2";
+const WORLD_CONTEXT_VERSION_V2: &str = "2";
+const WORLD_CONTEXT_VERSION_V3: &str = "3";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorldContextVersion {
+    V2,
+    V3,
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -117,19 +126,35 @@ async fn get_character_world_context(
     let Some(user_id) = extract_user_id(&headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    if !supports_world_context_v2(&headers) {
-        return StatusCode::NO_CONTENT.into_response();
+    match world_context_version(&headers) {
+        Some(WorldContextVersion::V2) => character_world_context_response(
+            state
+                .handler
+                .get_character_world_context(user_id, novel_id, character_id)
+                .await,
+        ),
+        Some(WorldContextVersion::V3) => character_context_envelope_response(
+            state
+                .handler
+                .get_character_context_envelope(user_id, novel_id, character_id)
+                .await,
+        ),
+        None => StatusCode::NO_CONTENT.into_response(),
     }
-    character_world_context_response(
-        state
-            .handler
-            .get_character_world_context(user_id, novel_id, character_id)
-            .await,
-    )
 }
 
 fn character_world_context_response(
     result: Result<Option<CharacterWorldContext>, NarrativeError>,
+) -> Response {
+    match result {
+        Ok(Some(context)) => (StatusCode::OK, Json(context)).into_response(),
+        Ok(None) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => narrative_error_response(error),
+    }
+}
+
+fn character_context_envelope_response(
+    result: Result<Option<CharacterContextEnvelope>, NarrativeError>,
 ) -> Response {
     match result {
         Ok(Some(context)) => (StatusCode::OK, Json(context)).into_response(),
@@ -654,11 +679,15 @@ fn internal_request_authorized(state: &AppState, headers: &HeaderMap) -> bool {
     internal_token_authorized(headers, state.internal_service_token.as_ref())
 }
 
-fn supports_world_context_v2(headers: &HeaderMap) -> bool {
-    headers
+fn world_context_version(headers: &HeaderMap) -> Option<WorldContextVersion> {
+    match headers
         .get(WORLD_CONTEXT_VERSION_HEADER)
         .and_then(|value| value.to_str().ok())
-        == Some(WORLD_CONTEXT_VERSION)
+    {
+        Some(WORLD_CONTEXT_VERSION_V2) => Some(WorldContextVersion::V2),
+        Some(WORLD_CONTEXT_VERSION_V3) => Some(WorldContextVersion::V3),
+        _ => None,
+    }
 }
 
 fn internal_token_authorized(headers: &HeaderMap, expected: &str) -> bool {
@@ -694,28 +723,42 @@ mod principal_contract_tests {
     }
 
     #[test]
-    fn world_context_version_gate_is_fail_closed_for_old_consumers() {
+    fn world_context_version_gate_supports_v2_and_v3_and_fails_closed_otherwise() {
         let mut headers = HeaderMap::new();
-        assert!(!supports_world_context_v2(&headers));
+        assert_eq!(world_context_version(&headers), None);
 
-        for unsupported in ["1", "3"] {
+        for unsupported in ["1", "4"] {
             headers.insert(
                 WORLD_CONTEXT_VERSION_HEADER,
                 HeaderValue::from_static(unsupported),
             );
-            assert!(!supports_world_context_v2(&headers));
+            assert_eq!(world_context_version(&headers), None);
         }
 
         headers.insert(
             WORLD_CONTEXT_VERSION_HEADER,
-            HeaderValue::from_static(WORLD_CONTEXT_VERSION),
+            HeaderValue::from_static(WORLD_CONTEXT_VERSION_V2),
         );
-        assert!(supports_world_context_v2(&headers));
+        assert_eq!(
+            world_context_version(&headers),
+            Some(WorldContextVersion::V2)
+        );
+        headers.insert(
+            WORLD_CONTEXT_VERSION_HEADER,
+            HeaderValue::from_static(WORLD_CONTEXT_VERSION_V3),
+        );
+        assert_eq!(
+            world_context_version(&headers),
+            Some(WorldContextVersion::V3)
+        );
     }
 
     #[test]
     fn absent_character_world_context_is_a_no_content_response() {
         let response = character_world_context_response(Ok(None));
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let response = character_context_envelope_response(Ok(None));
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
     }
 
