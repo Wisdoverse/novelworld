@@ -1,0 +1,390 @@
+{
+  "schema_version": 1,
+  "report_kind": "live-provider-baseline",
+  "evidence_class": "baseline",
+  "baseline_only": true,
+  "qualification_claim": false,
+  "evaluated_git_sha": "c13ffd9f9904c36ed3f7abf01d7d66160b7f15bd",
+  "evidence_commit": "the git commit containing this file",
+  "provider": {
+    "name": "deepseek",
+    "configured_model": "deepseek-v4-flash",
+    "response_models": [
+      "deepseek-v4-flash"
+    ],
+    "api_origin": "https://api.deepseek.com",
+    "product_thinking_enabled": true,
+    "schema_bound_evaluation_thinking_enabled": false
+  },
+  "policy_identity": {
+    "qualification": "private-preview-qualification-v1",
+    "extraction": "extraction-quality-v1",
+    "semantic": "h3-semantic-v1",
+    "llm_budget": "h3-llm-budget-v2",
+    "llm_metrics": "llm-observability-v1"
+  },
+  "environment": {
+    "deployment": "production-compose",
+    "network_bind": "loopback",
+    "cache_mode": "postgres",
+    "docker_server": "29.6.2|linux|amd64",
+    "docker_compose": "5.3.1",
+    "compose_sha256": "d8e21c893a02d535dae34c07be7c22cf4558c79b6a1651f034130e51559b62db",
+    "image_ids": {
+      "gateway": "sha256:5c800c299ac0f82bb977191c5fef3c26e6da7ef30ee6ec728958c43aa1327127",
+      "user_service": "sha256:b17fc0c64a218c16b99d2e85d5ea8960d7d6476c0434b95af5f03e512ef11b79",
+      "novel_service": "sha256:e1cc00f09da6adf9a0fc9569fafe755c6f6c03ee96ca1e8fbe18513e5c7f10b3",
+      "agent_service": "sha256:f6c0b16524a1ee6da4e3cc76998a9235f63b07da5f3a2ad8945bfb2d0e8907e6",
+      "narrative_service": "sha256:6f10a12ab8327afad32913b39121beac37304fe21c9a38fce65d54796347dd4b",
+      "frontend": "sha256:172267c64b7a8dab2d925b5db6067ac21f900b4d8e9c02682cc26d2894ed69da"
+    },
+    "isolated_cleanup_completed": true,
+    "existing_user_stack_unchanged": true
+  },
+  "product_attempts": [
+    {
+      "attempt": 1,
+      "evaluated_git_sha": "4406efde4d7c16b58363d0174d50f09e50746114",
+      "outcome": "failed",
+      "failure_stage": "branch_and_player_entry",
+      "failure_code": "unexpected_runner_failure",
+      "private_report_sha256": "8a41a7f3ddeb156694db3e66e5b248f19ffed602ec2961180fa41afeb335d205",
+      "private_metrics_sha256": [],
+      "metrics_retention": "not_available_in_runner_version",
+      "reported_isolated_cleanup_completed": false,
+      "existing_user_stack_unchanged": true
+    },
+    {
+      "attempt": 2,
+      "evaluated_git_sha": "d9ec68ef1fb6c66605060ce61a92179a33ea02e9",
+      "outcome": "failed",
+      "failure_stage": "branch_and_player_entry",
+      "failure_code": "branch_replay_mismatch",
+      "private_report_sha256": "5f0ffbfba02ae83bd271766349109026b0d26420aac5748b1c87aee800da3bd8",
+      "private_metrics_sha256": [],
+      "metrics_retention": "not_available_in_runner_version",
+      "reported_isolated_cleanup_completed": true,
+      "existing_user_stack_unchanged": true
+    },
+    {
+      "attempt": 3,
+      "evaluated_git_sha": "490da7d8d717c428527fef603c2adf96d5a14a1b",
+      "outcome": "failed",
+      "failure_stage": "cleanup",
+      "failure_code": "unexpected_cleanup_failure",
+      "provider_calls_started": false,
+      "private_report_sha256": "6f5004ef19b2b320e65b16caebd676dfb4ab86ea36785a192e0050cd5ec16def",
+      "private_metrics_sha256": [],
+      "metrics_retention": "not_applicable_preflight",
+      "reported_isolated_cleanup_completed": true,
+      "existing_user_stack_unchanged": null
+    },
+    {
+      "attempt": 4,
+      "evaluated_git_sha": "490da7d8d717c428527fef603c2adf96d5a14a1b",
+      "outcome": "failed",
+      "failure_stage": "twelve_turn_world_trajectory",
+      "failure_code": "http_502_llm_error",
+      "private_report_sha256": "f3c1e282fcbf7266cecb440f0bebc2970f29116547100acc4a2583cc3ef248d7",
+      "private_metrics_sha256": [],
+      "metrics_retention": "not_available_in_runner_version",
+      "reported_isolated_cleanup_completed": true,
+      "existing_user_stack_unchanged": true
+    },
+    {
+      "attempt": 5,
+      "evaluated_git_sha": "bb213aab6e58daf33d7b95ce70dbe1574828f94a",
+      "outcome": "failed",
+      "failure_stage": "branch_and_player_entry",
+      "failure_code": "http_502_llm_error",
+      "private_report_sha256": "444b793364c34f6029f8d2cffb0d9ec1570f658fbc35e040721035ad7198b83c",
+      "private_metrics_sha256": [],
+      "metrics_retention": "not_available_in_runner_version",
+      "reported_isolated_cleanup_completed": true,
+      "existing_user_stack_unchanged": true
+    },
+    {
+      "attempt": 6,
+      "evaluated_git_sha": "4f7a69e99b57f606ec15c3401db08d308713c0b8",
+      "outcome": "failed",
+      "failure_stage": "branch_and_player_entry",
+      "failure_code": "http_502_llm_error",
+      "private_report_sha256": "fd297718143f9469c05e21570c3ca4fff57dcc598996c3d9bde62308e3c397b8",
+      "private_metrics_sha256": [
+        "a8dd5bbacad21af11a05e46cfba4591f815d7fc15d10be360954bd0b5740ca03"
+      ],
+      "metrics_retention": "complete_for_failed_run",
+      "reported_isolated_cleanup_completed": true,
+      "existing_user_stack_unchanged": true
+    },
+    {
+      "attempt": 7,
+      "evaluated_git_sha": "6c001cb0e5e3c3c5746a7ea86b8b9a81cf3b9607",
+      "outcome": "failed",
+      "failure_stage": "twelve_turn_world_trajectory",
+      "failure_code": "character_visibility_window_invalid",
+      "private_report_sha256": "8dfe58c75cff35086178f9e38eb230a4e006a504087a447c948b040e7a888d80",
+      "private_metrics_sha256": [
+        "f24e98cdf5676850e6f6dedca475fb600a0b42ad198be637e50867dfea51ce33"
+      ],
+      "metrics_retention": "complete_for_failed_run",
+      "reported_isolated_cleanup_completed": true,
+      "existing_user_stack_unchanged": true
+    },
+    {
+      "attempt": 8,
+      "evaluated_git_sha": "c13ffd9f9904c36ed3f7abf01d7d66160b7f15bd",
+      "outcome": "completed",
+      "private_report_sha256": "5ec7fbf0024672138701fc8af2f43431b236d042fd48990094c6e47c9ca5c1c0",
+      "private_metrics_sha256": [
+        "7350a961cba89bed46dc3f4fdff14429c5bb8a122e0d61769a4d177972384108",
+        "54840b24ad80bbc64153df5a1415dddaccaa3ad8c0dc73416ff26e88b0fec46d"
+      ],
+      "metrics_retention": "complete_pre_and_post_restart",
+      "reported_isolated_cleanup_completed": true,
+      "existing_user_stack_unchanged": true
+    }
+  ],
+  "prior_live_evaluations": [
+    {
+      "evaluated_git_sha": "0d8dcbea405e0f78e0f2742b93f794b909f8f776",
+      "h1_passed": false,
+      "h3_passed": true
+    },
+    {
+      "evaluated_git_sha": "0de839d2770fa9591290939b69a3d92452b06bf8",
+      "h1_passed": false,
+      "h3_passed": true
+    },
+    {
+      "evaluated_git_sha": "20b07aa82739ec9ff7fc5af024ed13b1da698ecb",
+      "h1_passed": false,
+      "h3_passed": true
+    },
+    {
+      "evaluated_git_sha": "4406efde4d7c16b58363d0174d50f09e50746114",
+      "h1_passed": false,
+      "h3_passed": false,
+      "h3_hard_failures": [
+        "multi-turn-coherence-positive"
+      ]
+    }
+  ],
+  "final_product_journey": {
+    "completed_at": "2026-08-27T08:20:03.053837Z",
+    "outcome": "completed",
+    "source": {
+      "corpus_version": "h1-synthetic-v2",
+      "slice": "zh-utf8",
+      "corpus_sha256": "3443979c39886e2e58d8cc979a8978dea2e565957dde3749334b37ba9d0fc04f",
+      "source_sha256": "04ec6975c42ebdc7e9fc82dc10bbc5e4237ffaa7055149f2bd0b61689e7f80ea"
+    },
+    "import_status": "ready",
+    "chapters": 4,
+    "partial_persona_bounded": true,
+    "full_persona_source_high_water": 4,
+    "branch_committed": true,
+    "branch_replayed": true,
+    "branch_context_visible_to_witness": true,
+    "branch_chat_world_revision_exact": true,
+    "world_turns": 12,
+    "world_turn_replay_exact": true,
+    "total_chat_turns": 13,
+    "durable_chat_messages": 26,
+    "committed_world_memories": 12,
+    "mid_memory_windows": 1,
+    "character_recent_action_window": 4,
+    "unwitnessed_direct_action_window": 0,
+    "restart_world_replay": true,
+    "restart_chat_revision_exact": true,
+    "account_export_complete": true,
+    "account_erasure_private_rows": 0,
+    "deleted_reader_cannot_login": true,
+    "prompt_identity": {
+      "canon": "canon-chunk-v3",
+      "branch": "narrative-transition-v1",
+      "world": "world-turn-v2"
+    },
+    "llm_observations": {
+      "requests_started": 36,
+      "requests_success": 36,
+      "usage_reports_present": 36,
+      "logical_submission_retries": 1,
+      "input_tokens": 107692,
+      "cached_input_tokens": 23424,
+      "uncached_input_tokens": 84268,
+      "output_tokens": 17022,
+      "operations": {
+        "character_chat": 13,
+        "memory_summary": 1,
+        "branch_generation": 1,
+        "narrative_transition": 14,
+        "canon_extraction": 4,
+        "character_extraction": 1,
+        "narrative_node_detection": 1,
+        "setup_connection": 1
+      }
+    }
+  },
+  "h1_live": {
+    "completed_at": "2026-08-27T08:33:12.9020762Z",
+    "corpus_version": "h1-synthetic-v2",
+    "rubric_version": "h1-extraction-v1",
+    "sample_count": 6,
+    "thresholds": {
+      "coverage_percent": 80,
+      "precision_percent": 80,
+      "hallucination_max_percent": 20,
+      "chronology_violations_max": 0,
+      "provenance_percent": 100
+    },
+    "cases": [
+      {
+        "id": "zh-utf8",
+        "passed": false,
+        "failure": "judge_explanation_contract"
+      },
+      {
+        "id": "zh-gbk",
+        "passed": false,
+        "coverage_percent": {
+          "characters": 100,
+          "events": 0,
+          "relationships": 50,
+          "world_rules": 100
+        },
+        "precision_percent": 27,
+        "hallucination_percent": 73,
+        "chronology_violations": 0,
+        "provenance_percent": 100,
+        "failure": "extraction_quality_thresholds"
+      },
+      {
+        "id": "en-utf8",
+        "passed": false,
+        "failure": "judge_explanation_contract"
+      },
+      {
+        "id": "en-bom-utf16",
+        "passed": false,
+        "failure": "judge_explanation_contract"
+      },
+      {
+        "id": "zh-hostile",
+        "passed": false,
+        "coverage_percent": {
+          "characters": 100,
+          "events": 0,
+          "relationships": 0,
+          "world_rules": 0
+        },
+        "precision_percent": 25,
+        "hallucination_percent": 75,
+        "chronology_violations": 0,
+        "provenance_percent": 100,
+        "failure": "extraction_quality_thresholds"
+      },
+      {
+        "id": "zh-mixed-script",
+        "passed": true
+      }
+    ],
+    "hard_failures": [
+      "zh-utf8",
+      "zh-gbk",
+      "en-utf8",
+      "en-bom-utf16",
+      "zh-hostile"
+    ],
+    "llm_observations": {
+      "requests_started": 28,
+      "requests_success": 28,
+      "usage_reports_present": 28,
+      "retry_events": 1,
+      "retry_reason": "json_mode_fallback",
+      "input_tokens": 32189,
+      "cached_input_tokens": 23296,
+      "uncached_input_tokens": 8893,
+      "output_tokens": 26843,
+      "request_duration_seconds_count": 28,
+      "request_duration_seconds_sum": 157.725115375
+    },
+    "private_metrics_sha256": "97d42b4148258c152bdb6a0a8e3f725c3e86b5ec9087dc3bdf4fbef6655c75ed",
+    "passed": false
+  },
+  "h3_live": {
+    "completed_at": "2026-08-27T08:40:12.6920482Z",
+    "corpus_version": "h3-synthetic-v1",
+    "rubric_version": "h3-semantic-v1",
+    "sample_count": 24,
+    "thresholds": {
+      "classification_accuracy_basis_points": 1000,
+      "memory_f1_basis_points": 800,
+      "semantic_min_score": 4
+    },
+    "dimensions": {
+      "extraction_coverage": {
+        "samples": 3,
+        "observed_accuracy_basis_points": 1000
+      },
+      "chronology": {
+        "samples": 2,
+        "observed_accuracy_basis_points": 1000
+      },
+      "causal_consistency": {
+        "samples": 2,
+        "observed_accuracy_basis_points": 1000
+      },
+      "character_consistency": {
+        "samples": 2,
+        "observed_accuracy_basis_points": 1000
+      },
+      "spoiler_leakage": {
+        "samples": 7,
+        "observed_accuracy_basis_points": 1000
+      },
+      "memory_relevance": {
+        "samples": 4,
+        "observed_accuracy_basis_points": 1000
+      },
+      "multi_turn_coherence": {
+        "samples": 2,
+        "observed_accuracy_basis_points": 1000
+      },
+      "replay_determinism": {
+        "samples": 2,
+        "observed_accuracy_basis_points": 1000
+      }
+    },
+    "hard_failures": [],
+    "llm_observations": {
+      "requests_started": 8,
+      "requests_success": 8,
+      "usage_reports_present": 8,
+      "retry_events": 0,
+      "input_tokens": 1944,
+      "cached_input_tokens": 1024,
+      "uncached_input_tokens": 920,
+      "output_tokens": 644,
+      "request_duration_seconds_count": 8,
+      "request_duration_seconds_sum": 12.125498938
+    },
+    "private_metrics_sha256": "3ad57d95e919da39391a9a52eddbef7d9919cc6456f53a2a6819d4af33306645",
+    "passed": true
+  },
+  "privacy": {
+    "raw_artifacts_remain_private": true,
+    "contains_api_key": false,
+    "contains_prompt_or_model_prose": false,
+    "contains_novel_text": false,
+    "contains_user_or_resource_ids": false,
+    "contains_usage_key_fingerprint": false
+  },
+  "review": {
+    "human_quality_approval": false,
+    "same_provider_automated_judgment_is_supporting_evidence_only": true,
+    "disposition": "not_qualified",
+    "blocking_gate": "h1_live",
+    "blocking_reason": "Five of six H1 slices failed the frozen extraction-quality gate; three failed closed on the judge explanation contract and two missed extraction coverage, precision, and hallucination thresholds."
+  }
+}
