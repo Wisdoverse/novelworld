@@ -1263,6 +1263,14 @@ def main() -> int:
         except Exception:
             journey.report["failure"] = {"stage": journey.current_stage, "code": "unexpected_runner_failure"}
         finally:
+            if journey.stack_started and "llm_metrics" not in journey.report:
+                try:
+                    failure_metrics = journey.collect_metrics("failure")
+                    journey.report["llm_metrics"] = summarize_metrics(
+                        root, [("failure", failure_metrics)]
+                    )
+                except Exception:
+                    journey.report["llm_metrics_collection_failed"] = True
             try:
                 journey.cleanup()
             except Exception:
