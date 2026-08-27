@@ -5,7 +5,7 @@
   "baseline_only": true,
   "qualification_claim": false,
   "evaluated_git_sha": "ddefaa8c023019fb2cbf6b279444215795ef5f48",
-  "evidence_commit": "pending",
+  "evidence_commit": "db3122578ccc0c4e1ecaeeba2557aafdeaace91b",
   "provider": {
     "name": "deepseek",
     "configured_model": "deepseek-v4-flash",
