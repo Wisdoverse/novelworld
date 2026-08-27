@@ -4,8 +4,8 @@
   "evidence_class": "baseline",
   "baseline_only": true,
   "qualification_claim": false,
-  "evaluated_git_sha": "31e32d05ff41c4453892c9d3e599c07ad4c46fd3",
-  "evidence_commit": "52ab71083635eb44c4d802a34b231f2843da3297",
+  "evaluated_git_sha": "ddefaa8c023019fb2cbf6b279444215795ef5f48",
+  "evidence_commit": "pending",
   "provider": {
     "name": "deepseek",
     "configured_model": "deepseek-v4-flash",
@@ -31,12 +31,12 @@
     "docker_compose": "5.3.1",
     "compose_sha256": "d8e21c893a02d535dae34c07be7c22cf4558c79b6a1651f034130e51559b62db",
     "image_ids": {
-      "gateway": "sha256:26731af82d0b0c2c853a229a80e2ed41da6328aa0ef89ecf4196796d4873ac37",
-      "user_service": "sha256:716e8bfefc7b98e0d296573ed3037d2276c1f830479910b6c7a51d3f828b4ba9",
-      "novel_service": "sha256:9c71d6d9dfb9db2107a5f6a376e0e9be00b26b729f29f6a01d0daa801545af85",
-      "agent_service": "sha256:69977617fa86081b6ffbe6ba4f569579a3287da142a8ab07bb44b523d5d152dc",
-      "narrative_service": "sha256:bbd8998688d308185c9f79f7a9366219b3df9eeac74d682e47f7cd9103861d65",
-      "frontend": "sha256:23a366577015114c27894d7ea88b56263b8986f9606b3dec5625f2c6b26a3fb9"
+      "gateway": "sha256:744cc23e1d34242b517f4625dcf16f71eaa74354a50d59a22a7533cc31d59b36",
+      "user_service": "sha256:e7dcf0ed261e43588badca5e82d50561941688a34b34240cf2e8ea8551ffdd75",
+      "novel_service": "sha256:fb95f1810b7700e1372508257e1365450002b5baf89316fb1db4383096cfc331",
+      "agent_service": "sha256:6ac48b81ba2c09edc89222fc2f9cfa8fd575bd3edd581ce997cdeb34b6388fab",
+      "narrative_service": "sha256:ccefd854ba69cb68d06668bbd223a50ea328029b0464e10916607d11c44ffefe",
+      "frontend": "sha256:6af2727409f9d83f642433981f878a7c89d4631157f78d2e4f9fa132a9508d07"
     },
     "isolated_cleanup_completed": true,
     "existing_user_stack_unchanged": true
@@ -170,6 +170,33 @@
       "metrics_retention": "complete_pre_and_post_restart",
       "reported_isolated_cleanup_completed": true,
       "existing_user_stack_unchanged": true
+    },
+    {
+      "attempt": 11,
+      "evaluated_git_sha": "ddefaa8c023019fb2cbf6b279444215795ef5f48",
+      "outcome": "failed",
+      "failure_stage": "branch_and_player_entry",
+      "failure_code": "http_502_llm_error",
+      "private_report_sha256": "3d7ee6aed763c3eb47db9933c4818a3fdebf1844c46b65d3debeef5ffd7e1565",
+      "private_metrics_sha256": [
+        "228755fa903fdb59534c3e589286cc60b643860ac65ed638a380c745caa5bf71"
+      ],
+      "metrics_retention": "complete_for_failed_run",
+      "reported_isolated_cleanup_completed": true,
+      "existing_user_stack_unchanged": true
+    },
+    {
+      "attempt": 12,
+      "evaluated_git_sha": "ddefaa8c023019fb2cbf6b279444215795ef5f48",
+      "outcome": "completed",
+      "private_report_sha256": "316d70971212f0a051c76f11a706caadfff3a316c112539d8655e6acf3551a1c",
+      "private_metrics_sha256": [
+        "29bcb7efadfe075fc5d48d957d5b9c4d8c8f6cbe752137368f8b3aae5b28f872",
+        "d6826aa12df73c0748f99b7ae3e00227727855105dabbded50932cfaff718265"
+      ],
+      "metrics_retention": "complete_pre_and_post_restart",
+      "reported_isolated_cleanup_completed": true,
+      "existing_user_stack_unchanged": true
     }
   ],
   "prior_live_evaluations": [
@@ -200,10 +227,18 @@
       "evaluated_git_sha": "c13ffd9f9904c36ed3f7abf01d7d66160b7f15bd",
       "h1_passed": false,
       "h3_passed": true
+    },
+    {
+      "evaluated_git_sha": "31e32d05ff41c4453892c9d3e599c07ad4c46fd3",
+      "h1_passed": false,
+      "h3_passed": false,
+      "h3_hard_failures": [
+        "multi-turn-coherence-positive"
+      ]
     }
   ],
   "final_product_journey": {
-    "completed_at": "2026-08-27T09:38:56.619369Z",
+    "completed_at": "2026-08-27T10:20:33.92689Z",
     "outcome": "completed",
     "source": {
       "corpus_version": "h1-synthetic-v2",
@@ -238,20 +273,20 @@
       "world": "world-turn-v2"
     },
     "llm_observations": {
-      "requests_started": 35,
-      "requests_success": 35,
-      "usage_reports_present": 35,
-      "logical_submission_retries": 0,
-      "input_tokens": 99140,
-      "cached_input_tokens": 18944,
-      "uncached_input_tokens": 80196,
-      "output_tokens": 15694,
+      "requests_started": 41,
+      "requests_success": 41,
+      "usage_reports_present": 41,
+      "logical_submission_retries": 1,
+      "input_tokens": 108309,
+      "cached_input_tokens": 22912,
+      "uncached_input_tokens": 85397,
+      "output_tokens": 21093,
       "operations": {
         "character_chat": 13,
         "memory_summary": 1,
         "branch_generation": 1,
-        "narrative_transition": 13,
-        "canon_extraction": 4,
+        "narrative_transition": 18,
+        "canon_extraction": 5,
         "character_extraction": 1,
         "narrative_node_detection": 1,
         "setup_connection": 1
@@ -259,7 +294,7 @@
     }
   },
   "h1_live": {
-    "completed_at": "2026-08-27T09:44:10.5820554Z",
+    "completed_at": "2026-08-27T10:29:00.6813732Z",
     "corpus_version": "h1-synthetic-v2",
     "rubric_version": "h1-extraction-v1",
     "sample_count": 6,
@@ -274,17 +309,7 @@
       {
         "id": "zh-utf8",
         "passed": false,
-        "coverage_percent": {
-          "characters": 100,
-          "events": 0,
-          "relationships": 50,
-          "world_rules": 100
-        },
-        "precision_percent": 24,
-        "hallucination_percent": 76,
-        "chronology_violations": 0,
-        "provenance_percent": 100,
-        "failure": "extraction_quality_thresholds"
+        "failure": "judge_explanation_contract"
       },
       {
         "id": "zh-gbk",
@@ -292,11 +317,11 @@
         "coverage_percent": {
           "characters": 100,
           "events": 0,
-          "relationships": 0,
+          "relationships": 50,
           "world_rules": 100
         },
-        "precision_percent": 23,
-        "hallucination_percent": 77,
+        "precision_percent": 28,
+        "hallucination_percent": 72,
         "chronology_violations": 0,
         "provenance_percent": 100,
         "failure": "extraction_quality_thresholds"
@@ -309,7 +334,17 @@
       {
         "id": "en-bom-utf16",
         "passed": false,
-        "failure": "judge_explanation_contract"
+        "coverage_percent": {
+          "characters": 100,
+          "events": 0,
+          "relationships": 0,
+          "world_rules": 0
+        },
+        "precision_percent": 12,
+        "hallucination_percent": 88,
+        "chronology_violations": 0,
+        "provenance_percent": 100,
+        "failure": "extraction_quality_thresholds"
       },
       {
         "id": "zh-hostile",
@@ -320,8 +355,8 @@
           "relationships": 0,
           "world_rules": 0
         },
-        "precision_percent": 20,
-        "hallucination_percent": 80,
+        "precision_percent": 22,
+        "hallucination_percent": 78,
         "chronology_violations": 0,
         "provenance_percent": 100,
         "failure": "extraction_quality_thresholds"
@@ -342,19 +377,20 @@
       "requests_started": 28,
       "requests_success": 28,
       "usage_reports_present": 28,
-      "retry_events": 0,
-      "input_tokens": 30431,
+      "retry_events": 1,
+      "retry_reason": "json_mode_fallback",
+      "input_tokens": 31964,
       "cached_input_tokens": 24064,
-      "uncached_input_tokens": 6367,
-      "output_tokens": 24658,
+      "uncached_input_tokens": 7900,
+      "output_tokens": 26615,
       "request_duration_seconds_count": 28,
-      "request_duration_seconds_sum": 131.43258856
+      "request_duration_seconds_sum": 153.4131268
     },
-    "private_metrics_sha256": "baa4e689ef9a7f24976e52af45f21916055479cc9b3d86b4c00a371089ca3174",
+    "private_metrics_sha256": "824ca659eb1bf353b8195a7616c5e8a484145c17a42ba889ab23af124e8fffbe",
     "passed": false
   },
   "h3_live": {
-    "completed_at": "2026-08-27T09:46:16.2271263Z",
+    "completed_at": "2026-08-27T10:30:36.3132993Z",
     "corpus_version": "h3-synthetic-v1",
     "rubric_version": "h3-semantic-v1",
     "sample_count": 24,
@@ -390,21 +426,14 @@
       },
       "multi_turn_coherence": {
         "samples": 2,
-        "observed_accuracy_basis_points": 500
+        "observed_accuracy_basis_points": 1000
       },
       "replay_determinism": {
         "samples": 2,
         "observed_accuracy_basis_points": 1000
       }
     },
-    "hard_failures": [
-      {
-        "id": "multi-turn-coherence-positive",
-        "expected": true,
-        "observed": false,
-        "score_basis_points": 200
-      }
-    ],
+    "hard_failures": [],
     "llm_observations": {
       "requests_started": 8,
       "requests_success": 8,
@@ -413,12 +442,12 @@
       "input_tokens": 1944,
       "cached_input_tokens": 1024,
       "uncached_input_tokens": 920,
-      "output_tokens": 624,
+      "output_tokens": 670,
       "request_duration_seconds_count": 8,
-      "request_duration_seconds_sum": 8.019660003
+      "request_duration_seconds_sum": 12.8593661
     },
-    "private_metrics_sha256": "4dbba512eb517078dc8729bc42a33909a1a32397095469d1454b4a53c8e1e71c",
-    "passed": false
+    "private_metrics_sha256": "5ecd8f7119adc0d63d2d979d5b27b7a1b3cddca10c3b63b5c3dd41035a2403ca",
+    "passed": true
   },
   "privacy": {
     "raw_artifacts_remain_private": true,
@@ -433,9 +462,8 @@
     "same_provider_automated_judgment_is_supporting_evidence_only": true,
     "disposition": "not_qualified",
     "blocking_gates": [
-      "h1_live",
-      "h3_live"
+      "h1_live"
     ],
-    "blocking_reason": "Five of six H1 slices failed the frozen extraction-quality gate: three missed extraction coverage, precision, and hallucination thresholds, and two failed closed on the judge explanation contract. H3 also failed one of 24 samples because the positive multi-turn-coherence case scored below its frozen threshold."
+    "blocking_reason": "Five of six H1 slices failed the frozen extraction-quality gate: three missed extraction coverage, precision, and hallucination thresholds, and two failed closed on the judge explanation contract. H3 passed all 24 samples, but same-provider automated judgment remains supporting evidence only and human quality approval is absent."
   }
 }
