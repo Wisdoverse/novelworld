@@ -898,6 +898,12 @@ class Journey:
             )
             if character_id is None:
                 raise QualificationFailure("branch_has_no_protagonist_witness")
+            non_target_character_id = next(
+                (candidate for candidate in character_by_id if candidate != character_id),
+                None,
+            )
+            if non_target_character_id is None:
+                raise QualificationFailure("visibility_negative_character_missing")
             if any(
                 character.get("persona_source_chapter_high_water") != total_chapters
                 or "system_prompt" in character
@@ -1038,8 +1044,23 @@ class Journey:
                 raise QualificationFailure("journey_memory_trajectory_incomplete")
             final_context = self.internal_character_context(user_id, novel_id, character_id)
             recent_actions = (final_context.get("world_context") or {}).get("recent_actions", [])
-            if len(recent_actions) != 4 or any(action.get("target_id") != character_id for action in recent_actions):
+            if (
+                not 1 <= len(recent_actions) <= 4
+                or recent_actions[-1].get("turn_number") != 12
+                or any(
+                    action.get("action", {}).get("target_id") != character_id
+                    for action in recent_actions
+                )
+            ):
                 raise QualificationFailure("character_visibility_window_invalid")
+            non_target_context = self.internal_character_context(
+                user_id, novel_id, non_target_character_id
+            )
+            non_target_actions = (non_target_context.get("world_context") or {}).get(
+                "recent_actions", []
+            )
+            if non_target_actions:
+                raise QualificationFailure("unwitnessed_action_visible")
             self.report["journey"].update(
                 {
                     "world_turns": 12,
@@ -1048,6 +1069,7 @@ class Journey:
                     "mid_memory_windows": mid_count,
                     "committed_world_memories": permanent_count,
                     "character_recent_action_window": len(recent_actions),
+                    "unwitnessed_direct_action_window": len(non_target_actions),
                 }
             )
             if first_action is None or first_result is None:
