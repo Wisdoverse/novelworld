@@ -433,7 +433,6 @@ class Journey:
         self.port = reserve_port()
         self.api = f"http://127.0.0.1:{self.port}/api"
         self.compose_env: dict[str, str] = {}
-        self.env_file: Path | None = None
         self.stack_started = False
         self.current_stage = "preflight"
         self.user_stack_before: dict[str, str] = {}
@@ -501,7 +500,7 @@ class Journey:
         raise AssertionError("unreachable")
 
     def compose(self, *args: str, capture: bool = True, check: bool = True) -> str:
-        if self.env_file is None:
+        if not self.compose_env:
             raise QualificationFailure("compose_environment_missing")
         return run(
             [
@@ -509,8 +508,6 @@ class Journey:
                 "compose",
                 "--project-name",
                 self.project,
-                "--env-file",
-                str(self.env_file),
                 "-f",
                 str(self.root / "docker-compose.yml"),
                 *args,
@@ -521,7 +518,7 @@ class Journey:
             check=check,
         )
 
-    def prepare_compose(self, temporary: Path) -> None:
+    def prepare_compose(self) -> None:
         if not PROJECT_PATTERN.fullmatch(self.project):
             raise QualificationFailure("unsafe_compose_project")
         short_sha = self.git_sha[:12]
@@ -549,11 +546,6 @@ class Journey:
             "NARRATIVE_SERVICE_IMAGE": f"{self.project}-narrative-service:{short_sha}",
             "FRONTEND_IMAGE": f"{self.project}-frontend:{short_sha}",
         }
-        self.env_file = temporary / "compose.env"
-        self.env_file.write_text(
-            "".join(f"{key}={value}\n" for key, value in variables.items()),
-            encoding="utf-8",
-        )
         self.compose_env = {**os.environ, **variables, "DOCKER_BUILDKIT": "1"}
 
     def wait_gateway(self, attempts: int = 180) -> None:
@@ -670,8 +662,8 @@ class Journey:
         run(["docker", "restart", *names])
         self.wait_gateway()
 
-    def execute(self, temporary: Path) -> None:
-        self.prepare_compose(temporary)
+    def execute(self) -> None:
+        self.prepare_compose()
         self.user_stack_before = existing_stack_snapshot()
         self.report["environment"].update(
             {
@@ -1307,28 +1299,27 @@ def main() -> int:
         raise QualificationFailure("output_dir_must_be_outside_checkout")
     output.mkdir(parents=True, exist_ok=True)
     journey = Journey(root, args.config.resolve(), output, args.git_sha, args.keep_stack)
-    with tempfile.TemporaryDirectory(prefix="novelworld-live-") as directory:
-        try:
-            journey.execute(Path(directory))
-        except QualificationFailure as error:
-            journey.report["failure"] = {"stage": journey.current_stage, "code": error.code}
-        except Exception:
-            journey.report["failure"] = {"stage": journey.current_stage, "code": "unexpected_runner_failure"}
-        finally:
-            if journey.stack_started and "llm_metrics" not in journey.report:
-                try:
-                    failure_metrics = journey.collect_metrics("failure")
-                    journey.report["llm_metrics"] = summarize_metrics(
-                        root, [("failure", failure_metrics)]
-                    )
-                except Exception:
-                    journey.report["llm_metrics_collection_failed"] = True
+    try:
+        journey.execute()
+    except QualificationFailure as error:
+        journey.report["failure"] = {"stage": journey.current_stage, "code": error.code}
+    except Exception:
+        journey.report["failure"] = {"stage": journey.current_stage, "code": "unexpected_runner_failure"}
+    finally:
+        if journey.stack_started and "llm_metrics" not in journey.report:
             try:
-                journey.cleanup()
+                failure_metrics = journey.collect_metrics("failure")
+                journey.report["llm_metrics"] = summarize_metrics(
+                    root, [("failure", failure_metrics)]
+                )
             except Exception:
-                journey.report["outcome"] = "failed"
-                journey.report["failure"] = {"stage": "cleanup", "code": "unexpected_cleanup_failure"}
-            journey.write_report()
+                journey.report["llm_metrics_collection_failed"] = True
+        try:
+            journey.cleanup()
+        except Exception:
+            journey.report["outcome"] = "failed"
+            journey.report["failure"] = {"stage": "cleanup", "code": "unexpected_cleanup_failure"}
+        journey.write_report()
     return 0 if journey.report["outcome"] == "completed" else 1
 
 
