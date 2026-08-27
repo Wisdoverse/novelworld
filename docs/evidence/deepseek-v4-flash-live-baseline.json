@@ -5,7 +5,7 @@
   "baseline_only": true,
   "qualification_claim": false,
   "evaluated_git_sha": "c13ffd9f9904c36ed3f7abf01d7d66160b7f15bd",
-  "evidence_commit": "the git commit containing this file",
+  "evidence_commit": "65f835d4f15690d262548613e3b1af56cbfa60d8",
   "provider": {
     "name": "deepseek",
     "configured_model": "deepseek-v4-flash",
