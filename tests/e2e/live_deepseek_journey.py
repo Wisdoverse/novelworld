@@ -773,11 +773,13 @@ class Journey:
             )
 
         with self.stage("branch_and_player_entry"):
-            checkpoint = int(
-                self.db_scalar(
-                    f"SELECT MIN(chapter_number) FROM narrative_nodes WHERE user_id IS NULL AND novel_id = '{novel_id}'"
-                )
+            checkpoint_value = self.db_scalar(
+                "SELECT MIN(chapter_number) FROM chapters "
+                f"WHERE novel_id = '{novel_id}' AND is_key_node"
             )
+            if not checkpoint_value.isdigit():
+                raise QualificationFailure("canonical_key_node_missing")
+            checkpoint = int(checkpoint_value)
             if checkpoint < 1 or checkpoint >= total_chapters:
                 raise QualificationFailure("branch_checkpoint_unusable")
             request_no_content(
@@ -796,9 +798,15 @@ class Journey:
                 f"{self.api}/narrative/{novel_id}/player-entry?{urllib.parse.urlencode({'checkpoint_chapter': checkpoint})}",
                 token=token,
             )
-            if not entry.get("locations"):
+            locations = entry.get("locations")
+            if (
+                not isinstance(locations, list)
+                or not locations
+                or not isinstance(locations[0], dict)
+                or not isinstance(locations[0].get("id"), str)
+            ):
                 raise QualificationFailure("player_entry_has_no_location")
-            location_id = entry["locations"][0]["id"]
+            location_id = locations[0]["id"]
             player = request_json(
                 f"{self.api}/narrative/{novel_id}/player-entry",
                 method="PUT",
@@ -815,11 +823,14 @@ class Journey:
             if not player.get("player", {}).get("id"):
                 raise QualificationFailure("player_entry_not_committed")
             node = request_json(f"{self.api}/narrative/{novel_id}/{checkpoint}", token=token)
+            node_id = node.get("id")
+            if not isinstance(node_id, str):
+                raise QualificationFailure("canonical_branch_node_missing")
             choice = request_json(
                 f"{self.api}/narrative/choose",
                 method="POST",
                 token=token,
-                value={"novel_id": novel_id, "node_id": node["id"], "choice_index": 0},
+                value={"novel_id": novel_id, "node_id": node_id, "choice_index": 0},
                 timeout=600,
             )
             transition = choice.get("transition", {})
@@ -834,7 +845,7 @@ class Journey:
                 f"{self.api}/narrative/choose",
                 method="POST",
                 token=token,
-                value={"novel_id": novel_id, "node_id": node["id"], "choice_index": 0},
+                value={"novel_id": novel_id, "node_id": node_id, "choice_index": 0},
             )
             if branch_replay != choice:
                 raise QualificationFailure("branch_replay_mismatch")
@@ -1202,20 +1213,20 @@ def main() -> int:
         raise QualificationFailure("output_dir_must_be_outside_checkout")
     output.mkdir(parents=True, exist_ok=True)
     journey = Journey(root, args.config.resolve(), output, args.git_sha, args.keep_stack)
-    try:
-        with tempfile.TemporaryDirectory(prefix="novelworld-live-") as directory:
-            journey.execute(Path(directory))
-    except QualificationFailure as error:
-        journey.report["failure"] = {"stage": journey.current_stage, "code": error.code}
-    except Exception:
-        journey.report["failure"] = {"stage": journey.current_stage, "code": "unexpected_runner_failure"}
-    finally:
+    with tempfile.TemporaryDirectory(prefix="novelworld-live-") as directory:
         try:
-            journey.cleanup()
+            journey.execute(Path(directory))
+        except QualificationFailure as error:
+            journey.report["failure"] = {"stage": journey.current_stage, "code": error.code}
         except Exception:
-            journey.report["outcome"] = "failed"
-            journey.report["failure"] = {"stage": "cleanup", "code": "unexpected_cleanup_failure"}
-        journey.write_report()
+            journey.report["failure"] = {"stage": journey.current_stage, "code": "unexpected_runner_failure"}
+        finally:
+            try:
+                journey.cleanup()
+            except Exception:
+                journey.report["outcome"] = "failed"
+                journey.report["failure"] = {"stage": "cleanup", "code": "unexpected_cleanup_failure"}
+            journey.write_report()
     return 0 if journey.report["outcome"] == "completed" else 1
 
 
