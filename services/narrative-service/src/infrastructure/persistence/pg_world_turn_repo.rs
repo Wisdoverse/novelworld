@@ -93,7 +93,7 @@ impl From<WorldStateRow> for WorldState {
 }
 
 #[derive(Debug, FromRow)]
-struct JournalRow {
+pub(super) struct JournalRow {
     id: Uuid,
     turn_number: i64,
     memory_projection_status: String,
@@ -102,6 +102,26 @@ struct JournalRow {
     transition: serde_json::Value,
     created_at: DateTime<Utc>,
     completed_at: DateTime<Utc>,
+}
+
+impl TryFrom<JournalRow> for WorldTurnJournalEntry {
+    type Error = anyhow::Error;
+
+    fn try_from(row: JournalRow) -> Result<Self> {
+        Ok(Self {
+            turn_id: row.id,
+            turn_number: row.turn_number,
+            memory_projection_status: MemoryProjectionStatus::from_str(
+                &row.memory_projection_status,
+            )
+            .context("journal contains invalid memory projection status")?,
+            action: serde_json::from_value(row.action)?,
+            resolution: row.resolution.map(serde_json::from_value).transpose()?,
+            transition: serde_json::from_value(row.transition)?,
+            created_at: row.created_at,
+            completed_at: row.completed_at,
+        })
+    }
 }
 
 pub struct PgWorldTurnRepository {
@@ -585,23 +605,7 @@ impl WorldTurnRepository for PgWorldTurnRepository {
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter()
-            .map(|row| {
-                Ok(WorldTurnJournalEntry {
-                    turn_id: row.id,
-                    turn_number: row.turn_number,
-                    memory_projection_status: MemoryProjectionStatus::from_str(
-                        &row.memory_projection_status,
-                    )
-                    .context("journal contains invalid memory projection status")?,
-                    action: serde_json::from_value(row.action)?,
-                    resolution: row.resolution.map(serde_json::from_value).transpose()?,
-                    transition: serde_json::from_value(row.transition)?,
-                    created_at: row.created_at,
-                    completed_at: row.completed_at,
-                })
-            })
-            .collect()
+        rows.into_iter().map(TryInto::try_into).collect()
     }
 }
 

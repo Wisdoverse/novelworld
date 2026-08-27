@@ -187,7 +187,9 @@ also fenced by both initiating token and user; stale export bytes are dropped
 before inspection or download. An `auth_token` change from another tab clears
 this tab's query/chat state and reloads it for authoritative re-authentication
 before private UI can continue.
-It is not autonomous server reconciliation.
+Separately, Narrative performs a bounded, oldest-first reconciliation scan for
+committed `pending` projections, so recovery does not depend on the browser
+retaining the key; the browser record remains the immediate same-tab path.
 Successful removal of one novel from the current shelf clears only that
 user-and-novel pending record; a failed removal retains it, and records for
 other users or novels are untouched.
@@ -195,8 +197,13 @@ Before open-world entry, character chat now receives only the latest four commit
 branch-event summaries that explicitly list that character and remain inside the
 server reading boundary. The version-3 internal envelope keeps the existing
 version-2 world-context response compatible; unsupported peers add no branch
-context. Exact chat/world revision provenance, visibility beyond explicit IDs,
-continuous-window selection under late memory compensation, live
+context. Version 4 adds a 32-byte causal world revision from the same Narrative
+snapshot; every new Agent claim persists it and rechecks it after provider
+generation, so a branch or world commit during generation leaves zero durable
+chat messages and no completion event. The final Narrative read and Agent commit
+remain separate service transactions and do not claim cross-service
+linearizability. Visibility beyond explicit IDs, continuous-window selection
+under late memory compensation, live
 provider/lifecycle evidence, and human accessibility qualification remain open
 H3/H4 work.
 
@@ -219,7 +226,7 @@ start.cmd
 On Linux, install Docker Engine and Docker Compose v2, then run:
 
 ```bash
-git clone https://github.com/schorsch888/novelworld.git
+git clone https://github.com/Wisdoverse/novelworld.git
 cd novelworld
 ./start.sh
 ```
@@ -228,16 +235,19 @@ Keep the default preview on localhost. Remote access requires an
 operator-managed encrypted tunnel or TLS boundary; the current stack is not
 qualified for direct public-Internet hosting.
 
-Application-semantic migrations 0021 and 0024 use a maintenance window: the
+Application-semantic migrations 0021, 0024, and 0025 use a maintenance window: the
 managed release path stops the old Narrative producer before exposing candidate
 client assets, verifies that world actions fail with a retryable `5xx` while
 preserving their recovery key, then stops old Novel and Agent processes before
 migrating. Zero-downtime world actions are not claimed.
 An installation running older release tooling must first activate a
-control-only release containing the new release script but neither barrier,
-then use that script for the migration release. New-script adoption requires a
-target containing both barriers; upgrade, marked restore, and rollback refuse a
-schema downgrade across either one. A durable schema-transition manifest is written
+control-only release containing the new release script and every barrier already
+present in its active release, while omitting only barriers not yet applied. For a
+post-0024 installation adopting 0025, that control-only release therefore retains
+0021 and 0024 and omits 0025; the next release adds 0025 with its matching services.
+New-script initial adoption requires a target containing all three barriers;
+upgrade, marked restore, and rollback refuse a
+schema downgrade across any of them. A durable schema-transition manifest is written
 only immediately before the migrator runs and is cleared only after release
 state promotion. Normal restore and healthy rollback discard any unmarked
 candidate before writing that exact marker, then use the same finalization
@@ -251,7 +261,7 @@ directory entry. A legacy `rollback.pending` pair is still recovered for
 compatibility, but new rollback operations use the schema-transition protocol.
 Merely
 downloading a candidate cannot block restoration of the current release. Any
-marked transition rolls the exact marked manifest forward; a 0021/0024
+marked transition rolls the exact marked manifest forward; a 0021/0024/0025
 transition therefore never revives the older writer or reader. Recovery is idempotent even when the
 downloaded candidate file is gone, and promotes it only after health succeeds.
 An interrupted upgrade preserves the former
@@ -301,10 +311,10 @@ data, and generated secrets stay on the player's computer in the operating
 system's per-user application data directory. AI features require Internet
 access to the configured model provider and an API key only when they are used.
 Desktop startup stops its named embedded database, refuses occupied service
-ports, applies every embedded migration through 0024, and only then starts the
+ports, applies every embedded migration through 0025, and only then starts the
 five services; the migration therefore runs without an old local writer.
 Desktop archives are experimental and forward-migration-only: do not reuse a
-post-0024 application-data directory with an older archive. Older binaries do
+post-0025 application-data directory with an older archive. Older binaries do
 not contain the current downgrade guard.
 
 The current artifacts are unsigned engineering builds. Windows SmartScreen and

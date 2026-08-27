@@ -18,7 +18,10 @@ const MAX_BRANCH_EVENTS: usize = 4;
 const MAX_BRANCH_EVENT_SUMMARY_CHARS: usize = 256;
 const MAX_RECENT_ACTIONS: usize = 4;
 const WORLD_CONTEXT_VERSION_HEADER: &str = "X-World-Context-Version";
-const WORLD_CONTEXT_VERSION: &str = "3";
+const WORLD_CONTEXT_VERSION: &str = "4";
+
+// A context read is one bounded GET with no inline retry. Failure ends the
+// current attempt; an exact-key reclaim captures a fresh revision.
 
 pub struct NarrativeServiceClient {
     client: Client,
@@ -151,7 +154,6 @@ fn validate_envelope(
     character_id: Uuid,
 ) -> Result<()> {
     validate_envelope_scope(envelope, user_id, novel_id, character_id)?;
-    ensure!(envelope.branch_context.is_some() || envelope.world_context.is_some());
     if let Some(branch) = &envelope.branch_context {
         validate_branch_context(branch, character_id)?;
     }
@@ -371,13 +373,14 @@ mod tests {
             user_id,
             novel_id,
             character_id,
+            world_revision: [7; 32],
             branch_context: Some(valid_branch(character_id)),
             world_context: Some(valid_context(user_id, novel_id, character_id)),
         }
     }
 
     #[test]
-    fn v3_envelope_decodes_bounded_branch_and_world_context() {
+    fn v4_envelope_decodes_bounded_branch_and_world_context() {
         let user_id = Uuid::new_v4();
         let novel_id = Uuid::new_v4();
         let character_id = Uuid::new_v4();
@@ -395,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_or_legacy_only_v3_envelope_fails_closed() {
+    fn revision_only_v4_envelope_is_valid_but_legacy_world_context_is_omitted() {
         let user_id = Uuid::new_v4();
         let novel_id = Uuid::new_v4();
         let character_id = Uuid::new_v4();
@@ -403,30 +406,37 @@ mod tests {
             user_id,
             novel_id,
             character_id,
+            world_revision: [9; 32],
             branch_context: None,
             world_context: None,
         };
-        assert!(decode_context(
-            &serde_json::to_vec(&empty).unwrap(),
-            user_id,
-            novel_id,
-            character_id,
-        )
-        .is_err());
+        assert_eq!(
+            decode_context(
+                &serde_json::to_vec(&empty).unwrap(),
+                user_id,
+                novel_id,
+                character_id,
+            )
+            .unwrap(),
+            Some(empty.clone())
+        );
 
         let mut legacy_world = valid_context(user_id, novel_id, character_id);
         legacy_world.source_chapter_high_water = None;
         let legacy_only = CharacterContextEnvelope {
             world_context: Some(legacy_world),
-            ..empty
+            ..empty.clone()
         };
-        assert!(decode_context(
-            &serde_json::to_vec(&legacy_only).unwrap(),
-            user_id,
-            novel_id,
-            character_id,
-        )
-        .is_err());
+        assert_eq!(
+            decode_context(
+                &serde_json::to_vec(&legacy_only).unwrap(),
+                user_id,
+                novel_id,
+                character_id,
+            )
+            .unwrap(),
+            Some(empty)
+        );
     }
 
     #[test]
@@ -537,6 +547,32 @@ mod tests {
     }
 
     #[test]
+    fn missing_or_non_32_byte_revision_fails_closed() {
+        let user_id = Uuid::new_v4();
+        let novel_id = Uuid::new_v4();
+        let character_id = Uuid::new_v4();
+        let mut value =
+            serde_json::to_value(valid_envelope(user_id, novel_id, character_id)).unwrap();
+        value.as_object_mut().unwrap().remove("world_revision");
+        assert!(decode_context(
+            &serde_json::to_vec(&value).unwrap(),
+            user_id,
+            novel_id,
+            character_id,
+        )
+        .is_err());
+
+        value["world_revision"] = serde_json::json!([1, 2, 3]);
+        assert!(decode_context(
+            &serde_json::to_vec(&value).unwrap(),
+            user_id,
+            novel_id,
+            character_id,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn aggregate_envelope_size_is_bounded_before_deserialization() {
         let user_id = Uuid::new_v4();
         let novel_id = Uuid::new_v4();
@@ -625,6 +661,7 @@ mod tests {
             user_id,
             novel_id,
             character_id,
+            world_revision: [7; 32],
             branch_context: Some(valid_branch(character_id)),
             world_context: Some(context),
         };

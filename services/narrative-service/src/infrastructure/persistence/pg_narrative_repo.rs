@@ -126,7 +126,7 @@ impl NarrativeNodeRepository for PgNarrativeNodeRepository {
 // ─── UserChoice persistence ─────────────────────────────────────────────────
 
 #[derive(Debug, FromRow)]
-struct UserChoiceRow {
+pub(super) struct UserChoiceRow {
     id: Uuid,
     user_id: Uuid,
     novel_id: Uuid,

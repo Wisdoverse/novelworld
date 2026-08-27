@@ -18,6 +18,7 @@ pub struct ChatTurnClaim {
     pub reader_identity_type: String,
     pub reader_character_id: Option<Uuid>,
     pub deviation_mode: String,
+    pub world_revision: [u8; 32],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
