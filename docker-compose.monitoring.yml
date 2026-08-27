@@ -6,7 +6,7 @@
 services:
   prometheus:
     image: prom/prometheus@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996
-    container_name: novel-prometheus
+    container_name: ${CONTAINER_PREFIX:-novel}-prometheus
     volumes:
       - ./infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./infra/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
@@ -21,7 +21,7 @@ services:
 
   grafana:
     image: grafana/grafana@sha256:62d2b9d20a19714ebfe48d1bb405086081bc602aa053e28cf6d73c7537640dfb
-    container_name: novel-grafana
+    container_name: ${CONTAINER_PREFIX:-novel}-grafana
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set for the monitoring profile}
       GF_AUTH_ANONYMOUS_ENABLED: "false"

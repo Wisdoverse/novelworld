@@ -139,6 +139,8 @@ jobs:
             --metrics tools/llm-budget/recorded-release.prom \
             --commit "$GITHUB_SHA" > /tmp/llm-budget-b.json
           cmp /tmp/llm-budget-a.json /tmp/llm-budget-b.json
+      - name: Live qualification runner contract
+        run: python3 tests/e2e/live_deepseek_journey.py --self-test
       - name: Horizon 5 capacity policy contract
         run: python3 tools/capacity/run.py --self-test
       - name: Test

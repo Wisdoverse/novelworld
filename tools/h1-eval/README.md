@@ -38,6 +38,14 @@ LLM_MODEL=gpt-4o-mini \
 cargo run -p h1-eval -- --live --git-sha "$(git rev-parse HEAD)"
 ```
 
+Live baseline runs may add `--metrics-output <path>` to retain the existing
+`llm-observability-v1` counters and latency summaries, including failed
+attempts and retries. The path is live-only, and the report records
+`thinking_enabled: false` because these schema-bound JSON calls deliberately
+disable DeepSeek thinking. Raw metrics contain a stable usage-key fingerprint;
+keep them in the private evidence directory and commit only the sanitized
+aggregate produced for the reviewed evidence package.
+
 Both modes fail closed on malformed corpus data, threshold drift from the
 policy, missing judge categories, a non-commit SHA, a dirty checkout, or a
 provider that violates the extraction schema. Reports record corpus/rubric

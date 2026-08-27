@@ -41,6 +41,39 @@ deterministic test provider and recorded fixtures never satisfy the
 `configured provider/model` identity that Baseline and Qualification evidence
 require.
 
+### DeepSeek v4 Flash baseline entrypoint
+
+The baseline runner requires a clean commit and an operator-owned JSON file
+outside the checkout with exactly `provider`, `api_url`, `model`,
+`thinking_enabled`, and `api_key`. The accepted slice is `deepseek`,
+`https://api.deepseek.com`, `deepseek-v4-flash`, with product thinking enabled.
+Keep the file readable only by the operator and invoke:
+
+```bash
+tests/e2e/live_deepseek_journey.sh \
+  --config /private/path/deepseek.json \
+  --output-dir /private/path/novelworld-baseline \
+  --git-sha "$(git rev-parse HEAD)"
+```
+
+The runner creates a unique Compose project, container prefix, volumes,
+loopback port, and local image tags; it never joins or restarts the default
+`novel-*` deployment and verifies that deployment's container identities and
+restart counters are unchanged. It uses PostgreSQL authority without Redis or
+S3, completes the ordinary-reader journey, and removes only its isolated
+Compose volumes on exit. Its raw Prometheus files contain a stable usage-key
+fingerprint and remain private; only the sanitized aggregate report is eligible
+for review or commit.
+
+Run H1 and H3 live evaluation separately at the same clean commit with their
+documented `--metrics-output` option. The resulting reports identify returned
+models and force `thinking_enabled: false` for schema-bound JSON calls. A later
+evidence commit records the immutable reports, so `evaluated_git_sha` identifies
+the code that ran while `evidence_commit` identifies the commit that packages
+that evidence; they cannot be the same self-referential value. This entrypoint
+creates baseline evidence only and does not supply the separate threshold or
+human-quality approval required for Qualification.
+
 ## Existing evidence packages
 
 | Package | Current use | Explicit limit |

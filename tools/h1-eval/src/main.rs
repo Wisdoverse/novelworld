@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     env,
+    path::PathBuf,
     process::Command,
 };
 
@@ -333,6 +334,8 @@ struct EvalReport {
     mode: String,
     provider: String,
     model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_enabled: Option<bool>,
     response_models: Vec<String>,
     sample_count: usize,
     thresholds: Thresholds,
@@ -361,10 +364,16 @@ struct CaseReport {
     error: Option<String>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Mode {
     Recorded,
     Live,
+}
+
+struct Args {
+    mode: Mode,
+    git_sha: String,
+    metrics_output: Option<PathBuf>,
 }
 
 impl Mode {
@@ -385,11 +394,21 @@ struct RunConfig {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let (mode, git_sha) = parse_args()?;
-    validate_checkout(&git_sha)?;
+    let args = parse_args()?;
+    validate_checkout(&args.git_sha)?;
     let corpus = load_corpus()?;
-    let config = run_config(mode)?;
-    let report = evaluate(&corpus, &config, git_sha).await?;
+    let config = run_config(args.mode)?;
+    let metrics = args
+        .metrics_output
+        .as_ref()
+        .map(|_| llm_client::install_metrics("h1-eval"))
+        .transpose()?;
+    let outcome = evaluate(&corpus, &config, args.git_sha).await;
+    if let (Some(path), Some(handle)) = (args.metrics_output, metrics) {
+        std::fs::write(&path, handle.render())
+            .with_context(|| format!("cannot write live metrics to {}", path.display()))?;
+    }
+    let report = outcome?;
     println!("{}", serde_json::to_string_pretty(&report)?);
     if !report.passed {
         bail!("extraction-quality evaluation gate failed");
@@ -397,10 +416,15 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn parse_args() -> Result<(Mode, String)> {
+fn parse_args() -> Result<Args> {
+    parse_args_from(env::args().skip(1))
+}
+
+fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args> {
     let mut mode = None;
     let mut git_sha = None;
-    let mut args = env::args().skip(1);
+    let mut metrics_output = None;
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--recorded" if mode.is_none() => mode = Some(Mode::Recorded),
@@ -408,13 +432,31 @@ fn parse_args() -> Result<(Mode, String)> {
             "--git-sha" if git_sha.is_none() => {
                 git_sha = Some(args.next().context("--git-sha requires a value")?)
             }
-            _ => bail!("usage: h1-eval (--recorded | --live) --git-sha <40-hex-sha>"),
+            "--metrics-output" if metrics_output.is_none() => {
+                metrics_output = Some(PathBuf::from(
+                    args.next().context("--metrics-output requires a value")?,
+                ))
+            }
+            _ => bail!(
+                "usage: h1-eval (--recorded | --live) --git-sha <40-hex-sha> [--metrics-output <path>]"
+            ),
         }
     }
-    Ok((
-        mode.context("--recorded or --live is required")?,
-        git_sha.context("--git-sha is required")?,
-    ))
+    let mode = mode.context("--recorded or --live is required")?;
+    if matches!(mode, Mode::Recorded) && metrics_output.is_some() {
+        bail!("--metrics-output is available only in live mode");
+    }
+    if metrics_output
+        .as_ref()
+        .is_some_and(|path| path.as_os_str().is_empty())
+    {
+        bail!("--metrics-output must not be empty");
+    }
+    Ok(Args {
+        mode,
+        git_sha: git_sha.context("--git-sha is required")?,
+        metrics_output,
+    })
 }
 
 fn validate_checkout(git_sha: &str) -> Result<()> {
@@ -857,6 +899,7 @@ async fn evaluate(corpus: &Corpus, config: &RunConfig, git_sha: String) -> Resul
         mode: config.mode.as_str().into(),
         provider: config.provider.clone(),
         model: config.model.clone(),
+        thinking_enabled: matches!(config.mode, Mode::Live).then_some(false),
         response_models: response_models.into_iter().collect(),
         sample_count: cases.len(),
         thresholds: corpus.thresholds,
@@ -1931,6 +1974,35 @@ mod tests {
         let report = evaluate(&corpus, &config, "0".repeat(40)).await.unwrap();
         assert!(report.passed, "hard failures: {:?}", report.hard_failures);
         assert!(report.cases.iter().all(|case| case.passed));
+        assert!(!serde_json::to_value(report)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("thinking_enabled"));
+    }
+
+    #[test]
+    fn metrics_output_is_live_only() {
+        let sha = "0".repeat(40);
+        assert!(parse_args_from([
+            "--recorded".into(),
+            "--git-sha".into(),
+            sha.clone(),
+            "--metrics-output".into(),
+            "metrics.prom".into(),
+        ])
+        .is_err());
+
+        let args = parse_args_from([
+            "--live".into(),
+            "--git-sha".into(),
+            sha,
+            "--metrics-output".into(),
+            "metrics.prom".into(),
+        ])
+        .unwrap();
+        assert_eq!(args.mode, Mode::Live);
+        assert_eq!(args.metrics_output, Some(PathBuf::from("metrics.prom")));
     }
 
     #[test]
