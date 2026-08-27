@@ -1906,8 +1906,9 @@ fn require_exact_tokens<'a>(
     let expected = (0..expected_len)
         .map(|index| fact_token(prefix, index))
         .collect::<BTreeSet<_>>();
-    let actual = actual.map(str::to_owned).collect::<BTreeSet<_>>();
-    if actual != expected {
+    let actual = actual.map(str::to_owned).collect::<Vec<_>>();
+    let actual_tokens = actual.iter().cloned().collect::<BTreeSet<_>>();
+    if actual.len() != expected_len || actual_tokens != expected {
         bail!("judge {name} tokens do not exactly cover input facts");
     }
     Ok(())
@@ -2176,6 +2177,18 @@ mod tests {
             "expected-character",
             2,
             ["expected-character-0", "expected-character-0"].into_iter(),
+        )
+        .is_err());
+        assert!(require_exact_tokens(
+            "characters",
+            "expected-character",
+            2,
+            [
+                "expected-character-0",
+                "expected-character-1",
+                "expected-character-1",
+            ]
+            .into_iter(),
         )
         .is_err());
     }
