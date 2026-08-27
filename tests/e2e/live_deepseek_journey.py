@@ -74,6 +74,18 @@ def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def choice_replay_projection(value: Any) -> dict[str, Any]:
+    world_state = value.get("world_state") if isinstance(value, dict) else None
+    if not isinstance(world_state, dict) or not isinstance(world_state.get("updated_at"), str):
+        raise QualificationFailure("branch_world_state_invalid")
+    return {
+        **value,
+        "world_state": {
+            key: item for key, item in world_state.items() if key != "updated_at"
+        },
+    }
+
+
 def run(
     args: list[str],
     *,
@@ -847,7 +859,7 @@ class Journey:
                 token=token,
                 value={"novel_id": novel_id, "node_id": node_id, "choice_index": 0},
             )
-            if branch_replay != choice:
+            if choice_replay_projection(branch_replay) != choice_replay_projection(choice):
                 raise QualificationFailure("branch_replay_mismatch")
             self.report["journey"].update(
                 {"branch_committed": True, "branch_replayed": True, "branch_checkpoint": checkpoint}
@@ -1180,6 +1192,17 @@ def self_test(root: Path) -> None:
         assert "usage_key" not in encoded
         assert summary["counter_totals"]
         assert PROJECT_PATTERN.fullmatch("nwq-0123456789")
+        committed = {
+            "chapter_number": 1,
+            "world_state": {"state": {"choices": [1]}, "updated_at": "first"},
+        }
+        replayed = {
+            "chapter_number": 1,
+            "world_state": {"state": {"choices": [1]}, "updated_at": "replayed"},
+        }
+        assert choice_replay_projection(committed) == choice_replay_projection(replayed)
+        replayed["world_state"]["state"]["choices"].append(2)
+        assert choice_replay_projection(committed) != choice_replay_projection(replayed)
     print("live DeepSeek journey self-test passed")
 
 
