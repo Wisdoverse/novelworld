@@ -118,6 +118,31 @@ pub trait LoreContextPort: Send + Sync {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CharacterContextEnvelope {
+    pub user_id: Uuid,
+    pub novel_id: Uuid,
+    pub character_id: Uuid,
+    pub branch_context: Option<CharacterBranchContext>,
+    pub world_context: Option<CharacterWorldContext>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CharacterBranchContext {
+    pub source_chapter_high_water: i32,
+    pub events: Vec<CharacterBranchEvent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CharacterBranchEvent {
+    pub chapter_number: i32,
+    pub summary: String,
+    pub actor_character_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CharacterWorldContext {
     pub user_id: Uuid,
     pub novel_id: Uuid,
@@ -211,5 +236,5 @@ pub trait WorldContextPort: Send + Sync {
         novel_id: Uuid,
         character_id: Uuid,
         user_id: Uuid,
-    ) -> Result<Option<CharacterWorldContext>>;
+    ) -> Result<Option<CharacterContextEnvelope>>;
 }
