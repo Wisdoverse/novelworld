@@ -210,7 +210,7 @@ impl RuntimeLlmClient {
     }
 
     pub async fn json_chat(&self, operation: crate::LlmOperation, prompt: &str) -> Result<String> {
-        self.chat(json_request(operation, prompt))
+        self.chat(production_json_request(operation, prompt))
             .await
             .map(|response| response.content)
     }
@@ -221,7 +221,7 @@ impl RuntimeLlmClient {
         operation: crate::LlmOperation,
         prompt: &str,
     ) -> Result<String> {
-        self.chat(json_request(operation, prompt).runtime_user_id(runtime_user_id))
+        self.chat(production_json_request(operation, prompt).runtime_user_id(runtime_user_id))
             .await
             .map(|response| response.content)
     }
@@ -252,7 +252,11 @@ fn longform_request(operation: crate::LlmOperation, system: &str, user: &str) ->
         .thinking(false)
 }
 
-fn json_request(operation: crate::LlmOperation, prompt: &str) -> ChatRequest {
+/// Build the JSON request used by production domain adapters.
+///
+/// Qualification tools reuse this narrow constructor so they measure the
+/// deployed request contract instead of a hand-maintained approximation.
+pub fn production_json_request(operation: crate::LlmOperation, prompt: &str) -> ChatRequest {
     ChatRequest::new(operation, "")
         .message(
             "system",
@@ -377,6 +381,28 @@ mod tests {
         .build()
         .unwrap();
         assert!(!platform_request.headers().contains_key("X-User-Id"));
+    }
+
+    #[test]
+    fn production_json_request_contract_is_fixed() {
+        for operation in [
+            crate::LlmOperation::CharacterExtraction,
+            crate::LlmOperation::CanonExtraction,
+        ] {
+            let request = production_json_request(operation, "prompt");
+            assert_eq!(request.operation, operation);
+            assert_eq!(request.runtime_user_id, None);
+            assert!(request.model.is_empty());
+            assert_eq!(request.messages.len(), 2);
+            assert_eq!(request.messages[0].role, "system");
+            assert_eq!(request.messages[1].role, "user");
+            assert_eq!(request.messages[1].content, "prompt");
+            assert_eq!(request.temperature, Some(0.3));
+            assert_eq!(request.max_tokens, Some(operation.max_output_tokens()));
+            assert!(!request.stream);
+            assert!(request.json_mode);
+            assert_eq!(request.thinking, Some(false));
+        }
     }
 
     #[test]
