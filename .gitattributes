@@ -1,1 +1,2 @@
 tests/e2e/gitleaks_self_test.sh text eol=lf
+tests/e2e/live_deepseek_journey.sh text eol=lf

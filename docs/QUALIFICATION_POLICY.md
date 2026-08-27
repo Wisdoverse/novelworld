@@ -41,6 +41,39 @@ deterministic test provider and recorded fixtures never satisfy the
 `configured provider/model` identity that Baseline and Qualification evidence
 require.
 
+### DeepSeek v4 Flash baseline entrypoint
+
+The baseline runner requires a clean commit and an operator-owned JSON file
+outside the checkout with exactly `provider`, `api_url`, `model`,
+`thinking_enabled`, and `api_key`. The accepted slice is `deepseek`,
+`https://api.deepseek.com`, `deepseek-v4-flash`, with product thinking enabled.
+Keep the file readable only by the operator and invoke:
+
+```bash
+tests/e2e/live_deepseek_journey.sh \
+  --config /private/path/deepseek.json \
+  --output-dir /private/path/novelworld-baseline \
+  --git-sha "$(git rev-parse HEAD)"
+```
+
+The runner creates a unique Compose project, container prefix, volumes,
+loopback port, and local image tags; it never joins or restarts the default
+`novel-*` deployment and verifies that deployment's container identities and
+restart counters are unchanged. It uses PostgreSQL authority without Redis or
+S3, completes the ordinary-reader journey, and removes only its isolated
+Compose volumes on exit. Its raw Prometheus files contain a stable usage-key
+fingerprint and remain private; only the sanitized aggregate report is eligible
+for review or commit.
+
+Run H1 and H3 live evaluation separately at the same clean commit with their
+documented `--metrics-output` option. The resulting reports identify returned
+models and force `thinking_enabled: false` for schema-bound JSON calls. A later
+evidence commit records the immutable reports, so `evaluated_git_sha` identifies
+the code that ran while `evidence_commit` identifies the commit that packages
+that evidence; they cannot be the same self-referential value. This entrypoint
+creates baseline evidence only and does not supply the separate threshold or
+human-quality approval required for Qualification.
+
 ## Existing evidence packages
 
 | Package | Current use | Explicit limit |
@@ -48,6 +81,7 @@ require.
 | Required [CI](../.github/workflows/ci.yml) | PRs run structural build, unit, frontend, browser accessibility, PostgreSQL/Redis, Windows launcher, and a production Compose smoke; `main`, manual verification, and release calls additionally run the deterministic recovery, outage, backup/restore, secret-rotation, and capacity drills | Not a live provider, target-environment, manual accessibility, or user-quality report |
 | [`single-node-v1`](./SLOS.md) | Deterministic admission, latency, replay, persistence, and Redis bounds on recorded CI hardware | Not a public-traffic or sustained availability SLO |
 | [`h3-synthetic-v1`](../tools/h3-eval/README.md) | Positive/adversarial calibration for extraction coverage, chronology, causality, character consistency, spoilers, memory, coherence, and replay | Recorded judgments do not qualify a provider/model or representative novel corpus |
+| [DeepSeek v4 Flash live baseline](./evidence/deepseek-v4-flash-live-baseline.json) | At exact code SHA `31e32d05ff41c4453892c9d3e599c07ad4c46fd3`, an isolated production-Compose reader journey completed, including branch-to-chat revision binding, 12 world turns, restart recovery, export, and deletion | H1 failed 5/6 slices, H3 failed 1/24 samples, human quality approval is absent, and no qualification claim is made |
 | [`h3-llm-budget-v2`](../tools/llm-budget/policy-v2.json) | Metrics-schema, closed operation set, token-ceiling, retry/error, latency, missing-usage, and full release-window sampling contract | Checked-in metrics are synthetic; provider price and live unit cost are not qualified |
 | [`THREAT_MODEL.md`](./THREAT_MODEL.md) | Current assets, trust boundaries, attacker stories, severity, and accepted external boundaries | A repository review is not host configuration or incident-response evidence |
 | [`DATA_RETENTION.md`](./DATA_RETENTION.md) and [`ACCOUNT_EXPORT.md`](./ACCOUNT_EXPORT.md) | Application retention, erasure, provider/operator boundary, and export completeness | Not backup restore, provider deletion, or target-environment verification |
@@ -64,7 +98,7 @@ passing one dimension does not qualify its untested combinations.
 | Platform | Linux full journey; Windows launcher initialization | Missing/invalid prerequisites, interrupted startup, path and encoding edge cases | Launcher structural evidence only; H2/H4 own platform/browser qualification |
 | Input format and encoding | Paste UTF-8; TXT UTF-8, BOM UTF-16, GBK; text EPUB; text PDF at declared sizes | Oversize, invalid encoding, malformed/traversal or decompression-heavy EPUB, scanned/encrypted/malformed PDF | Parser acceptance only; H1 owns recoverability and extraction quality |
 | Language | Simplified Chinese and English chapter/lore fixtures; generated-world journey explicitly Chinese | Mixed-script headers, ambiguous boundaries, hostile instructions, future-spoiler text | Structural only; H1/H3/H4 own representative live quality |
-| Provider and model | Exact provider, model, response model, prompt/corpus/policy versions recorded | Timeout, retry-after, malformed JSON/SSE, silent EOF, hostile text, changed response model, missing usage | No provider/model qualified; H2/H3 own live evidence |
+| Provider and model | Exact provider, model, response model, prompt/corpus/policy versions recorded | Timeout, retry-after, malformed JSON/SSE, silent EOF, hostile text, changed response model, missing usage | DeepSeek v4 Flash has a baseline, but H1 failed and no provider/model is qualified; H2/H3 own the remaining evidence |
 | Scale and cost | `single-node-v1` workload and `h3-llm-budget-v2` schema/ceilings | Admission overflow, retry amplification, missing usage, provider failure, cost ceiling breach | Deterministic only; H2/H3/H5 own live spend and SLO observation |
 | Accessibility and browser | Critical journey with keyboard, focus, names/roles/status, zoom, motion, and supported viewport/browser record | Failed request/retry, streaming announcement, modal/focus escape, narrow viewport, reduced motion | Baseline missing; H4 owns WCAG 2.2 AA qualification |
 
@@ -95,8 +129,8 @@ cost risk makes the existing intersections insufficient.
 |---|---|---|---|
 | Eligible journey completion | Attempts initiated by an eligible reader on the qualified deployment with a source/configuration inside the declared slice | All six journey stages complete for one principal without manual data repair | Baseline-only |
 | Recoverable import | All attempts with a source/configuration inside the declared import slice | Terminal ready, or actionable terminal failure that can safely retry/re-upload without duplicate authority | Baseline-only |
-| Extraction quality | Labeled expected canon facts in a legally usable corpus | Non-empty accepted canon with coverage, precision, hallucination, chronology, causality, and provenance scores | Synthetic calibration plus the approved [`extraction-quality-v1`](./EXTRACTION_QUALITY.md) thresholds; no provider/model has passed a live run |
-| Character/world quality | Human-calibrated live conversation and trajectory cases | Character fidelity, memory relevance, multi-turn and causal coherence meet the approved rubric | Synthetic calibration only; H3/H4 live threshold unapproved |
+| Extraction quality | Labeled expected canon facts in a legally usable corpus | Non-empty accepted canon with coverage, precision, hallucination, chronology, causality, and provenance scores | The approved [`extraction-quality-v1`](./EXTRACTION_QUALITY.md) gate is live: DeepSeek v4 Flash failed 5/6 final-SHA slices, so no provider/model has passed |
+| Character/world quality | Human-calibrated live conversation and trajectory cases | Character fidelity, memory relevance, multi-turn and causal coherence meet the approved rubric | DeepSeek v4 Flash completed the product baseline, but its final-SHA H3 run failed the positive multi-turn-coherence sample; human approval and H4 release-upgrade/accessibility evidence remain absent |
 | Latency and recovery | All eligible operations for the exact environment; success latency and timeout/failure counts remain separate | First token, durable completion, replay, restart, restore, and rollback observations | `single-node-v1` structural thresholds only; live SLO unapproved |
 | Unit cost | Attempts and successful operations, both retained | Provider calls, retries, tokens, missing usage, and priced billable classes per operation | Schema/ceilings structural; live price and cost threshold unapproved |
 
