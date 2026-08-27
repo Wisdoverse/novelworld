@@ -116,6 +116,7 @@ async fn run_body() -> Result<()> {
         let handler = Arc::new(NarrativeCommandHandler {
             node_repo,
             choice_repo,
+            character_context_repo: world_state_repo.clone(),
             world_state_repo,
             world_turn_repo,
             player_chapter_repo,

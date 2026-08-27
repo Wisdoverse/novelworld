@@ -313,6 +313,11 @@ fn application_error_response(
             "idempotency_conflict",
             "Idempotency key conflicts with an existing chat turn".to_string(),
         ),
+        Some(AgentRequestError::WorldRevisionChanged) => (
+            StatusCode::CONFLICT,
+            "world_revision_changed",
+            "The reader world changed; retry the chat turn".to_string(),
+        ),
         Some(AgentRequestError::Llm(_)) if llm_not_configured => (
             StatusCode::SERVICE_UNAVAILABLE,
             "llm_not_configured",
@@ -968,6 +973,22 @@ mod principal_contract_tests {
         );
         assert_eq!(response.status(), StatusCode::CONFLICT);
         assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "117");
+    }
+
+    #[tokio::test]
+    async fn changed_world_revision_is_a_retryable_conflict() {
+        let response = application_error_response(
+            AgentRequestError::WorldRevisionChanged.into(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        );
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"]["code"],
+            "world_revision_changed"
+        );
     }
 
     #[tokio::test]

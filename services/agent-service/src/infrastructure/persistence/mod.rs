@@ -34,12 +34,57 @@ impl ReadinessProbe for PgReadinessProbe {
                         bool,
                         bool,
                         bool,
+                        bool,
+                        bool,
+                        bool,
                     ),
                 >(
                     r#"
                     SELECT
                         (SELECT id FROM public.chat_turns LIMIT 1),
                         (SELECT turn_id FROM public.chat_messages LIMIT 1),
+                        EXISTS (
+                            SELECT 1
+                            FROM pg_catalog.pg_attribute AS attribute
+                            LEFT JOIN pg_catalog.pg_attrdef AS default_definition
+                              ON default_definition.adrelid = attribute.attrelid
+                             AND default_definition.adnum = attribute.attnum
+                            WHERE attribute.attrelid =
+                                      'public.chat_turns'::pg_catalog.regclass
+                              AND attribute.attname = 'world_revision'
+                              AND attribute.attnum > 0
+                              AND NOT attribute.attisdropped
+                              AND attribute.atttypid = 'pg_catalog.bytea'::pg_catalog.regtype
+                              AND attribute.atttypmod = -1
+                              AND NOT attribute.attnotnull
+                              AND default_definition.oid IS NULL
+                        ),
+                        EXISTS (
+                            SELECT 1
+                            FROM pg_catalog.pg_constraint AS constraint_definition
+                            WHERE constraint_definition.conrelid =
+                                      'public.chat_turns'::pg_catalog.regclass
+                              AND constraint_definition.conname =
+                                      'chat_turns_world_revision_check'
+                              AND constraint_definition.contype::pg_catalog.text = 'c'
+                              AND constraint_definition.convalidated
+                              AND pg_catalog.pg_get_constraintdef(
+                                      constraint_definition.oid, FALSE
+                                  ) = 'CHECK (((world_revision IS NULL) OR (octet_length(world_revision) = 32)))'
+                        ),
+                        EXISTS (
+                            SELECT 1
+                            FROM pg_catalog.pg_constraint AS constraint_definition
+                            WHERE constraint_definition.conrelid =
+                                      'public.chat_turns'::pg_catalog.regclass
+                              AND constraint_definition.conname =
+                                      'chat_turns_world_revision_state_check'
+                              AND constraint_definition.contype::pg_catalog.text = 'c'
+                              AND constraint_definition.convalidated
+                              AND pg_catalog.pg_get_constraintdef(
+                                      constraint_definition.oid, FALSE
+                                  ) = 'CHECK ((((status)::text <> ''in_progress''::text) OR (world_revision IS NOT NULL)))'
+                        ),
                         EXISTS (
                             SELECT 1
                             FROM pg_catalog.pg_attribute AS attribute
@@ -168,7 +213,9 @@ impl ReadinessProbe for PgReadinessProbe {
                 .fetch_one(&self.pool),
             )
             .await,
-            Ok(Ok((_, _, true, true, true, true, true, true)))
+            Ok(Ok((
+                _, _, true, true, true, true, true, true, true, true, true
+            )))
         )
     }
 }

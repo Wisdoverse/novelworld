@@ -119,6 +119,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0024_persona_provenance.sql",
         include_str!("../../../infra/postgres/migrations/0024_persona_provenance.sql"),
     ),
+    (
+        "0025_chat_world_revision.sql",
+        include_str!("../../../infra/postgres/migrations/0025_chat_world_revision.sql"),
+    ),
 ];
 
 #[derive(Serialize, Deserialize)]
@@ -469,8 +473,27 @@ mod tests {
     #[test]
     fn embedded_migrations_are_complete_and_ordered() {
         assert_eq!(MIGRATIONS.first().unwrap().0, "0001_runtime_contract.sql");
-        assert_eq!(MIGRATIONS.last().unwrap().0, "0024_persona_provenance.sql");
+        assert_eq!(MIGRATIONS.last().unwrap().0, "0025_chat_world_revision.sql");
         assert!(MIGRATIONS.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    }
+
+    #[test]
+    fn embedded_chat_world_revision_migration_keeps_its_causal_fences() {
+        let migration = MIGRATIONS
+            .iter()
+            .find(|(name, _)| *name == "0025_chat_world_revision.sql")
+            .unwrap()
+            .1;
+        for required in [
+            "world_revision pg_catalog.bytea",
+            "causal_revision_unavailable",
+            "chat_turns_world_revision_check",
+            "pg_catalog.octet_length(world_revision) = 32",
+            "chat_turns_world_revision_state_check",
+            "OR world_revision IS NOT NULL",
+        ] {
+            assert!(migration.contains(required), "missing: {required}");
+        }
     }
 
     #[test]

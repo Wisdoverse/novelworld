@@ -1,9 +1,25 @@
-use agent_service::domain::{
-    entities::memory::{ChatMessage, Memory, MemoryLayer},
-    repositories::{BeginChatTurn, ChatRepository, ChatTurnClaim, MemoryRepository},
-};
-use agent_service::infrastructure::persistence::{
-    pg_chat_repo::PgChatRepository, pg_memory_repo::PgMemoryRepository,
+use agent_service::{
+    application::handlers::{AgentCommandHandler, AgentRequestError, ChatResult},
+    domain::{
+        entities::memory::{ChatMessage, Memory, MemoryLayer},
+        ports::{
+            CharacterContextEnvelope as AgentCharacterContextEnvelope, ChatCompletion, ChatStream,
+            LoreContextPort, LoreExcerpt, ReadinessProbe, ReadingContext, ReadingContextPort,
+            TextSummarizer, WorldContextPort,
+        },
+        repositories::{
+            BeginChatTurn, CharacterInfo, CharacterInfoRepository, ChatRepository, ChatTurnClaim,
+            MemoryRepository,
+        },
+        services::memory_manager::MemoryManager,
+    },
+    infrastructure::{
+        cache::NoopMessageCache,
+        embedding::NoopEmbeddingGenerator,
+        persistence::{
+            pg_chat_repo::PgChatRepository, pg_memory_repo::PgMemoryRepository, PgReadinessProbe,
+        },
+    },
 };
 use narrative_service::domain::{
     entities::{
@@ -18,8 +34,9 @@ use narrative_service::domain::{
         },
     },
     repositories::{
-        BeginWorldTurn, ChoiceCommit, MemoryProjectionStatus, NarrativeNodeRepository,
-        UserChoiceRepository, WorldStateRepository, WorldTurnClaim, WorldTurnRepository,
+        BeginWorldTurn, CharacterContextSnapshotRepository, ChoiceCommit, MemoryProjectionStatus,
+        NarrativeNodeRepository, UserChoiceRepository, WorldStateRepository, WorldTurnClaim,
+        WorldTurnRepository,
     },
     services::narrative_transition::{
         NarrativeTransition, RelationshipChange, TransitionEvent, TRANSITION_PROMPT_VERSION,
@@ -72,6 +89,255 @@ use uuid::Uuid;
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
         .unwrap_or_else(|_| "postgres://test:test@localhost:25432/novelworld_test".into())
+}
+
+struct CausalChatCharacter {
+    user_id: Uuid,
+    character: CharacterInfo,
+}
+
+#[async_trait::async_trait]
+impl CharacterInfoRepository for CausalChatCharacter {
+    async fn find_by_id(&self, id: Uuid, user_id: Uuid) -> anyhow::Result<Option<CharacterInfo>> {
+        Ok((id == self.character.id && user_id == self.user_id).then(|| self.character.clone()))
+    }
+}
+
+struct CausalChatReading(ReadingContext);
+
+#[async_trait::async_trait]
+impl ReadingContextPort for CausalChatReading {
+    async fn find(&self, novel_id: Uuid, user_id: Uuid) -> anyhow::Result<Option<ReadingContext>> {
+        Ok((novel_id == self.0.novel_id && user_id == self.0.user_id).then(|| self.0.clone()))
+    }
+}
+
+struct EmptyLoreContext;
+
+#[async_trait::async_trait]
+impl LoreContextPort for EmptyLoreContext {
+    async fn search(
+        &self,
+        _novel_id: Uuid,
+        _user_id: Uuid,
+        _max_chapter: i32,
+        _query: &str,
+        _limit: usize,
+    ) -> anyhow::Result<Vec<LoreExcerpt>> {
+        Ok(Vec::new())
+    }
+}
+
+/// Test adapter over the production V4 snapshot repository. The race contract
+/// only needs the opaque revision; provider-visible projection remains owned
+/// by narrative-service's application handler.
+struct PgRevisionWorldContext {
+    repository: PgWorldStateRepository,
+}
+
+#[async_trait::async_trait]
+impl WorldContextPort for PgRevisionWorldContext {
+    async fn find(
+        &self,
+        novel_id: Uuid,
+        character_id: Uuid,
+        user_id: Uuid,
+    ) -> anyhow::Result<Option<AgentCharacterContextEnvelope>> {
+        let snapshot = self
+            .repository
+            .read_character_context_snapshot(user_id, novel_id, 100)
+            .await?;
+        Ok(Some(AgentCharacterContextEnvelope {
+            user_id,
+            novel_id,
+            character_id,
+            world_revision: snapshot.world_state.fingerprint(),
+            branch_context: None,
+            world_context: None,
+        }))
+    }
+}
+
+struct BlockingChatCompletion {
+    entered: Semaphore,
+    release: Semaphore,
+}
+
+impl Default for BlockingChatCompletion {
+    fn default() -> Self {
+        Self {
+            entered: Semaphore::new(0),
+            release: Semaphore::new(0),
+        }
+    }
+}
+
+impl BlockingChatCompletion {
+    async fn wait_until_entered(&self) {
+        self.entered.acquire().await.unwrap().forget();
+    }
+
+    fn release(&self) {
+        self.release.add_permits(1);
+    }
+}
+
+#[async_trait::async_trait]
+impl ChatCompletion for BlockingChatCompletion {
+    async fn chat_stream(
+        &self,
+        _user_id: Uuid,
+        _messages: Vec<(String, String)>,
+    ) -> anyhow::Result<ChatStream> {
+        anyhow::bail!("causal race contract uses non-streaming chat")
+    }
+
+    async fn chat_messages(
+        &self,
+        _user_id: Uuid,
+        _messages: Vec<(String, String)>,
+    ) -> anyhow::Result<String> {
+        self.entered.add_permits(1);
+        self.release.acquire().await?.forget();
+        Ok("response generated against the old world revision".into())
+    }
+}
+
+struct UnusedChatSummarizer;
+
+#[async_trait::async_trait]
+impl TextSummarizer for UnusedChatSummarizer {
+    async fn summarize(
+        &self,
+        _user_id: Uuid,
+        _system: &str,
+        _text: &str,
+    ) -> anyhow::Result<String> {
+        anyhow::bail!("stale chat must not reach memory projection")
+    }
+}
+
+fn causal_chat_handler(
+    pool: &PgPool,
+    user_id: Uuid,
+    novel_id: Uuid,
+    character_id: Uuid,
+    llm: Arc<dyn ChatCompletion>,
+) -> AgentCommandHandler {
+    let chat_repo: Arc<dyn ChatRepository> = Arc::new(PgChatRepository::new(pool.clone()));
+    AgentCommandHandler {
+        memory_manager: Arc::new(MemoryManager {
+            memory_repo: Arc::new(PgMemoryRepository::new(pool.clone())),
+            chat_repo,
+            cache: Arc::new(NoopMessageCache),
+            llm: Arc::new(UnusedChatSummarizer),
+            embedding: Arc::new(NoopEmbeddingGenerator),
+        }),
+        character_repo: Arc::new(CausalChatCharacter {
+            user_id,
+            character: CharacterInfo {
+                id: character_id,
+                name: "Revision Witness".into(),
+                novel_id,
+                aliases: Vec::new(),
+                role: None,
+                description: None,
+                personality: None,
+                background: None,
+                speaking_style: None,
+                persona_source_chapter_high_water: None,
+                first_appearance_chapter: Some(1),
+            },
+        }),
+        reading_context: Arc::new(CausalChatReading(ReadingContext {
+            user_id,
+            novel_id,
+            current_chapter: 1,
+            reader_identity: Some("Reader".into()),
+            reader_identity_type: "self".into(),
+            reader_character_id: None,
+            deviation_mode: "canon".into(),
+        })),
+        lore_context: Arc::new(EmptyLoreContext),
+        world_context: Arc::new(PgRevisionWorldContext {
+            repository: PgWorldStateRepository::new(pool.clone()),
+        }),
+        llm,
+        chat_permits: Arc::new(Semaphore::new(2)),
+        active_chat_users: Arc::new(Mutex::new(HashSet::new())),
+    }
+}
+
+async fn begin_blocked_chat(
+    pool: &PgPool,
+    user_id: Uuid,
+    novel_id: Uuid,
+    character_id: Uuid,
+    user_message: &str,
+) -> (
+    Uuid,
+    [u8; 32],
+    Arc<BlockingChatCompletion>,
+    tokio::task::JoinHandle<anyhow::Result<ChatResult>>,
+) {
+    let revision = PgWorldStateRepository::new(pool.clone())
+        .read_character_context_snapshot(user_id, novel_id, 100)
+        .await
+        .unwrap()
+        .world_state
+        .fingerprint();
+    let llm = Arc::new(BlockingChatCompletion::default());
+    let handler = causal_chat_handler(pool, user_id, novel_id, character_id, llm.clone());
+    let turn_id = Uuid::new_v4();
+    let user_message = user_message.to_owned();
+    let chat = tokio::spawn(async move {
+        handler
+            .chat(turn_id, character_id, user_id, Some(novel_id), user_message)
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), llm.wait_until_entered())
+        .await
+        .unwrap();
+    let (status, claimed_revision): (String, Vec<u8>) =
+        sqlx::query_as("SELECT status, world_revision FROM chat_turns WHERE id = $1")
+            .bind(turn_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "in_progress");
+    assert_eq!(claimed_revision, revision);
+
+    (turn_id, revision, llm, chat)
+}
+
+async fn assert_stale_chat(
+    pool: &PgPool,
+    turn_id: Uuid,
+    llm: &BlockingChatCompletion,
+    chat: tokio::task::JoinHandle<anyhow::Result<ChatResult>>,
+) {
+    llm.release();
+    let error = tokio::time::timeout(std::time::Duration::from_secs(2), chat)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<AgentRequestError>(),
+        Some(AgentRequestError::WorldRevisionChanged)
+    ));
+    let (status, failure_code, messages): (String, Option<String>, i64) = sqlx::query_as(
+        "SELECT status, failure_code, \
+         (SELECT COUNT(*) FROM chat_messages WHERE turn_id = $1) \
+         FROM chat_turns WHERE id = $1",
+    )
+    .bind(turn_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(status, "failed");
+    assert_eq!(failure_code.as_deref(), Some("stale_world_revision"));
+    assert_eq!(messages, 0);
 }
 
 struct BlockingImportLlm;
@@ -2777,6 +3043,7 @@ async fn chat_history_is_scoped_by_the_committed_reader_identity() {
             },
             reader_character_id,
             deviation_mode: "canon".into(),
+            world_revision: [index; 32],
         };
         let attempt = match chat_repo.begin_turn(&claim).await.unwrap() {
             BeginChatTurn::Acquired { attempt, .. } => attempt,
@@ -3073,15 +3340,11 @@ async fn chat_history_is_scoped_by_the_committed_reader_identity() {
             reader_identity_type: "self".into(),
             reader_character_id: None,
             deviation_mode: "canon".into(),
+            world_revision: [91; 32],
         })
         .await
         .unwrap();
-    assert!(matches!(
-        legacy_replay,
-        BeginChatTurn::Completed { claim, response }
-            if claim.persona_source_chapter_high_water.is_none()
-                && response == "LEGACY-UNPROVEN-RESPONSE-MARKER"
-    ));
+    assert!(matches!(legacy_replay, BeginChatTurn::Conflict));
 
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
@@ -3097,6 +3360,7 @@ async fn production_repositories_match_fresh_schema() {
         .connect(&db_url())
         .await
         .unwrap();
+    assert!(PgReadinessProbe::new(pool.clone()).is_ready().await);
 
     let user_id = Uuid::new_v4();
     let novel_id = Uuid::new_v4();
@@ -3378,11 +3642,19 @@ async fn production_repositories_match_fresh_schema() {
         reader_identity_type: "self".into(),
         reader_character_id: None,
         deviation_mode: "canon".into(),
+        world_revision: [1; 32],
     };
     let attempt = match chat_repo.begin_turn(&claim).await.unwrap() {
         BeginChatTurn::Acquired { attempt, .. } => attempt,
         result => panic!("unexpected turn reservation: {result:?}"),
     };
+    let stored_world_revision: Vec<u8> =
+        sqlx::query_scalar("SELECT world_revision FROM chat_turns WHERE id = $1")
+            .bind(claim.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored_world_revision, claim.world_revision);
     let user_message = ChatMessage::new(
         user_id,
         character_id,
@@ -3403,10 +3675,105 @@ async fn production_repositories_match_fresh_schema() {
         Some(1),
     )
     .with_turn_id(claim.id);
+    let stale_revision_claim = ChatTurnClaim {
+        world_revision: [2; 32],
+        ..claim.clone()
+    };
+    assert!(chat_repo
+        .complete_turn(
+            &stale_revision_claim,
+            attempt,
+            &user_message,
+            &character_message,
+        )
+        .await
+        .is_err());
+    let (pre_commit_status, pre_commit_messages): (String, i64) = sqlx::query_as(
+        "SELECT status, (SELECT COUNT(*) FROM chat_messages WHERE turn_id = $1) FROM chat_turns WHERE id = $1",
+    )
+    .bind(claim.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pre_commit_status, "in_progress");
+    assert_eq!(pre_commit_messages, 0);
     chat_repo
         .complete_turn(&claim, attempt, &user_message, &character_message)
         .await
         .unwrap();
+
+    let missing_revision_error = sqlx::query(
+        "INSERT INTO chat_turns (id, user_id, character_id, novel_id, request_fingerprint, chapter_context, persona_source_chapter_high_water, reader_identity_type, deviation_mode, status, lease_expires_at) VALUES ($1, $2, $3, $4, $5, 1, 1, 'self', 'canon', 'in_progress', NOW() + INTERVAL '2 minutes')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(character_id)
+    .bind(novel_id)
+    .bind(vec![21_u8; 32])
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    assert_eq!(
+        missing_revision_error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("chat_turns_world_revision_state_check")
+    );
+    let short_revision_error = sqlx::query(
+        "INSERT INTO chat_turns (id, user_id, character_id, novel_id, request_fingerprint, world_revision, chapter_context, persona_source_chapter_high_water, reader_identity_type, deviation_mode, status, failure_code) VALUES ($1, $2, $3, $4, $5, $6, 1, 1, 'self', 'canon', 'failed', 'invalid_revision')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(character_id)
+    .bind(novel_id)
+    .bind(vec![22_u8; 32])
+    .bind(vec![22_u8; 31])
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    assert_eq!(
+        short_revision_error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("chat_turns_world_revision_check")
+    );
+
+    let legacy_failed_claim = ChatTurnClaim {
+        id: Uuid::new_v4(),
+        request_fingerprint: vec![23; 32],
+        world_revision: [23; 32],
+        ..claim.clone()
+    };
+    sqlx::query(
+        "INSERT INTO chat_turns (id, user_id, character_id, novel_id, request_fingerprint, chapter_context, persona_source_chapter_high_water, reader_identity, reader_identity_type, deviation_mode, status, failure_code) VALUES ($1, $2, $3, $4, $5, 1, 1, 'Reader', 'self', 'canon', 'failed', 'legacy_failure')",
+    )
+    .bind(legacy_failed_claim.id)
+    .bind(user_id)
+    .bind(character_id)
+    .bind(novel_id)
+    .bind(&legacy_failed_claim.request_fingerprint)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let legacy_attempt = match chat_repo.begin_turn(&legacy_failed_claim).await.unwrap() {
+        BeginChatTurn::Acquired {
+            claim: persisted,
+            attempt,
+        } if persisted.world_revision == legacy_failed_claim.world_revision => attempt,
+        result => panic!("legacy failed turn was not refreshed: {result:?}"),
+    };
+    assert_eq!(legacy_attempt, 2);
+    let refreshed_revision: Vec<u8> =
+        sqlx::query_scalar("SELECT world_revision FROM chat_turns WHERE id = $1")
+            .bind(legacy_failed_claim.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(refreshed_revision, legacy_failed_claim.world_revision);
+    assert!(chat_repo
+        .fail_turn(legacy_failed_claim.id, legacy_attempt, "test_cleanup")
+        .await
+        .unwrap());
 
     let future_claim = ChatTurnClaim {
         id: Uuid::new_v4(),
@@ -3465,6 +3832,7 @@ async fn production_repositories_match_fresh_schema() {
     let advanced_context = ChatTurnClaim {
         chapter_context: 2,
         deviation_mode: "creative".into(),
+        world_revision: [99; 32],
         ..claim.clone()
     };
     assert!(matches!(
@@ -3512,8 +3880,19 @@ async fn production_repositories_match_fresh_schema() {
     .execute(&pool)
     .await
     .unwrap();
-    let reclaimed_attempt = match chat_repo.begin_turn(&reclaim_claim).await.unwrap() {
-        BeginChatTurn::Acquired { attempt, .. } => attempt,
+    let refreshed_reclaim_claim = ChatTurnClaim {
+        world_revision: [3; 32],
+        ..reclaim_claim.clone()
+    };
+    let reclaimed_attempt = match chat_repo
+        .begin_turn(&refreshed_reclaim_claim)
+        .await
+        .unwrap()
+    {
+        BeginChatTurn::Acquired {
+            claim: persisted,
+            attempt,
+        } if persisted.world_revision == refreshed_reclaim_claim.world_revision => attempt,
         result => panic!("unexpected reclaimed turn: {result:?}"),
     };
     assert_eq!(reclaimed_attempt, 2);
@@ -3541,9 +3920,18 @@ async fn production_repositories_match_fresh_schema() {
         .complete_turn(&reclaim_claim, 1, &reclaimed_user, &reclaimed_character,)
         .await
         .is_err());
-    chat_repo
+    assert!(chat_repo
         .complete_turn(
             &reclaim_claim,
+            reclaimed_attempt,
+            &reclaimed_user,
+            &reclaimed_character,
+        )
+        .await
+        .is_err());
+    chat_repo
+        .complete_turn(
+            &refreshed_reclaim_claim,
             reclaimed_attempt,
             &reclaimed_user,
             &reclaimed_character,
@@ -5237,12 +5625,12 @@ async fn world_turn_complete_rechecks_durable_choice_projection() {
         .unwrap();
 }
 
-async fn seed_world_turn(pool: &PgPool) -> (Uuid, Uuid, WorldEntryContext) {
+async fn seed_ready_novel(pool: &PgPool, email_prefix: &str, title: &str) -> (Uuid, Uuid) {
     let user_id = Uuid::new_v4();
     let novel_id = Uuid::new_v4();
     sqlx::query("INSERT INTO users (id, email, password_hash) VALUES ($1, $2, $3)")
         .bind(user_id)
-        .bind(format!("world-turn-{user_id}@test.invalid"))
+        .bind(format!("{email_prefix}-{user_id}@test.invalid"))
         .bind("not-a-real-password-hash")
         .execute(pool)
         .await
@@ -5253,10 +5641,29 @@ async fn seed_world_turn(pool: &PgPool) -> (Uuid, Uuid, WorldEntryContext) {
     )
     .bind(novel_id)
     .bind(user_id)
-    .bind("World turn contract")
+    .bind(title)
     .execute(pool)
     .await
     .unwrap();
+    (user_id, novel_id)
+}
+
+async fn seed_character(pool: &PgPool, novel_id: Uuid) -> Uuid {
+    let character_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO characters (id, novel_id, name, first_appearance_chapter) \
+         VALUES ($1, $2, 'Revision Witness', 1)",
+    )
+    .bind(character_id)
+    .bind(novel_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    character_id
+}
+
+async fn seed_world_turn(pool: &PgPool) -> (Uuid, Uuid, WorldEntryContext) {
+    let (user_id, novel_id) = seed_ready_novel(pool, "world-turn", "World turn contract").await;
     let world_state_repo = PgWorldStateRepository::new(pool.clone());
     world_state_repo
         .get_or_create(user_id, novel_id)
@@ -5388,6 +5795,97 @@ async fn world_turn_acquire(repo: &PgWorldTurnRepository, claim: &WorldTurnClaim
         BeginWorldTurn::Acquired { attempt, .. } => attempt,
         result => panic!("unexpected reservation: {result:?}"),
     }
+}
+
+#[tokio::test]
+async fn chat_branch_commit_during_provider_generation_is_revision_fenced() {
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (user_id, novel_id) =
+        seed_ready_novel(&pool, "branch-chat-race", "Branch chat revision race").await;
+    let character_id = seed_character(&pool, novel_id).await;
+    let (turn_id, revision_before, llm, chat) = begin_blocked_chat(
+        &pool,
+        user_id,
+        novel_id,
+        character_id,
+        "Tell me what happens next",
+    )
+    .await;
+
+    let node = NarrativeNode::new(
+        novel_id,
+        1,
+        "A branch chosen while the provider is running".into(),
+        vec![NarrativeChoice {
+            index: 0,
+            text: "Take the hidden road".into(),
+            hint: "Commit the branch".into(),
+            generated_consequence: None,
+        }],
+    );
+    PgNarrativeNodeRepository::new(pool.clone())
+        .save(&node)
+        .await
+        .unwrap();
+    PgUserChoiceRepository::new(pool.clone())
+        .commit_choice(&ChoiceCommit {
+            user_id,
+            novel_id,
+            node_id: node.id,
+            chapter_number: 1,
+            choice_index: 0,
+            choice_text: "Take the hidden road".into(),
+            expected_world_state_fingerprint: revision_before,
+            transition: transition(1, "你在模型生成期间选择了隐藏道路。"),
+            rewritten_chapter_content: "你在模型生成期间选择了隐藏道路。".into(),
+        })
+        .await
+        .unwrap();
+    assert_stale_chat(&pool, turn_id, llm.as_ref(), chat).await;
+
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn chat_world_turn_commit_during_provider_generation_is_revision_fenced() {
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (user_id, novel_id, context) = seed_world_turn(&pool).await;
+    let character_id = seed_character(&pool, novel_id).await;
+    let (chat_turn_id, _revision_before, llm, chat) = begin_blocked_chat(
+        &pool,
+        user_id,
+        novel_id,
+        character_id,
+        "What changed in the world?",
+    )
+    .await;
+
+    let turn_repo = PgWorldTurnRepository::new(pool.clone());
+    let world_claim = world_turn_claim(user_id, novel_id);
+    let attempt = world_turn_acquire(&turn_repo, &world_claim).await;
+    turn_repo
+        .complete_turn(&world_claim, attempt, &world_turn_transition(), &context)
+        .await
+        .unwrap();
+    assert_stale_chat(&pool, chat_turn_id, llm.as_ref(), chat).await;
+
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
