@@ -1647,18 +1647,16 @@ async fn run_live(
             &extraction.characters,
             &chapters,
         ) else {
-            bail!(
-                "provider character {} has no verifiable first appearance",
-                extracted.name
-            );
+            continue;
         };
-        let mut character = Character::from_extraction(
+        let Some(mut character) = Character::from_extraction(
             case.novel_id,
             extracted,
             &extraction.world_summary,
             &case.novel_title,
-        )
-        .context("provider extraction contains an unusable character")?;
+        ) else {
+            continue;
+        };
         character.first_appearance_chapter = Some(first_appearance);
         characters.push(character);
         // Write the SOURCE-VERIFIED chapter back into the extraction so the
@@ -1738,7 +1736,7 @@ async fn judge_live(
                 .message("system", &system)
                 .message("user", &user)
                 .temperature(0.0)
-                .max_tokens(4_000)
+                .max_tokens(LlmOperation::OfflineEvaluation.max_output_tokens())
                 .thinking(false)
                 .json(),
         )
