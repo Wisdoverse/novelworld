@@ -935,14 +935,33 @@ class Journey:
                     "intent": f"第{number}次与守塔人核对星图、当前线索和彼此的下一步计划",
                 }
                 body = json.dumps(action, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-                payload, _, _ = request_bytes(
-                    f"{self.api}/narrative/{novel_id}/world/turns",
-                    method="POST",
-                    token=token,
-                    body=body,
-                    headers={"Content-Type": "application/json", "Idempotency-Key": turn_id},
-                    timeout=600,
-                )
+                try:
+                    payload, _, _ = request_bytes(
+                        f"{self.api}/narrative/{novel_id}/world/turns",
+                        method="POST",
+                        token=token,
+                        body=body,
+                        headers={"Content-Type": "application/json", "Idempotency-Key": turn_id},
+                        timeout=600,
+                    )
+                except QualificationFailure:
+                    failure_code = "unavailable"
+                    with contextlib.suppress(QualificationFailure):
+                        failure_code = re.sub(
+                            r"[^a-z0-9_]+",
+                            "_",
+                            self.db_scalar(
+                                "SELECT COALESCE(failure_code, 'missing') FROM world_turns "
+                                f"WHERE id = '{turn_id}'"
+                            ).lower(),
+                        )[:80]
+                    self.report["journey"].update(
+                        {
+                            "world_turns_completed": number - 1,
+                            "world_turn_failure_code": failure_code,
+                        }
+                    )
+                    raise
                 result = json.loads(payload)
                 if (
                     result.get("turn_id") != turn_id
