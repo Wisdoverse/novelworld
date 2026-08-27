@@ -489,6 +489,17 @@ class Journey:
         finally:
             record["duration_ms"] = round((time.monotonic() - started) * 1000)
 
+    def retry_llm_failure(self, request):
+        for attempt in range(3):
+            try:
+                return request()
+            except QualificationFailure as error:
+                if error.code != "http_502_llm_error" or attempt == 2:
+                    raise
+                journey = self.report["journey"]
+                journey["llm_submission_retries"] = journey.get("llm_submission_retries", 0) + 1
+        raise AssertionError("unreachable")
+
     def compose(self, *args: str, capture: bool = True, check: bool = True) -> str:
         if self.env_file is None:
             raise QualificationFailure("compose_environment_missing")
@@ -838,12 +849,14 @@ class Journey:
             node_id = node.get("id")
             if not isinstance(node_id, str):
                 raise QualificationFailure("canonical_branch_node_missing")
-            choice = request_json(
-                f"{self.api}/narrative/choose",
-                method="POST",
-                token=token,
-                value={"novel_id": novel_id, "node_id": node_id, "choice_index": 0},
-                timeout=600,
+            choice = self.retry_llm_failure(
+                lambda: request_json(
+                    f"{self.api}/narrative/choose",
+                    method="POST",
+                    token=token,
+                    value={"novel_id": novel_id, "node_id": node_id, "choice_index": 0},
+                    timeout=600,
+                )
             )
             transition = choice.get("transition", {})
             actor_ids = [
@@ -936,13 +949,18 @@ class Journey:
                 }
                 body = json.dumps(action, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
                 try:
-                    payload, _, _ = request_bytes(
-                        f"{self.api}/narrative/{novel_id}/world/turns",
-                        method="POST",
-                        token=token,
-                        body=body,
-                        headers={"Content-Type": "application/json", "Idempotency-Key": turn_id},
-                        timeout=600,
+                    payload, _, _ = self.retry_llm_failure(
+                        lambda: request_bytes(
+                            f"{self.api}/narrative/{novel_id}/world/turns",
+                            method="POST",
+                            token=token,
+                            body=body,
+                            headers={
+                                "Content-Type": "application/json",
+                                "Idempotency-Key": turn_id,
+                            },
+                            timeout=600,
+                        )
                     )
                 except QualificationFailure:
                     failure_code = "unavailable"
@@ -1222,6 +1240,18 @@ def self_test(root: Path) -> None:
         assert choice_replay_projection(committed) == choice_replay_projection(replayed)
         replayed["world_state"]["state"]["choices"].append(2)
         assert choice_replay_projection(committed) != choice_replay_projection(replayed)
+        journey = Journey.__new__(Journey)
+        journey.report = {"journey": {}}
+        attempts = iter([QualificationFailure("http_502_llm_error"), "recovered"])
+
+        def recover_once():
+            value = next(attempts)
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        assert journey.retry_llm_failure(recover_once) == "recovered"
+        assert journey.report["journey"]["llm_submission_retries"] == 1
     print("live DeepSeek journey self-test passed")
 
 
