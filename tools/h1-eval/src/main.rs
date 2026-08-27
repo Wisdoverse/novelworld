@@ -1710,6 +1710,105 @@ fn register_response_model(response_models: &mut BTreeSet<String>, model: &str) 
     Ok(())
 }
 
+fn fact_token(prefix: &str, index: usize) -> String {
+    format!("{prefix}-{index}")
+}
+
+fn semantic_judge_payload(
+    case: &PositiveCase,
+    extraction: &ExtractionResult,
+    canon: &CanonStoryModel,
+) -> Result<serde_json::Value> {
+    let expected_events = case
+        .expected
+        .events
+        .iter()
+        .enumerate()
+        .map(|(index, expected)| {
+            let recorded = case
+                .recorded
+                .canon
+                .content
+                .events
+                .iter()
+                .find(|event| event.id == expected.id)
+                .context("expected event lacks a recorded semantic fixture")?;
+            Ok(serde_json::json!({
+                "token": fact_token("expected-event", index),
+                "id": expected.id,
+                "sequence": expected.sequence,
+                "summary": recorded.summary,
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let expected_rules = case
+        .expected
+        .world_rules
+        .iter()
+        .enumerate()
+        .map(|(index, expected)| {
+            let recorded = case
+                .recorded
+                .canon
+                .content
+                .world_rules
+                .iter()
+                .find(|rule| rule.id == expected.id)
+                .context("expected world rule lacks a recorded semantic fixture")?;
+            Ok(serde_json::json!({
+                "token": fact_token("expected-world-rule", index),
+                "id": expected.id,
+                "description": recorded.description,
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(serde_json::json!({
+        "expected": {
+            "characters": case.expected.characters.iter().enumerate().map(|(index, fact)| serde_json::json!({
+                "token": fact_token("expected-character", index),
+                "name": fact.name,
+                "aliases": fact.aliases,
+            })).collect::<Vec<_>>(),
+            "relationships": case.expected.relationships.iter().enumerate().map(|(index, fact)| serde_json::json!({
+                "token": fact_token("expected-relationship", index),
+                "from": fact.from,
+                "to": fact.to,
+                "kind": fact.kind,
+            })).collect::<Vec<_>>(),
+            "events": expected_events,
+            "world_rules": expected_rules,
+        },
+        "extracted": {
+            "characters": extraction.characters.iter().enumerate().map(|(index, fact)| serde_json::json!({
+                "token": fact_token("extracted-character", index),
+                "name": fact.name,
+                "aliases": fact.aliases,
+                "role": fact.role,
+                "description": fact.description,
+            })).collect::<Vec<_>>(),
+            "relationships": extraction.relationships.iter().enumerate().map(|(index, fact)| serde_json::json!({
+                "token": fact_token("extracted-relationship", index),
+                "from": fact.from_character,
+                "to": fact.to_character,
+                "kind": fact.relationship_type,
+                "description": fact.description,
+            })).collect::<Vec<_>>(),
+            "events": canon.content.events.iter().enumerate().map(|(index, fact)| serde_json::json!({
+                "token": fact_token("extracted-event", index),
+                "id": fact.id,
+                "sequence": fact.sequence,
+                "summary": fact.summary,
+            })).collect::<Vec<_>>(),
+            "world_rules": canon.content.world_rules.iter().enumerate().map(|(index, fact)| serde_json::json!({
+                "token": fact_token("extracted-world-rule", index),
+                "id": fact.id,
+                "description": fact.description,
+            })).collect::<Vec<_>>(),
+        },
+    }))
+}
+
 async fn judge_live(
     client: &RuntimeLlmClient,
     case: &PositiveCase,
@@ -1723,13 +1822,7 @@ Exact shape: {{"rubric_version":"{RUBRIC_VERSION}","character_verdicts":[{{"expe
     let user = format!(
         "EVAL_CASE:
 {}",
-        serde_json::to_string(&serde_json::json!({
-            "expected": case.expected,
-            "extracted_characters": extraction.characters.iter().map(|c| (&c.name, &c.aliases)).collect::<Vec<_>>(),
-            "extracted_relationships": extraction.relationships.iter().map(|r| (&r.from_character, &r.to_character, &r.relationship_type)).collect::<Vec<_>>(),
-            "extracted_events": canon.content.events.iter().map(|e| &e.id).collect::<Vec<_>>(),
-            "extracted_world_rules": canon.content.world_rules.iter().map(|r| &r.id).collect::<Vec<_>>(),
-        }))?
+        serde_json::to_string(&semantic_judge_payload(case, extraction, canon)?)?
     );
     let response = client
         .chat(
@@ -1804,6 +1897,22 @@ fn validate_judge_verdicts(verdicts: &JudgeVerdicts) -> Result<()> {
     Ok(())
 }
 
+fn require_exact_tokens<'a>(
+    name: &str,
+    prefix: &str,
+    expected_len: usize,
+    actual: impl Iterator<Item = &'a str>,
+) -> Result<()> {
+    let expected = (0..expected_len)
+        .map(|index| fact_token(prefix, index))
+        .collect::<BTreeSet<_>>();
+    let actual = actual.map(str::to_owned).collect::<BTreeSet<_>>();
+    if actual != expected {
+        bail!("judge {name} tokens do not exactly cover input facts");
+    }
+    Ok(())
+}
+
 fn live_report(
     case: &PositiveCase,
     extraction: &ExtractionResult,
@@ -1811,6 +1920,79 @@ fn live_report(
     chapter_count: usize,
     verdicts: &JudgeVerdicts,
 ) -> Result<CaseReport> {
+    require_exact_tokens(
+        "character_verdicts",
+        "expected-character",
+        case.expected.characters.len(),
+        verdicts
+            .character_verdicts
+            .iter()
+            .map(|item| item.expected.as_str()),
+    )?;
+    require_exact_tokens(
+        "extracted_character_verdicts",
+        "extracted-character",
+        extraction.characters.len(),
+        verdicts
+            .extracted_character_verdicts
+            .iter()
+            .map(|item| item.extracted.as_str()),
+    )?;
+    require_exact_tokens(
+        "relationship_verdicts",
+        "expected-relationship",
+        case.expected.relationships.len(),
+        verdicts
+            .relationship_verdicts
+            .iter()
+            .map(|item| item.expected.as_str()),
+    )?;
+    require_exact_tokens(
+        "extracted_relationship_verdicts",
+        "extracted-relationship",
+        extraction.relationships.len(),
+        verdicts
+            .extracted_relationship_verdicts
+            .iter()
+            .map(|item| item.extracted.as_str()),
+    )?;
+    require_exact_tokens(
+        "event_verdicts",
+        "expected-event",
+        case.expected.events.len(),
+        verdicts
+            .event_verdicts
+            .iter()
+            .map(|item| item.expected.as_str()),
+    )?;
+    require_exact_tokens(
+        "extracted_event_verdicts",
+        "extracted-event",
+        canon.content.events.len(),
+        verdicts
+            .extracted_event_verdicts
+            .iter()
+            .map(|item| item.extracted.as_str()),
+    )?;
+    require_exact_tokens(
+        "world_rule_verdicts",
+        "expected-world-rule",
+        case.expected.world_rules.len(),
+        verdicts
+            .world_rule_verdicts
+            .iter()
+            .map(|item| item.expected.as_str()),
+    )?;
+    require_exact_tokens(
+        "extracted_world_rule_verdicts",
+        "extracted-world-rule",
+        canon.content.world_rules.len(),
+        verdicts
+            .extracted_world_rule_verdicts
+            .iter()
+            .map(|item| item.extracted.as_str()),
+    )?;
+
     let mut scores = Scores::default();
     scores
         .expected
@@ -1978,6 +2160,24 @@ mod tests {
             .as_object()
             .unwrap()
             .contains_key("thinking_enabled"));
+    }
+
+    #[test]
+    fn judge_tokens_must_exactly_cover_input_facts() {
+        assert!(require_exact_tokens(
+            "characters",
+            "expected-character",
+            2,
+            ["expected-character-0", "expected-character-1"].into_iter(),
+        )
+        .is_ok());
+        assert!(require_exact_tokens(
+            "characters",
+            "expected-character",
+            2,
+            ["expected-character-0", "expected-character-0"].into_iter(),
+        )
+        .is_err());
     }
 
     #[test]
