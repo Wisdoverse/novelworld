@@ -995,6 +995,17 @@ pub struct CharacterContextEnvelope {
     pub world_context: Option<CharacterWorldContext>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CharacterContextSnapshot {
+    pub user_id: Uuid,
+    pub novel_id: Uuid,
+    pub character_id: Uuid,
+    pub world_revision: [u8; 32],
+    pub branch_context: Option<CharacterBranchContext>,
+    pub world_context: Option<CharacterWorldContext>,
+}
+
 fn validate_world_state_checkpoint(
     world_state: &serde_json::Value,
     checkpoint_chapter: i32,

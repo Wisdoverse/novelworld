@@ -44,6 +44,23 @@ pub trait UserChoiceRepository: Send + Sync {
     async fn find_by_novel(&self, user_id: Uuid, novel_id: Uuid) -> Result<Vec<UserChoiceRecord>>;
 }
 
+#[derive(Debug, Clone)]
+pub struct CharacterContextReadModel {
+    pub world_state: WorldState,
+    pub choices: Vec<UserChoiceRecord>,
+    pub journal: Vec<WorldTurnJournalEntry>,
+}
+
+#[async_trait]
+pub trait CharacterContextSnapshotRepository: Send + Sync {
+    async fn read_character_context_snapshot(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        journal_limit: usize,
+    ) -> Result<CharacterContextReadModel>;
+}
+
 #[async_trait]
 pub trait WorldStateRepository: Send + Sync {
     async fn get_or_create(&self, user_id: Uuid, novel_id: Uuid) -> Result<WorldState>;

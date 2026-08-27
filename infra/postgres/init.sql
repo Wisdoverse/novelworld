@@ -394,6 +394,7 @@ CREATE TABLE chat_turns (
     character_id           UUID NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
     novel_id               UUID NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
     request_fingerprint    BYTEA NOT NULL,
+    world_revision         BYTEA,
     chapter_context        INTEGER NOT NULL,
     persona_source_chapter_high_water INTEGER,
     reader_identity        VARCHAR(200),
@@ -409,6 +410,14 @@ CREATE TABLE chat_turns (
     completed_at           TIMESTAMPTZ,
     CONSTRAINT chat_turns_request_fingerprint_check
         CHECK (pg_catalog.octet_length(request_fingerprint) = 32),
+    CONSTRAINT chat_turns_world_revision_check CHECK (
+        world_revision IS NULL
+        OR pg_catalog.octet_length(world_revision) = 32
+    ),
+    CONSTRAINT chat_turns_world_revision_state_check CHECK (
+        status::pg_catalog.text <> 'in_progress'::pg_catalog.text
+        OR world_revision IS NOT NULL
+    ),
     CONSTRAINT chat_turns_chapter_context_check CHECK (chapter_context >= 1),
     CONSTRAINT chat_turns_persona_source_chapter_high_water_check CHECK (
         persona_source_chapter_high_water IS NULL

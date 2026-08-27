@@ -61,6 +61,8 @@ const USER_LLM_CONFIG_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0023_user_llm_config.sql");
 const PERSONA_PROVENANCE_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0024_persona_provenance.sql");
+const CHAT_WORLD_REVISION_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0025_chat_world_revision.sql");
 
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
@@ -92,6 +94,7 @@ const ALL_MIGRATIONS: &[&str] = &[
     CHAPTER_TRANSLATIONS_MIGRATION,
     USER_LLM_CONFIG_MIGRATION,
     PERSONA_PROVENANCE_MIGRATION,
+    CHAT_WORLD_REVISION_MIGRATION,
 ];
 
 #[tokio::test]
@@ -1328,6 +1331,261 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
 }
 
 #[tokio::test]
+async fn chat_world_revision_upgrade_is_exact_and_replay_safe() {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    sqlx::query("DROP DATABASE IF EXISTS novelworld_chat_revision_contract WITH (FORCE)")
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("CREATE DATABASE novelworld_chat_revision_contract")
+        .execute(&admin)
+        .await
+        .unwrap();
+
+    let options = PgConnectOptions::from_str(&db_url())
+        .unwrap()
+        .database("novelworld_chat_revision_contract");
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::raw_sql(FRESH_SCHEMA).execute(&pool).await.unwrap();
+    sqlx::query("ALTER TABLE public.chat_turns DROP COLUMN world_revision")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let user_id = uuid::Uuid::new_v4();
+    let novel_id = uuid::Uuid::new_v4();
+    let character_id = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO users (id, email, password_hash) VALUES ($1, $2, 'hash')")
+        .bind(user_id)
+        .bind(format!("chat-revision-{user_id}@test.invalid"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO novels (id, user_id, title) VALUES ($1, $2, 'Causal chat')")
+        .bind(novel_id)
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO characters (id, novel_id, name) VALUES ($1, $2, 'Witness')")
+        .bind(character_id)
+        .bind(novel_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let in_progress_id = uuid::Uuid::new_v4();
+    let completed_id = uuid::Uuid::new_v4();
+    let failed_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO chat_turns (\
+             id, user_id, character_id, novel_id, request_fingerprint, chapter_context, \
+             reader_identity_type, deviation_mode, status, lease_expires_at) \
+         VALUES ($1, $2, $3, $4, $5, 1, 'self', 'canon', 'in_progress', NOW())",
+    )
+    .bind(in_progress_id)
+    .bind(user_id)
+    .bind(character_id)
+    .bind(novel_id)
+    .bind(vec![1_u8; 32])
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO chat_turns (\
+             id, user_id, character_id, novel_id, request_fingerprint, chapter_context, \
+             reader_identity_type, deviation_mode, status, completed_at) \
+         VALUES ($1, $2, $3, $4, $5, 1, 'self', 'canon', 'completed', NOW())",
+    )
+    .bind(completed_id)
+    .bind(user_id)
+    .bind(character_id)
+    .bind(novel_id)
+    .bind(vec![2_u8; 32])
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO chat_turns (\
+             id, user_id, character_id, novel_id, request_fingerprint, chapter_context, \
+             reader_identity_type, deviation_mode, status, failure_code) \
+         VALUES ($1, $2, $3, $4, $5, 1, 'self', 'canon', 'failed', 'legacy_failure')",
+    )
+    .bind(failed_id)
+    .bind(user_id)
+    .bind(character_id)
+    .bind(novel_id)
+    .bind(vec![3_u8; 32])
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::raw_sql(CHAT_WORLD_REVISION_MIGRATION)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    type MigratedChatTurnRow = (uuid::Uuid, String, Option<String>, Option<Vec<u8>>);
+    let migrated: Vec<MigratedChatTurnRow> = sqlx::query_as(
+        "SELECT id, status, failure_code, world_revision \
+         FROM chat_turns WHERE id = ANY($1) ORDER BY id",
+    )
+    .bind(vec![in_progress_id, completed_id, failed_id])
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(migrated.len(), 3);
+    assert!(migrated.iter().all(|row| row.3.is_none()));
+    assert!(migrated.iter().any(|row| {
+        row.0 == in_progress_id
+            && row.1 == "failed"
+            && row.2.as_deref() == Some("causal_revision_unavailable")
+    }));
+    assert!(migrated
+        .iter()
+        .any(|row| row.0 == completed_id && row.1 == "completed" && row.2.is_none()));
+    assert!(migrated.iter().any(|row| {
+        row.0 == failed_id && row.1 == "failed" && row.2.as_deref() == Some("legacy_failure")
+    }));
+
+    let constraints: Vec<(String, String)> = sqlx::query_as(
+        "SELECT conname, pg_catalog.pg_get_constraintdef(oid, FALSE) \
+         FROM pg_catalog.pg_constraint \
+         WHERE conrelid = 'public.chat_turns'::pg_catalog.regclass \
+           AND conname IN (\
+               'chat_turns_world_revision_check', \
+               'chat_turns_world_revision_state_check'\
+           ) \
+           AND contype::pg_catalog.text = 'c' \
+           AND convalidated \
+         ORDER BY conname",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        constraints,
+        vec![
+            (
+                "chat_turns_world_revision_check".into(),
+                "CHECK (((world_revision IS NULL) OR (octet_length(world_revision) = 32)))".into(),
+            ),
+            (
+                "chat_turns_world_revision_state_check".into(),
+                "CHECK ((((status)::text <> 'in_progress'::text) OR (world_revision IS NOT NULL)))"
+                    .into(),
+            ),
+        ]
+    );
+    assert!(PgReadinessProbe::new(pool.clone()).is_ready().await);
+
+    let qualified_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO chat_turns (\
+             id, user_id, character_id, novel_id, request_fingerprint, world_revision, \
+             chapter_context, reader_identity_type, deviation_mode, status, lease_expires_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, 1, 'self', 'canon', 'in_progress', NOW())",
+    )
+    .bind(qualified_id)
+    .bind(user_id)
+    .bind(character_id)
+    .bind(novel_id)
+    .bind(vec![9_u8; 32])
+    .bind(vec![10_u8; 32])
+    .execute(&pool)
+    .await
+    .unwrap();
+    let qualified_before: (String, Vec<u8>, chrono::DateTime<chrono::Utc>) =
+        sqlx::query_as("SELECT status, world_revision, updated_at FROM chat_turns WHERE id = $1")
+            .bind(qualified_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    let converted_at: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT updated_at FROM chat_turns WHERE id = $1")
+            .bind(in_progress_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::raw_sql(CHAT_WORLD_REVISION_MIGRATION)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>(
+            "SELECT updated_at FROM chat_turns WHERE id = $1",
+        )
+        .bind(in_progress_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        converted_at
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, Vec<u8>, chrono::DateTime<chrono::Utc>)>(
+            "SELECT status, world_revision, updated_at FROM chat_turns WHERE id = $1",
+        )
+        .bind(qualified_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        qualified_before
+    );
+
+    let null_in_progress = sqlx::query(
+        "INSERT INTO chat_turns (\
+             id, user_id, character_id, novel_id, request_fingerprint, chapter_context, \
+             reader_identity_type, deviation_mode, status, lease_expires_at) \
+         VALUES ($1, $2, $3, $4, $5, 1, 'self', 'canon', 'in_progress', NOW())",
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(user_id)
+    .bind(character_id)
+    .bind(novel_id)
+    .bind(vec![4_u8; 32])
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    assert!(null_in_progress
+        .to_string()
+        .contains("chat_turns_world_revision_state_check"));
+
+    let short_revision = sqlx::query(
+        "INSERT INTO chat_turns (\
+             id, user_id, character_id, novel_id, request_fingerprint, world_revision, \
+             chapter_context, reader_identity_type, deviation_mode, status, completed_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, 1, 'self', 'canon', 'completed', NOW())",
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(user_id)
+    .bind(character_id)
+    .bind(novel_id)
+    .bind(vec![5_u8; 32])
+    .bind(vec![5_u8; 31])
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    assert!(short_revision
+        .to_string()
+        .contains("chat_turns_world_revision_check"));
+
+    pool.close().await;
+    sqlx::query("DROP DATABASE novelworld_chat_revision_contract WITH (FORCE)")
+        .execute(&admin)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn legacy_world_turn_prose_is_retained_while_old_turns_become_terminal() {
     let admin = PgPoolOptions::new()
         .max_connections(1)
@@ -1646,6 +1904,7 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
         "0022_chapter_translations.sql",
         "0023_user_llm_config.sql",
         "0024_persona_provenance.sql",
+        "0025_chat_world_revision.sql",
     ] {
         let migration_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../infra/postgres/migrations")
@@ -2302,25 +2561,27 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
     sqlx::raw_sql(
         "INSERT INTO public.chat_turns ( \
              id, user_id, character_id, novel_id, request_fingerprint, \
-             chapter_context, reader_identity_type, deviation_mode, status, \
+             world_revision, chapter_context, reader_identity_type, deviation_mode, status, \
              lease_expires_at \
          ) VALUES \
              ( \
                  '00000000-0000-0000-0000-000000000020', \
                  '00000000-0000-0000-0000-000000000001', \
-                 '00000000-0000-0000-0000-000000000003', \
-                 '00000000-0000-0000-0000-000000000002', \
-                 decode(repeat('01', 32), 'hex'), 7, 'self', 'canon', \
-                 'in_progress', NOW() + INTERVAL '5 minutes' \
-             ), \
+                  '00000000-0000-0000-0000-000000000003', \
+                  '00000000-0000-0000-0000-000000000002', \
+                  decode(repeat('01', 32), 'hex'), decode(repeat('11', 32), 'hex'), \
+                  7, 'self', 'canon', \
+                  'in_progress', NOW() + INTERVAL '5 minutes' \
+              ), \
              ( \
                  '00000000-0000-0000-0000-000000000021', \
                  '00000000-0000-0000-0000-000000000001', \
-                 '00000000-0000-0000-0000-000000000003', \
-                 '00000000-0000-0000-0000-000000000002', \
-                 decode(repeat('02', 32), 'hex'), 7, 'self', 'canon', \
-                 'in_progress', NOW() + INTERVAL '5 minutes' \
-             )",
+                  '00000000-0000-0000-0000-000000000003', \
+                  '00000000-0000-0000-0000-000000000002', \
+                  decode(repeat('02', 32), 'hex'), decode(repeat('12', 32), 'hex'), \
+                  7, 'self', 'canon', \
+                  'in_progress', NOW() + INTERVAL '5 minutes' \
+              )",
     )
     .execute(&legacy)
     .await

@@ -123,6 +123,7 @@ pub struct CharacterContextEnvelope {
     pub user_id: Uuid,
     pub novel_id: Uuid,
     pub character_id: Uuid,
+    pub world_revision: [u8; 32],
     pub branch_context: Option<CharacterBranchContext>,
     pub world_context: Option<CharacterWorldContext>,
 }

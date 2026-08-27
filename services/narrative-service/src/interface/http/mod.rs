@@ -19,18 +19,21 @@ use crate::application::handlers::{
 };
 use crate::domain::entities::game_rules::PlayerRuleProfile;
 use crate::domain::entities::world_session::{
-    CharacterContextEnvelope, CharacterWorldContext, WorldAction, WorldActionKind,
+    CharacterContextEnvelope, CharacterContextSnapshot, CharacterWorldContext, WorldAction,
+    WorldActionKind,
 };
 use crate::domain::ports::{AccountExportPort, ReadinessProbe};
 
 const WORLD_CONTEXT_VERSION_HEADER: &str = "X-World-Context-Version";
 const WORLD_CONTEXT_VERSION_V2: &str = "2";
 const WORLD_CONTEXT_VERSION_V3: &str = "3";
+const WORLD_CONTEXT_VERSION_V4: &str = "4";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorldContextVersion {
     V2,
     V3,
+    V4,
 }
 
 #[derive(Clone)]
@@ -139,6 +142,12 @@ async fn get_character_world_context(
                 .get_character_context_envelope(user_id, novel_id, character_id)
                 .await,
         ),
+        Some(WorldContextVersion::V4) => character_context_snapshot_response(
+            state
+                .handler
+                .get_character_context_snapshot(user_id, novel_id, character_id)
+                .await,
+        ),
         None => StatusCode::NO_CONTENT.into_response(),
     }
 }
@@ -159,6 +168,15 @@ fn character_context_envelope_response(
     match result {
         Ok(Some(context)) => (StatusCode::OK, Json(context)).into_response(),
         Ok(None) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => narrative_error_response(error),
+    }
+}
+
+fn character_context_snapshot_response(
+    result: Result<CharacterContextSnapshot, NarrativeError>,
+) -> Response {
+    match result {
+        Ok(context) => (StatusCode::OK, Json(context)).into_response(),
         Err(error) => narrative_error_response(error),
     }
 }
@@ -686,6 +704,7 @@ fn world_context_version(headers: &HeaderMap) -> Option<WorldContextVersion> {
     {
         Some(WORLD_CONTEXT_VERSION_V2) => Some(WorldContextVersion::V2),
         Some(WORLD_CONTEXT_VERSION_V3) => Some(WorldContextVersion::V3),
+        Some(WORLD_CONTEXT_VERSION_V4) => Some(WorldContextVersion::V4),
         _ => None,
     }
 }
@@ -723,11 +742,11 @@ mod principal_contract_tests {
     }
 
     #[test]
-    fn world_context_version_gate_supports_v2_and_v3_and_fails_closed_otherwise() {
+    fn world_context_version_gate_supports_v2_v3_and_v4_and_fails_closed_otherwise() {
         let mut headers = HeaderMap::new();
         assert_eq!(world_context_version(&headers), None);
 
-        for unsupported in ["1", "4"] {
+        for unsupported in ["1", "5"] {
             headers.insert(
                 WORLD_CONTEXT_VERSION_HEADER,
                 HeaderValue::from_static(unsupported),
@@ -751,6 +770,14 @@ mod principal_contract_tests {
             world_context_version(&headers),
             Some(WorldContextVersion::V3)
         );
+        headers.insert(
+            WORLD_CONTEXT_VERSION_HEADER,
+            HeaderValue::from_static(WORLD_CONTEXT_VERSION_V4),
+        );
+        assert_eq!(
+            world_context_version(&headers),
+            Some(WorldContextVersion::V4)
+        );
     }
 
     #[test]
@@ -760,6 +787,47 @@ mod principal_contract_tests {
 
         let response = character_context_envelope_response(Ok(None));
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[test]
+    fn v3_wire_shape_stays_revision_free_and_v4_requires_the_revision() {
+        let user_id = Uuid::new_v4();
+        let novel_id = Uuid::new_v4();
+        let character_id = Uuid::new_v4();
+        let v3 = serde_json::to_value(CharacterContextEnvelope {
+            user_id,
+            novel_id,
+            character_id,
+            branch_context: None,
+            world_context: None,
+        })
+        .unwrap();
+        assert_eq!(
+            v3.as_object().unwrap().keys().cloned().collect::<Vec<_>>(),
+            vec![
+                "branch_context",
+                "character_id",
+                "novel_id",
+                "user_id",
+                "world_context",
+            ]
+        );
+        assert!(v3.get("world_revision").is_none());
+
+        let v4 = CharacterContextSnapshot {
+            user_id,
+            novel_id,
+            character_id,
+            world_revision: [7; 32],
+            branch_context: None,
+            world_context: None,
+        };
+        let encoded = serde_json::to_value(&v4).unwrap();
+        assert_eq!(encoded["world_revision"].as_array().unwrap().len(), 32);
+        assert_eq!(
+            character_context_snapshot_response(Ok(v4)).status(),
+            StatusCode::OK
+        );
     }
 
     #[test]

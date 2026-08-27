@@ -287,6 +287,16 @@ printf '%s\n' '-- remote-only persona provenance contract' \
 git -C "$fetch_seed" add \
   infra/postgres/migrations/0021_world_turn_memory_projection.sql \
   infra/postgres/migrations/0024_persona_provenance.sql
+git -C "$fetch_seed" commit -m pre-chat-world >/dev/null
+remote_pre_chat_world=$(git -C "$fetch_seed" rev-parse HEAD)
+printf '%s\n' 'release controls preserving the active 0021/0024 barriers' \
+  >"$fetch_seed/release-control.txt"
+git -C "$fetch_seed" add release-control.txt
+git -C "$fetch_seed" commit -m control-only >/dev/null
+remote_control=$(git -C "$fetch_seed" rev-parse HEAD)
+printf '%s\n' '-- remote-only chat-world revision contract' \
+  >"$fetch_seed/infra/postgres/migrations/0025_chat_world_revision.sql"
+git -C "$fetch_seed" add infra/postgres/migrations/0025_chat_world_revision.sql
 git -C "$fetch_seed" commit -m candidate >/dev/null
 remote_candidate=$(git -C "$fetch_seed" rev-parse HEAD)
 git -C "$fetch_seed" push origin main >/dev/null
@@ -303,11 +313,37 @@ expect_fail 'adopt fetches a remote-only candidate before the schema guard' \
   _ "$fetch_client" "$remote_state" "$release" "$remote_manifest"
 git -C "$fetch_client" cat-file -e "$remote_candidate^{commit}"
 
+post_0024_manifest=$(mktemp "$work/post-0024.XXXXXX")
+control_manifest=$(mktemp "$work/control-only.XXXXXX")
+write_manifest "$post_0024_manifest" "$remote_pre_chat_world"
+write_manifest "$control_manifest" "$remote_control"
+control_state=$(new_state)
+cp "$post_0024_manifest" "$control_state/current.env"
+expect_fail 'post-0024 control-only target retains existing barriers and omits 0025' \
+  'production secrets file not found' bash -c \
+  'cd "$1"; RELEASE_STATE_DIR="$2" "$3" upgrade "$4"' \
+  _ "$fetch_client" "$control_state" "$release" "$control_manifest"
+
+migration_state=$(new_state)
+cp "$control_manifest" "$migration_state/current.env"
+expect_fail 'control-only target can advance to the matching 0025 release' \
+  'production secrets file not found' bash -c \
+  'cd "$1"; RELEASE_STATE_DIR="$2" "$3" upgrade "$4"' \
+  _ "$fetch_client" "$migration_state" "$release" "$remote_manifest"
+
+pre_chat_world_manifest=$(mktemp "$work/pre-chat-world.XXXXXX")
+write_manifest "$pre_chat_world_manifest" "$remote_pre_chat_world"
+pre_chat_world_state=$(new_state)
+expect_fail 'adopt requires migration 0025' \
+  'adopt target predates the chat-world revision contract' \
+  bash -c 'cd "$1"; RELEASE_STATE_DIR="$2" "$3" adopt "$4"' \
+  _ "$fetch_client" "$pre_chat_world_state" "$release" "$pre_chat_world_manifest"
+
 # A downloaded candidate is not evidence that its migration ran. Before the
 # durable transition marker exists, restore reaches the current deployment
 # preflight. Once migration may have started, the same pre-0020 current target
 # can no longer run; restore must roll the exact marked release forward.
-remote_base=$(git -C "$fetch_client" rev-parse "$remote_candidate^")
+remote_base=$(git -C "$fetch_client" rev-parse "$remote_pre_chat_world^")
 remote_restore_state=$(new_state)
 remote_current=$(mktemp "$work/remote-current.XXXXXX")
 write_manifest "$remote_current" "$remote_base"
@@ -386,9 +422,12 @@ printf '%s\n' '-- initial roll-forward migration contract' \
   >"$roll_repo/infra/postgres/migrations/0021_world_turn_memory_projection.sql"
 printf '%s\n' '-- initial persona provenance contract' \
   >"$roll_repo/infra/postgres/migrations/0024_persona_provenance.sql"
+printf '%s\n' '-- initial chat-world revision contract' \
+  >"$roll_repo/infra/postgres/migrations/0025_chat_world_revision.sql"
 git -C "$roll_repo" add \
   infra/postgres/migrations/0021_world_turn_memory_projection.sql \
-  infra/postgres/migrations/0024_persona_provenance.sql
+  infra/postgres/migrations/0024_persona_provenance.sql \
+  infra/postgres/migrations/0025_chat_world_revision.sql
 git -C "$roll_repo" commit -m 'initial roll-forward fixture' >/dev/null
 roll_sha=$(git -C "$roll_repo" rev-parse HEAD)
 printf '%s\n' 'post-0020 release fixture' >"$roll_repo/release-fixture.txt"
@@ -676,6 +715,7 @@ while IFS='|' read -r barrier migration_number contract; do
 done <<'EOF'
 infra/postgres/migrations/0021_world_turn_memory_projection.sql|0021|world-memory projection
 infra/postgres/migrations/0024_persona_provenance.sql|0024|persona-provenance
+infra/postgres/migrations/0025_chat_world_revision.sql|0025|chat-world revision
 EOF
 
 if git cat-file -e "HEAD:infra/postgres/migrations/0021_world_turn_memory_projection.sql" 2>/dev/null; then

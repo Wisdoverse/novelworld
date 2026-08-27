@@ -59,6 +59,7 @@ struct ChatTurnRow {
     reader_identity_type: String,
     reader_character_id: Option<Uuid>,
     deviation_mode: String,
+    world_revision: Option<Vec<u8>>,
     status: String,
     attempt: i64,
     failure_code: Option<String>,
@@ -74,7 +75,17 @@ impl ChatTurnRow {
             && self.request_fingerprint == claim.request_fingerprint
     }
 
-    fn claim(&self, id: Uuid) -> ChatTurnClaim {
+    fn claim(&self, id: Uuid) -> Result<ChatTurnClaim> {
+        let world_revision: [u8; 32] = self
+            .world_revision
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("chat turn is missing its world revision"))?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("chat turn has an invalid world revision"))?;
+        Ok(self.claim_with_revision(id, world_revision))
+    }
+
+    fn claim_with_revision(&self, id: Uuid, world_revision: [u8; 32]) -> ChatTurnClaim {
         ChatTurnClaim {
             id,
             user_id: self.user_id,
@@ -87,6 +98,7 @@ impl ChatTurnRow {
             reader_identity_type: self.reader_identity_type.clone(),
             reader_character_id: self.reader_character_id,
             deviation_mode: self.deviation_mode.clone(),
+            world_revision,
         }
     }
 }
@@ -151,11 +163,11 @@ impl ChatRepository for PgChatRepository {
                     id, user_id, character_id, novel_id, request_fingerprint,
                     chapter_context, persona_source_chapter_high_water,
                     reader_identity, reader_identity_type,
-                    reader_character_id, deviation_mode, status, attempt,
+                    reader_character_id, deviation_mode, world_revision, status, attempt,
                     lease_expires_at
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9::identity_type,
-                    $10, $11::deviation_mode, 'in_progress', 1,
+                    $10, $11::deviation_mode, $12, 'in_progress', 1,
                     NOW() + INTERVAL '2 minutes'
                 )
                 ON CONFLICT (id) DO NOTHING
@@ -172,6 +184,7 @@ impl ChatRepository for PgChatRepository {
             .bind(&claim.reader_identity_type)
             .bind(claim.reader_character_id)
             .bind(&claim.deviation_mode)
+            .bind(claim.world_revision.as_slice())
             .execute(&self.pool)
             .await
             {
@@ -210,6 +223,7 @@ impl ChatRepository for PgChatRepository {
                        turn.persona_source_chapter_high_water,
                        turn.reader_identity, turn.reader_identity_type::text AS reader_identity_type,
                        turn.reader_character_id, turn.deviation_mode::text AS deviation_mode,
+                       turn.world_revision,
                        turn.status, turn.attempt, turn.failure_code,
                        COALESCE(turn.lease_expires_at <= NOW(), FALSE) AS lease_expired,
                        response.content AS response
@@ -226,8 +240,10 @@ impl ChatRepository for PgChatRepository {
             if !row.matches_request(claim) {
                 return Ok(BeginChatTurn::Conflict);
             }
-            let persisted_claim = row.claim(claim.id);
             if row.status == "completed" {
+                let Ok(persisted_claim) = row.claim(claim.id) else {
+                    return Ok(BeginChatTurn::Conflict);
+                };
                 return Ok(BeginChatTurn::Completed {
                     claim: persisted_claim,
                     response: row.response.ok_or_else(|| {
@@ -252,7 +268,7 @@ impl ChatRepository for PgChatRepository {
                 UPDATE chat_turns
                 SET status = 'in_progress', attempt = attempt + 1,
                     lease_expires_at = NOW() + INTERVAL '2 minutes',
-                    failure_code = NULL, updated_at = NOW()
+                    world_revision = $3, failure_code = NULL, updated_at = NOW()
                 WHERE id = $1 AND attempt = $2
                   AND ((status = 'failed' AND failure_code <> 'superseded')
                        OR (status = 'in_progress' AND lease_expires_at <= NOW()))
@@ -261,6 +277,7 @@ impl ChatRepository for PgChatRepository {
             )
             .bind(claim.id)
             .bind(row.attempt)
+            .bind(claim.world_revision.as_slice())
             .fetch_optional(&self.pool)
             .await
             {
@@ -277,7 +294,7 @@ impl ChatRepository for PgChatRepository {
             };
             if let Some((attempt,)) = reclaimed {
                 return Ok(BeginChatTurn::Acquired {
-                    claim: persisted_claim,
+                    claim: row.claim_with_revision(claim.id, claim.world_revision),
                     attempt,
                 });
             }
@@ -342,6 +359,7 @@ impl ChatRepository for PgChatRepository {
               AND reader_character_id IS NOT DISTINCT FROM $10
               AND deviation_mode = $11::deviation_mode
               AND persona_source_chapter_high_water = $12
+              AND world_revision = $13
             "#,
         )
         .bind(claim.id)
@@ -356,6 +374,7 @@ impl ChatRepository for PgChatRepository {
         .bind(claim.reader_character_id)
         .bind(&claim.deviation_mode)
         .bind(claim.persona_source_chapter_high_water)
+        .bind(claim.world_revision.as_slice())
         .execute(&mut *transaction)
         .await?;
         ensure!(claimed.rows_affected() == 1, "chat turn claim was fenced");
@@ -570,5 +589,44 @@ impl ChatRepository for PgChatRepository {
         .await?;
 
         Ok(rows.into_iter().map(ChatMessage::from).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(world_revision: Option<Vec<u8>>) -> ChatTurnRow {
+        ChatTurnRow {
+            user_id: Uuid::new_v4(),
+            character_id: Uuid::new_v4(),
+            novel_id: Uuid::new_v4(),
+            request_fingerprint: vec![1; 32],
+            chapter_context: 1,
+            persona_source_chapter_high_water: Some(1),
+            reader_identity: Some("Reader".into()),
+            reader_identity_type: "self".into(),
+            reader_character_id: None,
+            deviation_mode: "canon".into(),
+            world_revision,
+            status: "completed".into(),
+            attempt: 1,
+            failure_code: None,
+            lease_expired: false,
+            response: Some("response".into()),
+        }
+    }
+
+    #[test]
+    fn persisted_claim_requires_an_exact_32_byte_world_revision() {
+        assert!(row(None).claim(Uuid::new_v4()).is_err());
+        assert!(row(Some(vec![1; 31])).claim(Uuid::new_v4()).is_err());
+        assert_eq!(
+            row(Some(vec![2; 32]))
+                .claim(Uuid::new_v4())
+                .unwrap()
+                .world_revision,
+            [2; 32]
+        );
     }
 }

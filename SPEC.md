@@ -331,6 +331,12 @@ Fields:
 - `request_fingerprint` (32-byte message fingerprint; plaintext is not stored while pending)
 - `chapter_context`, `reader_identity`, `reader_identity_type`,
   `reader_character_id`, `deviation_mode` (immutable server-side prompt snapshot)
+- `world_revision` (nullable 32-byte Narrative `WorldState` fingerprint)
+  - Every new claim stores the exact revision returned with its causal context
+    before provider work. Historical completed/failed rows may remain null and
+    are retained for export/deletion, but they are not qualified for online
+    replay. A reclaimed failed/expired claim refreshes this field to the new
+    snapshot before another provider attempt.
 - `status` (`in_progress` | `completed` | `failed`)
 - `attempt` (positive fencing token)
 - `lease_expires_at`, `failure_code`, `created_at`, `updated_at`, `completed_at`
@@ -843,10 +849,14 @@ follows:
    prompt. Redis is only a projection and is not prompt authority.
 4. **Source and reader context**: bounded chapter-visible lore, persisted
    progress, identity, and deviation mode.
-5. **World context**: Agent MUST attempt this lookup only when the persisted
-   conversation-turn identity snapshot is `self`; a `character` turn MUST omit
-   the lookup even if the current downstream identity changes concurrently.
-   After open-world entry, Narrative may return a bounded,
+5. **Causal revision and world context**: before claiming a new attempt, Agent
+   MUST request Narrative's version-4 causal snapshot for the exact
+   user/novel/character scope. Narrative MUST derive its 32-byte
+   `WorldState::fingerprint()` and any branch/world context from one PostgreSQL
+   snapshot. A `character` turn receives and persists only that opaque revision;
+   it MUST neither receive nor inject Player branch/world context. A `self` turn
+   may consume the bounded context from the same response. After open-world entry,
+   Narrative may return a bounded,
    server-committed transport DTO. After validating its scope and bounds, Agent
    MUST build a separate provider-facing allowlist containing only world
    time/turn, that character's numeric relationship score and goals, a canonical
@@ -870,11 +880,11 @@ follows:
    high-water mark. If that mark is absent during a rolling deploy or exceeds
    current server-owned reading progress, the Agent MUST omit the entire world
    view before provider invocation, including after reading progress is
-   rewound. Agent requests for this view MUST declare
-   `X-World-Context-Version: 2`; Narrative MUST return no view to an
-   authenticated older consumer that omits or changes that version. Thus either
-   mixed-version direction degrades to no world context rather than exposing an
-   unbounded view. Narrative and Agent MUST each enforce the character-directed
+   rewound. Agent requests for a causally fenced view MUST declare
+   `X-World-Context-Version: 4`; an old Narrative peer returns no view and the
+   new Agent fails before claim/provider work. Versions 2 and 3 retain their
+   existing world-only and branch/world response shapes for old consumers; no
+   field is added to those strict envelopes. Narrative and Agent MUST each enforce the character-directed
    action kind and target UUID before provider invocation. The current
    structural visibility model does not infer line of sight, location
    propagation, or social knowledge beyond explicit IDs.
@@ -918,9 +928,16 @@ Agent Service MUST NOT emit it until a single PostgreSQL transaction has:
 Client disconnect MUST stop delivery only; the in-process producer continues to
 the durable boundary. A provider error, malformed frame, or EOF without the
 provider's explicit terminal event MUST fail the attempt and MUST NOT be
-followed by `done`. A completed key is replayed without another LLM call. An
-active key returns `409 turn_in_progress` with `Retry-After`; a failed or
-expired attempt may be reclaimed with a higher fencing attempt.
+followed by `done`. After provider completion and before the PostgreSQL message
+transaction, Agent MUST re-read the same Narrative V4 scope. If its revision is
+unavailable, malformed, or differs from the claim, the attempt fails closed
+with zero committed messages and no `done`; a later same-key reclaim records the
+new revision before retrying. The final re-read and Agent commit are separate
+service transactions, so this rule fences commits that occur during provider
+generation without claiming cross-service linearizability. A completed key
+with a qualified revision is replayed without another LLM call. An active key
+returns `409 turn_in_progress` with `Retry-After`; a failed or expired attempt
+may be reclaimed with a higher fencing attempt and a refreshed revision.
 
 Redis and memory-compression updates are derived, best-effort projections after
 the PostgreSQL commit. Prompt history MUST be read from committed PostgreSQL
@@ -1249,7 +1266,8 @@ existing wire name is retained for compatibility:
   persistence work; only exact read/replay of an already committed choice is
   allowed until node persistence is keyed by durable identity provenance.
 - A character-identity chat turn MUST be fenced by the identity snapshot stored
-  with its idempotent claim: Agent MUST neither request nor inject Player world
+  with its idempotent claim: Agent MUST persist and compare the opaque Narrative
+  causal revision, but MUST neither receive nor inject Player branch/world
   context even if the reader concurrently switches to `self` before generation.
 - The same persisted claim is the authority for conversation visibility. A
   character-identity prompt and history read MUST include only messages backed
@@ -1266,7 +1284,8 @@ existing wire name is retained for compatibility:
 - A general WorldState read in character mode MUST expose only the reader's `choices` plus the
   required empty `world_events` field. This choices-only projection MUST happen before source
   high-water validation, so hidden Player/open-world state neither leaks nor blocks a valid branch
-  recovery. Internal character-world-context reads in character mode MUST return no content.
+  recovery. Internal V4 reads in character mode MUST return only the opaque
+  causal revision; both branch and world context fields MUST be empty.
 - Switching identity from `character` to `self` (or back) MUST NOT create or destroy a
   `PlayerEntity`; the `self`-mode open world only exists once the reader explicitly creates one.
 - Character-identity data (identity type, name, character id) is portable account data: it MUST
@@ -1577,24 +1596,42 @@ The unresolved-turn authority index is accepted only when it belongs to
 unique, valid, ready, and live. Migration replay MUST replace an exact-name but
 non-enforcing index, and Narrative readiness MUST fail while any of those
 catalog flags is false.
-Before applying migration 0021, the supported release path MUST first stop and
-drain the Narrative Service world-turn producer before candidate client assets
-are exposed, then stop and drain the Agent Service memory-projection consumer.
+Migration 0024 MUST be one explicit transaction. It MUST add nullable,
+chapter-bounded persona-provenance markers to chat turns and Mid/Long memories;
+legacy null rows remain retained for export and deletion but MUST remain
+ineligible for online prompt, history, replay, consolidation, and retrieval.
+Migration 0025 MUST be one explicit transaction. It MUST add a nullable
+32-byte world revision to chat turns, preserve null revisions on legacy
+completed or failed rows, and convert every legacy null-revision
+`in_progress` row to retryable `failed` with
+`causal_revision_unavailable` before enforcing that every `in_progress` row
+has an exact 32-byte revision. Replaying each migration MUST preserve rows
+already in a valid post-contract state.
+
+Before applying migrations 0021, 0024, or 0025, the supported release path MUST
+first stop and drain the Narrative Service world-turn producer before candidate
+client assets are exposed, then stop and drain the Novel Service persona reader
+and Agent Service context/memory consumer.
 During the client contract gate, a candidate world action MUST receive a
 retryable `5xx` from the stopped producer rather than a terminal validation
 response from an older DTO, so its exact recovery key remains retained.
-Zero-downtime world actions are not claimed. Only after both services quiesce may the repair run, so first-adoption
+Zero-downtime world actions are not claimed. Only after all three services quiesce may the migrations run, so first-adoption
 backfill and activation of the consumer quarantine share one clean release
 boundary.
 
 An installation whose active release script predates this drain/barrier logic
 MUST use a two-stage managed upgrade: first activate a control-only release
-that contains the new release script but not migration 0021, then use that
-script to deploy the migration and matching services. Initial adoption through
-the new script MUST select a release that already contains migration 0021.
+that contains the new release script and every semantic-barrier migration
+already present in the active release, but none of the later barriers that
+have not yet been applied; then use that script to deploy the next barrier and
+matching services. A post-0024 installation adopting 0025 therefore MUST retain
+0021 and 0024 in the control-only target and omit only 0025. Initial adoption
+through the new script MUST select a release that
+already contains all three migrations.
 Adoption, upgrade, restore, and rollback tooling MUST fail closed rather than
-activate a pre-0020 writer after the contract is present. Crossing that barrier
-requires a separately approved database compatibility procedure.
+activate a writer or reader whose manifest lacks any required semantic barrier
+after that contract is present. Crossing any barrier requires a separately
+approved database compatibility procedure.
 The release state MUST persist the exact target manifest immediately before
 starting the migration phase and MUST clear that transition marker only after
 the deployed manifest is durably promoted. A successful storage sync of the
@@ -1632,7 +1669,7 @@ removing named volumes before starting the rebuilt stack. This MUST remove the
 old one-shot migration container and quiesce old writers so migrations rerun
 before dependent services. The portable desktop runtime MUST stop its named
 embedded database, refuse startup while old service ports remain occupied,
-apply its embedded migrations through 0020, and only then spawn application
+apply its embedded migrations through 0025, and only then spawn application
 services.
 
 ### 12.4 Backup, Restore, and Erasure Replay

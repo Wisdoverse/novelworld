@@ -16,18 +16,19 @@ use crate::domain::entities::narrative_node::{
 use crate::domain::entities::player_entity::PlayerEntity;
 use crate::domain::entities::world_session::{
     build_world_turn_prompt_with_check, parse_world_turn_transition_with_check, trailing_chars,
-    CharacterBranchContext, CharacterBranchEvent, CharacterContextEnvelope, CharacterWorldContext,
-    ObservedWorldAction, RecentWorldActionContext, RecentWorldTurnContext, WorldAction,
-    WorldActionKind, WorldSession, MAX_CHARACTER_CONTEXT_TEXT_CHARS, MAX_CHARACTER_RECENT_ACTIONS,
-    MAX_CHARACTER_RECENT_EVENTS, MAX_RECENT_WORLD_NARRATIVE_CHARS, MAX_RECENT_WORLD_TURNS,
+    CharacterBranchContext, CharacterBranchEvent, CharacterContextEnvelope,
+    CharacterContextSnapshot, CharacterWorldContext, ObservedWorldAction, RecentWorldActionContext,
+    RecentWorldTurnContext, WorldAction, WorldActionKind, WorldSession,
+    MAX_CHARACTER_CONTEXT_TEXT_CHARS, MAX_CHARACTER_RECENT_ACTIONS, MAX_CHARACTER_RECENT_EVENTS,
+    MAX_RECENT_WORLD_NARRATIVE_CHARS, MAX_RECENT_WORLD_TURNS,
 };
 use crate::domain::ports::{AgentMemoryPort, DiceRollerPort, LlmPort, NarrativeLlmTask};
 use crate::domain::repositories::{
-    BeginWorldTurn, ChapterInfo, ChapterReadRepository, CharacterBrief, ChoiceCommit,
-    GameRuleTemplateRequestError, MemoryProjectionStatus, NarrativeNodeRepository, NovelInfo,
-    PlayerChapter, PlayerChapterOrigin, PlayerChapterRepository, UserChoiceRecord,
-    UserChoiceRepository, WorldStateRepository, WorldTurnClaim, WorldTurnJournalEntry,
-    WorldTurnRepository, WorldTurnResult,
+    BeginWorldTurn, ChapterInfo, ChapterReadRepository, CharacterBrief,
+    CharacterContextSnapshotRepository, ChoiceCommit, GameRuleTemplateRequestError,
+    MemoryProjectionStatus, NarrativeNodeRepository, NovelInfo, PlayerChapter, PlayerChapterOrigin,
+    PlayerChapterRepository, UserChoiceRecord, UserChoiceRepository, WorldStateRepository,
+    WorldTurnClaim, WorldTurnJournalEntry, WorldTurnRepository, WorldTurnResult,
 };
 use crate::domain::services::narrative_engine::{
     build_branch_prompt, build_player_chapter_prompt, is_chinese_narrative, parse_generated_branch,
@@ -517,6 +518,7 @@ pub struct NarrativeCommandHandler {
     pub node_repo: Arc<dyn NarrativeNodeRepository>,
     pub choice_repo: Arc<dyn UserChoiceRepository>,
     pub world_state_repo: Arc<dyn WorldStateRepository>,
+    pub character_context_repo: Arc<dyn CharacterContextSnapshotRepository>,
     pub player_chapter_repo: Arc<dyn PlayerChapterRepository>,
     pub chapter_repo: Arc<dyn ChapterReadRepository>,
     pub world_turn_repo: Arc<dyn WorldTurnRepository>,
@@ -1306,6 +1308,69 @@ impl NarrativeCommandHandler {
             branch_context,
             world_context,
         }))
+    }
+
+    pub async fn get_character_context_snapshot(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        character_id: Uuid,
+    ) -> NarrativeResult<CharacterContextSnapshot> {
+        self.owned_novel(novel_id, user_id).await?;
+        let snapshot = self
+            .character_context_repo
+            .read_character_context_snapshot(user_id, novel_id, MAX_WORLD_JOURNAL_ENTRIES)
+            .await
+            .map_err(NarrativeError::Internal)?;
+        let world_revision = snapshot.world_state.fingerprint();
+        let progress = self
+            .chapter_repo
+            .get_reading_progress(novel_id, user_id)
+            .await
+            .map_err(NarrativeError::Unavailable)?;
+
+        if !progress.reader_identity_is_self {
+            return Ok(CharacterContextSnapshot {
+                user_id,
+                novel_id,
+                character_id,
+                world_revision,
+                branch_context: None,
+                world_context: None,
+            });
+        }
+
+        let mut world_context = snapshot
+            .world_state
+            .character_world_context(character_id)
+            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?;
+        if let Some(mut context) = world_context.take() {
+            context.recent_actions =
+                recent_character_actions(snapshot.journal, character_id, context.turn_number);
+            world_context = Some(fit_character_world_context(context));
+        }
+        if world_context
+            .as_ref()
+            .is_some_and(|context| context.source_chapter_high_water > progress.current_chapter)
+        {
+            world_context = None;
+        }
+        let branch_context = recent_character_branch_context(
+            &snapshot.choices,
+            user_id,
+            novel_id,
+            character_id,
+            progress.current_chapter,
+        );
+
+        Ok(CharacterContextSnapshot {
+            user_id,
+            novel_id,
+            character_id,
+            world_revision,
+            branch_context,
+            world_context,
+        })
     }
 
     async fn open_world_view(

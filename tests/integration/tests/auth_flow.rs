@@ -257,12 +257,13 @@ async fn account_erasure_fails_closed_cascades_owned_data_and_resets_final_setup
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO chat_turns (id, user_id, character_id, novel_id, request_fingerprint, chapter_context, reader_identity_type, deviation_mode, status, lease_expires_at) VALUES ($1, $2, $3, $4, $5, 1, 'self', 'canon', 'in_progress', NOW() + INTERVAL '1 minute')")
+    sqlx::query("INSERT INTO chat_turns (id, user_id, character_id, novel_id, request_fingerprint, world_revision, chapter_context, reader_identity_type, deviation_mode, status, lease_expires_at) VALUES ($1, $2, $3, $4, $5, $6, 1, 'self', 'canon', 'in_progress', NOW() + INTERVAL '1 minute')")
         .bind(turn_id)
         .bind(target.id)
         .bind(character_id)
         .bind(novel_id)
         .bind(vec![7_u8; 32])
+        .bind(vec![8_u8; 32])
         .execute(&pool)
         .await
         .unwrap();

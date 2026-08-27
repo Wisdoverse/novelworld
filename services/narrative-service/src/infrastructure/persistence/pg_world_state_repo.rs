@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::prelude::FromRow;
@@ -14,9 +14,17 @@ use crate::domain::entities::{
     player_entity::{PlayerEntity, RelationshipState},
     world_session::WorldEntryContext,
 };
-use crate::domain::repositories::WorldStateRepository;
+use crate::domain::repositories::{
+    CharacterContextReadModel, CharacterContextSnapshotRepository, WorldStateRepository,
+};
 
-use super::ensure_choice_projection_consistent;
+use super::{
+    ensure_choice_projection_consistent, pg_narrative_repo::UserChoiceRow,
+    pg_world_turn_repo::JournalRow,
+};
+
+const CHARACTER_CONTEXT_SNAPSHOT_TRANSACTION: &str =
+    "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY";
 
 #[derive(Debug, FromRow)]
 struct WorldStateRow {
@@ -45,12 +53,9 @@ impl PgWorldStateRepository {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
-}
 
-#[async_trait]
-impl WorldStateRepository for PgWorldStateRepository {
-    async fn get_or_create(&self, user_id: Uuid, novel_id: Uuid) -> Result<WorldState> {
-        let ws = WorldState::new(user_id, novel_id);
+    async fn ensure_default_world_state(&self, user_id: Uuid, novel_id: Uuid) -> Result<()> {
+        let world_state = WorldState::new(user_id, novel_id);
         sqlx::query(
             r#"
             INSERT INTO world_states (id, user_id, novel_id, state, updated_at)
@@ -59,12 +64,20 @@ impl WorldStateRepository for PgWorldStateRepository {
             "#,
         )
         .bind(Uuid::new_v4())
-        .bind(ws.user_id)
-        .bind(ws.novel_id)
-        .bind(&ws.state)
-        .bind(ws.updated_at)
+        .bind(world_state.user_id)
+        .bind(world_state.novel_id)
+        .bind(&world_state.state)
+        .bind(world_state.updated_at)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl WorldStateRepository for PgWorldStateRepository {
+    async fn get_or_create(&self, user_id: Uuid, novel_id: Uuid) -> Result<WorldState> {
+        self.ensure_default_world_state(user_id, novel_id).await?;
 
         let row = sqlx::query_as::<_, WorldStateRow>(
             r#"
@@ -220,5 +233,104 @@ impl WorldStateRepository for PgWorldStateRepository {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl CharacterContextSnapshotRepository for PgWorldStateRepository {
+    async fn read_character_context_snapshot(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        journal_limit: usize,
+    ) -> Result<CharacterContextReadModel> {
+        ensure!(
+            (1..=100).contains(&journal_limit),
+            "journal limit must be 1-100"
+        );
+
+        // Finish the idempotent default write before establishing the read-only
+        // MVCC snapshot. Every fact used to derive the revision and context is
+        // then read from the same PostgreSQL snapshot.
+        self.ensure_default_world_state(user_id, novel_id).await?;
+        let mut transaction = self
+            .pool
+            .begin_with(CHARACTER_CONTEXT_SNAPSHOT_TRANSACTION)
+            .await?;
+
+        let world_state = sqlx::query_as::<_, WorldStateRow>(
+            r#"
+            SELECT user_id, novel_id, state, updated_at
+            FROM world_states
+            WHERE user_id = $1 AND novel_id = $2
+            "#,
+        )
+        .bind(user_id)
+        .bind(novel_id)
+        .fetch_one(&mut *transaction)
+        .await?
+        .into();
+        ensure_choice_projection_consistent(&mut *transaction, user_id, novel_id).await?;
+
+        let choices = sqlx::query_as::<_, UserChoiceRow>(
+            r#"
+            SELECT id, user_id, novel_id, node_id, chapter_number,
+                   choice_index, choice_text, consequence, transition, created_at
+            FROM user_choices
+            WHERE user_id = $1 AND novel_id = $2
+            ORDER BY created_at ASC
+            "#,
+        )
+        .bind(user_id)
+        .bind(novel_id)
+        .fetch_all(&mut *transaction)
+        .await?
+        .into_iter()
+        .map(TryInto::try_into)
+        .collect::<Result<Vec<_>>>()?;
+
+        let journal = sqlx::query_as::<_, JournalRow>(
+            r#"
+            SELECT id, turn_number, memory_projection_status,
+                   action, resolution, transition, created_at, completed_at
+            FROM (
+                SELECT id, expected_turn_number + 1 AS turn_number, action, resolution,
+                       transition, memory_projection_status, created_at, completed_at
+                FROM world_turns
+                WHERE user_id = $1 AND novel_id = $2 AND status = 'completed'
+                ORDER BY expected_turn_number DESC
+                LIMIT $3
+            ) AS recent
+            ORDER BY turn_number ASC
+            "#,
+        )
+        .bind(user_id)
+        .bind(novel_id)
+        .bind(journal_limit as i64)
+        .fetch_all(&mut *transaction)
+        .await?
+        .into_iter()
+        .map(TryInto::try_into)
+        .collect::<Result<Vec<_>>>()?;
+
+        transaction.commit().await?;
+        Ok(CharacterContextReadModel {
+            world_state,
+            choices,
+            journal,
+        })
+    }
+}
+
+#[cfg(test)]
+mod snapshot_contract_tests {
+    use super::*;
+
+    #[test]
+    fn character_context_uses_a_repeatable_read_read_only_transaction() {
+        assert_eq!(
+            CHARACTER_CONTEXT_SNAPSHOT_TRANSACTION,
+            "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+        );
     }
 }

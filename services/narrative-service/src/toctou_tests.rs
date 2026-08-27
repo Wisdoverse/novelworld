@@ -21,11 +21,12 @@ use crate::domain::entities::{
 };
 use crate::domain::ports::{AgentMemoryPort, DiceRollerPort, LlmPort, NarrativeLlmTask};
 use crate::domain::repositories::{
-    BeginWorldTurn, ChapterInfo, ChapterReadRepository, CharacterBrief, ChoiceCommit,
-    ChoiceCommitResult, MemoryProjectionStatus, NarrativeNodeRepository, NovelInfo, PlayerChapter,
-    PlayerChapterOrigin, PlayerChapterRepository, PlayerEntryContext, ReadingProgressSnapshot,
-    UserChoiceRecord, UserChoiceRepository, WorldStateRepository, WorldTurnClaim,
-    WorldTurnJournalEntry, WorldTurnRepository, WorldTurnResult,
+    BeginWorldTurn, ChapterInfo, ChapterReadRepository, CharacterBrief, CharacterContextReadModel,
+    CharacterContextSnapshotRepository, ChoiceCommit, ChoiceCommitResult, MemoryProjectionStatus,
+    NarrativeNodeRepository, NovelInfo, PlayerChapter, PlayerChapterOrigin,
+    PlayerChapterRepository, PlayerEntryContext, ReadingProgressSnapshot, UserChoiceRecord,
+    UserChoiceRepository, WorldStateRepository, WorldTurnClaim, WorldTurnJournalEntry,
+    WorldTurnRepository, WorldTurnResult,
 };
 use crate::domain::services::narrative_transition::{
     CanonContext, CanonEntityRef, NarrativeTransition, TransitionEvent,
@@ -223,6 +224,7 @@ impl ToctouFixture {
             node_repo: self.clone(),
             choice_repo: self.clone(),
             world_state_repo: self.clone(),
+            character_context_repo: self.clone(),
             player_chapter_repo: self.clone(),
             chapter_repo: self.clone(),
             world_turn_repo: self.clone(),
@@ -578,6 +580,52 @@ impl WorldStateRepository for ToctouFixture {
 
     async fn update(&self, _state: &WorldState) -> Result<()> {
         bail!("unused")
+    }
+}
+
+#[async_trait]
+impl CharacterContextSnapshotRepository for ToctouFixture {
+    async fn read_character_context_snapshot(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        journal_limit: usize,
+    ) -> Result<CharacterContextReadModel> {
+        ensure!(novel_id == self.novel_id);
+        ensure!((1..=100).contains(&journal_limit));
+        let world_state = if user_id == self.user_id {
+            self.world_state.lock().unwrap().clone()
+        } else if user_id == self.other_user_id {
+            self.other_world_state.lock().unwrap().clone()
+        } else {
+            bail!("unknown test user")
+        };
+        let choices = self
+            .choice
+            .lock()
+            .unwrap()
+            .clone()
+            .filter(|choice| choice.user_id == user_id && choice.novel_id == novel_id)
+            .into_iter()
+            .collect();
+        let journal = self
+            .journal
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry.turn_number > 0)
+            .rev()
+            .take(journal_limit)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        Ok(CharacterContextReadModel {
+            world_state,
+            choices,
+            journal,
+        })
     }
 }
 
@@ -1516,6 +1564,143 @@ async fn character_context_v3_returns_only_committed_branch_facts_before_open_wo
         .await
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+async fn character_context_v4_fingerprints_the_same_committed_branch_snapshot() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    fixture.clear_world_state();
+    let character_id = Uuid::new_v4();
+    let handler = fixture.handler();
+
+    let before = handler
+        .get_character_context_snapshot(fixture.user_id, fixture.novel_id, character_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        before.world_revision,
+        fixture.world_state.lock().unwrap().fingerprint()
+    );
+    assert!(before.branch_context.is_none());
+    assert!(before.world_context.is_none());
+
+    let transition = NarrativeTransition {
+        schema_version: 1,
+        prompt_version: "narrative-transition-v1".into(),
+        canon_model_version: 1,
+        canonical_checkpoint_chapter: fixture.source_chapter,
+        rendered_narrative: "生成后果只留在读者时间线。".into(),
+        events: vec![TransitionEvent {
+            summary: "角色亲眼见证城门关闭".into(),
+            actor_character_ids: vec![character_id],
+            location_id: None,
+        }],
+        relationship_changes: vec![],
+        location_changes: vec![],
+        thread_changes: vec![],
+    };
+    let node_id = Uuid::new_v4();
+    let choice_text = "PRIVATE_CHOICE_TEXT";
+    fixture
+        .world_state
+        .lock()
+        .unwrap()
+        .apply_choice_transition(node_id, fixture.source_chapter, 0, choice_text, &transition)
+        .unwrap();
+    *fixture.choice.lock().unwrap() = Some(UserChoiceRecord {
+        id: Uuid::new_v4(),
+        user_id: fixture.user_id,
+        novel_id: fixture.novel_id,
+        node_id,
+        chapter_number: fixture.source_chapter,
+        choice_index: 0,
+        choice_text: choice_text.into(),
+        consequence: transition.rendered_narrative.clone(),
+        transition,
+        created_at: Utc::now(),
+    });
+
+    let after = handler
+        .get_character_context_snapshot(fixture.user_id, fixture.novel_id, character_id)
+        .await
+        .unwrap();
+    assert_ne!(after.world_revision, before.world_revision);
+    assert_eq!(
+        after.world_revision,
+        fixture.world_state.lock().unwrap().fingerprint()
+    );
+    assert_eq!(
+        after.branch_context.unwrap().events[0].summary,
+        "角色亲眼见证城门关闭"
+    );
+    assert!(after.world_context.is_none());
+}
+
+#[tokio::test]
+async fn character_context_v4_revision_changes_after_a_world_turn() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    let handler = fixture.handler();
+    let before = handler
+        .get_character_context_snapshot(fixture.user_id, fixture.novel_id, Uuid::new_v4())
+        .await
+        .unwrap();
+
+    let (_, action) = fixture.prepare_pending_witnessed_turn();
+    let character_id = Uuid::parse_str(action.target_id.as_deref().unwrap()).unwrap();
+    let completed = fixture
+        .completed_world_turn
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap();
+    let now = Utc::now();
+    fixture.journal.lock().unwrap().push(WorldTurnJournalEntry {
+        turn_id: completed.turn_id,
+        turn_number: 1,
+        memory_projection_status: MemoryProjectionStatus::Saved,
+        action: completed.action,
+        resolution: completed.resolution,
+        transition: completed.transition,
+        created_at: now,
+        completed_at: now,
+    });
+
+    let after = handler
+        .get_character_context_snapshot(fixture.user_id, fixture.novel_id, character_id)
+        .await
+        .unwrap();
+    assert_ne!(after.world_revision, before.world_revision);
+    assert_eq!(
+        after.world_revision,
+        fixture.world_state.lock().unwrap().fingerprint()
+    );
+    let world = after.world_context.unwrap();
+    assert_eq!(world.turn_number, 1);
+    assert_eq!(world.recent_actions.len(), 1);
+}
+
+#[tokio::test]
+async fn character_context_v4_non_self_identity_returns_only_an_opaque_revision() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    fixture.self_identity.store(false, Ordering::SeqCst);
+    let character_id = Uuid::new_v4();
+    let handler = fixture.handler();
+
+    let snapshot = handler
+        .get_character_context_snapshot(fixture.user_id, fixture.novel_id, character_id)
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.user_id, fixture.user_id);
+    assert_eq!(snapshot.novel_id, fixture.novel_id);
+    assert_eq!(snapshot.character_id, character_id);
+    assert_eq!(
+        snapshot.world_revision,
+        fixture.world_state.lock().unwrap().fingerprint()
+    );
+    assert!(snapshot.branch_context.is_none());
+    assert!(snapshot.world_context.is_none());
+    assert!(!serde_json::to_string(&snapshot).unwrap().contains("云舟"));
 }
 
 #[tokio::test]

@@ -62,6 +62,8 @@ pub enum AgentRequestError {
     Capacity { retry_after_seconds: u64 },
     #[error("Idempotency key conflicts with an existing chat turn")]
     TurnConflict,
+    #[error("The reader world changed while the response was generated")]
+    WorldRevisionChanged,
     #[error("The language model could not complete the request")]
     Llm(#[source] anyhow::Error),
     #[error("Required service is unavailable")]
@@ -85,6 +87,7 @@ pub struct ChatResult {
 struct AcquiredTurn {
     character: CharacterInfo,
     reading: ReadingContext,
+    character_context: CharacterContextEnvelope,
     claim: ChatTurnClaim,
     attempt: i64,
     user_message: String,
@@ -219,6 +222,32 @@ fn turn_has_safe_persona_provenance(claim: &ChatTurnClaim) -> bool {
     claim
         .persona_source_chapter_high_water
         .is_some_and(|chapter| (1..=claim.chapter_context).contains(&chapter))
+}
+
+async fn load_character_context(
+    world_context: &dyn WorldContextPort,
+    novel_id: Uuid,
+    character_id: Uuid,
+    user_id: Uuid,
+) -> Result<CharacterContextEnvelope> {
+    world_context
+        .find(novel_id, character_id, user_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("narrative-service V4 world context is unavailable"))
+}
+
+fn validate_identity_context(
+    reader_identity_type: &str,
+    context: &CharacterContextEnvelope,
+) -> std::result::Result<(), AgentRequestError> {
+    if reader_identity_type == "character"
+        && (context.branch_context.is_some() || context.world_context.is_some())
+    {
+        return Err(AgentRequestError::Unavailable(anyhow::anyhow!(
+            "narrative-service exposed player context for a character identity"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -638,6 +667,15 @@ impl AgentCommandHandler {
         let (character, reading, persona_source_chapter_high_water) = self
             .resolve_turn_context(character_id, user_id, claimed_novel_id)
             .await?;
+        let character_context = load_character_context(
+            self.world_context.as_ref(),
+            character.novel_id,
+            character_id,
+            user_id,
+        )
+        .await
+        .map_err(AgentRequestError::Unavailable)?;
+        validate_identity_context(&reading.reader_identity_type, &character_context)?;
         let claim = ChatTurnClaim {
             id: turn_id,
             user_id,
@@ -650,6 +688,7 @@ impl AgentCommandHandler {
             reader_identity_type: reading.reader_identity_type.clone(),
             reader_character_id: reading.reader_character_id,
             deviation_mode: reading.deviation_mode.clone(),
+            world_revision: character_context.world_revision,
         };
 
         match self
@@ -663,6 +702,28 @@ impl AgentCommandHandler {
                 claim: persisted,
                 attempt,
             } => {
+                if persisted.world_revision != character_context.world_revision {
+                    self.memory_manager
+                        .chat_repo
+                        .fail_turn(persisted.id, attempt, "claim_revision_mismatch")
+                        .await
+                        .map_err(AgentRequestError::Unavailable)?;
+                    return Err(AgentRequestError::TurnConflict);
+                }
+                if let Err(error) =
+                    validate_identity_context(&persisted.reader_identity_type, &character_context)
+                {
+                    let released = self
+                        .memory_manager
+                        .chat_repo
+                        .fail_turn(persisted.id, attempt, "identity_context_mismatch")
+                        .await
+                        .map_err(AgentRequestError::Unavailable)?;
+                    if !released {
+                        return Err(AgentRequestError::TurnConflict);
+                    }
+                    return Err(error);
+                }
                 if persisted.chapter_context > reading.current_chapter {
                     let released = self
                         .memory_manager
@@ -729,6 +790,7 @@ impl AgentCommandHandler {
                 Ok(TurnStart::Acquired(Box::new(AcquiredTurn {
                     character,
                     reading,
+                    character_context,
                     claim: persisted,
                     attempt,
                     user_message,
@@ -792,17 +854,11 @@ impl AgentCommandHandler {
         }
         Self::add_reader_context(&mut context, &turn.reading);
         if turn.claim.reader_identity_type == "self" {
-            if let Some(envelope) = self
-                .world_context
-                .find(
-                    turn.claim.novel_id,
-                    turn.claim.character_id,
-                    turn.claim.user_id,
-                )
-                .await?
-            {
-                Self::add_character_context(&mut context, envelope, turn.claim.chapter_context)?;
-            }
+            Self::add_character_context(
+                &mut context,
+                turn.character_context.clone(),
+                turn.claim.chapter_context,
+            )?;
         }
         context.push(("user".into(), turn.user_message.clone()));
         Self::ensure_prompt_budget(&context)?;
@@ -891,6 +947,7 @@ impl AgentCommandHandler {
 
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let memory_manager = self.memory_manager.clone();
+        let world_context = self.world_context.clone();
         let current_span = tracing::Span::current();
         let projection_span = current_span.clone();
         tokio::spawn(
@@ -950,6 +1007,48 @@ impl AgentCommandHandler {
                     "language model returned an empty response"
                 )));
                 return;
+            }
+
+            match lease
+                .run(load_character_context(
+                    world_context.as_ref(),
+                    turn.claim.novel_id,
+                    turn.claim.character_id,
+                    turn.claim.user_id,
+                ))
+                .await
+            {
+                Some(Ok(context)) if context.world_revision == turn.claim.world_revision => {}
+                Some(Ok(_)) => {
+                    tracing::warn!(turn_id = %turn.claim.id, attempt = turn.attempt, "chat world revision changed before commit");
+                    let _ = memory_manager
+                        .chat_repo
+                        .fail_turn(turn.claim.id, turn.attempt, "stale_world_revision")
+                        .await;
+                    let _ = sender.send(Err(anyhow::anyhow!(
+                        "reader world changed while the response was generated"
+                    )));
+                    return;
+                }
+                Some(Err(error)) => {
+                    tracing::warn!(turn_id = %turn.claim.id, attempt = turn.attempt, error = ?error, "chat world revision could not be re-read before commit");
+                    let _ = memory_manager
+                        .chat_repo
+                        .fail_turn(turn.claim.id, turn.attempt, "world_revision_unavailable")
+                        .await;
+                    let _ = sender.send(Err(anyhow::anyhow!(
+                        "reader world revision could not be verified"
+                    )));
+                    return;
+                }
+                None => {
+                    let _ = memory_manager
+                        .chat_repo
+                        .fail_turn(turn.claim.id, turn.attempt, "lease_lost")
+                        .await;
+                    let _ = sender.send(Err(anyhow::anyhow!("chat turn lease was lost")));
+                    return;
+                }
             }
 
             let user_message = ChatMessage::new(
@@ -1113,6 +1212,38 @@ impl AgentCommandHandler {
             }
         };
 
+        match lease
+            .run(load_character_context(
+                self.world_context.as_ref(),
+                turn.claim.novel_id,
+                turn.claim.character_id,
+                turn.claim.user_id,
+            ))
+            .await
+        {
+            Some(Ok(context)) if context.world_revision == turn.claim.world_revision => {}
+            Some(Ok(_)) => {
+                tracing::warn!(
+                    turn_id = %turn.claim.id,
+                    attempt = turn.attempt,
+                    "chat world revision changed before commit"
+                );
+                self.fail_claim(&turn, "stale_world_revision").await;
+                return Err(AgentRequestError::WorldRevisionChanged.into());
+            }
+            Some(Err(error)) => {
+                self.fail_claim(&turn, "world_revision_unavailable").await;
+                return Err(AgentRequestError::Unavailable(error).into());
+            }
+            None => {
+                self.fail_claim(&turn, "lease_lost").await;
+                return Err(AgentRequestError::Unavailable(anyhow::anyhow!(
+                    "Chat turn lease was lost"
+                ))
+                .into());
+            }
+        }
+
         let user_message = ChatMessage::new(
             turn.claim.user_id,
             turn.claim.character_id,
@@ -1273,7 +1404,10 @@ impl AgentCommandHandler {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use std::sync::{atomic::AtomicUsize, atomic::Ordering, Mutex};
+    use std::{
+        collections::VecDeque,
+        sync::{atomic::AtomicUsize, atomic::Ordering, Mutex},
+    };
 
     use crate::domain::entities::memory::MemoryLayer;
     use crate::domain::ports::{
@@ -1290,6 +1424,15 @@ mod tests {
     impl CharacterInfoRepository for FixedCharacter {
         async fn find_by_id(&self, id: Uuid, _user_id: Uuid) -> Result<Option<CharacterInfo>> {
             Ok((id == self.0.id).then(|| self.0.clone()))
+        }
+    }
+
+    struct FixedCharacters(Vec<CharacterInfo>);
+
+    #[async_trait]
+    impl CharacterInfoRepository for FixedCharacters {
+        async fn find_by_id(&self, id: Uuid, _user_id: Uuid) -> Result<Option<CharacterInfo>> {
+            Ok(self.0.iter().find(|character| character.id == id).cloned())
         }
     }
 
@@ -1363,6 +1506,44 @@ mod tests {
         }
     }
 
+    fn revision_context(
+        user_id: Uuid,
+        novel_id: Uuid,
+        character_id: Uuid,
+        world_revision: [u8; 32],
+    ) -> CharacterContextEnvelope {
+        CharacterContextEnvelope {
+            user_id,
+            novel_id,
+            character_id,
+            world_revision,
+            branch_context: None,
+            world_context: None,
+        }
+    }
+
+    struct SequencedWorldContext {
+        calls: AtomicUsize,
+        contexts: Mutex<VecDeque<Option<CharacterContextEnvelope>>>,
+    }
+
+    #[async_trait]
+    impl WorldContextPort for SequencedWorldContext {
+        async fn find(
+            &self,
+            _novel_id: Uuid,
+            _character_id: Uuid,
+            _user_id: Uuid,
+        ) -> Result<Option<CharacterContextEnvelope>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.contexts
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("world-context test sequence was exhausted"))
+        }
+    }
+
     #[derive(Default)]
     struct RecordingMemoryRepository {
         layer_chapters: Mutex<Vec<i32>>,
@@ -1428,11 +1609,14 @@ mod tests {
     struct RecordingChatRepository {
         saved: Mutex<Vec<ChatMessage>>,
         failed: Mutex<Vec<String>>,
+        begun_claims: Mutex<Vec<ChatTurnClaim>>,
+        completed_claims: Mutex<Vec<ChatTurnClaim>>,
         recent_chapters: Mutex<Vec<i32>>,
         recent_reader_characters: Mutex<Vec<Option<Uuid>>>,
         history_reader_characters: Mutex<Vec<Option<Uuid>>>,
         completed_response: Option<String>,
         persisted_chapter: Option<i32>,
+        persisted_reader_identity_type: Option<String>,
         persisted_persona_source_chapter_high_water: Option<i32>,
         legacy_persona_provenance: bool,
         completion_gate: Option<Arc<tokio::sync::Semaphore>>,
@@ -1445,11 +1629,14 @@ mod tests {
             Self {
                 saved: Mutex::new(Vec::new()),
                 failed: Mutex::new(Vec::new()),
+                begun_claims: Mutex::new(Vec::new()),
+                completed_claims: Mutex::new(Vec::new()),
                 recent_chapters: Mutex::new(Vec::new()),
                 recent_reader_characters: Mutex::new(Vec::new()),
                 history_reader_characters: Mutex::new(Vec::new()),
                 completed_response: None,
                 persisted_chapter: None,
+                persisted_reader_identity_type: None,
                 persisted_persona_source_chapter_high_water: None,
                 legacy_persona_provenance: false,
                 completion_gate: None,
@@ -1462,9 +1649,13 @@ mod tests {
     #[async_trait]
     impl ChatRepository for RecordingChatRepository {
         async fn begin_turn(&self, claim: &ChatTurnClaim) -> Result<BeginChatTurn> {
+            self.begun_claims.lock().unwrap().push(claim.clone());
             let mut persisted = claim.clone();
             if let Some(chapter) = self.persisted_chapter {
                 persisted.chapter_context = chapter;
+            }
+            if let Some(identity_type) = &self.persisted_reader_identity_type {
+                persisted.reader_identity_type = identity_type.clone();
             }
             if let Some(chapter) = self.persisted_persona_source_chapter_high_water {
                 persisted.persona_source_chapter_high_water = Some(chapter);
@@ -1491,11 +1682,12 @@ mod tests {
 
         async fn complete_turn(
             &self,
-            _claim: &ChatTurnClaim,
+            claim: &ChatTurnClaim,
             _attempt: i64,
             user_message: &ChatMessage,
             character_message: &ChatMessage,
         ) -> Result<()> {
+            self.completed_claims.lock().unwrap().push(claim.clone());
             if let Some(gate) = &self.completion_gate {
                 gate.acquire().await?.forget();
             }
@@ -1762,7 +1954,17 @@ mod tests {
                 deviation_mode: "canon".into(),
             })),
             lore_context: Arc::new(FixedLore),
-            world_context: Arc::new(NoWorldContext),
+            world_context: Arc::new(RecordingWorldContext {
+                calls: AtomicUsize::new(0),
+                context: CharacterContextEnvelope {
+                    user_id,
+                    novel_id,
+                    character_id,
+                    world_revision: [1; 32],
+                    branch_context: None,
+                    world_context: None,
+                },
+            }),
             llm,
             chat_permits: Arc::new(Semaphore::new(8)),
             active_chat_users: Arc::new(Mutex::new(HashSet::new())),
@@ -2110,6 +2312,7 @@ mod tests {
             user_id,
             novel_id,
             character_id,
+            world_revision: [7; 32],
             branch_context: Some(CharacterBranchContext {
                 source_chapter_high_water: 2,
                 events: vec![CharacterBranchEvent {
@@ -2188,6 +2391,7 @@ mod tests {
                 user_id,
                 novel_id,
                 character_id,
+                world_revision: [7; 32],
                 branch_context: None,
                 world_context: Some(CharacterWorldContext {
                     user_id,
@@ -2233,6 +2437,7 @@ mod tests {
                 reader_character_id: Some(reader_character_id),
                 deviation_mode: "canon".into(),
             },
+            character_context: world_context.context.clone(),
             claim: ChatTurnClaim {
                 id: Uuid::new_v4(),
                 user_id,
@@ -2245,6 +2450,7 @@ mod tests {
                 reader_identity_type: "character".into(),
                 reader_character_id: Some(reader_character_id),
                 deviation_mode: "canon".into(),
+                world_revision: [7; 32],
             },
             attempt: 1,
             user_message: "What happens now?".into(),
@@ -2329,6 +2535,7 @@ mod tests {
                 user_id,
                 novel_id,
                 character_id,
+                world_revision: [7; 32],
                 branch_context: Some(CharacterBranchContext {
                     source_chapter_high_water: 3,
                     events: vec![CharacterBranchEvent {
@@ -2382,7 +2589,329 @@ mod tests {
         assert!(!prompt.contains("Future spoiler"));
         assert!(prompt.contains("曾在北方关隘服役十年"));
         assert!(prompt.contains(branch_summary));
-        assert_eq!(character_context.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(character_context.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn old_world_context_capability_fails_before_claim_or_provider() {
+        let chat_repo = Arc::new(RecordingChatRepository::default());
+        let llm = Arc::new(RecordingLlm::default());
+        let (mut handler, _, _, user_id, novel_id, character_id) =
+            test_handler(chat_repo.clone(), llm.clone());
+        handler.world_context = Arc::new(NoWorldContext);
+
+        let error = handler
+            .chat(
+                Uuid::new_v4(),
+                character_id,
+                user_id,
+                Some(novel_id),
+                "requires V4".into(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<AgentRequestError>(),
+            Some(AgentRequestError::Unavailable(_))
+        ));
+        assert!(chat_repo.begun_claims.lock().unwrap().is_empty());
+        assert!(chat_repo.saved.lock().unwrap().is_empty());
+        assert!(llm.user_ids.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn character_identity_rejects_non_revision_context_before_claim() {
+        let chat_repo = Arc::new(RecordingChatRepository::default());
+        let llm = Arc::new(RecordingLlm::default());
+        let (mut handler, _, _, user_id, novel_id, character_id) =
+            test_handler(chat_repo.clone(), llm.clone());
+        let adopted_id = Uuid::new_v4();
+        let mut conversation_character = persona_character();
+        conversation_character.id = character_id;
+        conversation_character.novel_id = novel_id;
+        let mut adopted_character = persona_character();
+        adopted_character.id = adopted_id;
+        adopted_character.novel_id = novel_id;
+        adopted_character.name = "Reader Character".into();
+        handler.character_repo = Arc::new(FixedCharacters(vec![
+            conversation_character,
+            adopted_character,
+        ]));
+        handler.reading_context = Arc::new(FixedReading(ReadingContext {
+            user_id,
+            novel_id,
+            current_chapter: 3,
+            reader_identity: Some("Reader Character".into()),
+            reader_identity_type: "character".into(),
+            reader_character_id: Some(adopted_id),
+            deviation_mode: "canon".into(),
+        }));
+        let mut context = revision_context(user_id, novel_id, character_id, [2; 32]);
+        context.branch_context = Some(CharacterBranchContext {
+            source_chapter_high_water: 3,
+            events: vec![CharacterBranchEvent {
+                chapter_number: 3,
+                summary: "不得交给角色身份的 Player 分支".into(),
+                actor_character_ids: vec![character_id],
+            }],
+        });
+        handler.world_context = Arc::new(RecordingWorldContext {
+            calls: AtomicUsize::new(0),
+            context,
+        });
+
+        let error = handler
+            .chat(
+                Uuid::new_v4(),
+                character_id,
+                user_id,
+                Some(novel_id),
+                "character identity".into(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<AgentRequestError>(),
+            Some(AgentRequestError::Unavailable(_))
+        ));
+        assert!(chat_repo.begun_claims.lock().unwrap().is_empty());
+        assert!(llm.user_ids.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reclaimed_character_identity_rejects_player_context_before_provider() {
+        let chat_repo = Arc::new(RecordingChatRepository {
+            persisted_reader_identity_type: Some("character".into()),
+            ..Default::default()
+        });
+        let llm = Arc::new(RecordingLlm::default());
+        let (mut handler, _, _, user_id, novel_id, character_id) =
+            test_handler(chat_repo.clone(), llm.clone());
+        let mut context = revision_context(user_id, novel_id, character_id, [3; 32]);
+        context.branch_context = Some(CharacterBranchContext {
+            source_chapter_high_water: 3,
+            events: vec![CharacterBranchEvent {
+                chapter_number: 3,
+                summary: "当前 self 身份可见但旧 character claim 不可见".into(),
+                actor_character_ids: vec![character_id],
+            }],
+        });
+        handler.world_context = Arc::new(RecordingWorldContext {
+            calls: AtomicUsize::new(0),
+            context,
+        });
+
+        let error = handler
+            .chat(
+                Uuid::new_v4(),
+                character_id,
+                user_id,
+                Some(novel_id),
+                "reclaimed character identity".into(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<AgentRequestError>(),
+            Some(AgentRequestError::Unavailable(_))
+        ));
+        assert_eq!(
+            *chat_repo.failed.lock().unwrap(),
+            vec!["identity_context_mismatch"]
+        );
+        assert!(llm.user_ids.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn changed_branch_revision_after_provider_commits_no_messages() {
+        let chat_repo = Arc::new(RecordingChatRepository::default());
+        let llm = Arc::new(RecordingLlm::default());
+        let (mut handler, _, _, user_id, novel_id, character_id) =
+            test_handler(chat_repo.clone(), llm.clone());
+        let mut captured = revision_context(user_id, novel_id, character_id, [4; 32]);
+        captured.branch_context = Some(CharacterBranchContext {
+            source_chapter_high_water: 3,
+            events: vec![CharacterBranchEvent {
+                chapter_number: 3,
+                summary: "provider 只应看到旧分支".into(),
+                actor_character_ids: vec![character_id],
+            }],
+        });
+        let mut advanced = revision_context(user_id, novel_id, character_id, [5; 32]);
+        advanced.branch_context = Some(CharacterBranchContext {
+            source_chapter_high_water: 3,
+            events: vec![CharacterBranchEvent {
+                chapter_number: 3,
+                summary: "提交前已经出现的新分支".into(),
+                actor_character_ids: vec![character_id],
+            }],
+        });
+        handler.world_context = Arc::new(SequencedWorldContext {
+            calls: AtomicUsize::new(0),
+            contexts: Mutex::new(VecDeque::from([Some(captured), Some(advanced)])),
+        });
+
+        let error = handler
+            .chat(
+                Uuid::new_v4(),
+                character_id,
+                user_id,
+                Some(novel_id),
+                "race the branch".into(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<AgentRequestError>(),
+            Some(AgentRequestError::WorldRevisionChanged)
+        ));
+        assert!(chat_repo.saved.lock().unwrap().is_empty());
+        assert_eq!(
+            *chat_repo.failed.lock().unwrap(),
+            vec!["stale_world_revision"]
+        );
+        assert_eq!(
+            chat_repo.begun_claims.lock().unwrap()[0].world_revision,
+            [4; 32]
+        );
+        let prompt = llm.prompts.lock().unwrap()[0]
+            .iter()
+            .map(|(_, content)| content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(prompt.contains("provider 只应看到旧分支"));
+        assert!(!prompt.contains("提交前已经出现的新分支"));
+    }
+
+    #[tokio::test]
+    async fn equivalent_visible_context_with_new_revision_streams_no_done_or_commit() {
+        let chat_repo = Arc::new(RecordingChatRepository::default());
+        let (mut handler, _, _, user_id, novel_id, character_id) =
+            test_handler(chat_repo.clone(), Arc::new(RecordingLlm::default()));
+        handler.world_context = Arc::new(SequencedWorldContext {
+            calls: AtomicUsize::new(0),
+            contexts: Mutex::new(VecDeque::from([
+                Some(revision_context(user_id, novel_id, character_id, [6; 32])),
+                Some(revision_context(user_id, novel_id, character_id, [7; 32])),
+            ])),
+        });
+
+        let events = handler
+            .chat_stream(
+                Uuid::new_v4(),
+                character_id,
+                user_id,
+                Some(novel_id),
+                "same visible context".into(),
+            )
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, Ok(AgentStreamEvent::Delta(_)))));
+        assert!(events.iter().any(Result::is_err));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, Ok(AgentStreamEvent::Done { .. }))));
+        assert!(chat_repo.saved.lock().unwrap().is_empty());
+        assert_eq!(
+            *chat_repo.failed.lock().unwrap(),
+            vec!["stale_world_revision"]
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_final_revision_commits_no_messages() {
+        let chat_repo = Arc::new(RecordingChatRepository::default());
+        let llm = Arc::new(RecordingLlm::default());
+        let (mut handler, _, _, user_id, novel_id, character_id) =
+            test_handler(chat_repo.clone(), llm);
+        handler.world_context = Arc::new(SequencedWorldContext {
+            calls: AtomicUsize::new(0),
+            contexts: Mutex::new(VecDeque::from([
+                Some(revision_context(user_id, novel_id, character_id, [8; 32])),
+                None,
+            ])),
+        });
+
+        let error = handler
+            .chat(
+                Uuid::new_v4(),
+                character_id,
+                user_id,
+                Some(novel_id),
+                "dependency drops after provider".into(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<AgentRequestError>(),
+            Some(AgentRequestError::Unavailable(_))
+        ));
+        assert!(chat_repo.saved.lock().unwrap().is_empty());
+        assert_eq!(
+            *chat_repo.failed.lock().unwrap(),
+            vec!["world_revision_unavailable"]
+        );
+    }
+
+    #[tokio::test]
+    async fn same_key_retry_refreshes_the_claimed_world_revision() {
+        let chat_repo = Arc::new(RecordingChatRepository::default());
+        let (mut handler, _, _, user_id, novel_id, character_id) =
+            test_handler(chat_repo.clone(), Arc::new(RecordingLlm::default()));
+        let first = revision_context(user_id, novel_id, character_id, [9; 32]);
+        let current = revision_context(user_id, novel_id, character_id, [10; 32]);
+        handler.world_context = Arc::new(SequencedWorldContext {
+            calls: AtomicUsize::new(0),
+            contexts: Mutex::new(VecDeque::from([
+                Some(first),
+                Some(current.clone()),
+                Some(current.clone()),
+                Some(current),
+            ])),
+        });
+        let turn_id = Uuid::new_v4();
+
+        assert!(handler
+            .chat(
+                turn_id,
+                character_id,
+                user_id,
+                Some(novel_id),
+                "retry me".into(),
+            )
+            .await
+            .is_err());
+        let result = handler
+            .chat(
+                turn_id,
+                character_id,
+                user_id,
+                Some(novel_id),
+                "retry me".into(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.replayed);
+        let claims = chat_repo.begun_claims.lock().unwrap();
+        assert_eq!(claims.len(), 2);
+        assert_eq!(claims[0].world_revision, [9; 32]);
+        assert_eq!(claims[1].world_revision, [10; 32]);
+        assert_eq!(
+            chat_repo.completed_claims.lock().unwrap()[0].world_revision,
+            [10; 32]
+        );
+        assert_eq!(chat_repo.saved.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]

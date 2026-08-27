@@ -99,14 +99,15 @@ upgrade. `rollback.pending` is accepted only as a compatibility recovery record
 from older tooling, and the next locked operation converges it before doing
 anything else.
 That marker is the only recovery authority until promotion: a transition that
-may have crossed application-semantic migration 0021 or 0024 rolls the exact
-target forward and never starts the older writer or reader. Adoption requires
-both barriers, and upgrade, marked restore, and rollback refuse to cross either
-one backwards. On the supported managed Docker path, a database after 0024
-must not run a pre-0024 Agent or Novel release except through a separately
-approved compatibility procedure. Experimental desktop archives are
-forward-migration-only; an older archive must not reuse a newer data directory
-because that older binary cannot enforce this barrier. The marker is storage-synced before migration; promotion is
+may have crossed application-semantic migration 0021, 0024, or 0025 rolls the
+exact target forward and never starts the older writer or reader. Adoption
+requires all three barriers, and upgrade, marked restore, and rollback refuse
+to cross any one backwards. On the supported managed Docker path, a database
+after 0024 must not run a pre-0024 Agent or Novel release, and a database after
+0025 must not run a pre-0025 Agent release, except through a separately approved
+compatibility procedure. Experimental desktop archives are forward-migration-only;
+an older archive must not reuse a post-0025 data directory because that older
+binary cannot enforce these barriers. The marker is storage-synced before migration; promotion is
 synced before marker removal, and marker removal is synced again. For an
 upgrade, the former current manifest is renamed and synced as `previous`
 before the new current manifest is installed. In both adoption and upgrade,
