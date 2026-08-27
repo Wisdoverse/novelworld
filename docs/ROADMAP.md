@@ -459,10 +459,13 @@ Scope:
 - If H0 retains character-identity mode, define and test its separate
   perspective/agency rules throughout chat, choice, world-state, export, and
   identity switching; it cannot inherit self-mode authority accidentally.
-- Validate the supported player action set against unknown entities, hard world
-  rules, dead characters, unavailable locations/items, future knowledge,
-  malicious instructions, duplicate keys, stale versions, and out-of-order
-  requests.
+- Validate the supported player action set against unknown/dead supported
+  targets, unavailable listed location/thread state, future progress,
+  unsupported fields, invalid shapes/ranges, duplicate keys, stale versions,
+  and out-of-order requests. Treat hostile instructions as quoted, untrusted
+  data: they cannot bypass those server checks, while the frozen H3 and
+  independent-human corpus permits zero semantic canon, spoiler, or agency
+  violations. Do not claim a keyword filter or arbitrary free-text rules engine.
 - Distinguish canonical history, reader-created history, uncertain extraction,
   and generated prose in the UI and export.
 - If H0 retains generated portraits or the relationship graph as product
@@ -484,10 +487,14 @@ Exit evidence:
 - Rebuilding from checkpoint plus committed journal produces equivalent
   normalized authoritative state. Only completed API replay promises
   byte-identical response; regenerated prose need not be identical.
-- Negative tests reject every listed invalid action and prove zero duplicate
-  commit across retry/reordering races. Completed idempotency keys make no new
-  provider call; an in-flight call whose receipt cannot be proven stays within
-  the metered and budgeted unknown-outcome bound.
+- Negative tests reject every unsupported or structurally invalid action and
+  every provider-proposed transition that violates the schema or explicitly
+  listed identity/entity/state/progress/order checks. Hostile input cannot
+  bypass those checks; the approved semantic corpus permits zero canon, spoiler,
+  or agency violations. The tests prove zero duplicate commit across
+  retry/reordering races. Completed idempotency keys make no new provider call;
+  an in-flight call whose receipt cannot be proven stays within the metered and
+  budgeted unknown-outcome bound.
 - If character-identity mode remains supported, a separate golden journey
   proves its perspective, identity-switch, conversation, agency, export, and
   deletion rules without weakening self-mode guarantees.
