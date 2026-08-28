@@ -1188,6 +1188,10 @@ async fn evaluate(
             "canon_extraction".into(),
             canon_story_extractor::CANON_EXTRACTION_PROMPT_VERSION.into(),
         ),
+        (
+            "canon_event_selection".into(),
+            canon_story_extractor::CANON_EVENT_SELECTION_PROMPT_VERSION.into(),
+        ),
         ("semantic_judge".into(), JUDGE_PROMPT_VERSION.into()),
     ]);
 
@@ -2129,6 +2133,51 @@ async fn run_live(
             trace: JudgeTrace::default(),
         })?;
         chunks.push((scan.clone(), chunk_extraction));
+    }
+    if let Some(prompt) =
+        canon_story_extractor::build_event_selection_prompt(&case.novel_title, &chunks)
+    {
+        let candidate_count = chunks
+            .iter()
+            .map(|(_, extraction)| extraction.events.len())
+            .sum();
+        let response = client
+            .chat(production_json_request(
+                LlmOperation::CanonExtraction,
+                &prompt,
+            ))
+            .await
+            .map_err(|_| LiveFailure {
+                code: "canon_selection_request_failed",
+                trace: JudgeTrace::default(),
+            })?;
+        record_private_response(
+            &mut private_responses,
+            &case.id,
+            LlmOperation::CanonExtraction,
+            &response,
+        )?;
+        register_response_model(
+            response_models,
+            &config.allowed_response_models,
+            &response.model,
+        )
+        .map_err(|_| LiveFailure {
+            code: "response_model_not_allowed",
+            trace: JudgeTrace::default(),
+        })?;
+        let selection =
+            canon_story_extractor::parse_event_selection(&response.content, candidate_count)
+                .map_err(|_| LiveFailure {
+                    code: "canon_selection_schema_invalid",
+                    trace: JudgeTrace::default(),
+                })?;
+        canon_story_extractor::apply_event_selection(&mut chunks, &selection).map_err(|_| {
+            LiveFailure {
+                code: "canon_selection_apply_invalid",
+                trace: JudgeTrace::default(),
+            }
+        })?;
     }
     let model = canon_story_extractor::assemble_model(case.novel_id, 1, &chunks, &characters)
         .map_err(|_| LiveFailure {
