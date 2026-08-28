@@ -27,6 +27,7 @@ services:
       LLM_API_URL: http://llm-stub:18080
       LLM_ALLOW_INSECURE_HTTP: "true"
       IMAGE_GEN_API_URL: http://llm-stub:18080
+      IMAGE_GEN_API_KEY: e2e-only
     depends_on:
       llm-stub:
         condition: service_healthy

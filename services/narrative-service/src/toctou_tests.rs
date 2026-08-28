@@ -59,6 +59,7 @@ struct ToctouFixture {
     player_chapter_read_entered: Notify,
     player_chapter_read_release: Notify,
     provider_calls: AtomicUsize,
+    invalid_world_transition: AtomicBool,
     provider_prompts: Mutex<Vec<String>>,
     provider_entered: Notify,
     provider_release: Notify,
@@ -180,6 +181,7 @@ impl ToctouFixture {
             player_chapter_read_entered: Notify::new(),
             player_chapter_read_release: Notify::new(),
             provider_calls: AtomicUsize::new(0),
+            invalid_world_transition: AtomicBool::new(false),
             provider_prompts: Mutex::new(vec![]),
             provider_entered: Notify::new(),
             provider_release: Notify::new(),
@@ -875,6 +877,23 @@ impl LlmPort for ToctouFixture {
                             {"text": "趁夜离开古城", "hint": "避开守卫保存实力"}
                         ])
                     }
+                })
+                .to_string()
+            }
+            NarrativeLlmTask::NarrativeTransition
+                if self.invalid_world_transition.load(Ordering::SeqCst) =>
+            {
+                serde_json::json!({
+                    "schema_version": 1,
+                    "rendered_narrative": "伪造未知角色越权改变世界。",
+                    "events": [{
+                        "summary": "未知角色越权行动",
+                        "actor_character_ids": [Uuid::new_v4()],
+                        "location_id": null
+                    }],
+                    "relationship_changes": [],
+                    "location_changes": [],
+                    "thread_changes": []
                 })
                 .to_string()
             }
@@ -2198,6 +2217,108 @@ async fn open_world_view_does_not_mix_a_future_journal_with_an_older_state_snaps
             .map(|entry| entry.turn_number)
             .collect::<Vec<_>>(),
         vec![1]
+    );
+}
+
+#[tokio::test]
+async fn unknown_and_dead_targets_fail_before_provider_or_authority_changes() {
+    for dead in [false, true] {
+        let fixture = Arc::new(ToctouFixture::new(false));
+        let known_character_id = Uuid::new_v4();
+        let mut entry_context =
+            fixture.entry_context(fixture.source_chapter, Some(known_character_id));
+        if dead {
+            entry_context.dead_character_ids.push(known_character_id);
+        }
+        fixture
+            .world_state
+            .lock()
+            .unwrap()
+            .start_open_world(&entry_context)
+            .unwrap();
+        let before = fixture.world_state.lock().unwrap().clone();
+        fixture
+            .acquire_next_world_turn
+            .store(true, Ordering::SeqCst);
+        let turn_id = Uuid::new_v4();
+        let target_id = if dead {
+            known_character_id
+        } else {
+            Uuid::new_v4()
+        };
+
+        let error = fixture
+            .handler()
+            .submit_world_turn(
+                turn_id,
+                fixture.user_id,
+                fixture.novel_id,
+                0,
+                WorldAction {
+                    kind: WorldActionKind::Converse,
+                    target_id: Some(target_id.to_string()),
+                    intent: "不应越过已提交角色边界".into(),
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, NarrativeError::Validation(_)));
+        assert_eq!(*fixture.world_state.lock().unwrap(), before);
+        assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.complete_turn_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.agent_memory_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            *fixture.failed_turns.lock().unwrap(),
+            vec![(turn_id, 1, "validation_error".into())]
+        );
+    }
+}
+
+#[tokio::test]
+async fn invalid_provider_transition_cannot_commit_authority() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    let entry_context = fixture.entry_context(fixture.source_chapter, None);
+    fixture
+        .world_state
+        .lock()
+        .unwrap()
+        .start_open_world(&entry_context)
+        .unwrap();
+    let before = fixture.world_state.lock().unwrap().clone();
+    fixture
+        .acquire_next_world_turn
+        .store(true, Ordering::SeqCst);
+    fixture
+        .invalid_world_transition
+        .store(true, Ordering::SeqCst);
+    fixture.provider_release.notify_one();
+    let turn_id = Uuid::new_v4();
+
+    let error = fixture
+        .handler()
+        .submit_world_turn(
+            turn_id,
+            fixture.user_id,
+            fixture.novel_id,
+            0,
+            WorldAction {
+                kind: WorldActionKind::PursueGoal,
+                target_id: None,
+                intent: "验证模型输出仍受服务器 schema 约束".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, NarrativeError::Llm(_)));
+    assert_eq!(*fixture.world_state.lock().unwrap(), before);
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.complete_turn_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.agent_memory_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        *fixture.failed_turns.lock().unwrap(),
+        vec![(turn_id, 1, "invalid_transition".into())]
     );
 }
 

@@ -291,12 +291,12 @@ fn provider_metrics_count_logical_requests_attempts_usage_and_stream_terminals()
     let address = listener.local_addr().unwrap();
     let success = r#"{"choices":[{"message":{"content":"ok"}}],"model":"model","usage":{"prompt_tokens":10,"completion_tokens":3,"prompt_cache_hit_tokens":4}}"#;
     let stream_success = concat!(
-        "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}],\"usage\":null}\n\n",
-        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":2,\"prompt_cache_hit_tokens\":5}}\n\n",
+        "data: {\"model\":\"model\",\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}],\"usage\":null}\n\n",
+        "data: {\"model\":\"model\",\"choices\":[],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":2,\"prompt_cache_hit_tokens\":5}}\n\n",
         "data: [DONE]\n\n"
     );
     let stream_drop = concat!(
-        "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}],\"usage\":null}\n\n",
+        "data: {\"model\":\"model\",\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}],\"usage\":null}\n\n",
         "data: [DONE]\n\n"
     );
     let missing_terminal =
@@ -676,10 +676,34 @@ fn openai_requires_done_and_rejects_content_filter_or_error() {
 }
 
 #[test]
+fn openai_stream_exposes_the_provider_response_model() {
+    futures::executor::block_on(async {
+        let body = concat!(
+            "data: {\"model\":\"deepseek-v4-flash\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let actual: Result<Vec<_>> =
+            decode(vec![body.as_bytes().to_vec()], openai::parse_stream_frame)
+                .await
+                .into_iter()
+                .collect();
+        assert_eq!(
+            actual.unwrap(),
+            vec![
+                ChatStreamEvent::ResponseModel("deepseek-v4-flash".into()),
+                ChatStreamEvent::Delta("ok".into()),
+                ChatStreamEvent::Finished,
+            ]
+        );
+    });
+}
+
+#[test]
 fn anthropic_requires_message_stop_rejects_errors_and_ignores_unknown_events() {
     futures::executor::block_on(async {
         let valid = concat!(
             "event: future_event\ndata: not-json\n\n",
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n",
             "event: content_block_delta\n",
             "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n",
             "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
@@ -694,6 +718,7 @@ fn anthropic_requires_message_stop_rejects_errors_and_ignores_unknown_events() {
         assert_eq!(
             actual.unwrap(),
             vec![
+                ChatStreamEvent::ResponseModel("claude-test".into()),
                 ChatStreamEvent::Delta("Hello".into()),
                 ChatStreamEvent::Finished
             ]

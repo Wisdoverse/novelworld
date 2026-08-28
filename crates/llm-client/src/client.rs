@@ -414,6 +414,9 @@ impl LlmClient {
                 match provider.chat(&self.http, api_key, &req).await {
                     Ok(resp) => {
                         labels.attempt("success", attempt_started.elapsed().as_secs_f64());
+                        if provider.reports_response_model() {
+                            labels.response_model(&resp.model);
+                        }
                         labels.usage(resp.usage.as_ref());
                         labels.finish("success", started);
                         return Ok(resp);
@@ -619,6 +622,7 @@ struct StreamGuard {
     labels: RequestLabels,
     started: Instant,
     first_token: bool,
+    response_model: Option<String>,
     usage: Option<Usage>,
     terminal: bool,
     _permit: OwnedSemaphorePermit,
@@ -654,6 +658,7 @@ fn observe_stream(
         labels,
         started,
         first_token: false,
+        response_model: None,
         usage: None,
         terminal: false,
         _permit: permit,
@@ -682,6 +687,17 @@ fn observe_stream(
                     }
                     yield Ok(ChatStreamEvent::Delta(text));
                 }
+                Ok(ChatStreamEvent::ResponseModel(model)) => {
+                    match guard.response_model.as_deref() {
+                        None => guard.response_model = Some(model),
+                        Some(current) if current == model => {}
+                        Some(_) => {
+                            guard.finish("stream_error");
+                            yield Err(anyhow!("LLM response model changed during the stream"));
+                            return;
+                        }
+                    }
+                }
                 Ok(ChatStreamEvent::Usage(usage)) => {
                     if guard.usage.is_some()
                         || usage.cached_input_tokens.is_some_and(|cached| cached > usage.input_tokens)
@@ -693,6 +709,9 @@ fn observe_stream(
                     guard.usage = Some(usage);
                 }
                 Ok(ChatStreamEvent::Finished) => {
+                    if let Some(model) = guard.response_model.as_deref() {
+                        guard.labels.response_model(model);
+                    }
                     guard.finish("success");
                     yield Ok(ChatStreamEvent::Finished);
                     return;
@@ -705,4 +724,59 @@ fn observe_stream(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod response_model_tests {
+    use super::*;
+
+    async fn observed(events: Vec<ChatStreamEvent>) -> Vec<anyhow::Result<ChatStreamEvent>> {
+        let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap();
+        observe_stream(
+            Box::pin(futures::stream::iter(events.into_iter().map(Ok))),
+            RequestLabels::new(
+                "deepseek",
+                "deepseek-v4-flash",
+                "test-key",
+                LlmOperation::CharacterChat,
+                "stream",
+                1_024,
+            ),
+            Instant::now(),
+            permit,
+            TokioInstant::now() + Duration::from_secs(1),
+        )
+        .collect()
+        .await
+    }
+
+    #[test]
+    fn stream_accepts_one_observed_model_and_rejects_model_drift() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(async {
+                assert!(matches!(
+                    observed(vec![
+                        ChatStreamEvent::ResponseModel("deepseek-v4-flash".into()),
+                        ChatStreamEvent::Finished,
+                    ])
+                    .await
+                    .as_slice(),
+                    [Ok(ChatStreamEvent::Finished)]
+                ));
+
+                let drift = observed(vec![
+                    ChatStreamEvent::ResponseModel("deepseek-v4-flash".into()),
+                    ChatStreamEvent::ResponseModel("other-model".into()),
+                    ChatStreamEvent::Finished,
+                ])
+                .await;
+                assert_eq!(
+                    drift[0].as_ref().unwrap_err().to_string(),
+                    "LLM response model changed during the stream"
+                );
+            });
+    }
 }

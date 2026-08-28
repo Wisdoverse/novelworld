@@ -51,6 +51,10 @@ pub(crate) async fn json_response<T: DeserializeOwned>(response: reqwest::Respon
 pub trait LlmProvider: Send + Sync {
     fn auth_header(&self, api_key: &str) -> (String, String);
 
+    fn reports_response_model(&self) -> bool {
+        false
+    }
+
     async fn chat(
         &self,
         client: &reqwest::Client,
