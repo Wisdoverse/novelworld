@@ -913,7 +913,7 @@ fn ensure_import_budget(chapters: &[Chapter]) -> std::result::Result<(), ImportB
     let canon_scans = canon_story_extractor::build_scan_plan(chapters)
         .map_err(|_| ImportBudgetExceeded)?
         .len();
-    let calls = 3usize
+    let calls = 4usize
         .saturating_add(character_scans)
         .saturating_add(canon_scans)
         .saturating_add(MAX_AVATARS_PER_NOVEL);
@@ -1973,14 +1973,26 @@ impl NovelCommandHandler {
                     None => None,
                 };
                 if selection.is_none() {
-                    let raw = self
-                        .llm
-                        .chat_json(claim.user_id, NovelLlmTask::CanonExtraction, &prompt)
-                        .await?;
-                    selection = Some(canon_story_extractor::parse_event_selection(
-                        &raw,
-                        candidate_count,
-                    )?);
+                    for schema_attempt in 1..=2 {
+                        let raw = self
+                            .llm
+                            .chat_json(claim.user_id, NovelLlmTask::CanonExtraction, &prompt)
+                            .await?;
+                        match canon_story_extractor::parse_event_selection(&raw, candidate_count) {
+                            Ok(parsed) => {
+                                selection = Some(parsed);
+                                break;
+                            }
+                            Err(error) if schema_attempt == 1 => {
+                                tracing::warn!(
+                                    novel_id = %novel.id,
+                                    %error,
+                                    "retrying canonical event grouping after invalid schema"
+                                );
+                            }
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
                 }
                 let selection = selection
                     .ok_or_else(|| anyhow::anyhow!("canonical event selection is missing"))?;
