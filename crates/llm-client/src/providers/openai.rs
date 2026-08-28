@@ -164,6 +164,15 @@ impl ResponsesUsage {
     }
 }
 
+fn required_response_model(payload: &Value) -> Result<String> {
+    payload
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|model| !model.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("Responses API response model is missing"))
+}
+
 fn parse_responses_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>> {
     let payload: Value = serde_json::from_str(&frame.data)
         .map_err(|error| anyhow!("invalid Responses API stream payload: {error}"))?;
@@ -171,15 +180,23 @@ fn parse_responses_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>>
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or(frame.event.as_str());
+    let response_model = payload
+        .pointer("/response/model")
+        .and_then(Value::as_str)
+        .filter(|model| !model.trim().is_empty())
+        .map(|model| ChatStreamEvent::ResponseModel(model.to_owned()));
+    let mut events = response_model.into_iter().collect::<Vec<_>>();
     match event_type {
         "response.output_text.delta" => payload
             .get("delta")
             .and_then(Value::as_str)
             .filter(|delta| !delta.is_empty())
-            .map(|delta| vec![ChatStreamEvent::Delta(delta.to_owned())])
+            .map(|delta| {
+                events.push(ChatStreamEvent::Delta(delta.to_owned()));
+                events
+            })
             .ok_or_else(|| anyhow!("Responses API text delta is missing")),
         "response.completed" => {
-            let mut events = Vec::new();
             if let Some(usage) = payload.pointer("/response/usage") {
                 events.push(ChatStreamEvent::Usage(
                     serde_json::from_value::<ResponsesUsage>(usage.clone())?.into_usage()?,
@@ -190,7 +207,7 @@ fn parse_responses_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>>
         }
         "response.incomplete" => Err(anyhow!("Responses API output was incomplete")),
         "response.failed" => Err(anyhow!("Responses API failed")),
-        _ => Ok(Vec::new()),
+        _ => Ok(events),
     }
 }
 
@@ -248,6 +265,9 @@ pub(crate) fn parse_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>
     }
 
     let mut events = Vec::new();
+    if let Some(model) = payload.get("model").and_then(Value::as_str) {
+        events.push(ChatStreamEvent::ResponseModel(model.to_owned()));
+    }
     if let Some(usage) = payload.get("usage").filter(|usage| !usage.is_null()) {
         events.push(ChatStreamEvent::Usage(
             serde_json::from_value::<OpenAIUsage>(usage.clone())?.into_usage()?,
@@ -296,6 +316,10 @@ impl LlmProvider for OpenAIProvider {
         ("Authorization".into(), format!("Bearer {}", api_key))
     }
 
+    fn reports_response_model(&self) -> bool {
+        true
+    }
+
     async fn chat(
         &self,
         client: &reqwest::Client,
@@ -341,11 +365,7 @@ impl LlmProvider for OpenAIProvider {
             }
             return Ok(ChatResponse {
                 content,
-                model: payload
-                    .get("model")
-                    .and_then(Value::as_str)
-                    .unwrap_or(&request.model)
-                    .to_owned(),
+                model: required_response_model(&payload)?,
                 usage: payload
                     .get("usage")
                     .filter(|usage| !usage.is_null())
@@ -588,6 +608,15 @@ mod response_tests {
     fn responses_stream_emits_only_output_text_and_terminal_state() {
         assert_eq!(
             parse_responses_stream_frame(SseFrame {
+                event: "response.created".into(),
+                data: r#"{"type":"response.created","response":{"model":"deepseek-v4-flash"}}"#
+                    .into(),
+            })
+            .unwrap(),
+            vec![ChatStreamEvent::ResponseModel("deepseek-v4-flash".into())]
+        );
+        assert_eq!(
+            parse_responses_stream_frame(SseFrame {
                 event: "response.output_text.delta".into(),
                 data: r#"{"type":"response.output_text.delta","delta":"你好"}"#.into(),
             })
@@ -603,10 +632,11 @@ mod response_tests {
         assert_eq!(
             parse_responses_stream_frame(SseFrame {
                 event: "response.completed".into(),
-                data: r#"{"type":"response.completed"}"#.into(),
+                data: r#"{"type":"response.completed","response":{}}"#.into(),
             })
             .unwrap(),
             vec![ChatStreamEvent::Finished]
         );
+        assert!(required_response_model(&serde_json::json!({})).is_err());
     }
 }

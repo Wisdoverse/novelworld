@@ -41,38 +41,88 @@ deterministic test provider and recorded fixtures never satisfy the
 `configured provider/model` identity that Baseline and Qualification evidence
 require.
 
-### DeepSeek v4 Flash baseline entrypoint
+### DeepSeek v4 Flash journey entrypoint
 
-The baseline runner requires a clean commit and an operator-owned JSON file
+The journey runner requires a clean commit, digest-pinned base and candidate
+release manifests, and an operator-owned JSON file
 outside the checkout with exactly `provider`, `api_url`, `model`,
 `thinking_enabled`, and `api_key`. The accepted slice is `deepseek`,
 `https://api.deepseek.com`, `deepseek-v4-flash`, with product thinking enabled.
-Keep the file readable only by the operator and invoke:
+The base must contain response-model telemetry, be a strict Git ancestor of the
+candidate, and differ in at least one application image digest. Keep every
+private input readable only by the operator. A non-qualifying Diagnostic run is:
 
 ```bash
 tests/e2e/live_deepseek_journey.sh \
+  --evidence-class Diagnostic \
+  --slice core \
   --config /private/path/deepseek.json \
-  --output-dir /private/path/novelworld-baseline \
-  --git-sha "$(git rev-parse HEAD)"
+  --output-dir /private/path/novelworld-diagnostic \
+  --git-sha "$(git rev-parse HEAD)" \
+  --base-manifest /private/path/base.env \
+  --candidate-manifest /private/path/candidate.env
 ```
 
-The runner creates a unique Compose project, container prefix, volumes,
-loopback port, and local image tags; it never joins or restarts the default
-`novel-*` deployment and verifies that deployment's container identities and
-restart counters are unchanged. It uses PostgreSQL authority without Redis or
-S3, completes the ordinary-reader journey, and removes only its isolated
-Compose volumes on exit. Its raw Prometheus files contain a stable usage-key
-fingerprint and remain private; only the sanitized aggregate report is eligible
-for review or commit.
+Qualification additionally requires a pre-registered cohort and its immutable
+ledger, both outside the checkout. Run exactly three core attempts, each with a
+new pre-created empty output directory:
+
+```bash
+for attempt in 1 2 3; do
+  output="/private/path/novelworld-core-${attempt}"
+  install -d -m 700 "$output"
+  tests/e2e/live_deepseek_journey.sh \
+    --evidence-class Qualification \
+    --slice core \
+    --config /private/path/deepseek.json \
+    --output-dir "$output" \
+    --git-sha "$(git rev-parse HEAD)" \
+    --base-manifest /private/path/base.env \
+    --candidate-manifest /private/path/candidate.env \
+    --cohort-manifest /private/path/cohort.json \
+    --ledger /private/path/cohort-ledger.jsonl
+done
+```
+
+Only after that ledger contains three matching core `Started`/`Passed` pairs,
+run the one bounded legacy-character smoke with the same cohort, ledger,
+candidate, provider, and registered input. It uses a fourth empty output
+directory and does not enter the core 3/3 denominator:
+
+```bash
+output=/private/path/novelworld-legacy-character
+install -d -m 700 "$output"
+tests/e2e/live_deepseek_journey.sh \
+  --evidence-class Qualification \
+  --slice legacy-character \
+  --config /private/path/deepseek.json \
+  --output-dir "$output" \
+  --git-sha "$(git rev-parse HEAD)" \
+  --base-manifest /private/path/base.env \
+  --candidate-manifest /private/path/candidate.env \
+  --cohort-manifest /private/path/cohort.json \
+  --ledger /private/path/cohort-ledger.jsonl
+```
+
+Every ledger-v1 record includes `journey_slice` (`core` when absent in an older
+record) and reuses the standard `Started`/`Passed`/`Failed` states. A failed or
+abandoned compatibility attempt makes the cohort terminal. The runner creates
+a unique Compose project, prefix, volumes, and loopback port. Core adopts the
+registered base and upgrades the same volumes to the candidate; the separate
+legacy smoke cold-adopts the already-qualified candidate on fresh volumes. It
+never joins or restarts the default `novel-*` deployment and verifies that the
+pre-existing Docker inventory is unchanged. It uses PostgreSQL authority
+without Redis or S3 and removes only its isolated resources. Raw metrics,
+release logs, private reports, and account exports remain private; only the
+sanitized aggregate report is eligible for review or commit.
 
 Run H1 and H3 live evaluation separately at the same clean commit with their
 documented `--metrics-output` option. The resulting reports identify returned
 models and force `thinking_enabled: false` for schema-bound JSON calls. A later
 evidence commit records the immutable reports, so `evaluated_git_sha` identifies
 the code that ran while `evidence_commit` identifies the commit that packages
-that evidence; they cannot be the same self-referential value. This entrypoint
-creates baseline evidence only and does not supply the separate threshold or
-human-quality approval required for Qualification.
+that evidence; they cannot be the same self-referential value. A Diagnostic run
+cannot repair a failed cohort or substitute for Qualification and human review.
 
 ## H4 journey qualification — `h4-journey-qualification-v1`
 

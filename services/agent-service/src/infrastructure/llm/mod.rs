@@ -38,7 +38,10 @@ impl ChatCompletion for LlmAdapter {
                     Ok(llm_client::ChatStreamEvent::Finished) => {
                         Some(Ok(ChatCompletionEvent::Finished))
                     }
-                    Ok(llm_client::ChatStreamEvent::Usage(_)) => None,
+                    Ok(
+                        llm_client::ChatStreamEvent::ResponseModel(_)
+                        | llm_client::ChatStreamEvent::Usage(_),
+                    ) => None,
                     Err(error) => Some(Err(error)),
                 }
             },

@@ -98,8 +98,7 @@ async fn run_body() -> Result<()> {
 
         let image_client = Arc::new(ImageClient::new(
             std::env::var("IMAGE_GEN_API_URL").unwrap_or_else(|_| "https://api.openai.com".into()),
-            std::env::var("IMAGE_GEN_API_KEY")
-                .unwrap_or_else(|_| std::env::var("LLM_API_KEY").unwrap_or_default()),
+            std::env::var("IMAGE_GEN_API_KEY").unwrap_or_default(),
             std::env::var("IMAGE_GEN_MODEL").unwrap_or_else(|_| "dall-e-3".into()),
         ));
 

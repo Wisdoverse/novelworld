@@ -6,6 +6,7 @@ use std::pin::Pin;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatStreamEvent {
     Delta(String),
+    ResponseModel(String),
     Usage(Usage),
     Finished,
 }

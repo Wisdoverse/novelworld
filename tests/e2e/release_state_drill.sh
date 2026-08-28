@@ -81,8 +81,8 @@ gate_fail_stop_line=$(grep -nF 'is fail-stopped with 5xx' "$release" | cut -d: -
 novel_quiesce_line=$(grep -nF 'compose stop --timeout 120 novel-service' "$release" | cut -d: -f1)
 agent_quiesce_line=$(grep -nF 'compose stop --timeout 120 agent-service' "$release" | cut -d: -f1)
 schema_transition_line=$(grep -nF 'mv -f "$transition_tmp" "$schema_transition_manifest"' "$release" | cut -d: -f1)
-marker_sync_line=$(grep -nE '^  sync$' "$release" | head -n 1 | cut -d: -f1)
-migrate_line=$(grep -nF 'compose run --rm --no-deps postgres-migrate' "$release" | cut -d: -f1)
+marker_sync_line=$(grep -nF 'sync # schema transition target durable before migration' "$release" | cut -d: -f1)
+migrate_line=$(grep -nF 'compose run --rm --no-deps postgres-migrate # schema transition migration' "$release" | cut -d: -f1)
 candidate_novel_start_line=$(grep -nF 'compose up -d --wait --wait-timeout 120 --no-build --no-deps novel-service' "$release" | cut -d: -f1)
 upgrade_guard_line=$(grep -nF 'require_schema_safe_rollback "$current_manifest" "$candidate_tmp"' "$release" | cut -d: -f1)
 upgrade_fetch_line=$(grep -nF 'fetch_release_history "$current_manifest" "$candidate_tmp"' "$release" | cut -d: -f1)
@@ -137,6 +137,13 @@ adopt_fail_stop_line=$(grep -nF 'fail_stop_client "client contract gate was not 
 fail_stop_nginx_line=$(grep -nF 'compose stop --timeout 120 nginx' "$release" | cut -d: -f1)
 fail_stop_frontend_line=$(grep -nF 'compose stop --timeout 120 frontend' "$release" | cut -d: -f1)
 fail_stop_die_line=$(grep -nF 'die "$reason; client was stopped (fail-stopped)"' "$release" | cut -d: -f1)
+cold_pull_line=$(grep -nF 'narrative-service gateway # qualification cold pull' "$release" | cut -d: -f1)
+cold_marker_line=$(grep -nF 'qualification cold marker' "$release" | head -n 1 | cut -d: -f1)
+cold_sync_line=$(grep -nF 'sync # qualification cold marker durable before first migration' "$release" | cut -d: -f1)
+cold_postgres_line=$(grep -nF 'qualification cold postgres' "$release" | cut -d: -f1)
+cold_migrate_line=$(grep -nF 'qualification cold migration' "$release" | cut -d: -f1)
+cold_apps_line=$(grep -nF 'gateway frontend nginx # qualification cold applications' "$release" | cut -d: -f1)
+cold_health_line=$(grep -nF 'qualification cold health' "$release" | cut -d: -f1)
 [ -n "$narrative_quiesce_line" ] && [ -n "$agent_quiesce_line" ] \
   && [ -n "$candidate_client_line" ] \
   && [ -n "$gate_fail_stop_line" ] \
@@ -151,6 +158,13 @@ fail_stop_die_line=$(grep -nF 'die "$reason; client was stopped (fail-stopped)"'
   && [ "$agent_quiesce_line" -lt "$migrate_line" ] \
   && [ "$migrate_line" -lt "$candidate_novel_start_line" ] \
   || { printf 'drill: FAIL candidate client is not fail-stopped from the old producer before migrations\n' >&2; exit 1; }
+[ "$cold_pull_line" -lt "$cold_marker_line" ] \
+  && [ "$cold_marker_line" -lt "$cold_sync_line" ] \
+  && [ "$cold_sync_line" -lt "$cold_postgres_line" ] \
+  && [ "$cold_postgres_line" -lt "$cold_migrate_line" ] \
+  && [ "$cold_migrate_line" -lt "$cold_apps_line" ] \
+  && [ "$cold_apps_line" -lt "$cold_health_line" ] \
+  || { printf 'drill: FAIL qualification cold-start order is unsafe\n' >&2; exit 1; }
 [ -n "$upgrade_guard_line" ] && [ "$upgrade_guard_line" -lt "$upgrade_install_line" ] \
   || { printf 'drill: FAIL schema downgrade guard does not precede candidate installation\n' >&2; exit 1; }
 [ "$schema_transition_clear_count" -eq 1 ] \
@@ -224,6 +238,41 @@ printf 'drill: ok   rejected client gate restores current or stops candidate cli
 good=$(mktemp "$work/good.XXXXXX")
 write_manifest "$good" "$sha_a"
 expect_ok 'validate accepts a well-formed digest-pinned manifest' '' \
+  "$release" validate "$good"
+
+expect_ok 'qualification scope accepts an isolated loopback project' '' env \
+  RELEASE_COMPOSE_PROJECT=nwq-0123456789 \
+  RELEASE_CONTAINER_PREFIX=nwq-0123456789 \
+  RELEASE_HTTP_BIND=127.0.0.1 RELEASE_HTTP_PORT=18080 \
+  "$release" validate "$good"
+expect_fail 'qualification scope rejects partial configuration' \
+  'qualification scope requires project, prefix, bind, and port together' env \
+  RELEASE_COMPOSE_PROJECT=nwq-0123456789 "$release" validate "$good"
+expect_fail 'qualification scope rejects a production-like project' \
+  'qualification project must match nwq-<10 lowercase hex>' env \
+  RELEASE_COMPOSE_PROJECT=novelworld RELEASE_CONTAINER_PREFIX=novelworld \
+  RELEASE_HTTP_BIND=127.0.0.1 RELEASE_HTTP_PORT=18080 \
+  "$release" validate "$good"
+expect_fail 'qualification scope rejects a mismatched prefix' \
+  'qualification container prefix must equal its project' env \
+  RELEASE_COMPOSE_PROJECT=nwq-0123456789 RELEASE_CONTAINER_PREFIX=nwq-9876543210 \
+  RELEASE_HTTP_BIND=127.0.0.1 RELEASE_HTTP_PORT=18080 \
+  "$release" validate "$good"
+expect_fail 'qualification scope rejects a non-loopback bind' \
+  'qualification HTTP bind must be 127.0.0.1' env \
+  RELEASE_COMPOSE_PROJECT=nwq-0123456789 RELEASE_CONTAINER_PREFIX=nwq-0123456789 \
+  RELEASE_HTTP_BIND=0.0.0.0 RELEASE_HTTP_PORT=18080 \
+  "$release" validate "$good"
+expect_fail 'qualification scope rejects a privileged port' \
+  'qualification HTTP port must be between 1024 and 65535' env \
+  RELEASE_COMPOSE_PROJECT=nwq-0123456789 RELEASE_CONTAINER_PREFIX=nwq-0123456789 \
+  RELEASE_HTTP_BIND=127.0.0.1 RELEASE_HTTP_PORT=80 \
+  "$release" validate "$good"
+expect_fail 'qualification scope rejects an ambiguous leading-zero port' \
+  'qualification HTTP port must be between 1024 and 65535' env \
+  RELEASE_COMPOSE_PROJECT=nwq-0123456789 \
+  RELEASE_CONTAINER_PREFIX=nwq-0123456789 \
+  RELEASE_HTTP_BIND=127.0.0.1 RELEASE_HTTP_PORT=018080 \
   "$release" validate "$good"
 
 bad=$(mktemp "$work/bad.XXXXXX")
@@ -444,7 +493,15 @@ printf '%s\n' \
 
 cat >"$roll_bin/docker" <<'EOF'
 #!/usr/bin/env bash
-if [ "${1:-}" = inspect ]; then
+[ -z "${MOCK_DOCKER_LOG:-}" ] || printf '%s\n' "$*" >>"$MOCK_DOCKER_LOG"
+if [ -n "${MOCK_DOCKER_FAIL_MATCH:-}" ] \
+  && [[ " $* " == *"$MOCK_DOCKER_FAIL_MATCH"* ]]; then
+  exit 70
+fi
+if [ "${MOCK_PROJECT_NONEMPTY:-false}" = true ] \
+  && [[ " $* " == *" ps --all --quiet "* ]]; then
+  printf 'existing-container\n'
+elif [ "${1:-}" = inspect ]; then
   printf '%s\n' "${MOCK_REDIS_HEALTH:-healthy}"
 elif [ "${1:-}" = exec ]; then
   case " $* " in
@@ -456,6 +513,7 @@ exit 0
 EOF
 cat >"$roll_bin/curl" <<'EOF'
 #!/usr/bin/env bash
+[ -z "${MOCK_CURL_LOG:-}" ] || printf '%s\n' "$*" >>"$MOCK_CURL_LOG"
 exit 0
 EOF
 cat >"$roll_bin/sync" <<'EOF'
@@ -483,6 +541,82 @@ test ! -e "$roll_state/previous.env" \
 grep -qx 'CACHE_MODE=redis' "$roll_repo/.env" \
   || { printf 'drill: FAIL legacy Redis environment did not persist redis mode\n' >&2; exit 1; }
 printf 'drill: ok   interrupted initial adoption rolls exact marker forward and promotes atomically\n'
+
+scope_state=$(new_state)
+cp "$roll_marker" "$scope_state/current.env"
+scope_docker_log="$work/qualification-docker.log"
+scope_curl_log="$work/qualification-curl.log"
+(
+  cd "$roll_repo"
+  PATH="$roll_bin:$PATH" RELEASE_STATE_DIR="$scope_state" \
+    RELEASE_COMPOSE_PROJECT=nwq-0123456789 \
+    RELEASE_CONTAINER_PREFIX=nwq-0123456789 \
+    RELEASE_HTTP_BIND=127.0.0.1 RELEASE_HTTP_PORT=18080 \
+    MOCK_DOCKER_LOG="$scope_docker_log" MOCK_CURL_LOG="$scope_curl_log" \
+    "$release" restore
+)
+grep -Fq 'compose --project-name nwq-0123456789' "$scope_docker_log" \
+  || { printf 'drill: FAIL qualification release did not use the isolated Compose project\n' >&2; exit 1; }
+grep -Fq 'nwq-0123456789-postgres' "$scope_docker_log" \
+  || { printf 'drill: FAIL qualification release inspected the production container prefix\n' >&2; exit 1; }
+grep -Fq 'http://127.0.0.1:18080/health' "$scope_curl_log" \
+  || { printf 'drill: FAIL qualification release probed outside its loopback port\n' >&2; exit 1; }
+printf 'drill: ok   qualification release stays inside its project, prefix, and loopback port\n'
+
+sed -i 's/^CACHE_MODE=.*/CACHE_MODE=postgres/' "$roll_repo/.env"
+cold_nonempty_state=$(new_state)
+(
+  cd "$roll_repo"
+  PATH="$roll_bin:$PATH" RELEASE_STATE_DIR="$cold_nonempty_state" \
+    RELEASE_COMPOSE_PROJECT=nwq-0123456789 \
+    RELEASE_CONTAINER_PREFIX=nwq-0123456789 \
+    RELEASE_HTTP_BIND=127.0.0.1 RELEASE_HTTP_PORT=18080 \
+    MOCK_PROJECT_NONEMPTY=true \
+    expect_fail 'qualification cold adopt rejects an existing project container' \
+      'qualification cold adopt requires an empty Compose project' \
+      "$release" adopt "$roll_marker"
+)
+
+for failure in \
+  ' ps --all --quiet ' \
+  ' volume ls ' \
+  ' network ls '
+do
+  cold_inspect_state=$(new_state)
+  cold_inspect_log=$(mktemp "$work/qualification-inspect.XXXXXX")
+  case "$failure" in
+    *' ps '*) message='cannot inspect qualification Compose project' ;;
+    *' volume '*) message='cannot inspect qualification project volumes' ;;
+    *) message='cannot inspect qualification project networks' ;;
+  esac
+  (
+    cd "$roll_repo"
+    PATH="$roll_bin:$PATH" RELEASE_STATE_DIR="$cold_inspect_state" \
+      RELEASE_COMPOSE_PROJECT=nwq-0123456789 \
+      RELEASE_CONTAINER_PREFIX=nwq-0123456789 \
+      RELEASE_HTTP_BIND=127.0.0.1 RELEASE_HTTP_PORT=18080 \
+      MOCK_DOCKER_LOG="$cold_inspect_log" MOCK_DOCKER_FAIL_MATCH="$failure" \
+      expect_fail 'qualification cold adopt fails closed when Docker inspection fails' \
+        "$message" "$release" adopt "$roll_marker"
+  )
+  ! grep -Eq '(^| )(pull|up)( |$)' "$cold_inspect_log" \
+    || { printf 'drill: FAIL cold adopt continued after Docker inspection failed\n' >&2; exit 1; }
+done
+
+cold_state=$(new_state)
+(
+  cd "$roll_repo"
+  PATH="$roll_bin:$PATH" RELEASE_STATE_DIR="$cold_state" \
+    RELEASE_COMPOSE_PROJECT=nwq-0123456789 \
+    RELEASE_CONTAINER_PREFIX=nwq-0123456789 \
+    RELEASE_HTTP_BIND=127.0.0.1 RELEASE_HTTP_PORT=18080 \
+    "$release" adopt "$roll_marker"
+)
+cmp -s "$roll_marker" "$cold_state/current.env" \
+  || { printf 'drill: FAIL qualification cold adopt promoted a different manifest\n' >&2; exit 1; }
+test ! -e "$cold_state/schema-transition.pending" \
+  || { printf 'drill: FAIL qualification cold adopt left a schema marker\n' >&2; exit 1; }
+printf 'drill: ok   qualification cold adopt starts a fresh isolated release without a legacy gate\n'
 
 roll_base_manifest=$(mktemp "$work/roll-base.XXXXXX")
 write_manifest "$roll_base_manifest" "$roll_base_sha"
