@@ -1898,10 +1898,11 @@ fn record_private_response(
     private_responses: &mut Option<&mut PrivateResponseSink>,
     case_id: &str,
     operation: LlmOperation,
+    logical_attempt: u8,
     response: &ChatResponse,
 ) -> std::result::Result<(), LiveFailure> {
     if let Some(sink) = private_responses.as_deref_mut() {
-        sink.record(case_id, operation, 1, response)
+        sink.record(case_id, operation, logical_attempt, response)
             .map_err(|_| LiveFailure {
                 code: "private_evidence_write_failed",
                 trace: JudgeTrace::default(),
@@ -1960,6 +1961,7 @@ async fn run_live(
         &mut private_responses,
         &case.id,
         LlmOperation::CharacterExtraction,
+        1,
         &extraction_response,
     )?;
     register_response_model(
@@ -2008,6 +2010,7 @@ async fn run_live(
                 &mut private_responses,
                 &case.id,
                 LlmOperation::CharacterExtraction,
+                1,
                 &response,
             )?;
             register_response_model(
@@ -2108,6 +2111,7 @@ async fn run_live(
             &mut private_responses,
             &case.id,
             LlmOperation::CanonExtraction,
+            1,
             &response,
         )?;
         register_response_model(
@@ -2141,37 +2145,50 @@ async fn run_live(
             .iter()
             .map(|(_, extraction)| extraction.events.len())
             .sum();
-        let response = client
-            .chat(production_json_request(
-                LlmOperation::CanonExtraction,
-                &prompt,
-            ))
-            .await
-            .map_err(|_| LiveFailure {
-                code: "canon_selection_request_failed",
-                trace: JudgeTrace::default(),
-            })?;
-        record_private_response(
-            &mut private_responses,
-            &case.id,
-            LlmOperation::CanonExtraction,
-            &response,
-        )?;
-        register_response_model(
-            response_models,
-            &config.allowed_response_models,
-            &response.model,
-        )
-        .map_err(|_| LiveFailure {
-            code: "response_model_not_allowed",
-            trace: JudgeTrace::default(),
-        })?;
-        let selection =
-            canon_story_extractor::parse_event_selection(&response.content, candidate_count)
+        let request = production_json_request(LlmOperation::CanonExtraction, &prompt);
+        let mut selection = None;
+        for logical_attempt in 1..=2 {
+            let response = client
+                .chat(request.clone())
+                .await
                 .map_err(|_| LiveFailure {
-                    code: "canon_selection_schema_invalid",
+                    code: "canon_selection_request_failed",
                     trace: JudgeTrace::default(),
                 })?;
+            record_private_response(
+                &mut private_responses,
+                &case.id,
+                LlmOperation::CanonExtraction,
+                logical_attempt,
+                &response,
+            )?;
+            register_response_model(
+                response_models,
+                &config.allowed_response_models,
+                &response.model,
+            )
+            .map_err(|_| LiveFailure {
+                code: "response_model_not_allowed",
+                trace: JudgeTrace::default(),
+            })?;
+            match canon_story_extractor::parse_event_selection(&response.content, candidate_count) {
+                Ok(parsed) => {
+                    selection = Some(parsed);
+                    break;
+                }
+                Err(_) if logical_attempt == 1 => {}
+                Err(_) => {
+                    return Err(LiveFailure {
+                        code: "canon_selection_schema_invalid",
+                        trace: JudgeTrace::default(),
+                    });
+                }
+            }
+        }
+        let selection = selection.ok_or(LiveFailure {
+            code: "canon_selection_schema_invalid",
+            trace: JudgeTrace::default(),
+        })?;
         canon_story_extractor::apply_event_selection(&mut chunks, &selection).map_err(|_| {
             LiveFailure {
                 code: "canon_selection_apply_invalid",
