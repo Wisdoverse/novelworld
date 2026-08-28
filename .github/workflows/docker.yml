@@ -57,7 +57,8 @@ jobs:
         run: |
           docker pull "$IMAGE"
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-            aquasec/trivy:0.68.1 image --scanners vuln \
+            aquasec/trivy:0.68.1 image \
+            --db-repository ghcr.io/aquasecurity/trivy-db:2 --scanners vuln \
             --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
             --skip-version-check "$IMAGE"
 
@@ -88,7 +89,8 @@ jobs:
         run: |
           docker pull "$IMAGE"
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-            aquasec/trivy:0.68.1 image --scanners vuln \
+            aquasec/trivy:0.68.1 image \
+            --db-repository ghcr.io/aquasecurity/trivy-db:2 --scanners vuln \
             --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
             --skip-version-check "$IMAGE"
 
@@ -167,7 +169,9 @@ jobs:
             docker pull "$image" >/dev/null
             docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
               -v "$PWD/sboms:/out" \
-              aquasec/trivy:0.68.1 image --scanners vuln --format cyclonedx \
+              aquasec/trivy:0.68.1 image \
+              --db-repository ghcr.io/aquasecurity/trivy-db:2 \
+              --scanners vuln --format cyclonedx \
               --skip-version-check --output "/out/$service.cdx.json" "$image" >/dev/null 2>&1
             digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$image" | sed 's|.*@||')
             [[ -n "$digest" ]] || { echo "no registry digest for $image" >&2; exit 1; }

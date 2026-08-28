@@ -14,6 +14,8 @@ RUN pnpm build
 # ─── 运行阶段（Nginx 静态服务）────────────────────────────────────────────
 FROM nginx:alpine@sha256:4a73073bd557c65b759505da037898b61f1be6cbcc3c2c3aeac22d2a470c1752 AS runtime
 
+RUN apk upgrade --no-cache libcrypto3 libssl3
+
 COPY --from=builder /app/dist /usr/share/nginx/html
 COPY nginx-spa.conf /etc/nginx/conf.d/default.conf
 
