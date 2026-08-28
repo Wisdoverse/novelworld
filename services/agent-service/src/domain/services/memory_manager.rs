@@ -448,7 +448,7 @@ impl MemoryManager {
         current_chapter: i32,
         system_prompt: &str,
         user_message: &str,
-    ) -> Result<Vec<(String, String)>> {
+    ) -> Result<(Vec<(String, String)>, usize)> {
         let mut messages: Vec<(String, String)> = vec![];
         let allow_unscoped_memory = reader_character_id.is_none();
 
@@ -503,9 +503,11 @@ impl MemoryManager {
         } else {
             vec![]
         };
-        if !mid.is_empty() {
-            let mid_context =
-                encode_untrusted_memory_data(mid.iter().map(|memory| memory.content.as_str()), 5);
+        let selected_mid =
+            bounded_untrusted_memory_values(mid.iter().map(|memory| memory.content.as_str()), 5);
+        let selected_mid_count = selected_mid.len();
+        if !selected_mid.is_empty() {
+            let mid_context = serde_json::to_string(&selected_mid).unwrap_or_else(|_| "[]".into());
             messages.push((
                 "system".into(),
                 format!(
@@ -602,7 +604,7 @@ impl MemoryManager {
             ));
         }
 
-        Ok(messages)
+        Ok((messages, selected_mid_count))
     }
 
     /// Project an already committed turn into Redis and derived memories.
@@ -913,7 +915,7 @@ mod tests {
 
     struct PromptMemoryRepo {
         permanent: Vec<Memory>,
-        mid: Memory,
+        mid: Vec<Memory>,
         semantic: Vec<Memory>,
     }
 
@@ -943,7 +945,7 @@ mod tests {
         ) -> Result<Vec<Memory>> {
             Ok(match layer {
                 MemoryLayer::Permanent => self.permanent.clone(),
-                MemoryLayer::Mid => vec![self.mid.clone()],
+                MemoryLayer::Mid => self.mid.clone(),
                 _ => vec![],
             })
         }
@@ -1692,7 +1694,7 @@ mod tests {
         let manager = MemoryManager {
             memory_repo: Arc::new(PromptMemoryRepo {
                 permanent: vec![permanent_memory.clone()],
-                mid: memory(MemoryLayer::Mid, mid),
+                mid: vec![memory(MemoryLayer::Mid, mid)],
                 semantic: vec![permanent_memory, memory(MemoryLayer::Long, semantic)],
             }),
             chat_repo: Arc::new(CountingChatRepo { count: 0 }),
@@ -1704,7 +1706,7 @@ mod tests {
             }),
         };
 
-        let context = manager
+        let (context, selected_mid_count) = manager
             .build_context_with_semantic(
                 Uuid::new_v4(),
                 Uuid::new_v4(),
@@ -1716,6 +1718,8 @@ mod tests {
             )
             .await
             .unwrap();
+
+        assert_eq!(selected_mid_count, 1);
 
         for (heading, expected) in [
             ("## 你与读者的关系和重要记忆", permanent),
@@ -1731,6 +1735,50 @@ mod tests {
             let data: Vec<String> = serde_json::from_str(block.lines().last().unwrap()).unwrap();
             assert_eq!(data, vec![expected]);
         }
+    }
+
+    #[tokio::test]
+    async fn selected_mid_count_matches_the_bounded_prompt_block() {
+        let manager = MemoryManager {
+            memory_repo: Arc::new(PromptMemoryRepo {
+                permanent: vec![],
+                mid: (0..5)
+                    .map(|index| {
+                        memory(MemoryLayer::Mid, &format!("{index}:{}", "摘要".repeat(600)))
+                    })
+                    .collect(),
+                semantic: vec![],
+            }),
+            chat_repo: Arc::new(CountingChatRepo { count: 0 }),
+            cache: Arc::new(NoopCache),
+            llm: Arc::new(FakeSummarizer("unused".into())),
+            embedding: Arc::new(FakeEmbedding {
+                dims: EMBEDDING_DIMS,
+                fail: true,
+            }),
+        };
+
+        let (context, selected_mid_count) = manager
+            .build_context_with_semantic(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                None,
+                1,
+                "system",
+                "query",
+            )
+            .await
+            .unwrap();
+        let block = context
+            .iter()
+            .map(|(_, content)| content)
+            .find(|content| content.starts_with("## 之前对话的摘要"))
+            .unwrap();
+        let selected: Vec<String> = serde_json::from_str(block.lines().last().unwrap()).unwrap();
+
+        assert_eq!(selected_mid_count, selected.len());
+        assert!(selected_mid_count < 5);
     }
 
     #[tokio::test]
@@ -1756,7 +1804,7 @@ mod tests {
                     direct_journey,
                     memory(MemoryLayer::Permanent, permanent_marker),
                 ],
-                mid: memory(MemoryLayer::Mid, mid_marker),
+                mid: vec![memory(MemoryLayer::Mid, mid_marker)],
                 semantic: vec![semantic_journey, memory(MemoryLayer::Long, long_marker)],
             }),
             chat_repo: Arc::new(CountingChatRepo { count: 0 }),
@@ -1768,7 +1816,7 @@ mod tests {
             }),
         };
 
-        let character_prompt = manager
+        let (character_context, character_mid_count) = manager
             .build_context_with_semantic(
                 Uuid::new_v4(),
                 Uuid::new_v4(),
@@ -1779,11 +1827,13 @@ mod tests {
                 "query",
             )
             .await
-            .unwrap()
+            .unwrap();
+        let character_prompt = character_context
             .into_iter()
             .map(|(_, content)| content)
             .collect::<Vec<_>>()
             .join("\n");
+        assert_eq!(character_mid_count, 0);
         assert!(!character_prompt.contains(direct_marker));
         assert!(!character_prompt.contains(semantic_marker));
         for marker in [permanent_marker, mid_marker, long_marker] {
@@ -1793,7 +1843,7 @@ mod tests {
             character_prompt.contains(&format!("SAME-CHARACTER-CONTINUITY-{reader_character_id}"))
         );
 
-        let self_prompt = manager
+        let (self_context, self_mid_count) = manager
             .build_context_with_semantic(
                 Uuid::new_v4(),
                 Uuid::new_v4(),
@@ -1804,11 +1854,13 @@ mod tests {
                 "query",
             )
             .await
-            .unwrap()
+            .unwrap();
+        let self_prompt = self_context
             .into_iter()
             .map(|(_, content)| content)
             .collect::<Vec<_>>()
             .join("\n");
+        assert_eq!(self_mid_count, 1);
         for marker in [
             direct_marker,
             semantic_marker,
@@ -1838,7 +1890,7 @@ mod tests {
         let manager = MemoryManager {
             memory_repo: Arc::new(PromptMemoryRepo {
                 permanent,
-                mid: memory(MemoryLayer::Mid, "摘要"),
+                mid: vec![memory(MemoryLayer::Mid, "摘要")],
                 semantic: vec![],
             }),
             chat_repo: Arc::new(CountingChatRepo { count: 0 }),
@@ -1850,7 +1902,7 @@ mod tests {
             }),
         };
 
-        let context = manager
+        let (context, _) = manager
             .build_context_with_semantic(
                 Uuid::new_v4(),
                 Uuid::new_v4(),
@@ -1887,7 +1939,7 @@ mod tests {
         let manager = MemoryManager {
             memory_repo: Arc::new(PromptMemoryRepo {
                 permanent,
-                mid: memory(MemoryLayer::Mid, "摘要"),
+                mid: vec![memory(MemoryLayer::Mid, "摘要")],
                 semantic,
             }),
             chat_repo: Arc::new(CountingChatRepo { count: 0 }),
@@ -1899,7 +1951,7 @@ mod tests {
             }),
         };
 
-        let context = manager
+        let (context, _) = manager
             .build_context_with_semantic(
                 Uuid::new_v4(),
                 Uuid::new_v4(),
@@ -1954,7 +2006,7 @@ mod tests {
         let manager = MemoryManager {
             memory_repo: Arc::new(PromptMemoryRepo {
                 permanent: vec![direct_quarantine, weird_variant, visible_v4, valid_v5],
-                mid: memory(MemoryLayer::Mid, "摘要"),
+                mid: vec![memory(MemoryLayer::Mid, "摘要")],
                 semantic: vec![semantic_quarantine, visible_semantic],
             }),
             chat_repo: Arc::new(CountingChatRepo { count: 0 }),
@@ -1966,7 +2018,7 @@ mod tests {
             }),
         };
 
-        let context = manager
+        let (context, _) = manager
             .build_context_with_semantic(
                 Uuid::new_v4(),
                 Uuid::new_v4(),
@@ -2036,7 +2088,7 @@ mod tests {
         let manager = MemoryManager {
             memory_repo: Arc::new(PromptMemoryRepo {
                 permanent: direct,
-                mid: memory(MemoryLayer::Mid, "摘要"),
+                mid: vec![memory(MemoryLayer::Mid, "摘要")],
                 semantic,
             }),
             chat_repo: Arc::new(CountingChatRepo { count: 0 }),
@@ -2048,7 +2100,7 @@ mod tests {
             }),
         };
 
-        let context = manager
+        let (context, _) = manager
             .build_context_with_semantic(
                 Uuid::new_v4(),
                 Uuid::new_v4(),
@@ -2079,7 +2131,7 @@ mod tests {
         let manager = MemoryManager {
             memory_repo: Arc::new(PromptMemoryRepo {
                 permanent: vec![],
-                mid: summary.clone(),
+                mid: vec![summary.clone()],
                 semantic: vec![promoted, distinct.clone()],
             }),
             chat_repo: Arc::new(CountingChatRepo { count: 0 }),
@@ -2091,7 +2143,7 @@ mod tests {
             }),
         };
 
-        let context = manager
+        let (context, _) = manager
             .build_context_with_semantic(
                 Uuid::new_v4(),
                 Uuid::new_v4(),
@@ -2121,7 +2173,7 @@ mod tests {
         let manager = MemoryManager {
             memory_repo: Arc::new(PromptMemoryRepo {
                 permanent: vec![],
-                mid: unmarked_mid,
+                mid: vec![unmarked_mid],
                 semantic: vec![ahead_long],
             }),
             chat_repo: Arc::new(CountingChatRepo { count: 0 }),
@@ -2133,7 +2185,7 @@ mod tests {
             }),
         };
 
-        let prompt = manager
+        let (prompt_context, selected_mid_count) = manager
             .build_context_with_semantic(
                 Uuid::new_v4(),
                 Uuid::new_v4(),
@@ -2144,12 +2196,14 @@ mod tests {
                 "query",
             )
             .await
-            .unwrap()
+            .unwrap();
+        let prompt = prompt_context
             .into_iter()
             .map(|(_, content)| content)
             .collect::<Vec<_>>()
             .join("\n");
 
+        assert_eq!(selected_mid_count, 0);
         assert!(!prompt.contains("UNMARKED-MID-SECRET"));
         assert!(!prompt.contains("AHEAD-LONG-SECRET"));
     }

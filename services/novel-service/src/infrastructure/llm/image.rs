@@ -52,6 +52,9 @@ impl ImageClient {
 #[async_trait]
 impl ImagePort for ImageClient {
     async fn generate(&self, prompt: &str) -> Result<String> {
+        if self.api_key.trim().is_empty() {
+            bail!("Image generation is not configured");
+        }
         let req = ImageRequest {
             model: self.model.clone(),
             prompt: prompt.to_string(),
@@ -84,5 +87,28 @@ impl ImagePort for ImageClient {
             .first()
             .map(|d| d.url.clone())
             .ok_or_else(|| anyhow::anyhow!("Image API returned empty data"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn empty_key_fails_before_outbound_io() {
+        let client = ImageClient::new(
+            "https://unregistered.invalid".into(),
+            String::new(),
+            "test".into(),
+        );
+
+        assert_eq!(
+            client
+                .generate("private prompt")
+                .await
+                .unwrap_err()
+                .to_string(),
+            "Image generation is not configured"
+        );
     }
 }
