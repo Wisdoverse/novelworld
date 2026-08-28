@@ -913,7 +913,7 @@ fn ensure_import_budget(chapters: &[Chapter]) -> std::result::Result<(), ImportB
     let canon_scans = canon_story_extractor::build_scan_plan(chapters)
         .map_err(|_| ImportBudgetExceeded)?
         .len();
-    let calls = 2usize
+    let calls = 4usize
         .saturating_add(character_scans)
         .saturating_add(canon_scans)
         .saturating_add(MAX_AVATARS_PER_NOVEL);
@@ -1811,7 +1811,7 @@ impl NovelCommandHandler {
                             .find_import_checkpoint(
                                 novel_id,
                                 1,
-                                canon_story_extractor::CANON_EXTRACTION_PROMPT_VERSION,
+                                canon_story_extractor::CANON_CHUNK_PROMPT_VERSION,
                                 chunk.chapter_number,
                                 chunk_index,
                                 &chunk.content,
@@ -1901,7 +1901,7 @@ impl NovelCommandHandler {
                                     novel_id,
                                     model_version: 1,
                                     prompt_version:
-                                        canon_story_extractor::CANON_EXTRACTION_PROMPT_VERSION,
+                                        canon_story_extractor::CANON_CHUNK_PROMPT_VERSION,
                                     chapter_number: chunk.chapter_number,
                                     chunk_index,
                                     is_final: chunk.is_final,
@@ -1922,10 +1922,105 @@ impl NovelCommandHandler {
                 .await;
             let mut extracted = results.into_iter().collect::<Result<Vec<_>>>()?;
             extracted.sort_by_key(|(position, _, _)| *position);
-            let extracted = extracted
+            let mut extracted = extracted
                 .into_iter()
                 .map(|(_, chunk, extraction)| (chunk, extraction))
                 .collect::<Vec<_>>();
+            if let Some(prompt) =
+                canon_story_extractor::build_event_selection_prompt(&novel.title, &extracted)
+            {
+                let candidate_count = extracted
+                    .iter()
+                    .map(|(_, extraction)| extraction.events.len())
+                    .sum();
+                let final_chunk = &extracted.last().expect("canon chunks are non-empty").0;
+                let chapter_number = final_chunk.chapter_number;
+                let chunk_index = i32::try_from(final_chunk.chunk_index)
+                    .map_err(|_| anyhow::anyhow!("canon chunk index exceeds i32"))?;
+                let checkpoint = self
+                    .canon_repo
+                    .find_import_checkpoint(
+                        novel.id,
+                        1,
+                        canon_story_extractor::CANON_EVENT_SELECTION_PROMPT_VERSION,
+                        chapter_number,
+                        chunk_index,
+                        &prompt,
+                    )
+                    .await?;
+                let mut checkpointed = false;
+                let mut selection = match checkpoint {
+                    Some(raw) => {
+                        match canon_story_extractor::parse_event_selection(&raw, candidate_count) {
+                            Ok(selection) => {
+                                checkpointed = true;
+                                info!(
+                                    novel_id = %novel.id,
+                                    "resumed canonical event selection checkpoint"
+                                );
+                                Some(selection)
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    novel_id = %novel.id,
+                                    %error,
+                                    "discarding invalid canonical event selection checkpoint"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    None => None,
+                };
+                if selection.is_none() {
+                    for schema_attempt in 1..=2 {
+                        let raw = self
+                            .llm
+                            .chat_json(claim.user_id, NovelLlmTask::CanonExtraction, &prompt)
+                            .await?;
+                        match canon_story_extractor::parse_event_selection(&raw, candidate_count) {
+                            Ok(parsed) => {
+                                selection = Some(parsed);
+                                break;
+                            }
+                            Err(error) if schema_attempt == 1 => {
+                                tracing::warn!(
+                                    novel_id = %novel.id,
+                                    %error,
+                                    "retrying canonical event grouping after invalid schema"
+                                );
+                            }
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
+                }
+                let selection = selection
+                    .ok_or_else(|| anyhow::anyhow!("canonical event selection is missing"))?;
+                if !checkpointed {
+                    let selection_json = serde_json::to_string(&selection)?;
+                    if !self
+                        .canon_repo
+                        .save_import_checkpoint(
+                            CanonExtractionCheckpoint {
+                                novel_id: novel.id,
+                                model_version: 1,
+                                prompt_version:
+                                    canon_story_extractor::CANON_EVENT_SELECTION_PROMPT_VERSION,
+                                chapter_number,
+                                chunk_index,
+                                is_final: true,
+                                source_content: &prompt,
+                                extraction_json: &selection_json,
+                            },
+                            claim.attempt,
+                        )
+                        .await?
+                    {
+                        return Err(ImportLeaseLost.into());
+                    }
+                }
+                canon_story_extractor::apply_event_selection(&mut extracted, &selection)?;
+            }
             let model = canon_story_extractor::assemble_model(novel.id, 1, &extracted, characters)?;
             if !self.canon_repo.insert_import(&model, claim.attempt).await? {
                 return Err(ImportLeaseLost.into());
