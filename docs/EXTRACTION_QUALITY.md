@@ -58,12 +58,24 @@ provider meets the semantic thresholds.
 ## Judge rubric
 
 A live run extracts each positive case with the operator-configured provider,
-then an OpenAI-compatible judge scores each category against the expected-fact
-tables using a fixed rubric (match / partial / absent / hallucinated, with
-provenance checks). Judge output is schema-validated; malformed or missing
-categories fail closed. Reports record provider, model, corpus/rubric
-versions, and the exact git SHA, and contain no secrets, prompts, or user
-data.
+then an OpenAI-compatible judge scores each category against source-grounded
+expected-fact tables using a fixed rubric (match / partial / absent /
+hallucinated, with provenance checks). The judge sees semantic facts and
+opaque response tokens rather than fixture/runtime IDs. Expected-to-extracted
+event mappings drive a deterministic relative-order check for matched corpus
+events; canon validation separately rejects structurally forward causes. This
+evidence remains bounded to the versioned corpus and is not an independent
+claim about every possible semantic cause or death-continuity pattern. Judge
+output is schema-validated with exact token coverage; an identical application-level
+request is repeated once only for an invalid JSON/schema/rubric/token/
+explanation contract, never for a transport failure or a valid low score.
+Unregistered response-model identifiers and malformed or missing categories
+fail closed. Reports record provider, configured/observed model,
+corpus/rubric/prompt versions, attempt metadata, and the exact git SHA, and
+contain no secrets, prompts, raw responses, or user data. Raw responses belong
+only in a required fresh private evidence file outside the checkout; live
+runs also require a fresh private metrics file so attempts, retries, usage,
+and latency cannot be omitted from qualifying evidence.
 
 ## Change rule
 

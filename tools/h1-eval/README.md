@@ -19,38 +19,62 @@ fail the exact threshold it targets (per-category coverage, precision and the
 hallucination ceiling, provenance, chronology). It does **not** claim that a
 current provider meets the semantic thresholds.
 
-Live mode runs the production two-stage extraction contract — the production
-character-extraction prompt (with chunk scan and merge when the source
-exceeds the sample window, and first appearances verified against the split
-chapters), the per-chunk canon-extraction prompts with production assembly and
-validation — then one OpenAI-compatible judge call scores each category
-against the expected-fact tables with the fixed rubric (match / partial /
-absent / hallucinated). Provenance and chronology are enforced
-deterministically on the provider output. Thresholds are enforced exactly as
+Live mode reuses the production domain prompts, JSON request builder, chunk
+scan/merge, first-appearance proof, canon reference canonicalization,
+assembly, and validation. It intentionally does not reproduce the
+application handler's fresh-response schema-repair loops: a schema-invalid
+character or canon response fails the qualification case. An
+OpenAI-compatible judge scores each category against the source-grounded
+expected-fact tables with the fixed rubric (match / partial / absent /
+hallucinated). Judge inputs contain semantic facts and opaque response tokens,
+not fixture or runtime IDs. Expected-to-extracted event mappings make
+relative event order a deterministic check; production canon validation
+separately rejects structurally forward causes. The evidence is bounded to the
+versioned corpus facts and does not independently prove every possible
+semantic cause/death-continuity pattern. Thresholds remain exactly as
 versioned, and the hallucination ceiling rounds up so no fraction above the
-policy bound can pass:
+policy bound can pass.
+
+The application makes one judge request. It repeats that identical request
+once only when the response violates the judge JSON/schema/rubric/token/
+explanation contract. It does not add a retry for a transport failure or a
+valid low score. The production LLM client retains its documented transport
+retry contract.
 
 ```bash
-H1_EVAL_PROVIDER=openai \
-LLM_API_URL=https://api.openai.com \
+H1_EVAL_PROVIDER=deepseek \
+LLM_API_URL=https://api.deepseek.com \
 LLM_API_KEY=... \
-LLM_MODEL=gpt-4o-mini \
-cargo run -p h1-eval -- --live --git-sha "$(git rev-parse HEAD)"
+LLM_MODEL=deepseek-v4-flash \
+H1_EVAL_ALLOWED_RESPONSE_MODELS=deepseek-v4-flash \
+cargo run -p h1-eval -- --live --git-sha "$(git rev-parse HEAD)" \
+  --metrics-output /private/h1-metrics.prom \
+  --private-responses-output /private/h1-responses.jsonl
 ```
 
-Live baseline runs may add `--metrics-output <path>` to retain the existing
-`llm-observability-v1` counters and latency summaries, including failed
-attempts and retries. The path is live-only, and the report records
+Every live run requires both evidence outputs. `--metrics-output` retains the
+existing `llm-observability-v1` counters and latency summaries, including
+failed attempts and retries. The report records
 `thinking_enabled: false` because these schema-bound JSON calls deliberately
-disable DeepSeek thinking. Raw metrics contain a stable usage-key fingerprint;
-keep them in the private evidence directory and commit only the sanitized
-aggregate produced for the reviewed evidence package.
+disable DeepSeek thinking. Production character and canon extraction also use
+temperature 0.0 to make qualification and accepted imports deterministic. Raw
+metrics contain a stable usage-key fingerprint;
+keep them in the private evidence directory. Both output paths must be
+absolute, outside the Git checkout, inside existing directories, and fresh:
+the evaluator creates each file exclusively before any provider call.
+`--private-responses-output` records each raw provider response before parsing
+and flushes after every response. These private files may contain model output
+or stable fingerprints and must never be committed; publish only the
+sanitized aggregate produced for the reviewed evidence package. The public
+report records only the configured model, allowlisted observed response-model
+identifiers, attempt counts, typed failure codes, and aggregate scores.
 
 Both modes fail closed on malformed corpus data, threshold drift from the
-policy, missing judge categories, a non-commit SHA, a dirty checkout, or a
-provider that violates the extraction schema. Reports record corpus/rubric
-versions, the git SHA, provider/model identity, and no secrets, prompts, or
-user data.
+policy, missing or duplicate judge tokens, an unregistered response-model
+identifier, a non-commit SHA, a dirty checkout, or a provider that violates
+the extraction schema. Reports record corpus/rubric/prompt versions, the git
+SHA, provider/model identity, and no secrets, prompts, raw responses, or user
+data.
 
 Malformed and unsupported inputs are labeled and never scored. The empty and
 gapped-provenance labels exercise the production splitter and canon validator

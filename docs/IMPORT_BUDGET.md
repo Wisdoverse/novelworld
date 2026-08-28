@@ -11,8 +11,14 @@ total spend that an unknown outcome can cause.
 ## Contract — `import-provider-budget-v1`
 
 1. **Per-attempt ceiling.** `ensure_import_budget` admits at most **640
-   provider calls**: two mandatory calls, the character- and canon-extraction
-   scan plans, and at most 30 avatar generations.
+   provider calls**: four fixed-call slots (representative character
+   extraction, narrative-node detection, the bounded whole-novel event
+   grouping, and its one schema-invalid retry), the character- and
+   canon-extraction scan plans, and at most 30 avatar generations. The grouper
+   reuses `canon_extraction` telemetry and is skipped without a call when its
+   complete candidate prompt exceeds 16 KiB. Its second slot is used only when
+   the first response is invalid JSON/schema, never for transport or a valid
+   semantic result.
 2. **Attempt ceiling.** A `novel_import_jobs` row MUST NOT be claimed more
    than **3** times. Attempt counting includes the acceptance claim and every
    recovery, lease-expiry, or user-retry claim.
