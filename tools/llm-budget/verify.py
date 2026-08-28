@@ -153,17 +153,20 @@ def maximum(samples, name, **wanted):
     return max(values)
 
 
-def verify(policy_path, sample_path, commit):
+def verify_many(policy_path, sample_paths, commit):
     if not COMMIT.fullmatch(commit):
         raise BudgetError("commit must be a lowercase 40-character SHA")
-    policy_data, sample_data = policy_path.read_bytes(), sample_path.read_bytes()
+    if not sample_paths:
+        raise BudgetError("at least one metrics generation is required")
+    policy_data = policy_path.read_bytes()
+    sample_data = [path.read_bytes() for path in sample_paths]
     policy = json.loads(policy_data)
     if policy.get("schema_version") != 1 or not policy.get("policy_version"):
         raise BudgetError("unsupported budget policy")
     operations = policy.get("operations")
     if not isinstance(operations, dict) or not operations:
         raise BudgetError("budget policy has no operations")
-    samples = parse_metrics(sample_data)
+    samples = [sample for data in sample_data for sample in parse_metrics(data)]
     contract = policy["metrics_contract"]
     failures, results = [], {}
 
@@ -329,11 +332,20 @@ def verify(policy_path, sample_path, commit):
         "metrics_contract": contract,
         "commit": commit,
         "policy_sha256": digest(policy_data),
-        "sample_sha256": digest(sample_data),
+        "sample_sha256": digest(
+            sample_data[0]
+            if len(sample_data) == 1
+            else b"novelworld-metric-generations-v1\0"
+            + b"".join(len(data).to_bytes(8, "big") + data for data in sample_data)
+        ),
         "operations": results,
         "failures": sorted(set(failures)),
         "passed": not failures,
     }
+
+
+def verify(policy_path, sample_path, commit):
+    return verify_many(policy_path, [sample_path], commit)
 
 
 def main():

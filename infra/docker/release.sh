@@ -13,6 +13,13 @@ rollback_marker="$state_dir/rollback.pending"
 rollback_current="$state_dir/rollback-current.env"
 rollback_previous="$state_dir/rollback-previous.env"
 secrets_file="$repo_root/.env"
+container_prefix=novel
+qualification_project=
+http_bind=
+http_port=
+health_origin=http://localhost
+qualification_scope=false
+compose_project_args=()
 image_keys=(
   GATEWAY_IMAGE USER_SERVICE_IMAGE NOVEL_SERVICE_IMAGE AGENT_SERVICE_IMAGE
   NARRATIVE_SERVICE_IMAGE FRONTEND_IMAGE POSTGRES_IMAGE REDIS_IMAGE NGINX_IMAGE
@@ -27,6 +34,42 @@ minimal_bootstrap_adr=docs/adr/0002-minimal-bootstrap-and-deferred-runtime-confi
 die() {
   printf 'release: %s\n' "$*" >&2
   exit 1
+}
+
+configure_qualification_scope() {
+  local project=${RELEASE_COMPOSE_PROJECT:-}
+  local prefix=${RELEASE_CONTAINER_PREFIX:-}
+  local bind=${RELEASE_HTTP_BIND:-}
+  local port=${RELEASE_HTTP_PORT:-}
+  if [[ -z "$project$prefix$bind$port" ]]; then
+    return
+  fi
+  [[ -n "$project" && -n "$prefix" && -n "$bind" && -n "$port" ]] \
+    || die "qualification scope requires project, prefix, bind, and port together"
+  [[ "$project" =~ ^nwq-[a-f0-9]{10}$ ]] \
+    || die "qualification project must match nwq-<10 lowercase hex>"
+  [[ "$prefix" == "$project" ]] \
+    || die "qualification container prefix must equal its project"
+  [[ "$bind" == 127.0.0.1 ]] \
+    || die "qualification HTTP bind must be 127.0.0.1"
+  [[ "$port" =~ ^[1-9][0-9]{3,4}$ ]] && ((10#$port >= 1024 && 10#$port <= 65535)) \
+    || die "qualification HTTP port must be between 1024 and 65535"
+  container_prefix=$prefix
+  qualification_project=$project
+  http_bind=$bind
+  http_port=$port
+  health_origin="http://$bind:$port"
+  qualification_scope=true
+  compose_project_args=(--project-name "$project")
+}
+
+configure_qualification_scope
+readonly container_prefix qualification_project http_bind http_port health_origin qualification_scope
+readonly -a compose_project_args
+
+qualification_phase() {
+  [[ "$qualification_scope" == true ]] || return 0
+  printf 'qualification-phase %s %s %s\n' "$1" "$2" "$(date +%s%3N)"
 }
 
 acquire_release_lock() {
@@ -254,7 +297,7 @@ valid_llm_environment_override() {
 }
 
 current_user_service_proves_database_llm_configured() {
-  docker exec novel-user-service sh -ec '
+  docker exec "${container_prefix}-user-service" sh -ec '
     test -z "${LLM_API_KEY:-}" || exit 1
     code=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" \
       --max-time 15 -H "X-Internal-Service-Token: ${INTERNAL_SERVICE_TOKEN:?}" \
@@ -265,7 +308,7 @@ current_user_service_proves_database_llm_configured() {
 
 redis_accepts_persisted_password() {
   printf '%s\n' "$cache_redis_password" \
-    | docker exec -i novel-redis sh -ec '
+    | docker exec -i "${container_prefix}-redis" sh -ec '
         IFS= read -r persisted_password
         REDISCLI_AUTH="$persisted_password" exec redis-cli --no-auth-warning ping
       ' >/dev/null 2>&1
@@ -281,7 +324,7 @@ require_pre_minimum_rollback_ready() {
   load_cache_mode
   [[ "$cache_mode" == redis ]] \
     || die "rollback target predates minimal bootstrap and requires CACHE_MODE=redis"
-  redis_health=$(docker inspect --format '{{.State.Health.Status}}' novel-redis 2>/dev/null || true)
+  redis_health=$(docker inspect --format '{{.State.Health.Status}}' "${container_prefix}-redis" 2>/dev/null || true)
   [[ "$redis_health" == healthy ]] \
     || die "rollback target predates minimal bootstrap and requires healthy Redis"
   redis_accepts_persisted_password \
@@ -300,16 +343,97 @@ compose() (
   export CACHE_MODE="$cache_mode"
   export REDIS_PASSWORD="$cache_redis_password"
   export REDIS_URL="$cache_redis_url"
+  if [[ "$qualification_scope" == true ]]; then
+    export CONTAINER_PREFIX="$container_prefix"
+    export NGINX_HTTP_BIND="$http_bind"
+    export NGINX_HTTP_PORT="$http_port"
+  fi
   env \
     -u COMPOSE_PROFILES \
     -u RELEASE_VERSION -u RELEASE_GIT_SHA \
     -u GATEWAY_IMAGE -u USER_SERVICE_IMAGE -u NOVEL_SERVICE_IMAGE \
     -u AGENT_SERVICE_IMAGE -u NARRATIVE_SERVICE_IMAGE -u FRONTEND_IMAGE \
     -u POSTGRES_IMAGE -u REDIS_IMAGE -u NGINX_IMAGE \
-    docker compose --project-directory "$repo_root" -f "$repo_root/docker-compose.yml" \
+    docker compose "${compose_project_args[@]}" \
+      --project-directory "$repo_root" -f "$repo_root/docker-compose.yml" \
       --env-file "$secrets_file" --env-file "$active_manifest" \
       "${compose_profile_args[@]}" "$@"
 )
+
+require_empty_qualification_project() {
+  local existing
+  [[ "$qualification_scope" == true ]] \
+    || die "cold adoption is restricted to an isolated qualification project"
+  if ! existing=$(compose ps --all --quiet); then
+    die "cannot inspect qualification Compose project"
+  fi
+  [[ -z "$existing" ]] \
+    || die "qualification cold adopt requires an empty Compose project"
+  if ! existing=$(docker volume ls --quiet \
+    --filter "label=com.docker.compose.project=$qualification_project"); then
+    die "cannot inspect qualification project volumes"
+  fi
+  [[ -z "$existing" ]] \
+    || die "qualification cold adopt requires no existing project volumes"
+  if ! existing=$(docker network ls --quiet \
+    --filter "label=com.docker.compose.project=$qualification_project"); then
+    die "cannot inspect qualification project networks"
+  fi
+  [[ -z "$existing" ]] \
+    || die "qualification cold adopt requires no existing project networks"
+}
+
+deploy_initial_manifest() {
+  local manifest="$1" release_sha initial_transition_tmp
+  validate_manifest "$manifest"
+  [[ -f "$secrets_file" ]] || die "production secrets file not found: $secrets_file"
+  if [[ -z "$cache_mode" ]]; then
+    load_cache_mode
+  fi
+  [[ "$cache_mode" == postgres ]] \
+    || die "qualification cold adopt requires CACHE_MODE=postgres"
+  active_manifest="$manifest"
+  release_sha=$(manifest_value "$manifest" RELEASE_GIT_SHA)
+
+  require_clean_worktree
+  git cat-file -e "$release_sha^{commit}"
+  git checkout --detach "$release_sha"
+  require_clean_worktree
+
+  qualification_phase pull start
+  compose pull \
+    postgres-migrate nginx frontend user-service novel-service agent-service \
+    narrative-service gateway # qualification cold pull
+  qualification_phase pull end
+  if [[ -f "$schema_transition_manifest" ]]; then
+    manifests_equal "$schema_transition_manifest" "$manifest" \
+      || die "initial schema transition does not match its recovery target"
+  else
+    initial_transition_tmp=$(mktemp "$state_dir/.initial-schema-transition.XXXXXX")
+    install -m 600 "$manifest" "$initial_transition_tmp"
+    command mv -f "$initial_transition_tmp" "$schema_transition_manifest" # qualification cold marker
+    sync # qualification cold marker durable before first migration
+  fi
+
+  qualification_phase database_start start
+  compose up -d --wait --wait-timeout 120 --no-build postgres # qualification cold postgres
+  qualification_phase database_start end
+  qualification_phase migration start
+  compose run --rm --no-deps postgres-migrate # qualification cold migration
+  qualification_phase migration end
+  qualification_phase application_deployment start
+  compose up -d --wait --wait-timeout 120 --no-build --no-deps \
+    user-service novel-service
+  compose up -d --wait --wait-timeout 120 --no-build --no-deps narrative-service
+  compose up -d --wait --wait-timeout 120 --no-build --no-deps agent-service
+  compose up -d --wait --wait-timeout 120 --no-build --no-deps \
+    gateway frontend nginx # qualification cold applications
+  qualification_phase application_deployment end
+  qualification_phase readiness start
+  curl --fail --silent --show-error "$health_origin/health" >/dev/null # qualification cold health
+  curl --fail --silent --show-error "$health_origin/ready" >/dev/null
+  qualification_phase readiness end
+}
 
 fail_stop_client() {
   local reason="$1" nginx_stopped=true frontend_stopped=true
@@ -355,18 +479,20 @@ deploy_manifest() {
   git checkout --detach "$release_sha"
   require_clean_worktree
 
+  qualification_phase pull start
   compose pull \
     postgres-migrate nginx frontend user-service novel-service agent-service \
     narrative-service gateway
-  [[ "$(docker inspect --format '{{.State.Health.Status}}' novel-postgres)" == healthy ]] \
+  qualification_phase pull end
+  [[ "$(docker inspect --format '{{.State.Health.Status}}' "${container_prefix}-postgres")" == healthy ]] \
     || die "PostgreSQL is not healthy"
   if [[ "$cache_mode" == redis ]]; then
-    [[ "$(docker inspect --format '{{.State.Health.Status}}' novel-redis 2>/dev/null || true)" == healthy ]] \
+    [[ "$(docker inspect --format '{{.State.Health.Status}}' "${container_prefix}-redis" 2>/dev/null || true)" == healthy ]] \
       || die "Redis is not healthy"
     redis_accepts_persisted_password \
       || die "the persisted Redis credential cannot authenticate"
   else
-    [[ "$(docker inspect --format '{{.State.Status}}' novel-redis 2>/dev/null || true)" != running ]] \
+    [[ "$(docker inspect --format '{{.State.Status}}' "${container_prefix}-redis" 2>/dev/null || true)" != running ]] \
       || die "Redis is running while CACHE_MODE=postgres"
   fi
 
@@ -397,13 +523,19 @@ deploy_manifest() {
   # The migration cannot start until the exact recovery target is durable.
   # A host crash before this global flush leaves the old writer valid; after
   # it returns, every recovery path must honor the marker.
-  sync
-  compose run --rm --no-deps postgres-migrate
+  sync # schema transition target durable before migration
+  qualification_phase migration start
+  compose run --rm --no-deps postgres-migrate # schema transition migration
+  qualification_phase migration end
+  qualification_phase application_deployment start
   compose up -d --wait --wait-timeout 120 --no-build --no-deps novel-service
   compose up -d --wait --wait-timeout 120 --no-build --no-deps \
     user-service narrative-service agent-service gateway nginx
-  curl --fail --silent --show-error http://localhost/health >/dev/null
-  curl --fail --silent --show-error http://localhost/ready >/dev/null
+  qualification_phase application_deployment end
+  qualification_phase readiness start
+  curl --fail --silent --show-error "$health_origin/health" >/dev/null
+  curl --fail --silent --show-error "$health_origin/ready" >/dev/null
+  qualification_phase readiness end
 }
 
 validate_transition_candidate() {
@@ -477,13 +609,20 @@ case "$command" in
     require_schema_barriers_present "$candidate_tmp" "adopt target"
     mv -f "$candidate_tmp" "$candidate_manifest"
     release_sha=$(manifest_value "$candidate_manifest" RELEASE_GIT_SHA)
-    printf 'Confirm the legacy source, exact images, and database backup can restore service, then enter ADOPT-%s: ' \
-      "$release_sha" >&2
-    IFS= read -r confirmation
-    [[ "$confirmation" == "ADOPT-$release_sha" ]] \
-      || die "manual recovery was not confirmed"
     trap - EXIT
-    deploy_manifest "$candidate_manifest" true
+    if [[ "$qualification_scope" == true ]]; then
+      active_manifest="$candidate_manifest"
+      load_cache_mode
+      require_empty_qualification_project
+      deploy_initial_manifest "$candidate_manifest"
+    else
+      printf 'Confirm the legacy source, exact images, and database backup can restore service, then enter ADOPT-%s: ' \
+        "$release_sha" >&2
+      IFS= read -r confirmation
+      [[ "$confirmation" == "ADOPT-$release_sha" ]] \
+        || die "manual recovery was not confirmed"
+      deploy_manifest "$candidate_manifest" true
+    fi
     promote_schema_transition
     finalize_schema_transition
     ;;
@@ -543,7 +682,11 @@ case "$command" in
         fetch_release_history "$schema_transition_manifest"
         require_schema_barriers_present "$schema_transition_manifest" \
           "initial schema transition"
-        deploy_manifest "$schema_transition_manifest" false
+        if [[ "$qualification_scope" == true ]]; then
+          deploy_initial_manifest "$schema_transition_manifest"
+        else
+          deploy_manifest "$schema_transition_manifest" false
+        fi
         promote_schema_transition
       fi
       finalize_schema_transition # marked restore
