@@ -151,6 +151,17 @@ impl RequestLabels {
         .record(elapsed);
     }
 
+    pub(crate) fn response_model(&self, response_model: &str) {
+        tracing::info!(
+            provider = %self.provider,
+            configured_model = %self.model,
+            response_model = %bounded_label(response_model),
+            operation = self.operation,
+            mode = self.mode,
+            "LLM response model observed"
+        );
+    }
+
     pub(crate) fn finish(&self, status: &'static str, started: Instant) {
         counter!(
             "novelworld_llm_requests_total",

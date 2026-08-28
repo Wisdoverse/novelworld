@@ -120,6 +120,12 @@ pub(crate) fn parse_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>
 
     match event_type {
         "error" => Err(anyhow!("Anthropic stream failed")),
+        "message_start" => payload
+            .pointer("/message/model")
+            .and_then(Value::as_str)
+            .filter(|model| !model.trim().is_empty())
+            .map(|model| vec![ChatStreamEvent::ResponseModel(model.to_owned())])
+            .ok_or_else(|| anyhow!("Anthropic stream response model is missing")),
         "message_stop" => Ok(vec![ChatStreamEvent::Finished]),
         "content_block_delta" => {
             let delta = payload
@@ -151,6 +157,10 @@ pub(crate) fn parse_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>
 impl LlmProvider for AnthropicProvider {
     fn auth_header(&self, api_key: &str) -> (String, String) {
         ("x-api-key".into(), api_key.to_string())
+    }
+
+    fn reports_response_model(&self) -> bool {
+        true
     }
 
     async fn chat(
