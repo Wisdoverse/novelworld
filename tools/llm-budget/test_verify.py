@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from verify import BudgetError, verify
+from verify import BudgetError, verify, verify_many
 
 
 HERE = Path(__file__).parent
@@ -30,6 +30,21 @@ class BudgetVerifierTest(unittest.TestCase):
         second = self.run_verify()
         self.assertTrue(first["passed"])
         self.assertEqual(first, second)
+
+    def test_separate_process_generations_are_aggregated_without_duplicate_series(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            policy_path = root / "policy.json"
+            first = root / "first.prom"
+            second = root / "second.prom"
+            policy_path.write_text(self.policy)
+            first.write_text(self.sample)
+            second.write_text(self.sample)
+            report = verify_many(policy_path, [first, second], COMMIT)
+        self.assertTrue(report["passed"], report)
+        self.assertEqual(
+            report["operations"]["branch_generation"]["started"], 2
+        )
 
     def test_budget_contract_fails_closed(self):
         branch = 'operation="branch_generation"'
