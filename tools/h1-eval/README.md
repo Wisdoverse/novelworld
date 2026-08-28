@@ -56,7 +56,9 @@ Every live run requires both evidence outputs. `--metrics-output` retains the
 existing `llm-observability-v1` counters and latency summaries, including
 failed attempts and retries. The report records
 `thinking_enabled: false` because these schema-bound JSON calls deliberately
-disable DeepSeek thinking. Raw metrics contain a stable usage-key fingerprint;
+disable DeepSeek thinking. Production character and canon extraction also use
+temperature 0.0 to make qualification and accepted imports deterministic. Raw
+metrics contain a stable usage-key fingerprint;
 keep them in the private evidence directory. Both output paths must be
 absolute, outside the Git checkout, inside existing directories, and fresh:
 the evaluator creates each file exclusively before any provider call.

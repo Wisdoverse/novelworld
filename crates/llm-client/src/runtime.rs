@@ -257,13 +257,21 @@ fn longform_request(operation: crate::LlmOperation, system: &str, user: &str) ->
 /// Qualification tools reuse this narrow constructor so they measure the
 /// deployed request contract instead of a hand-maintained approximation.
 pub fn production_json_request(operation: crate::LlmOperation, prompt: &str) -> ChatRequest {
+    let temperature = if matches!(
+        operation,
+        crate::LlmOperation::CharacterExtraction | crate::LlmOperation::CanonExtraction
+    ) {
+        0.0
+    } else {
+        0.3
+    };
     ChatRequest::new(operation, "")
         .message(
             "system",
             "You are a helpful assistant that always responds with a non-empty valid JSON object. Output JSON only.",
         )
         .message("user", prompt)
-        .temperature(0.3)
+        .temperature(temperature)
         .max_tokens(operation.max_output_tokens())
         .thinking(false)
         .json()
@@ -397,12 +405,17 @@ mod tests {
             assert_eq!(request.messages[0].role, "system");
             assert_eq!(request.messages[1].role, "user");
             assert_eq!(request.messages[1].content, "prompt");
-            assert_eq!(request.temperature, Some(0.3));
+            assert_eq!(request.temperature, Some(0.0));
             assert_eq!(request.max_tokens, Some(operation.max_output_tokens()));
             assert!(!request.stream);
             assert!(request.json_mode);
             assert_eq!(request.thinking, Some(false));
         }
+        assert_eq!(
+            production_json_request(crate::LlmOperation::NarrativeNodeDetection, "prompt")
+                .temperature,
+            Some(0.3)
+        );
     }
 
     #[test]
