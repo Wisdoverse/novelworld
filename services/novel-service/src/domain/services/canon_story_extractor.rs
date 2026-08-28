@@ -14,9 +14,9 @@ use crate::domain::entities::{
     character::Character,
 };
 
-pub const CANON_CHUNK_PROMPT_VERSION: &str = "canon-chunk-v6";
+pub const CANON_CHUNK_PROMPT_VERSION: &str = "canon-chunk-v7";
 pub const CANON_EVENT_SELECTION_PROMPT_VERSION: &str = "canon-event-grouping-v3";
-pub const CANON_EXTRACTION_PROMPT_VERSION: &str = "canon-chunk-v6+event-grouping-v3";
+pub const CANON_EXTRACTION_PROMPT_VERSION: &str = "canon-chunk-v7+event-grouping-v3";
 const MAX_SOURCE_CHUNK_BYTES: usize = 16_000;
 const MAX_CHARACTER_CONTEXT_BYTES: usize = 16_000;
 const MAX_EVENT_SELECTION_PROMPT_BYTES: usize = 16_000;
@@ -1766,10 +1766,10 @@ mod tests {
         };
 
         let prompt = build_prompt("Novel", &chunk, &[]).unwrap();
-        assert_eq!(CANON_CHUNK_PROMPT_VERSION, "canon-chunk-v6");
+        assert_eq!(CANON_CHUNK_PROMPT_VERSION, "canon-chunk-v7");
         assert_eq!(
             CANON_EXTRACTION_PROMPT_VERSION,
-            "canon-chunk-v6+event-grouping-v3"
+            "canon-chunk-v7+event-grouping-v3"
         );
         assert!(!prompt.contains("coverage_summary"));
         assert!(prompt.contains("Keep each top-level fact array at 4 items or fewer"));
