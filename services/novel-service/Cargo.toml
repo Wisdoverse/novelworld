@@ -36,7 +36,7 @@ aws-sdk-s3.workspace = true
 pdf-extract = "0.12"
 # EPUB parsing and HTML-to-text conversion
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
-quick-xml = { version = "0.41", features = ["serialize"] }
+quick-xml = { version = "0.42", features = ["serialize"] }
 html2text = "0.17"
 encoding_rs = "0.8"
 percent-encoding = "2"
