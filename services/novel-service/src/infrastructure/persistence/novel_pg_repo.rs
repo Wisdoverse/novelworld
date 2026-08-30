@@ -13,6 +13,7 @@ use crate::domain::repositories::{
 };
 use crate::domain::value_objects::{DeviationMode, ImportStage, NovelStatus};
 use crate::infrastructure::persistence::chapter_pg_repo::save_batch_in_transaction;
+use crate::infrastructure::persistence::SOURCE_UPLOAD_PENDING;
 
 pub struct NovelPgRepository {
     pool: PgPool,
@@ -64,6 +65,23 @@ impl NovelPgRepository {
 }
 
 async fn insert_novel(tx: &mut Transaction<'_, Postgres>, novel: &Novel) -> Result<()> {
+    if let Some(key) = &novel.file_key {
+        // Consume and lock the upload reservation before touching `novels`.
+        // Cleanup claims the same row with SKIP LOCKED, so a slow INSERT/commit
+        // cannot race an external object deletion. If cleanup won first, this
+        // transaction fails closed and never publishes a dangling file key.
+        let reservation = sqlx::query(
+            "DELETE FROM source_file_deletions WHERE object_key = $1 AND last_error = $2",
+        )
+        .bind(key)
+        .bind(SOURCE_UPLOAD_PENDING)
+        .execute(&mut **tx)
+        .await?;
+        ensure!(
+            reservation.rows_affected() == 1,
+            "retained source upload lost its database reservation"
+        );
+    }
     sqlx::query(
         r#"INSERT INTO novels (
             id, user_id, title, author, cover_url, description,
@@ -88,12 +106,6 @@ async fn insert_novel(tx: &mut Transaction<'_, Postgres>, novel: &Novel) -> Resu
     .bind(novel.updated_at)
     .execute(&mut **tx)
     .await?;
-    if let Some(key) = &novel.file_key {
-        sqlx::query("DELETE FROM source_file_deletions WHERE object_key = $1")
-            .bind(key)
-            .execute(&mut **tx)
-            .await?;
-    }
     Ok(())
 }
 

@@ -6,7 +6,10 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, OnceLock,
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::{oneshot, watch, OwnedSemaphorePermit, Semaphore};
@@ -107,6 +110,7 @@ fn try_import_admission(
 
 async fn validated_json<T>(
     llm: &dyn LlmPort,
+    budget: &ImportLlmDispatchBudget,
     user_id: Uuid,
     task: NovelLlmTask,
     prompt: &str,
@@ -120,7 +124,9 @@ where
     for attempt in 1..=3 {
         // Transport retries already live in the shared client. This loop is
         // only for a fresh model response after JSON/schema validation fails.
-        let raw = llm.chat_json(user_id, task, &current_prompt).await?;
+        let raw = budget
+            .chat_json(llm, user_id, task, &current_prompt)
+            .await?;
         let result = serde_json::from_str::<T>(json_object_payload(&raw))
             .map_err(anyhow::Error::from)
             .and_then(|value| {
@@ -181,8 +187,10 @@ mod validated_json_tests {
             calls: AtomicUsize::new(0),
             saw_correction: AtomicBool::new(false),
         };
+        let budget = ImportLlmDispatchBudget::new(3);
         let value: serde_json::Value = validated_json(
             &llm,
+            &budget,
             Uuid::nil(),
             NovelLlmTask::CharacterExtraction,
             "prompt",
@@ -194,6 +202,29 @@ mod validated_json_tests {
         assert_eq!(value["ok"], true);
         assert_eq!(llm.calls.load(Ordering::Relaxed), 2);
         assert!(llm.saw_correction.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn llm_dispatch_budget_stops_a_schema_retry_before_dispatch() {
+        let llm = InvalidThenValid {
+            calls: AtomicUsize::new(0),
+            saw_correction: AtomicBool::new(false),
+        };
+        let budget = ImportLlmDispatchBudget::new(1);
+        let error = validated_json::<serde_json::Value>(
+            &llm,
+            &budget,
+            Uuid::nil(),
+            NovelLlmTask::CharacterExtraction,
+            "prompt",
+            |_| Ok(()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.downcast_ref::<ImportBudgetExceeded>().is_some());
+        assert_eq!(llm.calls.load(Ordering::Relaxed), 1);
+        assert!(!llm.saw_correction.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -726,7 +757,11 @@ const MAX_BOUNDARY_REPAIR_SEGMENTS: usize = 8;
 const MAX_BOUNDARY_REPAIR_ROUNDS: usize = 3;
 // 16 KiB canon chunks plus 24 KiB character scans keep the supported 5 MiB
 // paste limit below this cap while rejecting the next whole-MiB tier.
-const MAX_IMPORT_PROVIDER_CALLS: usize = 640;
+const MAX_IMPORT_APPLICATION_DISPATCHES: usize = 640;
+// Avatar generation happens only after the fenced import commit. Reserve its
+// complete projection allowance so fresh LLM responses, including every
+// schema/evidence retry and boundary repair, cannot consume those slots.
+const MAX_IMPORT_LLM_DISPATCHES: usize = MAX_IMPORT_APPLICATION_DISPATCHES - MAX_AVATARS_PER_NOVEL;
 const IMPORT_LEASE_HEARTBEAT: Duration = Duration::from_secs(30);
 const IMPORT_RECOVERY_INTERVAL: Duration = Duration::from_secs(30);
 const GAME_RULE_LEASE_HEARTBEAT: Duration = Duration::from_secs(30);
@@ -736,6 +771,41 @@ fn shared_avatar_admission() -> Arc<Semaphore> {
     ADMISSION
         .get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_AVATAR_REQUESTS)))
         .clone()
+}
+
+#[derive(Debug)]
+struct ImportLlmDispatchBudget {
+    remaining: AtomicUsize,
+}
+
+impl ImportLlmDispatchBudget {
+    fn new(limit: usize) -> Self {
+        Self {
+            remaining: AtomicUsize::new(limit),
+        }
+    }
+
+    fn spend(&self) -> std::result::Result<(), ImportBudgetExceeded> {
+        self.remaining
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .map(|_| ())
+            .map_err(|_| ImportBudgetExceeded)
+    }
+
+    async fn chat_json(
+        &self,
+        llm: &dyn LlmPort,
+        user_id: Uuid,
+        task: NovelLlmTask,
+        prompt: &str,
+    ) -> Result<String> {
+        // Spend before dispatch. A transport error can have an unknowable
+        // provider outcome, so returning the slot would violate the ceiling.
+        self.spend()?;
+        llm.chat_json(user_id, task, prompt).await
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -921,11 +991,11 @@ fn ensure_import_budget(chapters: &[Chapter]) -> std::result::Result<(), ImportB
     let canon_scans = canon_story_extractor::build_scan_plan(chapters)
         .map_err(|_| ImportBudgetExceeded)?
         .len();
-    let calls = 4usize
+    let planned_dispatches = 4usize
         .saturating_add(character_scans)
         .saturating_add(canon_scans)
         .saturating_add(MAX_AVATARS_PER_NOVEL);
-    (calls <= MAX_IMPORT_PROVIDER_CALLS)
+    (planned_dispatches <= MAX_IMPORT_APPLICATION_DISPATCHES)
         .then_some(())
         .ok_or(ImportBudgetExceeded)
 }
@@ -1274,7 +1344,33 @@ impl NovelCommandHandler {
             .iter()
             .map(|(novel, _)| novel.id)
             .collect::<Vec<_>>();
-        self.novel_repo.create_import_batch(&imports).await?;
+        if let Err(acceptance_error) = self.novel_repo.create_import_batch(&imports).await {
+            let mut cleanup_errors = Vec::new();
+            for object_key in imports
+                .iter()
+                .filter_map(|(novel, _)| novel.file_key.as_deref())
+            {
+                if let Err(cleanup_error) = self
+                    .source_deletions
+                    .enqueue_cleanup(object_key, Utc::now())
+                    .await
+                {
+                    error!(
+                        error = ?cleanup_error,
+                        %object_key,
+                        "failed to restore source cleanup after import acceptance failure"
+                    );
+                    cleanup_errors.push(format!("{object_key}: {cleanup_error:#}"));
+                }
+            }
+            if cleanup_errors.is_empty() {
+                return Err(acceptance_error);
+            }
+            return Err(acceptance_error.context(format!(
+                "source cleanup could not be restored for {}",
+                cleanup_errors.join(", ")
+            )));
+        }
 
         let first_novel_id = novel_ids[0];
         match self.novel_repo.claim_import(first_novel_id, user_id).await {
@@ -1319,7 +1415,8 @@ impl NovelCommandHandler {
             Some(claim) => claim,
             None => {
                 // A claim at the import-provider budget ceiling terminates the
-                // job; surface its guidance without any provider call.
+                // job; surface its guidance without an application provider
+                // dispatch.
                 let novel = self.novel_repo.find_by_id(novel_id).await?;
                 if novel
                     .as_ref()
@@ -1423,6 +1520,7 @@ impl NovelCommandHandler {
     }
 
     async fn process_import(&self, claim: &ImportClaim) -> Result<Vec<Character>> {
+        let llm_budget = Arc::new(ImportLlmDispatchBudget::new(MAX_IMPORT_LLM_DISPATCHES));
         let mut novel = self
             .novel_repo
             .find_by_id(claim.novel_id)
@@ -1440,7 +1538,8 @@ impl NovelCommandHandler {
             }
         };
         let chapters = if matches!(claim.stage, ImportStage::Source | ImportStage::Chapters) {
-            self.repair_chapter_boundaries(chapters, claim).await?
+            self.repair_chapter_boundaries(chapters, claim, llm_budget.clone())
+                .await?
         } else {
             chapters
         };
@@ -1448,7 +1547,7 @@ impl NovelCommandHandler {
 
         let characters = match claim.stage {
             ImportStage::Chapters | ImportStage::Source => {
-                self.enrich_novel_async(&mut novel, &chapters, claim)
+                self.enrich_novel_async(&mut novel, &chapters, claim, llm_budget.clone())
                     .await?
             }
             ImportStage::Enriched => {
@@ -1460,14 +1559,14 @@ impl NovelCommandHandler {
             }
             ImportStage::Completed => return Err(ImportLeaseLost.into()),
         };
-        self.complete_canon_async(&novel, &chapters, &characters, claim)
+        self.complete_canon_async(&novel, &chapters, &characters, claim, llm_budget)
             .await?;
         Ok(characters)
     }
 
     /// Rebuild deterministic chapters from the retained source object and
     /// fenced-commit them, advancing the durable stage from `source` to
-    /// `chapters` before any provider call.
+    /// `chapters` before any application provider dispatch.
     async fn replay_source_chapters(
         &self,
         novel: &Novel,
@@ -1525,6 +1624,7 @@ impl NovelCommandHandler {
         &self,
         mut chapters: Vec<Chapter>,
         claim: &ImportClaim,
+        llm_budget: Arc<ImportLlmDispatchBudget>,
     ) -> Result<Vec<Chapter>> {
         let mut repaired_segments = 0usize;
         for round in 1..=MAX_BOUNDARY_REPAIR_ROUNDS {
@@ -1546,6 +1646,7 @@ impl NovelCommandHandler {
             let results = stream::iter(indexes)
                 .map(|index| {
                     let llm = self.llm.clone();
+                    let llm_budget = llm_budget.clone();
                     let chapter = chapters[index].clone();
                     let expected_boundaries =
                         chapter_boundary_detector::expected_boundary_count(&chapters, index);
@@ -1555,6 +1656,7 @@ impl NovelCommandHandler {
                         let detection: chapter_boundary_detector::ChapterBoundaryDetection =
                             validated_json(
                                 llm.as_ref(),
+                                llm_budget.as_ref(),
                                 user_id,
                                 NovelLlmTask::ChapterBoundaryDetection,
                                 &prompt,
@@ -1621,6 +1723,7 @@ impl NovelCommandHandler {
         novel: &mut Novel,
         chapters: &[Chapter],
         claim: &ImportClaim,
+        llm_budget: Arc<ImportLlmDispatchBudget>,
     ) -> Result<Vec<Character>> {
         let novel_id = novel.id;
         let total_chapters = chapters.len() as i32;
@@ -1632,6 +1735,7 @@ impl NovelCommandHandler {
         let prompt = build_extraction_prompt(&title, &sample_text);
         let mut base_extraction: ExtractionResult = validated_json(
             self.llm.as_ref(),
+            llm_budget.as_ref(),
             claim.user_id,
             NovelLlmTask::CharacterExtraction,
             &prompt,
@@ -1646,11 +1750,13 @@ impl NovelCommandHandler {
             let results = stream::iter(scans.into_iter().enumerate())
                 .map(|(index, chunk)| {
                     let llm = self.llm.clone();
+                    let llm_budget = llm_budget.clone();
                     let title = title.clone();
                     async move {
                         let prompt = build_chunk_extraction_prompt(&title, &chunk, index);
                         let result: ChunkExtractionResult = validated_json(
                             llm.as_ref(),
+                            llm_budget.as_ref(),
                             user_id,
                             NovelLlmTask::CharacterExtraction,
                             &prompt,
@@ -1748,6 +1854,7 @@ impl NovelCommandHandler {
             .collect::<Vec<_>>();
         let detection: node_detector::NodeDetectionResult = validated_json(
             self.llm.as_ref(),
+            llm_budget.as_ref(),
             claim.user_id,
             NovelLlmTask::NarrativeNodeDetection,
             &node_prompt,
@@ -1802,6 +1909,7 @@ impl NovelCommandHandler {
         chapters: &[Chapter],
         characters: &[Character],
         claim: &ImportClaim,
+        llm_budget: Arc<ImportLlmDispatchBudget>,
     ) -> Result<()> {
         if self.canon_repo.find_latest(novel.id).await?.is_none() {
             info!(novel_id = %novel.id, "Extracting canonical story model");
@@ -1810,6 +1918,7 @@ impl NovelCommandHandler {
             let results = stream::iter(chunks.into_iter().enumerate())
                 .map(|(position, chunk)| {
                     let llm = self.llm.clone();
+                    let llm_budget = llm_budget.clone();
                     let canon_repo = self.canon_repo.clone();
                     let title = novel.title.clone();
                     let novel_id = novel.id;
@@ -1868,8 +1977,13 @@ impl NovelCommandHandler {
                         let mut extraction = None;
                         let mut prompt = base_prompt.clone();
                         for attempt in 0..3 {
-                            let raw = llm
-                                .chat_json(user_id, NovelLlmTask::CanonExtraction, &prompt)
+                            let raw = llm_budget
+                                .chat_json(
+                                    llm.as_ref(),
+                                    user_id,
+                                    NovelLlmTask::CanonExtraction,
+                                    &prompt,
+                                )
                                 .await?;
                             match canon_story_extractor::parse_chunk(&raw, &chunk).and_then(
                                 |mut extraction| {
@@ -1984,9 +2098,13 @@ impl NovelCommandHandler {
                 };
                 if selection.is_none() {
                     for schema_attempt in 1..=2 {
-                        let raw = self
-                            .llm
-                            .chat_json(claim.user_id, NovelLlmTask::CanonExtraction, &prompt)
+                        let raw = llm_budget
+                            .chat_json(
+                                self.llm.as_ref(),
+                                claim.user_id,
+                                NovelLlmTask::CanonExtraction,
+                                &prompt,
+                            )
                             .await?;
                         match canon_story_extractor::parse_event_selection(&raw, candidate_count) {
                             Ok(parsed) => {
@@ -2132,7 +2250,7 @@ async fn retain_source_file(
     };
     let key = source_file_key(novel.user_id, novel.id);
     deletions
-        .enqueue(&key, Utc::now() + ChronoDuration::minutes(5))
+        .reserve_upload(&key, Utc::now() + ChronoDuration::minutes(5))
         .await?;
     storage
         .put(&key, data)
@@ -2227,12 +2345,21 @@ mod import_budget_tests {
 
     #[async_trait::async_trait]
     impl SourceFileDeletionRepository for RecordingDeletions {
-        async fn enqueue(
+        async fn reserve_upload(
             &self,
             _object_key: &str,
             _not_before: chrono::DateTime<Utc>,
         ) -> Result<()> {
             self.0.lock().unwrap().push("enqueue");
+            Ok(())
+        }
+
+        async fn enqueue_cleanup(
+            &self,
+            _object_key: &str,
+            _not_before: chrono::DateTime<Utc>,
+        ) -> Result<()> {
+            self.0.lock().unwrap().push("cleanup");
             Ok(())
         }
 
@@ -2243,13 +2370,14 @@ mod import_budget_tests {
             Ok(vec![])
         }
 
-        async fn complete(&self, _object_key: &str) -> Result<()> {
+        async fn complete(&self, _object_key: &str, _claim_token: &str) -> Result<()> {
             Ok(())
         }
 
         async fn retry(
             &self,
             _object_key: &str,
+            _claim_token: &str,
             _error: &str,
             _not_before: chrono::DateTime<Utc>,
         ) -> Result<()> {
@@ -2263,6 +2391,14 @@ mod import_budget_tests {
         let at_paste_limit = vec![Chapter::new(novel_id, 1, None, "a".repeat(5 * 1024 * 1024))];
         let above_budget = vec![Chapter::new(novel_id, 1, None, "a".repeat(6 * 1024 * 1024))];
 
+        assert_eq!(build_scan_plan(&at_paste_limit).len(), 221);
+        assert_eq!(
+            canon_story_extractor::build_scan_plan(&at_paste_limit)
+                .unwrap()
+                .len(),
+            328
+        );
+        assert_eq!(MAX_IMPORT_LLM_DISPATCHES, 610);
         assert!(ensure_import_budget(&at_paste_limit).is_ok());
         assert!(ensure_import_budget(&above_budget).is_err());
     }

@@ -30,6 +30,22 @@ test.describe('critical journey — full axe rule set', () => {
     await expectNoA11yViolations(page);
   });
 
+  test('shelf dialogs', async ({ page }) => {
+    await installStubs(page);
+    await page.goto('/shelf');
+
+    await page.getByRole('button', { name: '打开共享书库' }).click();
+    await expect(page.getByRole('dialog', { name: '共享书库' })).toBeVisible();
+    await settleAnimations(page);
+    await expectNoA11yViolations(page);
+    await page.keyboard.press('Escape');
+
+    await page.getByRole('button', { name: '导入小说' }).click();
+    await expect(page.getByRole('dialog', { name: '导入小说' })).toBeVisible();
+    await settleAnimations(page);
+    await expectNoA11yViolations(page);
+  });
+
   test('reader page — guided chapter with branch and chat', async ({ page }) => {
     await installStubs(page);
     await page.goto('/reader/novel-1/1');

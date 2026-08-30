@@ -110,10 +110,11 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
                 </div>
               ) : (
                 <div>
-                  <label className="mb-1.5 block text-sm font-medium text-[#3c4043]">
+                  <label htmlFor="novel-import-title" className="mb-1.5 block text-sm font-medium text-[#3c4043]">
                     书名 *
                   </label>
                   <input
+                    id="novel-import-title"
                     value={title}
                     onChange={(event) => setTitle(event.target.value)}
                     placeholder="输入小说名称"
@@ -123,8 +124,9 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
                 </div>
               )}
               <div>
-                <label className="mb-1.5 block text-sm font-medium text-[#3c4043]">作者</label>
+                <label htmlFor="novel-import-author" className="mb-1.5 block text-sm font-medium text-[#3c4043]">作者</label>
                 <input
+                  id="novel-import-author"
                   value={author}
                   onChange={(event) => setAuthor(event.target.value)}
                   placeholder={isBatch ? '可选，应用到全部文件' : '可选'}
@@ -135,7 +137,7 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
 
             <div>
               <p className="mb-2 text-sm font-medium text-[#3c4043]">故事偏离度</p>
-              <div className="grid gap-2 sm:grid-cols-3">
+              <div className="grid gap-2 sm:grid-cols-3" role="group" aria-label="故事偏离度">
                 {[
                   { value: 'canon', label: '忠实原著', desc: '严格遵循原著' },
                   { value: 'creative', label: '创意扩展', desc: '在原著基础上发挥' },
@@ -214,10 +216,11 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
             </div>
 
             <div>
-              <label className="mb-1.5 block text-sm font-medium text-[#3c4043]">
+              <label htmlFor="novel-import-content" className="mb-1.5 block text-sm font-medium text-[#3c4043]">
                 小说内容 {!files.length && '*'}
               </label>
               <textarea
+                id="novel-import-content"
                 value={content}
                 onChange={(event) => {
                   setContent(event.target.value);
@@ -234,6 +237,10 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
               />
               <p className="mt-1 text-xs text-[#5f6368]">字数：{content.length.toLocaleString()} 字</p>
             </div>
+
+            <p className="rounded-xl border border-[#a8c7fa] bg-[#eef3fe] px-3 py-2.5 text-xs leading-5 text-[#174ea6]">
+              提交并被系统接受的正文，以及启用原文件存储时的上传文件，包括仍在解析或随后解析失败的内容，都会随共享原著保留。解析成功后其他用户可从共享书库加入；你的阅读进度、身份、对话、记忆和时间线仍为私有。移出书架或删除账号不会删除这些共享内容。
+            </p>
           </div>
 
           <div className="flex shrink-0 justify-end gap-3 border-t border-[#e8eaed] px-6 py-4 sm:px-8">

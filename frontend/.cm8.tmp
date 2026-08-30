@@ -1,4 +1,0 @@
-fix(h4): rustfmt the identity export assertions; drop stray temp file
-
-cargo fmt --check in CI rejected the assertion block formatting; also
-remove frontend/.cm7.tmp that slipped into the previous commit.

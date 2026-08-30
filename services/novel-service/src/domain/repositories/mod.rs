@@ -13,7 +13,8 @@ use crate::domain::value_objects::{DeviationMode, ImportStage};
 /// claim boundary.
 pub const MAX_IMPORT_ATTEMPTS: i64 = 3;
 /// Public, actionable guidance stored on the Novel when the attempt ceiling
-/// is reached; the retry endpoint surfaces it without a provider call.
+/// is reached; the retry endpoint surfaces it without an application provider
+/// dispatch.
 pub const IMPORT_BUDGET_EXHAUSTED_MESSAGE: &str =
     "Import provider budget exhausted; re-upload the source";
 // ponytail: terminal three-attempt budget; add an operator retry workflow only
@@ -90,14 +91,29 @@ pub trait NovelRepository: Send + Sync {
 pub struct PendingSourceFileDeletion {
     pub object_key: String,
     pub attempts: i32,
+    /// Opaque fencing token for this cleanup claim. Completion and retry from
+    /// an older worker must not consume a requeued or newly claimed intent.
+    pub claim_token: String,
 }
 
 #[async_trait]
 pub trait SourceFileDeletionRepository: Send + Sync {
-    async fn enqueue(&self, object_key: &str, not_before: DateTime<Utc>) -> Result<()>;
+    /// Reserve a newly uploaded object until the accepting Novel transaction
+    /// consumes the reservation. Cleanup may claim it only after `not_before`.
+    async fn reserve_upload(&self, object_key: &str, not_before: DateTime<Utc>) -> Result<()>;
+    /// Restore a due deletion intent after an upload completed but the Novel
+    /// transaction could not consume its reservation. This must replace any
+    /// stale cleanup claim so a late upload cannot become orphaned.
+    async fn enqueue_cleanup(&self, object_key: &str, not_before: DateTime<Utc>) -> Result<()>;
     async fn due(&self, limit: i64) -> Result<Vec<PendingSourceFileDeletion>>;
-    async fn complete(&self, object_key: &str) -> Result<()>;
-    async fn retry(&self, object_key: &str, error: &str, not_before: DateTime<Utc>) -> Result<()>;
+    async fn complete(&self, object_key: &str, claim_token: &str) -> Result<()>;
+    async fn retry(
+        &self,
+        object_key: &str,
+        claim_token: &str,
+        error: &str,
+        not_before: DateTime<Utc>,
+    ) -> Result<()>;
 }
 
 pub struct CanonExtractionCheckpoint<'a> {

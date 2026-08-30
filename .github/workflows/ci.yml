@@ -11,6 +11,11 @@ on:
 permissions:
   contents: read
 
+# Dependabot auto-merges use GITHUB_TOKEN, so GitHub suppresses the resulting
+# push workflow. Run the extended evidence on that PR's merge candidate instead.
+env:
+  RUN_EXTENDED_DRILLS: ${{ github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' }}
+
 concurrency:
   group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -423,21 +428,21 @@ jobs:
       - name: Self-check secret rotation verifier
         run: tests/e2e/secret_rotation_drill.sh --self-test
       - name: Verify restart-safe ingestion recovery boundaries
-        if: github.event_name != 'pull_request'
+        if: env.RUN_EXTENDED_DRILLS == 'true'
         run: tests/e2e/ingestion_recovery.sh
       - name: Verify restart-safe core reader loop
-        if: github.event_name != 'pull_request'
+        if: env.RUN_EXTENDED_DRILLS == 'true'
         run: tests/e2e/core_reader_loop.sh
       - name: Verify the provider-outage fail-closed drill
-        if: github.event_name != 'pull_request'
+        if: env.RUN_EXTENDED_DRILLS == 'true'
         run: tests/e2e/provider_outage_drill.sh
       - name: Run the backup-restore-v1 drills
-        if: github.event_name != 'pull_request'
+        if: env.RUN_EXTENDED_DRILLS == 'true'
         env:
           BACKUP_ENCRYPTION_KEY: runtime-drill-backup-key-at-least-32-characters
         run: tests/e2e/backup_restore_drill.sh
       - name: Start the S3 source-retention topology
-        if: github.event_name != 'pull_request'
+        if: env.RUN_EXTENDED_DRILLS == 'true'
         run: |
           docker compose -f docker-compose.yml -f docker-compose.e2e.yml --profile redis down -v
           docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml --profile redis up -d
@@ -450,27 +455,27 @@ jobs:
           docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml --profile redis ps --all
           exit 1
       - name: Verify the S3 source-boundary kill/restart drill
-        if: github.event_name != 'pull_request'
+        if: env.RUN_EXTENDED_DRILLS == 'true'
         run: tests/e2e/source_recovery_drill.sh
       - name: Verify the structured log contract
-        if: github.event_name != 'pull_request'
+        if: env.RUN_EXTENDED_DRILLS == 'true'
         run: python3 tests/e2e/log_contract.py
       - name: Verify the secret rotation drill
-        if: github.event_name != 'pull_request'
+        if: env.RUN_EXTENDED_DRILLS == 'true'
         env:
           COMPOSE_FILES: docker-compose.yml:docker-compose.e2e.yml:docker-compose.s3-e2e.yml
         run: tests/e2e/secret_rotation_drill.sh
       - name: Verify the bad-release edge envelope drill
-        if: github.event_name != 'pull_request'
+        if: env.RUN_EXTENDED_DRILLS == 'true'
         run: tests/e2e/bad_release_drill.sh
       - name: Show S3 topology logs on failure
-        if: failure() && github.event_name != 'pull_request'
+        if: failure() && env.RUN_EXTENDED_DRILLS == 'true'
         run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml --profile redis logs --no-color || true
       - name: Stop the S3 source-retention topology
-        if: always() && github.event_name != 'pull_request'
+        if: always() && env.RUN_EXTENDED_DRILLS == 'true'
         run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml --profile redis down -v
       - name: Reset production topology for the capacity profile
-        if: github.event_name != 'pull_request'
+        if: env.RUN_EXTENDED_DRILLS == 'true'
         env:
           RATE_LIMIT_RPS: 500
         run: |
@@ -484,14 +489,14 @@ jobs:
           done
           exit 1
       - name: Verify the single-node-v1 capacity SLO
-        if: github.event_name != 'pull_request'
+        if: env.RUN_EXTENDED_DRILLS == 'true'
         run: |
           python3 tools/capacity/run.py \
             --policy tools/capacity/policy-v1.json \
             --report capacity-report.json \
             --git-sha "$GITHUB_SHA"
       - name: Upload capacity report
-        if: always() && github.event_name != 'pull_request'
+        if: always() && env.RUN_EXTENDED_DRILLS == 'true'
         uses: actions/upload-artifact@v7.0.1
         with:
           name: single-node-v1-${{ github.sha }}

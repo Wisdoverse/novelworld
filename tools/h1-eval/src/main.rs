@@ -958,10 +958,8 @@ fn validate_corpus(corpus: &Corpus) -> Result<()> {
                     case.id
                 );
             }
-            MalformedKind::InvalidUtf8 => {
-                if String::from_utf8(case.bytes.clone()).is_ok() {
-                    bail!("malformed case {} bytes must be invalid UTF-8", case.id);
-                }
+            MalformedKind::InvalidUtf8 if std::str::from_utf8(&case.bytes).is_ok() => {
+                bail!("malformed case {} bytes must be invalid UTF-8", case.id);
             }
             MalformedKind::GappedChapters if !bases.contains_key(&case.base) => {
                 bail!("malformed case {} has an unknown base", case.id);

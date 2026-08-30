@@ -68,6 +68,12 @@ describe('NovelImportModal', () => {
     fireEvent.click(opener);
     const dialog = await screen.findByRole('dialog', { name: '导入小说' });
     const title = screen.getByPlaceholderText('输入小说名称');
+    expect(screen.getByLabelText(/书名/)).toBe(title);
+    expect(screen.getByLabelText('作者')).toBeTruthy();
+    expect(screen.getByLabelText(/小说内容/)).toBeTruthy();
+    expect(screen.getByRole('group', { name: '故事偏离度' })).toBeTruthy();
+    expect(screen.getByText(/仍在解析或随后解析失败的内容/)).toBeTruthy();
+    expect(screen.getByText(/删除账号不会删除这些共享内容/)).toBeTruthy();
     await waitFor(() => expect(document.activeElement).toBe(title));
 
     opener.focus();

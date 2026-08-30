@@ -189,7 +189,7 @@ function SharedLibraryModal({ onClose }: { onClose: () => void }) {
         <div className="border-b border-[#e8eaed] px-6 py-5 sm:px-8">
           <Dialog.Title className="text-2xl font-medium text-[#1f1f1f]">共享书库</Dialog.Title>
           <Dialog.Description className="mt-2 text-sm text-[#5f6368]">直接加入已解析的小说；你的进度、身份和世界线独立保存。</Dialog.Description>
-          <div className="mt-4 flex flex-wrap gap-2">
+          <div className="mt-4 flex flex-wrap gap-2" role="group" aria-label="故事偏离度">
             {[
               { value: 'canon', label: '忠实原著' },
               { value: 'creative', label: '创意扩展' },
@@ -214,9 +214,9 @@ function SharedLibraryModal({ onClose }: { onClose: () => void }) {
         </div>
         <div className="min-h-40 space-y-3 overflow-y-auto px-6 py-5 sm:px-8">
           {isLoading ? (
-            <div className="flex h-32 items-center justify-center"><Loader2 className="animate-spin text-[#0b57d0]" /></div>
+            <div className="flex h-32 items-center justify-center" role="status" aria-label="正在加载共享书库"><Loader2 className="animate-spin text-[#0b57d0]" /></div>
           ) : isError && !novels ? (
-            <div className="py-12 text-center text-sm text-[#5f6368]">
+            <div className="py-12 text-center text-sm text-[#5f6368]" role="alert">
               <p>共享书库加载失败。</p>
               <button type="button" onClick={() => refetch()} className="tonal-action mt-3 text-xs">重试</button>
             </div>
@@ -229,7 +229,13 @@ function SharedLibraryModal({ onClose }: { onClose: () => void }) {
                   <p className="truncate text-sm font-semibold text-[#1f1f1f]">{novel.title}</p>
                   <p className="mt-1 truncate text-xs text-[#5f6368]">{novel.author || '作者未知'} · {novel.total_chapters} 章</p>
                 </div>
-                <button type="button" disabled={attachNovel.isPending} onClick={() => attach(novel.id)} className="primary-action shrink-0 text-xs">
+                <button
+                  type="button"
+                  aria-label={`将《${novel.title}》加入书架`}
+                  disabled={attachNovel.isPending}
+                  onClick={() => attach(novel.id)}
+                  className="primary-action shrink-0 text-xs"
+                >
                   {attaching ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
                   加入书架
                 </button>
