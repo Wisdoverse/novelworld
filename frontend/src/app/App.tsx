@@ -1,4 +1,4 @@
-import React, { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef } from 'react';
 import { BrowserRouter, HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
@@ -52,10 +52,9 @@ export function handleAuthTokenStorageChange(
 }
 
 function AppRouteContent() {
-  const { user, fetchMe } = useAuthStore();
+  const { user, fetchMe, logout, authStatus } = useAuthStore();
   const previousPrincipal = useRef<string | null>(null);
   const setupStatus = useSetupStatus();
-  const [authReady, setAuthReady] = useState(false);
 
   useLayoutEffect(() => {
     previousPrincipal.current = resetPrivateClientStateForPrincipalChange(
@@ -66,19 +65,14 @@ function AppRouteContent() {
 
   useEffect(() => {
     if (setupStatus.data?.configured) {
-      let active = true;
-      setAuthReady(false);
-      fetchMe().finally(() => {
-        if (active) setAuthReady(true);
-      });
-      return () => {
-        active = false;
-      };
+      void fetchMe();
     }
-    setAuthReady(false);
   }, [setupStatus.data?.configured, fetchMe]);
 
-  if (setupStatus.isPending || (setupStatus.data?.configured && !authReady)) {
+  const awaitingStoredSession = authStatus === 'idle'
+    || authStatus === 'checking'
+    || (authStatus === 'anonymous' && localStorage.getItem('auth_token') !== null);
+  if (setupStatus.isPending || (setupStatus.data?.configured && awaitingStoredSession)) {
     return <AppLoadingScreen />;
   }
 
@@ -106,6 +100,37 @@ function AppRouteContent() {
       <SetupPage
         onComplete={() => { void setupStatus.refetch(); }}
       />
+    );
+  }
+
+  if (authStatus === 'error') {
+    return (
+      <div className="app-surface flex min-h-screen items-center justify-center px-4">
+        <div role="alert" className="surface-card max-w-md p-8 text-center text-[#5f6368]">
+          <h1 className="mb-2 text-lg font-semibold text-[#1f1f1f]">
+            暂时无法确认登录状态
+          </h1>
+          <p className="mb-5 text-sm leading-6">
+            会话信息已保留。请检查网络或服务状态后重试。
+          </p>
+          <div className="flex justify-center gap-3">
+            <button
+              type="button"
+              onClick={() => { void logout(); }}
+              className="tonal-action"
+            >
+              退出登录
+            </button>
+            <button
+              type="button"
+              onClick={() => { void fetchMe(); }}
+              className="primary-action"
+            >
+              重试
+            </button>
+          </div>
+        </div>
+      </div>
     );
   }
 

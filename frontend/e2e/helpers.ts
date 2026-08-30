@@ -51,6 +51,9 @@ export async function scanA11y(page: Page): Promise<AxeViolation[]> {
 export async function settleAnimations(page: Page): Promise<void> {
   await page.waitForFunction(() => {
     for (const el of Array.from(document.querySelectorAll('*'))) {
+      // Radix uses permanently transparent focus sentinels to contain Tab
+      // navigation. They are infrastructure, not an in-progress animation.
+      if (el.hasAttribute('data-radix-focus-guard')) continue;
       const value = (el as HTMLElement).style.opacity;
       if (value && Number(value) < 1) return false;
     }

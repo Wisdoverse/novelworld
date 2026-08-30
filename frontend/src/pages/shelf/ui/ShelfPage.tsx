@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import * as Dialog from '@radix-ui/react-dialog';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Plus, BookOpen, Clock, BookMinus, Loader2, CheckCircle, AlertCircle, RotateCcw, Settings, Library } from 'lucide-react';
 import {
@@ -69,9 +70,7 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, retrying }: {
         <button
           onClick={(e) => { e.stopPropagation(); onDelete(); }}
           aria-label={`将 ${novel.title} 移出书架`}
-          className={`absolute top-3 left-3 p-1.5 rounded-lg transition-opacity ${
-            novel.status === 'error' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
-          }`}
+          className="absolute top-3 left-3 rounded-lg p-1.5 opacity-80 transition-opacity hover:opacity-100 focus-visible:opacity-100"
           title="移出书架（个人世界会保留）"
           style={{ background: '#f1f3f4', color: '#5f6368' }}
         >
@@ -154,6 +153,11 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, retrying }: {
 }
 
 function SharedLibraryModal({ onClose }: { onClose: () => void }) {
+  const returnFocusRef = useRef<HTMLElement | null>(
+    typeof document !== 'undefined' && document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null,
+  );
   const { data: novels, isLoading, isError, refetch } = useNovelCatalog();
   const attachNovel = useAttachNovel();
   const [deviationMode, setDeviationMode] = useState('canon');
@@ -168,20 +172,23 @@ function SharedLibraryModal({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: 'rgba(32,33,36,0.42)', backdropFilter: 'blur(8px)' }}
-      onClick={(event) => event.target === event.currentTarget && onClose()}
-    >
-      <motion.div
-        initial={{ opacity: 0, scale: 0.95, y: 20 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.95, y: 20 }}
-        className="surface-card flex max-h-[80vh] w-full max-w-2xl flex-col overflow-hidden"
-      >
+    <Dialog.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <Dialog.Portal>
+        <Dialog.Overlay
+          className="fixed inset-0 z-50"
+          style={{ background: 'rgba(32,33,36,0.42)', backdropFilter: 'blur(8px)' }}
+        />
+        <Dialog.Content
+          className="surface-card fixed left-1/2 top-1/2 z-50 flex max-h-[80vh] w-[calc(100%_-_2rem)] max-w-2xl -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden outline-none"
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            const returnFocus = returnFocusRef.current;
+            if (returnFocus?.isConnected) returnFocus.focus();
+          }}
+        >
         <div className="border-b border-[#e8eaed] px-6 py-5 sm:px-8">
-          <h2 className="text-2xl font-medium text-[#1f1f1f]">共享书库</h2>
-          <p className="mt-2 text-sm text-[#5f6368]">直接加入已解析的小说；你的进度、身份和世界线独立保存。</p>
+          <Dialog.Title className="text-2xl font-medium text-[#1f1f1f]">共享书库</Dialog.Title>
+          <Dialog.Description className="mt-2 text-sm text-[#5f6368]">直接加入已解析的小说；你的进度、身份和世界线独立保存。</Dialog.Description>
           <div className="mt-4 flex flex-wrap gap-2">
             {[
               { value: 'canon', label: '忠实原著' },
@@ -191,6 +198,7 @@ function SharedLibraryModal({ onClose }: { onClose: () => void }) {
               <button
                 key={option.value}
                 type="button"
+                aria-pressed={deviationMode === option.value}
                 onClick={() => setDeviationMode(option.value)}
                 className="rounded-full px-3 py-1.5 text-xs font-medium"
                 style={{
@@ -207,7 +215,7 @@ function SharedLibraryModal({ onClose }: { onClose: () => void }) {
         <div className="min-h-40 space-y-3 overflow-y-auto px-6 py-5 sm:px-8">
           {isLoading ? (
             <div className="flex h-32 items-center justify-center"><Loader2 className="animate-spin text-[#0b57d0]" /></div>
-          ) : isError ? (
+          ) : isError && !novels ? (
             <div className="py-12 text-center text-sm text-[#5f6368]">
               <p>共享书库加载失败。</p>
               <button type="button" onClick={() => refetch()} className="tonal-action mt-3 text-xs">重试</button>
@@ -232,17 +240,25 @@ function SharedLibraryModal({ onClose }: { onClose: () => void }) {
           )}
         </div>
         <div className="flex justify-end border-t border-[#e8eaed] px-6 py-4 sm:px-8">
-          <button type="button" onClick={onClose} className="tonal-action text-sm">完成</button>
+          <Dialog.Close asChild>
+            <button type="button" className="tonal-action text-sm">完成</button>
+          </Dialog.Close>
         </div>
-      </motion.div>
-    </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 
 export function ShelfPage() {
   const navigate = useNavigate();
   const user = useAuthStore(state => state.user);
-  const { data: novels, isLoading } = useNovels();
+  const {
+    data: novels,
+    isLoading,
+    isError,
+    refetch,
+  } = useNovels();
   const deleteNovel = useDeleteNovel(user?.id);
   const retryNovel = useRetryNovel();
   const processingCount = novels?.filter(
@@ -317,6 +333,15 @@ export function ShelfPage() {
         {isLoading ? (
           <div className="flex items-center justify-center h-64">
             <div className="w-8 h-8 border-2 rounded-full animate-spin" style={{ borderColor: '#0b57d0', borderTopColor: 'transparent' }} />
+          </div>
+        ) : isError && !novels ? (
+          <div className="surface-card px-6 py-16 text-center" role="alert">
+            <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-[#fce8e6] text-[#b3261e]">
+              <AlertCircle size={24} aria-hidden="true" />
+            </span>
+            <h2 className="mt-5 text-xl font-semibold text-[#1f1f1f]">暂时无法加载书架</h2>
+            <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-[#5f6368]">书架加载失败，已导入的小说不会丢失。</p>
+            <button className="primary-action mt-6" onClick={() => refetch()}>重试</button>
           </div>
         ) : novels?.length === 0 ? (
           <div className="surface-card py-20 text-center">

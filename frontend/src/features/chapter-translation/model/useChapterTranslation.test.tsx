@@ -1,8 +1,11 @@
-import React, { type PropsWithChildren } from 'react';
+import type { PropsWithChildren } from 'react';
 import { renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  MAX_CHAPTER_TRANSLATION_BYTES,
+  chapterTranslationByteLength,
+  isChapterTranslationSupported,
   chapterTranslationRetryDelay,
   shouldRetryChapterTranslation,
   useChapterTranslation,
@@ -52,6 +55,26 @@ describe('chapter translation query', () => {
     );
   });
 
+  it('accepts exactly 48,000 UTF-8 bytes and blocks 48,001 bytes before a request', () => {
+    const atLimit = 'a'.repeat(MAX_CHAPTER_TRANSLATION_BYTES);
+    const overLimit = `${atLimit}a`;
+
+    expect(chapterTranslationByteLength(atLimit)).toBe(48_000);
+    expect(isChapterTranslationSupported(atLimit)).toBe(true);
+    expect(chapterTranslationByteLength(overLimit)).toBe(48_001);
+    expect(isChapterTranslationSupported(overLimit)).toBe(false);
+
+    renderHook(
+      () => useChapterTranslation('novel', 2, overLimit, true),
+      { wrapper },
+    );
+    expect(api.post).not.toHaveBeenCalled();
+  });
+
+  it('measures the UTF-8 payload rather than JavaScript code units', () => {
+    expect(chapterTranslationByteLength('中')).toBe(3);
+  });
+
   it.each([409, 429])('keeps retrying HTTP %i responses within the busy budget', (status) => {
     const error = httpError(status, '5');
 
@@ -67,6 +90,10 @@ describe('chapter translation query', () => {
     expect(chapterTranslationRetryDelay(0, error)).toBe(1_000);
     expect(chapterTranslationRetryDelay(1, error)).toBe(2_000);
     expect(chapterTranslationRetryDelay(2, error)).toBe(4_000);
+  });
+
+  it('does not retry the backend payload-contract rejection', () => {
+    expect(shouldRetryChapterTranslation(0, httpError(422))).toBe(false);
   });
 
   it('honors Retry-After for busy responses and clamps it to one through five seconds', () => {

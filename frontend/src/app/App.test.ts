@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAuthStore } from '@/features/auth';
 import { useChatStore } from '@/features/character-chat';
 import { apiClient } from '@/shared/api/client';
@@ -13,6 +13,11 @@ import {
   resetPrivateClientStateForPrincipalChange,
 } from './App';
 import { runtimeConfigKeys } from '@/entities/runtime-config';
+
+// App route tests exercise the auth guard, not ShelfPage's own lazy module
+// graph (covered by ShelfPage.test.tsx). Keeping this boundary local avoids
+// transform contention making session restoration look permanently pending.
+vi.mock('@/pages/shelf', () => ({ default: () => '我的书架' }));
 
 function renderAppRoutes(initialEntries = ['/']) {
   return render(React.createElement(
@@ -25,6 +30,11 @@ function renderAppRoutes(initialEntries = ['/']) {
     ),
   ));
 }
+
+beforeEach(() => {
+  localStorage.clear();
+  useAuthStore.setState({ user: null, loading: false, authStatus: 'idle' });
+});
 
 describe('principal-scoped query cache', () => {
   it('clears private chat state before a different principal can use it', () => {
@@ -200,5 +210,48 @@ describe('setup status', () => {
     localStorage.removeItem('auth_token');
     useAuthStore.setState({ user: null });
     request.mockRestore();
-  });
+  }, 15_000);
+
+  it('keeps a boot session indeterminate on transient auth failure and lets the user retry', async () => {
+    localStorage.setItem('auth_token', 'stored-token');
+    localStorage.setItem('refresh_token', 'stored-refresh');
+    let meAttempts = 0;
+    const request = vi.spyOn(apiClient, 'get').mockImplementation(async (url) => {
+      if (url === '/setup/status') {
+        return {
+          data: {
+            contract: 4,
+            configured: true,
+            admin_configured: true,
+            llm_configured: false,
+          },
+        };
+      }
+      if (url === '/auth/me') {
+        meAttempts++;
+        if (meAttempts === 1) {
+          throw { isAxiosError: true, response: { status: 503 } };
+        }
+        return {
+          data: { id: 'user-id', email: 'reader@example.com', role: 'user' },
+        };
+      }
+      if (url === '/novels') return { data: [] };
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    renderAppRoutes(['/shelf']);
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('暂时无法确认登录状态');
+    expect(screen.getByRole('button', { name: '退出登录' })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: '登录' })).toBeNull();
+    expect(localStorage.getItem('auth_token')).toBe('stored-token');
+    expect(localStorage.getItem('refresh_token')).toBe('stored-refresh');
+
+    fireEvent.click(screen.getByRole('button', { name: '重试' }));
+    expect(await screen.findByText('我的书架', {}, { timeout: 10_000 })).toBeTruthy();
+    expect(meAttempts).toBe(2);
+    request.mockRestore();
+  }, 15_000);
 });

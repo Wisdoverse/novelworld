@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -27,7 +27,10 @@ import { BranchChoice } from '@/widgets/branch-choice';
 import { WorldDashboard } from '@/widgets/world-dashboard';
 import { PlayerEntryForm } from '@/features/player-entry';
 import {
+  MAX_CHAPTER_TRANSLATION_BYTES,
   TranslationControls,
+  chapterTranslationByteLength,
+  isChapterTranslationSupported,
   useChapterTranslation,
 } from '@/features/chapter-translation';
 import { getApiErrorCode, getApiErrorMessage } from '@/shared/api/client';
@@ -88,8 +91,17 @@ export function ReaderPage() {
   const readerIdentityScope = getReaderIdentityScope(readingProgress);
   const progressBoundary = readingProgress?.current_chapter ?? 0;
 
-  const { data: novel } = useNovel(novelId!);
-  const { data: chapter, isLoading } = useChapter(novelId!, currentChapter);
+  const {
+    data: novel,
+    isError: isNovelError,
+    refetch: refetchNovel,
+  } = useNovel(novelId!);
+  const {
+    data: chapter,
+    isLoading,
+    isError: isChapterError,
+    refetch: refetchChapter,
+  } = useChapter(novelId!, currentChapter);
   const {
     data: effectiveChapter,
     isLoading: isEffectiveChapterLoading,
@@ -312,7 +324,13 @@ export function ReaderPage() {
     ? splitChapterAtAnchor(displayContent, activeBranchNode.anchor_quote)
     : undefined;
   const sourceContent = inlineChapter?.before ?? displayContent;
-  const canTranslate = Boolean(sourceContent) && (!isPlayerChapter || showCanonReference);
+  const canOfferTranslation = Boolean(sourceContent) && (!isPlayerChapter || showCanonReference);
+  const translationByteLength = chapterTranslationByteLength(sourceContent);
+  const translationSupported = isChapterTranslationSupported(sourceContent);
+  const canTranslate = canOfferTranslation && translationSupported;
+  const translationUnavailableReason = canOfferTranslation && !translationSupported
+    ? `当前正文为 ${translationByteLength.toLocaleString('zh-CN')} 字节，超过 ${MAX_CHAPTER_TRANSLATION_BYTES.toLocaleString('zh-CN')} 字节翻译上限，请阅读原文。`
+    : undefined;
   const translation = useChapterTranslation(
     novelId || '',
     currentChapter,
@@ -391,7 +409,7 @@ export function ReaderPage() {
     goToChapter(currentChapter - 1);
   };
 
-  if (isProgressError) {
+  if (isProgressError && !readingProgress) {
     return (
       <main className="app-surface flex min-h-screen items-center justify-center px-4 py-10">
         <div className="surface-card w-full max-w-lg px-7 py-12 text-center sm:px-10">
@@ -424,6 +442,32 @@ export function ReaderPage() {
       <div className="app-surface flex min-h-screen items-center justify-center">
         <div className="h-8 w-8 animate-spin rounded-full border-2 border-[#0b57d0] border-t-transparent" aria-label="正在恢复阅读进度" />
       </div>
+    );
+  }
+
+  if ((isNovelError && !novel) || (isChapterError && !chapter)) {
+    return (
+      <main className="app-surface flex min-h-screen items-center justify-center px-4 py-10">
+        <div className="surface-card w-full max-w-lg px-7 py-12 text-center sm:px-10" role="alert">
+          <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-[#fce8e6] text-[#b3261e]">
+            <AlertCircle size={24} aria-hidden="true" />
+          </span>
+          <h1 className="mt-5 text-2xl font-medium text-[#1f1f1f]">暂时无法加载章节</h1>
+          <p className="mt-3 text-sm leading-6 text-[#5f6368]">小说或章节正文加载失败。你的阅读记录不会丢失，可以重新加载。</p>
+          <div className="mt-7 flex flex-col-reverse justify-center gap-3 sm:flex-row">
+            <button className="tonal-action" onClick={() => navigate('/shelf')}>返回书架</button>
+            <button
+              className="primary-action"
+              onClick={() => {
+                if (isNovelError) void refetchNovel();
+                if (isChapterError) void refetchChapter();
+              }}
+            >
+              重试
+            </button>
+          </div>
+        </div>
+      </main>
     );
   }
 
@@ -579,11 +623,12 @@ export function ReaderPage() {
                   这是原著内容，仅用于回看世界设定，不属于你当前时间线已经发生的历史。
                 </p>
               ) : null}
-              {canTranslate ? (
+              {canOfferTranslation ? (
                 <TranslationControls
                   active={isShowingTranslation}
                   isLoading={translation.isFetching}
                   isError={translation.isError}
+                  unavailableReason={translationUnavailableReason}
                   onToggle={() => {
                     if (translation.isError) {
                       void translation.refetch();

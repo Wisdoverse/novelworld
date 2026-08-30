@@ -1,8 +1,19 @@
+import { useState } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { apiClient } from '@/shared/api/client';
 import { NovelImportModal } from './NovelImportModal';
+
+function TestHost() {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)}>打开导入</button>
+      {open ? <NovelImportModal onClose={() => setOpen(false)} /> : null}
+    </>
+  );
+}
 
 describe('NovelImportModal', () => {
   afterEach(() => vi.restoreAllMocks());
@@ -20,12 +31,12 @@ describe('NovelImportModal', () => {
     const queryClient = new QueryClient({
       defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
     });
-    const { container } = render(
+    render(
       <QueryClientProvider client={queryClient}>
         <NovelImportModal onClose={onClose} />
       </QueryClientProvider>,
     );
-    const input = container.querySelector<HTMLInputElement>('input[type="file"]');
+    const input = document.querySelector<HTMLInputElement>('input[type="file"]');
     const files = [
       new File(['first'], 'first.txt', { type: 'text/plain' }),
       new File(['second'], 'second.pdf', { type: 'application/pdf' }),
@@ -40,5 +51,30 @@ describe('NovelImportModal', () => {
     expect(form.getAll('file')).toEqual(files);
     expect(form.get('deviation_mode')).toBe('canon');
     expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('traps focus, closes with Escape, and restores focus to the opener', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <TestHost />
+      </QueryClientProvider>,
+    );
+
+    const opener = screen.getByRole('button', { name: '打开导入' });
+    opener.focus();
+    fireEvent.click(opener);
+    const dialog = await screen.findByRole('dialog', { name: '导入小说' });
+    const title = screen.getByPlaceholderText('输入小说名称');
+    await waitFor(() => expect(document.activeElement).toBe(title));
+
+    opener.focus();
+    await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(opener));
   });
 });

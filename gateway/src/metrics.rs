@@ -1,4 +1,8 @@
-use axum::{extract::Request, middleware::Next, response::Response};
+use axum::{
+    extract::{MatchedPath, Request},
+    middleware::Next,
+    response::Response,
+};
 use metrics::{counter, gauge, histogram};
 use metrics_exporter_prometheus::PrometheusHandle;
 use std::time::Instant;
@@ -14,8 +18,15 @@ pub fn init_metrics() -> PrometheusHandle {
 /// Middleware that tracks request count, duration, and in-flight gauge.
 pub async fn metrics_middleware(req: Request, next: Next) -> Response {
     let method = req.method().to_string();
-    let path = req.uri().path().to_string();
-    let normalized = normalize_path(&path);
+    // Route templates are bounded by source code. Never label metrics with the
+    // raw URI: unmatched attacker-controlled paths would create one series per
+    // request.
+    let path = req
+        .extensions()
+        .get::<MatchedPath>()
+        .map(MatchedPath::as_str)
+        .unwrap_or("unmatched")
+        .to_owned();
 
     gauge!("http_requests_in_flight").increment(1.0);
     let start = Instant::now();
@@ -25,53 +36,72 @@ pub async fn metrics_middleware(req: Request, next: Next) -> Response {
     let status = response.status().as_u16().to_string();
     let duration = start.elapsed().as_secs_f64();
 
-    counter!("http_requests_total", "method" => method.clone(), "path" => normalized.clone(), "status" => status)
+    counter!("http_requests_total", "method" => method.clone(), "path" => path.clone(), "status" => status)
         .increment(1);
-    histogram!("http_request_duration_seconds", "method" => method, "path" => normalized)
+    histogram!("http_request_duration_seconds", "method" => method, "path" => path)
         .record(duration);
     gauge!("http_requests_in_flight").decrement(1.0);
 
     response
 }
 
-/// Collapse UUIDs and numeric path segments to prevent metric cardinality explosion.
-fn normalize_path(path: &str) -> String {
-    path.split('/')
-        .map(|segment| {
-            if segment.len() == 36 && segment.chars().filter(|c| *c == '-').count() == 4 {
-                ":id"
-            } else if !segment.is_empty() && segment.chars().all(|c| c.is_ascii_digit()) {
-                ":num"
-            } else {
-                segment
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        middleware,
+        routing::get,
+        Router,
+    };
+    use tower::ServiceExt;
 
-    #[test]
-    fn test_normalize_path_uuid() {
-        assert_eq!(
-            normalize_path("/api/novels/550e8400-e29b-41d4-a716-446655440000/chapters"),
-            "/api/novels/:id/chapters"
-        );
-    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn dynamic_and_unmatched_paths_create_only_bounded_metric_series() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let app = Router::new()
+            .route(
+                "/api/novels/{*path}",
+                get(|| async { StatusCode::NO_CONTENT }),
+            )
+            .fallback(|| async { StatusCode::NOT_FOUND })
+            .layer(middleware::from_fn(metrics_middleware));
 
-    #[test]
-    fn test_normalize_path_numeric() {
-        assert_eq!(
-            normalize_path("/api/novels/42/chapters"),
-            "/api/novels/:num/chapters"
-        );
-    }
+        for index in 0..50 {
+            let matched = Request::builder()
+                .uri(format!("/api/novels/random-{index}"))
+                .body(Body::empty())
+                .unwrap();
+            assert_eq!(
+                app.clone().oneshot(matched).await.unwrap().status(),
+                StatusCode::NO_CONTENT
+            );
+            let unmatched = Request::builder()
+                .uri(format!("/attacker-controlled-{index}"))
+                .body(Body::empty())
+                .unwrap();
+            assert_eq!(
+                app.clone().oneshot(unmatched).await.unwrap().status(),
+                StatusCode::NOT_FOUND
+            );
+        }
 
-    #[test]
-    fn test_normalize_path_clean() {
-        assert_eq!(normalize_path("/api/novels"), "/api/novels");
+        let rendered = handle.render();
+        let request_series = rendered
+            .lines()
+            .filter(|line| line.starts_with("http_requests_total{"))
+            .collect::<Vec<_>>();
+        assert_eq!(request_series.len(), 2, "{rendered}");
+        assert!(request_series
+            .iter()
+            .any(|line| line.contains(r#"path="/api/novels/{*path}""#)));
+        assert!(request_series
+            .iter()
+            .any(|line| line.contains(r#"path="unmatched""#)));
+        assert!(!rendered.contains("attacker-controlled-"));
+        assert!(!rendered.contains("random-"));
     }
 }

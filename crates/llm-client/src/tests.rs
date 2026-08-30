@@ -1,7 +1,7 @@
 use crate::retry::RetryPolicy;
 use crate::{
-    providers::{anthropic, gemini, openai, sse},
-    ChatRequest, ChatStreamEvent, LlmClient,
+    providers::{openai, sse},
+    ChatRequest, ChatStreamEvent, EmbeddingRequest, LlmClient,
 };
 use anyhow::Result;
 use bytes::Bytes;
@@ -229,6 +229,14 @@ fn operation_output_limits_include_hidden_reasoning_and_fail_before_io() {
         crate::LlmOperation::CanonExtraction.max_output_tokens(),
         8_192
     );
+
+    let client = LlmClient::new().with_openai_compatible("configured", "key", "http://127.0.0.1:1");
+    let error = runtime
+        .block_on(client.chat(
+            ChatRequest::new(crate::LlmOperation::SetupConnection, "other/model").max_tokens(8),
+        ))
+        .unwrap_err();
+    assert!(error.to_string().contains("but 'configured' is configured"));
 }
 
 #[test]
@@ -283,6 +291,126 @@ fn stream_setup_honors_retry_after_and_uses_all_three_retries() {
     server.join().unwrap();
     assert!(started.elapsed() < Duration::from_secs(3));
     assert!(matches!(events.as_slice(), [Ok(ChatStreamEvent::Finished)]));
+}
+
+#[test]
+fn embedding_honors_retry_after_and_records_exact_attempts() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        for attempt in 0..2 {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0; 8192];
+            let read = socket.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..read]).starts_with("POST /v1/embeddings"));
+            if attempt == 0 {
+                socket
+                    .write_all(
+                        b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 0\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                    )
+                    .unwrap();
+            } else {
+                let body = r#"{"data":[{"embedding":[0.25,0.75]}],"model":"embedding-model"}"#;
+                socket
+                    .write_all(&http_response("200 OK", "application/json", body, ""))
+                    .unwrap();
+            }
+        }
+    });
+
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    let response = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            LlmClient::new()
+                .with_openai_compatible("test", "key", format!("http://{address}"))
+                .embed(EmbeddingRequest {
+                    model: "test/embedding-model".into(),
+                    input: "remember this".into(),
+                })
+                .await
+                .unwrap()
+        });
+
+    server.join().unwrap();
+    assert_eq!(response.embedding, vec![0.25, 0.75]);
+    let rendered = handle.render();
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_embedding_attempts_total",
+            &[("status", "provider_error")],
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_embedding_attempts_total",
+            &[("status", "success")],
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_embedding_retries_total",
+            &[("reason", "provider_error")],
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_embedding_requests_total",
+            &[("status", "success")],
+        ),
+        1.0
+    );
+    assert!(!rendered
+        .lines()
+        .any(|line| { line.starts_with("novelworld_llm_") && line.contains("embedding") }));
+}
+
+#[test]
+fn embedding_retry_delay_cannot_outlive_the_total_deadline() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let mut request = [0; 8192];
+        assert!(socket.read(&mut request).unwrap() > 0);
+        socket
+            .write_all(&http_response(
+                "503 Service Unavailable",
+                "application/json",
+                "{}",
+                "Retry-After: 1\r\n",
+            ))
+            .unwrap();
+    });
+
+    let started = Instant::now();
+    let error = tokio::runtime::Runtime::new().unwrap().block_on(async {
+        LlmClient::new()
+            .with_openai_compatible("test", "key", format!("http://{address}"))
+            .embed(EmbeddingRequest {
+                model: "test/embedding-model".into(),
+                input: "remember this".into(),
+            })
+            .await
+            .unwrap_err()
+    });
+    server.join().unwrap();
+    assert!(error.to_string().contains("total deadline"));
+    assert!(started.elapsed() < Duration::from_secs(1));
 }
 
 #[test]
@@ -699,89 +827,13 @@ fn openai_stream_exposes_the_provider_response_model() {
 }
 
 #[test]
-fn anthropic_requires_message_stop_rejects_errors_and_ignores_unknown_events() {
+fn openai_rejects_malformed_known_events() {
     futures::executor::block_on(async {
-        let valid = concat!(
-            "event: future_event\ndata: not-json\n\n",
-            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n",
-            "event: content_block_delta\n",
-            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n",
-            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
-        );
-        let actual: Result<Vec<_>> = decode(
-            vec![valid.as_bytes().to_vec()],
-            anthropic::parse_stream_frame,
-        )
-        .await
-        .into_iter()
-        .collect();
-        assert_eq!(
-            actual.unwrap(),
-            vec![
-                ChatStreamEvent::ResponseModel("claude-test".into()),
-                ChatStreamEvent::Delta("Hello".into()),
-                ChatStreamEvent::Finished
-            ]
-        );
-
-        let error =
-            "event: error\ndata: {\"type\":\"error\",\"error\":{\"message\":\"overloaded\"}}\n\n";
         let results = decode(
-            vec![error.as_bytes().to_vec()],
-            anthropic::parse_stream_frame,
+            vec![b"data: not-json\n\n".to_vec()],
+            openai::parse_stream_frame,
         )
         .await;
         assert!(results.into_iter().any(|item| item.is_err()));
-    });
-}
-
-#[test]
-fn providers_reject_malformed_known_events() {
-    futures::executor::block_on(async {
-        type Parser = fn(sse::SseFrame) -> Result<Vec<ChatStreamEvent>>;
-        let cases: [(&str, Parser); 3] = [
-            ("data: not-json\n\n", openai::parse_stream_frame),
-            (
-                "event: content_block_delta\ndata: not-json\n\n",
-                anthropic::parse_stream_frame,
-            ),
-            ("data: not-json\n\n", gemini::parse_stream_frame),
-        ];
-
-        for (body, parser) in cases {
-            let results = decode(vec![body.as_bytes().to_vec()], parser).await;
-            assert!(results.into_iter().any(|item| item.is_err()));
-        }
-    });
-}
-
-#[test]
-fn gemini_accepts_stop_and_max_tokens_but_rejects_block_or_other_finish() {
-    futures::executor::block_on(async {
-        for reason in ["STOP", "MAX_TOKENS"] {
-            let body = format!(
-                "data: {{\"candidates\":[{{\"content\":{{\"parts\":[{{\"text\":\"Hi\"}}]}},\"finishReason\":\"{reason}\"}}]}}\n\n"
-            );
-            let actual: Result<Vec<_>> =
-                decode(vec![body.into_bytes()], gemini::parse_stream_frame)
-                    .await
-                    .into_iter()
-                    .collect();
-            assert_eq!(
-                actual.unwrap(),
-                vec![
-                    ChatStreamEvent::Delta("Hi".into()),
-                    ChatStreamEvent::Finished
-                ]
-            );
-        }
-
-        for body in [
-            "data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\"}}\n\n",
-            "data: {\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"SAFETY\"}]}\n\n",
-        ] {
-            let results = decode(vec![body.as_bytes().to_vec()], gemini::parse_stream_frame).await;
-            assert!(results.into_iter().any(|item| item.is_err()));
-        }
     });
 }

@@ -144,10 +144,13 @@ SBOM generation has since landed (see Dependency Policy); deploy-time SBOM
 verification, provenance/attestation, and signing remain gated.
 ### Dependency Policy
 
-CI runs `cargo audit` against `Cargo.lock` with the live RustSec
-advisory database: any newly reported vulnerability fails the build. CI also
-runs `gitleaks` over the full commit history: any committed secret fails the
-build. `.gitleaks.toml` is the full default rule set plus narrow allowlists for
+CI runs `cargo audit` against `Cargo.lock` with the live RustSec advisory
+database and `pnpm audit --prod --audit-level high` against the frontend's
+frozen lockfile. A newly reported Rust vulnerability or HIGH/CRITICAL advisory
+in a shipped browser dependency fails the build; development-only frontend
+tooling is outside that production-dependency gate. CI also runs `gitleaks`
+over the full commit history: any committed secret fails the build.
+`.gitleaks.toml` is the full default rule set plus narrow allowlists for
 the upstream rule-set examples and two deliberate test fixtures (the CI
 `RUNTIME_CONFIG_KEY` smoke placeholder and two static provider model names).
 Credential-shaped upstream examples are regex-escaped so the allowlist still

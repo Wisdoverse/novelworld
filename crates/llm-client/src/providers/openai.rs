@@ -1,12 +1,10 @@
 use anyhow::{anyhow, Result};
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
     json_response, response_error,
     sse::{decode_stream, SseFrame},
-    LlmProvider,
 };
 use crate::types::*;
 
@@ -310,17 +308,16 @@ pub(crate) fn parse_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>
     Ok(events)
 }
 
-#[async_trait]
-impl LlmProvider for OpenAIProvider {
+impl OpenAIProvider {
     fn auth_header(&self, api_key: &str) -> (String, String) {
         ("Authorization".into(), format!("Bearer {}", api_key))
     }
 
-    fn reports_response_model(&self) -> bool {
+    pub(crate) fn reports_response_model(&self) -> bool {
         true
     }
 
-    async fn chat(
+    pub(crate) async fn chat(
         &self,
         client: &reqwest::Client,
         api_key: &str,
@@ -425,7 +422,7 @@ impl LlmProvider for OpenAIProvider {
         })
     }
 
-    async fn chat_stream(
+    pub(crate) async fn chat_stream(
         &self,
         client: &reqwest::Client,
         api_key: &str,
@@ -484,7 +481,7 @@ impl LlmProvider for OpenAIProvider {
         Ok(decode_stream(response.bytes_stream(), parse_stream_frame))
     }
 
-    async fn embed(
+    pub(crate) async fn embed(
         &self,
         client: &reqwest::Client,
         api_key: &str,

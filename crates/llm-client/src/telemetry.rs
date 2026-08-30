@@ -5,8 +5,10 @@ use std::{
 };
 
 use metrics::{counter, gauge, histogram};
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::PrometheusBuilder;
 use sha2::{Digest, Sha256};
+
+pub use metrics_exporter_prometheus::PrometheusHandle as MetricsHandle;
 
 use crate::{LlmOperation, Usage};
 
@@ -29,15 +31,6 @@ pub fn usage_key_fingerprint(api_key: &str) -> String {
         })
 }
 
-#[derive(Clone)]
-pub struct MetricsHandle(PrometheusHandle);
-
-impl MetricsHandle {
-    pub fn render(&self) -> String {
-        self.0.render()
-    }
-}
-
 pub fn install_metrics(service: &'static str) -> anyhow::Result<MetricsHandle> {
     let handle = PrometheusBuilder::new()
         // Three 30-minute buckets retain every sample for at least 60 minutes,
@@ -56,7 +49,7 @@ pub fn install_metrics(service: &'static str) -> anyhow::Result<MetricsHandle> {
         )
         .set(operation.max_output_tokens() as f64);
     }
-    Ok(MetricsHandle(handle))
+    Ok(handle)
 }
 
 #[derive(Clone)]
@@ -271,6 +264,78 @@ impl RequestLabels {
             "usage_key" => self.usage_key.clone(),
         )
         .increment(value.into());
+    }
+}
+
+/// Embeddings do not yet have the token-usage semantics required by the
+/// closed `llm-observability-v1` budget contract. Keep their bounded transport
+/// telemetry in a separate namespace so release qualification cannot mistake
+/// them for a chat operation.
+#[derive(Clone)]
+pub(crate) struct EmbeddingLabels {
+    provider: String,
+    model: String,
+}
+
+impl EmbeddingLabels {
+    pub(crate) fn new(provider: &str, model: &str) -> Self {
+        Self {
+            provider: bounded_label(provider),
+            model: bounded_label(model),
+        }
+    }
+
+    pub(crate) fn started(&self) {
+        counter!(
+            "novelworld_embedding_requests_started_total",
+            "provider" => self.provider.clone(),
+            "model" => self.model.clone(),
+        )
+        .increment(1);
+    }
+
+    pub(crate) fn attempt(&self, status: &'static str, elapsed: f64) {
+        counter!(
+            "novelworld_embedding_attempts_total",
+            "provider" => self.provider.clone(),
+            "model" => self.model.clone(),
+            "status" => status,
+        )
+        .increment(1);
+        histogram!(
+            "novelworld_embedding_attempt_duration_seconds",
+            "provider" => self.provider.clone(),
+            "model" => self.model.clone(),
+            "status" => status,
+        )
+        .record(elapsed);
+    }
+
+    pub(crate) fn retry(&self, reason: &'static str) {
+        counter!(
+            "novelworld_embedding_retries_total",
+            "provider" => self.provider.clone(),
+            "model" => self.model.clone(),
+            "reason" => reason,
+        )
+        .increment(1);
+    }
+
+    pub(crate) fn finish(&self, status: &'static str, started: Instant) {
+        counter!(
+            "novelworld_embedding_requests_total",
+            "provider" => self.provider.clone(),
+            "model" => self.model.clone(),
+            "status" => status,
+        )
+        .increment(1);
+        histogram!(
+            "novelworld_embedding_request_duration_seconds",
+            "provider" => self.provider.clone(),
+            "model" => self.model.clone(),
+            "status" => status,
+        )
+        .record(started.elapsed().as_secs_f64());
     }
 }
 
