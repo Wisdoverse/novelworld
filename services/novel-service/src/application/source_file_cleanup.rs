@@ -38,11 +38,20 @@ impl SourceFileCleanupWorker {
         let count = pending.len();
         for deletion in pending {
             match self.storage.delete(&deletion.object_key).await {
-                Ok(()) => self.deletions.complete(&deletion.object_key).await?,
+                Ok(()) => {
+                    self.deletions
+                        .complete(&deletion.object_key, &deletion.claim_token)
+                        .await?
+                }
                 Err(error) => {
                     let not_before = Utc::now() + retry_delay(deletion.attempts);
                     self.deletions
-                        .retry(&deletion.object_key, &error.to_string(), not_before)
+                        .retry(
+                            &deletion.object_key,
+                            &deletion.claim_token,
+                            &error.to_string(),
+                            not_before,
+                        )
                         .await?;
                     tracing::warn!(
                         error = ?error,

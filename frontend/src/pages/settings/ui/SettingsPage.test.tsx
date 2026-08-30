@@ -306,10 +306,12 @@ describe('SettingsPage', () => {
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
 
     render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+    expect(await screen.findByText(/仍在解析或随后解析失败的内容/)).toBeTruthy();
     fireEvent.click(await screen.findByRole('button', { name: '删除账号' }));
 
     await waitFor(() => expect(mocks.delete).toHaveBeenCalledWith('/auth/me'));
     expect(confirm).toHaveBeenCalledOnce();
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('仍在解析或随后解析失败的内容'));
     expect(mocks.get).toHaveBeenCalledWith('/settings/llm');
     expect(localStorage.getItem('auth_token')).toBeNull();
     confirm.mockRestore();

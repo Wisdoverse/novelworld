@@ -35,7 +35,7 @@ interface ChatState {
     readerIdentity?: string;
     readerIdentityScope: string;
     currentChapter: number;
-  }) => void;
+  }) => boolean;
   retryMessage: (sessionKey: string) => void;
   cancelMessage: (sessionKey: string, expectedTurnId?: string) => void;
   addMessage: (sessionKey: string, message: ChatMessage) => void;
@@ -112,6 +112,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           streamingText: { ...state.streamingText, [sessionKey]: '' },
           isStreaming: { ...state.isStreaming, [sessionKey]: false },
           cancelStream: { ...state.cancelStream, [sessionKey]: null },
+          activeTurnId: { ...state.activeTurnId, [sessionKey]: undefined },
           activeTurn: { ...state.activeTurn, [sessionKey]: undefined },
           failedTurn: { ...state.failedTurn, [sessionKey]: { ...turn, error } },
         };
@@ -174,7 +175,8 @@ export const useChatStore = create<ChatState>((set, get) => {
       currentChapter,
     }) => {
       const sessionKey = chatSessionKey(characterId, readerIdentityScope);
-      get().cancelStream[sessionKey]?.();
+      const state = get();
+      if (state.activeTurn[sessionKey] || state.failedTurn[sessionKey]) return false;
       const turn: ChatTurn = {
         turnId: crypto.randomUUID(),
         sessionKey,
@@ -210,6 +212,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         failedTurn: { ...state.failedTurn, [sessionKey]: undefined },
       }));
       startTurn(turn, generation);
+      return true;
     },
 
     retryMessage: sessionKey => {

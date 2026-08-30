@@ -3,7 +3,7 @@ use axum::{
     extract::{Request, State},
     http::{
         header::{CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, RETRY_AFTER, WWW_AUTHENTICATE},
-        HeaderMap, HeaderValue, StatusCode,
+        HeaderMap, HeaderValue, Method, StatusCode,
     },
     response::{IntoResponse, Response},
 };
@@ -11,15 +11,24 @@ use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt};
 use reqwest::Client;
 use std::{io, sync::Arc, time::Duration};
-use tokio::{sync::OwnedSemaphorePermit, time::Instant};
+use tokio::{
+    sync::{OwnedSemaphorePermit, Semaphore},
+    time::Instant,
+};
 use uuid::Uuid;
 
 use crate::AppState;
 
 const MAX_PROXY_BODY_BYTES: usize = 21 * 1024 * 1024;
+// The batch API admits 40 MiB of source bytes plus a bounded multipart envelope.
+const MAX_BATCH_PROXY_BODY_BYTES: usize = 41 * 1024 * 1024;
 const MAX_PUBLIC_ERROR_CHARS: usize = 512;
 const ACCOUNT_EXPORT_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const ACCOUNT_EXPORT_CONTENT_TYPE: &str = "application/x-ndjson";
+
+fn is_batch_upload(method: &Method, path: &str) -> bool {
+    *method == Method::POST && path == "/novels/upload/batch"
+}
 
 pub fn api_error_response(status: StatusCode, code: &str, message: &str) -> Response {
     let mut response = (
@@ -184,6 +193,7 @@ pub struct ServiceProxy {
     pub user_service_url: String,
     pub client: Client,
     pub internal_service_token: Arc<str>,
+    pub batch_upload_permits: Semaphore,
 }
 
 fn json_line(value: serde_json::Value) -> io::Result<Bytes> {
@@ -401,7 +411,31 @@ impl ServiceProxy {
                 );
             }
         };
-        let body = match axum::body::to_bytes(request.into_body(), MAX_PROXY_BODY_BYTES).await {
+        let batch_upload = is_batch_upload(&method, target_url.path());
+        let body_limit = if batch_upload {
+            MAX_BATCH_PROXY_BODY_BYTES
+        } else {
+            MAX_PROXY_BODY_BYTES
+        };
+        let _batch_upload_permit = if batch_upload {
+            match self.batch_upload_permits.try_acquire() {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    let mut response = api_error_response(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "rate_limited",
+                        "Too many batch uploads are running",
+                    );
+                    response
+                        .headers_mut()
+                        .insert(RETRY_AFTER, HeaderValue::from_static("1"));
+                    return response;
+                }
+            }
+        } else {
+            None
+        };
+        let body = match axum::body::to_bytes(request.into_body(), body_limit).await {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!("Failed to read request body: {}", e);
@@ -594,22 +628,30 @@ mod tests {
     use super::{
         has_stable_error_envelope, is_internal_service_path, is_sse_response,
         normalized_error_response, ServiceProxy, ACCOUNT_EXPORT_CONTENT_TYPE,
-        MAX_PUBLIC_ERROR_CHARS, NORMALIZED_ERROR_RESPONSES,
+        MAX_BATCH_PROXY_BODY_BYTES, MAX_PROXY_BODY_BYTES, MAX_PUBLIC_ERROR_CHARS,
+        NORMALIZED_ERROR_RESPONSES,
     };
     use axum::{
         body::{to_bytes, Body},
-        extract::{Path, State},
+        extract::{Path, Request, State},
         http::{
             header::{CACHE_CONTROL, CONTENT_TYPE, RETRY_AFTER, WWW_AUTHENTICATE},
-            HeaderMap, HeaderValue, StatusCode,
+            HeaderMap, HeaderValue, Method, StatusCode,
         },
         response::{IntoResponse, Response},
-        routing::get,
+        routing::{any, get},
         Router,
     };
     use bytes::Bytes;
     use futures::{StreamExt, TryStreamExt};
-    use std::{io, sync::Arc, time::Duration};
+    use std::{
+        io,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
     use tokio::sync::Semaphore;
     use uuid::Uuid;
 
@@ -676,6 +718,58 @@ mod tests {
         format!("http://{address}")
     }
 
+    async fn body_size(request: Request) -> String {
+        to_bytes(request.into_body(), MAX_BATCH_PROXY_BODY_BYTES + 1)
+            .await
+            .unwrap()
+            .len()
+            .to_string()
+    }
+
+    async fn body_server() -> String {
+        let app = Router::new()
+            .route("/novels/upload", any(body_size))
+            .route("/novels/upload/batch", any(body_size));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{address}")
+    }
+
+    #[derive(Clone)]
+    struct HeldBodyState {
+        entered: Arc<Semaphore>,
+        release: Arc<Semaphore>,
+    }
+
+    async fn held_body(State(state): State<HeldBodyState>, request: Request) -> String {
+        let size = to_bytes(request.into_body(), MAX_BATCH_PROXY_BODY_BYTES)
+            .await
+            .unwrap()
+            .len();
+        state.entered.add_permits(1);
+        state.release.acquire().await.unwrap().forget();
+        size.to_string()
+    }
+
+    async fn held_body_server(state: HeldBodyState) -> String {
+        let app = Router::new()
+            .route("/novels/upload/batch", any(held_body))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{address}")
+    }
+
+    fn body_request(method: Method, bytes: usize) -> Request {
+        Request::builder()
+            .method(method)
+            .uri("/")
+            .body(Body::from(vec![0_u8; bytes]))
+            .unwrap()
+    }
+
     fn export_proxy(base_url: &str) -> ServiceProxy {
         ServiceProxy {
             user_service_url: format!("{base_url}/user"),
@@ -684,7 +778,141 @@ mod tests {
             narrative_service_url: format!("{base_url}/narrative"),
             client: reqwest::Client::new(),
             internal_service_token: Arc::from(TEST_INTERNAL_TOKEN),
+            batch_upload_permits: Semaphore::new(2),
         }
+    }
+
+    #[tokio::test]
+    async fn batch_body_boundary_does_not_expand_other_proxy_routes() {
+        let target = body_server().await;
+        let mut proxy = export_proxy(&target);
+        proxy.batch_upload_permits = Semaphore::new(1);
+
+        let response = proxy
+            .forward(
+                &target,
+                "/novels/upload/batch",
+                body_request(Method::POST, MAX_BATCH_PROXY_BODY_BYTES),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 32).await.unwrap();
+        assert_eq!(body, MAX_BATCH_PROXY_BODY_BYTES.to_string());
+
+        for (path, method, bytes) in [
+            (
+                "/novels/upload/batch",
+                Method::POST,
+                MAX_BATCH_PROXY_BODY_BYTES + 1,
+            ),
+            ("/novels/upload", Method::POST, MAX_PROXY_BODY_BYTES + 1),
+            (
+                "/novels/upload/batch",
+                Method::PUT,
+                MAX_PROXY_BODY_BYTES + 1,
+            ),
+        ] {
+            let response = proxy
+                .forward(&target, path, body_request(method, bytes))
+                .await;
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        }
+
+        let response = proxy
+            .forward(
+                &target,
+                "/novels/upload/batch",
+                body_request(Method::POST, 1),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn batch_admission_rejects_before_buffering_when_capacity_is_full() {
+        let target = body_server().await;
+        let mut proxy = export_proxy(&target);
+        proxy.batch_upload_permits = Semaphore::new(1);
+        let _held = proxy.batch_upload_permits.try_acquire().unwrap();
+        let body_polls = Arc::new(AtomicUsize::new(0));
+        let observed_polls = body_polls.clone();
+        let body = Body::from_stream(futures::stream::once(async move {
+            observed_polls.fetch_add(1, Ordering::Relaxed);
+            Ok::<_, io::Error>(Bytes::from_static(b"x"))
+        }));
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            .body(body)
+            .unwrap();
+
+        let response = proxy
+            .forward(&target, "/novels/upload/batch", request)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "1");
+        assert_eq!(body_polls.load(Ordering::Relaxed), 0);
+
+        let ordinary = proxy
+            .forward(&target, "/novels/upload", body_request(Method::POST, 1))
+            .await;
+        assert_eq!(ordinary.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn batch_permit_is_held_until_the_upstream_response_finishes() {
+        let state = HeldBodyState {
+            entered: Arc::new(Semaphore::new(0)),
+            release: Arc::new(Semaphore::new(0)),
+        };
+        let target = held_body_server(state.clone()).await;
+        let mut proxy = export_proxy(&target);
+        proxy.batch_upload_permits = Semaphore::new(1);
+        let proxy = Arc::new(proxy);
+
+        let first_proxy = proxy.clone();
+        let first_target = target.clone();
+        let first = tokio::spawn(async move {
+            first_proxy
+                .forward(
+                    &first_target,
+                    "/novels/upload/batch",
+                    body_request(Method::POST, 1),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), state.entered.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+
+        let second = proxy
+            .forward(
+                &target,
+                "/novels/upload/batch",
+                body_request(Method::POST, 1),
+            )
+            .await;
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        state.release.add_permits(1);
+        let first = tokio::time::timeout(Duration::from_secs(2), first)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        state.release.add_permits(1);
+        let third = proxy
+            .forward(
+                &target,
+                "/novels/upload/batch",
+                body_request(Method::POST, 1),
+            )
+            .await;
+        assert_eq!(third.status(), StatusCode::OK);
     }
 
     #[test]

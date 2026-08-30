@@ -50,7 +50,7 @@ test.describe('critical journey — keyboard operability', () => {
 
     const dialog = page.getByRole('dialog', { name: '共享书库' });
     await expect(dialog).toBeVisible();
-    await expect(dialog.getByRole('button', { name: '加入书架' }).first()).toBeVisible();
+    await expect(dialog.getByRole('button', { name: '将《星海拾遗》加入书架' })).toBeVisible();
     await expectFocusWithin(dialog);
     for (let index = 0; index < 8; index += 1) {
       await page.keyboard.press('Tab');
@@ -76,6 +76,7 @@ test.describe('critical journey — keyboard operability', () => {
 
     const dialog = page.getByRole('dialog', { name: '导入小说' });
     await expect(dialog).toBeVisible();
+    await expect(dialog.getByText(/仍在解析或随后解析失败的内容/)).toBeVisible();
     await expectFocusWithin(dialog);
     for (let index = 0; index < 8; index += 1) {
       await page.keyboard.press('Shift+Tab');
@@ -123,6 +124,7 @@ test.describe('critical journey — keyboard operability', () => {
     await installStubs(page);
     await page.goto('/settings');
     await expect(page.getByRole('heading', { name: '平台模型设置' })).toBeVisible();
+    await expect(page.getByText(/仍在解析或随后解析失败的内容/)).toBeVisible();
     const stops = await tabWalk(page);
     expect(stops.length).toBeGreaterThan(3);
     for (const stop of stops) {

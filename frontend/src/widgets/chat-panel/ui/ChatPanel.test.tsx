@@ -113,6 +113,42 @@ describe('ChatPanel history', () => {
     expect(screen.getByRole('button', { name: '发送消息' }).hasAttribute('disabled')).toBe(true);
   });
 
+  it('blocks a replacement message while the failed turn keeps its retry key', () => {
+    useChatStore.setState({
+      activeTurnId: { [selfSession]: undefined },
+      failedTurn: {
+        [selfSession]: {
+          turnId: 'failed-turn',
+          sessionKey: selfSession,
+          characterId: character.id,
+          payload: {
+            novel_id: 'novel',
+            message: 'first',
+            current_chapter: 1,
+          },
+          error: { code: 'stream_error', message: '生成失败，请重试' },
+        },
+      },
+    });
+
+    render(
+      <ChatPanel
+        character={character}
+        novelId="novel"
+        currentChapter={1}
+        readerIdentityScope="self"
+        canChat
+        isOpen
+        onClose={() => undefined}
+      />,
+    );
+
+    expect(screen.getByRole('alert').textContent).toContain('生成失败，请重试');
+    expect(screen.getByRole('button', { name: '重试' })).toBeTruthy();
+    expect(screen.getByRole('textbox').hasAttribute('disabled')).toBe(true);
+    expect(screen.getByRole('button', { name: '发送消息' }).hasAttribute('disabled')).toBe(true);
+  });
+
   it('waits for committed reading progress before loading history', () => {
     render(
       <ChatPanel
@@ -210,7 +246,11 @@ describe('ChatPanel history', () => {
     );
 
     expect(screen.queryByText('第二章的未来内容')).toBeNull();
+    expect(screen.getByRole('textbox').hasAttribute('disabled')).toBe(true);
+    expect(screen.getByRole('button', { name: '发送消息' }).hasAttribute('disabled')).toBe(true);
     await waitFor(() => expect(cancel).toHaveBeenCalledOnce());
+    expect(screen.getByRole('alert').textContent).toContain('第 2 章有一条未完成消息');
+    expect(useChatStore.getState().failedTurn[selfSession]?.turnId).toBe('turn-2');
   });
 
   it('cancels and hides a stream from another novel at the same chapter', async () => {

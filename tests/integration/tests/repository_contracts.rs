@@ -1148,6 +1148,39 @@ impl SourceFileStorage for FakeSourceStorage {
     }
 }
 
+/// Models an uploader paused after its PUT became possible while the cleanup
+/// worker claims and completes the pre-upload reservation. The PUT then
+/// returns success, so acceptance must restore a deletion intent when its
+/// reservation check fails.
+struct CleanupWinsDuringPut {
+    pool: PgPool,
+    uploaded_key: Arc<Mutex<Option<String>>>,
+}
+
+#[async_trait::async_trait]
+impl SourceFileStorage for CleanupWinsDuringPut {
+    async fn put(&self, key: &str, _data: bytes::Bytes) -> anyhow::Result<()> {
+        let completed = sqlx::query("DELETE FROM source_file_deletions WHERE object_key = $1")
+            .bind(key)
+            .execute(&self.pool)
+            .await?;
+        anyhow::ensure!(
+            completed.rows_affected() == 1,
+            "test cleanup did not complete the upload reservation"
+        );
+        *self.uploaded_key.lock().unwrap() = Some(key.to_owned());
+        Ok(())
+    }
+
+    async fn get(&self, _key: &str) -> anyhow::Result<Option<bytes::Bytes>> {
+        Ok(None)
+    }
+
+    async fn delete(&self, _key: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
 async fn insert_test_user(pool: &PgPool, label: &str) -> Uuid {
     let user_id = Uuid::new_v4();
     sqlx::query("INSERT INTO users (id, email, password_hash) VALUES ($1, $2, $3)")
@@ -1557,6 +1590,13 @@ async fn source_stage_jobs_are_claimable_at_the_source_boundary() {
     let user_id = insert_test_user(&pool, "source-claim").await;
     let mut novel = Novel::create(user_id, "Source claim".into(), None);
     novel.retain_source_file(format!("source-files/{user_id}/{}", novel.id));
+    PgSourceFileDeletionRepository::new(pool.clone())
+        .reserve_upload(
+            novel.file_key.as_deref().unwrap(),
+            chrono::Utc::now() + chrono::Duration::minutes(5),
+        )
+        .await
+        .unwrap();
     let repo = NovelPgRepository::new(pool.clone());
     repo.create_source_import(&novel).await.unwrap();
 
@@ -1578,6 +1618,13 @@ async fn source_stage_jobs_are_claimable_at_the_source_boundary() {
 /// (not a recovery scan) is the only actor that can resume it. This keeps the
 /// test deterministic while other tests' recovery loops run concurrently.
 async fn seed_failed_source_import(pool: &PgPool, user_id: Uuid, novel: &Novel) {
+    PgSourceFileDeletionRepository::new(pool.clone())
+        .reserve_upload(
+            novel.file_key.as_deref().unwrap(),
+            chrono::Utc::now() + chrono::Duration::minutes(5),
+        )
+        .await
+        .unwrap();
     let repo = NovelPgRepository::new(pool.clone());
     repo.create_source_import(novel).await.unwrap();
     let claim = repo.claim_import(novel.id, user_id).await.unwrap().unwrap();
@@ -1674,6 +1721,13 @@ async fn replayed_chapter_replacement_is_fenced_and_replaces_legacy_rows() {
     let user_id = insert_test_user(&pool, "replay-fence").await;
     let mut novel = Novel::create(user_id, "Fenced replay".into(), None);
     novel.retain_source_file(format!("source-files/{user_id}/{}", novel.id));
+    PgSourceFileDeletionRepository::new(pool.clone())
+        .reserve_upload(
+            novel.file_key.as_deref().unwrap(),
+            chrono::Utc::now() + chrono::Duration::minutes(5),
+        )
+        .await
+        .unwrap();
     let repo = NovelPgRepository::new(pool.clone());
     repo.create_source_import(&novel).await.unwrap();
     let claim = repo.claim_import(novel.id, user_id).await.unwrap().unwrap();
@@ -2113,7 +2167,7 @@ async fn source_file_cleanup_waits_for_shared_novel_deletion() {
     novel.retain_source_file(object_key.clone());
     let deletions = PgSourceFileDeletionRepository::new(pool.clone());
     deletions
-        .enqueue(
+        .reserve_upload(
             &object_key,
             chrono::Utc::now() + chrono::Duration::minutes(5),
         )
@@ -2176,12 +2230,13 @@ async fn source_file_cleanup_waits_for_shared_novel_deletion() {
         .execute(&pool)
         .await
         .unwrap();
-    assert!(deletions
+    let deletion = deletions
         .due(100)
         .await
         .unwrap()
-        .iter()
-        .any(|pending| pending.object_key == object_key));
+        .into_iter()
+        .find(|pending| pending.object_key == object_key)
+        .expect("deleting a retained novel must queue its source");
     for unmanaged_key in unmanaged_keys {
         assert!(!sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS (SELECT 1 FROM source_file_deletions WHERE object_key = $1)",
@@ -2191,7 +2246,168 @@ async fn source_file_cleanup_waits_for_shared_novel_deletion() {
         .await
         .unwrap());
     }
-    deletions.complete(&object_key).await.unwrap();
+    deletions
+        .complete(&object_key, &deletion.claim_token)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn claimed_source_cleanup_fences_a_late_import_commit() {
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let user_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO users (id, email, password_hash) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(format!("source-race-{user_id}@test.invalid"))
+        .bind("not-a-real-password-hash")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut novel = Novel::create(user_id, "Cleanup race".into(), None);
+    let object_key = format!("source-files/{user_id}/{}", novel.id);
+    novel.retain_source_file(object_key.clone());
+    let chapter = Chapter::new(
+        novel.id,
+        1,
+        None,
+        "A source chapter that must never commit after cleanup wins the reservation race."
+            .repeat(2),
+    );
+    let deletions = PgSourceFileDeletionRepository::new(pool.clone());
+    deletions
+        .reserve_upload(&object_key, chrono::Utc::now())
+        .await
+        .unwrap();
+
+    let claimed = deletions.due(1).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].object_key, object_key);
+
+    let error = NovelPgRepository::new(pool.clone())
+        .create_import(&novel, &[chapter])
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("retained source upload lost its database reservation"));
+    assert!(
+        !sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM novels WHERE id = $1)",)
+            .bind(novel.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    );
+
+    deletions
+        .complete(&object_key, &claimed[0].claim_token)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn acceptance_failure_requeues_cleanup_after_a_late_put() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let user_id = insert_test_user(&pool, "late-source-put").await;
+    let uploaded_key = Arc::new(Mutex::new(None));
+    let storage = Arc::new(CleanupWinsDuringPut {
+        pool: pool.clone(),
+        uploaded_key: uploaded_key.clone(),
+    });
+    let handler = blocking_import_handler(&pool, Some(storage));
+
+    let error = handler
+        .handle_import(ImportNovelCommand {
+            user_id,
+            title: "Late retained source PUT".into(),
+            author: None,
+            raw_content: Some(retained_novel_text()),
+            source_bytes: Some(bytes::Bytes::from_static(b"late retained source")),
+            deviation_mode: None,
+        })
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("retained source upload lost its database reservation"));
+
+    let object_key = uploaded_key
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the delayed PUT must have completed");
+    let cleanup: Option<(chrono::DateTime<chrono::Utc>, Option<String>)> = sqlx::query_as(
+        "SELECT next_attempt_at, last_error FROM source_file_deletions WHERE object_key = $1",
+    )
+    .bind(&object_key)
+    .fetch_optional(&pool)
+    .await
+    .unwrap();
+    let (next_attempt_at, last_error) =
+        cleanup.expect("acceptance failure must restore the deletion intent");
+    assert!(next_attempt_at <= chrono::Utc::now());
+    assert_eq!(last_error, None);
+
+    // If an older cleanup worker finishes after this restored intent is
+    // claimed again, its token must not consume the newer claim.
+    sqlx::query(
+        "UPDATE source_file_deletions SET next_attempt_at = '-infinity'::timestamptz \
+         WHERE object_key = $1",
+    )
+    .bind(&object_key)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let deletions = PgSourceFileDeletionRepository::new(pool.clone());
+    let reclaimed = deletions.due(1).await.unwrap();
+    assert_eq!(reclaimed.len(), 1);
+    assert_eq!(reclaimed[0].object_key, object_key);
+    deletions
+        .complete(
+            &object_key,
+            "__source_delete_claimed__:superseded-test-claim",
+        )
+        .await
+        .unwrap();
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM source_file_deletions WHERE object_key = $1)",
+    )
+    .bind(&object_key)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+
+    let novel_id = Uuid::parse_str(object_key.rsplit('/').next().unwrap()).unwrap();
+    assert!(
+        !sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM novels WHERE id = $1)")
+            .bind(novel_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    );
+
+    deletions
+        .complete(&object_key, &reclaimed[0].claim_token)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

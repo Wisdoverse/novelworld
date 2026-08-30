@@ -20,6 +20,9 @@ pub struct Novel {
     pub description: Option<String>,
     pub world_summary: Option<String>,
     pub genre: Option<String>,
+    /// Internal object-storage locator. Public Novel responses must never
+    /// expose uploader identifiers or storage namespace details.
+    #[serde(skip_serializing)]
     pub file_key: Option<String>,
     pub total_chapters: i32,
     pub status: NovelStatus,
@@ -114,5 +117,22 @@ impl Novel {
     /// 取出并清空领域事件
     pub fn take_events(&mut self) -> Vec<NovelEvent> {
         std::mem::take(&mut self.domain_events)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_serialization_omits_internal_ownership_and_storage_fields() {
+        let mut novel = Novel::create(Uuid::new_v4(), "Private source".into(), None);
+        novel.retain_source_file("source-files/private-user/private-novel".into());
+
+        let value = serde_json::to_value(novel).unwrap();
+
+        assert!(value.get("user_id").is_none());
+        assert!(value.get("file_key").is_none());
+        assert_eq!(value["title"], "Private source");
     }
 }

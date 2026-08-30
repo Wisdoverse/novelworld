@@ -1,6 +1,5 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Noto+Serif+SC:wght@300;400;500;700&display=swap');
 @import 'tailwindcss';
-@config '../../../tailwind.config.js';
 
 /* WCAG 2.4.7 / 2.4.11: visible keyboard focus indicator. Unlayered author
    CSS wins over the tailwind utilities layer, so this also overrides
@@ -79,7 +78,7 @@ body {
   background: #0b57d0;
   border-radius: 999px;
   box-shadow: 0 2px 5px rgba(11, 87, 208, 0.22);
-  transition: background 160ms ease, box-shadow 160ms ease;
+  transition: box-shadow 160ms ease;
 }
 
 .primary-action:hover { background: #0842a0; }

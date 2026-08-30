@@ -7,6 +7,9 @@ pub mod novel_pg_repo;
 pub mod pg_progress_repo;
 pub mod source_file_deletion_pg_repo;
 
+pub(crate) const SOURCE_UPLOAD_PENDING: &str = "__source_upload_pending__";
+pub(crate) const SOURCE_DELETE_CLAIM_PREFIX: &str = "__source_delete_claimed__";
+
 use crate::domain::ports::ReadinessProbe;
 use async_trait::async_trait;
 use sqlx::PgPool;
