@@ -143,11 +143,11 @@ export function SettingsPage() {
       : null;
 
   const eraseAccount = async () => {
-    if (!window.confirm('永久删除账号及全部小说、对话、记忆和时间线？此操作无法撤销。')) return;
+    if (!window.confirm('永久删除你的账号、书架关联、阅读进度、身份、对话、记忆和个人时间线？你提交并被系统接受的来源内容，包括仍在解析或随后解析失败的内容，会随共享原著继续保留；移出书架或删除账号不会删除它们。此操作无法撤销。')) return;
     setDeleting(true);
     try {
       if (!await deleteAccount()) return;
-      toast.success('账号数据已删除');
+      toast.success('账号和个人数据已删除');
       navigate('/', { replace: true });
     } catch (error) {
       toast.error(getApiErrorMessage(error, '账号删除失败，请稍后重试'));
@@ -336,7 +336,7 @@ export function SettingsPage() {
             </div>
           </div>
           <p className="mb-6 text-sm leading-6 text-[#5f6368]">
-            你可以先导出完整数据。删除账号后，小说正文、对话、记忆、世界模型与个人时间线将永久移除。
+            你可以先导出账号数据。删除账号会永久删除你的登录资料、书架关联、阅读进度、身份、对话、记忆和个人时间线；你提交并被系统接受的来源内容，包括仍在解析或随后解析失败的内容，会随共享原著继续保留。解析成功后其他用户仍可从共享书库加入，移出书架或删除账号不会删除这些共享内容。
           </p>
           <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
             <button type="button" disabled={exporting || deleting} onClick={() => { void logout(); }} className="tonal-action">

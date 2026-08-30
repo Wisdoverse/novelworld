@@ -83,6 +83,7 @@ export function ChatPanel({
     && failedTurn.payload.current_chapter === currentChapter
     ? failedTurn
     : undefined;
+  const hasUnresolvedTurn = activeTurn !== undefined || failedTurn !== undefined;
   const charMessages = characterMatchesNovel
     ? mergeVisibleChatMessages(
       history.data ?? EMPTY_MESSAGES,
@@ -103,8 +104,8 @@ export function ChatPanel({
   }, [activeTurn, activeTurnMatchesView, cancelMessage, sessionKey]);
 
   const handleSend = () => {
-    if (!canChat || !historyReady || !input.trim() || isCurrentlyStreaming) return;
-    sendMessage({
+    if (!canChat || !historyReady || !input.trim() || isCurrentlyStreaming || hasUnresolvedTurn) return;
+    const accepted = sendMessage({
       characterId: character.id,
       novelId,
       message: input.trim(),
@@ -112,6 +113,7 @@ export function ChatPanel({
       readerIdentityScope,
       currentChapter,
     });
+    if (!accepted) return;
     setInput('');
     inputRef.current?.focus();
   };
@@ -300,6 +302,14 @@ export function ChatPanel({
                       </button>
                     </div>
                   )}
+                  {failedTurn && !visibleFailedTurn && !isCurrentlyStreaming && (
+                    <div
+                      className="mb-2 rounded bg-[#fce8e6] px-2 py-1.5 text-xs text-[#b3261e]"
+                      role="alert"
+                    >
+                      第 {failedTurn.payload.current_chapter} 章有一条未完成消息；请返回该章重试后再发送新消息。
+                    </div>
+                  )}
                   <div className="flex gap-2 items-end">
                     <textarea
                       ref={inputRef}
@@ -311,7 +321,7 @@ export function ChatPanel({
                       maxLength={4000}
                       className="field-control flex-1 resize-none text-sm"
                       style={{ fontFamily: 'var(--font-body)' }}
-                      disabled={!canChat || !historyReady || isCurrentlyStreaming}
+                      disabled={!canChat || !historyReady || isCurrentlyStreaming || hasUnresolvedTurn}
                     />
                     {isCurrentlyStreaming && (
                       <button
@@ -326,8 +336,8 @@ export function ChatPanel({
                       type="button"
                       onClick={handleSend}
                       aria-label="发送消息"
-                      disabled={!canChat || !historyReady || !input.trim() || isCurrentlyStreaming}
-                      className="flex-shrink-0 rounded-full bg-[#0b57d0] p-2.5 text-white transition-colors hover:bg-[#0842a0] disabled:cursor-not-allowed disabled:bg-[#c4c7c5] disabled:text-[#747775]"
+                      disabled={!canChat || !historyReady || !input.trim() || isCurrentlyStreaming || hasUnresolvedTurn}
+                      className="flex-shrink-0 rounded-full bg-[#0b57d0] p-2.5 text-white hover:bg-[#0842a0] disabled:cursor-not-allowed disabled:bg-[#c4c7c5] disabled:text-[#747775]"
                     >
                       <Send size={16} />
                     </button>

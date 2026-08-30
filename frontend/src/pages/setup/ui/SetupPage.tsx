@@ -111,4 +111,4 @@ export function SetupPage({ onComplete }: { onComplete: () => void }) {
 
 const inputClassName = 'mt-2 w-full rounded-xl border border-[#9aa0a6] bg-white px-4 py-3 text-base text-[#1f1f1f] outline-none transition-shadow placeholder:text-[#9aa0a6] hover:border-[#5f6368] focus:border-[#0b57d0] focus:ring-1 focus:ring-[#0b57d0]';
 
-const primaryButtonClassName = 'inline-flex min-h-11 items-center justify-center gap-1.5 rounded-full bg-[#0b57d0] px-6 font-semibold text-white shadow-sm transition-colors hover:bg-[#0842a0] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0b57d0] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:bg-[#c4c7c5] disabled:text-[#747775] disabled:shadow-none';
+const primaryButtonClassName = 'inline-flex min-h-11 items-center justify-center gap-1.5 rounded-full bg-[#0b57d0] px-6 font-semibold text-white shadow-sm hover:bg-[#0842a0] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0b57d0] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:bg-[#c4c7c5] disabled:text-[#747775] disabled:shadow-none';

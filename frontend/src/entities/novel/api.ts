@@ -9,10 +9,8 @@ export const novelKeys = {
   list: () => [...novelKeys.all, 'list'] as const,
   catalog: () => [...novelKeys.all, 'catalog'] as const,
   detail: (id: string) => [...novelKeys.all, 'detail', id] as const,
-  chapters: (id: string) => [...novelKeys.all, id, 'chapters'] as const,
   chapter: (id: string, num: number) => [...novelKeys.all, id, 'chapters', num] as const,
   characters: (id: string, chapter: number) => [...novelKeys.all, id, 'characters', chapter] as const,
-  status: (id: string) => [...novelKeys.all, id, 'status'] as const,
 };
 
 // ─── Hooks ────────────────────────────────────────────────────────────────────
@@ -43,28 +41,6 @@ export function useNovel(id: string) {
     queryKey: novelKeys.detail(id),
     queryFn: () => apiClient.get<Novel>(`/novels/${id}`).then(r => r.data),
     enabled: !!id,
-  });
-}
-
-export function useNovelStatus(id: string, enabled = true) {
-  return useQuery({
-    queryKey: novelKeys.status(id),
-    queryFn: () => apiClient.get<{ status: string; total_chapters: number; error?: string }>(
-      `/novels/${id}/status`
-    ).then(r => r.data),
-    enabled: enabled && !!id,
-    refetchInterval: (query) => {
-      if (query.state.data?.status === 'parsing') return 2000;
-      return false;
-    },
-  });
-}
-
-export function useChapters(novelId: string) {
-  return useQuery({
-    queryKey: novelKeys.chapters(novelId),
-    queryFn: () => apiClient.get<Chapter[]>(`/novels/${novelId}/chapters`).then(r => r.data),
-    enabled: !!novelId,
   });
 }
 

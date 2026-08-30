@@ -17,7 +17,7 @@ import { chatSessionKey, useChatStore } from './useChatStore';
 const SELF_SESSION = chatSessionKey('character', 'self');
 
 function send(message = 'private', readerIdentityScope = 'self') {
-  useChatStore.getState().sendMessage({
+  return useChatStore.getState().sendMessage({
     characterId: 'character',
     novelId: 'novel',
     message,
@@ -46,11 +46,19 @@ describe('chat turn isolation', () => {
     });
   });
 
-  it('retries a failed turn with the same id and without duplicating the optimistic user message', () => {
-    send();
+  it('keeps a failed turn until its original id is retried', () => {
+    send('first');
     const first = streams[0];
     first.onChunk('partial');
     first.onError({ code: 'stream_error', message: 'try again' });
+
+    send('replacement');
+
+    expect(streams).toHaveLength(1);
+    expect(useChatStore.getState().messages[SELF_SESSION].map(message => message.content))
+      .toEqual(['first']);
+    expect(useChatStore.getState().failedTurn[SELF_SESSION]?.turnId).toBe(first.turnId);
+    expect(useChatStore.getState().activeTurnId[SELF_SESSION]).toBeUndefined();
 
     useChatStore.getState().retryMessage(SELF_SESSION);
     const retry = streams[1];
@@ -67,19 +75,20 @@ describe('chat turn isolation', () => {
     ]);
   });
 
-  it('ignores late callbacks from a cancelled turn after a new turn starts', () => {
+  it('refuses to replace an active turn before it becomes retryable', () => {
     send('first');
     const first = streams[0];
-    send('second');
-    const second = streams[1];
+    const accepted = send('second');
 
-    expect(first.cancel).toHaveBeenCalledOnce();
+    expect(accepted).toBe(false);
+    expect(streams).toHaveLength(1);
+    expect(first.cancel).not.toHaveBeenCalled();
     first.onChunk('late secret');
-    first.onDone({ turnId: first.turnId, replayed: false, legacy: false });
-    second.onChunk('current');
 
-    expect(useChatStore.getState().streamingText[SELF_SESSION]).toBe('current');
-    expect(useChatStore.getState().messages[SELF_SESSION]).toHaveLength(2);
+    expect(useChatStore.getState().streamingText[SELF_SESSION]).toBe('late secret');
+    expect(useChatStore.getState().messages[SELF_SESSION].map(message => message.content))
+      .toEqual(['first']);
+    expect(useChatStore.getState().activeTurnId[SELF_SESSION]).toBe(first.turnId);
   });
 
   it('keeps a cancelled turn retryable and ignores its late callbacks', () => {
@@ -123,10 +132,17 @@ describe('chat turn isolation', () => {
       .toEqual(['character-a-only']);
     expect(useChatStore.getState().messages[characterBSession]).toBeUndefined();
 
+    const characterAStream = streams[1];
+    characterAStream.onChunk('reply');
+    characterAStream.onDone({
+      turnId: characterAStream.turnId,
+      replayed: false,
+      legacy: false,
+    });
     send('same-character', 'character:a');
 
     expect(useChatStore.getState().messages[characterASession].map(item => item.content))
-      .toEqual(['character-a-only', 'same-character']);
+      .toEqual(['character-a-only', 'reply', 'same-character']);
     expect(useChatStore.getState().messages[SELF_SESSION].map(item => item.content))
       .toEqual(['self-only']);
   });
