@@ -161,6 +161,12 @@ jobs:
         run: |
           cargo install cargo-audit --locked --version 0.22.2
           cargo audit
+          # Tauri 2's Linux GTK3 stack pins glib 0.18.5, but the resolved
+          # application graph has no caller of RUSTSEC-2024-0429's affected API.
+          # Keep that one reviewed exception explicit and reject new unsoundness.
+          cargo audit --file frontend/src-tauri/Cargo.lock \
+            --deny unsound \
+            --ignore RUSTSEC-2024-0429
       - name: Enforce the dependency license and source policy
         uses: EmbarkStudios/cargo-deny-action@v2.1.1
         with:
