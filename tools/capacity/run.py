@@ -635,8 +635,9 @@ class CapacityProfile:
             samples_seconds=ready_samples,
             maximum_seconds=objectives["import_ready_seconds_max"],
         )
+        # Two chapter extractions plus one whole-novel event selection.
         expected_calls = {
-            "canon": workload["import_concurrency"] * 2,
+            "canon": workload["import_concurrency"] * 3,
             "character_chunk": workload["import_concurrency"],
             "characters": workload["import_concurrency"],
             "image": workload["import_concurrency"],
