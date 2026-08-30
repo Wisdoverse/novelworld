@@ -142,6 +142,7 @@ Those claims require their own runtime or migration evidence.
 ```bash
 cd frontend
 pnpm install --frozen-lockfile
+pnpm audit:dependencies
 pnpm type-check
 pnpm lint
 pnpm lint:fsd

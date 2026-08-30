@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useCharacters } from '@/entities/novel';
 import { useReadingProgress, useResetReaderIdentity } from '@/entities/reading-progress';
@@ -23,7 +23,12 @@ export function CharactersPage() {
   const resetReaderIdentity = useResetReaderIdentity(novelId || '');
   const readerIdentityUnavailable = getApiErrorCode(progressError)
     === 'reader_identity_unavailable';
-  const { data: characters, isLoading } = useCharacters(
+  const {
+    data: characters,
+    isLoading,
+    isError: isCharactersError,
+    refetch: refetchCharacters,
+  } = useCharacters(
     novelId || '',
     readingProgress?.current_chapter ?? 0,
   );
@@ -64,7 +69,7 @@ export function CharactersPage() {
             <div className="h-5 w-5 animate-spin rounded-full border-2 border-[#0b57d0] border-t-transparent" />
             正在加载角色…
           </div>
-        ) : isProgressError ? (
+        ) : isProgressError && !readingProgress ? (
           <div className="surface-card px-6 py-16 text-center" role="alert">
             <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-[#fce8e6] text-[#b3261e]">
               <AlertCircle size={24} aria-hidden="true" />
@@ -82,6 +87,15 @@ export function CharactersPage() {
             ) : (
               <button className="primary-action mt-6" onClick={() => refetchProgress()}>重试</button>
             )}
+          </div>
+        ) : isCharactersError && !characters ? (
+          <div className="surface-card px-6 py-16 text-center" role="alert">
+            <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-[#fce8e6] text-[#b3261e]">
+              <AlertCircle size={24} aria-hidden="true" />
+            </span>
+            <h2 className="mt-5 text-xl font-semibold text-[#1f1f1f]">暂时无法加载角色</h2>
+            <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-[#5f6368]">角色数据加载失败，请重新加载。</p>
+            <button className="primary-action mt-6" onClick={() => refetchCharacters()}>重试</button>
           </div>
         ) : !characters?.length ? (
           <div className="surface-card px-6 py-16 text-center">

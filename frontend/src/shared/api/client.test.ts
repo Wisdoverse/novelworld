@@ -6,6 +6,7 @@ import {
   apiClient,
   createChatStream,
   invalidateSessionForUnauthorizedResponse,
+  refreshSessionForAccessToken,
   type ChatStreamError,
 } from './client';
 
@@ -50,6 +51,7 @@ function streamChat() {
 
 describe('createChatStream', () => {
   beforeEach(() => {
+    vi.restoreAllMocks();
     queryClient.clear();
     localStorage.clear();
     sessionStorage.clear();
@@ -198,6 +200,10 @@ describe('createChatStream', () => {
     localStorage.setItem('refresh_token', 'refresh');
     sessionStorage.setItem(worldTurnPendingStorageKey('user-a', 'novel-a'), 'pending-a');
     queryClient.setQueryData(['principal-a'], 'private-a');
+    vi.spyOn(apiClient, 'post').mockRejectedValueOnce({
+      isAxiosError: true,
+      response: { status: 401 },
+    });
     vi.mocked(fetch).mockResolvedValue(
       responseFromChunks([encoder.encode('{"error":{"code":"unauthorized"}}')], 401),
     );
@@ -218,6 +224,157 @@ describe('createChatStream', () => {
     expect(localStorage.getItem('refresh_token')).toBeNull();
     expect(sessionStorage.getItem(worldTurnPendingStorageKey('user-a', 'novel-a'))).toBeNull();
     expect(queryClient.getQueryData(['principal-a'])).toBeUndefined();
+  });
+
+  it('preserves the current principal when SSE session refresh is temporarily unavailable', async () => {
+    localStorage.setItem('auth_token', 'access');
+    localStorage.setItem('refresh_token', 'refresh');
+    sessionStorage.setItem(worldTurnPendingStorageKey('user-a', 'novel-a'), 'pending-a');
+    queryClient.setQueryData(['principal-a'], 'private-a');
+    vi.spyOn(apiClient, 'post').mockRejectedValueOnce({
+      isAxiosError: true,
+      response: { status: 503 },
+    });
+    vi.mocked(fetch).mockResolvedValue(
+      responseFromChunks([encoder.encode('{"error":{"code":"unauthorized"}}')], 401),
+    );
+
+    const error = await new Promise<ChatStreamError>(resolve => {
+      createChatStream({
+        characterId: 'character',
+        turnId: '11111111-1111-4111-8111-111111111111',
+        payload: { novel_id: 'novel', message: 'hello', current_chapter: 1 },
+        onChunk: vi.fn(),
+        onDone: vi.fn(),
+        onError: resolve,
+      });
+    });
+
+    expect(error.code).toBe('session_refresh_unavailable');
+    expect(localStorage.getItem('auth_token')).toBe('access');
+    expect(localStorage.getItem('refresh_token')).toBe('refresh');
+    expect(sessionStorage.getItem(worldTurnPendingStorageKey('user-a', 'novel-a'))).toBe('pending-a');
+    expect(queryClient.getQueryData(['principal-a'])).toBe('private-a');
+  });
+
+  it('rotates once and replays a protected Axios request with the new access token', async () => {
+    localStorage.setItem('auth_token', 'old-access');
+    localStorage.setItem('refresh_token', 'old-refresh');
+    const refresh = vi.spyOn(apiClient, 'post').mockResolvedValueOnce({
+      data: { access_token: 'new-access', refresh_token: 'new-refresh' },
+    });
+    const attempts: string[] = [];
+
+    const response = await apiClient.get('/novels', {
+      adapter: async config => {
+        const authorization = String(config.headers.get('Authorization'));
+        attempts.push(authorization);
+        if (authorization === 'Bearer old-access') {
+          throw Object.assign(new Error('Unauthorized'), {
+            isAxiosError: true,
+            config,
+            response: { status: 401, data: {}, headers: {}, config },
+          });
+        }
+        return { data: ['replayed'], status: 200, statusText: 'OK', headers: {}, config };
+      },
+    });
+
+    expect(response.data).toEqual(['replayed']);
+    expect(attempts).toEqual(['Bearer old-access', 'Bearer new-access']);
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(refresh).toHaveBeenCalledWith('/auth/refresh', { refresh_token: 'old-refresh' });
+    expect(localStorage.getItem('auth_token')).toBe('new-access');
+    expect(localStorage.getItem('refresh_token')).toBe('new-refresh');
+  });
+
+  it('preserves the current principal when Axios session refresh is temporarily unavailable', async () => {
+    localStorage.setItem('auth_token', 'access');
+    localStorage.setItem('refresh_token', 'refresh');
+    sessionStorage.setItem(worldTurnPendingStorageKey('user-a', 'novel-a'), 'pending-a');
+    queryClient.setQueryData(['principal-a'], 'private-a');
+    const refreshError = {
+      isAxiosError: true,
+      response: { status: 503 },
+    };
+    vi.spyOn(apiClient, 'post').mockRejectedValueOnce(refreshError);
+
+    const request = apiClient.get('/novels', {
+      adapter: async config => {
+        throw Object.assign(new Error('Unauthorized'), {
+          isAxiosError: true,
+          config,
+          response: { status: 401, data: {}, headers: {}, config },
+        });
+      },
+    });
+
+    await expect(request).rejects.toBe(refreshError);
+    expect(localStorage.getItem('auth_token')).toBe('access');
+    expect(localStorage.getItem('refresh_token')).toBe('refresh');
+    expect(sessionStorage.getItem(worldTurnPendingStorageKey('user-a', 'novel-a'))).toBe('pending-a');
+    expect(queryClient.getQueryData(['principal-a'])).toBe('private-a');
+  });
+
+  it('shares one refresh rotation across concurrent 401 responses', async () => {
+    localStorage.setItem('auth_token', 'concurrent-access');
+    localStorage.setItem('refresh_token', 'concurrent-refresh');
+    let resolveRefresh!: (value: { data: { access_token: string; refresh_token: string } }) => void;
+    const refresh = vi.spyOn(apiClient, 'post').mockImplementationOnce(
+      () => new Promise(resolve => { resolveRefresh = resolve; }),
+    );
+
+    const first = refreshSessionForAccessToken('concurrent-access');
+    const second = refreshSessionForAccessToken('concurrent-access');
+    expect(refresh).toHaveBeenCalledOnce();
+    resolveRefresh({ data: { access_token: 'rotated-access', refresh_token: 'rotated-refresh' } });
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      'rotated-access',
+      'rotated-access',
+    ]);
+    expect(localStorage.getItem('refresh_token')).toBe('rotated-refresh');
+  });
+
+  it('does not let a late refresh response overwrite a newer principal', async () => {
+    localStorage.setItem('auth_token', 'access-a');
+    localStorage.setItem('refresh_token', 'refresh-a');
+    let resolveRefresh!: (value: { data: { access_token: string; refresh_token: string } }) => void;
+    vi.spyOn(apiClient, 'post').mockImplementationOnce(
+      () => new Promise(resolve => { resolveRefresh = resolve; }),
+    );
+
+    const refresh = refreshSessionForAccessToken('access-a');
+    localStorage.setItem('auth_token', 'access-b');
+    localStorage.setItem('refresh_token', 'refresh-b');
+    resolveRefresh({ data: { access_token: 'late-a', refresh_token: 'late-refresh-a' } });
+
+    await expect(refresh).rejects.toThrow(/principal changed/i);
+    expect(localStorage.getItem('auth_token')).toBe('access-b');
+    expect(localStorage.getItem('refresh_token')).toBe('refresh-b');
+  });
+
+  it('refreshes and retries a POST SSE turn with the same idempotency key', async () => {
+    localStorage.setItem('auth_token', 'expired-access');
+    localStorage.setItem('refresh_token', 'valid-refresh');
+    vi.spyOn(apiClient, 'post').mockResolvedValueOnce({
+      data: { access_token: 'fresh-access', refresh_token: 'rotated-refresh' },
+    });
+    const turnId = '11111111-1111-4111-8111-111111111111';
+    const done = `event: done\ndata: {"turn_id":"${turnId}","committed":true,"replayed":true}\n\n`;
+    const fetchMock = vi.mocked(fetch)
+      .mockResolvedValueOnce(responseFromChunks([encoder.encode('{}')], 401))
+      .mockResolvedValueOnce(responseFromChunks([encoder.encode(done)]));
+
+    await expect(streamChat()).resolves.toMatchObject({ done: { turnId, replayed: true } });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect((fetchMock.mock.calls[0][1]?.headers as Record<string, string>).Authorization)
+      .toBe('Bearer expired-access');
+    expect((fetchMock.mock.calls[1][1]?.headers as Record<string, string>).Authorization)
+      .toBe('Bearer fresh-access');
+    for (const [, init] of fetchMock.mock.calls) {
+      expect(init?.headers).toMatchObject({ 'Idempotency-Key': turnId });
+    }
   });
 
   it('does not invalidate B when an old-token SSE request gets a late 401', async () => {

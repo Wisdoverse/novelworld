@@ -190,6 +190,8 @@ jobs:
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
+      - name: Audit frontend production dependencies
+        run: pnpm audit:dependencies
       - run: pnpm type-check
       - run: pnpm lint
       - name: Enforce strict FSD architecture boundaries

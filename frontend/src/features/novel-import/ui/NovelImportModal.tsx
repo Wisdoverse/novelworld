@@ -1,5 +1,5 @@
-import { useState, type FormEvent } from 'react';
-import { motion } from 'framer-motion';
+import { useRef, useState, type FormEvent } from 'react';
+import * as Dialog from '@radix-ui/react-dialog';
 import { Loader2, Upload, X } from 'lucide-react';
 import { toast } from 'sonner';
 import {
@@ -12,6 +12,11 @@ import {
 import { getApiErrorMessage } from '@/shared/api/client';
 
 export function NovelImportModal({ onClose }: { onClose: () => void }) {
+  const returnFocusRef = useRef<HTMLElement | null>(
+    typeof document !== 'undefined' && document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null,
+  );
   const [title, setTitle] = useState('');
   const [author, setAuthor] = useState('');
   const [content, setContent] = useState('');
@@ -74,24 +79,23 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: 'rgba(32,33,36,0.42)', backdropFilter: 'blur(8px)' }}
-      onClick={(event) => event.target === event.currentTarget && onClose()}
-      onKeyDown={(event) => event.key === 'Escape' && onClose()}
-    >
-      <motion.div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="novel-import-title"
-        initial={{ opacity: 0, scale: 0.95, y: 20 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.95, y: 20 }}
-        className="surface-card flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden"
-      >
+    <Dialog.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <Dialog.Portal>
+        <Dialog.Overlay
+          className="fixed inset-0 z-50"
+          style={{ background: 'rgba(32,33,36,0.42)', backdropFilter: 'blur(8px)' }}
+        />
+        <Dialog.Content
+          className="surface-card fixed left-1/2 top-1/2 z-50 flex max-h-[90vh] w-[calc(100%_-_2rem)] max-w-2xl -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden outline-none"
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            const returnFocus = returnFocusRef.current;
+            if (returnFocus?.isConnected) returnFocus.focus();
+          }}
+        >
         <div className="shrink-0 px-6 pt-6 sm:px-8 sm:pt-8">
-          <h2 id="novel-import-title" className="mb-2 text-2xl font-medium text-[#1f1f1f]">导入小说</h2>
-          <p className="text-sm text-[#5f6368]">可批量上传文件，或粘贴一本小说的正文。</p>
+          <Dialog.Title className="mb-2 text-2xl font-medium text-[#1f1f1f]">导入小说</Dialog.Title>
+          <Dialog.Description className="text-sm text-[#5f6368]">可批量上传文件，或粘贴一本小说的正文。</Dialog.Description>
         </div>
 
         <form onSubmit={handleSubmit} className="flex min-h-0 flex-col">
@@ -233,7 +237,9 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
           </div>
 
           <div className="flex shrink-0 justify-end gap-3 border-t border-[#e8eaed] px-6 py-4 sm:px-8">
-            <button type="button" onClick={onClose} className="tonal-action text-sm">取消</button>
+            <Dialog.Close asChild>
+              <button type="button" className="tonal-action text-sm">取消</button>
+            </Dialog.Close>
             <button
               type="submit"
               disabled={isPending || (!isBatch && !title.trim()) || (!files.length && !content.trim())}
@@ -247,7 +253,8 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
             </button>
           </div>
         </form>
-      </motion.div>
-    </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }

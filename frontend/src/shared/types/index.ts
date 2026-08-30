@@ -68,18 +68,6 @@ export interface ChatMessage {
   created_at: string;
 }
 
-// ─── 记忆 ─────────────────────────────────────────────────────────────────────
-
-export type MemoryLayer = 'short' | 'mid' | 'long' | 'permanent';
-
-export interface Memory {
-  id: string;
-  layer: MemoryLayer;
-  content: string;
-  importance: number;
-  created_at: string;
-}
-
 // ─── 叙事分支 ─────────────────────────────────────────────────────────────────
 
 export interface NarrativeChoice {

@@ -1,13 +1,19 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Locator } from '@playwright/test';
 import { installStubs } from './stubs';
 import { tabWalk } from './helpers';
 
 // Keyboard operability on the critical journey: real Tab focus movement,
 // visible focus indicators, Enter/Space activation, and focus containment.
 
+async function expectFocusWithin(dialog: Locator) {
+  await expect
+    .poll(() => dialog.evaluate((element) => element.contains(element.ownerDocument.activeElement)))
+    .toBe(true);
+}
+
 test.describe('critical journey — keyboard operability', () => {
   test('login: tab walk, visible focus, Enter submits and lands on the shelf', async ({ page }) => {
-    await installStubs(page);
+    await installStubs(page, { authenticated: false });
     await page.goto('/login');
     const email = page.getByRole('textbox').first();
     await email.fill('reader@example.com');
@@ -33,6 +39,52 @@ test.describe('critical journey — keyboard operability', () => {
     await card.focus();
     await page.keyboard.press('Enter');
     await expect(page).toHaveURL(/\/reader\/novel-1\/1/);
+  });
+
+  test('shelf: shared library traps focus, closes with Escape, and restores focus', async ({ page }) => {
+    await installStubs(page);
+    await page.goto('/shelf');
+    const trigger = page.getByRole('button', { name: '打开共享书库' });
+    await trigger.focus();
+    await page.keyboard.press('Enter');
+
+    const dialog = page.getByRole('dialog', { name: '共享书库' });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole('button', { name: '加入书架' }).first()).toBeVisible();
+    await expectFocusWithin(dialog);
+    for (let index = 0; index < 8; index += 1) {
+      await page.keyboard.press('Tab');
+      await expectFocusWithin(dialog);
+    }
+
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeHidden();
+    await expect(trigger).toBeFocused();
+
+    const remove = page.getByRole('button', { name: '将 星海拾遗 移出书架' });
+    await remove.focus();
+    await expect(remove).toBeVisible();
+    await expect(remove).toBeFocused();
+  });
+
+  test('shelf: import dialog traps focus, closes with Escape, and restores focus', async ({ page }) => {
+    await installStubs(page);
+    await page.goto('/shelf');
+    const trigger = page.getByRole('button', { name: '导入小说' });
+    await trigger.focus();
+    await page.keyboard.press('Enter');
+
+    const dialog = page.getByRole('dialog', { name: '导入小说' });
+    await expect(dialog).toBeVisible();
+    await expectFocusWithin(dialog);
+    for (let index = 0; index < 8; index += 1) {
+      await page.keyboard.press('Shift+Tab');
+      await expectFocusWithin(dialog);
+    }
+
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeHidden();
+    await expect(trigger).toBeFocused();
   });
 
   test('reader: branch choice activates with Space and renders the consequence', async ({ page }) => {

@@ -1,4 +1,3 @@
-import React from 'react';
 import type { Character } from '@/shared/types';
 import { MessageCircle, User } from 'lucide-react';
 

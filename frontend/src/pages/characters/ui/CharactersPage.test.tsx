@@ -1,11 +1,14 @@
-import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CharactersPage } from './CharactersPage';
 
 const mocks = vi.hoisted(() => ({
   characters: [] as Array<Record<string, unknown>>,
+  charactersError: false,
+  charactersCachedOnError: false,
+  refetchCharacters: vi.fn(),
   progressErrorCode: undefined as string | undefined,
+  progressCachedOnError: false,
   refetchProgress: vi.fn(),
   resetIdentity: vi.fn(),
   resetIdentityPending: false,
@@ -20,7 +23,7 @@ vi.mock('@/features/auth', () => ({
 }));
 vi.mock('@/entities/reading-progress', () => ({
   useReadingProgress: () => ({
-    data: mocks.progressErrorCode
+    data: mocks.progressErrorCode && !mocks.progressCachedOnError
       ? undefined
       : { current_chapter: 2, reader_identity_type: 'self' },
     isLoading: false,
@@ -39,7 +42,14 @@ vi.mock('@/entities/reading-progress', () => ({
   }),
 }));
 vi.mock('@/entities/novel', () => ({
-  useCharacters: () => ({ data: mocks.characters, isLoading: false }),
+  useCharacters: () => ({
+    data: mocks.charactersError && !mocks.charactersCachedOnError
+      ? undefined
+      : mocks.characters,
+    isLoading: false,
+    isError: mocks.charactersError,
+    refetch: mocks.refetchCharacters,
+  }),
 }));
 vi.mock('@/widgets/character-card', () => ({
   CharacterCard: ({ character, onTalk }: {
@@ -60,10 +70,14 @@ vi.mock('@/widgets/chat-panel', () => ({
 describe('CharactersPage progress gate', () => {
   beforeEach(() => {
     mocks.characters = [];
+    mocks.charactersError = false;
+    mocks.charactersCachedOnError = false;
     mocks.progressErrorCode = undefined;
+    mocks.progressCachedOnError = false;
     mocks.resetIdentityPending = false;
     mocks.refetchProgress.mockReset();
     mocks.resetIdentity.mockReset();
+    mocks.refetchCharacters.mockReset();
   });
 
   it('offers the explicit self-identity recovery for an unavailable reader identity', () => {
@@ -84,6 +98,33 @@ describe('CharactersPage progress gate', () => {
 
     expect(mocks.refetchProgress).toHaveBeenCalledOnce();
     expect(mocks.resetIdentity).not.toHaveBeenCalled();
+  });
+
+  it('distinguishes a character query failure from an empty cast and offers retry', () => {
+    mocks.charactersError = true;
+    render(<CharactersPage />);
+
+    expect(screen.getByRole('heading', { name: '暂时无法加载角色' })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: '暂时还没有角色' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '重试' }));
+    expect(mocks.refetchCharacters).toHaveBeenCalledOnce();
+  });
+
+  it('keeps cached characters visible when background refreshes fail', () => {
+    mocks.progressErrorCode = 'progress_unavailable';
+    mocks.progressCachedOnError = true;
+    mocks.charactersError = true;
+    mocks.charactersCachedOnError = true;
+    mocks.characters = [{
+      id: 'cached',
+      novel_id: 'novel',
+      name: 'Cached',
+      first_appearance_chapter: 1,
+    }];
+    render(<CharactersPage />);
+
+    expect(screen.getByRole('button', { name: 'Talk Cached' })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: '暂时无法加载角色' })).toBeNull();
   });
 
   it('closes chat when refreshed progress removes the active character', async () => {

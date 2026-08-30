@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
-import { ArrowLeft, Brain, Download, Key, Loader2, Save, Settings, Trash2 } from 'lucide-react';
+import { ArrowLeft, Brain, Download, Key, Loader2, LogOut, Save, Settings, Trash2 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import {
@@ -36,6 +36,7 @@ export function SettingsPage() {
   const navigate = useNavigate();
   const user = useAuthStore(state => state.user);
   const deleteAccount = useAuthStore(state => state.deleteAccount);
+  const logout = useAuthStore(state => state.logout);
   const [settings, setSettings] = useState<LlmSettings | null>(null);
   const [settingsLoading, setSettingsLoading] = useState(true);
   const [settingsError, setSettingsError] = useState(false);
@@ -338,6 +339,10 @@ export function SettingsPage() {
             你可以先导出完整数据。删除账号后，小说正文、对话、记忆、世界模型与个人时间线将永久移除。
           </p>
           <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
+            <button type="button" disabled={exporting || deleting} onClick={() => { void logout(); }} className="tonal-action">
+              <LogOut size={16} />
+              退出登录
+            </button>
             <button type="button" disabled={exporting || deleting} onClick={exportAccount} className="tonal-action">
               {exporting ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
               {exporting ? '正在导出…' : '导出账号数据'}
