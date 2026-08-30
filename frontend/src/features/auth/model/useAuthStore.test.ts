@@ -8,7 +8,7 @@ import { useAuthStore } from './useAuthStore';
 describe('useAuthStore', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
-    useAuthStore.setState({ user: null, loading: false });
+    useAuthStore.setState({ user: null, loading: false, authStatus: 'idle' });
     queryClient.clear();
     localStorage.clear();
     sessionStorage.clear();
@@ -18,6 +18,7 @@ describe('useAuthStore', () => {
     const state = useAuthStore.getState();
     expect(state.user).toBeNull();
     expect(state.loading).toBe(false);
+    expect(state.authStatus).toBe('idle');
   });
 
   it('clears private queries before exposing a registered principal', async () => {
@@ -42,7 +43,7 @@ describe('useAuthStore', () => {
     expect(cacheAtExposure).toEqual([undefined]);
   });
 
-  it('logout clears user and tokens', () => {
+  it('logout revokes by refresh token and clears the local session immediately', async () => {
     const request = vi.spyOn(apiClient, 'post').mockResolvedValue({ data: undefined });
     localStorage.setItem('auth_token', 'test');
     localStorage.setItem('refresh_token', 'test');
@@ -50,11 +51,10 @@ describe('useAuthStore', () => {
     sessionStorage.setItem(worldTurnPendingStorageKey('user-b', 'novel-b'), 'private-b');
     sessionStorage.setItem('unrelated', 'keep');
     queryClient.setQueryData(['private'], 'marker');
-    useAuthStore.getState().logout();
+    const logout = useAuthStore.getState().logout();
     expect(request).toHaveBeenCalledWith(
       '/auth/logout',
       { refresh_token: 'test' },
-      { headers: { Authorization: 'Bearer test' } },
     );
     expect(useAuthStore.getState().user).toBeNull();
     expect(localStorage.getItem('auth_token')).toBeNull();
@@ -62,6 +62,7 @@ describe('useAuthStore', () => {
     expect(sessionStorage.getItem(worldTurnPendingStorageKey('user-b', 'novel-b'))).toBeNull();
     expect(sessionStorage.getItem('unrelated')).toBe('keep');
     expect(queryClient.getQueryData(['private'])).toBeUndefined();
+    await logout;
   });
 
   it('keeps the session on failed erasure and clears it only after server success', async () => {
@@ -141,6 +142,7 @@ describe('useAuthStore', () => {
     expect(sessionStorage.getItem(worldTurnPendingStorageKey('old-user', 'novel'))).toBeNull();
     expect(sessionStorage.getItem('unrelated')).toBe('keep');
     expect(queryClient.getQueryData(['private'])).toBeUndefined();
+    expect(useAuthStore.getState().authStatus).toBe('anonymous');
     request.mockRestore();
   });
 
@@ -222,6 +224,7 @@ describe('useAuthStore', () => {
     expect(localStorage.getItem('refresh_token')).toBe('refresh');
     expect(sessionStorage.getItem(worldTurnPendingStorageKey('user-a', 'novel'))).toBe('recoverable');
     expect(queryClient.getQueryData(['private'])).toBe('marker');
+    expect(useAuthStore.getState().authStatus).toBe('error');
   });
 
   it('reconciles pending actions to the principal returned by fetchMe', async () => {

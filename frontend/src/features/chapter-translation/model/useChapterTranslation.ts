@@ -6,6 +6,16 @@ interface TranslationResponse {
   content: string;
 }
 
+export const MAX_CHAPTER_TRANSLATION_BYTES = 48_000;
+
+export function chapterTranslationByteLength(content: string) {
+  return new TextEncoder().encode(content).byteLength;
+}
+
+export function isChapterTranslationSupported(content: string) {
+  return chapterTranslationByteLength(content) <= MAX_CHAPTER_TRANSLATION_BYTES;
+}
+
 // Covers the backend's four-minute ownership lease when a replica disappears.
 const BUSY_RETRY_LIMIT = 55;
 const STANDARD_RETRY_LIMIT = 3;
@@ -19,6 +29,7 @@ function isBusyResponse(error: unknown) {
 }
 
 export function shouldRetryChapterTranslation(failureCount: number, error: unknown) {
+  if (axios.isAxiosError(error) && error.response?.status === 422) return false;
   return failureCount < (isBusyResponse(error) ? BUSY_RETRY_LIMIT : STANDARD_RETRY_LIMIT);
 }
 
@@ -45,14 +56,23 @@ export function useChapterTranslation(
 ) {
   return useQuery({
     queryKey: ['chapter-translation', novelId, chapterNumber, content],
-    queryFn: () => apiClient
-      .post<TranslationResponse>(
-        `/novels/${novelId}/chapters/${chapterNumber}/translation`,
-        { content },
-        { timeout: TRANSLATION_REQUEST_TIMEOUT_MS },
-      )
-      .then(response => response.data),
-    enabled: enabled && Boolean(novelId) && chapterNumber > 0 && Boolean(content.trim()),
+    queryFn: () => {
+      if (!isChapterTranslationSupported(content)) {
+        throw new Error(`chapter translation exceeds ${MAX_CHAPTER_TRANSLATION_BYTES} UTF-8 bytes`);
+      }
+      return apiClient
+        .post<TranslationResponse>(
+          `/novels/${novelId}/chapters/${chapterNumber}/translation`,
+          { content },
+          { timeout: TRANSLATION_REQUEST_TIMEOUT_MS },
+        )
+        .then(response => response.data);
+    },
+    enabled: enabled
+      && Boolean(novelId)
+      && chapterNumber > 0
+      && Boolean(content.trim())
+      && isChapterTranslationSupported(content),
     staleTime: Infinity,
     retry: shouldRetryChapterTranslation,
     retryDelay: chapterTranslationRetryDelay,

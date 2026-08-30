@@ -46,6 +46,14 @@ class BudgetVerifierTest(unittest.TestCase):
             report["operations"]["branch_generation"]["started"], 2
         )
 
+    def test_embedding_transport_metrics_do_not_pollute_the_chat_budget_contract(self):
+        sample = self.sample + (
+            '\nnovelworld_embedding_requests_total{contract="llm-observability-v1",'
+            'service="agent-service",provider="environment",model="embedding-model",'
+            'status="success"} 1\n'
+        )
+        self.assertTrue(self.run_verify(sample=sample)["passed"])
+
     def test_budget_contract_fails_closed(self):
         branch = 'operation="branch_generation"'
         mutations = {

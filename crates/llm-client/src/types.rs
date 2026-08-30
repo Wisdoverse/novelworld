@@ -44,27 +44,6 @@ pub struct ChatMessage {
     pub content: String,
 }
 
-impl ChatMessage {
-    pub fn system(content: impl Into<String>) -> Self {
-        Self {
-            role: "system".into(),
-            content: content.into(),
-        }
-    }
-    pub fn user(content: impl Into<String>) -> Self {
-        Self {
-            role: "user".into(),
-            content: content.into(),
-        }
-    }
-    pub fn assistant(content: impl Into<String>) -> Self {
-        Self {
-            role: "assistant".into(),
-            content: content.into(),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
     pub operation: LlmOperation,
@@ -256,52 +235,6 @@ pub struct EmbeddingRequest {
 pub struct EmbeddingResponse {
     pub embedding: Vec<f32>,
     pub model: String,
-}
-
-#[derive(Debug, Clone)]
-pub enum Provider {
-    OpenAI,
-    Anthropic,
-    Gemini,
-    OpenAICompatible,
-}
-
-#[derive(Debug, Clone)]
-pub struct ProviderConfig {
-    pub provider: Provider,
-    pub api_key: String,
-    pub base_url: Option<String>,
-}
-
-impl ProviderConfig {
-    pub fn openai(api_key: impl Into<String>) -> Self {
-        Self {
-            provider: Provider::OpenAI,
-            api_key: api_key.into(),
-            base_url: None,
-        }
-    }
-    pub fn anthropic(api_key: impl Into<String>) -> Self {
-        Self {
-            provider: Provider::Anthropic,
-            api_key: api_key.into(),
-            base_url: None,
-        }
-    }
-    pub fn gemini(api_key: impl Into<String>) -> Self {
-        Self {
-            provider: Provider::Gemini,
-            api_key: api_key.into(),
-            base_url: None,
-        }
-    }
-    pub fn openai_compatible(api_key: impl Into<String>, base_url: impl Into<String>) -> Self {
-        Self {
-            provider: Provider::OpenAICompatible,
-            api_key: api_key.into(),
-            base_url: Some(base_url.into()),
-        }
-    }
 }
 
 #[cfg(test)]

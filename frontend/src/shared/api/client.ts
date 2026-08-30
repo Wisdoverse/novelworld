@@ -1,4 +1,4 @@
-import axios, { AxiosHeaders, AxiosInstance } from 'axios';
+import axios, { AxiosHeaders, AxiosInstance, type InternalAxiosRequestConfig } from 'axios';
 import { isDesktopClient } from '@/shared/config/runtime';
 import { clearPrivateQueryCache } from '@/shared/api/queryClient';
 import { clearWorldTurnPendingRequests } from '@/shared/lib/worldTurnStorage';
@@ -10,20 +10,59 @@ export const apiClient: AxiosInstance = axios.create({
   timeout: 30000,
 });
 
-const PUBLIC_CREDENTIAL_PATHS = new Set(['/auth/login', '/auth/register', '/setup/init']);
+const PUBLIC_CREDENTIAL_PATHS = new Set([
+  '/auth/login',
+  '/auth/logout',
+  '/auth/refresh',
+  '/auth/register',
+  '/setup/init',
+]);
 
-export function invalidateSessionForUnauthorizedRequest(
-  status: number | undefined,
-  requestAuthorization: unknown,
-  requestUrl?: string,
-) {
-  if (status !== 401) return false;
-  if (requestUrl && PUBLIC_CREDENTIAL_PATHS.has(requestUrl)) return false;
-  const currentToken = localStorage.getItem('auth_token');
+type RefreshableRequestConfig = InternalAxiosRequestConfig & {
+  _sessionRefreshAttempted?: boolean;
+};
+
+type RefreshResult = {
+  previousAccessToken: string;
+  accessToken: string;
+  refreshToken: string;
+};
+
+let refreshFlight: { refreshToken: string; promise: Promise<RefreshResult> } | undefined;
+let lastRefresh: RefreshResult | undefined;
+
+class StaleSessionError extends Error {
+  constructor() {
+    super('The authenticated principal changed while refreshing the session');
+  }
+}
+
+function isDefinitiveRefreshRejection(error: unknown) {
+  if (!axios.isAxiosError(error)) return false;
+  return error.response?.status === 401 || error.response?.status === 403;
+}
+
+function requestPath(url?: string) {
+  if (!url) return undefined;
+  try {
+    const parsed = new URL(url, BASE_URL);
+    return parsed.pathname.replace(/^\/api(?=\/)/, '');
+  } catch {
+    return url.split(/[?#]/)[0];
+  }
+}
+
+function bearerToken(value: unknown) {
+  return typeof value === 'string' && value.startsWith('Bearer ')
+    ? value.slice('Bearer '.length)
+    : undefined;
+}
+
+function clearSession(expectedAccessToken: string, expectedRefreshToken?: string) {
+  if (localStorage.getItem('auth_token') !== expectedAccessToken) return false;
   if (
-    !currentToken
-    || typeof requestAuthorization !== 'string'
-    || requestAuthorization !== `Bearer ${currentToken}`
+    expectedRefreshToken !== undefined
+    && localStorage.getItem('refresh_token') !== expectedRefreshToken
   ) return false;
   clearPrivateQueryCache();
   localStorage.removeItem('auth_token');
@@ -32,12 +71,75 @@ export function invalidateSessionForUnauthorizedRequest(
   return true;
 }
 
+/** Rotate one refresh token at most once, even when several requests fail together. */
+export async function refreshSessionForAccessToken(
+  previousAccessToken: string,
+): Promise<string> {
+  const currentAccessToken = localStorage.getItem('auth_token');
+  const currentRefreshToken = localStorage.getItem('refresh_token');
+
+  if (
+    lastRefresh?.previousAccessToken === previousAccessToken
+    && lastRefresh.accessToken === currentAccessToken
+    && lastRefresh.refreshToken === currentRefreshToken
+  ) return lastRefresh.accessToken;
+
+  if (currentAccessToken !== previousAccessToken || !currentRefreshToken) {
+    throw new StaleSessionError();
+  }
+
+  if (refreshFlight?.refreshToken === currentRefreshToken) {
+    return (await refreshFlight.promise).accessToken;
+  }
+
+  const previousRefreshToken = currentRefreshToken;
+  const promise = apiClient.post<{ access_token: string; refresh_token: string }>(
+    '/auth/refresh',
+    { refresh_token: previousRefreshToken },
+  ).then(({ data }) => {
+    if (
+      localStorage.getItem('auth_token') !== previousAccessToken
+      || localStorage.getItem('refresh_token') !== previousRefreshToken
+    ) throw new StaleSessionError();
+
+    const result: RefreshResult = {
+      previousAccessToken,
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token,
+    };
+    localStorage.setItem('auth_token', result.accessToken);
+    localStorage.setItem('refresh_token', result.refreshToken);
+    lastRefresh = result;
+    return result;
+  }).finally(() => {
+    if (refreshFlight?.promise === promise) refreshFlight = undefined;
+  });
+  refreshFlight = { refreshToken: previousRefreshToken, promise };
+  return (await promise).accessToken;
+}
+
+export function invalidateSessionForUnauthorizedRequest(
+  status: number | undefined,
+  requestAuthorization: unknown,
+  requestUrl?: string,
+) {
+  if (status !== 401) return false;
+  if (requestUrl && PUBLIC_CREDENTIAL_PATHS.has(requestPath(requestUrl) ?? requestUrl)) return false;
+  const currentToken = localStorage.getItem('auth_token');
+  if (
+    !currentToken
+    || typeof requestAuthorization !== 'string'
+    || requestAuthorization !== `Bearer ${currentToken}`
+  ) return false;
+  return clearSession(currentToken);
+}
+
 export function invalidateSessionForUnauthorizedResponse(error: unknown) {
   if (!axios.isAxiosError(error)) return false;
   return invalidateSessionForUnauthorizedRequest(
     error.response?.status,
     AxiosHeaders.from(error.config?.headers).get('Authorization'),
-    error.config?.url?.split(/[?#]/)[0],
+    requestPath(error.config?.url),
   );
 }
 
@@ -77,7 +179,34 @@ apiClient.interceptors.request.use((config) => {
 // 响应拦截器：统一错误处理
 apiClient.interceptors.response.use(
   (response) => response,
-  (error) => {
+  async (error) => {
+    if (!axios.isAxiosError(error)) return Promise.reject(error);
+    const config = error.config as RefreshableRequestConfig | undefined;
+    const path = requestPath(config?.url);
+    const authorization = AxiosHeaders.from(config?.headers).get('Authorization');
+    const failedAccessToken = bearerToken(authorization);
+    const canRefresh = error.response?.status === 401
+      && config !== undefined
+      && !config._sessionRefreshAttempted
+      && (!path || !PUBLIC_CREDENTIAL_PATHS.has(path))
+      && failedAccessToken !== undefined;
+
+    if (canRefresh) {
+      config._sessionRefreshAttempted = true;
+      try {
+        const accessToken = await refreshSessionForAccessToken(failedAccessToken);
+        config.headers = AxiosHeaders.from(config.headers);
+        config.headers.set('Authorization', `Bearer ${accessToken}`);
+        return await apiClient.request(config);
+      } catch (refreshError) {
+        if (!isDefinitiveRefreshRejection(refreshError)) {
+          return Promise.reject(refreshError);
+        }
+        // The failing request is invalidated only when it still belongs to the
+        // current principal. A late response from an older principal is inert.
+      }
+    }
+
     if (invalidateSessionForUnauthorizedResponse(error)) {
       reloadOrRedirectAfterUnauthorized();
     }
@@ -285,7 +414,8 @@ function responseErrorBody(value: unknown, status: number): ChatStreamError {
 
 /** POST-based SSE chat with one idempotency key for every retry. */
 export function createChatStream(options: ChatStreamOptions): () => void {
-  const token = localStorage.getItem('auth_token');
+  let token = localStorage.getItem('auth_token');
+  let sessionRefreshAttempted = false;
   let cancelled = false;
   let settled = false;
   let retries = 0;
@@ -377,6 +507,33 @@ export function createChatStream(options: ChatStreamOptions): () => void {
     }
 
     if (!response.ok) {
+      if (response.status === 401 && token && !sessionRefreshAttempted) {
+        sessionRefreshAttempted = true;
+        try {
+          token = await refreshSessionForAccessToken(token);
+          await response.body?.cancel().catch(() => undefined);
+          options.onRetry?.();
+          await attempt();
+          return;
+        } catch (refreshError) {
+          if (
+            !(refreshError instanceof StaleSessionError)
+            && !isDefinitiveRefreshRejection(refreshError)
+          ) {
+            await response.body?.cancel().catch(() => undefined);
+            fail({
+              code: 'session_refresh_unavailable',
+              message: getApiErrorMessage(
+                refreshError,
+                'Session refresh is temporarily unavailable',
+              ),
+            });
+            return;
+          }
+          // Fall through to the same session-fenced invalidation used by the
+          // Axios interceptor. A newer principal is never cleared here.
+        }
+      }
       if (invalidateSessionForUnauthorizedRequest(
         response.status,
         token ? `Bearer ${token}` : undefined,

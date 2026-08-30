@@ -6,6 +6,8 @@ import {
 } from './fixtures';
 
 export interface StubOptions {
+  /** Seed an authenticated browser session. Defaults to true. */
+  authenticated?: boolean;
   /** /setup/status reports configured:false so the app boots into SetupPage. */
   setupNeeded?: boolean;
   /** Open-world view present on the reader page (WorldDashboard + WorldActionForm render). */
@@ -58,6 +60,7 @@ export async function installStubs(page: Page, opts: StubOptions = {}): Promise<
     ['POST', /^\/auth\/login$/, () => json(200, AUTH_TOKENS)],
     ['POST', /^\/auth\/register$/, () => json(200, AUTH_TOKENS)],
     ['GET', /^\/novels$/, () => json(200, NOVELS)],
+    ['GET', /^\/novels\/catalog$/, () => json(200, NOVELS)],
     ['GET', /^\/novels\/[^/]+$/, () => json(200, NOVEL)],
     ['GET', /^\/novels\/[^/]+\/status$/, () => json(200, { status: 'ready', total_chapters: 5 })],
     ['GET', /^\/novels\/[^/]+\/chapters$/, () => json(200, [CHAPTER])],
@@ -145,11 +148,13 @@ export async function installStubs(page: Page, opts: StubOptions = {}): Promise<
   await page.route('https://fonts.googleapis.com/**', (route) => route.abort());
   await page.route('https://fonts.gstatic.com/**', (route) => route.abort());
 
-  // Authenticated session: real guard passes; /auth/me returns USER.
-  await page.addInitScript(() => {
-    localStorage.setItem('auth_token', 'e2e-access-token');
-    localStorage.setItem('refresh_token', 'e2e-refresh-token');
-  });
+  if (opts.authenticated !== false) {
+    // Authenticated session: real guard passes; /auth/me returns USER.
+    await page.addInitScript(() => {
+      localStorage.setItem('auth_token', 'e2e-access-token');
+      localStorage.setItem('refresh_token', 'e2e-refresh-token');
+    });
+  }
 }
 
 export { JOURNAL_ENTRY };

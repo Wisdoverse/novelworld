@@ -1,13 +1,8 @@
-pub mod anthropic;
-pub mod gemini;
 pub mod openai;
 pub(crate) mod sse;
 
-use crate::types::{
-    ChatRequest, ChatResponse, ChatStream, EmbeddingRequest, EmbeddingResponse, LlmApiError,
-};
+use crate::types::LlmApiError;
 use anyhow::Result;
-use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest::header::RETRY_AFTER;
 use serde::de::DeserializeOwned;
@@ -45,34 +40,4 @@ pub(crate) async fn json_response<T: DeserializeOwned>(response: reqwest::Respon
         body.extend_from_slice(&chunk);
     }
     Ok(serde_json::from_slice(&body)?)
-}
-
-#[async_trait]
-pub trait LlmProvider: Send + Sync {
-    fn auth_header(&self, api_key: &str) -> (String, String);
-
-    fn reports_response_model(&self) -> bool {
-        false
-    }
-
-    async fn chat(
-        &self,
-        client: &reqwest::Client,
-        api_key: &str,
-        request: &ChatRequest,
-    ) -> Result<ChatResponse>;
-
-    async fn chat_stream(
-        &self,
-        client: &reqwest::Client,
-        api_key: &str,
-        request: &ChatRequest,
-    ) -> Result<ChatStream>;
-
-    async fn embed(
-        &self,
-        client: &reqwest::Client,
-        api_key: &str,
-        request: &EmbeddingRequest,
-    ) -> Result<EmbeddingResponse>;
 }

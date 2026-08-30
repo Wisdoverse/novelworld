@@ -11,7 +11,10 @@ services:
     volumes:
       - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U test -d novelworld_test"]
+      # pg_isready also succeeds against the image's temporary bootstrap
+      # server. PID 1 becomes postgres only after that server is replaced by
+      # the final runtime, so migrations cannot race the handoff.
+      test: ["CMD-SHELL", "test \"$$(cat /proc/1/comm)\" = postgres && pg_isready -U test -d novelworld_test"]
       interval: 2s
       timeout: 3s
       retries: 10

@@ -1350,8 +1350,10 @@ returns both a new access token and a replacement refresh token.
 
 - All application endpoints under `/api` except setup status/init, the
   deprecated setup LLM probe,
-  `POST /api/auth/register`, `POST /api/auth/login`, and
-  `POST /api/auth/refresh` MUST present a valid JWT. Setup init succeeds only while
+  `POST /api/auth/register`, `POST /api/auth/login`,
+  `POST /api/auth/refresh`, and `POST /api/auth/logout` MUST present a valid
+  JWT. Logout is authenticated by the opaque refresh token in its request body,
+  so a client can revoke the session after its access JWT expires. Setup init succeeds only while
   the `users` table is empty and atomically creates one administrator, its
   refresh token, and (when not supplied by the environment) an encrypted model
   configuration. Anonymous setup only accepts provider presets with fixed
@@ -1380,7 +1382,7 @@ routes are outside this public contract.
 | POST | `/api/auth/refresh` | User | Refresh token | Atomically rotate and issue new access and refresh tokens |
 | GET | `/api/auth/me` | User | JWT | Current user profile |
 | DELETE | `/api/auth/me` | User | JWT | Permanently delete the acting account and owned application data |
-| POST | `/api/auth/logout` | User | JWT | Invalidate refresh token |
+| POST | `/api/auth/logout` | User | Refresh token | Invalidate the submitted refresh token without requiring a valid access JWT |
 | GET | `/api/settings/llm` | User | JWT | Read the acting scope without returning a secret: platform for administrators; personal when configured for other users, otherwise platform fallback metadata |
 | PUT | `/api/settings/llm` | User | JWT | Validate and update the platform configuration for administrators or the acting user's encrypted personal configuration |
 | GET | `/api/settings/llm/usage` | User | JWT | Read key-scoped usage: platform for administrators, personal for other users; return 403 when no personal key is configured |

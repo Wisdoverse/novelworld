@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 use tokio::sync::{oneshot, watch, OwnedSemaphorePermit, Semaphore};
@@ -720,6 +720,7 @@ pub enum GameRuleTemplateRequestError {
 }
 
 const MAX_AVATARS_PER_NOVEL: usize = 30;
+const MAX_CONCURRENT_AVATAR_REQUESTS: usize = 6;
 const MAX_IMPORT_CHAPTERS: usize = 2_048;
 const MAX_BOUNDARY_REPAIR_SEGMENTS: usize = 8;
 const MAX_BOUNDARY_REPAIR_ROUNDS: usize = 3;
@@ -729,6 +730,13 @@ const MAX_IMPORT_PROVIDER_CALLS: usize = 640;
 const IMPORT_LEASE_HEARTBEAT: Duration = Duration::from_secs(30);
 const IMPORT_RECOVERY_INTERVAL: Duration = Duration::from_secs(30);
 const GAME_RULE_LEASE_HEARTBEAT: Duration = Duration::from_secs(30);
+
+fn shared_avatar_admission() -> Arc<Semaphore> {
+    static ADMISSION: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    ADMISSION
+        .get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_AVATAR_REQUESTS)))
+        .clone()
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error("Novel import lease was lost")]
@@ -1339,7 +1347,6 @@ impl NovelCommandHandler {
     }
 
     async fn run_claimed_import(&self, claim: ImportClaim, admission: ImportAdmission) {
-        let _admission = admission;
         let mut lease = ImportLease::start(self.novel_repo.clone(), claim.novel_id, claim.attempt);
         match lease.run(self.process_import(&claim)).await {
             None => tracing::warn!(
@@ -1407,6 +1414,9 @@ impl NovelCommandHandler {
             }
             Some(Ok(characters)) => {
                 lease.stop();
+                // Core import completion is durable. Cosmetic work no longer
+                // holds import admission, but it has its own service-wide cap.
+                drop(admission);
                 self.generate_avatars(claim.novel_id, &characters).await;
             }
         }
@@ -2060,16 +2070,19 @@ impl NovelCommandHandler {
                     .clone()
                     .map(|appearance| (character.id, appearance))
             });
+        let avatar_admission = shared_avatar_admission();
         stream::iter(avatar_jobs)
             .for_each_concurrent(3, |(character_id, appearance)| {
                 let character_repo = self.character_repo.clone();
                 let image_client = self.image_client.clone();
+                let avatar_admission = avatar_admission.clone();
                 async move {
                     if let Err(error) = Self::generate_avatar(
                         character_id,
                         &appearance,
                         character_repo,
                         image_client,
+                        avatar_admission,
                     )
                     .await
                     {
@@ -2085,7 +2098,12 @@ impl NovelCommandHandler {
         appearance: &str,
         character_repo: Arc<dyn CharacterRepository>,
         image_client: Arc<dyn ImagePort>,
+        avatar_admission: Arc<Semaphore>,
     ) -> Result<()> {
+        let _permit = avatar_admission
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow::anyhow!("avatar admission closed"))?;
         let appearance: String = appearance.chars().take(2_000).collect();
         let prompt = format!(
             "Portrait of a fictional character. {appearance}. \
@@ -2127,6 +2145,58 @@ async fn retain_source_file(
 #[cfg(test)]
 mod import_budget_tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct AvatarRepository;
+
+    #[async_trait::async_trait]
+    impl CharacterRepository for AvatarRepository {
+        async fn replace_import(
+            &self,
+            _novel_id: Uuid,
+            _attempt: i64,
+            _characters: &[Character],
+            _relationships: &[CharacterRelationshipRecord],
+        ) -> Result<bool> {
+            unreachable!("unused test repository method")
+        }
+
+        async fn find_by_novel(&self, _novel_id: Uuid) -> Result<Vec<Character>> {
+            unreachable!("unused test repository method")
+        }
+
+        async fn find_by_id(&self, _id: Uuid) -> Result<Option<Character>> {
+            unreachable!("unused test repository method")
+        }
+
+        async fn set_avatar(&self, _character_id: Uuid, _avatar_url: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn find_relationships(
+            &self,
+            _novel_id: Uuid,
+        ) -> Result<Vec<CharacterRelationshipRecord>> {
+            unreachable!("unused test repository method")
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingImage {
+        active: AtomicUsize,
+        maximum: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ImagePort for CountingImage {
+        async fn generate(&self, _prompt: &str) -> Result<String> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.maximum.fetch_max(active, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok("https://example.invalid/avatar.png".into())
+        }
+    }
 
     struct RecordingStorage {
         events: Arc<Mutex<Vec<&'static str>>>,
@@ -2210,6 +2280,49 @@ mod import_budget_tests {
         drop(first);
         drop(second);
         assert!(try_import_admission(&permits, &users, first_user).is_ok());
+    }
+
+    #[test]
+    fn durable_completion_releases_import_admission_before_optional_work() {
+        let permits = Arc::new(Semaphore::new(1));
+        let users = Arc::new(Mutex::new(HashSet::new()));
+        let user_id = Uuid::new_v4();
+        let admission = try_import_admission(&permits, &users, user_id).unwrap();
+
+        drop(admission);
+        assert_eq!(permits.available_permits(), 1);
+        assert!(!users.lock().unwrap().contains(&user_id));
+        let next = try_import_admission(&permits, &users, user_id);
+        assert!(next.is_ok());
+    }
+
+    #[tokio::test]
+    async fn avatar_requests_share_a_service_wide_admission_cap() {
+        let permits = Arc::new(Semaphore::new(2));
+        let repository: Arc<dyn CharacterRepository> = Arc::new(AvatarRepository);
+        let image = Arc::new(CountingImage::default());
+        let results = stream::iter(0..6)
+            .map(|_| {
+                let repository = repository.clone();
+                let image_client: Arc<dyn ImagePort> = image.clone();
+                let permits = permits.clone();
+                async move {
+                    NovelCommandHandler::generate_avatar(
+                        Uuid::new_v4(),
+                        "silver hair",
+                        repository,
+                        image_client,
+                        permits,
+                    )
+                    .await
+                }
+            })
+            .buffer_unordered(6)
+            .collect::<Vec<_>>()
+            .await;
+
+        assert!(results.into_iter().all(|result| result.is_ok()));
+        assert_eq!(image.maximum.load(Ordering::SeqCst), 2);
     }
 
     #[test]

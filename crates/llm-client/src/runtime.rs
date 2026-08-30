@@ -91,10 +91,6 @@ impl RuntimeLlmClient {
         }
     }
 
-    pub fn remote(user_service_url: String, token: String) -> Self {
-        Self::remote_with_http_policy(user_service_url, token, false)
-    }
-
     fn remote_with_http_policy(
         user_service_url: String,
         token: String,
@@ -165,38 +161,10 @@ impl RuntimeLlmClient {
         resolved.client.chat_stream(request).await
     }
 
-    pub async fn simple_chat(
-        &self,
-        operation: crate::LlmOperation,
-        system: &str,
-        user: &str,
-    ) -> Result<String> {
-        self.chat(
-            ChatRequest::new(operation, "")
-                .message("system", system)
-                .message("user", user)
-                .temperature(0.8)
-                .max_tokens(1024),
-        )
-        .await
-        .map(|response| response.content)
-    }
-
     /// Generate prose where the output itself is the product. Reasoning mode
     /// is deliberately disabled so providers such as DeepSeek cannot consume
     /// the response budget with hidden reasoning and return an incomplete
     /// chapter instead of usable text.
-    pub async fn longform_chat(
-        &self,
-        operation: crate::LlmOperation,
-        system: &str,
-        user: &str,
-    ) -> Result<String> {
-        self.chat(longform_request(operation, system, user))
-            .await
-            .map(|response| response.content)
-    }
-
     pub async fn longform_chat_for_user(
         &self,
         runtime_user_id: impl Into<String>,
@@ -205,12 +173,6 @@ impl RuntimeLlmClient {
         user: &str,
     ) -> Result<String> {
         self.chat(longform_request(operation, system, user).runtime_user_id(runtime_user_id))
-            .await
-            .map(|response| response.content)
-    }
-
-    pub async fn json_chat(&self, operation: crate::LlmOperation, prompt: &str) -> Result<String> {
-        self.chat(production_json_request(operation, prompt))
             .await
             .map(|response| response.content)
     }

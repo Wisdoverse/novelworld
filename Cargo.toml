@@ -23,10 +23,6 @@ axum = { version = "0.8", features = ["multipart", "ws"] }
 tower = { version = "0.5", features = ["full"] }
 tower-http = { version = "0.7", features = ["cors", "trace", "compression-gzip"] }
 
-# gRPC
-tonic = "0.14"
-prost = "0.14"
-
 # Database
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json"] }
 
@@ -53,7 +49,6 @@ anyhow = "1"
 sha2 = "0.11"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-config = "0.15"
 dotenvy = "0.15"
 futures = "0.3"
 async-trait = "0.1"

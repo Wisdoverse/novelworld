@@ -8,18 +8,30 @@ import type { User } from '@/shared/types';
 interface AuthState {
   user: User | null;
   loading: boolean;
+  authStatus: 'idle' | 'checking' | 'authenticated' | 'anonymous' | 'error';
   register: (email: string, password: string, name?: string) => Promise<void>;
   login: (email: string, password: string) => Promise<void>;
-  logout: () => void;
+  logout: () => Promise<void>;
   deleteAccount: () => Promise<boolean>;
   fetchMe: () => Promise<void>;
+}
+
+let principalRevision = 0;
+
+function clearLocalSession() {
+  clearPrivateQueryCache();
+  localStorage.removeItem('auth_token');
+  localStorage.removeItem('refresh_token');
+  clearWorldTurnPendingRequests();
 }
 
 export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
   loading: false,
+  authStatus: 'idle',
 
   register: async (email, password, name) => {
+    const revision = ++principalRevision;
     set({ loading: true });
     try {
       const res = await apiClient.post<{
@@ -27,18 +39,20 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         access_token: string;
         refresh_token: string;
       }>('/auth/register', { email, password, name });
+      if (principalRevision !== revision) return;
       clearPrivateQueryCache();
       clearWorldTurnPendingRequests(res.data.user.id);
       localStorage.setItem('auth_token', res.data.access_token);
       localStorage.setItem('refresh_token', res.data.refresh_token);
-      set({ user: res.data.user, loading: false });
+      set({ user: res.data.user, loading: false, authStatus: 'authenticated' });
     } catch (e) {
-      set({ loading: false });
+      if (principalRevision === revision) set({ loading: false });
       throw e;
     }
   },
 
   login: async (email, password) => {
+    const revision = ++principalRevision;
     set({ loading: true });
     try {
       const res = await apiClient.post<{
@@ -46,73 +60,76 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         access_token: string;
         refresh_token: string;
       }>('/auth/login', { email, password });
+      if (principalRevision !== revision) return;
       clearPrivateQueryCache();
       clearWorldTurnPendingRequests(res.data.user.id);
       localStorage.setItem('auth_token', res.data.access_token);
       localStorage.setItem('refresh_token', res.data.refresh_token);
-      set({ user: res.data.user, loading: false });
+      set({ user: res.data.user, loading: false, authStatus: 'authenticated' });
     } catch (e) {
-      set({ loading: false });
+      if (principalRevision === revision) set({ loading: false });
       throw e;
     }
   },
 
-  logout: () => {
-    const accessToken = localStorage.getItem('auth_token');
+  logout: async () => {
+    ++principalRevision;
     const refreshToken = localStorage.getItem('refresh_token');
-    if (refreshToken) {
-      apiClient.post(
-        '/auth/logout',
-        { refresh_token: refreshToken },
-        accessToken ? { headers: { Authorization: `Bearer ${accessToken}` } } : undefined,
-      ).catch(() => {});
-    }
-    clearPrivateQueryCache();
-    localStorage.removeItem('auth_token');
-    localStorage.removeItem('refresh_token');
-    clearWorldTurnPendingRequests();
-    set({ user: null });
+    const revocation = refreshToken
+      ? apiClient.post('/auth/logout', { refresh_token: refreshToken })
+      : Promise.resolve();
+    // Local logout is immediate. Clearing the token pair also fences any
+    // refresh response already in flight from resurrecting this session.
+    clearLocalSession();
+    set({ user: null, loading: false, authStatus: 'anonymous' });
+    await revocation.catch(() => undefined);
   },
 
   deleteAccount: async () => {
-    const token = localStorage.getItem('auth_token');
+    const revision = principalRevision;
     const userId = get().user?.id;
     await apiClient.delete('/auth/me');
-    if (
-      localStorage.getItem('auth_token') !== token
-      || get().user?.id !== userId
-    ) return false;
-    clearPrivateQueryCache();
-    localStorage.removeItem('auth_token');
-    localStorage.removeItem('refresh_token');
-    clearWorldTurnPendingRequests();
-    set({ user: null });
+    if (principalRevision !== revision || get().user?.id !== userId) return false;
+    ++principalRevision;
+    clearLocalSession();
+    set({ user: null, loading: false, authStatus: 'anonymous' });
     return true;
   },
 
   fetchMe: async () => {
-    const token = localStorage.getItem('auth_token');
-    if (!token) {
-      clearPrivateQueryCache();
-      clearWorldTurnPendingRequests();
-      set({ user: null });
+    const revision = principalRevision;
+    const principalAtStart = get().user?.id ?? null;
+    if (!localStorage.getItem('auth_token')) {
+      clearLocalSession();
+      set({ user: null, authStatus: 'anonymous' });
       return;
     }
+    set({ authStatus: 'checking' });
     try {
       const res = await apiClient.get<User>('/auth/me');
-      if (localStorage.getItem('auth_token') !== token) return;
+      if (
+        principalRevision !== revision
+        || (get().user?.id ?? null) !== principalAtStart
+      ) return;
       clearPrivateQueryCache();
       clearWorldTurnPendingRequests(res.data.id);
-      set({ user: res.data });
+      set({ user: res.data, authStatus: 'authenticated' });
     } catch (error) {
-      if (localStorage.getItem('auth_token') !== token) return;
+      if (
+        principalRevision !== revision
+        || (get().user?.id ?? null) !== principalAtStart
+      ) return;
       const status = isAxiosError(error) ? error.response?.status : undefined;
-      if (status === 401 || status === 403) {
-        clearPrivateQueryCache();
-        localStorage.removeItem('auth_token');
-        localStorage.removeItem('refresh_token');
-        clearWorldTurnPendingRequests();
-        set({ user: null });
+      if (
+        status === 401
+        || status === 403
+        || (!localStorage.getItem('auth_token') && !localStorage.getItem('refresh_token'))
+      ) {
+        ++principalRevision;
+        clearLocalSession();
+        set({ user: null, authStatus: 'anonymous' });
+      } else {
+        set({ authStatus: 'error' });
       }
     }
   },

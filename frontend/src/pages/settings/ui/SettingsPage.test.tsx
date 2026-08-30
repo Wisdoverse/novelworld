@@ -1,4 +1,3 @@
-import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -10,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   delete: vi.fn(),
   error: vi.fn(),
   get: vi.fn(),
+  post: vi.fn(),
   put: vi.fn(),
   success: vi.fn(),
 }));
@@ -17,7 +17,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('sonner', () => ({ toast: { error: mocks.error, success: mocks.success } }));
 
 vi.mock('@/shared/api/client', () => ({
-  apiClient: { delete: mocks.delete, get: mocks.get, put: mocks.put },
+  apiClient: { delete: mocks.delete, get: mocks.get, post: mocks.post, put: mocks.put },
   getApiErrorCode: (error: { code?: string }) => error?.code,
   getApiErrorMessage: (_error: unknown, fallback: string) => fallback,
 }));
@@ -41,6 +41,7 @@ describe('SettingsPage', () => {
     vi.restoreAllMocks();
     mocks.get.mockReset();
     mocks.put.mockReset();
+    mocks.post.mockReset();
     mocks.delete.mockReset();
     mocks.error.mockReset();
     mocks.success.mockReset();
@@ -55,6 +56,7 @@ describe('SettingsPage', () => {
       if (url === '/settings/llm') return Promise.resolve({ data: settingsForCurrentUser() });
       return Promise.reject(new Error(`unexpected GET ${url}`));
     });
+    mocks.post.mockResolvedValue({ data: undefined });
     Object.defineProperty(URL, 'createObjectURL', {
       configurable: true,
       value: vi.fn(() => 'blob:account-export'),
@@ -311,6 +313,26 @@ describe('SettingsPage', () => {
     expect(mocks.get).toHaveBeenCalledWith('/settings/llm');
     expect(localStorage.getItem('auth_token')).toBeNull();
     confirm.mockRestore();
+  });
+
+  it('offers visible logout and revokes the refresh token without relying on access validity', async () => {
+    useAuthStore.setState({
+      user: { id: 'reader', email: 'reader@example.com', role: 'user' },
+      authStatus: 'authenticated',
+    });
+    localStorage.setItem('auth_token', 'expired-access');
+    localStorage.setItem('refresh_token', 'valid-refresh');
+
+    render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: '退出登录' }));
+
+    expect(mocks.post).toHaveBeenCalledWith('/auth/logout', {
+      refresh_token: 'valid-refresh',
+    });
+    expect(useAuthStore.getState().user).toBeNull();
+    expect(useAuthStore.getState().authStatus).toBe('anonymous');
+    expect(localStorage.getItem('auth_token')).toBeNull();
+    expect(localStorage.getItem('refresh_token')).toBeNull();
   });
 
   it('keeps account erasure available when administrator model settings fail', async () => {

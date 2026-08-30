@@ -75,6 +75,11 @@ pub struct S3SourceFileStorage {
 
 impl S3SourceFileStorage {
     pub async fn new(config: S3StorageConfig) -> Result<Self> {
+        #[cfg(test)]
+        let uses_plain_http_test_endpoint = config
+            .endpoint
+            .as_deref()
+            .is_some_and(|endpoint| endpoint.starts_with("http://"));
         let timeout = TimeoutConfig::builder()
             .connect_timeout(Duration::from_secs(3))
             .read_timeout(Duration::from_secs(15))
@@ -85,6 +90,14 @@ impl S3SourceFileStorage {
             .region(Region::new(config.region))
             .retry_config(RetryConfig::standard().with_max_attempts(3))
             .timeout_config(timeout);
+        #[cfg(test)]
+        if uses_plain_http_test_endpoint {
+            // The loopback fake S3 server is deliberately HTTP-only. Supplying
+            // an HTTP-only Smithy client keeps these adapter tests independent
+            // of the host certificate store while production continues to use
+            // the SDK's normal verified TLS client.
+            loader = loader.http_client(aws_smithy_http_client::Builder::new().build_http());
+        }
         if let (Some(access_key), Some(secret_key)) = (config.access_key, config.secret_key) {
             loader = loader.credentials_provider(Credentials::new(
                 access_key,

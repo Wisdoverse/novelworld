@@ -1,4 +1,3 @@
-import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NarrativeNode, OpenWorldView } from '@/shared/types';
@@ -13,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   progressSaving: false,
   progressError: true,
   progressLoadErrorCode: undefined as string | undefined,
+  progressCachedOnError: false,
   refetchProgress: vi.fn(),
   resetIdentity: vi.fn(),
   resetIdentityPending: false,
@@ -21,6 +21,12 @@ const mocks = vi.hoisted(() => ({
   readerIdentity: undefined as string | undefined,
   readerCharacterId: undefined as string | undefined,
   totalChapters: 3,
+  novelError: false,
+  novelCachedOnError: false,
+  chapterError: false,
+  chapterCachedOnError: false,
+  refetchNovel: vi.fn(),
+  refetchChapter: vi.fn(),
   hasBranch: false,
   player: {
     id: 'player', name: '云舟', canonical_checkpoint_chapter: 1, location_id: 'tower',
@@ -44,6 +50,7 @@ const mocks = vi.hoisted(() => ({
   effectiveError: false,
   translationContent: '第二章',
   translationError: false,
+  translationQueryEnabled: false,
   effectiveIdentityScope: 'unresolved',
   effectiveProgressBoundary: 0,
   effectiveEnabled: false,
@@ -73,17 +80,25 @@ vi.mock('react-router-dom', () => ({
 
 vi.mock('@/entities/novel', () => ({
   useNovel: () => ({
-    data: { id: mocks.novelId, title: 'Novel', total_chapters: mocks.totalChapters },
+    data: mocks.novelError && !mocks.novelCachedOnError
+      ? undefined
+      : { id: mocks.novelId, title: 'Novel', total_chapters: mocks.totalChapters },
+    isError: mocks.novelError,
+    refetch: mocks.refetchNovel,
   }),
   useChapter: () => ({
-    data: {
-      chapter_number: 2,
-      title: 'Two',
-      content: 'Chapter two',
-      is_key_node: mocks.hasBranch,
-      key_node_description: mocks.hasBranch ? 'A choice' : undefined,
-    },
+    data: mocks.chapterError && !mocks.chapterCachedOnError
+      ? undefined
+      : {
+          chapter_number: 2,
+          title: 'Two',
+          content: 'Chapter two',
+          is_key_node: mocks.hasBranch,
+          key_node_description: mocks.hasBranch ? 'A choice' : undefined,
+        },
     isLoading: false,
+    isError: mocks.chapterError,
+    refetch: mocks.refetchChapter,
   }),
   useCharacters: (_novelId: string, chapter: number, enabled = true) => {
     mocks.charactersChapter = chapter;
@@ -100,7 +115,7 @@ vi.mock('@/entities/novel', () => ({
 
 vi.mock('@/entities/reading-progress', () => ({
   useReadingProgress: () => ({
-    data: mocks.progressLoadErrorCode
+    data: mocks.progressLoadErrorCode && !mocks.progressCachedOnError
       ? undefined
       : {
           current_chapter: mocks.progressChapter,
@@ -132,28 +147,39 @@ vi.mock('@/entities/reading-progress', () => ({
 }));
 
 vi.mock('@/features/chapter-translation', () => ({
+  MAX_CHAPTER_TRANSLATION_BYTES: 48_000,
+  chapterTranslationByteLength: (content: string) => new TextEncoder().encode(content).byteLength,
+  isChapterTranslationSupported: (content: string) => new TextEncoder().encode(content).byteLength <= 48_000,
   useChapterTranslation: (
     _novelId: string,
     _chapterNumber: number,
     _content: string,
     enabled: boolean,
-  ) => ({
-    data: enabled && !mocks.translationError ? { content: mocks.translationContent } : undefined,
-    isFetching: false,
-    isError: enabled && mocks.translationError,
-    refetch: vi.fn(),
-  }),
+  ) => {
+    mocks.translationQueryEnabled = enabled;
+    return {
+      data: enabled && !mocks.translationError ? { content: mocks.translationContent } : undefined,
+      isFetching: false,
+      isError: enabled && mocks.translationError,
+      refetch: vi.fn(),
+    };
+  },
   TranslationControls: ({
     active,
     isError,
+    unavailableReason,
     onToggle,
   }: {
     active: boolean;
     isError: boolean;
+    unavailableReason?: string;
     onToggle: () => void;
   }) => (
     <>
-      <button onClick={onToggle}>{active ? '显示原文' : '翻译成中文'}</button>
+      <button disabled={Boolean(unavailableReason)} onClick={onToggle}>
+        {unavailableReason ? '本章暂不支持翻译' : active ? '显示原文' : '翻译成中文'}
+      </button>
+      {unavailableReason ? <span>{unavailableReason}</span> : null}
       {isError ? <span role="alert">翻译失败，当前显示原文。</span> : null}
     </>
   ),
@@ -312,12 +338,17 @@ describe('ReaderPage progress gate', () => {
     mocks.progressSaving = false;
     mocks.progressError = true;
     mocks.progressLoadErrorCode = undefined;
+    mocks.progressCachedOnError = false;
     mocks.resetIdentityPending = false;
     mocks.progressChapter = 1;
     mocks.identityType = 'self';
     mocks.readerIdentity = undefined;
     mocks.readerCharacterId = undefined;
     mocks.totalChapters = 3;
+    mocks.novelError = false;
+    mocks.novelCachedOnError = false;
+    mocks.chapterError = false;
+    mocks.chapterCachedOnError = false;
     mocks.hasBranch = false;
     mocks.player = {
       id: 'player', name: '云舟', canonical_checkpoint_chapter: 1, location_id: 'tower',
@@ -337,6 +368,7 @@ describe('ReaderPage progress gate', () => {
     mocks.effectiveError = false;
     mocks.translationContent = '第二章';
     mocks.translationError = false;
+    mocks.translationQueryEnabled = false;
     mocks.effectiveIdentityScope = 'unresolved';
     mocks.effectiveProgressBoundary = 0;
     mocks.effectiveEnabled = false;
@@ -349,6 +381,8 @@ describe('ReaderPage progress gate', () => {
     mocks.resetIdentity.mockReset();
     mocks.refetchWorldState.mockReset();
     mocks.refetchOpenWorld.mockReset();
+    mocks.refetchNovel.mockReset();
+    mocks.refetchChapter.mockReset();
     mocks.refetchWorldState.mockImplementation(async () => ({
       data: { state: { choices: mocks.worldChoices } },
     }));
@@ -374,6 +408,33 @@ describe('ReaderPage progress gate', () => {
 
     expect(mocks.refetchProgress).toHaveBeenCalledOnce();
     expect(mocks.resetIdentity).not.toHaveBeenCalled();
+  });
+
+  it('offers retry when the novel or chapter body cannot be loaded', () => {
+    mocks.progressError = false;
+    mocks.novelError = true;
+    mocks.chapterError = true;
+    render(<ReaderPage />);
+
+    expect(screen.getByRole('heading', { name: '暂时无法加载章节' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '重试' }));
+
+    expect(mocks.refetchNovel).toHaveBeenCalledOnce();
+    expect(mocks.refetchChapter).toHaveBeenCalledOnce();
+  });
+
+  it('keeps cached chapter data visible when background refreshes fail', () => {
+    mocks.progressError = false;
+    mocks.progressLoadErrorCode = 'progress_unavailable';
+    mocks.progressCachedOnError = true;
+    mocks.novelError = true;
+    mocks.novelCachedOnError = true;
+    mocks.chapterError = true;
+    mocks.chapterCachedOnError = true;
+    render(<ReaderPage />);
+
+    expect(screen.getByRole('heading', { name: 'Two' })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: '暂时无法加载章节' })).toBeNull();
   });
 
   it('offers an explicit retry after persistence fails', async () => {
@@ -424,6 +485,18 @@ describe('ReaderPage progress gate', () => {
 
     expect(screen.getByText('Chapter two')).toBeTruthy();
     expect(screen.getByRole('alert').textContent).toContain('当前显示原文');
+  });
+
+  it('keeps over-limit UTF-8 content in source mode without requesting translation', () => {
+    mocks.progressError = false;
+    mocks.progressChapter = 2;
+    mocks.effectiveContent = 'a'.repeat(48_001);
+    render(<ReaderPage />);
+
+    const translate = screen.getByRole('button', { name: '本章暂不支持翻译' }) as HTMLButtonElement;
+    expect(translate.disabled).toBe(true);
+    expect(screen.getByText(/48,001.*48,000.*翻译上限/)).toBeTruthy();
+    expect(mocks.translationQueryEnabled).toBe(false);
   });
 
   it('closes chat when rewind makes the active character unavailable', async () => {

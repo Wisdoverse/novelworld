@@ -365,6 +365,9 @@ fn build_router(state: AppState) -> AnyResult<Router> {
         .route("/api/auth/register", post(proxy::forward_to_user))
         .route("/api/auth/login", post(proxy::forward_to_user))
         .route("/api/auth/refresh", post(proxy::forward_to_user))
+        // Logout is authenticated by the opaque refresh token in its body.
+        // Keeping it public lets an expired access token revoke that session.
+        .route("/api/auth/logout", post(proxy::forward_to_user))
         .route("/api/setup/status", get(proxy::forward_to_user))
         .route("/api/setup/init", post(proxy::forward_to_user))
         // Protected routes
@@ -372,7 +375,6 @@ fn build_router(state: AppState) -> AnyResult<Router> {
             "/api/auth/me",
             get(proxy::forward_to_user).delete(proxy::forward_to_user),
         )
-        .route("/api/auth/logout", post(proxy::forward_to_user))
         .route("/api/account/export", get(proxy::export_account))
         .route("/api/settings/{*path}", any(proxy::forward_to_user))
         .route("/api/novels", post(proxy::forward_to_novel))
@@ -408,6 +410,7 @@ const PUBLIC_PATHS: &[&str] = &[
     "/api/auth/register",
     "/api/auth/login",
     "/api/auth/refresh",
+    "/api/auth/logout",
     "/api/setup/status",
     "/api/setup/init",
     "/live",
@@ -421,7 +424,6 @@ const PUBLIC_PATHS: &[&str] = &[
 /// the matrix tests fail loudly if a family becomes public.
 const PROTECTED_ROUTE_FAMILIES: &[&str] = &[
     "/api/auth/me",
-    "/api/auth/logout",
     "/api/account/export",
     "/api/settings/",
     "/api/novels",
@@ -635,10 +637,9 @@ mod authz_matrix_tests {
         response.status()
     }
 
-    fn protected_representatives() -> [(Method, &'static str); 12] {
+    fn protected_representatives() -> [(Method, &'static str); 11] {
         [
             (Method::GET, "/api/auth/me"),
-            (Method::POST, "/api/auth/logout"),
             (Method::GET, "/api/account/export"),
             (Method::GET, "/api/settings/profile"),
             (Method::GET, "/api/novels"),
@@ -676,6 +677,7 @@ mod authz_matrix_tests {
                 "/api/auth/register",
                 "/api/auth/login",
                 "/api/auth/refresh",
+                "/api/auth/logout",
                 "/api/setup/status",
                 "/api/setup/init",
                 "/live",
@@ -735,6 +737,7 @@ mod authz_matrix_tests {
             (Method::POST, "/api/auth/register"),
             (Method::POST, "/api/auth/login"),
             (Method::POST, "/api/auth/refresh"),
+            (Method::POST, "/api/auth/logout"),
             (Method::GET, "/api/setup/status"),
             (Method::POST, "/api/setup/init"),
             (Method::GET, "/live"),

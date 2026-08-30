@@ -53,8 +53,9 @@ decisions for that profile and approves nothing beyond it.
    contract review and user consent are operator duties, not implemented
    features. Data minimization has no separate implemented control beyond
    the retention and erasure paths and must not be claimed.
-6. **Software supply chain — implemented boundaries.** Dependency
-   vulnerability gate (cargo-audit), committed-secret scanning (gitleaks),
+6. **Software supply chain — implemented boundaries.** Backend and shipped
+   frontend dependency vulnerability gates (cargo-audit and production-only
+   pnpm audit), committed-secret scanning (gitleaks),
    license/source policy (cargo-deny), container image scanning (trivy), and
    digest-pinned release manifests with a rollback state machine
    (release.sh). See [`SECURITY.md`](../SECURITY.md) 'Dependency Policy' and 'Release Rollback'.
