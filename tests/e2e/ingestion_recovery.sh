@@ -13,6 +13,7 @@
 set -euo pipefail
 
 if [ "${1:-}" = "--self-test" ]; then
+  python3 "$(dirname "$0")/mock_openai.py" --self-test
   python3 - <<'PY'
 import sys
 
