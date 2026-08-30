@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -13,6 +14,19 @@ FAILURES_REMAINING = {"canon": 1, "narrative_transition": 3, "world_turn": 0}
 CALLS = {}
 ACTIVE = {}
 PEAK = {}
+EVENT_SELECTION_PREFIX = (
+    "You group canonical events from an already source-validated whole-novel candidate list."
+)
+
+
+def event_selection_prompt(request):
+    if request.get("response_format") != {"type": "json_object"}:
+        return ""
+    for message in reversed(request.get("messages", [])):
+        if message.get("role") == "user" and isinstance(message.get("content"), str):
+            prompt = message["content"]
+            return prompt if prompt.startswith(EVENT_SELECTION_PREFIX) else ""
+    return ""
 
 
 def operation_for(path, request, prompt=""):
@@ -22,6 +36,8 @@ def operation_for(path, request, prompt=""):
         return "embedding"
     if request.get("stream"):
         return "stream"
+    if event_selection_prompt(request):
+        return "canon"
     for marker, operation in (
         ("source-backed canonical facts", "canon"),
         ("提取所有重要角色信息", "characters"),
@@ -189,7 +205,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(b"data: [DONE]\n\n")
             return
 
-        content = self.response_for(prompt)
+        content = self.response_for(request, prompt)
         self.json_response({
             "choices": [{"message": {"content": content}}],
             "model": "e2e",
@@ -197,7 +213,15 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     @staticmethod
-    def response_for(prompt):
+    def response_for(request, prompt):
+        selection_prompt = event_selection_prompt(request)
+        if selection_prompt:
+            if consume_failure("canon"):
+                return "{}"
+            selection_input = json.loads(selection_prompt.split("SELECTION_INPUT:\n", 1)[1])
+            return json.dumps({
+                "groups": [[candidate["index"]] for candidate in selection_input["candidates"]],
+            })
         if "source-backed canonical facts" in prompt:
             if consume_failure("canon"):
                 return "{}"
@@ -428,4 +452,35 @@ class LlmServer(ThreadingHTTPServer):
 
 
 if __name__ == "__main__":
-    LlmServer(("0.0.0.0", 18080), Handler).serve_forever()
+    if sys.argv[1:] == ["--self-test"]:
+        prompt = (
+            f"{EVENT_SELECTION_PREFIX}\nSELECTION_INPUT:\n"
+            '{"candidates":[{"index":0},{"index":1}]}'
+        )
+        request = {"response_format": {"type": "json_object"}, "messages": [
+            {"role": "system", "content": "Return JSON only."},
+            {"role": "user", "content": prompt},
+        ]}
+        envelope = "\n".join(message["content"] for message in request["messages"])
+        assert operation_for("/v1/chat/completions", request, envelope) == "canon"
+        assert Handler.response_for(request, envelope) == "{}"
+        assert json.loads(Handler.response_for(request, envelope)) == {"groups": [[0], [1]]}
+        extraction_prompt = (
+            "You extract source-backed canonical facts\n<SOURCE>\n"
+            f"{EVENT_SELECTION_PREFIX}\n</SOURCE>"
+        )
+        request["messages"][-1]["content"] = extraction_prompt
+        envelope = "\n".join(message["content"] for message in request["messages"])
+        assert operation_for("/v1/chat/completions", request, envelope) == "canon"
+        assert "arc" in json.loads(Handler.response_for(request, envelope))
+        request["messages"] = [
+            {"role": "system", "content": "Translate the supplied novel text faithfully."},
+            {"role": "user", "content": prompt},
+        ]
+        request.pop("response_format")
+        envelope = "\n".join(message["content"] for message in request["messages"])
+        assert operation_for("/v1/chat/completions", request, envelope) == "chat"
+        assert Handler.response_for(request, envelope) == "林岚记得你，也愿意继续同行。"
+        print("mock OpenAI self-test passed")
+    else:
+        LlmServer(("0.0.0.0", 18080), Handler).serve_forever()

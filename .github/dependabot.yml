@@ -34,27 +34,7 @@ updates:
           - "patch"
 
   - package-ecosystem: "docker"
-    directory: "/gateway"
-    schedule:
-      interval: "monthly"
-
-  - package-ecosystem: "docker"
-    directory: "/services/user-service"
-    schedule:
-      interval: "monthly"
-
-  - package-ecosystem: "docker"
-    directory: "/services/novel-service"
-    schedule:
-      interval: "monthly"
-
-  - package-ecosystem: "docker"
-    directory: "/services/agent-service"
-    schedule:
-      interval: "monthly"
-
-  - package-ecosystem: "docker"
-    directory: "/services/narrative-service"
+    directory: "/infra/docker"
     schedule:
       interval: "monthly"
 
