@@ -144,12 +144,13 @@ SBOM generation has since landed (see Dependency Policy); deploy-time SBOM
 verification, provenance/attestation, and signing remain gated.
 ### Dependency Policy
 
-CI runs `cargo audit` against `Cargo.lock` with the live RustSec advisory
-database and `pnpm audit --prod --audit-level high` against the frontend's
-frozen lockfile. A newly reported Rust vulnerability or HIGH/CRITICAL advisory
-in a shipped browser dependency fails the build; development-only frontend
-tooling is outside that production-dependency gate. CI also runs `gitleaks`
-over the full commit history: any committed secret fails the build.
+CI runs `cargo audit` against both `Cargo.lock` files with the live RustSec
+advisory database and `pnpm audit --prod --audit-level high` against the
+frontend's frozen lockfile. A newly reported Rust vulnerability or
+HIGH/CRITICAL advisory in a shipped browser dependency fails the build;
+development-only frontend tooling is outside that production-dependency gate.
+CI also runs `gitleaks` over the full commit history: any committed secret
+fails the build.
 `.gitleaks.toml` is the full default rule set plus narrow allowlists for
 the upstream rule-set examples and two deliberate test fixtures (the CI
 `RUNTIME_CONFIG_KEY` smoke placeholder and two static provider model names).
@@ -169,6 +170,19 @@ already-latest upstream releases. Each acknowledged entry is re-reviewed
 whenever its dependency chain updates; new advisories are not silently
 ignored. JWT signing and verification use the `aws_lc_rs` backend of
 jsonwebtoken, so the rsa crate is not part of the tree at all.
+
+The independent desktop lock has one narrower reviewed exception:
+`RUSTSEC-2024-0429` affects `glib::VariantStrIter` in `glib 0.18.5`, which is
+present only in the experimental Linux desktop graph through Tauri 2's GTK3
+stack. Neither NovelWorld nor any crate in the resolved graph calls its sole
+public constructor, `Variant::array_iter_str`; Windows and macOS do not resolve
+`glib`. GTK 0.18 requires `glib ^0.18`, so the patched `glib >=0.20` cannot be
+selected until Tauri completes its GTK4/WebKitGTK 6 migration. CI audits the
+desktop lock with `--deny unsound` and an exact ignore for this advisory, so a
+different unsound advisory still fails. Dependabot tracks the nested manifest
+weekly, and desktop dependency PRs are excluded from automatic merge. Re-review
+this exception on any Tauri/GTK/Wry graph change or direct use of the affected
+API, and remove it when the supported upstream stack is fixed.
 
 CI also runs `cargo deny check licenses sources` with `deny.toml`: every
 dependency license must be in the explicitly allowed permissive set (a new
