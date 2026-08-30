@@ -90,7 +90,7 @@ done
 canon_snapshot=$(docker exec novel-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT model_version || ':' || schema_version || ':' || prompt_version || ':' || md5(content::text) FROM canon_story_models WHERE novel_id = '$novel_id'")
-[[ "$canon_snapshot" == 1:1:canon-chunk-v3:* ]]
+[[ "$canon_snapshot" == 1:1:canon-chunk-v7+event-grouping-v3:* ]]
 
 pause
 chapters=$("${curl_cmd[@]}" "${auth[@]}" "$api/novels/$novel_id/chapters")
