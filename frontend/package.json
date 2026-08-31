@@ -2,7 +2,7 @@
   "name": "novel-world-frontend",
   "version": "0.1.0",
   "private": true,
-  "packageManager": "pnpm@10.34.5",
+  "packageManager": "pnpm@11.24.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
