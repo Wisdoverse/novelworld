@@ -314,6 +314,14 @@ redis_accepts_persisted_password() {
       ' >/dev/null 2>&1
 }
 
+redis_runs_manifest_image() {
+  local expected running
+  expected=$(manifest_value "$active_manifest" REDIS_IMAGE)
+  running=$(docker inspect --format '{{.Config.Image}}' \
+    "${container_prefix}-redis" 2>/dev/null || true)
+  [[ -n "$running" && "$running" == "$expected" ]]
+}
+
 require_pre_minimum_rollback_ready() {
   local from=$1 to=$2 redis_health
   if ! manifest_contains_path "$from" "$minimal_bootstrap_adr" \
@@ -489,6 +497,8 @@ deploy_manifest() {
   if [[ "$cache_mode" == redis ]]; then
     [[ "$(docker inspect --format '{{.State.Health.Status}}' "${container_prefix}-redis" 2>/dev/null || true)" == healthy ]] \
       || die "Redis is not healthy"
+    redis_runs_manifest_image \
+      || die "running Redis image does not match the release manifest"
     redis_accepts_persisted_password \
       || die "the persisted Redis credential cannot authenticate"
   else

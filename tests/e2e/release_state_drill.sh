@@ -502,7 +502,11 @@ if [ "${MOCK_PROJECT_NONEMPTY:-false}" = true ] \
   && [[ " $* " == *" ps --all --quiet "* ]]; then
   printf 'existing-container\n'
 elif [ "${1:-}" = inspect ]; then
-  printf '%s\n' "${MOCK_REDIS_HEALTH:-healthy}"
+  if [[ "$*" == *'.Config.Image'* ]]; then
+    printf '%s\n' "${MOCK_REDIS_IMAGE:-registry.example/novel@sha256:0000000000000000000000000000000000000000000000000000000000000000}"
+  else
+    printf '%s\n' "${MOCK_REDIS_HEALTH:-healthy}"
+  fi
 elif [ "${1:-}" = exec ]; then
   case " $* " in
     *" novel-redis "*) [ "${MOCK_REDIS_AUTH:-ok}" = ok ] || exit 1 ;;
@@ -541,6 +545,15 @@ test ! -e "$roll_state/previous.env" \
 grep -qx 'CACHE_MODE=redis' "$roll_repo/.env" \
   || { printf 'drill: FAIL legacy Redis environment did not persist redis mode\n' >&2; exit 1; }
 printf 'drill: ok   interrupted initial adoption rolls exact marker forward and promotes atomically\n'
+
+(
+  cd "$roll_repo"
+  PATH="$roll_bin:$PATH" RELEASE_STATE_DIR="$roll_state" \
+    MOCK_REDIS_IMAGE=registry.example/redis@sha256:1111111111111111111111111111111111111111111111111111111111111111 \
+    expect_fail 'restore rejects a running Redis image outside the manifest' \
+      'running Redis image does not match the release manifest' \
+      "$release" restore
+)
 
 scope_state=$(new_state)
 cp "$roll_marker" "$scope_state/current.env"
