@@ -122,6 +122,9 @@ What the release_state_drill.sh proves locally (no registry required):
   the current SHA, infrastructure-image changes, malformed rollback targets,
   a missing or mismatched previous release, and concurrent operations (held
   lock) all stop with an actionable error.
+- Redis mode verifies that the running container's immutable image reference
+  exactly matches the active release manifest before replacing any application
+  service; the state drill rejects a healthy container with a mismatched image.
 - A normal restore and a healthy rollback clear an unmarked candidate before
   the schema marker is written, durably promote the exact marked target, and
   clear the marker only after the promoted pair is synced.
@@ -212,14 +215,21 @@ only as the postgres entrypoint's privilege-drop helper, and that path
 does not exercise the affected Go TLS session-resumption code.
 
 The 2026-08-31 re-pin moved every Compose image to the newest artifact in its
-supported release channel. Redis and Prometheus scan clean; the official edge
-Nginx image and the Grafana, MinIO, pgvector, and Python drill images still
-contain upstream-owned findings. They are not application-release images and
-are not reported as clean or silently ignored: each stays digest-pinned and
-role-bounded, `docker-compose` Dependabot now tracks all of them, and every new
-artifact must be re-scanned before re-pinning. The shipped frontend runtime
-installs Alpine's fixed OpenSSL packages on the same Nginx base and passes the
-application-image gate.
+supported release channel. Prometheus scans clean. The pinned Redis 8.10.1
+image reports two HIGH package rows for one OpenSSL QUIC-server issue
+(`CVE-2026-14456`); NovelWorld runs ordinary Redis TCP without TLS or QUIC and
+does not publish its production port. The pinned Python 3.14.7 drill image
+reports two HIGH rows from pip's vendored SBOM (`GHSA-6v7p-g79w-8964` and
+`CVE-2025-47273`), but the vulnerable msgpack extension and setuptools
+package-index code are absent and the read-only mock imports only the standard
+library. The official edge Nginx image and the Grafana, MinIO, pgvector, and
+Python drill
+images still contain upstream-owned findings. They are not application-release
+images and are not reported as clean or silently ignored: each stays
+digest-pinned and role-bounded, `docker-compose` Dependabot tracks all of them,
+and every new artifact must be re-scanned before re-pinning. The shipped
+frontend runtime installs Alpine's fixed OpenSSL packages on the same Nginx
+base and passes the application-image gate.
 
 The release pipeline (docker.yml) generates one CycloneDX 1.6 SBOM per
 application image with the pinned trivy release and ships them with the

@@ -111,6 +111,48 @@ PostgreSQL、Redis、Nginx 的 digest 固定在 `docker-compose.yml`。普通应
 不会重建或降级它们。基础镜像变更必须作为独立基础设施变更，先完成数据库备份、
 格式兼容与恢复演练；本脚本会拒绝把它混入应用发布。
 
+Redis 7 到 8 是一次冷切换，不是普通 `release.sh upgrade`。本次切换只适用于
+尚无用户的默认 Unix 预览环境。`CACHE_MODE=redis` 的受管安装使用以下一次性
+流程；不要 `source` manifest：
+
+```bash
+set -euo pipefail
+target=/absolute/path/to/redis8-release.env
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+archive_root="$(dirname "$repo_root")/novelworld-release-archive"
+install -d -m 700 "$archive_root"
+./infra/docker/release.sh validate "$target"
+docker compose --env-file .env --env-file .release/current.env --profile redis \
+  stop nginx gateway agent-service redis
+redis_volume=$(docker inspect --format \
+  '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}' novel-redis)
+redis_project=$(docker inspect --format \
+  '{{ index .Config.Labels "com.docker.compose.project" }}' novel-redis)
+test -n "$redis_volume" && test -n "$redis_project"
+test "$(docker volume inspect --format \
+  '{{ index .Labels "com.docker.compose.volume" }}' "$redis_volume")" = redis_data
+test "$(docker volume inspect --format \
+  '{{ index .Labels "com.docker.compose.project" }}' "$redis_volume")" = "$redis_project"
+docker compose --env-file .env --env-file .release/current.env --profile redis rm -f redis
+archive="$archive_root/redis7.$(date -u +%Y%m%dT%H%M%SZ)"
+test ! -e "$archive"
+mv .release "$archive"
+sync
+docker volume rm "$redis_volume"
+unset REDIS_IMAGE COMPOSE_PROFILES
+docker compose --env-file .env --env-file "$target" --profile redis pull redis
+docker compose --env-file .env --env-file "$target" --profile redis up -d --wait redis
+./infra/docker/release.sh adopt "$target"
+```
+
+仓库外的 `.release` 归档是删除卷前的单向提交点；之后不得恢复其中的 Redis 7 manifest。
+`adopt` 会拒绝运行中 Redis 与目标 exact image 不一致的情况。失败时保持入口关闭
+并只向 Redis 8 重试。不得使用 `down -v`，PostgreSQL 卷必须保留。
+`CACHE_MODE=postgres` 没有运行中的 Redis，只需停入口和应用、归档旧 release
+状态并重新 `adopt`。新安装直接采用 Redis 8。任何已有用户、Windows 原地升级
+或需保留 Redis 投影的环境都不在本次批准范围内，必须另行设计并验证迁移。
+
 自动回滚只适用于新格式 release。如果当前环境已经使用九镜像契约，首次采用前先
 验证一份与实际代码和镜像完全一致的基线：
 
