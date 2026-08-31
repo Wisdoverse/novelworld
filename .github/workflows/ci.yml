@@ -377,8 +377,9 @@ jobs:
           test "$(docker exec novel-agent-service printenv CACHE_MODE)" = redis
           test "$(docker exec novel-redis redis-server --version \
             | sed -n 's/.* v=\([^ ]*\).*/\1/p')" = 8.10.1
-          docker exec novel-llm-stub python3 -c \
-            'import sys; assert sys.version_info[:3] == (3, 14, 7)'
+          docker compose -f docker-compose.yml -f docker-compose.e2e.yml \
+            exec -T llm-stub python3 -c \
+              'import sys; assert sys.version_info[:3] == (3, 14, 7)'
       - name: Verify dependency failure semantics
         run: |
           docker stop novel-redis
