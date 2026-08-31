@@ -78,9 +78,8 @@ docker exec novel-postgres psql   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB
 
 # Negative proof that the internal token actually rotated: the OLD token
 # must be rejected on the internal endpoint (reachable only on the compose
-# network, hence the in-network curl container).
-network=$(docker inspect novel-gateway --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}')
-old_internal_status=$(docker run --rm --network "$network" curlimages/curl:latest \
+# network, hence curl inside the existing gateway container).
+old_internal_status=$(docker exec novel-gateway curl \
   --silent --output /dev/null --write-out "%{http_code}" \
   -H "X-Internal-Service-Token: $old_internal_token" \
   http://user-service:8001/internal/runtime/llm)
