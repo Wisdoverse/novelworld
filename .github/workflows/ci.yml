@@ -120,15 +120,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo run --quiet -p h3-eval -- --recorded --git-sha "$GITHUB_SHA" > /tmp/h3-eval-a.json
-          cargo run --quiet -p h3-eval -- --recorded --git-sha "$GITHUB_SHA" > /tmp/h3-eval-b.json
+          cargo run --quiet --locked -p h3-eval -- --recorded --git-sha "$GITHUB_SHA" > /tmp/h3-eval-a.json
+          cargo run --quiet --locked -p h3-eval -- --recorded --git-sha "$GITHUB_SHA" > /tmp/h3-eval-b.json
           cmp /tmp/h3-eval-a.json /tmp/h3-eval-b.json
       - name: Horizon 1 extraction-quality evaluation gate
         shell: bash
         run: |
           set -euo pipefail
-          cargo run --quiet -p h1-eval -- --recorded --git-sha "$GITHUB_SHA" > /tmp/h1-eval-a.json
-          cargo run --quiet -p h1-eval -- --recorded --git-sha "$GITHUB_SHA" > /tmp/h1-eval-b.json
+          cargo run --quiet --locked -p h1-eval -- --recorded --git-sha "$GITHUB_SHA" > /tmp/h1-eval-a.json
+          cargo run --quiet --locked -p h1-eval -- --recorded --git-sha "$GITHUB_SHA" > /tmp/h1-eval-b.json
           cmp /tmp/h1-eval-a.json /tmp/h1-eval-b.json
       - name: Horizon 3 LLM budget contract
         shell: bash
@@ -151,7 +151,7 @@ jobs:
       - name: Test
         run: cargo test --workspace --exclude integration-tests --locked
       - name: Clippy
-        run: cargo clippy --workspace --exclude integration-tests --all-targets -- -D warnings
+        run: cargo clippy --workspace --exclude integration-tests --all-targets --locked -- -D warnings
       - name: Audit dependencies for known vulnerabilities
         # rustsec/audit-check publishes a check run the org token cannot
         # create ("Resource not accessible by integration"), and Node 24
