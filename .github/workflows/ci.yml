@@ -77,6 +77,10 @@ jobs:
           fetch-depth: 0
       - name: Specification conformance ledger
         run: sha256sum --check docs/SPEC_CONFORMANCE.sha256
+      - name: Dependabot auto-merge policy contract
+        run: >-
+          grep -Fq "contains(fromJSON('[\"cargo\",\"npm_and_yarn\",\"docker\"]'), steps.metadata.outputs.package-ecosystem)"
+          .github/workflows/dependabot-auto-merge.yml
       - name: Release manifest boundary
         shell: bash
         run: |
