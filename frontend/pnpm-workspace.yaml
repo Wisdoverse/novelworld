@@ -1,5 +1,9 @@
 packages:
   - .
 
+minimumReleaseAgeExclude:
+  - 'lucide-react@1.38.0'
+minimumReleaseAgeExcludePrune: true
+
 allowBuilds:
   esbuild: true
