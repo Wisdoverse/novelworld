@@ -1,7 +1,6 @@
 [advisories]
 ignore = []
 
-# ttf-parser (unmaintained) and lru 0.16.4 (unsound pop, patched in 0.18.2)
-# remain informational warnings: both are transitive through already-latest
-# upstream releases and do not fail the gate. They move to ignores only if
-# they become release-blocking with an actionable fix.
+# ttf-parser (unmaintained) remains an informational warning because it is
+# transitive through an already-latest upstream release. It moves to ignores
+# only if it becomes release-blocking with an actionable fix.

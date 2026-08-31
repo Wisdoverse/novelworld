@@ -32,7 +32,7 @@ else
       *) src="/repo" ;;
     esac
     docker run --rm -v "$repo_mount:/repo" -v "$work_mount:/plant" \
-      ghcr.io/gitleaks/gitleaks:v8.24.3 detect --no-banner \
+      ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f detect --no-banner \
       --exit-code 42 --config /repo/.gitleaks.toml --log-opts HEAD --source "$src"
   }
 fi

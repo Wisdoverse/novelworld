@@ -68,6 +68,10 @@ struct FunctionFacts {
     paths: BTreeSet<String>,
 }
 
+fn signature_is_unsafe_or_foreign(signature: &syn::Signature) -> bool {
+    matches!(signature.safety, syn::Safety::Unsafe(_)) || signature.abi.is_some()
+}
+
 #[derive(Clone, Debug, Default)]
 struct CargoTargets {
     production: Vec<PathBuf>,
@@ -1201,7 +1205,7 @@ impl<'ast> Visit<'ast> for HelperSourceAnalyzer<'_> {
         if item_is_test(&item.attrs) {
             self.production = false;
         }
-        if item.sig.unsafety.is_some() || item.sig.abi.is_some() {
+        if signature_is_unsafe_or_foreign(&item.sig) {
             self.unsafe_forbidden(item.span(), "unsafe or foreign-ABI function");
         }
         visit::visit_item_fn(self, item);
@@ -1213,7 +1217,7 @@ impl<'ast> Visit<'ast> for HelperSourceAnalyzer<'_> {
         if item_is_test(&item.attrs) {
             self.production = false;
         }
-        if item.sig.unsafety.is_some() || item.sig.abi.is_some() {
+        if signature_is_unsafe_or_foreign(&item.sig) {
             self.unsafe_forbidden(item.span(), "unsafe or foreign-ABI method");
         }
         visit::visit_impl_item_fn(self, item);
@@ -1221,7 +1225,7 @@ impl<'ast> Visit<'ast> for HelperSourceAnalyzer<'_> {
     }
 
     fn visit_trait_item_fn(&mut self, item: &'ast syn::TraitItemFn) {
-        if item.sig.unsafety.is_some() || item.sig.abi.is_some() {
+        if signature_is_unsafe_or_foreign(&item.sig) {
             self.unsafe_forbidden(item.span(), "unsafe or foreign-ABI trait method");
         }
         visit::visit_trait_item_fn(self, item);
@@ -2025,7 +2029,7 @@ impl<'ast> Visit<'ast> for Analyzer<'_> {
 
     fn visit_trait_item_fn(&mut self, item: &'ast syn::TraitItemFn) {
         if self.facts_enabled
-            && (item.sig.unsafety.is_some() || item.sig.abi.is_some())
+            && signature_is_unsafe_or_foreign(&item.sig)
             && matches!(
                 self.layer,
                 Some(Layer::Domain | Layer::Application | Layer::Interface)
@@ -2190,7 +2194,7 @@ impl<'ast> Visit<'ast> for Analyzer<'_> {
             self.facts_enabled = false;
         }
         if self.facts_enabled
-            && (item.sig.unsafety.is_some() || item.sig.abi.is_some())
+            && signature_is_unsafe_or_foreign(&item.sig)
             && matches!(
                 self.layer,
                 Some(Layer::Domain | Layer::Application | Layer::Interface)
@@ -2218,7 +2222,7 @@ impl<'ast> Visit<'ast> for Analyzer<'_> {
             self.facts_enabled = false;
         }
         if self.facts_enabled
-            && (item.sig.unsafety.is_some() || item.sig.abi.is_some())
+            && signature_is_unsafe_or_foreign(&item.sig)
             && matches!(
                 self.layer,
                 Some(Layer::Domain | Layer::Application | Layer::Interface)
@@ -3611,6 +3615,21 @@ pub fn self_test() -> Result<()> {
             >= 6,
         "{diagnostics:?}"
     );
+
+    let safety_file = syn::parse_file(
+        r#"unsafe extern "C" { safe fn explicit_safe(); unsafe fn explicit_unsafe(); }"#,
+    )?;
+    let syn::Item::ForeignMod(safety_block) = &safety_file.items[0] else {
+        unreachable!()
+    };
+    let syn::ForeignItem::Fn(explicit_safe) = &safety_block.items[0] else {
+        unreachable!()
+    };
+    let syn::ForeignItem::Fn(explicit_unsafe) = &safety_block.items[1] else {
+        unreachable!()
+    };
+    assert!(!signature_is_unsafe_or_foreign(&explicit_safe.sig));
+    assert!(signature_is_unsafe_or_foreign(&explicit_unsafe.sig));
 
     let cfg_file = syn::parse_file(
         r#"

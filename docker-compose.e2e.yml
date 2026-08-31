@@ -1,6 +1,6 @@
 services:
   llm-stub:
-    image: python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
+    image: python:3.13.15-slim-bookworm@sha256:c45a22ea000adfd9cda29364bbe7edd23001ce5cc2ad15857cfbf7766943b9ca
     working_dir: /app
     command: [python3, mock_openai.py]
     volumes:

@@ -1,6 +1,6 @@
 services:
   test-postgres:
-    image: pgvector/pgvector:pg18
+    image: pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
     container_name: novelworld-test-pg
     environment:
       POSTGRES_USER: test
@@ -20,7 +20,7 @@ services:
       retries: 10
 
   test-migrate:
-    image: pgvector/pgvector:pg18
+    image: pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
     environment:
       PGHOST: test-postgres
       PGUSER: test
@@ -40,7 +40,7 @@ services:
         done
 
   test-redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
     container_name: novelworld-test-redis
     ports:
       - "26379:6379"
