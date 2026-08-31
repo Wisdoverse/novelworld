@@ -29,7 +29,7 @@ fi
 for image in "${images[@]}"; do
   printf 'scan: %s\n' "$image"
   docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-    aquasec/trivy:0.68.1 image --scanners vuln \
+    aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 image --scanners vuln \
     --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
     --skip-version-check "$image"
 done

@@ -48,7 +48,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - uses: pnpm/action-setup@v6.0.10
         with:
-          version: 11.19.0
+          version: 10.34.5
       - uses: actions/setup-node@v7.0.0
         with:
           node-version: 26
@@ -82,7 +82,7 @@ jobs:
 
       - name: Build local microservices
         run: >-
-          cargo build --release --target ${{ matrix.target }}
+          cargo build --locked --release --target ${{ matrix.target }}
           -p gateway -p user-service -p novel-service -p agent-service -p narrative-service
 
       - name: Prepare pinned local runtime
@@ -95,7 +95,7 @@ jobs:
       - name: Build portable Windows executable
         if: runner.os == 'Windows'
         working-directory: frontend
-        run: pnpm exec tauri build --target ${{ matrix.target }} --no-bundle
+        run: pnpm exec tauri build --target ${{ matrix.target }} --no-bundle -- --locked
 
       - name: Assemble Windows portable directory
         if: runner.os == 'Windows'
@@ -109,7 +109,7 @@ jobs:
       - name: Build Linux/macOS portable bundle
         if: runner.os != 'Windows'
         working-directory: frontend
-        run: pnpm exec tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
+        run: pnpm exec tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundle }} -- --locked
 
       - name: Preserve Linux executable permissions
         if: runner.os == 'Linux'
