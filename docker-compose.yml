@@ -67,7 +67,7 @@ services:
 
   redis:
     profiles: ["redis"]
-    image: ${REDIS_IMAGE:-redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf}
+    image: ${REDIS_IMAGE:-redis:8-alpine@sha256:becdda6c7f4b3fb42e42fd7f120bbf5c54c4caaaf16f26da24e4563d2c1f0576}
     container_name: ${CONTAINER_PREFIX:-novel}-redis
     restart: unless-stopped
     environment:
