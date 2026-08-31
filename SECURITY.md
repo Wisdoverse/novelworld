@@ -149,6 +149,11 @@ advisory database and `pnpm audit --prod --audit-level high` against the
 frontend's frozen lockfile. A newly reported Rust vulnerability or
 HIGH/CRITICAL advisory in a shipped browser dependency fails the build;
 development-only frontend tooling is outside that production-dependency gate.
+Dependabot covers Cargo, npm, Dockerfiles, Compose files, and GitHub Actions.
+The temporary TypeScript 7/6 npm aliases, pinned Alpine packages in Dockerfile
+`RUN` steps, and immutable scanner images embedded in shell commands are
+verified manually against upstream releases during each dependency-maintenance
+change because Dependabot does not parse those forms.
 CI also runs `gitleaks` over the full commit history: any committed secret
 fails the build.
 `.gitleaks.toml` is the full default rule set plus narrow allowlists for
@@ -164,12 +169,13 @@ then asserts the repository stays clean.
 warnings for unmaintained or unsound transitive crates remain visible for
 upstream tracking without weakening the vulnerability gate.
 
-Informational warnings (`ttf-parser` unmaintained, `lru` unsound pop patched
-in 0.18.2) remain non-failing because both are transitive through
-already-latest upstream releases. Each acknowledged entry is re-reviewed
-whenever its dependency chain updates; new advisories are not silently
-ignored. JWT signing and verification use the `aws_lc_rs` backend of
-jsonwebtoken, so the rsa crate is not part of the tree at all.
+The remaining root-lock informational warning (`ttf-parser` unmaintained)
+stays non-failing because it is transitive through an already-latest upstream
+release. The formerly warned `lru` chain is now on patched 0.18.3. Each
+acknowledged entry is re-reviewed whenever its dependency chain updates; new
+advisories are not silently ignored. JWT signing and verification use the
+`aws_lc_rs` backend of jsonwebtoken, so the rsa crate is not part of the tree
+at all.
 
 The independent desktop lock has one narrower reviewed exception:
 `RUSTSEC-2024-0429` affects `glib::VariantStrIter` in `glib 0.18.5`, which is
@@ -192,18 +198,28 @@ sources are denied. Dependency advisories stay owned by cargo-audit to avoid
 maintaining two ignore lists.
 
 Every pushed application image is scanned in the tag pipeline (docker.yml)
-with the pinned `aquasec/trivy:0.68.1` for HIGH/CRITICAL vulnerabilities
+with the pinned `aquasec/trivy:0.74.0` for HIGH/CRITICAL vulnerabilities
 (--ignore-unfixed, vuln scanner); any finding fails the release. The same
 check runs locally via `infra/security/scan-images.sh`. The four base
 images in the Dockerfiles are digest-pinned. The digest-pinned
 infrastructure images are scanned when they are re-pinned through the
 separately approved infrastructure procedure; the current local scan of
-the pinned `pgvector/pgvector@sha256:69167330…` (compose `POSTGRES_IMAGE`)
+the pinned `pgvector/pgvector:pg18@sha256:2ba9ca5f…` (compose `POSTGRES_IMAGE`)
 reports 22 findings (21 HIGH, 1 CRITICAL, CVE-2025-68121) inside its
 bundled gosu binary, fixed upstream in go 1.24.13 but not yet rebuilt into
 the pinned image - tracked for the next infrastructure re-pin. gosu runs
 only as the postgres entrypoint's privilege-drop helper, and that path
 does not exercise the affected Go TLS session-resumption code.
+
+The 2026-08-31 re-pin moved every Compose image to the newest artifact in its
+supported release channel. Redis and Prometheus scan clean; the official edge
+Nginx image and the Grafana, MinIO, pgvector, and Python drill images still
+contain upstream-owned findings. They are not application-release images and
+are not reported as clean or silently ignored: each stays digest-pinned and
+role-bounded, `docker-compose` Dependabot now tracks all of them, and every new
+artifact must be re-scanned before re-pinning. The shipped frontend runtime
+installs Alpine's fixed OpenSSL packages on the same Nginx base and passes the
+application-image gate.
 
 The release pipeline (docker.yml) generates one CycloneDX 1.6 SBOM per
 application image with the pinned trivy release and ships them with the

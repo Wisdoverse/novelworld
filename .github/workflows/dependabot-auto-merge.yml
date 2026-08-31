@@ -20,6 +20,7 @@ jobs:
       - name: Auto-merge minor and patch updates
         if: >-
           steps.metadata.outputs.directory != '/frontend/src-tauri' &&
+          contains(fromJSON('["cargo","npm_and_yarn","docker"]'), steps.metadata.outputs.package-ecosystem) &&
           (steps.metadata.outputs.update-type == 'version-update:semver-minor' ||
           steps.metadata.outputs.update-type == 'version-update:semver-patch')
         run: gh pr merge --auto --squash "$PR_URL"
