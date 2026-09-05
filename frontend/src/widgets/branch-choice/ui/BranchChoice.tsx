@@ -129,6 +129,9 @@ export function BranchChoice({
         ))}
       </div>
 
+      <p role="status" aria-label="分支状态" className="sr-only">
+        {isLoading ? '正在根据你的行动重新生成后续内容，尚未确认保存。' : ''}
+      </p>
       {/* 加载状态 */}
       <AnimatePresence>
         {isLoading && selectedIndex !== null && (
@@ -164,6 +167,7 @@ export function BranchChoice({
         </div>
       )}
 
+      <div role="log" aria-label="已保存的分支结果" aria-relevant="additions">
       {consequence && selectedChoiceIndex !== undefined && (
         <motion.div
           initial={{ opacity: 0, y: 12 }}
@@ -179,6 +183,7 @@ export function BranchChoice({
           </p>
         </motion.div>
       )}
+      </div>
     </motion.div>
   );
 }

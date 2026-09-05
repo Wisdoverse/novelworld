@@ -305,6 +305,7 @@ export function WorldDashboard({
         <h3 id="world-action-journal" tabIndex={-1} className="flex scroll-mt-24 items-center gap-2 text-sm font-semibold text-[#1f1f1f]">
           <History size={14} /> 旅程时间线
         </h3>
+        <div role="log" aria-labelledby="world-action-journal" aria-relevant="additions">
         {choices.length || view.journal.length ? (
           <ol className="mt-3 space-y-3">
             {choices.map((choice, index) => (
@@ -351,6 +352,7 @@ export function WorldDashboard({
             ))}
           </ol>
         ) : <p className="mt-3 text-sm text-[#5f6368]">你的第一个选择或行动将记录在这里。</p>}
+        </div>
       </div>
 
       <div className="border-t border-[#e1e3e8] pt-6">
@@ -361,7 +363,10 @@ export function WorldDashboard({
           isLocked={actionsDisabled || Boolean(pendingRequest)}
           onSubmit={submit}
         />
-        {error || pendingRequest ? (
+        <p role="status" aria-label="世界行动状态" className="sr-only">
+          {turn.isPending ? '正在确认世界行动，请等待已保存的结果。' : ''}
+        </p>
+        {!turn.isPending && (error || pendingRequest) ? (
           <div role="alert" className="mt-4 text-sm text-[#b3261e]">
             {error ? `${error} ` : ''}{pendingRequest
               ? '尚未确认这次行动的最终结果；请使用原请求继续确认，避免重复行动。'

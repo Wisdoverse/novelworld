@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, useId } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Send, X, Minimize2, Maximize2, Brain } from 'lucide-react';
 import ReactMarkdown, { type Components } from 'react-markdown';
@@ -8,6 +8,7 @@ import {
   useChatStore,
 } from '@/features/character-chat';
 import type { Character, ChatMessage } from '@/shared/types';
+import { useReducedMotionPreference } from '@/shared/lib/reducedMotion';
 
 const EMPTY_MESSAGES: ChatMessage[] = [];
 const SAFE_MARKDOWN_COMPONENTS: Components = {
@@ -41,6 +42,7 @@ interface ChatPanelProps {
   readerIdentityScope: string;
   canChat: boolean;
   isOpen: boolean;
+  returnFocusRef?: React.RefObject<HTMLElement | null>;
   onClose: () => void;
 }
 
@@ -52,12 +54,17 @@ export function ChatPanel({
   readerIdentityScope,
   canChat,
   isOpen,
+  returnFocusRef,
   onClose,
 }: ChatPanelProps) {
   const [input, setInput] = useState('');
   const [isMinimized, setIsMinimized] = useState(false);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const titleId = useId();
+  const reducedMotion = useReducedMotionPreference();
 
   const sessionKey = chatSessionKey(character.id, readerIdentityScope);
   const sessionMessages = useChatStore(state => state.messages[sessionKey]) ?? EMPTY_MESSAGES;
@@ -92,10 +99,27 @@ export function ChatPanel({
     )
     : EMPTY_MESSAGES;
   const historyReady = !history.isLoading && !history.isError;
+  const uncommittedTurnId = activeTurn?.turnId ?? failedTurn?.turnId;
+  const pendingUserMessage = charMessages.find(message => (
+    uncommittedTurnId && message.turn_id === uncommittedTurnId && message.role === 'user'
+  ));
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView?.({ behavior: 'smooth' });
-  }, [charMessages, currentStreamText]);
+    const messages = messagesRef.current;
+    messages?.scrollTo?.({ top: messages.scrollHeight, behavior: reducedMotion ? 'instant' : 'smooth' });
+  }, [charMessages, currentStreamText, reducedMotion]);
+
+  useLayoutEffect(() => {
+    if (!isOpen || !characterMatchesNovel) return;
+    const trigger = returnFocusRef?.current ?? document.activeElement;
+    const panel = panelRef.current;
+    // The history request may still disable the input. Close is always usable.
+    closeRef.current?.focus({ preventScroll: true });
+    return () => {
+      if (panel?.contains(document.activeElement)
+        && trigger instanceof HTMLElement && trigger.isConnected) trigger.focus();
+    };
+  }, [isOpen, characterMatchesNovel, character.id, returnFocusRef]);
 
   useEffect(() => {
     if (activeTurn && !activeTurnMatchesView) {
@@ -129,6 +153,15 @@ export function ChatPanel({
     <AnimatePresence>
       {isOpen && characterMatchesNovel && (
         <motion.div
+          ref={panelRef}
+          role="region"
+          aria-labelledby={titleId}
+          onKeyDown={event => {
+            if (event.key === 'Escape') {
+              event.stopPropagation();
+              onClose();
+            }
+          }}
           initial={{ opacity: 0, x: 60, scale: 0.95 }}
           animate={{ opacity: 1, x: 0, scale: 1 }}
           exit={{ opacity: 0, x: 60, scale: 0.95 }}
@@ -136,15 +169,14 @@ export function ChatPanel({
           className="fixed right-4 bottom-4 z-50 flex flex-col"
           style={{
             width: 'min(380px, calc(100vw - 2rem))',
-            height: isMinimized ? '64px' : '560px',
+            height: isMinimized ? '80px' : 'min(560px, calc(100dvh - 2rem))',
             transition: 'height 250ms cubic-bezier(0.23, 1, 0.32, 1)',
           }}
         >
-          <div className="surface-card flex h-full flex-col overflow-hidden">
+          <div className="surface-card flex h-full flex-col overflow-y-auto">
             {/* Header */}
             <div
-              className="flex cursor-pointer items-center gap-3 border-b border-[#e1e3e8] p-4"
-              onClick={() => setIsMinimized(!isMinimized)}
+              className="flex shrink-0 items-center gap-3 border-b border-[#e1e3e8] p-4"
             >
               {/* 角色头像 */}
               <div className="relative flex-shrink-0">
@@ -175,9 +207,9 @@ export function ChatPanel({
               </div>
 
               <div className="flex-1 min-w-0">
-                <div className="truncate text-sm font-semibold text-[#1f1f1f]">
-                  {character.name}
-                </div>
+                <h2 id={titleId} className="truncate text-sm font-semibold text-[#1f1f1f]">
+                  <span className="sr-only">与 </span>{character.name}<span className="sr-only"> 对话</span>
+                </h2>
                 <div className="truncate text-xs text-[#5f6368]">
                   {isCurrentlyStreaming ? (
                     <span className="text-[#0b57d0]" style={{ fontSize: '11px' }}>正在思考...</span>
@@ -191,11 +223,13 @@ export function ChatPanel({
                 <button
                   onClick={(e) => { e.stopPropagation(); setIsMinimized(!isMinimized); }}
                   aria-label={isMinimized ? '展开聊天窗口' : '收起聊天窗口'}
+                  aria-expanded={!isMinimized}
                   className="min-h-8 min-w-8 rounded-full p-1.5 text-[#5f6368] transition-colors hover:bg-[#f1f3f4]"
                 >
                   {isMinimized ? <Maximize2 size={14} /> : <Minimize2 size={14} />}
                 </button>
                 <button
+                  ref={closeRef}
                   onClick={(e) => { e.stopPropagation(); onClose(); }}
                   aria-label="关闭聊天"
                   className="min-h-8 min-w-8 rounded-full p-1.5 text-[#5f6368] transition-colors hover:bg-[#f1f3f4]"
@@ -204,11 +238,15 @@ export function ChatPanel({
                 </button>
               </div>
             </div>
+            <p role="status" aria-label="对话状态" className="sr-only">
+              {isCurrentlyStreaming ? '正在生成回复，尚未确认保存。' : ''}
+            </p>
 
             {/* Messages */}
             {!isMinimized && (
               <>
                 <div
+                  ref={messagesRef}
                   className="flex-1 overflow-y-auto p-4 space-y-4"
                   style={{ minHeight: 0 }}
                 >
@@ -237,7 +275,8 @@ export function ChatPanel({
                     </div>
                   )}
 
-                  {charMessages.map((msg) => (
+                  <div role="log" aria-label="已保存的对话" aria-relevant="additions" className="space-y-4">
+                  {charMessages.filter(message => !uncommittedTurnId || message.turn_id !== uncommittedTurnId).map((msg) => (
                     <div
                       key={msg.id}
                       className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} gap-2`}
@@ -251,7 +290,7 @@ export function ChatPanel({
                         </div>
                       )}
                       <div
-                        className={`max-w-[80%] text-sm leading-relaxed ${
+                        className={`min-w-0 max-w-[80%] [overflow-wrap:anywhere] [&_pre]:overflow-x-auto text-sm leading-relaxed ${
                           msg.role === 'user' ? 'chat-bubble-user' : 'chat-bubble-character'
                         }`}
                       >
@@ -259,6 +298,15 @@ export function ChatPanel({
                       </div>
                     </div>
                   ))}
+                  </div>
+                  {pendingUserMessage && (
+                    <div className="flex justify-end">
+                      <div className="chat-bubble-user min-w-0 max-w-[80%] [overflow-wrap:anywhere] [&_pre]:overflow-x-auto text-sm">
+                        <span className="sr-only">尚未确认保存：</span>
+                        <ChatMarkdown>{pendingUserMessage.content}</ChatMarkdown>
+                      </div>
+                    </div>
+                  )}
 
                   {/* 流式输出 */}
                   {isCurrentlyStreaming && currentStreamText && (
@@ -269,18 +317,17 @@ export function ChatPanel({
                       >
                         {character.name[0]}
                       </div>
-                      <div className="chat-bubble-character max-w-[80%] text-sm leading-relaxed">
+                      <div className="chat-bubble-character min-w-0 max-w-[80%] [overflow-wrap:anywhere] [&_pre]:overflow-x-auto text-sm leading-relaxed">
                         <ChatMarkdown>{currentStreamText}</ChatMarkdown>
                         <span className="ml-0.5 inline-block h-4 w-1 animate-pulse bg-[#0b57d0]" />
                       </div>
                     </div>
                   )}
 
-                  <div ref={messagesEndRef} />
                 </div>
 
                 {/* Input */}
-                <div className="border-t border-[#e1e3e8] p-3">
+                <div className="shrink-0 border-t border-[#e1e3e8] p-3">
                   {readerIdentity && (
                     <div className="mb-2 rounded bg-[#e8f0fe] px-2 py-1 text-xs text-[#0b57d0]">
                       以「{readerIdentity}」身份对话
@@ -317,9 +364,10 @@ export function ChatPanel({
                       onChange={(e) => setInput(e.target.value)}
                       onKeyDown={handleKeyDown}
                       placeholder={`对 ${character.name} 说...`}
+                      aria-label={`对 ${character.name} 说...`}
                       rows={2}
                       maxLength={4000}
-                      className="field-control flex-1 resize-none text-sm"
+                      className="field-control min-w-0 flex-1 resize-none text-sm"
                       style={{ fontFamily: 'var(--font-body)' }}
                       disabled={!canChat || !historyReady || isCurrentlyStreaming || hasUnresolvedTurn}
                     />

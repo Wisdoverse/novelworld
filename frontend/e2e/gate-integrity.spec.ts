@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { installStubs } from './stubs';
-import { scanA11y } from './helpers';
+import { scanA11y, tabWalk, horizontalOverflow, currentFocus } from './helpers';
 
 // Anti-vacuous gate checks: the scan must FAIL CLOSED on injected
 // violations, the catch-all stub must answer unstubbed routes, and a
@@ -61,4 +61,23 @@ test('gate integrity: a keyboard-focused control shows the focus indicator', asy
     await page.keyboard.press('Tab');
   }
   throw new Error('never reached a SELECT in the tab order on /settings');
+});
+
+test('gate integrity: keyboard ceiling and identical labels cannot pass early', async ({ page }) => {
+  await page.setContent('<style>button:focus { outline: 2px solid blue; }</style><button>Same</button><button>Same</button><button>Last</button>');
+  await expect(tabWalk(page, 1)).rejects.toThrow('exceeded');
+  const stops = await tabWalk(page);
+  expect(stops.map(stop => stop.identity).sort()).toEqual(['Last', 'Same', 'Same']);
+  const reverse = await tabWalk(page, 120, 'Shift+Tab');
+  expect(reverse.map(stop => stop.identity).sort()).toEqual(['Last', 'Same', 'Same']);
+});
+
+test('gate integrity: clipped left content and obscured focus are detected', async ({ page }) => {
+  await page.setContent('<button style="position:fixed;left:-30px">Clipped</button>');
+  expect(await horizontalOverflow(page)).not.toEqual([]);
+  await page.keyboard.press('Tab');
+  expect((await currentFocus(page))?.inViewport).toBe(false);
+  await page.setContent('<button>Covered</button><div style="position:fixed;inset:0;background:white"></div>');
+  await page.keyboard.press('Tab');
+  expect((await currentFocus(page))?.inViewport).toBe(false);
 });

@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useLayoutEffect, useRef } from 'react';
 import { BrowserRouter, HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
+import { MotionConfig } from 'framer-motion';
 import './styles/globals.css';
 
 import { useSetupStatus } from '@/entities/runtime-config';
@@ -9,6 +10,7 @@ import { useAuthStore } from '@/features/auth';
 import { useChatStore } from '@/features/character-chat';
 import { clearPrivateQueryCache, queryClient } from '@/shared/api/queryClient';
 import { isDesktopClient } from '@/shared/config/runtime';
+import { useReducedMotionPreference } from '@/shared/lib/reducedMotion';
 
 const HomePage = lazy(() => import('@/pages/home'));
 const LoginPage = lazy(() => import('@/pages/login'));
@@ -158,6 +160,7 @@ export function AppRoutes() {
 }
 
 export function App() {
+  const reducedMotion = useReducedMotionPreference();
   const Router = isDesktopClient ? HashRouter : BrowserRouter;
   useEffect(() => {
     const handleStorage = (event: StorageEvent) => {
@@ -167,6 +170,7 @@ export function App() {
     return () => window.removeEventListener('storage', handleStorage);
   }, []);
   return (
+    <MotionConfig reducedMotion="user" skipAnimations={Boolean(reducedMotion)}>
     <QueryClientProvider client={queryClient}>
       <Router>
         <AppRoutes />
@@ -183,5 +187,6 @@ export function App() {
         }}
       />
     </QueryClientProvider>
+    </MotionConfig>
   );
 }

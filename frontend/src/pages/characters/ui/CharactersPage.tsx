@@ -48,7 +48,7 @@ export function CharactersPage() {
   if (!novelId || !user) return null;
 
   return (
-    <div className="app-surface min-h-screen px-4 py-8 sm:px-6 sm:py-10">
+    <main className="app-surface min-h-screen px-4 py-8 sm:px-6 sm:py-10">
       <div className="max-w-6xl mx-auto">
         <div className="mb-8 flex items-center gap-4">
           <button
@@ -130,6 +130,6 @@ export function CharactersPage() {
           onClose={() => setChatCharacterId(null)}
         />
       )}
-    </div>
+    </main>
   );
 }
