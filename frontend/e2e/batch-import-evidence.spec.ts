@@ -10,7 +10,10 @@ test('captures bounded batch novel import', async ({ page }) => {
 
   const dialog = page.getByRole('dialog', { name: '导入小说' });
   await expect(dialog).toBeVisible();
-  await dialog.locator('input[type="file"]').setInputFiles([
+  const picker = page.waitForEvent('filechooser');
+  await dialog.getByRole('button', { name: '选择 TXT、EPUB 或 PDF 文件（可多选）' }).focus();
+  await page.keyboard.press('Enter');
+  await (await picker).setFiles([
     {
       name: '星河彼岸.txt',
       mimeType: 'text/plain',

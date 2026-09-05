@@ -1,6 +1,6 @@
 import { test, expect, type Locator } from '@playwright/test';
 import { installStubs } from './stubs';
-import { tabWalk } from './helpers';
+import { tabWalk, tabTo, currentFocus, settleAnimations } from './helpers';
 
 // Keyboard operability on the critical journey: real Tab focus movement,
 // visible focus indicators, Enter/Space activation, and focus containment.
@@ -109,15 +109,107 @@ test.describe('critical journey — keyboard operability', () => {
     await expect(page.getByText('星光洒在海面上。').first()).toBeVisible();
   });
 
+  test('reader: drawer and non-modal chat have keyboard entry, exit, and restoration', async ({ page }) => {
+    await installStubs(page);
+    await page.goto('/reader/novel-1/1');
+    await expect(page.getByRole('main')).toBeVisible();
+    const trigger = page.getByRole('button', { name: '角色', exact: true });
+    await tabTo(page, trigger);
+    await page.keyboard.press('Enter');
+    const drawer = page.getByRole('dialog', { name: '故事角色' });
+    await expectFocusWithin(drawer);
+    for (const key of ['Tab', 'Shift+Tab']) {
+      for (let i = 0; i < 6; i++) {
+        await page.keyboard.press(key);
+        await expectFocusWithin(drawer);
+        expect((await currentFocus(page))?.inViewport).toBe(true);
+      }
+    }
+    await page.keyboard.press('Escape');
+    await expect(trigger).toBeFocused();
+    await page.keyboard.press('Enter');
+    await tabTo(page, drawer.getByRole('button', { name: /林晚/ }));
+    await page.keyboard.press('Enter');
+    const chat = page.getByRole('region', { name: '与 林晚 对话' });
+    await expect(drawer).toBeHidden();
+    await settleAnimations(page);
+    await expect(chat.getByRole('button', { name: '关闭聊天' })).toBeFocused();
+    const input = chat.getByRole('textbox');
+    await tabTo(page, input);
+    await tabTo(page, chat.getByRole('button', { name: '收起聊天窗口' }), 'Shift+Tab');
+    await page.keyboard.press('Enter');
+    await expect(input).toBeHidden();
+    await page.keyboard.press('Enter');
+    await expect(input).toBeVisible();
+    await tabTo(page, input);
+    await input.fill('保留这条草稿');
+    // Returning to the chapter dismisses the non-modal panel without losing input.
+    await tabTo(page, trigger);
+    await expect(chat).toBeHidden();
+    await page.keyboard.press('Enter');
+    await tabTo(page, drawer.getByRole('button', { name: /林晚/ }));
+    await page.keyboard.press('Enter');
+    await settleAnimations(page);
+    await tabTo(page, input);
+    await expect(input).toHaveValue('保留这条草稿');
+    await page.keyboard.press('Escape');
+    await expect(chat).toBeHidden();
+    await expect(trigger).toBeFocused();
+  });
+
+  test('characters: closing chat restores the card trigger', async ({ page }) => {
+    await installStubs(page);
+    await page.goto('/characters/novel-1');
+    await expect(page.getByRole('main')).toBeVisible();
+    const trigger = page.getByRole('button', { name: /对话/ }).first();
+    await tabTo(page, trigger);
+    await page.keyboard.press('Enter');
+    const close = page.getByRole('button', { name: '关闭聊天' });
+    await expect(close).toBeFocused();
+    await settleAnimations(page);
+    const input = page.getByRole('textbox', { name: /对 林晚 说/ });
+    await tabTo(page, input);
+    await input.fill('同一角色的草稿');
+    await tabTo(page, close, 'Shift+Tab');
+    await page.keyboard.press('Enter');
+    await expect(close).toBeHidden();
+    await expect(trigger).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(input).toHaveValue('同一角色的草稿');
+    await page.keyboard.press('Escape');
+    await tabTo(page, page.getByRole('button', { name: /对话/ }).nth(1));
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('textbox', { name: /对 老船长 说/ })).toHaveValue('');
+  });
+
+  for (const direction of ['Tab', 'Shift+Tab'] as const) {
+    test(`narrow reader: every ${direction} stop remains visible with chat open`, async ({ page }) => {
+      await installStubs(page);
+      await page.setViewportSize({ width: 320, height: 720 });
+      await page.goto('/reader/novel-1/1');
+      await page.getByRole('button', { name: '角色', exact: true }).click();
+      await page.getByRole('dialog').getByRole('button', { name: /林晚/ }).click();
+      await settleAnimations(page);
+      const chat = page.getByRole('region', { name: '与 林晚 对话' });
+      await tabTo(page, page.getByRole('button', { name: '角色', exact: true }), direction);
+      await expect(chat).toBeHidden();
+      const stops = await tabWalk(page);
+      expect(stops.length).toBeGreaterThan(3);
+      const reverse = await tabWalk(page, 120, 'Shift+Tab');
+      expect(reverse.length).toBeGreaterThan(3);
+    });
+  }
+
   test('world action form submits from the keyboard', async ({ page }) => {
     await installStubs(page, { openWorld: true });
     await page.goto('/reader/novel-1/1');
     await expect(page.getByText(/的开放世界/).first()).toBeVisible();
-    const submit = page.getByRole('button', { name: /行动|提交|执行/ }).first();
-    await submit.focus();
+    await page.getByRole('textbox', { name: '你的意图' }).fill('沿山路下行');
+    const submit = page.getByRole('button', { name: '执行行动', exact: true });
+    await tabTo(page, submit);
     await page.keyboard.press('Space');
     // The turn stub commits: the rendered narrative of the transition appears.
-    await expect(page.getByText(/旅人沿山路下行/).first()).toBeVisible();
+    await expect(page.getByRole('log', { name: '旅程时间线' })).toContainText('回合 2');
   });
 
   test('settings: tab walk stays in the page and every stop has a focus indicator', async ({ page }) => {

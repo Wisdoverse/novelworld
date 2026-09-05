@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
+import * as Dialog from '@radix-ui/react-dialog';
 import { useParams, useNavigate } from 'react-router-dom';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import {
   AlertCircle, ChevronLeft, ChevronRight, MessageCircle, Users,
-  BookOpen, MapPin, Sparkles
+  BookOpen, MapPin, Sparkles, X
 } from 'lucide-react';
 import { useChapter, useCharacters, useNovel } from '@/entities/novel';
 import {
@@ -35,6 +36,7 @@ import {
 } from '@/features/chapter-translation';
 import { getApiErrorCode, getApiErrorMessage } from '@/shared/api/client';
 import { getReaderIdentityScope } from '@/shared/lib/readerIdentityScope';
+import { prefersReducedMotion } from '@/shared/lib/reducedMotion';
 import type { NarrativeChoice } from '@/shared/types';
 
 export function splitChapterAtAnchor(content: string, anchorQuote?: string) {
@@ -51,7 +53,7 @@ export function splitChapterAtAnchor(content: string, anchorQuote?: string) {
 
 function focusSection(id: string) {
   const target = document.getElementById(id);
-  target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  target?.scrollIntoView({ behavior: prefersReducedMotion() ? 'instant' : 'smooth', block: 'start' });
   target?.focus({ preventScroll: true });
 }
 
@@ -179,7 +181,10 @@ export function ReaderPage() {
   );
 
   const [activeChatCharacterId, setActiveChatCharacterId] = useState<string | null>(null);
+  const [isChatOpen, setIsChatOpen] = useState(false);
   const [showCharacterList, setShowCharacterList] = useState(false);
+  const characterTriggerRef = useRef<HTMLButtonElement>(null);
+  const pendingChatCharacterId = useRef<string | null>(null);
   const [choiceError, setChoiceError] = useState<string | undefined>();
   const [choiceRecoveryLocked, setChoiceRecoveryLocked] = useState(false);
   const [chapterView, setChapterView] = useState<'timeline' | 'canon'>('timeline');
@@ -472,6 +477,10 @@ export function ReaderPage() {
   }
 
   return (
+    <Dialog.Root open={showCharacterList && !timelineMutationLocked} onOpenChange={open => {
+      if (open) setIsChatOpen(false);
+      setShowCharacterList(open);
+    }}>
     <div className="app-surface min-h-screen">
       {/* 顶部导航栏 */}
       <motion.header
@@ -509,21 +518,21 @@ export function ReaderPage() {
           </div>
 
           {/* 角色列表按钮 */}
+          <Dialog.Trigger asChild>
           <button
+            ref={characterTriggerRef}
             disabled={timelineMutationLocked}
-            onClick={() => {
-              if (!timelineMutationLocked) setShowCharacterList(!showCharacterList);
-            }}
             className={`flex shrink-0 items-center gap-1.5 rounded-full px-3 py-2 text-xs font-semibold transition-colors ${showCharacterList ? 'bg-[#d2e3fc] text-[#0842a0]' : 'bg-[#e8f0fe] text-[#0b57d0] hover:bg-[#d2e3fc]'}`}
           >
             <Users size={12} />
             角色
           </button>
+          </Dialog.Trigger>
         </div>
       </motion.header>
 
       {/* 主内容区 */}
-      <div className="mx-auto max-w-4xl px-4 pb-28 pt-16 md:px-8">
+      <main className="mx-auto max-w-4xl px-4 pb-28 pt-16 md:px-8">
         {isProgressSaveError && (
           <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-[#f2b8b5] bg-[#fce8e6] p-3 text-[#b3261e]" role="alert">
             <span className="text-sm">阅读进度保存失败，聊天已暂停。</span>
@@ -599,7 +608,7 @@ export function ReaderPage() {
               )}
               <div className="mx-auto mt-4 h-px w-16 bg-[#0b57d0]" />
               {visibleEffectiveChapter.generated ? (
-                <div className="mx-auto mt-6 inline-flex rounded-full bg-[#eef3fe] p-1" aria-label="阅读版本">
+                <div className="mx-auto mt-6 inline-flex flex-wrap justify-center rounded-full bg-[#eef3fe] p-1" role="group" aria-label="阅读版本">
                   <button
                     type="button"
                     aria-pressed={!showCanonReference}
@@ -764,10 +773,10 @@ export function ReaderPage() {
             onRefresh={refetchOpenWorld}
           />
         ) : null}
-      </div>
+      </main>
 
       {/* 底部翻页导航 */}
-      <div className="fixed bottom-0 left-0 right-0 z-20 flex items-center justify-between gap-2 border-t border-[#e1e3e8] bg-white/95 px-3 py-3 shadow-[0_-1px_3px_rgba(60,64,67,0.08)] backdrop-blur-xl sm:px-6 sm:py-4">
+      <nav aria-label="阅读导航" className="fixed bottom-0 left-0 right-0 z-20 flex items-center justify-between gap-2 border-t border-[#e1e3e8] bg-white/95 px-3 py-3 shadow-[0_-1px_3px_rgba(60,64,67,0.08)] backdrop-blur-xl sm:px-6 sm:py-4">
         <button
           onClick={goBack}
           disabled={isProgressSaving || (!openWorld && currentChapter <= 1)}
@@ -802,25 +811,32 @@ export function ReaderPage() {
                 : '下一章'}
           <ChevronRight size={14} />
         </button>
-      </div>
+      </nav>
 
       {/* 角色列表侧边栏 */}
-      {!timelineMutationLocked ? (
-        <AnimatePresence>
-          {showCharacterList && (
-            <motion.div
-            initial={{ opacity: 0, x: 300 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: 300 }}
-            transition={{ duration: 0.25, ease: [0.23, 1, 0.32, 1] }}
-            className="fixed bottom-0 right-0 top-14 z-30 w-[min(280px,100vw)] space-y-3 overflow-y-auto border-l border-[#e1e3e8] bg-white/95 p-4 shadow-[-8px_0_28px_rgba(60,64,67,0.1)] backdrop-blur-xl"
-            style={{
-              backdropFilter: 'blur(20px)',
-            }}
-          >
-            <div className="mb-4 text-xs font-semibold uppercase tracking-widest text-[#0b57d0]">
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/20" />
+        <Dialog.Content
+          aria-describedby={undefined}
+          onCloseAutoFocus={event => {
+            // Mount chat after Radix releases the drawer's modal focus scope.
+            if (pendingChatCharacterId.current) {
+              event.preventDefault();
+              setActiveChatCharacterId(pendingChatCharacterId.current);
+              setIsChatOpen(true);
+              pendingChatCharacterId.current = null;
+            }
+          }}
+          className="fixed bottom-0 right-0 top-0 z-50 w-[min(280px,100vw)] space-y-3 overflow-y-auto border-l border-[#e1e3e8] bg-white p-4 shadow-[-8px_0_28px_rgba(60,64,67,0.1)]"
+        >
+          <div className="mb-4 flex items-center justify-between gap-2">
+            <Dialog.Title className="text-xs font-semibold uppercase tracking-widest text-[#0b57d0]">
               故事角色
-            </div>
+            </Dialog.Title>
+            <Dialog.Close className="tonal-action p-2" aria-label="关闭角色列表">
+              <X size={16} />
+            </Dialog.Close>
+          </div>
             {characters?.map((char) => {
               const isDead = openWorld?.session.dead_character_ids.includes(char.id) ?? false;
               return (
@@ -829,7 +845,7 @@ export function ReaderPage() {
                   disabled={!isChatReady || isDead}
                   onClick={() => {
                     if (!isChatReady || isDead) return;
-                    setActiveChatCharacterId(char.id);
+                    pendingChatCharacterId.current = char.id;
                     setShowCharacterList(false);
                   }}
                   className="flex w-full items-center gap-3 rounded-xl border border-[#e1e3e8] bg-white p-3 text-left transition-colors hover:bg-[#f8faff] disabled:opacity-50"
@@ -863,24 +879,25 @@ export function ReaderPage() {
                 </button>
               );
             })}
-            </motion.div>
-          )}
-        </AnimatePresence>
-      ) : null}
+        </Dialog.Content>
+      </Dialog.Portal>
 
       {/* 角色对话面板 */}
       {activeChatCharacter && activeCharacterIsAvailable && !timelineMutationLocked && (
         <ChatPanel
+          key={`${novelId}:${activeChatCharacter.id}:${readerIdentityScope}:${currentChapter}`}
           character={activeChatCharacter}
           novelId={novelId!}
           currentChapter={currentChapter}
           readerIdentity={readingProgress?.reader_identity}
           readerIdentityScope={readerIdentityScope}
           canChat={isChatReady && activeCharacterIsAvailable}
-          isOpen={!!activeChatCharacter}
-          onClose={() => setActiveChatCharacterId(null)}
+          isOpen={isChatOpen}
+          returnFocusRef={characterTriggerRef}
+          onClose={() => setIsChatOpen(false)}
         />
       )}
     </div>
+    </Dialog.Root>
   );
 }
