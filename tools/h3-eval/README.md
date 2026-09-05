@@ -30,7 +30,11 @@ attempts and retries. The path is live-only, and the report records
 `thinking_enabled: false` because these schema-bound JSON calls deliberately
 disable DeepSeek thinking. Raw metrics contain a stable usage-key fingerprint;
 keep them in the private evidence directory and commit only a sanitized
-aggregate.
+aggregate. Every successful HTTP envelope is checked before fallback: models
+must be valid identifiers and usage must be present and valid. The report retains
+all observed model aliases, including earlier fallback responses and failed
+judgments. Evidence failure stops subsequent live cases. H3 does not retain raw
+bodies; H1's separate private JSONL capture is required for H1 qualification.
 
 Both modes fail closed on missing categories, malformed judge output, lowered
 thresholds, incomplete samples, unsupported versions, or a non-commit SHA.
