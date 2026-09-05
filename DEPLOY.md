@@ -34,7 +34,7 @@ newgrp docker
 ### 第 2 步：克隆代码
 
 ```bash
-git clone https://github.com/schorsch888/novelworld.git
+git clone https://github.com/Wisdoverse/novelworld.git
 cd novelworld
 ```
 
