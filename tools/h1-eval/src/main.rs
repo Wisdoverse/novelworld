@@ -6,11 +6,13 @@ use std::{
     io::{BufWriter, Write},
     path::{Path, PathBuf},
     process::Command,
+    sync::{Arc, Mutex},
 };
 
 use anyhow::{bail, Context, Result};
 use llm_client::{
-    production_json_request, ChatRequest, ChatResponse, LlmOperation, RuntimeLlmClient,
+    chat_completion_response_metadata, production_json_request, ChatRequest, ChatResponse,
+    HttpResponseEvidence, LlmOperation, RuntimeLlmClient,
 };
 use novel_service::domain::{
     entities::{
@@ -293,6 +295,7 @@ struct JudgeRunFailure {
     trace: JudgeTrace,
 }
 
+#[derive(Debug)]
 struct LiveFailure {
     code: &'static str,
     trace: JudgeTrace,
@@ -474,56 +477,100 @@ struct RunConfig {
 
 #[derive(Serialize)]
 struct PrivateResponseRecord<'a> {
+    schema_version: u8,
     sequence: usize,
     case_id: &'a str,
     operation: &'a str,
     logical_attempt: u8,
-    response_model: &'a str,
-    response_content: &'a str,
-    usage: &'a Option<llm_client::Usage>,
+    http_status: u16,
+    complete: bool,
+    // Bytes preserve invalid UTF-8 and truncated JSON without lossy conversion.
+    body: &'a [u8],
 }
 
-struct PrivateResponseSink {
+#[derive(Clone)]
+struct PrivateResponseSink(Arc<Mutex<PrivateResponseState>>);
+
+struct PrivateResponseState {
     writer: BufWriter<File>,
     count: usize,
+    response_models: BTreeSet<String>,
+    failure: Option<&'static str>,
 }
 
 impl PrivateResponseSink {
     fn create(path: &Path) -> Result<Self> {
         let file = create_fresh_evidence_file(path, "--private-responses-output")?;
-        Ok(Self {
+        Ok(Self(Arc::new(Mutex::new(PrivateResponseState {
             writer: BufWriter::new(file),
             count: 0,
-        })
+            response_models: BTreeSet::new(),
+            failure: None,
+        }))))
+    }
+
+    fn failure(&self) -> Option<&'static str> {
+        self.0
+            .lock()
+            .map(|state| state.failure)
+            .unwrap_or(Some("private_evidence_write_failed"))
     }
 
     fn record(
-        &mut self,
+        &self,
         case_id: &str,
         operation: LlmOperation,
         logical_attempt: u8,
-        response: &ChatResponse,
+        allowed_models: &BTreeSet<String>,
+        response: HttpResponseEvidence<'_>,
     ) -> Result<()> {
-        self.count += 1;
-        serde_json::to_writer(
-            &mut self.writer,
-            &PrivateResponseRecord {
-                sequence: self.count,
+        let mut state = self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("private_evidence_write_failed"))?;
+        if let Some(code) = state.failure {
+            bail!(code);
+        }
+        let result = (|| -> std::result::Result<(), &'static str> {
+            let record = PrivateResponseRecord {
+                schema_version: 2,
+                sequence: state.count + 1,
                 case_id,
                 operation: operation.to_str(),
                 logical_attempt,
-                response_model: &response.model,
-                response_content: &response.content,
-                usage: &response.usage,
-            },
-        )
-        .context("cannot serialize private response evidence")?;
-        self.writer
-            .write_all(b"\n")
-            .context("cannot append private response evidence")?;
-        self.writer
-            .flush()
-            .context("cannot flush private response evidence")?;
+                http_status: response.status,
+                complete: response.complete,
+                body: response.body,
+            };
+            serde_json::to_writer(&mut state.writer, &record)
+                .map_err(|_| "private_evidence_write_failed")?;
+            state
+                .writer
+                .write_all(b"\n")
+                .map_err(|_| "private_evidence_write_failed")?;
+            state
+                .writer
+                .flush()
+                .map_err(|_| "private_evidence_write_failed")?;
+            state.count += 1;
+            if !response.complete {
+                return Err("private_evidence_incomplete");
+            }
+            if (200..300).contains(&response.status) {
+                let (model, usage) = chat_completion_response_metadata(response.body)
+                    .map_err(|_| "response_envelope_invalid")?;
+                register_response_model(&mut state.response_models, allowed_models, &model)
+                    .map_err(|_| "response_model_not_allowed")?;
+                if usage.is_none() {
+                    return Err("response_usage_missing");
+                }
+            }
+            Ok(())
+        })();
+        if let Err(code) = result {
+            state.failure = Some(code);
+            bail!(code);
+        }
         Ok(())
     }
 }
@@ -541,9 +588,14 @@ fn create_fresh_evidence_file(path: &Path, flag: &str) -> Result<File> {
     if parent.starts_with(&checkout) {
         bail!("{flag} must be outside the Git checkout");
     }
-    OpenOptions::new()
-        .create_new(true)
-        .write(true)
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
         .open(path)
         .with_context(|| format!("cannot create fresh evidence at {}", path.display()))
 }
@@ -1082,7 +1134,7 @@ async fn evaluate(
                 case,
                 config,
                 &mut response_models,
-                private_responses.as_mut(),
+                private_responses.as_ref(),
             )
             .await
         };
@@ -1173,10 +1225,16 @@ async fn evaluate(
         .collect::<Vec<_>>();
     let passed = hard_failures.is_empty();
     let private_responses_retained = private_responses.is_some();
-    let private_response_count = private_responses
-        .as_ref()
-        .map(|sink| sink.count)
-        .unwrap_or(0);
+    let private_response_count = if let Some(sink) = private_responses {
+        let state = sink
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("private evidence lock failed"))?;
+        response_models.extend(state.response_models.iter().cloned());
+        state.count
+    } else {
+        0
+    };
     let prompt_versions = BTreeMap::from([
         (
             "character_extraction".into(),
@@ -1862,7 +1920,7 @@ async fn score_live(
     case: &PositiveCase,
     config: &RunConfig,
     response_models: &mut BTreeSet<String>,
-    private_responses: Option<&mut PrivateResponseSink>,
+    private_responses: Option<&PrivateResponseSink>,
 ) -> CaseReport {
     match run_live(case, config, response_models, private_responses).await {
         Ok(report) => report,
@@ -1892,28 +1950,62 @@ async fn score_live(
     }
 }
 
-fn record_private_response(
-    private_responses: &mut Option<&mut PrivateResponseSink>,
+fn private_request(
+    private_responses: Option<&PrivateResponseSink>,
     case_id: &str,
-    operation: LlmOperation,
     logical_attempt: u8,
-    response: &ChatResponse,
-) -> std::result::Result<(), LiveFailure> {
-    if let Some(sink) = private_responses.as_deref_mut() {
-        sink.record(case_id, operation, logical_attempt, response)
-            .map_err(|_| LiveFailure {
-                code: "private_evidence_write_failed",
-                trace: JudgeTrace::default(),
-            })?;
+    allowed_models: &BTreeSet<String>,
+    request: ChatRequest,
+) -> std::result::Result<ChatRequest, LiveFailure> {
+    let Some(sink) = private_responses else {
+        return Ok(request);
+    };
+    if let Some(code) = sink.failure() {
+        return Err(LiveFailure {
+            code,
+            trace: JudgeTrace::default(),
+        });
     }
-    Ok(())
+    let sink = sink.clone();
+    let case_id = case_id.to_owned();
+    let allowed_models = allowed_models.clone();
+    let operation = request.operation;
+    Ok(request.observe_responses(move |response| {
+        sink.record(
+            &case_id,
+            operation,
+            logical_attempt,
+            &allowed_models,
+            response,
+        )
+    }))
+}
+
+fn request_failure(
+    sink: Option<&PrivateResponseSink>,
+    fallback: &'static str,
+    error: &anyhow::Error,
+) -> LiveFailure {
+    if error.is::<llm_client::ResponseEvidenceError>() {
+        if let Some(sink) = sink {
+            if let Ok(mut state) = sink.0.lock() {
+                state.failure.get_or_insert("private_evidence_incomplete");
+            }
+        }
+    }
+    LiveFailure {
+        code: sink
+            .and_then(PrivateResponseSink::failure)
+            .unwrap_or(fallback),
+        trace: JudgeTrace::default(),
+    }
 }
 
 async fn run_live(
     case: &PositiveCase,
     config: &RunConfig,
     response_models: &mut BTreeSet<String>,
-    mut private_responses: Option<&mut PrivateResponseSink>,
+    private_responses: Option<&PrivateResponseSink>,
 ) -> std::result::Result<CaseReport, LiveFailure> {
     let client = config.client.as_ref().ok_or(LiveFailure {
         code: "live_client_missing",
@@ -1946,22 +2038,15 @@ async fn run_live(
     let extraction_prompt =
         character_extractor::build_extraction_prompt(&case.novel_title, &sample);
     let extraction_response = client
-        .chat(production_json_request(
-            LlmOperation::CharacterExtraction,
-            &extraction_prompt,
-        ))
+        .chat(private_request(
+            private_responses,
+            &case.id,
+            1,
+            &config.allowed_response_models,
+            production_json_request(LlmOperation::CharacterExtraction, &extraction_prompt),
+        )?)
         .await
-        .map_err(|_| LiveFailure {
-            code: "character_request_failed",
-            trace: JudgeTrace::default(),
-        })?;
-    record_private_response(
-        &mut private_responses,
-        &case.id,
-        LlmOperation::CharacterExtraction,
-        1,
-        &extraction_response,
-    )?;
+        .map_err(|error| request_failure(private_responses, "character_request_failed", &error))?;
     register_response_model(
         response_models,
         &config.allowed_response_models,
@@ -1995,22 +2080,17 @@ async fn run_live(
                 index,
             );
             let response = client
-                .chat(production_json_request(
-                    LlmOperation::CharacterExtraction,
-                    &prompt,
-                ))
+                .chat(private_request(
+                    private_responses,
+                    &case.id,
+                    1,
+                    &config.allowed_response_models,
+                    production_json_request(LlmOperation::CharacterExtraction, &prompt),
+                )?)
                 .await
-                .map_err(|_| LiveFailure {
-                    code: "character_chunk_request_failed",
-                    trace: JudgeTrace::default(),
+                .map_err(|error| {
+                    request_failure(private_responses, "character_chunk_request_failed", &error)
                 })?;
-            record_private_response(
-                &mut private_responses,
-                &case.id,
-                LlmOperation::CharacterExtraction,
-                1,
-                &response,
-            )?;
             register_response_model(
                 response_models,
                 &config.allowed_response_models,
@@ -2096,22 +2176,15 @@ async fn run_live(
                 trace: JudgeTrace::default(),
             })?;
         let response = client
-            .chat(production_json_request(
-                LlmOperation::CanonExtraction,
-                &prompt,
-            ))
+            .chat(private_request(
+                private_responses,
+                &case.id,
+                1,
+                &config.allowed_response_models,
+                production_json_request(LlmOperation::CanonExtraction, &prompt),
+            )?)
             .await
-            .map_err(|_| LiveFailure {
-                code: "canon_request_failed",
-                trace: JudgeTrace::default(),
-            })?;
-        record_private_response(
-            &mut private_responses,
-            &case.id,
-            LlmOperation::CanonExtraction,
-            1,
-            &response,
-        )?;
+            .map_err(|error| request_failure(private_responses, "canon_request_failed", &error))?;
         register_response_model(
             response_models,
             &config.allowed_response_models,
@@ -2147,19 +2220,17 @@ async fn run_live(
         let mut selection = None;
         for logical_attempt in 1..=2 {
             let response = client
-                .chat(request.clone())
+                .chat(private_request(
+                    private_responses,
+                    &case.id,
+                    logical_attempt,
+                    &config.allowed_response_models,
+                    request.clone(),
+                )?)
                 .await
-                .map_err(|_| LiveFailure {
-                    code: "canon_selection_request_failed",
-                    trace: JudgeTrace::default(),
+                .map_err(|error| {
+                    request_failure(private_responses, "canon_selection_request_failed", &error)
                 })?;
-            record_private_response(
-                &mut private_responses,
-                &case.id,
-                LlmOperation::CanonExtraction,
-                logical_attempt,
-                &response,
-            )?;
             register_response_model(
                 response_models,
                 &config.allowed_response_models,
@@ -2445,7 +2516,7 @@ async fn execute_judge<C, F>(
     case_id: &str,
     response_models: &mut BTreeSet<String>,
     allowed_response_models: &BTreeSet<String>,
-    mut private_responses: Option<&mut PrivateResponseSink>,
+    private_responses: Option<&PrivateResponseSink>,
 ) -> std::result::Result<JudgeOutcome, JudgeRunFailure>
 where
     C: FnMut(ChatRequest) -> F,
@@ -2454,22 +2525,23 @@ where
     let mut trace = JudgeTrace::default();
     for logical_attempt in 1..=2 {
         trace.attempts = logical_attempt;
-        let response = send(request.clone()).await.map_err(|_| JudgeRunFailure {
-            code: "judge_transport_failed",
+        let observed_request = private_request(
+            private_responses,
+            case_id,
+            logical_attempt,
+            allowed_response_models,
+            request.clone(),
+        )
+        .map_err(|failure| JudgeRunFailure {
+            code: failure.code,
             trace,
         })?;
-        if let Some(sink) = private_responses.as_deref_mut() {
-            sink.record(
-                case_id,
-                LlmOperation::OfflineEvaluation,
-                logical_attempt,
-                &response,
-            )
-            .map_err(|_| JudgeRunFailure {
-                code: "private_evidence_write_failed",
+        let response = send(observed_request)
+            .await
+            .map_err(|error| JudgeRunFailure {
+                code: request_failure(private_responses, "judge_transport_failed", &error).code,
                 trace,
             })?;
-        }
         register_response_model(response_models, allowed_response_models, &response.model)
             .map_err(|_| JudgeRunFailure {
                 code: "response_model_not_allowed",
@@ -2496,7 +2568,7 @@ async fn judge_live(
     canon: &CanonStoryModel,
     response_models: &mut BTreeSet<String>,
     allowed_response_models: &BTreeSet<String>,
-    private_responses: Option<&mut PrivateResponseSink>,
+    private_responses: Option<&PrivateResponseSink>,
 ) -> std::result::Result<JudgeOutcome, JudgeRunFailure> {
     let payload = semantic_judge_payload(case, extraction, canon).map_err(|_| JudgeRunFailure {
         code: "judge_payload_invalid",
@@ -3611,5 +3683,211 @@ mod tests {
         )
         .unwrap();
         assert_eq!(invalid, "invalid_encoding");
+    }
+    async fn evidence_server(
+        bodies: Vec<String>,
+    ) -> (
+        llm_client::LlmClient,
+        tokio::task::JoinHandle<()>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = count.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    socket.read_line(&mut line).await.unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                socket.read_exact(&mut vec![0; length]).await.unwrap();
+                let index = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let body = &bodies[index.min(bodies.len() - 1)];
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (
+            llm_client::LlmClient::new().with_openai_compatible(
+                "test",
+                "synthetic-key",
+                format!("http://{address}"),
+            ),
+            server,
+            count,
+        )
+    }
+
+    fn envelope(model: &str, content: &str, usage: bool) -> String {
+        let mut value =
+            serde_json::json!({"model": model, "choices": [{"message": {"content": content}}]});
+        if usage {
+            value["usage"] = serde_json::json!({"prompt_tokens": 3, "completion_tokens": 2});
+        }
+        value.to_string()
+    }
+
+    #[tokio::test]
+    async fn invalid_http_evidence_stops_fallback_and_later_cases() {
+        for (body, failure) in [
+            (
+                envelope("unregistered-model", "", true),
+                "response_model_not_allowed",
+            ),
+            (
+                envelope("registered-model", "", false),
+                "response_usage_missing",
+            ),
+            ("{malformed".into(), "response_envelope_invalid"),
+        ] {
+            let path = env::temp_dir().join(format!("h1-evidence-{}.jsonl", Uuid::new_v4()));
+            let sink = PrivateResponseSink::create(&path).unwrap();
+            let (client, server, calls) =
+                evidence_server(vec![body.clone(), envelope("registered-model", "{}", true)]).await;
+            let allowed = BTreeSet::from(["registered-model".into()]);
+            let request = ChatRequest::new(LlmOperation::CharacterExtraction, "registered-model")
+                .max_tokens(20)
+                .json();
+            let observed =
+                private_request(Some(&sink), "case-one", 1, &allowed, request.clone()).unwrap();
+            assert!(client
+                .chat(observed)
+                .await
+                .unwrap_err()
+                .is::<llm_client::ResponseEvidenceError>());
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(sink.failure(), Some(failure));
+            assert_eq!(
+                private_request(Some(&sink), "case-two", 1, &allowed, request)
+                    .unwrap_err()
+                    .code,
+                failure
+            );
+            server.abort();
+            let records = std::fs::read_to_string(&path).unwrap();
+            let record: serde_json::Value = serde_json::from_str(records.trim()).unwrap();
+            assert_eq!(record["complete"], true);
+            assert_eq!(
+                serde_json::from_value::<Vec<u8>>(record["body"].clone()).unwrap(),
+                body.as_bytes()
+            );
+            assert_eq!(record["case_id"], "case-one");
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn judge_private_evidence_covers_fallback_and_contract_retry() {
+        let (case, contract) = fixture_contract();
+        let path = env::temp_dir().join(format!("h1-evidence-{}.jsonl", Uuid::new_v4()));
+        let sink = PrivateResponseSink::create(&path).unwrap();
+        let bodies = vec![
+            envelope("alias-a", "", true),
+            envelope("alias-b", "{invalid", true),
+            envelope(
+                "alias-b",
+                &valid_judge_value(&contract, false).to_string(),
+                true,
+            ),
+        ];
+        let (client, server, calls) = evidence_server(bodies.clone()).await;
+        let allowed = BTreeSet::from(["alias-a".into(), "alias-b".into()]);
+        let mut models = BTreeSet::new();
+        let result = execute_judge(
+            |request| client.chat(request),
+            ChatRequest::new(LlmOperation::OfflineEvaluation, "alias-b")
+                .max_tokens(800)
+                .json(),
+            &contract,
+            &case.id,
+            &mut models,
+            &allowed,
+            Some(&sink),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.trace.attempts, 2);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+        server.abort();
+        assert_eq!(sink.0.lock().unwrap().response_models, allowed);
+        let records: Vec<serde_json::Value> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            records
+                .iter()
+                .map(|r| r["logical_attempt"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            [1, 1, 2]
+        );
+        for (index, record) in records.iter().enumerate() {
+            assert_eq!(record["sequence"], index + 1);
+            assert_eq!(record["operation"], "offline_evaluation");
+            assert_eq!(
+                serde_json::from_value::<Vec<u8>>(record["body"].clone()).unwrap(),
+                bodies[index].as_bytes()
+            );
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn private_write_failure_stops_before_fallback() {
+        let path = env::temp_dir().join(format!("h1-evidence-{}.jsonl", Uuid::new_v4()));
+        let sink = PrivateResponseSink::create(&path).unwrap();
+        // A read-only descriptor exercises an actual write failure on every platform.
+        sink.0.lock().unwrap().writer = BufWriter::new(File::open(&path).unwrap());
+        let (client, server, calls) = evidence_server(vec![
+            envelope("registered-model", "", true),
+            envelope("registered-model", "{}", true),
+        ])
+        .await;
+        let allowed = BTreeSet::from(["registered-model".into()]);
+        let request = ChatRequest::new(LlmOperation::CharacterExtraction, "registered-model")
+            .max_tokens(20)
+            .json();
+        let request = private_request(Some(&sink), "case", 1, &allowed, request).unwrap();
+        assert!(client
+            .chat(request)
+            .await
+            .unwrap_err()
+            .is::<llm_client::ResponseEvidenceError>());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(sink.failure(), Some("private_evidence_write_failed"));
+        assert_eq!(sink.0.lock().unwrap().count, 0);
+        server.abort();
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn timeout_before_headers_invalidates_later_private_requests() {
+        let path = env::temp_dir().join(format!("h1-evidence-{}.jsonl", Uuid::new_v4()));
+        let sink = PrivateResponseSink::create(&path).unwrap();
+        let failure = request_failure(
+            Some(&sink),
+            "request_failed",
+            &llm_client::ResponseEvidenceError.into(),
+        );
+        assert_eq!(failure.code, "private_evidence_incomplete");
+        let request =
+            ChatRequest::new(LlmOperation::CharacterExtraction, "registered-model").max_tokens(20);
+        assert!(private_request(Some(&sink), "later-case", 1, &BTreeSet::new(), request).is_err());
+        assert_eq!(sink.0.lock().unwrap().count, 0);
+        std::fs::remove_file(path).unwrap();
     }
 }

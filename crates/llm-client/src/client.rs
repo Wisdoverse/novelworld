@@ -129,6 +129,7 @@ impl LlmClient {
         let deadline = TokioInstant::now() + LLM_TOTAL_TIMEOUT;
         match tokio::time::timeout_at(deadline, async {
             let mut retry_attempt = 0;
+            let mut missing_attempt_usage = false;
             loop {
                 let attempt_started = Instant::now();
                 match provider.chat(&self.http, api_key, &req).await {
@@ -137,17 +138,31 @@ impl LlmClient {
                         if provider.reports_response_model() {
                             labels.response_model(&resp.model);
                         }
-                        labels.usage(resp.usage.as_ref());
+                        if missing_attempt_usage {
+                            if let Some(usage) = &resp.usage {
+                                labels.additional_usage(usage);
+                            }
+                            labels.usage(None);
+                        } else {
+                            labels.usage(resp.usage.as_ref());
+                        }
                         labels.finish("success", started);
                         return Ok(resp);
                     }
                     Err(e) => {
+                        if e.is::<ResponseEvidenceError>() {
+                            labels
+                                .attempt("evidence_error", attempt_started.elapsed().as_secs_f64());
+                            labels.finish("evidence_error", started);
+                            return Err(e);
+                        }
                         if req.json_mode && e.downcast_ref::<JsonModeEmpty>().is_some() {
-                            if let Some(usage) = e
-                                .downcast_ref::<JsonModeEmpty>()
-                                .and_then(|empty| empty.0.as_ref())
-                            {
+                            let empty = e.downcast_ref::<JsonModeEmpty>().unwrap();
+                            labels.response_model(&empty.model);
+                            if let Some(usage) = &empty.usage {
                                 labels.additional_usage(usage);
+                            } else {
+                                missing_attempt_usage = true;
                             }
                             labels.attempt(
                                 "empty_json_mode",
@@ -191,12 +206,21 @@ impl LlmClient {
             Ok(result) => result,
             Err(_) => {
                 labels.finish("timeout", started);
-                Err(anyhow!("LLM request exceeded the total deadline"))
+                if req.response_observer.is_some() {
+                    Err(ResponseEvidenceError.into())
+                } else {
+                    Err(anyhow!("LLM request exceeded the total deadline"))
+                }
             }
         }
     }
 
     pub async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream> {
+        if request.response_observer.is_some() {
+            return Err(anyhow!(
+                "response evidence observers require non-streaming chat"
+            ));
+        }
         validate_request(&request)?;
         let started = Instant::now();
         let (provider, api_key, provider_name, model_name) =

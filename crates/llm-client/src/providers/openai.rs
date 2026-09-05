@@ -3,13 +3,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    json_response, response_error,
+    json_response, json_response_with_evidence, response_error, response_error_with_evidence,
     sse::{decode_stream, SseFrame},
 };
 use crate::types::*;
 
 pub struct OpenAIProvider {
     base_url: String,
+}
+
+/// Reuses the transport's envelope and usage schema for qualification checks.
+/// Empty content is valid here because JSON-mode fallback may follow it.
+pub fn chat_completion_response_metadata(body: &[u8]) -> Result<(String, Option<Usage>)> {
+    let response: OpenAIResponse = serde_json::from_slice(body)?;
+    let usage = response.usage.map(OpenAIUsage::into_usage).transpose()?;
+    Ok((response.model, usage))
 }
 
 impl OpenAIProvider {
@@ -340,9 +348,9 @@ impl OpenAIProvider {
                 .send()
                 .await?;
             if !response.status().is_success() {
-                return Err(response_error(response).await);
+                return Err(response_error_with_evidence(response, Some(request)).await);
             }
-            let payload: Value = json_response(response).await?;
+            let payload: Value = json_response_with_evidence(response, Some(request)).await?;
             if payload.get("status").and_then(Value::as_str) != Some("completed") {
                 return Err(anyhow!("Responses API output was not completed"));
             }
@@ -397,10 +405,10 @@ impl OpenAIProvider {
             .await?;
 
         if !response.status().is_success() {
-            return Err(response_error(response).await);
+            return Err(response_error_with_evidence(response, Some(request)).await);
         }
 
-        let resp: OpenAIResponse = json_response(response).await?;
+        let resp: OpenAIResponse = json_response_with_evidence(response, Some(request)).await?;
 
         let content = response_content(&resp);
         let usage = resp.usage.map(OpenAIUsage::into_usage).transpose()?;
@@ -410,7 +418,11 @@ impl OpenAIProvider {
                 // DeepSeek documents that JSON mode can occasionally return an
                 // empty content field. The shared client owns the single
                 // response_format-free fallback so it is counted as an attempt.
-                return Err(JsonModeEmpty(usage).into());
+                return Err(JsonModeEmpty {
+                    model: resp.model,
+                    usage,
+                }
+                .into());
             }
             Err(error) => return Err(error),
         };

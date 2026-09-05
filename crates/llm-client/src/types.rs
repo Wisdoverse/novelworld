@@ -1,7 +1,37 @@
 use anyhow::Result;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
-use std::pin::Pin;
+use std::{pin::Pin, sync::Arc};
+
+/// Bounded upstream evidence. Consumers must treat the body as untrusted data.
+#[derive(Clone, Copy)]
+pub struct HttpResponseEvidence<'a> {
+    pub status: u16,
+    pub body: &'a [u8],
+    pub complete: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct ResponseObserver(
+    Arc<dyn Fn(HttpResponseEvidence<'_>) -> Result<()> + Send + Sync>,
+);
+
+impl std::fmt::Debug for ResponseObserver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ResponseObserver")
+    }
+}
+
+#[derive(Debug)]
+pub struct ResponseEvidenceError;
+
+impl std::fmt::Display for ResponseEvidenceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("provider response evidence could not be retained or validated")
+    }
+}
+
+impl std::error::Error for ResponseEvidenceError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatStreamEvent {
@@ -28,7 +58,10 @@ impl std::fmt::Display for LlmApiError {
 impl std::error::Error for LlmApiError {}
 
 #[derive(Debug)]
-pub(crate) struct JsonModeEmpty(pub(crate) Option<Usage>);
+pub(crate) struct JsonModeEmpty {
+    pub(crate) model: String,
+    pub(crate) usage: Option<Usage>,
+}
 
 impl std::fmt::Display for JsonModeEmpty {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -55,6 +88,7 @@ pub struct ChatRequest {
     pub stream: bool,
     pub json_mode: bool,
     pub thinking: Option<bool>,
+    pub(crate) response_observer: Option<ResponseObserver>,
 }
 
 impl ChatRequest {
@@ -69,7 +103,29 @@ impl ChatRequest {
             stream: false,
             json_mode: false,
             thinking: None,
+            response_observer: None,
         }
+    }
+
+    /// Qualification-only opt-in for non-streaming `chat`. Runs once per HTTP
+    /// response before parsing or retry, with at most 1 MiB of body bytes.
+    /// Cancellation retains a partial body when headers have arrived. A timeout
+    /// before headers has no HTTP envelope and terminates with `ResponseEvidenceError`.
+    /// Keep callbacks short: private local writes run synchronously on the caller.
+    /// Its failure is terminal and its contents are never included in errors.
+    pub fn observe_responses(
+        mut self,
+        observer: impl Fn(HttpResponseEvidence<'_>) -> Result<()> + Send + Sync + 'static,
+    ) -> Self {
+        self.response_observer = Some(ResponseObserver(Arc::new(observer)));
+        self
+    }
+
+    pub(crate) fn observe_response(&self, evidence: HttpResponseEvidence<'_>) -> Result<()> {
+        if let Some(observer) = &self.response_observer {
+            (observer.0)(evidence).map_err(|_| ResponseEvidenceError)?;
+        }
+        Ok(())
     }
 
     pub fn runtime_user_id(mut self, user_id: impl Into<String>) -> Self {
