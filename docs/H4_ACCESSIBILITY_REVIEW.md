@@ -9,7 +9,7 @@ architecture change is needed.
 
 1. Repair chat and character-drawer focus entry, keyboard exit, and restoration.
    Reuse the installed Radix dialog for the drawer. Chat remains a non-modal
-   labelled region so readers can still use the chapter while it is open.
+   labelled region; returning focus to the chapter dismisses it.
 2. Give committed chat, branch, and world outcomes named announcements; keep
    partial streaming text out of the committed live log. Preserve retry and
    unknown-outcome semantics and never announce an uncommitted turn as success.
@@ -51,16 +51,45 @@ review, not independent approval. No non-author review is currently recorded.
   explicit containment checks; a cycle alone never proves page reachability.
 - Rollout: ordinary frontend artifact replacement. Abort on unreachable
   controls, lost focus, misleading announcements, or browser failures; revert
-  the frontend commit. No migration, data rollback, or new telemetry applies.
+  the frontend commits. No migration, data rollback, or new telemetry applies.
 - Human screen-reader/mobile/non-author evidence in #169 and provider/live
   qualification in #222/#229/#230 remain separate requirements. Automation
   cannot close those requirements.
 
 ## Implementation and adversarial review
 
+### Follow-up plan review: focus behind non-modal chat
+
+A fresh complete Tab walk on `b35a120` at 320px fails at the Reader translation
+button: the button receives focus behind the floating chat panel. The previous
+named-target checks passed because they did not inspect intermediate stops.
+
+Reviewed decision: dismiss the non-modal panel when focus enters the background,
+without redirecting that focus. Keep its local draft mounted in each owning
+page so dismissal cannot discard unsent input. Reopening the same character
+restores that draft; a different character, identity, chapter, or novel gets a
+fresh keyed panel. Existing spoiler/ownership invalidation still unmounts it.
+Use one document focus listener inside the existing widget and one visibility
+state per caller. No focus trap, responsive modal mode, placement algorithm,
+new global store or persistence is needed. Add complete Tab/Shift+Tab walks and
+draft-reopen evidence before considering the finding closed.
+
+The strengthened walk also exposes the import form's visually clipped file
+input and a textarea hidden by its nested scrolling form/footer. Reviewed
+correction: use a visible native button to open the existing file input, and
+let the entire bounded dialog scroll with a viewport-limited textarea. The
+input resets after selection so repeat selections work; its own empty-file
+label must not contradict the authoritative selected-file list. The button
+keeps the file chooser keyboard accessible without a second selection state.
+
+Disposition: implementer plan review approves this bounded correction; an
+independent approval is still not represented by this record.
+
 Reviewer: Codex, the implementer (2026-09-05). This pass is not independent
-human approval. No unresolved code finding remains in the exercised scope;
-independent design/final-evidence review and required CI remain merge gates.
+human approval. The follow-up uses immediate background-focus dismissal with a
+mounted local draft, explicit focus restoration before DOM removal, a native file-picker
+button, and one scrolling import dialog. Independent design/final-evidence
+review and required CI remain merge gates.
 
 The initial browser pass found a real focus race: mounting chat while Radix was
 still releasing the drawer redirected focus into the disappearing drawer.
@@ -87,8 +116,10 @@ left-clipped content and obscured focus. It also submits an actual world action
 and checks a newly committed turn, avoiding the former broad button selector
 and pre-existing narrative text. Tab walkers distinguish actual DOM elements
 and fail at their bound; named-target checks establish reachability separately
-from modal containment. Focus checks allow native scrolling to settle and then
-require a visible, unobscured control. Native scroll padding keeps Reader's
+from modal containment. Named-target checks now inspect every intermediate
+stop, with an injected covered-stop test proving that a visible destination
+cannot hide an inaccessible path. Focus checks allow native scrolling to settle
+and then require a visible, unobscured control. Native scroll padding keeps Reader's
 fixed bars clear of keyboard targets.
 
 ## Executed evidence and remaining boundaries
@@ -105,19 +136,31 @@ browser focus, styles and stream parsing are real.
 | `pnpm lint:fsd` | 84 files, 339 edges, zero violations; negative self-tests pass |
 | `pnpm test --maxWorkers=2` | 26 files, 220 tests pass |
 | `VITE_API_URL=/api pnpm build` | Pass |
-| Focused built-app keyboard/reflow suite | 24 pass, including 320×720, 568×320 and 320×256 overlays |
-| `pnpm exec playwright test` (final built app, no retries) | 46 pass |
+| Opened overlays in final built-app suite | Pass at 320×720, 568×320 and 320×256 |
+| `pnpm exec playwright test` (final built app, no retries) | 48 pass |
+| CI workflow | YAML parses; browser failure artifacts retained for 7 days |
 
 An unrestricted local unit run timed out in the existing one-second lazy-home
 route assertion (219 passed, one failed); the bounded-worker full run above
 passed without changing that test or its deadline. Exact-commit CI results
 belong to the linked pull request.
 
+One follow-up browser attempt had blank-page startup timeouts in the advanced
+rules and batch-import screens plus one keyboard visibility failure, then ended
+with SIGTERM before completing the suite. Its orphaned local preview process
+was identified and stopped before starting the final clean preview. That attempt
+is not passing evidence and its startup cause is unconfirmed.
+The harness now retains failure traces/screenshots, and the browser CI job uploads
+them on failure. This diagnostic limitation remains visible to independent review;
+no timeout, retry count, or assertion was relaxed. The final clean-preview
+run passed all 48 tests, including each previously failing path, without retries.
+
 Visual review of the final built app checked the visible focus ring and
 reachable header/input/send controls in the opened overlays:
 [320px character drawer](./evidence/h4-character-drawer-320.png),
-[320px chat](./evidence/h4-chat-320.png), and
-[short-landscape chat](./evidence/h4-chat-landscape.png).
+[320px chat](./evidence/h4-chat-320.png),
+[short-landscape chat](./evidence/h4-chat-landscape.png), and the updated
+[keyboard-opened file picker result](./evidence/batch-novel-import.png).
 
 No backend, API, SQL, migration, auth/session, provider, persistent data,
 dependency version, or lifecycle contract changes are included. Backend

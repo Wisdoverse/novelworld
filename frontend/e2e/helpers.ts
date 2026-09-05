@@ -142,14 +142,16 @@ export async function tabWalk(page: Page, maxStops = 120, direction: 'Tab' | 'Sh
 
 /** Proves a named control is reachable, not merely that some cycle exists. */
 export async function tabTo(page: Page, target: Locator, direction: 'Tab' | 'Shift+Tab' = 'Tab') {
+  await expect(target).toBeVisible();
+  await expect(target).toBeEnabled();
   for (let i = 0; i < 120; i++) {
     await page.keyboard.press(direction);
-    if (!await target.evaluate(el => el === document.activeElement)) continue;
     const state = await currentFocus(page);
-    expect(state?.visibleIndicator, 'target focus indicator').toBe(true);
+    if (!state) continue;
+    expect(state.visibleIndicator, `focus indicator: ${state.identity}`).toBe(true);
     await expect.poll(async () => (await currentFocus(page))?.inViewport,
-      { message: 'target focus in viewport and unobscured' }).toBe(true);
-    return;
+      { message: `focus outside viewport or obscured: ${state.identity}` }).toBe(true);
+    if (await target.evaluateAll(els => els.some(el => el === document.activeElement))) return;
   }
   throw new Error('Target was not reached within 120 keyboard stops');
 }

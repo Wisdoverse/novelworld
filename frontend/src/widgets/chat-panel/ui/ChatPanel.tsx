@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useId } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import { Send, X, Minimize2, Maximize2, Brain } from 'lucide-react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import {
@@ -62,6 +62,7 @@ export function ChatPanel({
   const messagesRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
+  const returnTriggerRef = useRef<HTMLElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const titleId = useId();
   const reducedMotion = useReducedMotionPreference();
@@ -112,6 +113,7 @@ export function ChatPanel({
   useLayoutEffect(() => {
     if (!isOpen || !characterMatchesNovel) return;
     const trigger = returnFocusRef?.current ?? document.activeElement;
+    returnTriggerRef.current = trigger instanceof HTMLElement ? trigger : null;
     const panel = panelRef.current;
     // The history request may still disable the input. Close is always usable.
     closeRef.current?.focus({ preventScroll: true });
@@ -120,6 +122,15 @@ export function ChatPanel({
         && trigger instanceof HTMLElement && trigger.isConnected) trigger.focus();
     };
   }, [isOpen, characterMatchesNovel, character.id, returnFocusRef]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const dismissOnOutsideFocus = (event: FocusEvent) => {
+      if (event.target instanceof Node && !panelRef.current?.contains(event.target)) onClose();
+    };
+    document.addEventListener('focusin', dismissOnOutsideFocus);
+    return () => document.removeEventListener('focusin', dismissOnOutsideFocus);
+  }, [isOpen, onClose]);
 
   useEffect(() => {
     if (activeTurn && !activeTurnMatchesView) {
@@ -142,6 +153,13 @@ export function ChatPanel({
     inputRef.current?.focus();
   };
 
+  const handleClose = () => {
+    // Restore before the focused DOM node is removed. Background dismissal
+    // calls onClose directly, preserving the user's new focus destination.
+    if (returnTriggerRef.current?.isConnected) returnTriggerRef.current.focus();
+    onClose();
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -150,8 +168,7 @@ export function ChatPanel({
   };
 
   return (
-    <AnimatePresence>
-      {isOpen && characterMatchesNovel && (
+      isOpen && characterMatchesNovel && (
         <motion.div
           ref={panelRef}
           role="region"
@@ -159,12 +176,11 @@ export function ChatPanel({
           onKeyDown={event => {
             if (event.key === 'Escape') {
               event.stopPropagation();
-              onClose();
+              handleClose();
             }
           }}
           initial={{ opacity: 0, x: 60, scale: 0.95 }}
           animate={{ opacity: 1, x: 0, scale: 1 }}
-          exit={{ opacity: 0, x: 60, scale: 0.95 }}
           transition={{ duration: 0.25, ease: [0.23, 1, 0.32, 1] }}
           className="fixed right-4 bottom-4 z-50 flex flex-col"
           style={{
@@ -230,7 +246,7 @@ export function ChatPanel({
                 </button>
                 <button
                   ref={closeRef}
-                  onClick={(e) => { e.stopPropagation(); onClose(); }}
+                  onClick={(e) => { e.stopPropagation(); handleClose(); }}
                   aria-label="关闭聊天"
                   className="min-h-8 min-w-8 rounded-full p-1.5 text-[#5f6368] transition-colors hover:bg-[#f1f3f4]"
                 >
@@ -395,7 +411,6 @@ export function ChatPanel({
             )}
           </div>
         </motion.div>
-      )}
-    </AnimatePresence>
+      )
   );
 }

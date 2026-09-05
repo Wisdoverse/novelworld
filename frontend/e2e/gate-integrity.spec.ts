@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { installStubs } from './stubs';
-import { scanA11y, tabWalk, horizontalOverflow, currentFocus } from './helpers';
+import { scanA11y, tabWalk, tabTo, horizontalOverflow, currentFocus } from './helpers';
 
 // Anti-vacuous gate checks: the scan must FAIL CLOSED on injected
 // violations, the catch-all stub must answer unstubbed routes, and a
@@ -80,4 +80,7 @@ test('gate integrity: clipped left content and obscured focus are detected', asy
   await page.setContent('<button>Covered</button><div style="position:fixed;inset:0;background:white"></div>');
   await page.keyboard.press('Tab');
   expect((await currentFocus(page))?.inViewport).toBe(false);
+  await page.setContent('<button>Covered stop</button><button style="position:relative;z-index:1">Target</button><div style="position:fixed;inset:0;background:white"></div>');
+  await expect(tabTo(page, page.getByRole('button', { name: 'Target', exact: true })))
+    .rejects.toThrow('focus outside viewport or obscured: Covered stop');
 });

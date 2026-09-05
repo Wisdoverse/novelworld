@@ -33,6 +33,7 @@ export function CharactersPage() {
     readingProgress?.current_chapter ?? 0,
   );
   const [chatCharacterId, setChatCharacterId] = useState<string | null>(null);
+  const [isChatOpen, setIsChatOpen] = useState(false);
   const chatCharacter = chatCharacterId
     ? characters?.find(character => character.id === chatCharacterId) ?? null
     : null;
@@ -110,7 +111,10 @@ export function CharactersPage() {
                 key={char.id}
                 character={char}
                 onTalk={(c) => {
-                  if (readingProgress) setChatCharacterId(c.id);
+                  if (readingProgress) {
+                    setChatCharacterId(c.id);
+                    setIsChatOpen(true);
+                  }
                 }}
               />
             ))}
@@ -120,14 +124,15 @@ export function CharactersPage() {
 
       {chatCharacter && (
         <ChatPanel
+          key={`${novelId}:${chatCharacter.id}:${readerIdentityScope}:${readingProgress?.current_chapter}`}
           character={chatCharacter}
           novelId={novelId}
           currentChapter={readingProgress?.current_chapter || 1}
           readerIdentity={readingProgress?.reader_identity}
           readerIdentityScope={readerIdentityScope}
           canChat={readerIdentityScope !== 'unresolved' && chatCharacterIsAvailable}
-          isOpen={!!chatCharacter}
-          onClose={() => setChatCharacterId(null)}
+          isOpen={isChatOpen}
+          onClose={() => setIsChatOpen(false)}
         />
       )}
     </main>

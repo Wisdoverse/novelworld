@@ -181,6 +181,7 @@ export function ReaderPage() {
   );
 
   const [activeChatCharacterId, setActiveChatCharacterId] = useState<string | null>(null);
+  const [isChatOpen, setIsChatOpen] = useState(false);
   const [showCharacterList, setShowCharacterList] = useState(false);
   const characterTriggerRef = useRef<HTMLButtonElement>(null);
   const pendingChatCharacterId = useRef<string | null>(null);
@@ -477,7 +478,7 @@ export function ReaderPage() {
 
   return (
     <Dialog.Root open={showCharacterList && !timelineMutationLocked} onOpenChange={open => {
-      if (open) setActiveChatCharacterId(null);
+      if (open) setIsChatOpen(false);
       setShowCharacterList(open);
     }}>
     <div className="app-surface min-h-screen">
@@ -822,6 +823,7 @@ export function ReaderPage() {
             if (pendingChatCharacterId.current) {
               event.preventDefault();
               setActiveChatCharacterId(pendingChatCharacterId.current);
+              setIsChatOpen(true);
               pendingChatCharacterId.current = null;
             }
           }}
@@ -883,15 +885,16 @@ export function ReaderPage() {
       {/* 角色对话面板 */}
       {activeChatCharacter && activeCharacterIsAvailable && !timelineMutationLocked && (
         <ChatPanel
+          key={`${novelId}:${activeChatCharacter.id}:${readerIdentityScope}:${currentChapter}`}
           character={activeChatCharacter}
           novelId={novelId!}
           currentChapter={currentChapter}
           readerIdentity={readingProgress?.reader_identity}
           readerIdentityScope={readerIdentityScope}
           canChat={isChatReady && activeCharacterIsAvailable}
-          isOpen={!!activeChatCharacter}
+          isOpen={isChatOpen}
           returnFocusRef={characterTriggerRef}
-          onClose={() => setActiveChatCharacterId(null)}
+          onClose={() => setIsChatOpen(false)}
         />
       )}
     </div>
