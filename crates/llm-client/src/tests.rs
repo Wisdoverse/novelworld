@@ -478,6 +478,8 @@ fn provider_metrics_count_logical_requests_attempts_usage_and_stream_terminals()
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
     let _guard = metrics::set_default_local_recorder(&recorder);
+    let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let records = observed.clone();
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -491,7 +493,15 @@ fn provider_metrics_count_logical_requests_attempts_usage_and_stream_terminals()
             client
                 .chat(
                     ChatRequest::new(crate::LlmOperation::CharacterExtraction, "deepseek/model")
-                        .max_tokens(4_096),
+                        .max_tokens(4_096)
+                        .observe_responses(move |evidence| {
+                            records.lock().unwrap().push((
+                                evidence.status,
+                                evidence.body.to_vec(),
+                                evidence.complete,
+                            ));
+                            Ok(())
+                        }),
                 )
                 .await
                 .unwrap();
@@ -568,8 +578,39 @@ fn provider_metrics_count_logical_requests_attempts_usage_and_stream_terminals()
             assert!(provider_error.into_iter().any(|item| item.is_err()));
         });
     server.join().unwrap();
+    assert_eq!(
+        *observed.lock().unwrap(),
+        [
+            (429, b"{}".to_vec(), true),
+            (200, success.as_bytes().to_vec(), true)
+        ]
+    );
 
     let rendered = handle.render();
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_llm_usage_reports_total",
+            &[("operation", "canon_extraction"), ("status", "present")]
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_llm_usage_reports_total",
+            &[("operation", "canon_extraction"), ("status", "missing")]
+        ),
+        0.0
+    );
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_llm_requests_total",
+            &[("operation", "canon_extraction"), ("status", "success")]
+        ),
+        1.0
+    );
     let usage_key = crate::usage_key_fingerprint("key");
     assert_eq!(
         metric_value(
@@ -836,4 +877,215 @@ fn openai_rejects_malformed_known_events() {
         .await;
         assert!(results.into_iter().any(|item| item.is_err()));
     });
+}
+
+#[test]
+fn empty_json_fallback_keeps_earlier_model_and_missing_usage_visible() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        for body in [
+            r#"{"model":"unregistered-model","choices":[{"message":{"content":""}}]}"#,
+            r#"{"model":"registered-model","choices":[{"message":{"content":"{}"}}],"usage":{"prompt_tokens":3,"completion_tokens":2}}"#,
+        ] {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0; 8192];
+            assert!(socket.read(&mut request).unwrap() > 0);
+            socket
+                .write_all(&http_response("200 OK", "application/json", body, ""))
+                .unwrap();
+        }
+    });
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let collected = observed.clone();
+    let response = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut request =
+                crate::production_json_request(crate::LlmOperation::CanonExtraction, "probe");
+            request.model = "registered-model".into();
+            let request = request.observe_responses(move |evidence| {
+                collected
+                    .lock()
+                    .unwrap()
+                    .push(crate::chat_completion_response_metadata(evidence.body)?.0);
+                Ok(())
+            });
+            LlmClient::new()
+                .with_openai_compatible("test", "key", format!("http://{address}"))
+                .chat(request)
+                .await
+                .unwrap()
+        });
+    server.join().unwrap();
+    assert_eq!(response.model, "registered-model");
+    let rendered = handle.render();
+    assert_eq!(
+        *observed.lock().unwrap(),
+        ["unregistered-model", "registered-model"]
+    );
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_llm_usage_reports_total",
+            &[("status", "missing")]
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_llm_usage_reports_total",
+            &[("status", "present")]
+        ),
+        0.0
+    );
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_llm_tokens_total",
+            &[("type", "input")]
+        ),
+        3.0
+    );
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "novelworld_llm_tokens_total",
+            &[("type", "output")]
+        ),
+        2.0
+    );
+}
+
+#[tokio::test]
+async fn response_evidence_is_bounded_and_retained_before_parse_or_cancellation() {
+    for (body, extra_length, stall) in [
+        (b"{bad-json".to_vec(), 0, false),
+        (vec![b'x'; 1024 * 1024 + 1], 0, false),
+        (b"{partial".to_vec(), 100, false),
+        (b"{pending".to_vec(), 100, true),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let complete = extra_length == 0 && body.len() <= 1024 * 1024;
+        let expected = body[..body.len().min(1024 * 1024)].to_vec();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0; 8192];
+            assert!(socket.read(&mut request).unwrap() > 0);
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len() + extra_length
+            )
+            .unwrap();
+            socket.write_all(&body).unwrap();
+            if stall {
+                thread::sleep(Duration::from_millis(350));
+            }
+        });
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let records = observed.clone();
+        let request = ChatRequest::new(crate::LlmOperation::CanonExtraction, "test-model")
+            .max_tokens(20)
+            .json()
+            .observe_responses(move |evidence| {
+                records.lock().unwrap().push((
+                    evidence.status,
+                    evidence.body.to_vec(),
+                    evidence.complete,
+                ));
+                anyhow::bail!("private body must not appear in the public error");
+            });
+        let result = LlmClient::new()
+            .with_openai_compatible("test", "synthetic-key", format!("http://{address}"))
+            .chat(request)
+            .await;
+        server.join().unwrap();
+        let error = result.unwrap_err();
+        assert!(!error.to_string().contains("private body"));
+        assert!(error.is::<crate::ResponseEvidenceError>(), "{error}");
+        assert_eq!(*observed.lock().unwrap(), [(200, expected, complete)]);
+    }
+}
+
+#[tokio::test]
+async fn response_observer_covers_responses_api_and_http_errors() {
+    for status in ["200 OK", "429 Too Many Requests"] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0; 8192];
+            let size = socket.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..size]).starts_with("POST /v1/responses "));
+            socket
+                .write_all(&http_response(
+                    status,
+                    "application/json",
+                    "private-envelope",
+                    "Retry-After: 0\r\n",
+                ))
+                .unwrap();
+        });
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let records = observed.clone();
+        // Force the real DeepSeek route onto loopback; no DNS or provider traffic.
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .resolve("api.deepseek.com", address)
+            .build()
+            .unwrap();
+        let provider = openai::OpenAIProvider::new(Some(&format!(
+            "http://api.deepseek.com:{}",
+            address.port()
+        )));
+        let request = ChatRequest::new(crate::LlmOperation::CanonExtraction, "test-model")
+            .max_tokens(20)
+            .thinking(true)
+            .observe_responses(move |evidence| {
+                records.lock().unwrap().push((
+                    evidence.status,
+                    evidence.body.to_vec(),
+                    evidence.complete,
+                ));
+                anyhow::bail!("synthetic sink failure");
+            });
+        assert!(provider
+            .chat(&http, "synthetic-key", &request)
+            .await
+            .unwrap_err()
+            .is::<crate::ResponseEvidenceError>());
+        server.join().unwrap();
+        assert_eq!(
+            *observed.lock().unwrap(),
+            [(
+                if status.starts_with("200") { 200 } else { 429 },
+                b"private-envelope".to_vec(),
+                true
+            )]
+        );
+    }
+}
+
+#[tokio::test]
+async fn unsupported_stream_evidence_fails_before_io() {
+    let request = ChatRequest::new(crate::LlmOperation::CharacterChat, "model")
+        .max_tokens(20)
+        .observe_responses(|_| panic!("no provider request is permitted"));
+    let result = LlmClient::new().chat_stream(request).await;
+    assert!(result
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("non-streaming chat"));
 }

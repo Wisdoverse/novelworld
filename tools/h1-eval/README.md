@@ -62,8 +62,25 @@ metrics contain a stable usage-key fingerprint;
 keep them in the private evidence directory. Both output paths must be
 absolute, outside the Git checkout, inside existing directories, and fresh:
 the evaluator creates each file exclusively before any provider call.
-`--private-responses-output` records each raw provider response before parsing
-and flushes after every response. These private files may contain model output
+`--private-responses-output` records every non-streaming HTTP response before
+parsing, JSON fallback or transport retry, and flushes each JSONL record. Private
+schema version 2 stores `sequence`, `case_id`, `operation`, `logical_attempt`,
+`http_status`, `complete` and exact `body` bytes (a JSON integer array). The body
+is capped at 1 MiB; truncated, oversized or deadline-cancelled bodies retain the
+available prefix with `complete: false`. No envelope exists when a request fails
+before response headers. Files are created exclusively; Unix permissions are 0600. Writes use synchronous
+local filesystem I/O with no retry; the HTTP deadline cannot preempt a stuck
+filesystem, and flush is not an fsync durability guarantee.
+
+Every complete successful envelope, including an empty JSON-mode reply, must
+contain an allowed model and valid usage. Invalid or incomplete evidence, a
+private-write failure or a total timeout stops further provider calls across the
+run. Complete HTTP errors remain subject to the existing bounded retry policy.
+`private_response_count` counts flushed HTTP envelopes, including failed replies;
+it is not the logical-request or judge-attempt denominator. The public model set
+includes all validated observed aliases, even before fallback or a later failure.
+Rejected-envelope tokens may be absent from metrics: reconcile the private bytes
+when diagnosing cost; such a run cannot qualify. These private files may contain model output
 or stable fingerprints and must never be committed; publish only the
 sanitized aggregate produced for the reviewed evidence package. The public
 report records only the configured model, allowlisted observed response-model
