@@ -191,22 +191,84 @@ jobs:
             release.env
             sboms/
 
-  github-release:
-    if: startsWith(github.ref, 'refs/tags/v')
+  release-attestation:
     needs: [release-manifest, desktop]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
-      contents: write
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
+      - uses: actions/checkout@v7.0.1
       - uses: actions/download-artifact@v8.0.1
+        timeout-minutes: 5
         with:
           name: novel-world-release-${{ github.sha }}
-          path: release-assets
+          path: server-assets
       - uses: actions/download-artifact@v8.0.1
+        timeout-minutes: 5
         with:
           pattern: novelworld-*
           path: release-assets
           merge-multiple: true
+      - name: Prepare release files and pinned native verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA" ]]
+          cp server-assets/release.env server-assets/sboms/* release-assets/
+          (cd release-assets && sha256sum novelworld-* > desktop-SHA256SUMS)
+
+          cli_dir="$RUNNER_TEMP/release-attestation-cli"
+          mkdir -p "$cli_dir"
+          curl --fail --silent --show-error --location --connect-timeout 10 --max-time 120 \
+            https://github.com/cli/cli/releases/download/v2.100.0/gh_2.100.0_linux_amd64.tar.gz \
+            --output "$cli_dir/gh.tar.gz"
+          printf '%s  %s\n' e4d4bb4498e8d007abe545b6568926793ace1b6447da598294a610018cb164be \
+            "$cli_dir/gh.tar.gz" | sha256sum --check --strict
+          tar -xzf "$cli_dir/gh.tar.gz" -C "$cli_dir" --strip-components=2 gh_2.100.0_linux_amd64/bin/gh
+          echo "$cli_dir" >> "$GITHUB_PATH"
+          # Trust comes from the CLI's independent distribution, never release assets.
+          timeout --kill-after=10s 120s "$cli_dir/gh" attestation trusted-root \
+            > "$RUNNER_TEMP/release-trusted-root.jsonl"
+      - name: Attest every release file
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        timeout-minutes: 10
+        with:
+          subject-path: release-assets/*
+      - name: Verify file provenance and native rejection cases
+        timeout-minutes: 10
+        env:
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cp "$BUNDLE_PATH" release-assets/release-attestation.json
+          tests/e2e/release_attestation_check.sh release-assets "$GITHUB_SHA" \
+            "$RUNNER_TEMP/release-trusted-root.jsonl"
+      - uses: actions/upload-artifact@v7.0.1
+        timeout-minutes: 5
+        with:
+          name: release-files-${{ github.sha }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  github-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release-attestation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8.0.1
+        timeout-minutes: 5
+        with:
+          name: release-files-${{ github.sha }}
+          path: release-assets
       - name: Publish server and desktop assets
         shell: bash
         env:
@@ -216,7 +278,6 @@ jobs:
           set -euo pipefail
           tag=$GITHUB_REF_NAME
           cd release-assets
-          sha256sum novelworld-* > desktop-SHA256SUMS
 
           state=missing
           if state=$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null); then
@@ -228,6 +289,5 @@ jobs:
             state=true
           fi
 
-          gh release upload "$tag" \
-            release.env sboms/* novelworld-* desktop-SHA256SUMS --clobber
+          gh release upload "$tag" ./* --clobber
           [[ "$state" == false ]] || gh release edit "$tag" --draft=false

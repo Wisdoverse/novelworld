@@ -143,8 +143,9 @@ guards; the deployment path itself is not exercised by a local drill. The
 state drill pins sync/rename order and simulates process crashes, but it does
 not inject a real Linux host power loss or prove filesystem directory-entry
 durability across one.
-SBOM generation has since landed (see Dependency Policy); deploy-time SBOM
-verification, provenance/attestation, and signing remain gated.
+SBOM generation has since landed (see Dependency Policy). Release-file
+provenance is documented in the Release-file provenance section below;
+deploy-time SBOM admission and platform-native signing remain gated.
 ### Dependency Policy
 
 CI runs `cargo audit` against both `Cargo.lock` files with the live RustSec
@@ -154,7 +155,8 @@ HIGH/CRITICAL advisory in a shipped browser dependency fails the build;
 development-only frontend tooling is outside that production-dependency gate.
 Dependabot covers Cargo, npm, Dockerfiles, Compose files, and GitHub Actions.
 The temporary TypeScript 7/6 npm aliases, pinned Alpine packages in Dockerfile
-`RUN` steps, and immutable scanner images embedded in shell commands are
+`RUN` steps, the release workflow's GitHub CLI archive, and immutable scanner
+images embedded in shell commands are
 verified manually against upstream releases during each dependency-maintenance
 change because Dependabot does not parse those forms.
 CI also runs `gitleaks` over the full commit history: any committed secret
@@ -245,9 +247,43 @@ image-ID fallback. Local commands require GNU `timeout`: pulls are bounded to
 termination grace; no command is retried automatically. A timeout does not
 guarantee that daemon work has fully stopped.
 
-Still-open H2 supply-chain gates: deploy-time SBOM verification,
-provenance/attestation, and signature generation for official release
-artifacts.
+#### Release-file provenance
+
+The release workflow's provenance outcome covers the existing flat release
+files: `release.env`, six CycloneDX SBOMs, `digests.txt`, four desktop
+archives, and `desktop-SHA256SUMS`. After the required quality, image, manifest,
+and desktop builds succeed, the pinned `actions/attest` v4.2.2 action produces
+native provenance for these exact file subjects and writes the Sigstore bundle
+as `release-attestation.json`. A `workflow_dispatch` exercises signing and
+verification without publishing a GitHub Release; tag publication remains
+blocked until the required checks and native verification of every file pass.
+
+Consumers must obtain the expected source and signer SHA from an independently
+reviewed workflow run or operator record, never only from `release.env`. Verify
+each consumed file separately with GitHub CLI 2.100.0 or newer, for example:
+
+```bash
+expected_sha="$REVIEWED_SOURCE_SHA"
+/path/to/gh attestation verify release.env \
+  --hostname github.com \
+  --repo Wisdoverse/novelworld \
+  --signer-workflow Wisdoverse/novelworld/.github/workflows/docker.yml \
+  --source-digest "$expected_sha" \
+  --signer-digest "$expected_sha" \
+  --deny-self-hosted-runners \
+  --bundle release-attestation.json
+```
+
+Run the same command separately for every SBOM, digest sidecar, desktop
+archive, and checksum file. For offline verification, obtain trusted roots
+separately with `gh attestation trusted-root` and pass the resulting file with
+`--custom-trusted-root`; never trust a root downloaded alongside the release.
+A valid signature establishes file content and producing workflow identity;
+it does not establish release qualification.
+
+Deploy-time SBOM verification remains a separate gate. Platform-native Windows
+code signing, Apple signing/notarization, human review, and release
+qualification remain outside this file-provenance outcome.
 
 ### Provider Incidents
 
