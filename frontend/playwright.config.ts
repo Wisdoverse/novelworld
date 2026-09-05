@@ -14,6 +14,8 @@ export default defineConfig({
   use: {
     baseURL: previewUrl,
     headless: true,
+    trace: 'retain-on-failure',
+    screenshot: 'only-on-failure',
     viewport: { width: 1280, height: 800 },
   },
   // The suite runs against the BUILT app (VITE_API_URL=/api) served by vite

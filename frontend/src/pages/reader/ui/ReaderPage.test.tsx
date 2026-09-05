@@ -515,14 +515,14 @@ describe('ReaderPage progress gate', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '角色' }));
     fireEvent.click(screen.getByRole('button', { name: /Future/ }));
-    expect(screen.getByTestId('chat-panel').textContent).toContain('Future');
+    expect((await screen.findByTestId('chat-panel')).textContent).toContain('Future');
 
     mocks.characters = [];
     view.rerender(<ReaderPage />);
     await waitFor(() => expect(screen.queryByTestId('chat-panel')).toBeNull());
   });
 
-  it('hides a future character synchronously while a rewind is being committed', () => {
+  it('hides a future character synchronously while a rewind is being committed', async () => {
     mocks.routeChapter = '5';
     mocks.progressChapter = 5;
     mocks.progressSaving = false;
@@ -540,7 +540,7 @@ describe('ReaderPage progress gate', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '角色' }));
     fireEvent.click(screen.getByRole('button', { name: /Future Five/ }));
-    expect(screen.getByTestId('chat-panel').textContent).toContain('Future Five');
+    expect((await screen.findByTestId('chat-panel')).textContent).toContain('Future Five');
 
     mocks.routeChapter = '2';
     mocks.progressSaving = true;
@@ -572,7 +572,7 @@ describe('ReaderPage progress gate', () => {
     expect(mocks.charactersEnabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: '角色' }));
     fireEvent.click(screen.getByRole('button', { name: /Old Full/ }));
-    expect(screen.getByTestId('chat-panel').textContent).toContain('Old Full');
+    expect((await screen.findByTestId('chat-panel')).textContent).toContain('Old Full');
 
     mocks.routeChapter = '2';
     view.rerender(<ReaderPage />);
@@ -597,7 +597,7 @@ describe('ReaderPage progress gate', () => {
     expect(screen.queryByText(/Old Full|Future Alias/)).toBeNull();
   });
 
-  it('uses the latest partial persona for a selected character with the same id', () => {
+  it('uses the latest partial persona for a selected character with the same id', async () => {
     mocks.progressChapter = 2;
     mocks.progressError = false;
     mocks.characters = [{
@@ -615,7 +615,7 @@ describe('ReaderPage progress gate', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '角色' }));
     fireEvent.click(screen.getByRole('button', { name: /Same/ }));
-    expect(screen.getByTestId('chat-panel').textContent).toContain('future-avatar');
+    expect((await screen.findByTestId('chat-panel')).textContent).toContain('future-avatar');
 
     mocks.characters = [{
       id: 'same',
@@ -647,7 +647,7 @@ describe('ReaderPage progress gate', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '角色' }));
     fireEvent.click(screen.getByRole('button', { name: /Future/ }));
-    expect(screen.getByTestId('chat-panel')).toBeTruthy();
+    expect(await screen.findByTestId('chat-panel')).toBeTruthy();
 
     mocks.openWorld = {
       session: { dead_character_ids: ['future'] },

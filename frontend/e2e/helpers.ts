@@ -1,4 +1,4 @@
-import { expect, type Page } from '@playwright/test';
+import { expect, type Page, type Locator } from '@playwright/test';
 
 export interface AxeViolation {
   id: string;
@@ -88,6 +88,7 @@ export async function currentFocus(page: Page): Promise<FocusState | null> {
     const rect = el.getBoundingClientRect();
     const hasOutline = cs.outlineStyle !== 'none' && cs.outlineWidth !== '0px';
     const hasShadow = cs.boxShadow !== 'none';
+    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
     return {
       tag: el.tagName.toLowerCase(),
       identity: el.getAttribute('id')
@@ -99,8 +100,11 @@ export async function currentFocus(page: Page): Promise<FocusState | null> {
       text: ((el as HTMLElement).textContent ?? '').trim().slice(0, 40),
       role: el.getAttribute('role'),
       visibleIndicator: hasOutline || hasShadow,
-      inViewport: rect.top >= 0 && rect.bottom <= window.innerHeight
-        && rect.left >= 0 && rect.right <= window.innerWidth,
+      inViewport: rect.width > 0 && rect.height > 0
+        && cs.visibility === 'visible' && Number(cs.opacity) > 0
+        && rect.top >= 0 && rect.bottom <= window.innerHeight
+        && rect.left >= 0 && rect.right <= window.innerWidth
+        && (hit === el || el.contains(hit)),
     };
   });
 }
@@ -109,29 +113,47 @@ export async function currentFocus(page: Page): Promise<FocusState | null> {
  * Walk the real tab order with the native keyboard, collecting every focus
  * stop. Throws if the focus sequence cycles (trap) or runs too long.
  */
-export async function tabWalk(page: Page, maxStops = 120): Promise<FocusState[]> {
+export async function tabWalk(page: Page, maxStops = 120, direction: 'Tab' | 'Shift+Tab' = 'Tab'): Promise<FocusState[]> {
   const stops: FocusState[] = [];
-  await page.keyboard.press('Tab');
-  for (let i = 0; i < maxStops; i++) {
-    let state = await currentFocus(page);
-    // In headless Chromium, Tab past the last focusable lands on the page
-    // chrome (activeElement === body). Press again: it wraps to the first
-    // focusable, completing the cycle.
-    if (!state) {
-      if (stops.length === 0) break;
-      await page.keyboard.press('Tab');
-      state = await currentFocus(page);
-      if (!state) break;
+  const seen = await page.evaluateHandle(() => new Set<Element>());
+  try {
+    for (let i = 0; i < maxStops; i++) {
+      await page.keyboard.press(direction);
+      const state = await currentFocus(page);
+      if (!state) continue; // Chromium's page-chrome stop between page cycles.
+      const repeat = await seen.evaluate(elements => {
+        const active = document.activeElement!;
+        if (elements.has(active)) return active === elements.values().next().value ? 'first' : 'trap';
+        elements.add(active);
+        return null;
+      });
+      if (repeat === 'first') return stops;
+      if (repeat === 'trap') throw new Error('Tab walk repeated an element before completing its cycle');
+      expect(state.visibleIndicator, `focus indicator: ${state.identity}`).toBe(true);
+      await expect.poll(async () => (await currentFocus(page))?.inViewport,
+        { message: `focus outside viewport or obscured: ${state.identity}` }).toBe(true);
+      stops.push(state);
     }
-    const key = state.tag + '|' + state.identity;
-    if (stops.length > 0) {
-      const first = stops[0];
-      if (first.tag + '|' + first.identity === key) break; // full cycle: walk done
-    }
-    stops.push(state);
-    await page.keyboard.press('Tab');
+    throw new Error(`Tab walk exceeded ${maxStops} stops without a complete cycle`);
+  } finally {
+    await seen.dispose();
   }
-  return stops;
+}
+
+/** Proves a named control is reachable, not merely that some cycle exists. */
+export async function tabTo(page: Page, target: Locator, direction: 'Tab' | 'Shift+Tab' = 'Tab') {
+  await expect(target).toBeVisible();
+  await expect(target).toBeEnabled();
+  for (let i = 0; i < 120; i++) {
+    await page.keyboard.press(direction);
+    const state = await currentFocus(page);
+    if (!state) continue;
+    expect(state.visibleIndicator, `focus indicator: ${state.identity}`).toBe(true);
+    await expect.poll(async () => (await currentFocus(page))?.inViewport,
+      { message: `focus outside viewport or obscured: ${state.identity}` }).toBe(true);
+    if (await target.evaluateAll(els => els.some(el => el === document.activeElement))) return;
+  }
+  throw new Error('Target was not reached within 120 keyboard stops');
 }
 
 export interface OverflowItem {
@@ -155,15 +177,16 @@ export async function horizontalOverflow(page: Page): Promise<OverflowItem[]> {
       // the edge are clipped by body overflow-x:hidden and never cause
       // scrolling. In-flow content (including wide images) is never skipped.
       const text = (el.textContent ?? '').trim();
-      const interactive = el.querySelector('input, button, select, textarea, a, [tabindex]');
+      const interactive = el.matches('input, button, select, textarea, a, [tabindex]')
+        || el.querySelector('input, button, select, textarea, a, [tabindex]');
       const named = el.getAttribute('aria-label') || el.getAttribute('role') || el.getAttribute('alt');
       const position = getComputedStyle(el).position;
       const decorative = !text && !interactive && !named
         && (position === 'absolute' || position === 'fixed');
       if (decorative) continue;
-      // Only right-edge overflow can cause horizontal scrolling; decorative
-      // elements bleeding off the LEFT edge never do.
-      if (rect.right > width + 1) {
+      // CSS-clipped sr-only labels are deliberately outside visual layout.
+      if (getComputedStyle(el).clip === 'rect(0px, 0px, 0px, 0px)') continue;
+      if (rect.left < -1 || rect.right > width + 1) {
         bad.push({
           tag: el.tagName.toLowerCase(),
           cls: (el as HTMLElement).className?.slice(0, 60) ?? '',

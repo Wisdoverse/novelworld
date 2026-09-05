@@ -17,6 +17,7 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
       ? document.activeElement
       : null,
   );
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [title, setTitle] = useState('');
   const [author, setAuthor] = useState('');
   const [content, setContent] = useState('');
@@ -86,7 +87,7 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
           style={{ background: 'rgba(32,33,36,0.42)', backdropFilter: 'blur(8px)' }}
         />
         <Dialog.Content
-          className="surface-card fixed left-1/2 top-1/2 z-50 flex max-h-[90vh] w-[calc(100%_-_2rem)] max-w-2xl -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden outline-none"
+          className="surface-card fixed left-1/2 top-1/2 z-50 max-h-[90dvh] w-[calc(100%_-_2rem)] max-w-2xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto scroll-py-4 outline-none"
           onCloseAutoFocus={(event) => {
             event.preventDefault();
             const returnFocus = returnFocusRef.current;
@@ -98,8 +99,8 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
           <Dialog.Description className="text-sm text-[#5f6368]">可批量上传文件，或粘贴一本小说的正文。</Dialog.Description>
         </div>
 
-        <form onSubmit={handleSubmit} className="flex min-h-0 flex-col">
-          <div className="space-y-5 overflow-y-auto px-6 py-6 sm:px-8">
+        <form onSubmit={handleSubmit}>
+          <div className="space-y-5 px-6 py-6 sm:px-8">
             <div className="grid gap-4 sm:grid-cols-2">
               {isBatch ? (
                 <div>
@@ -163,8 +164,10 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
 
             <div>
               <p className="mb-2 text-sm font-medium text-[#3c4043]">小说文件</p>
-              <label
-                className="flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl px-4 py-6 text-sm transition-colors"
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="flex w-full items-center justify-center gap-2 rounded-xl px-4 py-6 text-sm transition-colors"
                 style={{
                   background: files.length ? '#e6f4ea' : '#f8fafd',
                   border: `1px dashed ${files.length ? '#188038' : '#9aa0a6'}`,
@@ -173,17 +176,18 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
               >
                 <Upload size={16} />
                 {files.length ? `已选择 ${files.length} 本小说` : '选择 TXT、EPUB 或 PDF 文件（可多选）'}
-                <input
-                  type="file"
-                  multiple
-                  accept=".txt,.epub,.pdf,text/plain,application/epub+zip,application/pdf"
-                  className="sr-only"
-                  onChange={(event) => {
-                    selectFiles(Array.from(event.target.files ?? []));
-                    event.currentTarget.value = '';
-                  }}
-                />
-              </label>
+              </button>
+              <input
+                ref={fileInputRef}
+                hidden
+                type="file"
+                multiple
+                accept=".txt,.epub,.pdf,text/plain,application/epub+zip,application/pdf"
+                onChange={(event) => {
+                  selectFiles(Array.from(event.target.files ?? []));
+                  event.currentTarget.value = '';
+                }}
+              />
               {files.length > 0 && (
                 <ul aria-label="已选择的小说文件" className="mt-2 space-y-1.5">
                   {files.map((file, index) => (
@@ -232,7 +236,7 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
                 placeholder="粘贴小说全文内容（支持中英文，建议至少粘贴前3章用于角色提取）"
                 rows={6}
                 required={!files.length}
-                className="field-control resize-none text-sm"
+                className="field-control max-h-[40dvh] resize-none text-sm"
                 style={{ fontFamily: 'var(--font-reading)', lineHeight: '1.8' }}
               />
               <p className="mt-1 text-xs text-[#5f6368]">字数：{content.length.toLocaleString()} 字</p>

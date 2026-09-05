@@ -51,6 +51,7 @@ test.describe('critical journey — full axe rule set', () => {
     await page.goto('/reader/novel-1/1');
     await expect(page.getByText('第一章 北塔来信').first()).toBeVisible();
     await expect(page.getByRole('button', { name: /收下信/ })).toBeVisible();
+    await expect(page.getByRole('main')).toHaveCount(1);
     await page.waitForLoadState('networkidle');
     await expectNoA11yViolations(page);
 
@@ -58,6 +59,7 @@ test.describe('critical journey — full axe rule set', () => {
     await page.getByRole('button', { name: /角色/ }).first().click();
     await page.getByRole('button', { name: /林晚/ }).first().click();
     await expect(page.getByRole('textbox', { name: /对 林晚 说/ })).toBeVisible();
+    await expect(page.getByRole('log', { name: '已保存的对话' })).toHaveCount(1);
     await settleAnimations(page);
     await expectNoA11yViolations(page);
   });
@@ -85,6 +87,7 @@ test.describe('critical journey — full axe rule set', () => {
     await installStubs(page);
     await page.goto('/characters/novel-1');
     await expect(page.getByRole('button', { name: /对话/ }).first()).toBeVisible();
+    await expect(page.getByRole('main')).toHaveCount(1);
     await page.waitForLoadState('networkidle');
     await expectNoA11yViolations(page);
   });
@@ -104,4 +107,74 @@ test.describe('critical journey — full axe rule set', () => {
     await page.waitForLoadState('networkidle');
     await expectNoA11yViolations(page);
   });
+});
+
+test('chat announces pending/error/retry separately from committed messages', async ({ page }) => {
+  await installStubs(page);
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  let attempts = 0;
+  const keys: string[] = [];
+  await page.route('**/api/chat/*/stream', async route => {
+    const turnId = route.request().headers()['idempotency-key'];
+    keys.push(turnId);
+    if (attempts++ === 0) {
+      await pending;
+      await route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: { code: 'invalid_request', message: '暂时无法生成回复' } }) });
+    } else {
+      await route.fulfill({ status: 200, contentType: 'text/event-stream', body:
+        'event: delta\ndata: {"content":"已保存的测试回复"}\n\n'
+        + `event: done\ndata: {"turn_id":"${turnId}","committed":true,"replayed":false}\n\n` });
+    }
+  });
+  await page.goto('/characters/novel-1');
+  await page.getByRole('button', { name: /对话/ }).first().click();
+  const input = page.getByRole('textbox', { name: /对 林晚 说/ });
+  const log = page.getByRole('log', { name: '已保存的对话' });
+  await input.fill('尚未提交的消息');
+  await input.press('Enter');
+  await expect(page.getByRole('status', { name: '对话状态' })).toContainText('尚未确认保存');
+  await expect(log).not.toContainText('尚未提交的消息');
+  release();
+  await expect(page.getByRole('alert')).toContainText('暂时无法生成回复');
+  await expect(log).not.toContainText('尚未提交的消息');
+  await page.getByRole('button', { name: '重试', exact: true }).click();
+  await expect(log).toContainText('已保存的测试回复');
+  await expect(log).toContainText('尚未提交的消息');
+  await expect(page.getByRole('status', { name: '对话状态' })).toBeEmpty();
+  expect(keys).toHaveLength(2);
+  expect(keys[0]).toBe(keys[1]);
+  await expectNoA11yViolations(page);
+});
+
+test('branch and world outcomes have named committed logs and pending status', async ({ page }) => {
+  await installStubs(page);
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  await page.route('**/api/narrative/choose', async route => {
+    await pending;
+    await route.fallback();
+  });
+  await page.goto('/reader/novel-1/1');
+  await page.getByRole('button', { name: /收下信/ }).click();
+  await expect(page.getByRole('status', { name: '分支状态' })).toContainText('尚未确认保存');
+  await expect(page.getByRole('log', { name: '已保存的分支结果' })).toBeEmpty();
+  release();
+  await expect(page.getByRole('log', { name: '已保存的分支结果' })).toContainText('你的行动改变了后续故事');
+  await expect(page.getByRole('group', { name: '阅读版本' })).toBeVisible();
+
+  await installStubs(page, { openWorld: true });
+  const worldPending = new Promise<void>(resolve => { release = resolve; });
+  await page.route('**/api/narrative/*/world/turns', async route => {
+    await worldPending;
+    await route.fallback();
+  });
+  await page.reload();
+  await page.getByRole('textbox', { name: '你的意图' }).fill('沿山路下行');
+  await page.getByRole('button', { name: '执行行动', exact: true }).click();
+  await expect(page.getByRole('status', { name: '世界行动状态' })).toContainText('正在确认世界行动');
+  release();
+  await expect(page.getByRole('log', { name: '旅程时间线' })).toContainText('回合 2');
+  await expect(page.getByRole('status', { name: '世界行动状态' })).toBeEmpty();
+  await expectNoA11yViolations(page);
 });
