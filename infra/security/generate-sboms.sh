@@ -3,8 +3,11 @@
 # Emits one CycloneDX 1.6 JSON SBOM per application image with the pinned
 # trivy release, plus a digests.txt sidecar binding each SBOM to the
 # sha256 digest (registry digest, or the content-addressed image id for
-# locally built images) it describes. The release pipeline (docker.yml)
-# runs equivalent generation against the pushed registry images.
+# locally built images) it describes. The release pipeline supplies exact
+# build digests; never re-resolve them through a tag or RepoDigests ordering.
+# Registry pulls have a 10-minute deadline and scans a 15-minute deadline,
+# with 30 seconds of termination grace and no automatic retry. Terminating
+# the client does not prove Docker has stopped all daemon-side work.
 #
 # Deploy-time SBOM verification, provenance/attestation, and signing remain
 # open release-infrastructure work and are recorded as such.
@@ -32,19 +35,28 @@ mkdir -p "$out_dir"
 : >"$out_dir/digests.txt"
 
 for image in "${images[@]}"; do
-  service=${image##*/}
+  service=${image%@*}
+  service=${service##*/}
   service=${service%%:*}
   service=${service#novel-world-}
-  digest=$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$image" \
-    | head -1 | sed 's|.*@||')
-  if [ -z "$digest" ]; then
-    # Locally built images have no registry digest; the content-addressed
-    # image id (kept sha256-prefixed) is the equivalent binding.
-    digest=$(docker inspect --format '{{.Id}}' "$image")
+  service=${service#novelworld-}
+  if [[ "$image" == *@* ]]; then
+    [[ "$image" =~ ^[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}$ ]] \
+      || { printf 'sbom: invalid registry digest reference\n' >&2; exit 1; }
+    digest=${image##*@}
+    timeout --kill-after=30s 600s docker pull "$image" >/dev/null
+  else
+    digest=$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$image" \
+      | head -1 | sed 's|.*@||')
+    if [ -z "$digest" ]; then
+      # Local-only mode has no registry digest. Keep its content-addressed
+      # image-ID binding distinct from the release pipeline's registry proof.
+      digest=$(docker inspect --format '{{.Id}}' "$image")
+    fi
   fi
   [ -n "$digest" ] || { printf 'sbom: no digest for %s\n' "$image" >&2; exit 1; }
   printf 'sbom: %s %s\n' "$service" "$digest"
-  docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+  timeout --kill-after=30s 900s docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
     -v "$out_dir:/out" \
     aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 image --scanners vuln --format cyclonedx \
     --skip-version-check --output "/out/$service.cdx.json" "$image" >/dev/null 2>&1

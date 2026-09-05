@@ -233,8 +233,17 @@ base and passes the application-image gate.
 
 The release pipeline (docker.yml) generates one CycloneDX 1.6 SBOM per
 application image with the pinned trivy release and ships them with the
-release artifact, bound to the recorded image digest via `sboms/digests.txt`;
+release artifact, bound to the recorded image digest via the generated
+`sboms/digests.txt` sidecar;
 `infra/security/generate-sboms.sh` is the local operator form.
+
+For registry releases, successful per-run build and vulnerability-scan digest
+records drive both the release manifest and SBOM generation; the pipeline does
+not resolve mutable SHA tags again. The local generator keeps its explicit
+image-ID fallback. Local commands require GNU `timeout`: pulls are bounded to
+10 minutes and scans to 15 minutes, each with an additional 30-second
+termination grace; no command is retried automatically. A timeout does not
+guarantee that daemon work has fully stopped.
 
 Still-open H2 supply-chain gates: deploy-time SBOM verification,
 provenance/attestation, and signature generation for official release
