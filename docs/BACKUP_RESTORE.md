@@ -357,6 +357,48 @@ must fail closed with actionable errors before any data change; erasure
 sources that disagree on a deletion fact of the same subject abort the
 restore.
 
+## Scale rehearsal operation
+
+The scale rehearsal is an opt-in measurement on a dedicated, freshly migrated
+synthetic deployment. It must name the PostgreSQL container explicitly and
+repeat that name as the confirmation token. Export the preserved backup key
+from operator custody first; do not place it in shell history or the command
+below:
+
+```bash
+: "${BACKUP_ENCRYPTION_KEY:?Export the preserved backup key first}"
+export BACKUP_ENCRYPTION_KEY
+POSTGRES_CONTAINER=novelworld-scale-postgres \
+infra/backup/scale_rehearsal.sh \
+  --env-file /srv/novelworld-scale/preserved.env \
+  --confirm-target novelworld-scale-postgres \
+  --target-gb 5
+```
+
+The target is at least 5 GiB of plain SQL and the database must be fresh,
+migrated, and free of existing users and novels. Application writers must stay
+stopped for the entire restore. Before seeding, `TMPDIR` must have at least
+twice the requested plain size free; the PostgreSQL and backup filesystems also
+need operator-confirmed headroom. Set `TMPDIR` to a persistent filesystem when
+the default temporary filesystem is too small. The command bounds Compose and
+Docker discovery at 30 seconds per call, fixture statements at 10 minutes,
+backup and artifact-size scanning at 1 hour, and restore plus readiness at 30
+minutes. A timeout fails the measurement; command termination can take another
+30 seconds. Inspect any remaining database or migration work before manual
+recovery; failed side effects are never automatically retried.
+
+The command retains `measurement.json` and the encrypted artifact in its own
+dedicated backup directory. A failed restore is left stopped: the rehearsal
+does not retry the restore or start services after failure. The report records
+plain and encrypted artifact sizes, physical database size, restore-to-readiness
+time, readiness result, source hashes, and observed host resources.
+
+The fixture uses repeated text and is highly compressible, so a successful
+scripted measurement is not itself the H1 RTO record. Shared-host CPU and
+memory counts do not establish the required 2-core / 4 GB / SSD reference
+envelope. Qualifying evidence requires a separate deployment with verified
+resource and storage bounds, followed by hardware and artifact review.
+
 ## Versioning
 
 Changes to targets, artifact requirements, the restore contract, the

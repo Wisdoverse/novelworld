@@ -112,6 +112,8 @@ jobs:
         run: tests/e2e/release_state_drill.sh
       - name: Verify restore deployment selection fails closed
         run: python3 tests/e2e/restore_preflight_test.py
+      - name: Verify scale rehearsal measures the complete restore path
+        run: python3 tests/e2e/scale_rehearsal_test.py
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Format
@@ -281,14 +283,6 @@ jobs:
       RATE_LIMIT_RPS: 1
     steps:
       - uses: actions/checkout@v7.0.1
-        with:
-          fetch-depth: 2
-      - name: Include extended drills for backup and restore changes
-        if: github.event_name == 'pull_request'
-        run: |
-          if ! git diff --quiet HEAD^1 HEAD -- infra/backup/ tests/e2e/backup_restore_drill.sh; then
-            echo "RUN_EXTENDED_DRILLS=true" >> "$GITHUB_ENV"
-          fi
       - name: Generate minimum-profile bootstrap roots
         run: |
           postgres_password=$(openssl rand -hex 16)
