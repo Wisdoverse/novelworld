@@ -114,6 +114,8 @@ jobs:
         run: python3 tests/e2e/restore_preflight_test.py
       - name: Verify scale rehearsal measures the complete restore path
         run: python3 tests/e2e/scale_rehearsal_test.py
+      - name: Verify release image digest wiring
+        run: python3 tests/e2e/release_image_digest_test.py
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Format

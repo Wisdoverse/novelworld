@@ -31,7 +31,7 @@ RUN cp "/app/bin/$SERVICE" /app/service
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl \
+    ca-certificates curl libssh2-1=1.10.0-3+deb12u1 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --shell /usr/sbin/nologin appuser
 
