@@ -131,9 +131,18 @@ The scripted restore procedure, in order:
    compare the manifest's lineage token with the token inside the
    verified dump — a mismatch between present tokens or asymmetric
    absence aborts here. No data is changed before verification passes.
-3. **Stop writes**: stop application services (or confirm they are not
-   running) before any erasure-record export, so no deletion can commit
-   between export and replacement.
+3. **Stop writes**: stop application services before any erasure-record export,
+   and keep application and unmanaged external writers stopped until restore
+   finishes, so no deletion can commit between export and replacement. The
+   script resolves the selected Compose `postgres` service and requires its
+   container ID to equal `POSTGRES_CONTAINER` (default `novel-postgres`). It
+   checks every discovered application replica and `postgres-migrate` container,
+   rejecting running, restarting,
+   paused, or unknown states. Invalid Compose configuration, missing/ambiguous
+   PostgreSQL selection, and failed inspections abort before database access or
+   secret rotation; unrelated
+   projects' fixed container names are not consulted. This is a preflight,
+   not a fence against an operator concurrently restarting a writer.
 4. **Collect erasure sources**: the union of (a) the erasure records
    embedded in the artifact being restored, (b) a fresh export from the
    current database when it is reachable after writes stopped **and its
@@ -199,6 +208,15 @@ The scripted restore procedure, in order:
 7. **Deploy normally.** The standard migration path replays idempotent
    erasure before any service starts, so a restored deployment can never
    serve a subject covered by any collected erasure record.
+
+Pass the preserved deployment file through `restore.sh --env-file FILE`.
+The same file is used by Compose discovery and both migration invocations;
+export `COMPOSE_FILE` and `COMPOSE_PROJECT_NAME` when the deployment uses
+non-default files or a separate project. `POSTGRES_CONTAINER` must name that
+project's PostgreSQL container. The Unix restore tool uses GNU `timeout` to
+bound each Docker preflight command to 30 seconds, with no automatic retry.
+Existing migration calls retain their current unbounded duration; a successful
+preflight does not establish the RTO target or replace its scale rehearsal.
 
 ## Lineage identity
 

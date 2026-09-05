@@ -18,14 +18,17 @@
 # --i-stopped-writes is an acknowledgement, not a bypass: step 2 always verifies.
 # The preserved .env must already be installed (secret custody prerequisite);
 # this script rotates JWT_SECRET in it and reports any secret that is missing.
-# Set COMPOSE_FILE when the deployment uses more than docker-compose.yml.
+# Set COMPOSE_FILE/COMPOSE_PROJECT_NAME for the selected deployment. Its postgres
+# service must resolve to POSTGRES_CONTAINER. The preserved --env-file is used
+# for both inspection and migrations. Docker preflight calls have a 30-second
+# deadline and no retry; the existing migration calls have no added deadline.
 set -euo pipefail
 
 container=${POSTGRES_CONTAINER:-novel-postgres}
 pg_user=${POSTGRES_USER:-novel}
 pg_db=${POSTGRES_DB:-novel_world}
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
-app_services="gateway user-service novel-service agent-service narrative-service"
+writer_services=(gateway user-service novel-service agent-service narrative-service postgres-migrate)
 tab=$(printf '\t')
 
 manifest=""
@@ -121,6 +124,7 @@ done
 
 
 cd "$repo_root"
+compose=(docker compose --env-file "$env_file")
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir "$work/sources"
@@ -239,24 +243,38 @@ EOF
 # ─── 2. stop writes ────────────────────────────────────────────────────────
 # No deletion may commit between the erasure export and the replacement.
 
-running=""
-for service in $app_services; do
-  if docker inspect --format '{{.State.Running}}' "novel-$service" 2>/dev/null |
-    grep -qx true; then
-    running="$running novel-$service"
-  fi
-done
-if compose_running=$(docker compose ps --services --status running 2>/dev/null); then
-  for service in $app_services; do
-    if printf '%s\n' "$compose_running" | grep -qx "$service"; then
-      running="$running $service"
-    fi
-  done
-fi
-[ -z "$running" ] ||
-  fail "stop the application services before restoring; still running:$running"
+# `compose ps` can query an existing project without loading its current files.
+# Validate those files before a later migration could fail after database load.
+timeout 30s "${compose[@]}" config --quiet ||
+  fail 'cannot validate the selected Compose configuration; refusing to restore'
+compose_postgres=$(timeout 30s "${compose[@]}" ps --all --quiet postgres) ||
+  fail 'cannot inspect the selected Compose postgres service; refusing to restore'
+case "$compose_postgres" in
+'' | *$'\n'*) fail 'the selected Compose project must have exactly one postgres container' ;;
+esac
+compose_postgres_id=$(timeout 30s docker inspect --format '{{.Id}}' "$compose_postgres") ||
+  fail 'cannot inspect the selected Compose postgres container'
+target_id=$(timeout 30s docker inspect --format '{{.Id}}' "$container") ||
+  fail 'cannot inspect POSTGRES_CONTAINER'
+matches "$target_id" '[0-9a-f]{64}' && [ "$target_id" = "$compose_postgres_id" ] ||
+  fail 'POSTGRES_CONTAINER does not match the selected Compose postgres service'
 
-docker inspect --format '{{.State.Health.Status}}' "$container" 2>/dev/null | grep -qx healthy ||
+# Include every replica and any active migrator, including restarting/paused
+# writers. A missing or failed inventory is not proof of quiescence. Keep writers
+# stopped for the whole restore; this preflight is not a concurrency fence.
+writer_ids=$(timeout 30s "${compose[@]}" ps --all --quiet "${writer_services[@]}") ||
+  fail 'cannot inspect application writers in the selected Compose project'
+while IFS= read -r writer_id; do
+  [ -n "$writer_id" ] || continue
+  writer_state=$(timeout 30s docker inspect --format '{{.State.Status}}' "$writer_id") ||
+    fail 'cannot inspect an application writer; refusing to restore'
+  case "$writer_state" in
+  created | exited | dead) ;;
+  *) fail "stop the application services before restoring; writer state: $writer_state" ;;
+  esac
+done <<<"$writer_ids"
+
+timeout 30s docker inspect --format '{{.State.Health.Status}}' "$container" 2>/dev/null | grep -qx healthy ||
   fail "postgres container '$container' is not ready; start it with: docker compose up -d --wait postgres"
 
 check_calendar "$covered_through" "the covered_through of $manifest"
@@ -503,7 +521,7 @@ docker exec "$container" psql -U "$pg_user" -d postgres -q -c "CREATE DATABASE $
 
 # The artifact may predate any migration, including the erasure journal itself,
 # so bring the schema forward before writing erasure state into it.
-docker compose run --rm postgres-migrate >/dev/null
+"${compose[@]}" run --rm postgres-migrate >/dev/null
 
 # ─── 6. erasure sources, decisions, secret rotation ────────────────────────
 
@@ -579,7 +597,7 @@ done
 # ─── 7. replay ─────────────────────────────────────────────────────────────
 # The standard migration path replays every collected and decision-written
 # erasure record before any service starts.
-docker compose run --rm postgres-migrate >/dev/null
+"${compose[@]}" run --rm postgres-migrate >/dev/null
 
 new_token=$(docker exec "$container" psql -U "$pg_user" -d "$pg_db" -At -c \
   "SELECT token || ' parent=' || COALESCE(parent::pg_catalog.text, 'absent')
