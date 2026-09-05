@@ -217,7 +217,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA" ]]
+          [[ "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA" ]] || {
+            echo '::error::Source and signing workflow must resolve to the same commit'
+            exit 1
+          }
           cp server-assets/release.env server-assets/sboms/* release-assets/
           (cd release-assets && sha256sum novelworld-* > desktop-SHA256SUMS)
 

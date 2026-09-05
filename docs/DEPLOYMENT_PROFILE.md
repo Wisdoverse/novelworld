@@ -61,8 +61,9 @@ decisions for that profile and approves nothing beyond it.
    (release.sh). See [`SECURITY.md`](../SECURITY.md) 'Dependency Policy' and 'Release Rollback'.
    CycloneDX SBOMs are generated per release (docker.yml) and locally via
    `infra/security/generate-sboms.sh`, digest-bound; deploy-time SBOM
-   verification, provenance/attestation, and signing remain open
-   release-infrastructure work.
+   admission and platform-native signing remain open H2 work. The release-file
+   provenance workflow and documentation are implemented under [Issue #274](https://github.com/Wisdoverse/novelworld/issues/274),
+   which owns the exact source, run, and native acceptance evidence.
 7. **Incident response — existing procedures.** The operator runbook is
    [`OPERATIONS.md`](./OPERATIONS.md) (health checks, playbook index, ownership).
    Secret rotation
