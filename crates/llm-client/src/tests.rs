@@ -981,7 +981,7 @@ async fn response_evidence_is_bounded_and_retained_before_parse_or_cancellation(
         let server = thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
             let mut request = [0; 8192];
-            socket.read(&mut request).unwrap();
+            assert!(socket.read(&mut request).unwrap() > 0);
             write!(
                 socket,
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
