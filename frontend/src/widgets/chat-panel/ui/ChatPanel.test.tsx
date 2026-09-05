@@ -253,6 +253,27 @@ describe('ChatPanel history', () => {
     expect(useChatStore.getState().failedTurn[selfSession]?.turnId).toBe('turn-2');
   });
 
+  it('keeps stream deltas and optimistic messages out of the saved live log', () => {
+    useChatStore.setState({
+      messages: { [selfSession]: [{
+        id: 'pending-user', turn_id: 'pending-turn', role: 'user', content: '未提交的问题',
+        character_id: character.id, chapter_context: 1, created_at: '2026-09-05T00:00:00Z',
+      }] },
+      streamingText: { [selfSession]: '未提交的流式回复' },
+      isStreaming: { [selfSession]: true },
+      activeTurn: { [selfSession]: {
+        turnId: 'pending-turn', sessionKey: selfSession, characterId: character.id,
+        payload: { novel_id: 'novel', message: '未提交的问题', current_chapter: 1 },
+      } },
+    });
+    render(<ChatPanel character={character} novelId="novel" currentChapter={1}
+      readerIdentityScope="self" canChat isOpen onClose={() => undefined} />);
+    expect(screen.getByText('未提交的问题')).toBeTruthy();
+    expect(screen.getByText('未提交的流式回复')).toBeTruthy();
+    expect(screen.getByRole('log', { name: '已保存的对话' }).textContent).toBe('');
+    expect(screen.getByRole('status', { name: '对话状态' }).textContent).toContain('尚未确认保存');
+  });
+
   it('cancels and hides a stream from another novel at the same chapter', async () => {
     const cancel = vi.fn();
     useChatStore.setState({
