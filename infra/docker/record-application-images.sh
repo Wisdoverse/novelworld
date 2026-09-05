@@ -21,7 +21,7 @@ for service in "${services[@]}"; do
   [[ ${#lines[@]} -eq 1 ]] || die "expected one image reference: $service"
   image=${lines[0]}
   [[ "$image" == "$image_prefix-$service@sha256:"* ]] || die "wrong image identity: $service"
-  digest=${image##*@sha256:}
+  digest=${image#*@sha256:}
   [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || die "invalid image digest: $service"
   images+=("$image")
 done

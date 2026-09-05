@@ -82,6 +82,7 @@ class ReleaseImageDigestTest(unittest.TestCase):
         valid = gateway.read_text()
         for invalid in ("", valid + valid, valid + "\n", valid.replace("gateway@", "frontend@"),
                         valid.replace("wisdoverse/", "untrusted/"),
+                        valid.replace("@" + BUILT, "@sha256:garbage@" + BUILT),
                         valid.replace("@" + BUILT, ":moving-tag"),
                         valid.replace(BUILT, "sha256:1234")):
             with self.subTest(invalid=invalid):
