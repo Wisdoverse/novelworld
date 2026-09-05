@@ -331,12 +331,14 @@ journey/evaluation slices and threshold process.
 | Contract/design | Fresh-context review agent, non-author | Pass with limitation | Audited slice coverage, anti-gaming, guardrail, and evidence-class rules of the qualification policy; landed fixes — the deterministic test provider and recorded fixtures can never satisfy Baseline/Qualification provider identity, and explicit guardrails now cover non-authoritative projections served as authority and unusable failure states. Agent-supplied, not human sign-off |
 | Adversarial overclaim | Fresh-context review agent | Pass with limitation | Evidence recorded in [#123](https://github.com/schorsch888/novelworld/issues/123) and fixed in [#124](https://github.com/schorsch888/novelworld/pull/124). Agent-supplied, not human sign-off |
 
-Remaining H0 gates: the verified-dispatch `make verify` record with its
-successful run URL, required CI on the final commit, and the independent
-maintainer, product, security, accessibility, and legal reviews named in
-[`PRODUCT_CONTRACT.md`](./PRODUCT_CONTRACT.md). These gates match the ROADMAP
-H0 exit evidence list and [`review protocol`](./ROADMAP.md); the agent records
-above are evidence with a recorded limitation, not human sign-off.
+The automated H0 `make verify` record, exact SHA, and successful run URL are
+tracked in [Issue #270](https://github.com/Wisdoverse/novelworld/issues/270).
+Required CI on the final commit and the independent maintainer, product,
+security, accessibility, and legal reviews named in
+[`PRODUCT_CONTRACT.md`](./PRODUCT_CONTRACT.md) remain required. These gates
+match the ROADMAP H0 exit evidence list and [`review protocol`](./ROADMAP.md);
+the agent records above are evidence with a recorded limitation, not human
+sign-off.
 
 ## Recorded H2 reviews
 
