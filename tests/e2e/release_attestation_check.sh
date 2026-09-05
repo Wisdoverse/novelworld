@@ -43,14 +43,6 @@ trap 'rm -rf "$scratch"' EXIT
 verified_json="$scratch/verified.json"
 first_file=${files[0]}
 verify "$release_dir/$first_file" "$expected_sha" > "$verified_json"
-mapfile -t signed_digests < <(
-  jq -r '[.[]?.verificationResult.statement.subject[]?.digest.sha256?
-    | select(type == "string" and length > 0)] | unique[]' "$verified_json"
-)
-[[ ${#signed_digests[@]} -gt 0 ]] || {
-  echo 'verified attestation output contained no non-empty subject digests' >&2
-  exit 1
-}
 printf 'Verified %s\n' "$first_file"
 for file in "${files[@]:1}"; do
   verify "$release_dir/$file" "$expected_sha" >/dev/null
@@ -68,10 +60,9 @@ reject() {
   grep -Fxq "$reason" "$scratch/rejection.log"
 }
 tampered_digest=$(sha256sum "$scratch/release.env" | awk '{print $1}')
-if printf '%s\n' "${signed_digests[@]}" | grep -Fxq "$tampered_digest"; then
-  echo "tampered digest unexpectedly present in verified subject set: $tampered_digest" >&2
-  exit 1
-fi
+jq -e --arg digest "$tampered_digest" \
+  '[.[].verificationResult.statement.subject[].digest.sha256]
+   | length > 0 and index($digest) == null' "$verified_json" >/dev/null
 printf 'Tampered digest mismatch: %s absent from %s verified subject digests\n' \
   "$tampered_digest" "$verified_json"
 reject "$scratch/release.env" "$expected_sha" \
