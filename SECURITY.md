@@ -154,7 +154,7 @@ frontend's frozen lockfile. A newly reported Rust vulnerability or
 HIGH/CRITICAL advisory in a shipped browser dependency fails the build;
 development-only frontend tooling is outside that production-dependency gate.
 Dependabot covers Cargo, npm, Dockerfiles, Compose files, and GitHub Actions.
-The temporary TypeScript 7/6 npm aliases, pinned Alpine packages in Dockerfile
+The temporary TypeScript 7/6 npm aliases, pinned OS packages in Dockerfile
 `RUN` steps, the release workflow's GitHub CLI archive, and immutable scanner
 images embedded in shell commands are
 verified manually against upstream releases during each dependency-maintenance
