@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Native release-file provenance check, including content/source rejection cases.
-# Requires GitHub CLI 2.100.0, GNU timeout and an independently obtained trusted root.
+# Requires GitHub CLI 2.100.0, GNU timeout, jq, and an independently obtained
+# trusted root. CLI 2.100 hides the lower-level crypto error; the verified JSON
+# subject set is used to prove a tampered digest is absent, rather than treating
+# any nonzero result as a passing negative.
 set -euo pipefail
 [[ $# -eq 3 ]] || { echo "Usage: $0 RELEASE_DIR EXPECTED_SHA TRUSTED_ROOT" >&2; exit 2; }
 release_dir=$(realpath "$1")
@@ -32,14 +35,28 @@ verify() {
     --source-digest "$2" --signer-digest "$expected_sha" \
     --deny-self-hosted-runners \
     --bundle "$release_dir/release-attestation.json" \
-    --custom-trusted-root "$trusted_root"
+    --custom-trusted-root "$trusted_root" \
+    --format json
 }
-for file in "${files[@]}"; do
-  verify "$release_dir/$file" "$expected_sha"
-done
-
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
+verified_json="$scratch/verified.json"
+first_file=${files[0]}
+verify "$release_dir/$first_file" "$expected_sha" > "$verified_json"
+mapfile -t signed_digests < <(
+  jq -r '[.[]?.verificationResult.statement.subject[]?.digest.sha256?
+    | select(type == "string" and length > 0)] | unique[]' "$verified_json"
+)
+[[ ${#signed_digests[@]} -gt 0 ]] || {
+  echo 'verified attestation output contained no non-empty subject digests' >&2
+  exit 1
+}
+printf 'Verified %s\n' "$first_file"
+for file in "${files[@]:1}"; do
+  verify "$release_dir/$file" "$expected_sha" >/dev/null
+  printf 'Verified %s\n' "$file"
+done
+
 cp "$release_dir/release.env" "$scratch/release.env"
 printf '\n# tampered after signing\n' >> "$scratch/release.env"
 reject() {
@@ -48,12 +65,21 @@ reject() {
   cat "$scratch/rejection.log"
   # A timeout, tool error or unrelated policy failure is not a passing negative case.
   [[ "$status" -eq 1 ]]
-  grep -Fq "$reason" "$scratch/rejection.log"
+  grep -Fxq "$reason" "$scratch/rejection.log"
 }
+tampered_digest=$(sha256sum "$scratch/release.env" | awk '{print $1}')
+if printf '%s\n' "${signed_digests[@]}" | grep -Fxq "$tampered_digest"; then
+  echo "tampered digest unexpectedly present in verified subject set: $tampered_digest" >&2
+  exit 1
+fi
+printf 'Tampered digest mismatch: %s absent from %s verified subject digests\n' \
+  "$tampered_digest" "$verified_json"
 reject "$scratch/release.env" "$expected_sha" \
-  'provided artifact digest does not match any digest in statement'
+  'Error: verifying with issuer "sigstore.dev"'
+verify "$release_dir/release.env" "$expected_sha" >/dev/null
+printf 'Verified release.env after tamper rejection\n'
 wrong_sha=0000000000000000000000000000000000000000
 [[ "$wrong_sha" != "$expected_sha" ]] || wrong_sha=1111111111111111111111111111111111111111
 reject "$release_dir/release.env" "$wrong_sha" \
-  "expected SourceRepositoryDigest to be $wrong_sha, got $expected_sha"
+  "Error: expected SourceRepositoryDigest to be $wrong_sha, got $expected_sha"
 echo "Verified all ${#files[@]} release files; native content and source rejection cases passed."
