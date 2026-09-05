@@ -187,7 +187,7 @@ jobs:
           record_pinned_image NGINX_IMAGE "$(jq -r '.services.nginx.image' <<<"$compose_json")"
           infra/docker/release.sh validate release.env
 
-          # SBOM generation: one CycloneDX 1.6 document per application image.
+          # SBOM generation: one CycloneDX 1.7 document per application image.
           mkdir -p sboms
           mapfile -t app_images < <(awk -F= '/^(GATEWAY|USER_SERVICE|NOVEL_SERVICE|AGENT_SERVICE|NARRATIVE_SERVICE|FRONTEND)_IMAGE=/{print $2}' release.env)
           [[ "${#app_images[@]}" -eq 6 ]]

@@ -233,7 +233,7 @@ and every new artifact must be re-scanned before re-pinning. The shipped
 frontend runtime installs Alpine's fixed OpenSSL packages on the same Nginx
 base and passes the application-image gate.
 
-The release pipeline (docker.yml) generates one CycloneDX 1.6 SBOM per
+The current release pipeline (docker.yml) generates one CycloneDX 1.7 SBOM per
 application image with the pinned trivy release and ships them with the
 release artifact, bound to the recorded image digest via the generated
 `sboms/digests.txt` sidecar;

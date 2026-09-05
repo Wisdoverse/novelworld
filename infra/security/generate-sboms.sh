@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SBOM generation (H2 supply-chain; see SECURITY.md 'Dependency Policy').
-# Emits one CycloneDX 1.6 JSON SBOM per application image with the pinned
+# Emits one CycloneDX 1.7 JSON SBOM per application image with the pinned
 # trivy release, plus a digests.txt sidecar binding each SBOM to the
 # sha256 digest (registry digest, or the content-addressed image id for
 # locally built images) it describes. The release pipeline supplies exact
@@ -9,8 +9,8 @@
 # with 30 seconds of termination grace and no automatic retry. Terminating
 # the client does not prove Docker has stopped all daemon-side work.
 #
-# Deploy-time SBOM verification, provenance/attestation, and signing remain
-# open release-infrastructure work and are recorded as such.
+# Release-file provenance/attestation is implemented in the release workflow;
+# deploy-time SBOM admission and platform-native signing remain open.
 #
 # Usage: infra/security/generate-sboms.sh [OUTPUT_DIR] [IMAGE ...]
 set -euo pipefail
