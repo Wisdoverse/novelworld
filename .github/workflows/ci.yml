@@ -283,6 +283,14 @@ jobs:
       RATE_LIMIT_RPS: 1
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 2
+      - name: Include extended drills for backup and restore changes
+        if: github.event_name == 'pull_request'
+        run: |
+          if ! git diff --quiet HEAD^1 HEAD -- infra/backup/ tests/e2e/backup_restore_drill.sh .github/workflows/ci.yml; then
+            echo "RUN_EXTENDED_DRILLS=true" >> "$GITHUB_ENV"
+          fi
       - name: Generate minimum-profile bootstrap roots
         run: |
           postgres_password=$(openssl rand -hex 16)
