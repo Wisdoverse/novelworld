@@ -265,11 +265,72 @@ test "$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
 
 world_turn_two_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
 world_action_two='{"expected_turn_number":1,"kind":"pursue_goal","target_id":null,"intent":"绘制地下回廊并寻找守门人的踪迹"}'
+journey_memory_two_id=$(journey_memory_id "$world_turn_two_id")
+world_calls_before=$("${curl_cmd[@]}" "$stub/__control__/stats" | json_get "value['calls'].get('world_turn', 0)")
+docker stop --time 30 novel-agent-service >/dev/null
+pause
+pending_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
+  --output "$failed_choice_file" --write-out '%{http_code}' "${auth[@]}" \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: $world_turn_two_id" \
+  --data "$world_action_two" "$api/narrative/$novel_id/world/turns")
+[ "$pending_status" = 409 ]
+[ "$(json_get "value['error']['code']" <"$failed_choice_file")" = turn_outcome_unknown ]
+pending_snapshot=$(docker exec novel-postgres psql \
+  -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At -v ON_ERROR_STOP=1 \
+  -c "SELECT status || ':' || memory_projection_status || ':' || (SELECT COUNT(*) FROM character_memories WHERE id = '$journey_memory_two_id') FROM world_turns WHERE id = '$world_turn_two_id'")
+[ "$pending_snapshot" = completed:pending:0 ]
+committed_result=$(docker exec novel-postgres psql \
+  -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At -v ON_ERROR_STOP=1 \
+  -c "SELECT result::text FROM world_turns WHERE id = '$world_turn_two_id'")
+world_calls_committed=$("${curl_cmd[@]}" "$stub/__control__/stats" | json_get "value['calls'].get('world_turn', 0)")
+[ "$world_calls_committed" = "$((world_calls_before + 1))" ]
+
+overtaking_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
+pause
+overtaking_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
+  --dump-header "$account_export_headers" --output "$failed_choice_file" --write-out '%{http_code}' "${auth[@]}" \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: $overtaking_id" \
+  --data '{"expected_turn_number":2,"kind":"pursue_goal","target_id":null,"intent":"等待上一回合记忆补齐"}' \
+  "$api/narrative/$novel_id/world/turns")
+[ "$overtaking_status" = 409 ]
+[ "$(json_get "value['error']['code']" <"$failed_choice_file")" = turn_in_progress ]
+grep -Eiq '^retry-after: [1-9][0-9]*[[:space:]]*$' "$account_export_headers"
+[ "$(docker exec novel-postgres psql \
+  -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At -v ON_ERROR_STOP=1 \
+  -c "SELECT COUNT(*) FROM world_turns WHERE id = '$overtaking_id'")" = 0 ]
+[ "$("${curl_cmd[@]}" "$stub/__control__/stats" | json_get "value['calls'].get('world_turn', 0)")" = "$world_calls_committed" ]
+
+docker start novel-agent-service >/dev/null
+for _ in $(seq 1 60); do
+  [ "$(docker inspect --format '{{.State.Health.Status}}' novel-agent-service)" = healthy ] && break
+  sleep 1
+done
+[ "$(docker inspect --format '{{.State.Health.Status}}' novel-agent-service)" = healthy ]
+# Observe only: replay here would hide a broken autonomous recovery scanner.
+recovery_deadline=$((SECONDS + 90))
+while [ "$SECONDS" -lt "$recovery_deadline" ]; do
+  projection_status=$(docker exec novel-postgres psql \
+    -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At -v ON_ERROR_STOP=1 \
+    -c "SELECT memory_projection_status FROM world_turns WHERE id = '$world_turn_two_id'")
+  [ "$projection_status" = pending ] || break
+  sleep 1
+done
+[ "$projection_status" = saved ]
 pause
 world_turn_two=$("${curl_cmd[@]}" "${auth[@]}" \
   -H 'Content-Type: application/json' -H "Idempotency-Key: $world_turn_two_id" \
   --data "$world_action_two" "$api/narrative/$novel_id/world/turns")
 python3 -c "import json,sys; value=json.load(sys.stdin); session=value['world_state']['state']['open_world']; assert value['turn_id']=='$world_turn_two_id'; assert value['memory_projection_status']=='saved'; assert value['transition']['canonical_event_change'] is None; assert session['turn_number']==2; assert session['world_time']==2" <<<"$world_turn_two"
+python3 -c 'import json,sys; response=json.load(sys.stdin); response.pop("memory_projection_status"); assert response==json.loads(sys.argv[1])' "$committed_result" <<<"$world_turn_two"
+pause
+replayed_world_turn_two=$("${curl_cmd[@]}" "${auth[@]}" \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: $world_turn_two_id" \
+  --data "$world_action_two" "$api/narrative/$novel_id/world/turns")
+[ "$replayed_world_turn_two" = "$world_turn_two" ]
+[ "$("${curl_cmd[@]}" "$stub/__control__/stats" | json_get "value['calls'].get('world_turn', 0)")" = "$world_calls_committed" ]
+[ "$(docker exec novel-postgres psql \
+  -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At -v ON_ERROR_STOP=1 \
+  -c "SELECT COUNT(*) FROM character_memories WHERE id = '$journey_memory_two_id' AND user_id = '$user_id' AND novel_id = '$novel_id' AND character_id = '$character_id' AND layer = 'permanent' AND content::jsonb ->> 'source_turn_id' = '$world_turn_two_id'")" = 1 ]
 
 pause
 world_view=$("${curl_cmd[@]}" "${auth[@]}" "$api/narrative/$novel_id/world")
