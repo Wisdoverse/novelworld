@@ -33,7 +33,12 @@ separately rejects structurally forward causes. The evidence is bounded to the
 versioned corpus facts and does not independently prove every possible
 semantic cause/death-continuity pattern. Thresholds remain exactly as
 versioned, and the hallucination ceiling rounds up so no fraction above the
-policy bound can pass.
+policy bound can pass. Live character judging also requires the number of
+expected `match` plus `partial` verdicts to be no greater than the number of
+extracted `match` verdicts; violation is `judge_rubric_invalid` and uses the
+existing bounded identical-request retry. This is only a necessary cardinality
+constraint, not identity-by-identity or equal-count semantic matching; recorded
+scoring is unchanged.
 
 The application makes one judge request. It repeats that identical request
 once only when the response violates the judge JSON/schema/rubric/token/
