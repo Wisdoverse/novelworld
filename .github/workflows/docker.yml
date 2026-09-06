@@ -268,7 +268,7 @@ jobs:
           if-no-files-found: error
 
   github-release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: release-attestation
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -290,15 +290,6 @@ jobs:
           tag=$GITHUB_REF_NAME
           cd release-assets
 
-          state=missing
-          if state=$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null); then
-            :
-          else
-            flags=(--verify-tag --draft --generate-notes)
-            [[ "$tag" == *-* ]] && flags+=(--prerelease)
-            gh release create "$tag" "${flags[@]}"
-            state=true
-          fi
-
-          gh release upload "$tag" ./* --clobber
-          [[ "$state" == false ]] || gh release edit "$tag" --draft=false
+          flags=(--verify-tag --generate-notes)
+          [[ "$tag" == *-* ]] && flags+=(--prerelease)
+          gh release create "$tag" ./* "${flags[@]}"
