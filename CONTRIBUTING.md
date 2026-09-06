@@ -131,6 +131,27 @@ go through `frontend/src/shared/api/client.ts`.
 Run the narrowest useful check while iterating, then all affected gates before
 review.
 
+Push and pull-request CI select jobs from the complete change set:
+
+| Changed area | Selected checks beyond the always-on policy checks |
+|---|---|
+| Root Markdown, documentation prose/images, issue/PR templates | None |
+| Backend services, shared Rust crates, integration tests | Backend, integration, production smoke |
+| Frontend | Frontend build/browser, desktop contract, production smoke |
+| Tauri shell | Desktop contract and backend (includes Tauri dependency audit) |
+| PostgreSQL schema/migrations | Backend, integration, desktop contract, production smoke |
+| Launchers | Unix and Windows launcher contracts |
+| Shared build/configuration, workflows, or unknown paths | Full suite |
+
+`tools/ci_scope.py` owns the conservative routing rules. Mixed changes take the
+union; unavailable Git history falls back to the full suite. Scope self-tests,
+specification checksums, and secret scanning always run. The required
+`Rust Build & Test` check aggregates policy and selected-job results, so a failed
+scope detector or failed selected check blocks merging even when unrelated jobs
+are skipped. Manual verification (`make verify`) and reusable release CI run
+the full suite. Docker image publication and portable builds retain their
+existing release/manual triggers.
+
 ### Backend
 
 ```bash
