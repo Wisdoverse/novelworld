@@ -32,7 +32,7 @@ mod budget;
 const CORPUS: &str = include_str!("../corpus/v1.json");
 const CORPUS_VERSION: &str = "h1-synthetic-v3";
 const RUBRIC_VERSION: &str = "h1-extraction-v2";
-const JUDGE_PROMPT_VERSION: &str = "h1-semantic-judge-v4";
+const JUDGE_PROMPT_VERSION: &str = "h1-semantic-judge-v5";
 const REPORT_SCHEMA_VERSION: u8 = 2;
 const MAX_CORPUS_BYTES: usize = 256 * 1024;
 const MAX_JUDGE_RESPONSE_BYTES: usize = 32 * 1024;
@@ -2554,7 +2554,7 @@ fn judge_request(payload: &serde_json::Value) -> Result<ChatRequest> {
 Exact shape: {{"rubric_version":"{RUBRIC_VERSION}","character_verdicts":[{{"expected":"<exact expected character token>","verdict":"<match|partial|absent>"}}],"extracted_character_verdicts":[{{"extracted":"<exact extracted character token>","verdict":"<match|hallucinated>"}}],"relationship_verdicts":[{{"expected":"<exact expected relationship token>","verdict":"<match|partial|absent>"}}],"extracted_relationship_verdicts":[{{"extracted":"<exact extracted relationship token>","verdict":"<match|hallucinated>"}}],"event_verdicts":[{{"expected":"<exact expected event token>","verdict":"<match|partial|absent>","matched_extracted_token":"<exact extracted event token or null>"}}],"extracted_event_verdicts":[{{"extracted":"<exact extracted event token>","verdict":"<match|hallucinated>"}}],"world_rule_verdicts":[{{"expected":"<exact expected world-rule token>","verdict":"<match|partial|absent>"}}],"extracted_world_rule_verdicts":[{{"extracted":"<exact extracted world-rule token>","verdict":"<match|hallucinated>"}}],"explanation":"<1-500 printable characters on one line>"}}"#,
     );
     let system = format!(
-        "{system}\nThe number of expected characters marked match or partial must not exceed the number of extracted characters marked match: distinct expected identities cannot share a single extracted character."
+        "{system}\nThe number of expected characters marked match or partial must not exceed the number of extracted characters marked match: distinct expected identities cannot share a single extracted character. Write explanation as one short sentence, targeting at most 200 characters; the hard limit remains 500 printable characters on one line."
     );
     let user = format!(
         "EVAL_CASE:\n{}",
@@ -3220,12 +3220,14 @@ mod tests {
     #[test]
     fn judge_prompt_requires_one_to_one_event_matches() {
         let request = judge_request(&serde_json::json!({"bounded": true})).unwrap();
-        assert_eq!(JUDGE_PROMPT_VERSION, "h1-semantic-judge-v4");
+        assert_eq!(JUDGE_PROMPT_VERSION, "h1-semantic-judge-v5");
         let system = &request.messages[0].content;
         assert!(system.contains("Event verdicts use stricter one-to-one mapping"));
         assert!(system.contains("Every additional extracted event token must be hallucinated"));
         assert!(system.contains("without a distinct expected fact"));
         assert!(system.contains("expected characters marked match or partial must not exceed"));
+        assert!(system.contains("one short sentence, targeting at most 200 characters"));
+        assert!(system.contains("hard limit remains 500 printable characters on one line"));
     }
 
     #[test]
@@ -3426,6 +3428,13 @@ mod tests {
 
         let mut explanation = valid_judge_value(&contract, false);
         explanation["explanation"] = serde_json::json!("two\nlines");
+        assert_eq!(
+            parse_judge_verdicts(&explanation.to_string(), &contract).unwrap_err(),
+            JudgeContractFailureKind::Explanation
+        );
+        explanation["explanation"] = serde_json::json!("界".repeat(500));
+        assert!(parse_judge_verdicts(&explanation.to_string(), &contract).is_ok());
+        explanation["explanation"] = serde_json::json!("界".repeat(501));
         assert_eq!(
             parse_judge_verdicts(&explanation.to_string(), &contract).unwrap_err(),
             JudgeContractFailureKind::Explanation

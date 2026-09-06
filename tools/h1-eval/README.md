@@ -40,6 +40,12 @@ existing bounded identical-request retry. This is only a necessary cardinality
 constraint, not identity-by-identity or equal-count semantic matching; recorded
 scoring is unchanged.
 
+Production prompts distinguish explicitly established relationships and persistent
+world rules from unsupported inference, without treating dialogue alone as proof.
+The judge targets one short explanatory sentence of at most 200 characters;
+hard validation remains 500 printable characters on one line. Offline prompt tests
+prove wording/shape only, not recall improvement or paid-run authorization.
+
 The application makes one judge request. It repeats that identical request
 once only when the response violates the judge JSON/schema/rubric/token/
 explanation contract. It does not add a retry for a transport failure or a
