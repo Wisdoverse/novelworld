@@ -11,8 +11,11 @@ Operator decision, **2026-09-06**: the current private rapid-iteration phase
 does **not require human acceptance**. Development, merge, and private
 iteration delivery do not wait for manual keyboard/screen-reader/mobile,
 non-author human journey completion, or human voice/content-quality approval.
-This is an execution-phase decision, not a change to the frozen Qualification
-contract below.
+This applies throughout the active roadmap goal. Agents adjudicate engineering
+tradeoffs from first principles and executable evidence for correctness,
+security, reliability and operability; no additional human decision or approval
+is required within this private iteration scope. This is an execution-phase
+decision, not a change to the frozen Qualification contract below.
 
 - Keep the workflow: plan → non-author review → implementation → independent
   final review. A non-author agent may supply the independent review; no
@@ -29,8 +32,24 @@ contract below.
   Human-review gaps in #222/#230 do not block rapid iteration. Their separate
   live-model and formal-qualification gaps remain open.
 - Do not change prior cohort denominators, frozen model/evaluator identities,
-  quality thresholds, retry rules or failed results. This decision authorizes
-  no provider call, new live cohort, or rerun of a frozen candidate.
+  quality thresholds, retry rules or failed results, including failed #236.
+  New revisions and bounded Diagnostics are authorized when supported by a
+  causal hypothesis and independent agent plan review. Do not repeatedly
+  sample an unchanged failed revision to obtain a pass or tune historical
+  cohorts after seeing their results.
+- The selected iteration model is `deepseek-v4-flash-vision-exp`; the
+  unregistered Pro proposal is not executed. Selection is not evidence of
+  qualification and does not change runtime defaults or past model identities.
+- Before any paid Diagnostic, register the hypothesis, immutable commit,
+  corpus/policy/prompt identities, configured and allowed response models,
+  and enforceable request/token/spend ceilings. Reserve a conservative
+  worst-case allowance before each request, including bounded retries, and
+  stop before a ceiling can be exceeded. If the runner cannot enforce these
+  ceilings, add and verify that control before calling the provider; a
+  post-run cost threshold is not a spend cap. Retain failures and complete
+  usage evidence; keep credentials and raw responses outside Git and public
+  reports. This delegation does not authorize account top-ups or public
+  deployment and does not automatically unlock H4 or formal Qualification.
 - Formal Qualification/Observation and broader release/support claims still
   use their versioned evidence contracts. Before leaving this rapid-iteration
   phase, explicitly review the next acceptance policy and any deferred human
