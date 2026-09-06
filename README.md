@@ -2,6 +2,8 @@
 
 # NovelWorld
 
+[English](./README.md) · [简体中文](./README.zh-CN.md)
+
 **Read a novel. Talk to its characters. Make the next move.**
 
 [![CI](https://github.com/Wisdoverse/novelworld/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Wisdoverse/novelworld/actions/workflows/ci.yml)
