@@ -3633,7 +3633,7 @@ class Journey:
                 token,
                 novel_id,
                 overtaking_id,
-                pending_action,
+                dict(pending_action, expected_turn_number=12),
                 expected=(409,),
             )
             self.require_error(overtaking, "turn_in_progress")

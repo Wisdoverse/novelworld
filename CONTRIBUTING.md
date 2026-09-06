@@ -183,6 +183,13 @@ set `CACHE_MODE=redis`, a strong URL-safe `REDIS_PASSWORD`, and the matching
 together and are the supported path. The independent integration Compose file
 above always starts its isolated unauthenticated test Redis.
 
+The extended Compose core journey stops Agent during a world turn and checks
+durable pending state, the no-overtake barrier, scanner recovery before replay,
+and exact replay without another model call. Changes to its script trigger
+these drills on PRs. This fixture-based check does not prove live model quality
+or release-upgrade recovery. Run it only in the existing isolated CI topology,
+not against a personal deployment; the script uses fixed test container names.
+
 The authoritative required gate is [CI](./.github/workflows/ci.yml). To dispatch
 that exact workflow for a clean, pushed commit and wait for the result, run:
 
