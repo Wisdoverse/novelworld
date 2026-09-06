@@ -40,6 +40,14 @@ existing bounded identical-request retry. This is only a necessary cardinality
 constraint, not identity-by-identity or equal-count semantic matching; recorded
 scoring is unchanged.
 
+Production and H1 share an event-selection parser that validates actual chunk
+boundaries before accepting, saving, or resuming a selection. A legacy invalid
+runtime checkpoint is rejected in memory and replaced by the existing
+attempt-fenced upsert after regeneration; if regeneration is invalid too, the
+old row remains and is rejected again. The two-schema-attempt limit is unchanged,
+and the first cross-chunk rejection may use the existing second attempt. This
+boundary fix changes no prompt version, diagnostic immutability, or quality claim.
+
 Production prompts distinguish explicitly established relationships and persistent
 world rules from unsupported inference, without treating dialogue alone as proof.
 The judge targets one short explanatory sentence of at most 200 characters;
