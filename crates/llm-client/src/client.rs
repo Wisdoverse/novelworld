@@ -53,6 +53,8 @@ impl LlmClient {
             http: reqwest::Client::builder()
                 .connect_timeout(LLM_CONNECT_TIMEOUT)
                 .timeout(LLM_TOTAL_TIMEOUT)
+                .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
                 .build()
                 .expect("valid static LLM HTTP client configuration"),
             provider: None,

@@ -143,6 +143,84 @@ fn provider_error_text_is_discarded_and_success_bodies_are_bounded() {
 }
 
 #[test]
+fn redirects_are_not_followed_or_observed_as_target_responses() {
+    for status in ["307 Temporary Redirect", "308 Permanent Redirect"] {
+        let source = TcpListener::bind("127.0.0.1:0").unwrap();
+        let source_address = source.local_addr().unwrap();
+        let target = TcpListener::bind("127.0.0.1:0").unwrap();
+        target.set_nonblocking(true).unwrap();
+        let target_address = target.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = source.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut bytes = [0; 1024];
+                let read = socket.read(&mut bytes).unwrap();
+                assert!(read > 0, "request ended before complete HTTP headers");
+                request.extend_from_slice(&bytes[..read]);
+                assert!(request.len() <= 8192, "request headers exceed test bound");
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            socket
+                .write_all(&http_response(
+                    status,
+                    "application/json",
+                    "redirected",
+                    &format!("Location: http://{target_address}/target\r\n"),
+                ))
+                .unwrap();
+            request
+        });
+
+        let records = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = records.clone();
+        let result = tokio::runtime::Runtime::new().unwrap().block_on(async {
+            LlmClient::new()
+                .with_openai_compatible("test", "synthetic-key", format!("http://{source_address}"))
+                .chat(
+                    ChatRequest::new(crate::LlmOperation::CharacterExtraction, "test/model")
+                        .max_tokens(4_096)
+                        .observe_responses(move |evidence| {
+                            observed.lock().unwrap().push((
+                                evidence.status,
+                                evidence.body.to_vec(),
+                                evidence.complete,
+                            ));
+                            Ok(())
+                        }),
+                )
+                .await
+        });
+        let source_request = server.join().unwrap();
+        let error = result.unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<crate::LlmApiError>()
+                .expect("redirect must be reported as an HTTP API error")
+                .status,
+            status[..3].parse::<u16>().unwrap()
+        );
+        assert_eq!(records.lock().unwrap().len(), 1);
+        assert_eq!(
+            records.lock().unwrap()[0].0,
+            status[..3].parse::<u16>().unwrap()
+        );
+        assert!(matches!(
+            target.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+        assert!(String::from_utf8_lossy(&source_request)
+            .to_ascii_lowercase()
+            .contains("authorization: bearer synthetic-key"));
+    }
+}
+
+#[test]
 fn retry_delay_cannot_outlive_the_total_deadline() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
