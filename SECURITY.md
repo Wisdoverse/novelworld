@@ -143,8 +143,9 @@ guards; the deployment path itself is not exercised by a local drill. The
 state drill pins sync/rename order and simulates process crashes, but it does
 not inject a real Linux host power loss or prove filesystem directory-entry
 durability across one.
-SBOM generation has since landed (see Dependency Policy); deploy-time SBOM
-verification, provenance/attestation, and signing remain gated.
+SBOM generation has since landed (see Dependency Policy). Release-file
+provenance is documented in the Release-file provenance section below;
+deploy-time SBOM admission and platform-native signing remain gated.
 ### Dependency Policy
 
 CI runs `cargo audit` against both `Cargo.lock` files with the live RustSec
@@ -153,21 +154,36 @@ frontend's frozen lockfile. A newly reported Rust vulnerability or
 HIGH/CRITICAL advisory in a shipped browser dependency fails the build;
 development-only frontend tooling is outside that production-dependency gate.
 Dependabot covers Cargo, npm, Dockerfiles, Compose files, and GitHub Actions.
-The temporary TypeScript 7/6 npm aliases, pinned Alpine packages in Dockerfile
-`RUN` steps, and immutable scanner images embedded in shell commands are
+The temporary TypeScript 7/6 npm aliases, pinned OS packages in Dockerfile
+`RUN` steps, the release workflow's GitHub CLI archive, and immutable scanner
+images embedded in shell commands are
 verified manually against upstream releases during each dependency-maintenance
 change because Dependabot does not parse those forms.
-CI also runs `gitleaks` over the full commit history: any committed secret
-fails the build.
+CI runs `bash tools/scan-secrets.sh` over history reachable from the selected
+HEAD. A detected credential fails the build; unrelated branch histories are
+excluded. This is pattern-based detection, not proof that no secret can exist.
 `.gitleaks.toml` is the full default rule set plus narrow allowlists for
 the upstream rule-set examples and two deliberate test fixtures (the CI
 `RUNTIME_CONFIG_KEY` smoke placeholder and two static provider model names).
 Credential-shaped upstream examples are regex-escaped so the allowlist still
 matches historical fixtures without committing complete key-shaped literals.
-CI and the self-test `tests/e2e/gitleaks_self_test.sh` scan the full history:
-it plants a GitHub-shaped token and asserts the scan fails (a config that
-silently lost its rules would pass everything and must not go unnoticed),
-then asserts the repository stays clean.
+CI and `tests/e2e/gitleaks_self_test.sh` use that same entrypoint with the
+digest-pinned Docker image; repository-local scanner executables cannot
+replace it. It requires non-shallow, readable HEAD history and a positive,
+completed scan without Git
+or scanner errors. Missing/partial evidence fails even if the scanner exits
+zero. Linked worktrees mount their exact Git metadata read-only. The scanner
+has a 300-second deadline without retry; CI also bounds the scan step to six
+minutes, including container startup. Local Docker startup is host-managed.
+Gitleaks redaction is enabled. Diagnostics are captured privately and removed
+on exit; only fixed outcomes and commit counts reach the console. Exit 42
+means detected credentials; exit 1 means operational/incomplete evidence.
+The self-test rejects generated GitHub and DeepSeek-shaped credentials,
+verifies unrelated-ref isolation and linked-worktree scanning, and checks
+invalid histories, incomplete results and output privacy. Empty histories
+cannot supply a positive scan control. For a local checkout, run
+`bash tools/scan-secrets.sh /path/to/checkout`; it scans committed history,
+so uncommitted/ignored local secret files are outside that evidence.
 `.cargo/audit.toml` currently carries no vulnerability ignores. Informational
 warnings for unmaintained or unsound transitive crates remain visible for
 upstream tracking without weakening the vulnerability gate.
@@ -231,14 +247,68 @@ and every new artifact must be re-scanned before re-pinning. The shipped
 frontend runtime installs Alpine's fixed OpenSSL packages on the same Nginx
 base and passes the application-image gate.
 
-The release pipeline (docker.yml) generates one CycloneDX 1.6 SBOM per
+The current release pipeline (docker.yml) generates one CycloneDX 1.7 SBOM per
 application image with the pinned trivy release and ships them with the
-release artifact, bound to the recorded image digest via `sboms/digests.txt`;
+release artifact, bound to the recorded image digest via the generated
+`sboms/digests.txt` sidecar;
 `infra/security/generate-sboms.sh` is the local operator form.
 
-Still-open H2 supply-chain gates: deploy-time SBOM verification,
-provenance/attestation, and signature generation for official release
-artifacts.
+For registry releases, successful per-run build and vulnerability-scan digest
+records drive both the release manifest and SBOM generation; the pipeline does
+not resolve mutable SHA tags again. The local generator keeps its explicit
+image-ID fallback. Local commands require GNU `timeout`: pulls are bounded to
+10 minutes and scans to 15 minutes, each with an additional 30-second
+termination grace; no command is retried automatically. A timeout does not
+guarantee that daemon work has fully stopped.
+
+#### Release-file provenance
+
+The release workflow's provenance outcome covers the existing flat release
+files: `release.env`, six CycloneDX SBOMs, `digests.txt`, four desktop
+archives, and `desktop-SHA256SUMS`. After the required quality, image, manifest,
+and desktop builds succeed, the pinned `actions/attest` v4.2.2 action produces
+native provenance for these exact file subjects and writes the Sigstore bundle
+as `release-attestation.json`. A `workflow_dispatch` exercises signing and
+verification without publishing a GitHub Release, even when its selected ref
+is a tag. Tag publication requires a tag-push event and remains blocked until
+the required checks and native verification of every file pass. The top-level
+signing job requires `GITHUB_WORKFLOW_SHA` and `GITHUB_SHA` to resolve to the
+same source/workflow commit.
+
+The tag-push job passes every verified file to one native `gh release create`
+invocation. The CLI refuses an existing draft or public Release, stages all
+uploads in a temporary draft, publishes only after every upload succeeds, and
+removes that draft after an upload or publish failure. If cleanup itself fails,
+the remaining Release blocks another run; diagnose it and explicitly remove
+that exact draft before retrying. The workflow never reconciles or overwrites
+an existing Release.
+
+Consumers must obtain the expected source and signer SHA from an independently
+reviewed workflow run or operator record, never only from `release.env`. Verify
+each consumed file separately with GitHub CLI 2.100.0 or newer, for example:
+
+```bash
+expected_sha="$REVIEWED_SOURCE_SHA"
+/path/to/gh attestation verify release.env \
+  --hostname github.com \
+  --repo Wisdoverse/novelworld \
+  --signer-workflow Wisdoverse/novelworld/.github/workflows/docker.yml \
+  --source-digest "$expected_sha" \
+  --signer-digest "$expected_sha" \
+  --deny-self-hosted-runners \
+  --bundle release-attestation.json
+```
+
+Run the same command separately for every SBOM, digest sidecar, desktop
+archive, and checksum file. For offline verification, obtain trusted roots
+separately with `gh attestation trusted-root` and pass the resulting file with
+`--custom-trusted-root`; never trust a root downloaded alongside the release.
+A valid signature establishes file content and producing workflow identity;
+it does not establish release qualification.
+
+Deploy-time SBOM verification remains a separate gate. Platform-native Windows
+code signing, Apple signing/notarization, human review, and release
+qualification remain outside this file-provenance outcome.
 
 ### Provider Incidents
 

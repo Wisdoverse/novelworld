@@ -101,9 +101,15 @@ URL-safe `REDIS_PASSWORD`（`A-Z a-z 0-9 . _ ~ -`），再重新运行 `start.sh
 
 `v*` Tag workflow 会先运行完整 CI，只发布以 Git SHA 标记的应用镜像。
 全部镜像和 Windows/Linux/macOS 客户端构建成功后，同一 GitHub Release
-会附加 `release.env`、SBOM、客户端压缩包和 `desktop-SHA256SUMS`。
+会附加 `release.env`、SBOM、客户端压缩包、`desktop-SHA256SUMS` 和
+`release-attestation.json`。发布文件的逐文件 provenance 验证流程见
+[`SECURITY.md#release-file-provenance`](SECURITY.md#release-file-provenance)。
 `release.env` 只允许版本、代码 SHA、六个应用镜像和三个经源码审批的
 基础镜像 digest；不要部署单个镜像或使用 `latest`。
+
+消费者必须使用独立复核取得的 source/signer SHA，并独立取得 trusted roots；不能
+只信 `release.env` 或随 release 附带的 root。当前 `release.sh` 仍不会自动执行
+provenance 或 deploy-time SBOM admission，相关 H2 证据仍待完成。
 
 PostgreSQL、Redis、Nginx 的 digest 固定在 `docker-compose.yml`。普通应用发布
 要求候选与当前 release 的三个 digest 完全一致，总是检查 PostgreSQL，

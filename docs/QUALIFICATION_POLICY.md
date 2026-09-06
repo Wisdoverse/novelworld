@@ -5,6 +5,60 @@ the policy; the baselines, thresholds, live runs, and H1–H5 gates it defines
 remain open. It does not claim that any live product slice is
 release-qualified.
 
+## Rapid-iteration acceptance
+
+Operator decision, **2026-09-06**: the current private rapid-iteration phase
+does **not require human acceptance**. Development, merge, and private
+iteration delivery do not wait for manual keyboard/screen-reader/mobile,
+non-author human journey completion, or human voice/content-quality approval.
+This applies throughout the active roadmap goal. Agents adjudicate engineering
+tradeoffs from first principles and executable evidence for correctness,
+security, reliability and operability; no additional human decision or approval
+is required within this private iteration scope. This is an execution-phase
+decision, not a change to the frozen Qualification contract below.
+
+- Keep the workflow: plan → non-author review → implementation → independent
+  final review. A non-author agent may supply the independent review; no
+  additional human sign-off is required for rapid-iteration acceptance.
+- All affected automated tests and required CI remain blocking, including
+  browser accessibility, strict FSD, backend Cloud Native/DDD/microservice
+  architecture, security, privacy, data-integrity and recovery gates where
+  applicable. Removing human acceptance does not remove accessibility basics.
+- Record this delivery as **Landed/Structural**, not Release-qualified or
+  human-approved. Missing human observations remain **unverified / NOT RUN**;
+  an agent review or automated check never becomes a human result.
+- Human-only issue #169 is not planned for this phase; retain its history and
+  unexecuted handoff, and archive it rather than mark its checklist passed.
+  Human-review gaps in #222/#230 do not block rapid iteration. Their separate
+  live-model and formal-qualification gaps remain open.
+- Do not change prior cohort denominators, frozen model/evaluator identities,
+  quality thresholds, retry rules or failed results, including failed #236.
+  New revisions and bounded Diagnostics are authorized when supported by a
+  causal hypothesis and independent agent plan review. Do not repeatedly
+  sample an unchanged failed revision to obtain a pass or tune historical
+  cohorts after seeing their results.
+- The selected iteration model is `deepseek-v4-flash-vision-exp`; the
+  unregistered Pro proposal is not executed. Selection is not evidence of
+  qualification and does not change runtime defaults or past model identities.
+- Before any paid Diagnostic, register the hypothesis, immutable commit,
+  corpus/policy/prompt identities, configured and allowed response models,
+  and enforceable request/token/spend ceilings. Reserve a conservative
+  worst-case allowance before each request, including bounded retries, and
+  stop before a ceiling can be exceeded. If the runner cannot enforce these
+  ceilings, add and verify that control before calling the provider; a
+  post-run cost threshold is not a spend cap. Retain failures and complete
+  usage evidence; keep credentials and raw responses outside Git and public
+  reports. This delegation does not authorize account top-ups or public
+  deployment and does not automatically unlock H4 or formal Qualification.
+- Formal Qualification/Observation and broader release/support claims still
+  use their versioned evidence contracts. Before leaving this rapid-iteration
+  phase, explicitly review the next acceptance policy and any deferred human
+  evidence; do not silently promote a rapid-iteration result.
+
+The operator accepts the temporary lack of direct human usability and quality
+evidence for private iteration. Reversing this decision restores the deferred
+human-review work without rewriting historical results or production data.
+
 ## Decision contract
 
 NovelWorld qualifies a user outcome, not a component or endpoint. A journey
