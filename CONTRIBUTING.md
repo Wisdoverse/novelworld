@@ -50,6 +50,9 @@ During the current private rapid-iteration phase,
 [human acceptance is not required](./docs/QUALIFICATION_POLICY.md#rapid-iteration-acceptance).
 Non-author agent review and all affected automated/required CI gates remain
 mandatory; no additional human sign-off is needed to deliver a focused change.
+This applies throughout the active roadmap goal, including agent-adjudicated
+new revisions and bounded Diagnostics under the linked policy's pre-call
+identity, budget and evidence controls.
 Keep unperformed human checks unverified, and do not label iteration delivery
 as formal release qualification or authorization to rerun a frozen model.
 
