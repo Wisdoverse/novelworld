@@ -2567,6 +2567,42 @@ async fn canon_story_models_are_versioned_and_immutable() {
             .unwrap(),
         Some(checkpoint_json.into())
     );
+    // Checkpoints are replaceable working state, unlike committed canon.
+    // A current attempt can replace rejected content; a stale one cannot
+    // overwrite either the original or its validated replacement.
+    let replacement = r#"{"coverage_summary":"Validated replacement."}"#;
+    for (attempt, extraction_json, accepted) in [
+        (1, replacement, false),
+        (2, replacement, true),
+        (1, checkpoint_json, false),
+    ] {
+        assert_eq!(
+            repository
+                .save_import_checkpoint(
+                    CanonExtractionCheckpoint {
+                        novel_id,
+                        model_version: 1,
+                        prompt_version: "canon-chunk-v3",
+                        chapter_number: 1,
+                        chunk_index: 0,
+                        is_final: true,
+                        source_content: &checkpoint_source,
+                        extraction_json,
+                    },
+                    attempt,
+                )
+                .await
+                .unwrap(),
+            accepted
+        );
+    }
+    assert_eq!(
+        repository
+            .find_import_checkpoint(novel_id, 1, "canon-chunk-v3", 1, 0, &checkpoint_source)
+            .await
+            .unwrap(),
+        Some(replacement.into())
+    );
     assert!(repository
         .find_import_checkpoint(novel_id, 1, "canon-chunk-v3", 1, 0, "changed source")
         .await

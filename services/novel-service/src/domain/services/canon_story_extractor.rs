@@ -346,19 +346,23 @@ SELECTION_INPUT:
 
 pub fn parse_event_selection(
     raw: &str,
-    candidate_count: usize,
+    chunks: &[(CanonSourceChunk, ChunkExtraction)],
 ) -> Result<EventSelection, CanonExtractionError> {
     let selection = serde_json::from_str::<EventSelection>(raw.trim()).map_err(|error| {
         CanonExtractionError(format!("event selection JSON is invalid: {error}"))
     })?;
-    validate_event_selection(&selection, candidate_count)?;
+    validate_event_selection(&selection, chunks)?;
     Ok(selection)
 }
 
 fn validate_event_selection(
     selection: &EventSelection,
-    candidate_count: usize,
+    chunks: &[(CanonSourceChunk, ChunkExtraction)],
 ) -> Result<(), CanonExtractionError> {
+    let candidate_count = chunks
+        .iter()
+        .map(|(_, extraction)| extraction.events.len())
+        .sum();
     if candidate_count == 0 || selection.groups.is_empty() {
         return invalid("event selection must contain groups");
     }
@@ -374,18 +378,14 @@ fn validate_event_selection(
             previous = Some(*index);
         }
     }
-    Ok(())
+    validate_event_groups(chunks, &selection.groups)
 }
 
 pub fn apply_event_selection(
     chunks: &mut [(CanonSourceChunk, ChunkExtraction)],
     selection: &EventSelection,
 ) -> Result<(), CanonExtractionError> {
-    let candidate_count = chunks
-        .iter()
-        .map(|(_, extraction)| extraction.events.len())
-        .sum();
-    validate_event_selection(selection, candidate_count)?;
+    validate_event_selection(selection, chunks)?;
     for (_, extraction) in chunks.iter() {
         for (event_index, event) in extraction.events.iter().enumerate() {
             if event.caused_by.iter().any(|cause| *cause >= event_index) {
@@ -1840,16 +1840,16 @@ mod tests {
         assert!(prompt.contains("caused_by may support that decision but is not required"));
         assert!(prompt.len() <= MAX_EVENT_SELECTION_PROMPT_BYTES);
 
-        assert!(parse_event_selection("```json\n{\"groups\":[[2]]}\n```", 3).is_err());
-        assert!(parse_event_selection("{\"groups\":[]}", 3).is_err());
-        assert!(parse_event_selection("{\"groups\":[[]]}", 3).is_err());
-        assert!(parse_event_selection("{\"groups\":[[2,1]]}", 3).is_err());
-        assert!(parse_event_selection("{\"groups\":[[1],[1]]}", 3).is_err());
-        assert!(parse_event_selection("{\"groups\":[[3]]}", 3).is_err());
-        assert!(parse_event_selection("{\"selected\":[2]}", 3).is_err());
-        assert!(parse_event_selection("{\"groups\":[[2]],\"extra\":true}", 3).is_err());
+        assert!(parse_event_selection("```json\n{\"groups\":[[2]]}\n```", &chunks).is_err());
+        assert!(parse_event_selection("{\"groups\":[]}", &chunks).is_err());
+        assert!(parse_event_selection("{\"groups\":[[]]}", &chunks).is_err());
+        assert!(parse_event_selection("{\"groups\":[[2,1]]}", &chunks).is_err());
+        assert!(parse_event_selection("{\"groups\":[[1],[1]]}", &chunks).is_err());
+        assert!(parse_event_selection("{\"groups\":[[3]]}", &chunks).is_err());
+        assert!(parse_event_selection("{\"selected\":[2]}", &chunks).is_err());
+        assert!(parse_event_selection("{\"groups\":[[2]],\"extra\":true}", &chunks).is_err());
 
-        let omitted_death = parse_event_selection("{\"groups\":[[2]]}", 3).unwrap();
+        let omitted_death = parse_event_selection("{\"groups\":[[2]]}", &chunks).unwrap();
         let mut death_fallback = chunks.clone();
         apply_event_selection(&mut death_fallback, &omitted_death).unwrap();
         assert_eq!(death_fallback[0].1.events.len(), 2);
@@ -1860,7 +1860,7 @@ mod tests {
         assert_eq!(death_fallback[0].1.events[1].caused_by, vec![0]);
         assert_eq!(death_fallback[0].1.deaths[0].event_index, 0);
 
-        let selection = parse_event_selection("{\"groups\":[[0,1],[2]]}", 3).unwrap();
+        let selection = parse_event_selection("{\"groups\":[[0,1],[2]]}", &chunks).unwrap();
         let mut invalid = chunks.clone();
         invalid[0].1.events[1].caused_by = vec![1];
         assert!(apply_event_selection(&mut invalid, &selection).is_err());
@@ -1904,8 +1904,36 @@ mod tests {
             (first_chunk, base_extraction("First source.", false)),
             (second_chunk, base_extraction("Second source.", true)),
         ];
-        let cross_chunk = parse_event_selection("{\"groups\":[[0,1]]}", 2).unwrap();
+        for chapter_number in [1, 2] {
+            chunks[1].0.chapter_number = chapter_number;
+            let raw = "{\"groups\":[[0,1]]}";
+            assert!(parse_event_selection(raw, &chunks).is_err());
+            // Deserialization must not bypass the apply boundary either.
+            let cross_chunk = serde_json::from_str(raw).unwrap();
+            let before = serde_json::to_value(&chunks[0].1).unwrap();
+            let second_before = serde_json::to_value(&chunks[1].1).unwrap();
+            assert!(apply_event_selection(&mut chunks, &cross_chunk).is_err());
+            assert_eq!(serde_json::to_value(&chunks[0].1).unwrap(), before);
+            assert_eq!(serde_json::to_value(&chunks[1].1).unwrap(), second_before);
+            assert!(parse_event_selection("{\"groups\":[[0],[1]]}", &chunks).is_ok());
+        }
+
+        // An omitted death used to split every selected group into singletons,
+        // masking a cross-chunk group before the boundary check was reached.
+        let retained_event = chunks[1].1.events[0].clone();
+        chunks[1].1.events.push(retained_event);
+        chunks[1].1.deaths.push(ExtractedDeath {
+            character: "Hero".into(),
+            event_index: 1,
+            description: "The hero dies.".into(),
+            evidence: extracted_evidence("Second source."),
+        });
+        let raw = "{\"groups\":[[0,1]]}";
+        assert!(parse_event_selection(raw, &chunks).is_err());
+        let cross_chunk = serde_json::from_str(raw).unwrap();
+        let before = serde_json::to_value(&chunks[1].1).unwrap();
         assert!(apply_event_selection(&mut chunks, &cross_chunk).is_err());
+        assert_eq!(serde_json::to_value(&chunks[1].1).unwrap(), before);
 
         let chunk = CanonSourceChunk {
             chapter_number: 1,
@@ -1922,8 +1950,8 @@ mod tests {
             factions: vec![],
             evidence: extracted_evidence("Second source."),
         });
-        let local_beat = parse_event_selection("{\"groups\":[[0,1]]}", 2).unwrap();
         let mut chunks = vec![(chunk, extraction)];
+        let local_beat = parse_event_selection("{\"groups\":[[0,1]]}", &chunks).unwrap();
         apply_event_selection(&mut chunks, &local_beat).unwrap();
         assert_eq!(chunks[0].1.events.len(), 1);
         assert_eq!(
@@ -1950,8 +1978,8 @@ mod tests {
             factions: vec![],
             evidence: extracted_evidence("Second source."),
         });
-        let selection = parse_event_selection("{\"groups\":[[0,1]]}", 2).unwrap();
         let mut chunks = vec![(chunk, extraction)];
+        let selection = parse_event_selection("{\"groups\":[[0,1]]}", &chunks).unwrap();
         apply_event_selection(&mut chunks, &selection).unwrap();
         assert_eq!(chunks[0].1.events.len(), 2);
         assert_eq!(chunks[0].1.events[0].summary.chars().count(), 1_100);
