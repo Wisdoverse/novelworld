@@ -255,10 +255,19 @@ archives, and `desktop-SHA256SUMS`. After the required quality, image, manifest,
 and desktop builds succeed, the pinned `actions/attest` v4.2.2 action produces
 native provenance for these exact file subjects and writes the Sigstore bundle
 as `release-attestation.json`. A `workflow_dispatch` exercises signing and
-verification without publishing a GitHub Release; tag publication remains
-blocked until the required checks and native verification of every file pass.
-The top-level signing job requires `GITHUB_WORKFLOW_SHA` and `GITHUB_SHA` to
-resolve to the same source/workflow commit.
+verification without publishing a GitHub Release, even when its selected ref
+is a tag. Tag publication requires a tag-push event and remains blocked until
+the required checks and native verification of every file pass. The top-level
+signing job requires `GITHUB_WORKFLOW_SHA` and `GITHUB_SHA` to resolve to the
+same source/workflow commit.
+
+The tag-push job passes every verified file to one native `gh release create`
+invocation. The CLI refuses an existing draft or public Release, stages all
+uploads in a temporary draft, publishes only after every upload succeeds, and
+removes that draft after an upload or publish failure. If cleanup itself fails,
+the remaining Release blocks another run; diagnose it and explicitly remove
+that exact draft before retrying. The workflow never reconciles or overwrites
+an existing Release.
 
 Consumers must obtain the expected source and signer SHA from an independently
 reviewed workflow run or operator record, never only from `release.env`. Verify
