@@ -5,6 +5,41 @@ the policy; the baselines, thresholds, live runs, and H1–H5 gates it defines
 remain open. It does not claim that any live product slice is
 release-qualified.
 
+## Rapid-iteration acceptance
+
+Operator decision, **2026-09-06**: the current private rapid-iteration phase
+does **not require human acceptance**. Development, merge, and private
+iteration delivery do not wait for manual keyboard/screen-reader/mobile,
+non-author human journey completion, or human voice/content-quality approval.
+This is an execution-phase decision, not a change to the frozen Qualification
+contract below.
+
+- Keep the workflow: plan → non-author review → implementation → independent
+  final review. A non-author agent may supply the independent review; no
+  additional human sign-off is required for rapid-iteration acceptance.
+- All affected automated tests and required CI remain blocking, including
+  browser accessibility, strict FSD, backend Cloud Native/DDD/microservice
+  architecture, security, privacy, data-integrity and recovery gates where
+  applicable. Removing human acceptance does not remove accessibility basics.
+- Record this delivery as **Landed/Structural**, not Release-qualified or
+  human-approved. Missing human observations remain **unverified / NOT RUN**;
+  an agent review or automated check never becomes a human result.
+- Human-only issue #169 is not planned for this phase; retain its history and
+  unexecuted handoff, and archive it rather than mark its checklist passed.
+  Human-review gaps in #222/#230 do not block rapid iteration. Their separate
+  live-model and formal-qualification gaps remain open.
+- Do not change prior cohort denominators, frozen model/evaluator identities,
+  quality thresholds, retry rules or failed results. This decision authorizes
+  no provider call, new live cohort, or rerun of a frozen candidate.
+- Formal Qualification/Observation and broader release/support claims still
+  use their versioned evidence contracts. Before leaving this rapid-iteration
+  phase, explicitly review the next acceptance policy and any deferred human
+  evidence; do not silently promote a rapid-iteration result.
+
+The operator accepts the temporary lack of direct human usability and quality
+evidence for private iteration. Reversing this decision restores the deferred
+human-review work without rewriting historical results or production data.
+
 ## Decision contract
 
 NovelWorld qualifies a user outcome, not a component or endpoint. A journey
