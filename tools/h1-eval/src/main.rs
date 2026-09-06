@@ -27,6 +27,8 @@ use novel_service::domain::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+mod budget;
+
 const CORPUS: &str = include_str!("../corpus/v1.json");
 const CORPUS_VERSION: &str = "h1-synthetic-v3";
 const RUBRIC_VERSION: &str = "h1-extraction-v2";
@@ -410,6 +412,8 @@ struct EvalReport {
     cases: Vec<CaseReport>,
     hard_failures: Vec<String>,
     passed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostic_budget: Option<budget::Report>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
@@ -453,6 +457,7 @@ enum Mode {
 
 struct Args {
     mode: Mode,
+    bounded_diagnostic: bool,
     git_sha: String,
     metrics_output: Option<PathBuf>,
     private_responses_output: Option<PathBuf>,
@@ -473,6 +478,60 @@ struct RunConfig {
     model: String,
     allowed_response_models: BTreeSet<String>,
     client: Option<RuntimeLlmClient>,
+    budget: Option<budget::Control>,
+}
+
+impl RunConfig {
+    async fn chat(
+        &self,
+        sink: Option<&PrivateResponseSink>,
+        request: ChatRequest,
+    ) -> Result<ChatResponse> {
+        let client = self.client.as_ref().context("live_client_missing")?;
+        let Some(control) = &self.budget else {
+            return client.chat(request).await;
+        };
+        let fail = |code| {
+            control.stop(code);
+            if let Some(sink) = sink {
+                if let Ok(mut state) = sink.0.lock() {
+                    state.failure.get_or_insert(code);
+                }
+            }
+            anyhow::anyhow!(code)
+        };
+        if request.stream || request.thinking == Some(true) || request.runtime_user_id.is_some() {
+            return Err(fail("diagnostic_request_invalid"));
+        }
+        let sink = sink.ok_or_else(|| fail("diagnostic_evidence_missing"))?;
+        let usage_start = sink
+            .0
+            .lock()
+            .map_err(|error| {
+                drop(error);
+                fail("diagnostic_evidence_missing")
+            })?
+            .usages
+            .len();
+        let ticket = control
+            .begin(request.max_tokens.unwrap_or(0))
+            .map_err(&fail)?;
+        let response = match client.chat(request).await {
+            Ok(response) => response,
+            Err(_) => return Err(fail("diagnostic_request_failed")),
+        };
+        let usages = sink
+            .0
+            .lock()
+            .map_err(|error| {
+                drop(error);
+                fail("diagnostic_evidence_missing")
+            })?
+            .usages[usage_start..]
+            .to_vec();
+        control.finish(ticket, &usages).map_err(fail)?;
+        Ok(response)
+    }
 }
 
 #[derive(Serialize)]
@@ -496,6 +555,7 @@ struct PrivateResponseState {
     count: usize,
     response_models: BTreeSet<String>,
     failure: Option<&'static str>,
+    usages: Vec<llm_client::Usage>,
 }
 
 impl PrivateResponseSink {
@@ -506,6 +566,7 @@ impl PrivateResponseSink {
             count: 0,
             response_models: BTreeSet::new(),
             failure: None,
+            usages: Vec::new(),
         }))))
     }
 
@@ -561,9 +622,7 @@ impl PrivateResponseSink {
                     .map_err(|_| "response_envelope_invalid")?;
                 register_response_model(&mut state.response_models, allowed_models, &model)
                     .map_err(|_| "response_model_not_allowed")?;
-                if usage.is_none() {
-                    return Err("response_usage_missing");
-                }
+                state.usages.push(usage.ok_or("response_usage_missing")?);
             }
             Ok(())
         })();
@@ -619,7 +678,7 @@ async fn main() -> Result<()> {
     let args = parse_args()?;
     validate_checkout(&args.git_sha)?;
     let corpus = load_corpus()?;
-    let config = run_config(args.mode)?;
+    let mut config = run_config(args.mode, args.bounded_diagnostic)?;
     let mut private_responses = args
         .private_responses_output
         .as_deref()
@@ -637,6 +696,14 @@ async fn main() -> Result<()> {
         .as_ref()
         .map(|_| llm_client::install_metrics("h1-eval"))
         .transpose()?;
+    if args.bounded_diagnostic {
+        config.budget = Some(budget::Control::new(
+            metrics
+                .as_ref()
+                .context("diagnostic_metrics_missing")?
+                .clone(),
+        ));
+    }
     let outcome = evaluate(&corpus, &config, args.git_sha, &mut private_responses).await;
     if let (Some((path, file)), Some(handle)) = (metrics_evidence.as_mut(), metrics) {
         file.write_all(handle.render().as_bytes())
@@ -658,6 +725,7 @@ fn parse_args() -> Result<Args> {
 
 fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args> {
     let mut mode = None;
+    let mut bounded_diagnostic = false;
     let mut git_sha = None;
     let mut metrics_output = None;
     let mut private_responses_output = None;
@@ -666,6 +734,7 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args> {
         match arg.as_str() {
             "--recorded" if mode.is_none() => mode = Some(Mode::Recorded),
             "--live" if mode.is_none() => mode = Some(Mode::Live),
+            "--bounded-diagnostic" if !bounded_diagnostic => bounded_diagnostic = true,
             "--git-sha" if git_sha.is_none() => {
                 git_sha = Some(args.next().context("--git-sha requires a value")?)
             }
@@ -681,11 +750,14 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args> {
                     )?))
             }
             _ => bail!(
-                "usage: h1-eval (--recorded | --live) --git-sha <40-hex-sha> [--metrics-output <path>] [--private-responses-output <absolute-path-outside-checkout>]"
+                "usage: h1-eval (--recorded | --live) [--bounded-diagnostic] --git-sha <40-hex-sha> [--metrics-output <path>] [--private-responses-output <absolute-path-outside-checkout>]"
             ),
         }
     }
     let mode = mode.context("--recorded or --live is required")?;
+    if bounded_diagnostic && mode != Mode::Live {
+        bail!("--bounded-diagnostic requires --live");
+    }
     if matches!(mode, Mode::Recorded)
         && (metrics_output.is_some() || private_responses_output.is_some())
     {
@@ -710,6 +782,7 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args> {
     }
     Ok(Args {
         mode,
+        bounded_diagnostic,
         git_sha: git_sha.context("--git-sha is required")?,
         metrics_output,
         private_responses_output,
@@ -737,7 +810,7 @@ fn validate_checkout(git_sha: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_config(mode: Mode) -> Result<RunConfig> {
+fn run_config(mode: Mode, bounded_diagnostic: bool) -> Result<RunConfig> {
     if matches!(mode, Mode::Recorded) {
         return Ok(RunConfig {
             mode,
@@ -745,6 +818,7 @@ fn run_config(mode: Mode) -> Result<RunConfig> {
             model: "calibration-fixtures-v1".into(),
             allowed_response_models: BTreeSet::from(["calibration-fixtures-v1".into()]),
             client: None,
+            budget: None,
         });
     }
 
@@ -761,6 +835,14 @@ fn run_config(mode: Mode) -> Result<RunConfig> {
     }
     let model = bounded_env("LLM_MODEL", 200)?;
     let allowed_response_models = bounded_list_env("H1_EVAL_ALLOWED_RESPONSE_MODELS", 200)?;
+    if bounded_diagnostic
+        && (provider != "deepseek"
+            || api_url != "https://api.deepseek.com"
+            || model != budget::MODEL
+            || allowed_response_models != BTreeSet::from([budget::MODEL.to_owned()]))
+    {
+        bail!("bounded Diagnostic requires the fixed Vision provider profile");
+    }
     let api_key = bounded_env("LLM_API_KEY", 4_096)?;
     let client = RuntimeLlmClient::static_config(api_url, model.clone(), api_key, false);
     Ok(RunConfig {
@@ -769,6 +851,7 @@ fn run_config(mode: Mode) -> Result<RunConfig> {
         model,
         allowed_response_models,
         client: Some(client),
+        budget: None,
     })
 }
 
@@ -1270,6 +1353,12 @@ async fn evaluate(
         cases,
         hard_failures,
         passed,
+        diagnostic_budget: config
+            .budget
+            .as_ref()
+            .map(budget::Control::report)
+            .transpose()
+            .map_err(|code| anyhow::anyhow!(code))?,
     })
 }
 
@@ -2007,7 +2096,7 @@ async fn run_live(
     response_models: &mut BTreeSet<String>,
     private_responses: Option<&PrivateResponseSink>,
 ) -> std::result::Result<CaseReport, LiveFailure> {
-    let client = config.client.as_ref().ok_or(LiveFailure {
+    config.client.as_ref().ok_or(LiveFailure {
         code: "live_client_missing",
         trace: JudgeTrace::default(),
     })?;
@@ -2037,14 +2126,17 @@ async fn run_live(
     let sample = character_extractor::build_representative_sample(&chapters);
     let extraction_prompt =
         character_extractor::build_extraction_prompt(&case.novel_title, &sample);
-    let extraction_response = client
-        .chat(private_request(
+    let extraction_response = config
+        .chat(
             private_responses,
-            &case.id,
-            1,
-            &config.allowed_response_models,
-            production_json_request(LlmOperation::CharacterExtraction, &extraction_prompt),
-        )?)
+            private_request(
+                private_responses,
+                &case.id,
+                1,
+                &config.allowed_response_models,
+                production_json_request(LlmOperation::CharacterExtraction, &extraction_prompt),
+            )?,
+        )
         .await
         .map_err(|error| request_failure(private_responses, "character_request_failed", &error))?;
     register_response_model(
@@ -2079,14 +2171,17 @@ async fn run_live(
                 &chunk,
                 index,
             );
-            let response = client
-                .chat(private_request(
+            let response = config
+                .chat(
                     private_responses,
-                    &case.id,
-                    1,
-                    &config.allowed_response_models,
-                    production_json_request(LlmOperation::CharacterExtraction, &prompt),
-                )?)
+                    private_request(
+                        private_responses,
+                        &case.id,
+                        1,
+                        &config.allowed_response_models,
+                        production_json_request(LlmOperation::CharacterExtraction, &prompt),
+                    )?,
+                )
                 .await
                 .map_err(|error| {
                     request_failure(private_responses, "character_chunk_request_failed", &error)
@@ -2175,14 +2270,17 @@ async fn run_live(
                 code: "canon_prompt_invalid",
                 trace: JudgeTrace::default(),
             })?;
-        let response = client
-            .chat(private_request(
+        let response = config
+            .chat(
                 private_responses,
-                &case.id,
-                1,
-                &config.allowed_response_models,
-                production_json_request(LlmOperation::CanonExtraction, &prompt),
-            )?)
+                private_request(
+                    private_responses,
+                    &case.id,
+                    1,
+                    &config.allowed_response_models,
+                    production_json_request(LlmOperation::CanonExtraction, &prompt),
+                )?,
+            )
             .await
             .map_err(|error| request_failure(private_responses, "canon_request_failed", &error))?;
         register_response_model(
@@ -2219,14 +2317,17 @@ async fn run_live(
         let request = production_json_request(LlmOperation::CanonExtraction, &prompt);
         let mut selection = None;
         for logical_attempt in 1..=2 {
-            let response = client
-                .chat(private_request(
+            let response = config
+                .chat(
                     private_responses,
-                    &case.id,
-                    logical_attempt,
-                    &config.allowed_response_models,
-                    request.clone(),
-                )?)
+                    private_request(
+                        private_responses,
+                        &case.id,
+                        logical_attempt,
+                        &config.allowed_response_models,
+                        request.clone(),
+                    )?,
+                )
                 .await
                 .map_err(|error| {
                     request_failure(private_responses, "canon_selection_request_failed", &error)
@@ -2278,12 +2379,11 @@ async fn run_live(
         })?;
 
     let outcome = judge_live(
-        client,
+        config,
         case,
         &extraction,
         &model,
         response_models,
-        &config.allowed_response_models,
         private_responses,
     )
     .await
@@ -2562,12 +2662,11 @@ where
 }
 
 async fn judge_live(
-    client: &RuntimeLlmClient,
+    config: &RunConfig,
     case: &PositiveCase,
     extraction: &ExtractionResult,
     canon: &CanonStoryModel,
     response_models: &mut BTreeSet<String>,
-    allowed_response_models: &BTreeSet<String>,
     private_responses: Option<&PrivateResponseSink>,
 ) -> std::result::Result<JudgeOutcome, JudgeRunFailure> {
     let payload = semantic_judge_payload(case, extraction, canon).map_err(|_| JudgeRunFailure {
@@ -2580,12 +2679,12 @@ async fn judge_live(
     })?;
     let contract = JudgeContract::new(case, extraction, canon);
     execute_judge(
-        |request| client.chat(request),
+        |request| config.chat(private_responses, request),
         request,
         &contract,
         &case.id,
         response_models,
-        allowed_response_models,
+        &config.allowed_response_models,
         private_responses,
     )
     .await
@@ -3058,7 +3157,7 @@ mod tests {
     #[tokio::test]
     async fn recorded_corpus_passes() {
         let corpus = load_corpus().unwrap();
-        let config = run_config(Mode::Recorded).unwrap();
+        let config = run_config(Mode::Recorded, false).unwrap();
         let report = evaluate(&corpus, &config, "0".repeat(40), &mut None)
             .await
             .unwrap();
@@ -3066,6 +3165,10 @@ mod tests {
         assert!(report.cases.iter().all(|case| case.passed));
         let report = serde_json::to_value(report).unwrap();
         assert!(!report.as_object().unwrap().contains_key("thinking_enabled"));
+        assert!(!report
+            .as_object()
+            .unwrap()
+            .contains_key("diagnostic_budget"));
         assert_eq!(report["schema_version"], REPORT_SCHEMA_VERSION);
         assert_eq!(report["corpus_version"], CORPUS_VERSION);
         assert_eq!(
@@ -3176,6 +3279,72 @@ mod tests {
                 .to_string()
                 .contains("absolute path")
         );
+    }
+
+    #[test]
+    fn bounded_diagnostic_requires_live_and_fixed_profile() {
+        const CHILD: &str = "NOVELWORLD_BUDGET_PROFILE_TEST";
+        if let Ok(valid) = std::env::var(CHILD) {
+            let result = run_config(Mode::Live, true);
+            if valid == "valid" {
+                assert!(result.is_ok());
+            } else {
+                assert_eq!(
+                    result.err().unwrap().to_string(),
+                    "bounded Diagnostic requires the fixed Vision provider profile"
+                );
+            }
+            return;
+        }
+        let args = vec![
+            "--live".to_owned(),
+            "--bounded-diagnostic".to_owned(),
+            "--git-sha".to_owned(),
+            "0".repeat(40),
+            "--metrics-output".to_owned(),
+            "/private/metrics.prom".to_owned(),
+            "--private-responses-output".to_owned(),
+            "/private/responses.jsonl".to_owned(),
+        ];
+        assert!(parse_args_from(args.clone()).unwrap().bounded_diagnostic);
+        let mut invalid = args.clone();
+        invalid[0] = "--recorded".into();
+        assert!(parse_args_from(invalid).is_err());
+        let mut invalid = args;
+        invalid.push("--bounded-diagnostic".into());
+        assert!(parse_args_from(invalid).is_err());
+
+        for (name, value) in [
+            ("", ""),
+            ("H1_EVAL_PROVIDER", "other"),
+            ("LLM_API_URL", "https://example.invalid"),
+            ("LLM_MODEL", "other"),
+            ("H1_EVAL_ALLOWED_RESPONSE_MODELS", "other"),
+        ] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "tests::bounded_diagnostic_requires_live_and_fixed_profile",
+                    "--nocapture",
+                ])
+                .env(CHILD, if name.is_empty() { "valid" } else { "invalid" })
+                .env("H1_EVAL_PROVIDER", "deepseek")
+                .env("LLM_API_URL", "https://api.deepseek.com")
+                .env("LLM_MODEL", budget::MODEL)
+                .env("H1_EVAL_ALLOWED_RESPONSE_MODELS", budget::MODEL)
+                .env("LLM_API_KEY", "synthetic-key");
+            if !name.is_empty() {
+                child.env(name, value).env_remove("LLM_API_KEY");
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{name}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     #[test]
@@ -3684,12 +3853,13 @@ mod tests {
         .unwrap();
         assert_eq!(invalid, "invalid_encoding");
     }
-    async fn evidence_server(
-        bodies: Vec<String>,
+    pub(super) async fn evidence_server(
+        bodies: Vec<Option<String>>,
     ) -> (
         llm_client::LlmClient,
         tokio::task::JoinHandle<()>,
         Arc<std::sync::atomic::AtomicUsize>,
+        String,
     ) {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3713,7 +3883,9 @@ mod tests {
                 }
                 socket.read_exact(&mut vec![0; length]).await.unwrap();
                 let index = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let body = &bodies[index.min(bodies.len() - 1)];
+                let Some(body) = &bodies[index.min(bodies.len() - 1)] else {
+                    continue; // Drop the socket before returning any headers.
+                };
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
@@ -3729,10 +3901,11 @@ mod tests {
             ),
             server,
             count,
+            format!("http://{address}"),
         )
     }
 
-    fn envelope(model: &str, content: &str, usage: bool) -> String {
+    pub(super) fn envelope(model: &str, content: &str, usage: bool) -> String {
         let mut value =
             serde_json::json!({"model": model, "choices": [{"message": {"content": content}}]});
         if usage {
@@ -3756,8 +3929,11 @@ mod tests {
         ] {
             let path = env::temp_dir().join(format!("h1-evidence-{}.jsonl", Uuid::new_v4()));
             let sink = PrivateResponseSink::create(&path).unwrap();
-            let (client, server, calls) =
-                evidence_server(vec![body.clone(), envelope("registered-model", "{}", true)]).await;
+            let (client, server, calls, _) = evidence_server(vec![
+                Some(body.clone()),
+                Some(envelope("registered-model", "{}", true)),
+            ])
+            .await;
             let allowed = BTreeSet::from(["registered-model".into()]);
             let request = ChatRequest::new(LlmOperation::CharacterExtraction, "registered-model")
                 .max_tokens(20)
@@ -3795,7 +3971,7 @@ mod tests {
         let (case, contract) = fixture_contract();
         let path = env::temp_dir().join(format!("h1-evidence-{}.jsonl", Uuid::new_v4()));
         let sink = PrivateResponseSink::create(&path).unwrap();
-        let bodies = vec![
+        let bodies = [
             envelope("alias-a", "", true),
             envelope("alias-b", "{invalid", true),
             envelope(
@@ -3804,7 +3980,8 @@ mod tests {
                 true,
             ),
         ];
-        let (client, server, calls) = evidence_server(bodies.clone()).await;
+        let (client, server, calls, _) =
+            evidence_server(bodies.iter().cloned().map(Some).collect()).await;
         let allowed = BTreeSet::from(["alias-a".into(), "alias-b".into()]);
         let mut models = BTreeSet::new();
         let result = execute_judge(
@@ -3853,9 +4030,9 @@ mod tests {
         let sink = PrivateResponseSink::create(&path).unwrap();
         // A read-only descriptor exercises an actual write failure on every platform.
         sink.0.lock().unwrap().writer = BufWriter::new(File::open(&path).unwrap());
-        let (client, server, calls) = evidence_server(vec![
-            envelope("registered-model", "", true),
-            envelope("registered-model", "{}", true),
+        let (client, server, calls, _) = evidence_server(vec![
+            Some(envelope("registered-model", "", true)),
+            Some(envelope("registered-model", "{}", true)),
         ])
         .await;
         let allowed = BTreeSet::from(["registered-model".into()]);
