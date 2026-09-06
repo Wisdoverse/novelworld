@@ -52,6 +52,52 @@ cargo run -p h1-eval -- --live --git-sha "$(git rev-parse HEAD)" \
   --private-responses-output /private/h1-responses.jsonl
 ```
 
+## Bounded Vision Diagnostic (opt-in)
+
+The current private rapid-iteration goal may run a new paid Diagnostic only
+with `--bounded-diagnostic` together with `--live` and both private output
+paths, using the fixed `vision-diagnostic-budget-v1` profile:
+
+```bash
+H1_EVAL_PROVIDER=deepseek \
+LLM_API_URL=https://api.deepseek.com \
+LLM_API_KEY=... \
+LLM_MODEL=deepseek-v4-flash-vision-exp \
+H1_EVAL_ALLOWED_RESPONSE_MODELS=deepseek-v4-flash-vision-exp \
+cargo run -p h1-eval -- --live --bounded-diagnostic \
+  --git-sha "$(git rev-parse HEAD)" \
+  --metrics-output /private/vision-diagnostic-metrics.prom \
+  --private-responses-output /private/vision-diagnostic-responses.jsonl
+```
+
+This mode is the only mode for new paid Diagnostics in the current goal. It
+uses the fixed DeepSeek provider, URL and Vision model above, non-streaming
+JSON requests with `thinking_enabled: false`, and a request output limit of at
+most 8192 tokens. Its per-invocation ceilings are 40 logical calls, 200 actual
+HTTP attempts, 20,000,000 cumulative reserved/settled tokens, and 35,000,000
+micro-CNY (CNY 35). Before each logical call, five attempts reserve the
+worst-case `2^20` input tokens plus the request output limit, with conservative
+peak pricing of 3 micro-CNY per input token and 9 per output token. Only
+complete counter and private response-envelope/usage reconciliation releases
+unused reservation and settles actual usage. Missing or inconsistent evidence,
+timeout, request/write error, or any other uncertain accounting permanently
+stops new dispatches and retains the unproven reservation.
+
+These are per-invocation dispatch and evidence bounds under the frozen provider
+context and billing contract, not an account-wide, provider-enforced, or
+cross-process spending cap. A restart does not resume a run or replenish its
+budget. Revalidate the provider's current context, output and pricing contract
+at registration; if it cannot be established, stop before generation. Keep
+credentials and raw responses in the required private locations; public
+reports contain only the profile, fixed ceilings, sanitized failure codes, and
+reserved/settled aggregates. See the [official DeepSeek pricing
+documentation](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/).
+
+The existing `--recorded` and unflagged formal `--live` behavior is unchanged.
+This Diagnostic is non-qualifying evidence only: it does not rerun the failed
+#236 cohort, lower thresholds, establish model quality, authorize a production
+model switch, or unlock H4/formal Qualification.
+
 Every live run requires both evidence outputs. `--metrics-output` retains the
 existing `llm-observability-v1` counters and latency summaries, including
 failed attempts and retries. The report records
