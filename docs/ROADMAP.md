@@ -144,11 +144,19 @@ list:
 
 ## Review protocol
 
+For the current private rapid-iteration phase, follow
+[rapid-iteration acceptance](./QUALIFICATION_POLICY.md#rapid-iteration-acceptance):
+human acceptance is not a development, merge, or iteration-delivery gate.
+Retain plan review, implementation, non-author agent review and all affected
+automated gates. Deferred human evidence is unverified, not passed; human-only
+work is not planned for this phase. The horizon exit requirements below remain
+the formal qualification contract, not a reason to block rapid iteration.
+
 Every horizon exit has at least three recorded perspectives. Each record names
 the reviewer, commit, evidence, unresolved risks, and disposition. A
 fresh-context review agent may supply adversarial evidence, but it does not
 replace accountable maintainer approval or an independent human reviewer when
-policy requires one; the implementer cannot be the only approving person.
+policy requires one; the implementer cannot be the only approving reviewer.
 
 1. **Current-truth review — before planning.** Reconstruct the user outcome,
    current runtime, hard constraints, dependencies, and non-goals from evidence.
