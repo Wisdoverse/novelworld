@@ -183,15 +183,12 @@ jobs:
           command-arguments: licenses sources
       - name: Scan for committed secrets
         # gitleaks-action requires a paid GITLEAKS_LICENSE for
-        # organization repositories, so run the open-source gitleaks
-        # binary directly with the committed config (same image + config
-        # the local self-test uses).
-        run: |
-          docker run --rm -v "$PWD:/repo" \
-            ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
-            detect --no-banner --config /repo/.gitleaks.toml --exit-code 2 \
-            --log-opts HEAD --source /repo
+        # organization repositories, so CI and the local self-test share the
+        # open-source, digest-pinned Docker scanner and completion gate.
+        timeout-minutes: 6
+        run: bash tools/scan-secrets.sh
       - name: Self-test the secret-scanning gate
+        timeout-minutes: 10
         run: tests/e2e/gitleaks_self_test.sh
 
   frontend:

@@ -159,17 +159,31 @@ The temporary TypeScript 7/6 npm aliases, pinned OS packages in Dockerfile
 images embedded in shell commands are
 verified manually against upstream releases during each dependency-maintenance
 change because Dependabot does not parse those forms.
-CI also runs `gitleaks` over the full commit history: any committed secret
-fails the build.
+CI runs `bash tools/scan-secrets.sh` over history reachable from the selected
+HEAD. A detected credential fails the build; unrelated branch histories are
+excluded. This is pattern-based detection, not proof that no secret can exist.
 `.gitleaks.toml` is the full default rule set plus narrow allowlists for
 the upstream rule-set examples and two deliberate test fixtures (the CI
 `RUNTIME_CONFIG_KEY` smoke placeholder and two static provider model names).
 Credential-shaped upstream examples are regex-escaped so the allowlist still
 matches historical fixtures without committing complete key-shaped literals.
-CI and the self-test `tests/e2e/gitleaks_self_test.sh` scan the full history:
-it plants a GitHub-shaped token and asserts the scan fails (a config that
-silently lost its rules would pass everything and must not go unnoticed),
-then asserts the repository stays clean.
+CI and `tests/e2e/gitleaks_self_test.sh` use that same entrypoint with the
+digest-pinned Docker image; repository-local scanner executables cannot
+replace it. It requires non-shallow, readable HEAD history and a positive,
+completed scan without Git
+or scanner errors. Missing/partial evidence fails even if the scanner exits
+zero. Linked worktrees mount their exact Git metadata read-only. The scanner
+has a 300-second deadline without retry; CI also bounds the scan step to six
+minutes, including container startup. Local Docker startup is host-managed.
+Gitleaks redaction is enabled. Diagnostics are captured privately and removed
+on exit; only fixed outcomes and commit counts reach the console. Exit 42
+means detected credentials; exit 1 means operational/incomplete evidence.
+The self-test rejects generated GitHub and DeepSeek-shaped credentials,
+verifies unrelated-ref isolation and linked-worktree scanning, and checks
+invalid histories, incomplete results and output privacy. Empty histories
+cannot supply a positive scan control. For a local checkout, run
+`bash tools/scan-secrets.sh /path/to/checkout`; it scans committed history,
+so uncommitted/ignored local secret files are outside that evidence.
 `.cargo/audit.toml` currently carries no vulnerability ignores. Informational
 warnings for unmaintained or unsound transitive crates remain visible for
 upstream tracking without weakening the vulnerability gate.
