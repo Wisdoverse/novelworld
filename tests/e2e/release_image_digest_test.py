@@ -13,6 +13,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+WORKFLOW = ROOT / ".github/workflows/docker.yml"
 RECORD = ROOT / "infra/docker/record-application-images.sh"
 SBOM = ROOT / "infra/security/generate-sboms.sh"
 RELEASE = ROOT / "infra/docker/release.sh"
@@ -76,6 +77,18 @@ class ReleaseImageDigestTest(unittest.TestCase):
     def sboms(self, output, images):
         return subprocess.run(["bash", str(SBOM), str(output), *images], env=self.env,
                               capture_output=True, text=True, check=False, timeout=20)
+
+    def test_publication_is_new_tag_push_only(self):
+        workflow = WORKFLOW.read_text()
+        publish = workflow.split("\n  github-release:\n", 1)[1]
+        self.assertIn(
+            "if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')",
+            publish,
+        )
+        self.assertIn('gh release create "$tag" ./* "${flags[@]}"', publish)
+        for forbidden in ("gh release view", "gh release upload", "gh release edit",
+                          "--draft", "--clobber"):
+            self.assertNotIn(forbidden, publish)
 
     def test_rejects_incomplete_ambiguous_or_wrong_records(self):
         gateway = self.records / "gateway.txt"
