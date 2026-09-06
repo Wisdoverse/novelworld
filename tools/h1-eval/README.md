@@ -54,6 +54,16 @@ The judge targets one short explanatory sentence of at most 200 characters;
 hard validation remains 500 printable characters on one line. Offline prompt tests
 prove wording/shape only, not recall improvement or paid-run authorization.
 
+World-rule verdicts use `world_rule_verdicts` supports: `[{extracted, excerpt}]`
+for `match`/`partial`, and an empty list for `absent`; each excerpt must be an
+exact raw substring of its referenced extracted description (whitespace-only
+support is invalid). Many-to-many and compound reuse are allowed; no
+injectivity or cardinality rule is added. This wires validator and judge prompt
+v6 only; rubric, thresholds, and recorded mode are unchanged. Supports stay in
+private responses and are excluded from public aggregates; an irrelevant but
+real excerpt may still be semantically misjudged. No paid run or qualification
+claim follows from this contract change.
+
 The application makes one judge request. It repeats that identical request
 once only when the response violates the judge JSON/schema/rubric/token/
 explanation contract. It does not add a retry for a transport failure or a
