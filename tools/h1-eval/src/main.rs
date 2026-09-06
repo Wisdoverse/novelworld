@@ -2310,10 +2310,6 @@ async fn run_live(
     if let Some(prompt) =
         canon_story_extractor::build_event_selection_prompt(&case.novel_title, &chunks)
     {
-        let candidate_count = chunks
-            .iter()
-            .map(|(_, extraction)| extraction.events.len())
-            .sum();
         let request = production_json_request(LlmOperation::CanonExtraction, &prompt);
         let mut selection = None;
         for logical_attempt in 1..=2 {
@@ -2341,7 +2337,7 @@ async fn run_live(
                 code: "response_model_not_allowed",
                 trace: JudgeTrace::default(),
             })?;
-            match canon_story_extractor::parse_event_selection(&response.content, candidate_count) {
+            match canon_story_extractor::parse_event_selection(&response.content, &chunks) {
                 Ok(parsed) => {
                     selection = Some(parsed);
                     break;

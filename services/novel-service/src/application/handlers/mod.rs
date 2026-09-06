@@ -2053,10 +2053,6 @@ impl NovelCommandHandler {
             if let Some(prompt) =
                 canon_story_extractor::build_event_selection_prompt(&novel.title, &extracted)
             {
-                let candidate_count = extracted
-                    .iter()
-                    .map(|(_, extraction)| extraction.events.len())
-                    .sum();
                 let final_chunk = &extracted.last().expect("canon chunks are non-empty").0;
                 let chapter_number = final_chunk.chapter_number;
                 let chunk_index = i32::try_from(final_chunk.chunk_index)
@@ -2075,7 +2071,7 @@ impl NovelCommandHandler {
                 let mut checkpointed = false;
                 let mut selection = match checkpoint {
                     Some(raw) => {
-                        match canon_story_extractor::parse_event_selection(&raw, candidate_count) {
+                        match canon_story_extractor::parse_event_selection(&raw, &extracted) {
                             Ok(selection) => {
                                 checkpointed = true;
                                 info!(
@@ -2106,7 +2102,7 @@ impl NovelCommandHandler {
                                 &prompt,
                             )
                             .await?;
-                        match canon_story_extractor::parse_event_selection(&raw, candidate_count) {
+                        match canon_story_extractor::parse_event_selection(&raw, &extracted) {
                             Ok(parsed) => {
                                 selection = Some(parsed);
                                 break;
