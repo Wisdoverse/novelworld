@@ -152,6 +152,13 @@ automated gates. Deferred human evidence is unverified, not passed; human-only
 work is not planned for this phase. The horizon exit requirements below remain
 the formal qualification contract, not a reason to block rapid iteration.
 
+This private iteration direction prioritizes H3/H4: believable cross-session
+character memory and a coherent, durable world journey. H1 remains a required
+dependency where a change relies on its source-to-world guarantees, but this
+priority does not change H1's formal exit criteria or supersede the repository
+Project as the authority for execution status and priority. It is not evidence
+that H3 or H4 has reached its horizon exit state.
+
 Every horizon exit has at least three recorded perspectives. Each record names
 the reviewer, commit, evidence, unresolved risks, and disposition. A
 fresh-context review agent may supply adversarial evidence, but it does not
@@ -565,6 +572,13 @@ This horizon is conditional. Each proposal must name the user demand or failed
 predicate, reproduce it on comparable hardware/workload, quantify expected
 gain and cost, and include migration, compatibility, rollback, and post-change
 evidence.
+
+- **Future mainstream-LLM direction:** expand across vendors incrementally
+  through a versioned provider/model/capability matrix, covering
+  OpenAI-compatible and, where needed, native APIs. Reuse the domain ports and
+  qualify streaming, structured output, retry, deadlines, budgets, secrets,
+  and applicable live quality for each slice; this does not claim current
+  universal support, start H6, create a new H6 issue, or justify empty adapters.
 
 | Candidate mechanism or feature | Eligible only when |
 |---|---|
