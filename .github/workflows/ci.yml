@@ -7,6 +7,10 @@ on:
     branches: [main]
   workflow_dispatch:
   workflow_call:
+    inputs:
+      full:
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -21,8 +25,44 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Change Scope & Policy
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.scope.outputs.backend }}
+      frontend: ${{ steps.scope.outputs.frontend }}
+      desktop: ${{ steps.scope.outputs.desktop }}
+      integration: ${{ steps.scope.outputs.integration }}
+      runtime: ${{ steps.scope.outputs.runtime }}
+      launchers: ${{ steps.scope.outputs.launchers }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Test CI scope selection
+        run: python3 tools/ci_scope_test.py
+      - name: Select affected jobs
+        id: scope
+        env:
+          CI_FULL: ${{ inputs.full }}
+        run: python3 tools/ci_scope.py
+      - name: Specification conformance ledger
+        run: sha256sum --check docs/SPEC_CONFORMANCE.sha256
+      - name: Scan for committed secrets
+        # gitleaks-action requires a paid GITLEAKS_LICENSE for
+        # organization repositories, so CI and the local self-test share the
+        # open-source, digest-pinned Docker scanner and completion gate.
+        timeout-minutes: 6
+        run: bash tools/scan-secrets.sh
+      - name: Self-test the secret-scanning gate
+        if: steps.scope.outputs.backend == 'true'
+        timeout-minutes: 10
+        run: tests/e2e/gitleaks_self_test.sh
+
   unix-launcher:
     name: Unix Launcher
+    needs: changes
+    if: needs.changes.outputs.launchers == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -31,6 +71,8 @@ jobs:
 
   windows-launcher:
     name: Windows Launcher
+    needs: changes
+    if: needs.changes.outputs.launchers == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -40,6 +82,8 @@ jobs:
 
   desktop-contract:
     name: Desktop Shell Contract
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -68,15 +112,15 @@ jobs:
       - name: Test desktop runtime contracts
         run: cargo test --manifest-path frontend/src-tauri/Cargo.toml --locked
 
-  rust:
-    name: Rust Build & Test
+  backend:
+    name: Backend Build & Test
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
-      - name: Specification conformance ledger
-        run: sha256sum --check docs/SPEC_CONFORMANCE.sha256
       - name: Dependabot auto-merge policy contract
         run: >-
           grep -Fq "contains(fromJSON('[\"cargo\",\"npm_and_yarn\",\"docker\"]'), steps.metadata.outputs.package-ecosystem)"
@@ -181,18 +225,11 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2.1.1
         with:
           command-arguments: licenses sources
-      - name: Scan for committed secrets
-        # gitleaks-action requires a paid GITLEAKS_LICENSE for
-        # organization repositories, so CI and the local self-test share the
-        # open-source, digest-pinned Docker scanner and completion gate.
-        timeout-minutes: 6
-        run: bash tools/scan-secrets.sh
-      - name: Self-test the secret-scanning gate
-        timeout-minutes: 10
-        run: tests/e2e/gitleaks_self_test.sh
 
   frontend:
     name: Frontend Build
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -219,6 +256,8 @@ jobs:
 
   frontend-a11y-browser:
     name: Frontend Browser A11y
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -250,6 +289,8 @@ jobs:
 
   integration:
     name: PostgreSQL & Redis Integration
+    needs: changes
+    if: needs.changes.outputs.integration == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -273,6 +314,8 @@ jobs:
 
   runtime:
     name: Production Compose Smoke
+    needs: changes
+    if: needs.changes.outputs.runtime == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -546,3 +589,23 @@ jobs:
       - name: Stop production topology
         if: always()
         run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml --profile redis down -v
+
+  required:
+    # Preserve the existing required-check name; never turn detector/policy
+    # failures or failed selected jobs into a successful skipped check.
+    name: Rust Build & Test
+    needs: [changes, unix-launcher, windows-launcher, desktop-contract, backend, frontend, frontend-a11y-browser, integration, runtime]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require policy checks and every selected job to pass
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          results = json.loads(os.environ['RESULTS'])
+          assert results['changes']['result'] == 'success', 'CI scope/policy check failed'
+          for name, job in results.items():
+              assert job['result'] in {'success', 'skipped'}, f'{name}: {job["result"]}'
+          PY
