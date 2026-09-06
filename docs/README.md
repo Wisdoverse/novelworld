@@ -67,6 +67,7 @@ roadmap status only when its required evidence exists.
 | [Data retention](./DATA_RETENTION.md) | Retention, deletion, and external data boundaries | Stored data or deletion behavior changes |
 | [Account export](./ACCOUNT_EXPORT.md) | Export wire format and completeness contract | Exported fields, ordering, limits, or completion semantics change |
 | [Extraction quality](./EXTRACTION_QUALITY.md) | Supported slices and extraction thresholds | A parser slice, metric, judge rubric, or threshold changes |
+| [Extraction quality v2 (prospective)](./EXTRACTION_QUALITY_V2.md) | Prospective source-grounded oracle correction; unimplemented and not adopted for Qualification | The v2 oracle or its separately reviewed implementation changes |
 | [Import budget](./IMPORT_BUDGET.md) | Provider work limits during import | Provider calls, retry behavior, or budget evidence changes |
 
 ### Reliability, security, and operations
