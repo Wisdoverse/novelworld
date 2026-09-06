@@ -1,6 +1,7 @@
 {
-  "schema_version": 1,
-  "corpus_version": "h1-synthetic-v3",
+  "schema_version": 2,
+  "policy_version": "extraction-quality-v2",
+  "corpus_version": "h1-synthetic-v4",
   "rubric_version": "h1-extraction-v2",
   "thresholds": {
     "coverage_percent": 80,
@@ -451,9 +452,6 @@
         ],
         "world_rules": [
           {
-            "id": "wr1"
-          },
-          {
             "id": "wr2"
           }
         ]
@@ -652,20 +650,6 @@
               }
             ],
             "world_rules": [
-              {
-                "id": "wr1",
-                "description": "雾港从来没有夜船。",
-                "hard": true,
-                "evidence": {
-                  "provenance": [
-                    {
-                      "chapter_number": 4,
-                      "excerpt": "雾港从来没有夜船。"
-                    }
-                  ],
-                  "confidence": 0.9
-                }
-              },
               {
                 "id": "wr2",
                 "description": "雾港每天只有一班白船靠岸。",
@@ -1199,9 +1183,6 @@
         ],
         "world_rules": [
           {
-            "id": "wr1"
-          },
-          {
             "id": "wr2"
           }
         ]
@@ -1400,20 +1381,6 @@
               }
             ],
             "world_rules": [
-              {
-                "id": "wr1",
-                "description": "The port of Salt never had a night boat.",
-                "hard": true,
-                "evidence": {
-                  "provenance": [
-                    {
-                      "chapter_number": 4,
-                      "excerpt": "the port of Salt never had a night boat"
-                    }
-                  ],
-                  "confidence": 0.9
-                }
-              },
               {
                 "id": "wr2",
                 "description": "Signals travel only at dusk in the port of Salt.",

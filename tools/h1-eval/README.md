@@ -1,8 +1,15 @@
 # Horizon 1 extraction-quality evaluation gate
 
-This tool implements the extraction-quality-v1 policy
-(docs/EXTRACTION_QUALITY.md) over the checked-in synthetic corpus
-corpus/v1.json without writing runtime data.
+This tool implements the structurally landed `extraction-quality-v2` policy
+(docs/EXTRACTION_QUALITY_V2.md) over the checked-in `h1-synthetic-v4` corpus
+`corpus/v1.json` without writing runtime data. This is Structural evidence, not
+formal Qualification; the historical v1 policy, v3 corpus and failed reports
+are immutable and are not rescored or compared for quality.
+
+Public reports use schema 3 and explicitly carry policy/corpus identity; the
+private HTTP response envelope remains schema 2. The registered H4 cohort keeps
+its fixed v3 corpus-hash guard, while an unregistered Diagnostic is unaffected.
+This corpus change does not authorize a paid run.
 
 Recorded mode is deterministic and required in CI:
 
@@ -122,7 +129,9 @@ reports contain only the profile, fixed ceilings, sanitized failure codes, and
 reserved/settled aggregates. See the [official DeepSeek pricing
 documentation](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/).
 
-The existing `--recorded` and unflagged formal `--live` behavior is unchanged.
+The request and retry mechanics of `--recorded` and unflagged `--live` are
+unchanged, but all current reports identify policy v2 and corpus v4. They
+cannot satisfy a frozen formal v1 cohort or authorize its replacement.
 This Diagnostic is non-qualifying evidence only: it does not rerun the failed
 #236 cohort, lower thresholds, establish model quality, authorize a production
 model switch, or unlock H4/formal Qualification.

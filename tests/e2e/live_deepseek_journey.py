@@ -65,6 +65,8 @@ APPLICATION_CONTAINERS = {
 }
 RELEASE_KEYS = {"RELEASE_VERSION", "RELEASE_GIT_SHA", *RELEASE_IMAGE_KEYS}
 PRODUCT_INPUT = Path("tests/e2e/fixtures/h4-journey-v1.json")
+# Frozen Qualification v1 input; adopting a new oracle needs a new policy.
+H1_V1_CORPUS_SHA256 = "90dc9be0ca422f4a2c79b8912e5d5f19a0a14b5581c9ffc51292ea14d225c1cf"
 PRIVATE_TABLES = (
     "user_novels",
     "reading_progress",
@@ -1306,6 +1308,9 @@ class Journey:
     def cohort_identity(
         self, docker_engine: str, docker_compose: str, declared: dict[str, Any]
     ) -> dict[str, Any]:
+        h1_digest = sha256_bytes((self.root / "tools/h1-eval/corpus/v1.json").read_bytes())
+        if h1_digest != H1_V1_CORPUS_SHA256:
+            raise QualificationFailure("qualification_h1_corpus_not_adopted")
         controlled_keys = {
             "allowed_response_models",
             "base_application_image_ids",
@@ -1377,6 +1382,7 @@ class Journey:
         }
         return {
             "evaluated_git_sha": self.git_sha,
+            "allowed_response_models": declared["allowed_response_models"],
             "clean_tree_proof": True,
             "compose_sha256": sha256_bytes((self.root / "docker-compose.yml").read_bytes()),
             "schema_barriers": schema_barriers,
@@ -1417,9 +1423,7 @@ class Journey:
             "versions": COHORT_VERSIONS,
             "registered_inputs": {
                 "product": sha256_bytes(self.product_input_path.read_bytes()),
-                "h1": sha256_bytes(
-                    (self.root / "tools/h1-eval/corpus/v1.json").read_bytes()
-                ),
+                "h1": h1_digest,
                 "h3": sha256_bytes(
                     (self.root / "tools/h3-eval/corpus/v1.json").read_bytes()
                 ),
@@ -4119,7 +4123,123 @@ class Journey:
         print(f"live qualification report: {path}")
 
 
+def self_test_h1_cohort_boundary(root: Path) -> None:
+    from unittest.mock import patch
+
+    corpus_bytes = (root / "tools/h1-eval/corpus/v1.json").read_bytes()
+    digest = sha256_bytes
+    assert digest(corpus_bytes) != H1_V1_CORPUS_SHA256
+    engine, compose = "fixture|linux|amd64", "fixture-compose"
+
+    def fake_run(command: list[str], **_kwargs: Any) -> str:
+        if command[:2] == ["docker", "version"]:
+            return engine
+        if command == ["docker", "compose", "version", "--short"]:
+            return compose
+        if command[:2] == ["docker", "compose"] and command[-2:] == ["config", "--quiet"]:
+            return ""
+        raise AssertionError("unexpected external work in preflight")
+
+    with tempfile.TemporaryDirectory() as directory:
+        temporary = Path(directory)
+        journey = Journey.__new__(Journey)
+        journey.root = root
+        journey.git_sha = "b" * 40
+        journey.project = journey.prefix = "nwq-0123456789"
+        journey.port = 12345
+        journey.attempt_id = str(uuid.uuid4())
+        journey.journey_slice = "core"
+        journey.base_manifest = {key: "base" for key in APPLICATION_IMAGE_KEYS}
+        journey.candidate_manifest = {key: "candidate" for key in APPLICATION_IMAGE_KEYS}
+        journey.base_manifest_path = temporary / "base.env"
+        journey.candidate_manifest_path = temporary / "candidate.env"
+        journey.base_manifest_path.write_text("base", encoding="utf-8")
+        journey.candidate_manifest_path.write_text("candidate", encoding="utf-8")
+        journey.product_input_path = root / PRODUCT_INPUT
+        declared = {
+            key: ["fixture"] for key in (
+                "browser_matrix", "assistive_technology_matrix",
+                "viewport_device_matrix", "manual_review_role_matrix",
+            )
+        }
+        declared["allowed_response_models"] = [EXPECTED_MODEL]
+        declared["base_application_image_ids"] = {
+            key: "sha256:" + "a" * 64 for key in APPLICATION_IMAGE_KEYS
+        }
+        declared["candidate_application_image_ids"] = {
+            key: "sha256:" + "b" * 64 for key in APPLICATION_IMAGE_KEYS
+        }
+
+        # Exercise the frozen digest branch without duplicating the old corpus
+        # or changing its constant. Only this test's digest observation is fake;
+        # the v4 rejection below uses the actual checked-in bytes and SHA-256.
+        def frozen_digest(value: bytes) -> str:
+            return H1_V1_CORPUS_SHA256 if value == corpus_bytes else digest(value)
+
+        with patch.dict(globals(), {"sha256_bytes": frozen_digest}):
+            declared = journey.cohort_identity(engine, compose, declared)
+        assert declared["registered_inputs"]["h1"] == H1_V1_CORPUS_SHA256
+
+        for name, observed_digest, registered, expected_error in (
+            ("frozen", H1_V1_CORPUS_SHA256, True, None),
+            ("modified", digest(corpus_bytes + b"\n"), True, "qualification_h1_corpus_not_adopted"),
+            ("v4", digest(corpus_bytes), True, "qualification_h1_corpus_not_adopted"),
+            ("declared-drift", H1_V1_CORPUS_SHA256, True, "cohort_identity_mismatch"),
+            ("allowlist-drift", H1_V1_CORPUS_SHA256, True, "cohort_identity_mismatch"),
+            ("unregistered", digest(corpus_bytes), False, None),
+        ):
+            journey.private_report, journey.report = {}, {}
+            journey.ledger = None
+            journey.cleanup_required = False
+            journey.evidence_class = "Qualification" if registered else "Diagnostic"
+            journey.ledger_path = temporary / f"{name}.jsonl" if registered else None
+            if journey.ledger_path is not None:
+                journey.ledger_path.write_text("", encoding="utf-8")
+            identity = json.loads(json.dumps(declared))
+            if name == "declared-drift":
+                identity["docker_engine"] = "unregistered-engine"
+            if name == "allowlist-drift":
+                identity["provider"]["allowed_response_models"] = ["different-model"]
+            journey.cohort_manifest = {
+                "identity": identity,
+                "cohort_id": digest(canonical_json(identity)),
+            } if registered else None
+
+            def observed(value: bytes) -> str:
+                return observed_digest if value == corpus_bytes else digest(value)
+
+            with (
+                patch.dict(globals(), {
+                    "run": fake_run,
+                    "docker_inventory_snapshot": lambda: {"containers": {}, "volumes": {}, "networks": {}},
+                    "sha256_bytes": digest if name == "v4" else observed,
+                }),
+                patch.object(Journey, "validate_release_inputs"),
+                patch.object(Journey, "prepare_compose") as prepare,
+            ):
+                if expected_error is not None:
+                    try:
+                        journey.execute()
+                    except QualificationFailure as error:
+                        assert error.code == expected_error
+                    else:
+                        raise AssertionError("unadopted cohort reached runtime work")
+                    prepare.assert_not_called()
+                    assert journey.ledger is None
+                    assert journey.ledger_path.read_text(encoding="utf-8") == ""
+                else:
+                    journey.preflight()
+                    assert journey.cleanup_required
+                    if registered:
+                        records = journey.ledger_path.read_text(encoding="utf-8").splitlines()
+                        assert len(records) == 1 and json.loads(records[0])["status"] == "Started"
+                        journey.ledger.finish(True, None)
+                    else:
+                        assert journey.ledger is None and journey.ledger_path is None
+
+
 def self_test(root: Path) -> None:
+    self_test_h1_cohort_boundary(root)
     sanitized = qualification_environment(
         root,
         {

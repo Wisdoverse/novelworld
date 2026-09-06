@@ -30,10 +30,11 @@ use uuid::Uuid;
 mod budget;
 
 const CORPUS: &str = include_str!("../corpus/v1.json");
-const CORPUS_VERSION: &str = "h1-synthetic-v3";
+const POLICY_VERSION: &str = "extraction-quality-v2";
+const CORPUS_VERSION: &str = "h1-synthetic-v4";
 const RUBRIC_VERSION: &str = "h1-extraction-v2";
 const JUDGE_PROMPT_VERSION: &str = "h1-semantic-judge-v6";
-const REPORT_SCHEMA_VERSION: u8 = 2;
+const REPORT_SCHEMA_VERSION: u8 = 3;
 const MAX_CORPUS_BYTES: usize = 256 * 1024;
 const MAX_JUDGE_RESPONSE_BYTES: usize = 32 * 1024;
 /// Declared TXT acceptance limit from the product contract (10 MiB).
@@ -63,6 +64,7 @@ const REQUIRED_THRESHOLDS: Thresholds = Thresholds {
 #[serde(deny_unknown_fields)]
 struct Corpus {
     schema_version: u8,
+    policy_version: String,
     corpus_version: String,
     rubric_version: String,
     thresholds: Thresholds,
@@ -409,6 +411,7 @@ fn percent_ceil(numerator: usize, denominator: usize) -> u8 {
 #[derive(Debug, Serialize)]
 struct EvalReport {
     schema_version: u8,
+    policy_version: String,
     corpus_version: String,
     rubric_version: String,
     git_sha: String,
@@ -909,12 +912,13 @@ fn load_corpus() -> Result<Corpus> {
 }
 
 fn validate_corpus(corpus: &Corpus) -> Result<()> {
-    if corpus.schema_version != 1
+    if corpus.schema_version != 2
+        || corpus.policy_version != POLICY_VERSION
         || corpus.corpus_version != CORPUS_VERSION
         || corpus.rubric_version != RUBRIC_VERSION
         || corpus.thresholds != REQUIRED_THRESHOLDS
     {
-        bail!("unsupported corpus, rubric, or threshold version");
+        bail!("unsupported corpus schema, policy, corpus, rubric, or threshold version");
     }
 
     let total = corpus.positive_cases.len()
@@ -1351,6 +1355,7 @@ async fn evaluate(
 
     Ok(EvalReport {
         schema_version: REPORT_SCHEMA_VERSION,
+        policy_version: corpus.policy_version.clone(),
         corpus_version: corpus.corpus_version.clone(),
         rubric_version: corpus.rubric_version.clone(),
         git_sha,
@@ -3252,6 +3257,7 @@ mod tests {
             .unwrap()
             .contains_key("diagnostic_budget"));
         assert_eq!(report["schema_version"], REPORT_SCHEMA_VERSION);
+        assert_eq!(report["policy_version"], POLICY_VERSION);
         assert_eq!(report["corpus_version"], CORPUS_VERSION);
         assert_eq!(
             report["prompt_versions"]["canon_extraction"],
@@ -4103,11 +4109,11 @@ mod tests {
             en_salt.expected.relationships[0].evidence_excerpt
         );
         assert_eq!(
-            zh_salt.recorded.canon.content.world_rules[1].description,
+            zh_salt.recorded.canon.content.world_rules[0].description,
             "雾港每天只有一班白船靠岸。"
         );
         assert_eq!(
-            en_salt.recorded.canon.content.world_rules[1].description,
+            en_salt.recorded.canon.content.world_rules[0].description,
             "Signals travel only at dusk in the port of Salt."
         );
 
@@ -4122,6 +4128,98 @@ mod tests {
         assert!(hostile
             .source
             .contains(&rule.evidence.provenance[0].excerpt));
+    }
+
+    #[test]
+    fn corpus_policy_identity_fails_closed() {
+        for (field, wrong) in [
+            ("schema_version", serde_json::json!(1)),
+            ("policy_version", serde_json::json!("extraction-quality-v1")),
+            ("corpus_version", serde_json::json!("h1-synthetic-v3")),
+            ("rubric_version", serde_json::json!("unknown")),
+        ] {
+            let mut value: serde_json::Value = serde_json::from_str(CORPUS).unwrap();
+            value[field] = wrong;
+            let corpus: Corpus = serde_json::from_value(value).unwrap();
+            assert!(validate_corpus(&corpus).is_err(), "accepted wrong {field}");
+        }
+        let mut value: serde_json::Value = serde_json::from_str(CORPUS).unwrap();
+        value.as_object_mut().unwrap().remove("policy_version");
+        assert!(serde_json::from_value::<Corpus>(value).is_err());
+    }
+
+    #[test]
+    fn salt_letter_assertions_are_not_required_hard_rules() {
+        let corpus = load_corpus().unwrap();
+        assert_eq!(corpus.positive_cases.len(), 5);
+        assert_eq!(corpus.splitter_cases.len(), 1);
+        assert_eq!(corpus.adversarial_cases.len(), 8);
+        assert_eq!(corpus.malformed_cases.len(), 5);
+        for (id, assertion, excerpt) in [
+            ("zh-gbk", "雾港从来没有夜船。", "雾港从来没有夜船。"),
+            (
+                "en-bom-utf16",
+                "The port of Salt never had a night boat.",
+                "the port of Salt never had a night boat",
+            ),
+        ] {
+            let mut case = corpus
+                .positive_cases
+                .iter()
+                .find(|case| case.id == id)
+                .unwrap()
+                .clone();
+            assert_eq!(case.expected.world_rules.len(), 1);
+            assert_eq!(case.expected.world_rules[0].id, "wr2");
+            assert_eq!(case.recorded.canon.content.world_rules.len(), 1);
+            assert_eq!(case.recorded.canon.content.world_rules[0].id, "wr2");
+            assert!(case.source.contains(excerpt));
+            assert!(case.recorded.canon.content.ending.evidence.provenance[0]
+                .excerpt
+                .contains(excerpt));
+            let baseline = score_recorded(&case).unwrap();
+            assert!(baseline.passed);
+            assert_eq!(baseline.hallucination_percent, 0);
+
+            let mut unsupported = case.recorded.canon.content.world_rules[0].clone();
+            unsupported.id = "wr1".into();
+            unsupported.description = assertion.into();
+            unsupported.evidence.provenance[0].chapter_number = 4;
+            unsupported.evidence.provenance[0].excerpt = excerpt.into();
+            case.recorded.canon.content.world_rules.push(unsupported);
+            let recorded = score_recorded(&case).unwrap();
+            let contract =
+                JudgeContract::new(&case, &case.recorded.extraction, &case.recorded.canon);
+            let mut value = valid_judge_value(&contract, false);
+            value["extracted_world_rule_verdicts"][1]["verdict"] =
+                serde_json::json!("hallucinated");
+            let verdicts = parse_judge_verdicts(&value.to_string(), &contract).unwrap();
+            let live = live_report(
+                &case,
+                &case.recorded.extraction,
+                &case.recorded.canon,
+                4,
+                &verdicts,
+                JudgeTrace::default(),
+            )
+            .unwrap();
+            for report in [recorded, live] {
+                let rules = &report.fact_counts["world_rules"];
+                assert_eq!(
+                    (rules.expected, rules.extracted, rules.matched_extracted),
+                    (1, 2, 1)
+                );
+                assert!(report.hallucination_percent > 0);
+                assert!(
+                    report.passed,
+                    "the unchanged aggregate tolerance is not zero tolerance"
+                );
+                let public = serde_json::to_string(&report).unwrap();
+                assert!(!public.contains(assertion));
+            }
+            // The live verdict is synthetic: this proves accounting, not that
+            // a provider judge will always recognize an unsupported assertion.
+        }
     }
 
     #[test]
