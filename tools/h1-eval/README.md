@@ -47,6 +47,19 @@ existing bounded identical-request retry. This is only a necessary cardinality
 constraint, not identity-by-identity or equal-count semantic matching; recorded
 scoring is unchanged.
 
+The active `h1-semantic-judge-v7` prompt explicitly distinguishes complete from
+partial event coverage. A complete match requires every material part of the
+expected event in its single mapped extracted event's own fields; another event
+or surrounding story context cannot supply missing content. Faithful cross-language
+paraphrases remain valid, without requiring verbatim wording or unrelated source
+details. Partial mappings are valid but earn no full-event recall. The unchanged
+one-to-one rubric labels additional unmapped events `hallucinated` even when they
+are source-grounded finer-grained events; this label is not a count of fabricated
+facts. Prompt and scoring tests do not prove that a live judge follows these
+semantic instructions. Historical reports remain frozen; this clarification
+does not change the rubric, thresholds, corpus, schema or retry policy, authorize
+a paid run, or adopt v2 for formal Qualification.
+
 Production and H1 share an event-selection parser that validates actual chunk
 boundaries before accepting, saving, or resuming a selection. A legacy invalid
 runtime checkpoint is rejected in memory and replaced by the existing
@@ -73,8 +86,9 @@ World-rule verdicts use `world_rule_verdicts` supports: `[{extracted, excerpt}]`
 for `match`/`partial`, and an empty list for `absent`; each excerpt must be an
 exact raw substring of its referenced extracted description (whitespace-only
 support is invalid). Many-to-many and compound reuse are allowed; no
-injectivity or cardinality rule is added. This wires validator and judge prompt
-v6 only; rubric, thresholds, and recorded mode are unchanged. Supports stay in
+injectivity or cardinality rule is added. The active v7 judge retains the
+description-bound support contract introduced in v6; rubric, thresholds, and
+recorded mode are unchanged. Supports stay in
 private responses and are excluded from public aggregates; an irrelevant but
 real excerpt may still be semantically misjudged. No paid run or qualification
 claim follows from this contract change.
