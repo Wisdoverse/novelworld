@@ -35,7 +35,7 @@ from typing import Any, Callable, Iterable
 EXPECTED_PROVIDER = "deepseek"
 EXPECTED_MODEL = "deepseek-v4-flash"
 EXPECTED_API_URL = "https://api.deepseek.com"
-EXPECTED_CANON_PROMPT = "canon-chunk-v9+event-grouping-v4"
+EXPECTED_CANON_PROMPT = "canon-chunk-v10+event-grouping-v5"
 EXPECTED_BRANCH_PROMPT = "narrative-transition-v1"
 EXPECTED_WORLD_PROMPT = "world-turn-v2"
 PROJECT_PATTERN = re.compile(r"^nwq-[a-f0-9]{10}$")

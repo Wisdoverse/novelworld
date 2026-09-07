@@ -68,7 +68,7 @@ old row remains and is rejected again. The two-schema-attempt limit is unchanged
 and the first cross-chunk rejection may use the existing second attempt. This
 boundary fix changes no prompt version, diagnostic immutability, or quality claim.
 
-The active selection prompt `canon-event-grouping-v4` nests candidates inside
+The active selection prompt `canon-event-grouping-v5` retains v4's nesting inside
 their source chunks while retaining whole-novel selection, global event/causal
 indexes, all candidate facts, and the unchanged output schema and validator.
 It makes legal grouping boundaries explicit; this is an input-presentation
@@ -77,11 +77,22 @@ are still rejected, never split or repaired into accepted outputs. Empty chunks
 are omitted, and zero/one total candidate still skips selection. The same byte
 ceiling and fallback apply, but changed input lengths can move near-limit inputs
 across that ceiling; there is no new call stage, not a guarantee of identical
-call counts. Selection v4 plus the exact prompt isolate old v3 checkpoints;
-unchanged v9 chunk checkpoints remain reusable. Committed canon stays readable
+call counts. Selection v5 plus the exact prompt isolate older selection checkpoints;
+chunk v10 does not reuse v9 chunk checkpoints. Committed canon stays readable
 without automatic re-import. The deterministic mock still retains all candidates
 as singletons and is not a semantic-quality oracle. No paid run, historical
 rescore, formal v2 adoption or H4 qualification follows from this change.
+
+Chunk v10 replaces the broad instruction to omit observations/dialogue with a
+material-versus-incidental distinction. Retained milestones must preserve their
+source-established actions, identity, participants, targets, quantities and
+conditions; a quoted claim alone does not establish truth. Selection v5 clarifies
+that same-source candidates supplying material parts of one retained beat belong
+in a legal group, not a representative fragment. It cannot invent missing chunk
+content. Existing grouping, source, size, causal/death and retry validation is
+unchanged. Prompt assertions and composer tests prove only instructions and
+mechanics, not live completeness or causal quality improvement. The failed bda2406
+Diagnostic stays frozen; no judge/schema, policy or paid-run change is included.
 
 Production prompts distinguish explicitly established relationships and persistent
 world rules from unsupported inference, without treating dialogue alone as proof.
@@ -89,11 +100,11 @@ The judge targets one short explanatory sentence of at most 200 characters;
 hard validation remains 500 printable characters on one line. Offline prompt tests
 prove wording/shape only, not recall improvement or paid-run authorization.
 
-The shared `canon-chunk-v9+event-grouping-v4` prompt puts evidence before the
+The shared `canon-chunk-v10+event-grouping-v5` prompt retains v9's evidence before the
 ending summary and each nested faction/location state. This is a generation-order
 hypothesis, not measured quality improvement. Both JSON key orders remain valid;
 source validation, the 12-character partial-repair anchor and retry limits are
-unchanged. Versioned checkpoint keys prevent v9 from reusing v8 chunk results;
+unchanged. Versioned checkpoint keys prevent v10 from reusing older chunk results;
 committed canon remains readable without automatic re-import. Recorded tests
 prove structure only, and all historical live reports remain frozen.
 
