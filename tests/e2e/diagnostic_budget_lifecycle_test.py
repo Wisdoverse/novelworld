@@ -54,11 +54,16 @@ class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
 
     def test_cleanup_removes_all_owned_resources_without_error(self):
         lifecycle = self.lifecycle(("owned-a", "owned-b"))
-        lifecycle.docker = mock.Mock(side_effect=lambda *args, **kwargs: SimpleNamespace(
-            returncode=0,
-            stdout=(lifecycle.project + "\n").encode()
-            if args[:3] == ("network", "ls", "--filter") else b"",
-        ))
+        network_present = True
+
+        def docker(*args, **_):
+            nonlocal network_present
+            if args[:2] == ("network", "rm"):
+                network_present = False
+            return SimpleNamespace(returncode=0, stdout=(lifecycle.project + "\n").encode()
+                if args[:3] == ("network", "ls", "--filter") and network_present else b"")
+
+        lifecycle.docker = mock.Mock(side_effect=docker)
         temporary = Path(lifecycle.temporary.name)
 
         lifecycle.cleanup()
@@ -67,7 +72,41 @@ class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
         lifecycle.docker.assert_any_call("rm", "--force", "--volumes", "owned-a", check=False)
         lifecycle.docker.assert_any_call("rm", "--force", "--volumes", "owned-b", check=False)
         lifecycle.docker.assert_any_call("network", "rm", lifecycle.project, check=False)
-        self.assertEqual(lifecycle.docker.call_count, 4)
+        self.assertEqual(lifecycle.docker.call_count, 7)
+        lifecycle.docker.assert_any_call("ps", "--all", "--quiet", "--filter", "name=^/owned-a$")
+        lifecycle.docker.assert_any_call("ps", "--all", "--quiet", "--filter", "name=^/owned-b$")
+
+    def test_child_terminal_failure_cleanup_removes_exact_containers_never_named_pg_volume(self):
+        lifecycle = self.lifecycle((), network=False)
+        project, identifier = "nwq-0123456789", "a" * 64
+        lifecycle.journeys = [SimpleNamespace(project=project)]
+
+        def docker(*args, **_):
+            return SimpleNamespace(returncode=0, stdout=(f"{identifier} {project}-postgres\n".encode()
+                if args[:3] == ("ps", "--all", "--no-trunc") else b""))
+
+        lifecycle.docker = mock.Mock(side_effect=docker)
+        lifecycle.cleanup()
+        lifecycle.docker.assert_any_call("rm", "--force", "--volumes", identifier, check=False)
+        self.assertFalse(any(call.args[:2] == ("volume", "rm") for call in lifecycle.docker.call_args_list))
+
+    def test_container_remove_ack_without_absence_is_failure(self):
+        lifecycle = self.lifecycle(("owned",), network=False)
+        lifecycle.docker = mock.Mock(side_effect=lambda *args, **_: SimpleNamespace(
+            returncode=0, stdout=b"still-present" if args[0] == "ps" else b""))
+        with self.assertRaises(LIFECYCLE.Failure):
+            lifecycle.cleanup()
+
+    def test_shared_external_network_remove_ack_requires_absence(self):
+        lifecycle = self.lifecycle((), network=True)
+        lifecycle.journeys = [SimpleNamespace(project="nwq-0123456789")]
+        lifecycle.docker = mock.Mock(side_effect=lambda *args, **_: SimpleNamespace(
+            returncode=0, stdout=(lifecycle.project + "\n").encode()
+            if args[:2] == ("network", "ls") else b""))
+        with self.assertRaises(LIFECYCLE.Failure):
+            lifecycle.cleanup()
+        lifecycle.docker.assert_any_call("network", "rm", lifecycle.project, check=False)
+        self.assertFalse(any(call.args[:2] == ("volume", "rm") for call in lifecycle.docker.call_args_list))
 
     def test_image_cleanup_continues_after_timeout_and_skips_missing_image(self):
         lifecycle = self.lifecycle((), network=False)
@@ -184,6 +223,10 @@ class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
             runtime.write_text("{}")
             capability.write_text("{}")
             cases = (
+                ["--journey-images", str(runtime)],
+                ["--journey-output", directory],
+                ["--journey-images", str(runtime), "--journey-output", directory,
+                 "--client-binary", "/tmp/client"],
                 ["--runtime-images", str(runtime)],
                 ["--owner-binary", "/tmp/owner", "--client-binary", "/tmp/client",
                  "--runtime-images", str(runtime)],

@@ -582,7 +582,126 @@ class DiagnosticJourneyTest(unittest.TestCase):
                 RUNNER, "load_config"
             ) as config, self.assertRaises(RUNNER.QualificationFailure):
                 RUNNER.main()
-            config.assert_not_called()
+                config.assert_not_called()
+
+    def test_diagnostic_cli_validates_registration_source_and_artifacts_before_start(self):
+        journey = self.journey()
+        registration = journey.diagnostic_registration
+        candidate_values = dict(journey.candidate_manifest)
+        for key in RUNNER.INFRASTRUCTURE_IMAGE_KEYS:
+            candidate_values[key] = journey.base_manifest[key]
+        self.candidate.write_text(
+            "".join(f"{key}={value}\n" for key, value in candidate_values.items())
+        )
+        sha = "a" * 40
+        arguments = [
+            "runner", "--config", str(self.directory / "config.json"),
+            "--output-dir", str(self.output), "--git-sha", sha,
+            "--base-manifest", str(self.base), "--candidate-manifest", str(self.candidate),
+            "--diagnostic-registration", str(self.registration_file),
+            "--diagnostic-registration-sha256", registration.sha256,
+        ]
+
+        def fake_git(_root, *parts):
+            if parts[:2] == ("rev-parse", "HEAD"):
+                return sha
+            if parts[:2] == ("status", "--porcelain=v1"):
+                return ""
+            return ""
+
+        for failure, loader, source, artifacts in (
+            ("registration", mock.DEFAULT,
+             mock.DEFAULT, mock.DEFAULT),
+            ("source", registration,
+             RUNNER.diagnostic.DiagnosticFailure("synthetic_source_failure"), mock.DEFAULT),
+            ("artifacts", registration, {},
+             RUNNER.diagnostic.DiagnosticFailure("synthetic_artifact_failure")),
+        ):
+            with self.subTest(failure=failure), mock.patch.object(sys, "argv", arguments), \
+                 mock.patch.object(RUNNER, "git", side_effect=fake_git), \
+                 mock.patch.object(RUNNER, "load_config") as config, \
+                 mock.patch.object(RUNNER, "Journey") as journey_type, \
+                 mock.patch.object(RUNNER.diagnostic, "load_registration") as load_registration, \
+                 mock.patch.object(RUNNER.diagnostic, "source_identities") as identities, \
+                 mock.patch.object(RUNNER.diagnostic, "verify_artifacts") as verify:
+                if failure == "registration":
+                    load_registration.side_effect = RUNNER.diagnostic.DiagnosticFailure(
+                        "synthetic_registration_failure"
+                    )
+                    identities.return_value = {}
+                elif failure == "source":
+                    load_registration.return_value = loader
+                    identities.side_effect = source
+                else:
+                    load_registration.return_value = loader
+                    identities.return_value = source
+                    verify.side_effect = artifacts
+                with self.assertRaises(RUNNER.diagnostic.DiagnosticFailure):
+                    RUNNER.main()
+                config.assert_not_called()
+                journey_type.assert_not_called()
+
+    def test_diagnostic_cli_valid_path_reaches_run_diagnostic_after_artifact_checks(self):
+        journey = self.journey()
+        registration = journey.diagnostic_registration
+        candidate_values = dict(journey.candidate_manifest)
+        for key in RUNNER.INFRASTRUCTURE_IMAGE_KEYS:
+            candidate_values[key] = journey.base_manifest[key]
+        self.candidate.write_text(
+            "".join(f"{key}={value}\n" for key, value in candidate_values.items())
+        )
+        sha = "a" * 40
+        arguments = [
+            "runner", "--config", str(self.directory / "config.json"),
+            "--output-dir", str(self.output), "--git-sha", sha,
+            "--base-manifest", str(self.base), "--candidate-manifest", str(self.candidate),
+            "--diagnostic-registration", str(self.registration_file),
+            "--diagnostic-registration-sha256", registration.sha256,
+        ]
+
+        def fake_git(_root, *parts):
+            if parts[:2] == ("rev-parse", "HEAD"):
+                return sha
+            if parts[:2] == ("status", "--porcelain=v1"):
+                return ""
+            return ""
+
+        fake_journey = mock.Mock(diagnostic_ledger=object())
+        with mock.patch.object(sys, "argv", arguments), \
+             mock.patch.object(RUNNER, "git", side_effect=fake_git), \
+             mock.patch.object(RUNNER.diagnostic, "source_identities", return_value={}), \
+             mock.patch.object(RUNNER.diagnostic, "load_registration", return_value=registration), \
+             mock.patch.object(RUNNER.diagnostic, "verify_artifacts"), \
+             mock.patch.object(RUNNER, "Journey", return_value=fake_journey) as journey_type, \
+             mock.patch.object(RUNNER, "run_diagnostic", return_value=0) as run_diagnostic:
+            self.assertEqual(RUNNER.main(), 0)
+        journey_type.assert_called_once()
+        run_diagnostic.assert_called_once_with(fake_journey)
+
+    def test_artifact_verification_rejects_non_ancestor_and_missing_repo_digest(self):
+        journey = self.journey()
+        registration = journey.diagnostic_registration
+        base, candidate = journey.base_manifest, journey.candidate_manifest
+        with mock.patch.object(
+            CONTROL, "bounded_command",
+            side_effect=CONTROL.DiagnosticFailure("synthetic_non_ancestor"),
+        ) as command:
+            with self.assertRaises(CONTROL.DiagnosticFailure):
+                CONTROL.verify_artifacts(registration, ROOT, base, candidate)
+            self.assertEqual(command.call_args.args[0][:3], ["git", "-C", str(ROOT)])
+
+        def no_digest(argv, **_kwargs):
+            if argv[0] == "git":
+                return b"changed-source\n"
+            return CONTROL.canonical([{
+                "Id": registration.value["base_application_image_ids"]["GATEWAY_IMAGE"],
+                "RepoDigests": [], "RootFS": {"Layers": ["sha256:" + "c" * 64]},
+            }])
+
+        with mock.patch.object(CONTROL, "bounded_command", side_effect=no_digest):
+            with self.assertRaises(CONTROL.DiagnosticFailure) as rejected:
+                CONTROL.verify_artifacts(registration, ROOT, base, candidate)
+        self.assertEqual(rejected.exception.code, "diagnostic_artifact_identity_mismatch")
 
     def test_control_seal_rejects_integer_boolean_and_still_cannot_retry(self):
         journey = self.journey()

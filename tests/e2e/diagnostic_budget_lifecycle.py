@@ -225,6 +225,7 @@ class Lifecycle:
         self.budget_id = str(uuid.uuid4())
         self.environment = {}
         self.subnet = subnet
+        self.journeys = []
 
     def docker(self, *args, **kwargs):
         return command(["docker", *args], **kwargs)
@@ -296,11 +297,12 @@ class Lifecycle:
         require(status == 200, "snapshot_failed")
         return tuple(snapshot["charged"][key] for key in ("attempts", "tokens", "cost_micro_cny"))
 
-    def prepare_images(self, sources=None):
+    def prepare_images(self, sources=None, *, journey=False):
+        services = (*SERVICES, "gateway", "frontend") if journey else SERVICES
         self.docker("image", "inspect", REGISTRY_IMAGE)
         self.docker("image", "inspect", PYTHON_IMAGE)
         if sources is not None:
-            require(isinstance(sources, dict) and set(sources) == set(SERVICES)
+            require(isinstance(sources, dict) and set(sources) == set(services)
                     and all(isinstance(value, str) and re.fullmatch(r"[a-z0-9][a-z0-9._/:@-]*", value)
                             for value in sources.values()), "invalid_service_image_map")
             # Resolve mutable local names before creating/pushing our own refs.
@@ -318,7 +320,7 @@ class Lifecycle:
         require(binding["HostIp"] == "127.0.0.1", "registry_not_loopback")
         registry_host = "127.0.0.1:" + binding["HostPort"]
         self.wait_http("http://" + registry_host, "/v2/")
-        for service in SERVICES:
+        for service in services:
             tag = f"{registry_host}/{self.project}/{service}:fixture"
             self.image_refs.add(tag)
             if sources is None:
@@ -338,7 +340,7 @@ class Lifecycle:
             self.image_refs.add(digest)
             self.images[service] = digest
         if sources is not None:
-            for service in SERVICES:
+            for service in services:
                 require(self.docker("image", "inspect", "--format", "{{.Id}}", self.images[service]).stdout.decode().strip()
                         == sources[service], "published_image_identity_changed")
         print("diagnostic lifecycle: four service images published only to isolated loopback registry", flush=True)
@@ -390,6 +392,20 @@ class Lifecycle:
         self.prepare_images(image_sources)
         self.configure_budget(zero=True)
         self.preflight_images()
+        self.prepare_network_mock()
+        self.run("postgres", PG_IMAGE, ["postgres"],
+                 {"POSTGRES_USER": "test", "POSTGRES_PASSWORD": "test", "POSTGRES_DB": "novelworld_test"}, alias="postgres")
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if self.docker("exec", self.project + "-postgres", "pg_isready", "-h", "127.0.0.1", "-U", "test", check=False).returncode == 0:
+                break
+            time.sleep(0.2)
+        else:
+            raise Failure("postgres_readiness_timeout")
+        self.sql((ROOT / "infra/postgres/init.sql").read_text())
+
+    def prepare_network_mock(self):
+        """Shared no-egress provider fixture; never starts a product database."""
         network_args = []
         if self.subnet:
             selected = ipaddress.ip_network(self.subnet, strict=True)
@@ -429,16 +445,6 @@ class Lifecycle:
         denied = self.docker("exec", mock, "python3", "-c",
                              "import socket; socket.create_connection(('1.1.1.1',443),timeout=1)", check=False)
         require(denied.returncode != 0, "public_egress_available")
-        self.run("postgres", PG_IMAGE, ["postgres"],
-                 {"POSTGRES_USER": "test", "POSTGRES_PASSWORD": "test", "POSTGRES_DB": "novelworld_test"}, alias="postgres")
-        deadline = time.monotonic() + 20
-        while time.monotonic() < deadline:
-            if self.docker("exec", self.project + "-postgres", "pg_isready", "-h", "127.0.0.1", "-U", "test", check=False).returncode == 0:
-                break
-            time.sleep(0.2)
-        else:
-            raise Failure("postgres_readiness_timeout")
-        self.sql((ROOT / "infra/postgres/init.sql").read_text())
 
     def configure_budget(self, zero=False):
         self.budget_id = str(uuid.uuid4())
@@ -454,6 +460,167 @@ class Lifecycle:
                             "USER_SERVICE_URL": "http://mock:8081", "PORT": "8001",
                             "HTTPS_PROXY": "http://mock:3128", "NO_PROXY": NO_PROXY,
                             "SSL_CERT_FILE": "/fixture/ca.pem", "RUST_LOG": "error"}
+
+    def journey_wiring(self, image_sources, evidence):
+        """Real single-image cold adoption, not a semantic/two-version journey.
+
+        Use the runner's registration, environment, release, snapshot, seal and
+        cleanup methods. A private synthetic checkout changes only network/CA
+        wiring. Full-journey quality gates intentionally fail on these partial
+        fixtures, exercising retained PG evidence rather than inventing samples.
+        """
+        import live_deepseek_journey as runner
+        control = runner.diagnostic
+        evidence = control.private_path(evidence, ROOT, directory=True)
+        require(not any(evidence.iterdir()), "journey_evidence_not_empty")
+        self.journey_user_stack_before = runner.docker_inventory_snapshot()
+        runner.write_private(evidence / "fixture-boundary.json", control.canonical({
+            "kind": "offline-cold-adopt-wiring", "qualification_claim": False,
+            "registry": "loopback-published bridge; local image transport only, no product/provider credentials",
+            "product_network": "external Docker internal network, no public egress",
+            "runtime_source_commit": runner.git(ROOT, "rev-parse", "HEAD"),
+        }) + b"\n")
+        control.sync_directory(evidence)
+        self.prepare_images(image_sources, journey=True)
+        self.prepare_network_mock()
+        checkout = self.files / "cold-adopt-source"
+        command(["git", "clone", "--no-hardlinks", str(ROOT), str(checkout)], timeout=60)
+        # No runtime implementation or release script is replaced. The explicit
+        # test-only commit cannot be used as a genuine application upgrade pair.
+        compose = (checkout / "docker-compose.yml").read_text()
+        network = "  novel-net:\n    driver: bridge\n"
+        require(compose.count(network) == 1, "fixture_compose_network_shape_changed")
+        compose = compose.replace(network, "  novel-net:\n    external: true\n    name: " + self.project + "\n")
+        for service in SERVICES:
+            marker = "  " + service + ":\n"
+            start = compose.index(marker)
+            # Service attributes use four spaces; only another two-space key
+            # ends this block (comments between services are preserved).
+            matches = list(re.finditer(r"(?m)^  [a-z][a-z-]*:\s*$", compose[start + len(marker):]))
+            end = start + len(marker) + matches[0].start() if matches else len(compose)
+            block = compose[start:end]
+            require(block.count("    environment:\n") == 1 and "    volumes:\n" not in block,
+                    "fixture_service_shape_changed")
+            block = block.replace("    environment:\n", "    volumes:\n      - " + json.dumps(
+                str(self.files / "ca.pem") + ":/fixture/ca.pem:ro") + "\n    environment:\n"
+                "      HTTPS_PROXY: http://mock:3128\n      NO_PROXY: localhost,127.0.0.1,user-service\n"
+                "      SSL_CERT_FILE: /fixture/ca.pem\n")
+            compose = compose[:start] + block + compose[end:]
+        (checkout / "docker-compose.yml").write_text(compose)
+        command(["git", "add", "docker-compose.yml"], cwd=checkout)
+        command(["git", "-c", "user.name=Offline Fixture", "-c", "user.email=fixture@example.invalid",
+                 "-c", "core.hooksPath=/dev/null", "commit", "-m", "test-only isolated cold adoption network"], cwd=checkout)
+        sha = command(["git", "rev-parse", "HEAD"], cwd=checkout).stdout.decode().strip()
+        infrastructure = {
+            "POSTGRES_IMAGE": PG_IMAGE,
+            "REDIS_IMAGE": "redis:8.10.1-alpine@sha256:becdda6c7f4b3fb42e42fd7f120bbf5c54c4caaaf16f26da24e4563d2c1f0576",
+            "NGINX_IMAGE": "nginx:alpine@sha256:db35bfc6b2951e7f8a72db5db120288c127ffaeeb4a6d4b95a26fead017d5913",
+        }
+        manifest = {"RELEASE_VERSION": "offline-cold-adopt", "RELEASE_GIT_SHA": sha, **infrastructure,
+                    **{service.upper().replace("-", "_") + "_IMAGE": reference
+                       for service, reference in self.images.items()}}
+        manifest_path = evidence / "fixture-release.env"
+        runner.write_private(manifest_path, "".join(f"{key}={value}\n" for key, value in manifest.items()).encode())
+        image_ids = {key: runner.docker_inspect("image", manifest[key])["Id"]
+                     for key in runner.APPLICATION_IMAGE_KEYS}
+        profile_bytes = (ROOT / control.PROFILE_PATH).read_bytes()
+        for zero in (True, False):
+            output = evidence / ("zero" if zero else "nonzero")
+            output.mkdir(mode=0o700)
+            identifier = str(uuid.uuid4())
+            registration_value = {
+                "schema": control.REGISTRATION_SCHEMA, "budget_id": identifier,
+                "hypothesis": "Synthetic offline cold adoption and budget wiring only",
+                "candidate_git_sha": sha,
+                "base_manifest_sha256": control.digest(manifest_path.read_bytes()),
+                "candidate_manifest_sha256": control.digest(manifest_path.read_bytes()),
+                "base_application_image_ids": image_ids, "candidate_application_image_ids": image_ids,
+                "profile_sha256": control.digest(profile_bytes),
+                "product_fixture_sha256": control.digest((checkout / runner.PRODUCT_INPUT).read_bytes()),
+                "prompt_schema_identities": control.source_identities(checkout, sha, sha),
+                "limits": {"profile": PROFILE, "max_attempts": 0 if zero else 5,
+                           "max_tokens": 0 if zero else 2000000, "max_cost_micro_cny": 0 if zero else 5000000,
+                           "expires_at": (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1))
+                                         .strftime("%Y-%m-%dT%H:%M:%SZ")},
+                "output_dir": str(output), "ledger_path": str(evidence / (identifier + ".jsonl")),
+            }
+            registration_path = evidence / (identifier + ".json")
+            encoded = control.canonical(registration_value)
+            runner.write_private(registration_path, encoded)
+            registration = control.load_registration(
+                registration_path, control.digest(encoded), root=checkout, git_sha=sha,
+                output=output, base_manifest=manifest_path, candidate_manifest=manifest_path,
+                prompt_schema_identities=control.source_identities(checkout, sha, sha),
+            )
+            config = evidence / (identifier + "-synthetic-config.json")
+            runner.write_private(config, control.canonical({"provider": "deepseek", "model": MODEL,
+                "api_url": "https://api.deepseek.com", "api_key": KEY, "thinking_enabled": False}))
+            journey = runner.Journey(checkout, config, output, sha, manifest_path, manifest_path,
+                                     None, None, "bash", "Diagnostic", diagnostic_registration=registration)
+            self.journeys.append(journey)
+
+            def cold_adopt():
+                journey.user_stack_before = runner.docker_inventory_snapshot()
+                require(not runner.attempt_resources(journey.user_stack_before, journey.project, journey.prefix),
+                        "journey_project_collision")
+                journey.inventory_captured = True
+                journey.cleanup_required = True
+                journey.prepare_runtime()
+                journey.release("adopt", manifest_path, release_name="base")
+                journey.stack_started = True
+                journey.wait_gateway()
+                journey.verify_release_images("base", manifest)
+                for service in (*SERVICES, "gateway", "frontend", "nginx", "postgres"):
+                    networks = runner.docker_inspect("container", journey.prefix + "-" + service)["NetworkSettings"]["Networks"]
+                    require(set(networks) == {self.project}, "journey_public_network_attached")
+                require(journey.diagnostic_checkpoint("initial")["charged"]["attempts"] == 0, "cold_budget_not_empty")
+                require(journey.diagnostic_owner_control()["charged"]["attempts"] == 0, "owner_budget_not_empty")
+                admin = runner.request_json(journey.api + "/setup/init", method="POST",
+                    value={"email": "fixture@example.invalid", "password": "FixtureOnlyPassword12345", "name": "Fixture"},
+                    expected=(201,))
+                before = self.state()
+                result = runner.request_json(journey.api + "/settings/llm", method="PUT", token=admin["access_token"],
+                    value={"provider": "deepseek", "model": MODEL, "thinking_enabled": False, "api_key": KEY},
+                    expected=(400, 429, 502, 503) if zero else (200,), timeout=15)
+                after = self.state()
+                require(after["connects"] - before["connects"] == (0 if zero else 1), "settings_connection_count")
+                if not zero:
+                    require(result == {"provider": "deepseek", "model": MODEL, "thinking_enabled": False,
+                                       "api_key_configured": True, "scope": "platform"}, "settings_identity_changed")
+                budget = journey.diagnostic_checkpoint("settings")
+                require(budget["charged"] == {"attempts": 0 if zero else 1, "tokens": 0 if zero else 12,
+                                              "cost_micro_cny": 0 if zero else 48}, "settings_receipts_differ")
+                # Readiness and ledger persistence, not a second paid call.
+                journey.collect_metrics("before-restart", ["user-service", "agent-service"])
+                journey.collect_response_models("before-restart", ["user-service", "agent-service"])
+                journey.compose("restart", "user-service", "agent-service")
+                journey.wait_gateway()
+                journey.wait_agent_ready()
+                require(journey.diagnostic_checkpoint("restart") == budget, "restart_changed_receipts")
+            # The fixture supplies only the partial product steps; use the real
+            # single-start/cancellation/failure-safe terminal wrapper unchanged.
+            journey.execute = cold_adopt
+            require(runner.run_diagnostic(journey) == 1, "partial_journey_must_not_pass")
+            require(set(journey.diagnostic_failures) <= {
+                "response_model_observation_count_mismatch", "llm_budget_failed", "diagnostic_cleanup_residue",
+                "diagnostic_completion_unproven",
+            }, "unexpected_journey_terminal_failure")
+            require(journey.private_report.get("diagnostic_payers_stopped") is True, "payer_stop_not_proven")
+            final_snapshot = json.loads((output / "budget-terminal.json").read_bytes())
+            require(final_snapshot == journey.diagnostic_last_snapshot
+                    and control.reconcile_snapshot(registration, final_snapshot)["sealed"] is True,
+                    "terminal_not_sealed")
+            require((output / "pre-cleanup-private.json").is_file(), "terminal_receipts_not_durable")
+            residue = journey.private_report["environment"]["attempt_resource_residue"]
+            require(residue == ["volumes:" + journey.project + "_postgres_data"], "unexpected_retained_resources")
+            volume = journey.project + "_postgres_data"
+            require(runner.docker_inspect("volume", volume)["Labels"]["com.docker.compose.project"] == journey.project,
+                    "retained_volume_owner_changed")
+            # Explicit non-paid evidence-recovery cleanup after the failure-path
+            # retention assertion, never resume/refill the failed registration.
+            self.docker("volume", "rm", volume)
+            print("diagnostic cold adoption: " + ("zero" if zero else "nonzero") +
+                  " Settings, restart, terminal evidence and retained-volume cleanup passed", flush=True)
 
     def register(self, zero=False):
         if not zero:
@@ -720,10 +887,30 @@ class Lifecycle:
 
     def cleanup(self):
         failures = []
+        # The runner normally cleans each child project. Also track its exact
+        # residual container IDs for exceptional terminal/report/ledger paths.
+        # Never delete a named PG volume here: unproven evidence stays retained.
+        for journey in getattr(self, "journeys", ()):
+            try:
+                require(re.fullmatch(r"nwq-[a-f0-9]{10}", journey.project), "child_project_invalid")
+                rows = self.docker("ps", "--all", "--no-trunc", "--filter",
+                    "label=com.docker.compose.project=" + journey.project,
+                    "--format", "{{.ID}} {{.Names}}").stdout.decode().splitlines()
+                for row in rows:
+                    identifier, name = row.split()
+                    require(re.fullmatch(r"[0-9a-f]{64}", identifier) and name.startswith(journey.project + "-"),
+                            "child_container_ownership_unproven")
+                    self.containers.add(identifier)
+            except (Failure, OSError, ValueError, subprocess.SubprocessError):
+                failures.append("child_cleanup_unproven")
         for container in sorted(self.containers):
             try:
                 require(self.docker("rm", "--force", "--volumes", container, check=False).returncode == 0,
                         "container_cleanup_failed")
+                require(not self.docker("ps", "--all", "--quiet", "--filter",
+                                       "id=" + container if re.fullmatch(r"[0-9a-f]{64}", container)
+                                       else "name=^/" + container + "$"
+                                       ).stdout.strip(), "container_removal_unproven")
             except (Failure, OSError, subprocess.SubprocessError):
                 failures.append(container)
         try:
@@ -733,6 +920,9 @@ class Lifecycle:
                 if self.project in networks:
                     require(self.docker("network", "rm", self.project, check=False).returncode == 0,
                             "network_cleanup_failed")
+                    remaining = self.docker("network", "ls", "--filter", "label=novelworld.issue=320",
+                                            "--format", "{{.Name}}").stdout.decode().splitlines()
+                    require(self.project not in remaining, "network_removal_unproven")
         except (Failure, OSError, subprocess.SubprocessError):
             failures.append(self.project)
         finally:
@@ -764,10 +954,34 @@ def main():
                         help="Probe only: JSON map of four existing service images; no database or provider setup")
     parser.add_argument("--runtime-images", type=Path,
                         help="Full fixture using four existing service images instead of packaging normal binaries")
+    parser.add_argument("--journey-images", type=Path,
+                        help="Cold-adopt wiring only: six release-built application images, no semantic journey")
+    parser.add_argument("--journey-output", type=Path,
+                        help="Pre-created empty private directory for retained cold-adopt evidence")
     parser.add_argument("--subnet", help="Optional unused RFC1918 /28 for hosts with exhausted Docker default pools")
     args = parser.parse_args()
     if args.mock:
         mock_server()
+        return
+    if args.journey_images or args.journey_output:
+        require(args.journey_images and args.journey_output
+                and not any((args.owner_binary, args.client_binary, args.capability_images, args.runtime_images)),
+                "journey_fixture_inputs_required")
+        lifecycle = Lifecycle(None, None, args.subnet)
+        def cancel_journey(*_):
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            raise Failure("fixture_cancelled")
+        signal.signal(signal.SIGTERM, cancel_journey)
+        signal.signal(signal.SIGINT, cancel_journey)
+        try:
+            lifecycle.journey_wiring(json.loads(args.journey_images.read_bytes()), args.journey_output)
+        finally:
+            lifecycle.cleanup()
+        import live_deepseek_journey as runner
+        require(runner.docker_inventory_snapshot() == lifecycle.journey_user_stack_before,
+                "user_docker_inventory_changed")
+        print("diagnostic cold adoption: offline wiring passed; no live/upgrade/qualification claim")
         return
     require(bool(args.capability_images) != bool(args.owner_binary or args.client_binary or args.runtime_images),
             "choose_binaries_or_images")

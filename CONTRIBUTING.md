@@ -222,6 +222,30 @@ checks do not replace the mandatory real release-image cold-adoption/Settings
 and lifecycle wiring evidence tracked in #322. No protected operator key is
 needed or authorized by these offline gates.
 
+The same lifecycle fixture has a separate `--journey-images` mode for actual
+cold-adoption wiring. Its JSON map contains the four paying services plus
+`gateway` and `frontend`, all built with the repository's release Dockerfiles.
+Use a pre-created mode-0700 output directory outside the checkout:
+
+```bash
+python3 tests/e2e/diagnostic_budget_lifecycle.py \
+  --journey-images /private/path/six-release-images.json \
+  --journey-output /private/path/empty-cold-adopt-evidence
+```
+
+This mode reuses the internal-network TLS fixture and supported `release.sh`
+cold adoption. Only a private synthetic checkout changes Compose network/CA/
+proxy wiring; runtime images and release implementation are not replaced.
+Separate zero/nonzero registrations exercise Settings, the runner's generated
+environment, consistent owner/PG checkpoints and restart persistence. Since
+these are partial fixtures, the full journey's missing-quality-sample gate
+must fail; terminal handling preserves the owned PG volume. After checking
+the durable receipts and exact retained-volume ownership, the fixture performs
+non-paid cleanup of that volume. Private evidence remains in the output
+directory. A single-image cold adoption is not a genuine version upgrade or
+a live-model/whole-journey PASS. Run the existing `--runtime-images` matrix
+separately as well; cold adoption does not replace its dispatch/ACK-loss cases.
+
 Production Compose Smoke also invokes the same fixture with
 `--runtime-images <json-file> --client-binary <path>`: a map from each of the
 four service names to its existing local image built by `Dockerfile.rust-service`.
