@@ -61,6 +61,14 @@ The judge targets one short explanatory sentence of at most 200 characters;
 hard validation remains 500 printable characters on one line. Offline prompt tests
 prove wording/shape only, not recall improvement or paid-run authorization.
 
+The shared `canon-chunk-v9+event-grouping-v3` prompt puts evidence before the
+ending summary and each nested faction/location state. This is a generation-order
+hypothesis, not measured quality improvement. Both JSON key orders remain valid;
+source validation, the 12-character partial-repair anchor and retry limits are
+unchanged. Versioned checkpoint keys prevent v9 from reusing v8 chunk results;
+committed canon remains readable without automatic re-import. Recorded tests
+prove structure only, and all historical live reports remain frozen.
+
 World-rule verdicts use `world_rule_verdicts` supports: `[{extracted, excerpt}]`
 for `match`/`partial`, and an empty list for `absent`; each excerpt must be an
 exact raw substring of its referenced extracted description (whitespace-only
