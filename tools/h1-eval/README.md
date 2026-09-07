@@ -68,13 +68,28 @@ old row remains and is rejected again. The two-schema-attempt limit is unchanged
 and the first cross-chunk rejection may use the existing second attempt. This
 boundary fix changes no prompt version, diagnostic immutability, or quality claim.
 
+The active selection prompt `canon-event-grouping-v4` nests candidates inside
+their source chunks while retaining whole-novel selection, global event/causal
+indexes, all candidate facts, and the unchanged output schema and validator.
+It makes legal grouping boundaries explicit; this is an input-presentation
+hypothesis, not proof that a live model follows the boundary. Invalid groups
+are still rejected, never split or repaired into accepted outputs. Empty chunks
+are omitted, and zero/one total candidate still skips selection. The same byte
+ceiling and fallback apply, but changed input lengths can move near-limit inputs
+across that ceiling; there is no new call stage, not a guarantee of identical
+call counts. Selection v4 plus the exact prompt isolate old v3 checkpoints;
+unchanged v9 chunk checkpoints remain reusable. Committed canon stays readable
+without automatic re-import. The deterministic mock still retains all candidates
+as singletons and is not a semantic-quality oracle. No paid run, historical
+rescore, formal v2 adoption or H4 qualification follows from this change.
+
 Production prompts distinguish explicitly established relationships and persistent
 world rules from unsupported inference, without treating dialogue alone as proof.
 The judge targets one short explanatory sentence of at most 200 characters;
 hard validation remains 500 printable characters on one line. Offline prompt tests
 prove wording/shape only, not recall improvement or paid-run authorization.
 
-The shared `canon-chunk-v9+event-grouping-v3` prompt puts evidence before the
+The shared `canon-chunk-v9+event-grouping-v4` prompt puts evidence before the
 ending summary and each nested faction/location state. This is a generation-order
 hypothesis, not measured quality improvement. Both JSON key orders remain valid;
 source validation, the 12-character partial-repair anchor and retry limits are
