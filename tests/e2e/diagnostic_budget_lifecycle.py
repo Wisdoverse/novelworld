@@ -531,7 +531,7 @@ class Lifecycle:
             "registry": "loopback-published bridge; local image transport only, no product/provider credentials",
             "product_network": "external Docker internal network, no public egress",
             "ingress": "host-only socat loopback to reserved internal nginx IPv4:80; no Docker published product port",
-            "runtime_source_commit": runner.git(ROOT, "rev-parse", "HEAD"),
+            "fixture_source_commit": runner.git(ROOT, "rev-parse", "HEAD"),
         }) + b"\n")
         control.sync_directory(evidence)
         self.prepare_images(image_sources, journey=True)
@@ -603,6 +603,9 @@ class Lifecycle:
                         "journey_project_collision")
                 journey.inventory_captured = True
                 journey.cleanup_required = True
+                runner.write_private(output / "docker-inventory-before.json",
+                                     control.canonical(journey.user_stack_before) + b"\n")
+                control.sync_directory(output)
                 journey.prepare_runtime()
                 self.start_ingress(journey.port)
                 journey.release("adopt", manifest_path, release_name="base")
@@ -626,10 +629,12 @@ class Lifecycle:
                 before = self.state()
                 result = runner.request_json(journey.api + "/settings/llm", method="PUT", token=admin["access_token"],
                     value={"provider": "deepseek", "model": MODEL, "thinking_enabled": False, "api_key": KEY},
-                    expected=(400, 429, 502, 503) if zero else (200,), timeout=15)
+                    expected=(422,) if zero else (200,), timeout=15)
                 after = self.state()
                 require(after["connects"] - before["connects"] == (0 if zero else 1), "settings_connection_count")
-                if not zero:
+                if zero:
+                    require(result.get("error", {}).get("code") == "llm_unavailable", "settings_rejection_changed")
+                else:
                     require(result == {"provider": "deepseek", "model": MODEL, "thinking_enabled": False,
                                        "api_key_configured": True, "scope": "platform"}, "settings_identity_changed")
                 budget = journey.diagnostic_checkpoint("settings")

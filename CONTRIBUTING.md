@@ -177,6 +177,7 @@ cargo build --locked -p llm-client --example diagnostic_budget_driver
 python3 tests/e2e/diagnostic_budget_lifecycle_test.py
 python3 tests/e2e/diagnostic_release_docker_spy_test.py
 python3 tests/e2e/diagnostic_journey_test.py
+python3 tools/llm-budget/test_verify.py
 python3 - <<'PY'
 import runpy
 import subprocess

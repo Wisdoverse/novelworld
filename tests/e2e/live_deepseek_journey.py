@@ -1118,9 +1118,7 @@ def docker_inventory_snapshot(
         }
         for start in range(0, len(names), 32):
             batch = names[start:start + 32]
-            if not all(re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", name) for name in batch):
-                raise QualificationFailure("docker_inventory_name_invalid")
-            raw = runner(["docker", kind, "inspect", "--format", fields[kind], *batch])
+            raw = runner(["docker", kind, "inspect", "--format", fields[kind], "--", *batch])
             try:
                 values = [json.loads(line) for line in raw.splitlines()]
             except json.JSONDecodeError as error:
@@ -1963,7 +1961,7 @@ class Journey:
             self.diagnostic_evidence_deadline = time.monotonic() + 20
             self.report.pop("llm_metrics", None)
             self.finalize_observability("diagnostic-terminal")
-        except (QualificationFailure, diagnostic.DiagnosticFailure, OSError) as error:
+        except (Exception, KeyboardInterrupt) as error:
             terminal_ok = False
             self.diagnostic_failure(getattr(error, "code", "diagnostic_terminal_evidence_failed"))
         finally:
@@ -2643,8 +2641,8 @@ class Journey:
                     expected_model=self.expected_model,
                 )
             )
-        except QualificationFailure as error:
-            errors.append(error.code)
+        except (QualificationFailure, OSError, ValueError) as error:
+            errors.append(getattr(error, "code", "llm_metrics_invalid"))
         try:
             self.report["llm_metrics"] = summarize_metrics(
                 self.root, windows, expected_model=self.expected_model

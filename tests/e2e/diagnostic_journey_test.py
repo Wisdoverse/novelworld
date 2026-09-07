@@ -569,7 +569,8 @@ class DiagnosticJourneyTest(unittest.TestCase):
         self.assertEqual(ledger.read_bytes(), b"partial-started")
 
     def test_terminal_exact_payers_and_unresolved_drain_bound(self):
-        for scenario in ("complete", "missing", "unresolved", "recreated", "image-drift", "metrics-drift"):
+        for scenario in ("complete", "missing", "unresolved", "recreated", "image-drift", "metrics-drift",
+                         "parser-error", "interrupt"):
             with self.subTest(scenario=scenario):
                 journey = self.journey()
                 journey.cleanup_required = True
@@ -581,6 +582,8 @@ class DiagnosticJourneyTest(unittest.TestCase):
                 journey.diagnostic_last_snapshot = snapshot
 
                 def observability(*_):
+                    if scenario in ("parser-error", "interrupt"):
+                        raise ValueError("synthetic invalid metrics") if scenario == "parser-error" else KeyboardInterrupt()
                     journey.report["llm_metrics"] = {"counter_totals": [] if scenario != "metrics-drift" else [{
                         "operation": "setup_connection", "provider_model": "deepseek/" + CONTROL.MODEL,
                         "counter": "attempts.success", "value": 1,
@@ -617,7 +620,7 @@ class DiagnosticJourneyTest(unittest.TestCase):
                     journey, "diagnostic_checkpoint", return_value=aggregate
                 ), mock.patch.object(journey, "finalize_observability", side_effect=observability), mock.patch.object(
                     RUNNER.diagnostic, "bounded_command", side_effect=bounded
-                ), mock.patch.object(RUNNER, "write_private"), mock.patch.object(
+                ) as commands, mock.patch.object(RUNNER, "write_private") as evidence, mock.patch.object(
                     RUNNER.diagnostic, "sync_directory"
                 ), mock.patch.object(RUNNER.time, "monotonic", side_effect=lambda: next(tick, 304)):
                     journey.diagnostic_terminal()
@@ -630,6 +633,12 @@ class DiagnosticJourneyTest(unittest.TestCase):
                     self.assertIn("diagnostic_payer_stop_unproven", journey.diagnostic_failures)
                 if scenario == "metrics-drift":
                     self.assertIn("diagnostic_metrics_receipt_mismatch", journey.diagnostic_failures)
+                if scenario in ("parser-error", "interrupt"):
+                    self.assertIn("diagnostic_terminal_evidence_failed", journey.diagnostic_failures)
+                    self.assertTrue(journey.private_report["diagnostic_payers_stopped"])
+                    self.assertTrue(any(call.args[0][1] == "stop" for call in commands.call_args_list))
+                    self.assertTrue(any(call.args[0].name == "pre-cleanup-private.json"
+                                        for call in evidence.call_args_list))
 
     def test_source_identity_reads_actual_committed_prompts_and_schema(self):
         sha = RUNNER.git(ROOT, "rev-parse", "HEAD")
@@ -850,7 +859,7 @@ class DiagnosticJourneyTest(unittest.TestCase):
         project = "nwq-abcdef1234"
         container_names = [f"{project}-service-{index:02d}" for index in range(33)]
         volume_names = [f"{project}-volume-{index}" for index in range(2)]
-        network_names = [f"{project}-network-{index}" for index in range(2)]
+        network_names = ["--network", "network with space", "网络"]
         calls = []
 
         def runner(command):
@@ -862,7 +871,7 @@ class DiagnosticJourneyTest(unittest.TestCase):
             if command[:4] == ["docker", "network", "ls", "--format"]:
                 return "\n".join(reversed(network_names))
             kind = command[1]
-            names = command[command.index("--format") + 2:]
+            names = command[command.index("--") + 1:]
             values = []
             for name in names:
                 if kind == "container":
@@ -906,13 +915,14 @@ class DiagnosticJourneyTest(unittest.TestCase):
         self.assertEqual(len(inspect_commands), 4)
         self.assertTrue(all("Config.Env" not in command for command in inspect_commands))
         self.assertTrue(all("--format" in command for command in inspect_commands))
+        self.assertTrue(all(command[command.index("--")] == "--" for command in inspect_commands))
         self.assertEqual(len([command for command in inspect_commands if command[1] == "container"]), 2)
 
         def invalid_runner(command):
             if command[:4] == ["docker", "ps", "-a", "--format"]:
                 return "\n".join(container_names)
             if command[1] == "container":
-                names = command[command.index("--format") + 2:]
+                names = command[command.index("--") + 1:]
                 return json.dumps({"Name": "/wrong"}) + "\n" * len(names)
             return ""
 
@@ -924,19 +934,13 @@ class DiagnosticJourneyTest(unittest.TestCase):
             if command[:4] == ["docker", "ps", "-a", "--format"]:
                 return "\n".join(container_names)
             if command[1] == "container":
-                names = command[command.index("--format") + 2:]
+                names = command[command.index("--") + 1:]
                 return "\n".join(json.dumps({"Name": "/" + name}) for name in reversed(names))
             return ""
 
         with self.assertRaises(RUNNER.QualificationFailure) as reordered:
             RUNNER.docker_inventory_snapshot(runner=reordered_runner)
         self.assertEqual(reordered.exception.code, "docker_inventory_incomplete")
-
-        with self.assertRaises(RUNNER.QualificationFailure) as option_name:
-            RUNNER.docker_inventory_snapshot(
-                runner=lambda command: "--evil\n" if command[:4] == ["docker", "ps", "-a", "--format"] else ""
-            )
-        self.assertEqual(option_name.exception.code, "docker_inventory_name_invalid")
 
     def test_control_seal_rejects_integer_boolean_and_still_cannot_retry(self):
         journey = self.journey()
