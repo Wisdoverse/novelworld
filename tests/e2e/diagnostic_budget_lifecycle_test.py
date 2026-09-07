@@ -513,6 +513,89 @@ class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
         with mock.patch("builtins.print", side_effect=BrokenPipeError):
             LIFECYCLE.report_cold_adoption_status(journey(), False)
 
+    def test_cold_release_status_is_allowlisted_and_bounded(self):
+        phases = ("pull", "database_start", "migration", "application_deployment", "readiness")
+        refusal_lines = (
+            "release: diagnostic budget preflight failed",
+            "release: working tree is not clean",
+            "release: diagnostic provisioning uncertain; attempt frozen",
+        )
+        expected_keys = {
+            "case", "release_log_present", "release_log_complete",
+            *(phase + "_" + boundary for phase in phases for boundary in ("start", "end")),
+            "preflight_refused", "worktree_dirty", "provision_uncertain",
+            "capability_probe_failed", "curl_failed", "release_adopt_failed",
+            "image_identity_failed",
+        }
+        legal = "\n".join(
+            [*(f"qualification-phase {phase} {boundary} 1"
+               for phase in phases for boundary in ("start", "end")),
+             *refusal_lines, "diagnostic phase=probe_cleanup_ps",
+             "curl: (7) private-key=/private/key path=/private/report id=secret-id"]
+        ) + "\n"
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            (output_dir / "release-adopt.log").write_text(legal)
+            journey = SimpleNamespace(
+                output=output_dir,
+                diagnostic_failures=["release_adopt_failed", "release_image_identity_mismatch"],
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                LIFECYCLE.report_cold_release_status(journey, True)
+            encoded = output.getvalue()
+            summary = next(json.loads(line) for line in encoded.splitlines()
+                            if line.lstrip().startswith("{"))
+            self.assertEqual(set(summary), expected_keys)
+            self.assertEqual(summary["case"], "zero")
+            self.assertTrue(all(isinstance(summary[key], bool) for key in expected_keys - {"case"}))
+            self.assertTrue(all(summary[phase + "_" + boundary]
+                                for phase in phases for boundary in ("start", "end")))
+            self.assertTrue(all(summary[key] for key in ("preflight_refused", "worktree_dirty",
+                                                         "provision_uncertain", "capability_probe_failed",
+                                                         "curl_failed", "release_adopt_failed",
+                                                         "image_identity_failed")))
+            for private in ("private-key", "/private/key", "/private/report", "secret-id"):
+                self.assertNotIn(private, encoded)
+
+            (output_dir / "release-adopt.log").write_bytes(b"qualification-phase unknown start 1\n"
+                                                            b"diagnostic phase=probe_unknown\n"
+                                                            b"release: unknown refusal\n")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                LIFECYCLE.report_cold_release_status(SimpleNamespace(output=output_dir,
+                                                                      diagnostic_failures=[]), False)
+            summary = next(json.loads(line) for line in output.getvalue().splitlines()
+                           if line.lstrip().startswith("{"))
+            self.assertEqual(set(summary), expected_keys)
+            self.assertFalse(any(summary[key] for key in expected_keys - {"case", "release_log_present",
+                                                                            "release_log_complete"}))
+            self.assertTrue(summary["release_log_present"] and summary["release_log_complete"])
+
+            (output_dir / "release-adopt.log").write_bytes(b"x" * (1048576 + 1))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                LIFECYCLE.report_cold_release_status(SimpleNamespace(output=output_dir,
+                                                                      diagnostic_failures=[]), False)
+            summary = next(json.loads(line) for line in output.getvalue().splitlines()
+                           if line.lstrip().startswith("{"))
+            self.assertTrue(summary["release_log_present"])
+            self.assertFalse(summary["release_log_complete"])
+            self.assertFalse(any(summary[key] for key in expected_keys - {"case", "release_log_present"}))
+
+            (output_dir / "release-adopt.log").unlink()
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                LIFECYCLE.report_cold_release_status(SimpleNamespace(output=output_dir,
+                                                                      diagnostic_failures=[]), False)
+            summary = next(json.loads(line) for line in output.getvalue().splitlines()
+                           if line.lstrip().startswith("{"))
+            self.assertFalse(any(summary[key] for key in expected_keys - {"case"}))
+
+        with mock.patch("builtins.print", side_effect=BrokenPipeError):
+            LIFECYCLE.report_cold_release_status(SimpleNamespace(output=Path("/missing"),
+                                                                  diagnostic_failures=[]), False)
+
     def test_cleanup_docker_calls_are_clamped_to_remaining_deadline(self):
         lifecycle = self.ingress_lifecycle()
         lifecycle.cleanup_deadline = 105

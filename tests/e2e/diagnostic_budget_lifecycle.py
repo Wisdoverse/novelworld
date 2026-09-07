@@ -84,6 +84,45 @@ def report_cold_adoption_status(journey, zero):
         pass
 
 
+def report_cold_release_status(journey, zero):
+    """Project fixed release markers only; raw private logs never reach CI."""
+    phases = ("pull", "database_start", "migration", "application_deployment", "readiness")
+    refusals = {
+        "preflight_refused": b"release: diagnostic budget preflight failed",
+        "worktree_dirty": b"release: working tree is not clean",
+        "provision_uncertain": b"release: diagnostic provisioning uncertain; attempt frozen",
+    }
+    status = {"case": "zero" if zero else "nonzero", "release_log_present": False,
+              "release_log_complete": False,
+              **{phase + "_" + boundary: False for phase in phases for boundary in ("start", "end")},
+              **{name: False for name in refusals}, "capability_probe_failed": False,
+              "curl_failed": False, "release_adopt_failed": False, "image_identity_failed": False}
+    try:
+        failures = journey.diagnostic_failures
+        status["release_adopt_failed"] = "release_adopt_failed" in failures
+        status["image_identity_failed"] = "release_image_identity_mismatch" in failures
+        with (journey.output / "release-adopt.log").open("rb") as stream:
+            status["release_log_present"] = True
+            raw = stream.read(1048577)
+        if len(raw) <= 1048576:
+            status["release_log_complete"] = True
+            for line in raw.splitlines():
+                marker = re.fullmatch(rb"qualification-phase (pull|database_start|migration|application_deployment|readiness) (start|end) [0-9]+", line)
+                if marker:
+                    status[(marker[1] + b"_" + marker[2]).decode("ascii")] = True
+                for name, literal in refusals.items():
+                    status[name] |= line == literal
+                status["capability_probe_failed"] |= re.fullmatch(
+                    rb"diagnostic phase=probe_(create|start|expectation|cleanup_rm|cleanup_ps|cleanup_unproven)", line) is not None
+                status["curl_failed"] |= re.match(rb"curl: \([0-9]+\) ", line) is not None
+    except (AttributeError, TypeError, OSError):
+        pass
+    try:
+        print(json.dumps(status, sort_keys=True), flush=True)
+    except Exception:
+        pass  # Observability cannot supersede terminal failure or cleanup.
+
+
 def ingress_address(network, project):
     configurations = [item for item in network["IPAM"]["Config"]
                       if ipaddress.ip_network(item["Subnet"]).version == 4]
@@ -689,6 +728,7 @@ class Lifecycle:
                 require(runner.run_diagnostic(journey) == 1, "partial_journey_must_not_pass")
             finally:
                 report_cold_adoption_status(journey, zero)
+                report_cold_release_status(journey, zero)
                 self.stop_ingresses()
             require(set(journey.diagnostic_failures) <= {
                 "response_model_observation_count_mismatch", "llm_budget_failed", "diagnostic_cleanup_residue",

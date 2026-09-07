@@ -252,6 +252,9 @@ Cold-adoption stdout reports only the zero/nonzero case and fixed boolean stage
 presence/terminal flags after the journey's terminal handling, including failure;
 private reports and identifiers
 remain local. These flags do not replace the fixture's blocking assertions.
+A second fixed boolean summary recognizes release phase markers and selected
+failure classes from at most 1 MiB of the private adoption log. Missing or larger
+logs do not produce phase evidence; raw lines and unknown values are never emitted.
 Outer fallback cleanup shares a 60-second deadline, with Docker calls capped at
 10 seconds each. CI sends a soft TERM after 15 minutes, reserving 10 minutes for
 terminal handling before a hard kill; SIGKILL/host loss still has no cleanup
