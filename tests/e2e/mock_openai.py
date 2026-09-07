@@ -220,7 +220,9 @@ class Handler(BaseHTTPRequestHandler):
                 return "{}"
             selection_input = json.loads(selection_prompt.split("SELECTION_INPUT:\n", 1)[1])
             return json.dumps({
-                "groups": [[candidate["index"]] for candidate in selection_input["candidates"]],
+                "groups": [[candidate["index"]]
+                           for chunk in selection_input["source_chunks"]
+                           for candidate in chunk["candidates"]],
             })
         if "source-backed canonical facts" in prompt:
             if consume_failure("canon"):
@@ -455,7 +457,8 @@ if __name__ == "__main__":
     if sys.argv[1:] == ["--self-test"]:
         prompt = (
             f"{EVENT_SELECTION_PREFIX}\nSELECTION_INPUT:\n"
-            '{"candidates":[{"index":0},{"index":1}]}'
+            '{"source_chunks":[{"candidates":[{"index":0},{"index":1}]},'
+            '{"candidates":[{"index":2}]}]}'
         )
         request = {"response_format": {"type": "json_object"}, "messages": [
             {"role": "system", "content": "Return JSON only."},
@@ -464,7 +467,7 @@ if __name__ == "__main__":
         envelope = "\n".join(message["content"] for message in request["messages"])
         assert operation_for("/v1/chat/completions", request, envelope) == "canon"
         assert Handler.response_for(request, envelope) == "{}"
-        assert json.loads(Handler.response_for(request, envelope)) == {"groups": [[0], [1]]}
+        assert json.loads(Handler.response_for(request, envelope)) == {"groups": [[0], [1], [2]]}
         extraction_prompt = (
             "You extract source-backed canonical facts\n<SOURCE>\n"
             f"{EVENT_SELECTION_PREFIX}\n</SOURCE>"
