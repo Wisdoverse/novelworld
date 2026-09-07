@@ -10,12 +10,14 @@ use tokio::{
     time::Instant as TokioInstant,
 };
 
+use crate::diagnostic_budget::{BudgetClient, BudgetControlError, BudgetEvidenceError, Grant};
 use crate::providers::openai::OpenAIProvider;
 use crate::retry::RetryPolicy;
 use crate::telemetry::{EmbeddingLabels, RequestLabels};
 use crate::types::*;
 
 pub struct LlmClient {
+    pub(crate) budget: std::result::Result<Option<Arc<BudgetClient>>, BudgetControlError>,
     http: reqwest::Client,
     provider: Option<ConfiguredProvider>,
     admission: Arc<Semaphore>,
@@ -48,8 +50,26 @@ impl Default for LlmClient {
 }
 
 impl LlmClient {
+    #[cfg(test)]
+    pub(crate) fn diagnostic_test_client(budget: Arc<BudgetClient>, dispatch_base: String) -> Self {
+        let mut client = Self::new().with_openai_compatible(
+            "deepseek",
+            "synthetic-test-key",
+            "https://api.deepseek.com",
+        );
+        client.budget = Ok(Some(budget));
+        client.admission = Arc::new(Semaphore::new(8));
+        client
+            .provider
+            .as_mut()
+            .unwrap()
+            .transport
+            .test_dispatch_base = Some(dispatch_base);
+        client
+    }
     pub fn new() -> Self {
         Self {
+            budget: BudgetClient::from_environment(),
             http: reqwest::Client::builder()
                 .connect_timeout(LLM_CONNECT_TIMEOUT)
                 .timeout(LLM_TOTAL_TIMEOUT)
@@ -111,6 +131,15 @@ impl LlmClient {
     }
 
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
+        self.chat_with_deadline(request, None).await
+    }
+
+    pub(crate) async fn chat_with_deadline(
+        &self,
+        request: ChatRequest,
+        deadline: Option<TokioInstant>,
+    ) -> Result<ChatResponse> {
+        let budget = self.budget.as_ref().map_err(|error| *error)?.clone();
         validate_request(&request)?;
         let started = Instant::now();
         let (provider, api_key, provider_name, model_name) =
@@ -127,15 +156,39 @@ impl LlmClient {
         labels.started();
         let mut req = request;
         req.model = model_name;
+        req.stream = false;
 
-        let deadline = TokioInstant::now() + LLM_TOTAL_TIMEOUT;
+        let deadline = deadline.unwrap_or_else(|| TokioInstant::now() + LLM_TOTAL_TIMEOUT);
+        let mut provider_started = false;
+        let mut pending_attempt = None;
         match tokio::time::timeout_at(deadline, async {
             let mut retry_attempt = 0;
             let mut missing_attempt_usage = false;
             loop {
+                provider_started = false;
+                let grant = match reserve_attempt(
+                    budget.as_ref(),
+                    provider,
+                    &provider_name,
+                    &req,
+                    deadline,
+                )
+                .await
+                {
+                    Ok(grant) => grant,
+                    Err(error) => {
+                        labels.finish("budget_error", started);
+                        return Err(error);
+                    }
+                };
                 let attempt_started = Instant::now();
-                match provider.chat(&self.http, api_key, &req).await {
+                provider_started = true;
+                pending_attempt = Some(attempt_started);
+                let response = provider.chat(&self.http, api_key, &req).await;
+                pending_attempt = None;
+                match response {
                     Ok(resp) => {
+                        // Provider work occurred even if its subsequent ledger ACK is lost.
                         labels.attempt("success", attempt_started.elapsed().as_secs_f64());
                         if provider.reports_response_model() {
                             labels.response_model(&resp.model);
@@ -148,10 +201,26 @@ impl LlmClient {
                         } else {
                             labels.usage(resp.usage.as_ref());
                         }
+                        if let (Some(budget), Some(grant)) = (&budget, grant) {
+                            if let Err(error) = budget
+                                .settle(grant, Some(&resp.model), resp.usage.as_ref(), deadline)
+                                .await
+                            {
+                                labels.finish("evidence_error", started);
+                                return Err(error.into());
+                            }
+                        }
                         labels.finish("success", started);
                         return Ok(resp);
                     }
                     Err(e) => {
+                        if budget.is_some() && e.is::<crate::providers::openai::InvalidCompletion>()
+                        {
+                            labels
+                                .attempt("evidence_error", attempt_started.elapsed().as_secs_f64());
+                            labels.finish("evidence_error", started);
+                            return Err(BudgetEvidenceError.into());
+                        }
                         if e.is::<ResponseEvidenceError>() {
                             labels
                                 .attempt("evidence_error", attempt_started.elapsed().as_secs_f64());
@@ -160,16 +229,34 @@ impl LlmClient {
                         }
                         if req.json_mode && e.downcast_ref::<JsonModeEmpty>().is_some() {
                             let empty = e.downcast_ref::<JsonModeEmpty>().unwrap();
+                            labels.attempt(
+                                "empty_json_mode",
+                                attempt_started.elapsed().as_secs_f64(),
+                            );
                             labels.response_model(&empty.model);
                             if let Some(usage) = &empty.usage {
                                 labels.additional_usage(usage);
                             } else {
                                 missing_attempt_usage = true;
                             }
-                            labels.attempt(
-                                "empty_json_mode",
-                                attempt_started.elapsed().as_secs_f64(),
-                            );
+                            if let (Some(budget), Some(grant)) = (&budget, grant) {
+                                if !empty.complete_empty {
+                                    labels.finish("evidence_error", started);
+                                    return Err(BudgetEvidenceError.into());
+                                }
+                                if let Err(error) = budget
+                                    .settle(
+                                        grant,
+                                        Some(&empty.model),
+                                        empty.usage.as_ref(),
+                                        deadline,
+                                    )
+                                    .await
+                                {
+                                    labels.finish("evidence_error", started);
+                                    return Err(error.into());
+                                }
+                            }
                             labels.retry("json_mode_fallback");
                             req.json_mode = false;
                             continue;
@@ -207,8 +294,17 @@ impl LlmClient {
         {
             Ok(result) => result,
             Err(_) => {
+                if let Some(attempt_started) = pending_attempt {
+                    labels.attempt("timeout", attempt_started.elapsed().as_secs_f64());
+                }
                 labels.finish("timeout", started);
-                if req.response_observer.is_some() {
+                if budget.is_some() {
+                    if provider_started {
+                        Err(BudgetEvidenceError.into())
+                    } else {
+                        Err(BudgetControlError.into())
+                    }
+                } else if req.response_observer.is_some() {
                     Err(ResponseEvidenceError.into())
                 } else {
                     Err(anyhow!("LLM request exceeded the total deadline"))
@@ -218,6 +314,15 @@ impl LlmClient {
     }
 
     pub async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream> {
+        self.chat_stream_with_deadline(request, None).await
+    }
+
+    pub(crate) async fn chat_stream_with_deadline(
+        &self,
+        request: ChatRequest,
+        deadline: Option<TokioInstant>,
+    ) -> Result<ChatStream> {
+        let budget = self.budget.as_ref().map_err(|error| *error)?.clone();
         if request.response_observer.is_some() {
             return Err(anyhow!(
                 "response evidence observers require non-streaming chat"
@@ -241,16 +346,38 @@ impl LlmClient {
         req.model = model_name;
         req.stream = true;
 
-        let deadline = TokioInstant::now() + LLM_TOTAL_TIMEOUT;
-        let upstream = match tokio::time::timeout_at(deadline, async {
+        let deadline = deadline.unwrap_or_else(|| TokioInstant::now() + LLM_TOTAL_TIMEOUT);
+        let mut provider_started = false;
+        let mut pending_attempt = None;
+        let (upstream, grant) = match tokio::time::timeout_at(deadline, async {
             for attempt in 0..=RetryPolicy::max_retries() {
+                provider_started = false;
+                let grant = match reserve_attempt(
+                    budget.as_ref(),
+                    provider,
+                    &provider_name,
+                    &req,
+                    deadline,
+                )
+                .await
+                {
+                    Ok(grant) => grant,
+                    Err(error) => {
+                        labels.finish("budget_error", started);
+                        return Err(error);
+                    }
+                };
                 let attempt_started = Instant::now();
-                match provider.chat_stream(&self.http, api_key, &req).await {
+                provider_started = true;
+                pending_attempt = Some(attempt_started);
+                let response = provider.chat_stream(&self.http, api_key, &req).await;
+                pending_attempt = None;
+                match response {
                     Ok(upstream) => {
                         let setup = attempt_started.elapsed().as_secs_f64();
                         labels.attempt("success", setup);
                         labels.stream_setup("success", setup);
-                        return Ok(upstream);
+                        return Ok((upstream, grant));
                     }
                     Err(error) => {
                         let api_error = error.downcast_ref::<LlmApiError>();
@@ -288,14 +415,36 @@ impl LlmClient {
         {
             Ok(result) => result?,
             Err(_) => {
+                if let Some(attempt_started) = pending_attempt {
+                    let elapsed = attempt_started.elapsed().as_secs_f64();
+                    labels.attempt("timeout", elapsed);
+                    labels.stream_setup("timeout", elapsed);
+                }
                 labels.finish("setup_timeout", started);
+                if budget.is_some() {
+                    return if provider_started {
+                        Err(BudgetEvidenceError.into())
+                    } else {
+                        Err(BudgetControlError.into())
+                    };
+                }
                 return Err(anyhow!("LLM request exceeded the total deadline"));
             }
         };
-        Ok(observe_stream(upstream, labels, started, permit, deadline))
+        Ok(observe_stream(
+            upstream,
+            labels,
+            started,
+            permit,
+            deadline,
+            budget.zip(grant),
+        ))
     }
 
     pub async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
+        if self.budget.as_ref().map_err(|error| *error)?.is_some() {
+            return Err(BudgetControlError.into());
+        }
         let started = Instant::now();
         let (provider, api_key, provider_name, model_name) =
             self.resolve_provider(&request.model)?;
@@ -357,6 +506,26 @@ impl LlmClient {
     }
 }
 
+async fn reserve_attempt(
+    budget: Option<&Arc<BudgetClient>>,
+    provider: &OpenAIProvider,
+    provider_name: &str,
+    request: &ChatRequest,
+    deadline: TokioInstant,
+) -> Result<Option<Grant>> {
+    let Some(budget) = budget else {
+        return Ok(None);
+    };
+    let wire = provider
+        .chat_wire_bytes(request)
+        .map_err(|_| BudgetControlError)?;
+    Ok(Some(
+        budget
+            .reserve(provider_name, provider.base_url(), request, &wire, deadline)
+            .await?,
+    ))
+}
+
 fn validate_request(request: &ChatRequest) -> Result<()> {
     let max_tokens = request
         .effective_max_output_tokens()
@@ -415,6 +584,7 @@ fn observe_stream(
     started: Instant,
     permit: OwnedSemaphorePermit,
     deadline: TokioInstant,
+    mut settlement: Option<(Arc<BudgetClient>, Grant)>,
 ) -> ChatStream {
     let mut guard = StreamGuard {
         labels,
@@ -427,18 +597,23 @@ fn observe_stream(
     };
 
     Box::pin(stream! {
+        let budgeted = settlement.is_some();
+        let evidence_error = |error: anyhow::Error| -> anyhow::Error {
+            if budgeted { BudgetEvidenceError.into() } else { error }
+        };
+        let failure_status = if budgeted { "evidence_error" } else { "stream_error" };
         loop {
             let item = match tokio::time::timeout_at(deadline, upstream.next()).await {
                 Ok(item) => item,
                 Err(_) => {
                     guard.finish("timeout");
-                    yield Err(anyhow!("LLM request exceeded the total deadline"));
+                    yield Err(evidence_error(anyhow!("LLM request exceeded the total deadline")));
                     return;
                 }
             };
             let Some(item) = item else {
-                guard.finish("stream_error");
-                yield Err(anyhow!("LLM stream ended without a terminal event"));
+                guard.finish(failure_status);
+                yield Err(evidence_error(anyhow!("LLM stream ended without a terminal event")));
                 return;
             };
             match item {
@@ -454,8 +629,8 @@ fn observe_stream(
                         None => guard.response_model = Some(model),
                         Some(current) if current == model => {}
                         Some(_) => {
-                            guard.finish("stream_error");
-                            yield Err(anyhow!("LLM response model changed during the stream"));
+                            guard.finish(failure_status);
+                            yield Err(evidence_error(anyhow!("LLM response model changed during the stream")));
                             return;
                         }
                     }
@@ -464,13 +639,20 @@ fn observe_stream(
                     if guard.usage.is_some()
                         || usage.cached_input_tokens.is_some_and(|cached| cached > usage.input_tokens)
                     {
-                        guard.finish("stream_error");
-                        yield Err(anyhow!("invalid or duplicate LLM stream usage"));
+                        guard.finish(failure_status);
+                        yield Err(evidence_error(anyhow!("invalid or duplicate LLM stream usage")));
                         return;
                     }
                     guard.usage = Some(usage);
                 }
                 Ok(ChatStreamEvent::Finished) => {
+                    if let Some((budget, grant)) = settlement.take() {
+                        if let Err(error) = budget.settle(grant, guard.response_model.as_deref(), guard.usage.as_ref(), deadline).await {
+                            guard.finish("evidence_error");
+                            yield Err(error.into());
+                            return;
+                        }
+                    }
                     if let Some(model) = guard.response_model.as_deref() {
                         guard.labels.response_model(model);
                     }
@@ -479,8 +661,8 @@ fn observe_stream(
                     return;
                 }
                 Err(error) => {
-                    guard.finish("stream_error");
-                    yield Err(error);
+                    guard.finish(failure_status);
+                    yield Err(evidence_error(error));
                     return;
                 }
             }
@@ -507,6 +689,7 @@ mod response_model_tests {
             Instant::now(),
             permit,
             TokioInstant::now() + Duration::from_secs(1),
+            None,
         )
         .collect()
         .await

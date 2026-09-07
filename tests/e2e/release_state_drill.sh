@@ -128,7 +128,7 @@ adopt_guard_line=$(grep -nF 'require_schema_barriers_present "$candidate_tmp" "a
 adopt_fetch_line=$(grep -nF 'fetch_release_history "$candidate_tmp"' "$release" | cut -d: -f1)
 adopt_deploy_line=$(grep -nF 'deploy_manifest "$candidate_manifest" true' "$release" | head -n 1 | cut -d: -f1)
 gate_recovery_call_line=$(grep -nF '[[ "$confirmation" == "$release_sha" ]] || recover_client_after_gate_failure' "$release" | cut -d: -f1)
-current_restore_line=$(grep -nF 'active_manifest="$current_manifest"' "$release" | cut -d: -f1)
+current_restore_line=$(grep -nF 'active_manifest="$current_manifest"' "$release" | head -n 1 | cut -d: -f1)
 current_restore_up_line=$(grep -nF 'frontend nginx; then' "$release" | head -n 1 | cut -d: -f1)
 current_restore_narrative_line=$(grep -nF 'narrative-service frontend nginx; then' "$release" | cut -d: -f1)
 current_restore_fail_stop_line=$(grep -nF 'fail_stop_client "client contract gate was not confirmed and current client restore failed"' "$release" | cut -d: -f1)
@@ -498,6 +498,48 @@ if [ -n "${MOCK_DOCKER_FAIL_MATCH:-}" ] \
   && [[ " $* " == *"$MOCK_DOCKER_FAIL_MATCH"* ]]; then
   exit 70
 fi
+if [[ -n "${MOCK_DIAGNOSTIC_PROFILE:-}" && " $* " == *" config --format json "* ]]; then
+  python3 - "$@" <<'PY'
+import json, os, pathlib, sys
+args = sys.argv[1:]
+manifest = pathlib.Path([args[i+1] for i, a in enumerate(args[:-1]) if a == '--env-file'][-1])
+images = dict(line.split('=', 1) for line in manifest.read_text().splitlines())
+services = {}
+for service in ('user-service', 'novel-service', 'agent-service', 'narrative-service'):
+    owner = service == 'user-service'
+    env = {'LLM_DIAGNOSTIC_BUDGET_ID': os.environ['LLM_DIAGNOSTIC_BUDGET_ID'],
+           'USER_SERVICE_URL': 'http://127.0.0.1:8001' if owner else 'http://user-service:8001',
+           'INTERNAL_SERVICE_TOKEN': '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'}
+    if owner: env['LLM_DIAGNOSTIC_BUDGET_LIMITS'] = os.environ['LLM_DIAGNOSTIC_BUDGET_LIMITS']
+    services[service] = {'environment': env, 'image': images[service.upper().replace('-', '_') + '_IMAGE']}
+print(json.dumps({'services': services}))
+PY
+  exit $?
+elif [[ -n "${MOCK_DIAGNOSTIC_PROFILE:-}" && " $* " == *" --diagnostic-budget-contract "* ]]; then
+  printf '%064d\n' 0
+  exit 0
+elif [[ -n "${MOCK_DIAGNOSTIC_PROFILE:-}" && "$1" == start && "$2" == --attach ]]; then
+  python3 - <<'PY'
+import hashlib, json, os, pathlib
+raw = pathlib.Path(os.environ['MOCK_DIAGNOSTIC_PROFILE']).read_bytes()
+profile = json.loads(raw)
+print(json.dumps({'contract': profile['contract'], 'profile': profile['profile'],
+                  'profile_sha256': hashlib.sha256(raw).hexdigest()}))
+PY
+  exit $?
+elif [[ -n "${MOCK_DIAGNOSTIC_PROFILE:-}" && " $* " == *" --provision-diagnostic-budget "* ]]; then
+  python3 - <<'PY'
+import json, os, pathlib
+state = pathlib.Path(os.environ['RELEASE_STATE_DIR'])
+marker = json.loads((state / 'diagnostic-provisioning.json').read_bytes())
+assert marker['completed'] is False
+assert marker['binding']['budget_id'] == os.environ['LLM_DIAGNOSTIC_BUDGET_ID']
+with (state / 'mock-provisioned-once').open('x') as stream: stream.write('one invocation')
+PY
+  [ "$?" -eq 0 ] || exit 71
+  [ "${MOCK_DIAGNOSTIC_PROVISION_FAILURE:-false}" = false ] || exit 72
+  exit 0
+fi
 if [ "${MOCK_PROJECT_NONEMPTY:-false}" = true ] \
   && [[ " $* " == *" ps --all --quiet "* ]]; then
   printf 'existing-container\n'
@@ -630,6 +672,62 @@ cmp -s "$roll_marker" "$cold_state/current.env" \
 test ! -e "$cold_state/schema-transition.pending" \
   || { printf 'drill: FAIL qualification cold adopt left a schema marker\n' >&2; exit 1; }
 printf 'drill: ok   qualification cold adopt starts a fresh isolated release without a legacy gate\n'
+
+# Same real release entrypoint and filesystem state machine, mocked Docker only.
+# This proves order/freeze semantics, NOT a container/DB/provider lifecycle.
+diagnostic_profile="$(pwd)/tools/llm-budget/diagnostic-v1.json"
+diagnostic_fixture_id=550e8400-e29b-41d4-a716-446655440000
+diagnostic_fixture_limits='{"profile":"vision-journey-diagnostic-v1","max_attempts":2,"max_tokens":100,"max_cost_micro_cny":200,"expires_at":"2099-01-01T00:00:00Z"}'
+for provision_failure in false true; do
+  diagnostic_state=$(new_state)
+  diagnostic_log=$(mktemp "$work/diagnostic-docker.XXXXXX")
+  (
+    cd "$roll_repo"
+    export PATH="$roll_bin:$PATH" RELEASE_STATE_DIR="$diagnostic_state"
+    export RELEASE_COMPOSE_PROJECT=nwq-0123456789 RELEASE_CONTAINER_PREFIX=nwq-0123456789
+    export RELEASE_HTTP_BIND=127.0.0.1 RELEASE_HTTP_PORT=18080
+    export LLM_DIAGNOSTIC_BUDGET_ID="$diagnostic_fixture_id" LLM_DIAGNOSTIC_BUDGET_LIMITS="$diagnostic_fixture_limits"
+    export MOCK_DIAGNOSTIC_PROFILE="$diagnostic_profile" MOCK_DOCKER_LOG="$diagnostic_log"
+    export MOCK_DIAGNOSTIC_PROVISION_FAILURE="$provision_failure"
+    if [[ "$provision_failure" == false ]]; then
+      "$release" adopt "$roll_marker"
+      "$release" preflight "$roll_marker"
+    else
+      expect_fail 'diagnostic uncertain provision freezes cold adoption' \
+        'diagnostic provisioning uncertain; attempt frozen' "$release" adopt "$roll_marker"
+      before_retry=$(wc -l < "$diagnostic_log")
+      expect_fail 'diagnostic incomplete marker forbids a second adopt' \
+        'diagnostic budget preflight failed' "$release" adopt "$roll_marker"
+      expect_fail 'diagnostic incomplete marker forbids upgrade' \
+        'diagnostic budget preflight failed' "$release" upgrade "$roll_marker"
+      expect_fail 'diagnostic incomplete marker forbids rollback' \
+        'diagnostic budget preflight failed' "$release" rollback "$roll_sha"
+      expect_fail 'diagnostic restore cannot recover allowance' \
+        'diagnostic budget cannot restore and resume' "$release" restore
+      test "$(wc -l < "$diagnostic_log")" -eq "$before_retry"
+    fi
+  )
+  python3 - "$diagnostic_state" "$diagnostic_log" "$provision_failure" <<'PY'
+import json, pathlib, sys
+state, log, failed = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3] == 'true'
+calls = log.read_text().splitlines()
+probes = [i for i, call in enumerate(calls) if '--diagnostic-budget-contract' in call]
+database = next(i for i, call in enumerate(calls) if ' up ' in call and call.endswith(' postgres'))
+migration = next(i for i, call in enumerate(calls) if call.endswith('run --rm --no-deps postgres-migrate'))
+provisions = [i for i, call in enumerate(calls) if '--provision-diagnostic-budget' in call]
+assert len(probes) == (4 if failed else 8) and probes[3] < database < migration < provisions[0]
+assert len(provisions) == 1
+assert (state / 'mock-provisioned-once').read_text() == 'one invocation'
+assert json.loads((state / 'diagnostic-provisioning.json').read_text())['completed'] is (not failed)
+if failed:
+    assert not (state / 'current.env').exists()
+    assert not any(' up ' in call for call in calls[provisions[0] + 1:])
+else:
+    assert (state / 'current.env').is_file()
+    assert any(' up ' in call for call in calls[provisions[0] + 1:])
+PY
+done
+printf 'drill: ok   diagnostic probes precede migration and one-shot provisioning freezes uncertain outcomes\n'
 
 roll_base_manifest=$(mktemp "$work/roll-base.XXXXXX")
 write_manifest "$roll_base_manifest" "$roll_base_sha"

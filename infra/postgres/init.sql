@@ -853,6 +853,65 @@ CREATE TABLE user_llm_configs (
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- ─── Durable opt-in diagnostic budget (user-service owned) ────────────────
+
+CREATE TABLE diagnostic_llm_budgets (
+    budget_id              UUID PRIMARY KEY,
+    contract               TEXT NOT NULL,
+    profile                TEXT NOT NULL,
+    profile_sha256         TEXT NOT NULL CHECK (
+        profile_sha256 ~ '^[0-9a-f]{64}$'
+    ),
+    max_attempts           BIGINT NOT NULL CHECK (max_attempts BETWEEN 0 AND 2000),
+    max_tokens             BIGINT NOT NULL CHECK (max_tokens BETWEEN 0 AND 20000000),
+    max_cost_micro_cny     BIGINT NOT NULL CHECK (max_cost_micro_cny BETWEEN 0 AND 35000000),
+    charged_attempts       BIGINT NOT NULL DEFAULT 0 CHECK (
+        charged_attempts BETWEEN 0 AND max_attempts
+    ),
+    charged_tokens         BIGINT NOT NULL DEFAULT 0 CHECK (
+        charged_tokens BETWEEN 0 AND max_tokens
+    ),
+    charged_cost_micro_cny BIGINT NOT NULL DEFAULT 0 CHECK (
+        charged_cost_micro_cny BETWEEN 0 AND max_cost_micro_cny
+    ),
+    expires_at             TIMESTAMPTZ NOT NULL,
+    sealed                 BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at             TIMESTAMPTZ NOT NULL DEFAULT CLOCK_TIMESTAMP()
+);
+
+CREATE TABLE diagnostic_llm_attempts (
+    budget_id                  UUID NOT NULL REFERENCES diagnostic_llm_budgets(budget_id),
+    attempt_id                 UUID NOT NULL,
+    ordinal                    BIGINT NOT NULL CHECK (ordinal BETWEEN 1 AND 2000),
+    operation                  TEXT NOT NULL,
+    output_limit               INTEGER NOT NULL CHECK (output_limit BETWEEN 1 AND 8192),
+    reservation_tokens         BIGINT NOT NULL CHECK (reservation_tokens BETWEEN 1 AND 1056768),
+    reservation_cost_micro_cny BIGINT NOT NULL CHECK (reservation_cost_micro_cny BETWEEN 1 AND 3219456),
+    settled                    BOOLEAN NOT NULL DEFAULT FALSE,
+    settlement_model           TEXT,
+    input_tokens               BIGINT CHECK (input_tokens BETWEEN 0 AND 1048576),
+    output_tokens              BIGINT CHECK (
+        output_tokens BETWEEN 0 AND output_limit
+    ),
+    cached_input_tokens        BIGINT CHECK (
+        cached_input_tokens BETWEEN 0 AND input_tokens
+    ),
+    PRIMARY KEY (budget_id, attempt_id),
+    UNIQUE (budget_id, ordinal),
+    CHECK (
+        (NOT settled
+            AND settlement_model IS NULL
+            AND input_tokens IS NULL
+            AND output_tokens IS NULL
+            AND cached_input_tokens IS NULL)
+        OR
+        (settled
+            AND settlement_model IS NOT NULL
+            AND input_tokens IS NOT NULL
+            AND output_tokens IS NOT NULL)
+    )
+);
+
 -- ─── 触发器：自动更新 updated_at ──────────────────────────────────────────
 
 CREATE OR REPLACE FUNCTION update_updated_at()

@@ -1,0 +1,34 @@
+{
+  "contract": "llm-diagnostic-budget-v1",
+  "profile": "vision-journey-diagnostic-v1",
+  "provider": "deepseek",
+  "model": "deepseek-v4-flash-vision-exp",
+  "origin": "https://api.deepseek.com",
+  "thinking_enabled": false,
+  "input_token_ceiling": 1048576,
+  "input_micro_cny": 3,
+  "output_micro_cny": 9,
+  "max_messages": 64,
+  "max_request_bytes": 262144,
+  "max_lifetime_seconds": 14400,
+  "max_limits": {
+    "attempts": 2000,
+    "tokens": 20000000,
+    "cost_micro_cny": 35000000
+  },
+  "operations": {
+    "setup_connection": 8,
+    "translation": 8192,
+    "chapter_boundary_detection": 2048,
+    "character_extraction": 4096,
+    "canon_extraction": 8192,
+    "game_rule_generation": 8192,
+    "narrative_node_detection": 4096,
+    "branch_generation": 4096,
+    "narrative_transition": 4096,
+    "player_chapter": 8192,
+    "character_chat": 5120,
+    "memory_summary": 256,
+    "offline_evaluation": 800
+  }
+}

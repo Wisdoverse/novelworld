@@ -14,9 +14,12 @@ use uuid::Uuid;
 
 use crate::application::handlers::{AuthError, AuthHandler, LlmUsageError, LlmUsageHandler};
 use crate::domain::ports::ReadinessProbe;
+pub mod diagnostic_budget;
 
 #[derive(Clone)]
 pub struct AppState {
+    pub diagnostic_budget:
+        Option<Arc<crate::application::diagnostic_budget::DiagnosticBudgetHandler>>,
     pub handler: Arc<AuthHandler>,
     pub llm_usage_handler: Arc<LlmUsageHandler>,
     pub readiness: Arc<dyn ReadinessProbe>,
@@ -25,6 +28,10 @@ pub struct AppState {
 }
 
 pub fn router(state: AppState) -> Router {
+    let budget_router = diagnostic_budget::router(
+        state.diagnostic_budget.clone(),
+        state.internal_service_token.clone(),
+    );
     Router::new()
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))
@@ -46,6 +53,7 @@ pub fn router(state: AppState) -> Router {
         .route("/metrics", get(metrics))
         .layer(DefaultBodyLimit::max(16 * 1024))
         .with_state(state)
+        .merge(budget_router)
 }
 
 async fn export_account(
@@ -198,6 +206,8 @@ struct SetupRequest {
 #[derive(Serialize)]
 struct RuntimeLlmConfigResponse {
     contract: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostic_budget: Option<llm_client::diagnostic_budget::Binding>,
     api_url: String,
     model: String,
     thinking_enabled: bool,
@@ -529,7 +539,15 @@ async fn runtime_llm_config(
             StatusCode::OK,
             [(CACHE_CONTROL, "no-store")],
             Json(RuntimeLlmConfigResponse {
-                contract: 2,
+                contract: if state.diagnostic_budget.is_some() {
+                    3
+                } else {
+                    2
+                },
+                diagnostic_budget: state
+                    .diagnostic_budget
+                    .as_deref()
+                    .map(diagnostic_budget::binding),
                 api_url: config.api_url,
                 model: config.model,
                 thinking_enabled: config.thinking_enabled,

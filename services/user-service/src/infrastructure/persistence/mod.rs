@@ -1,3 +1,4 @@
+pub mod pg_diagnostic_budget;
 pub mod pg_user_repo;
 
 use crate::domain::ports::ReadinessProbe;

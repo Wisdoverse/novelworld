@@ -53,6 +53,12 @@ async fn trace_middleware(request: Request, next: Next) -> Response {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if let Some(output) =
+        llm_client::diagnostic_capability::capability_probe(std::env::args_os().skip(1))
+    {
+        println!("{output}");
+        return Ok(());
+    }
     run_body().await
 }
 
