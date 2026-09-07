@@ -1,11 +1,12 @@
 # Extraction Quality Policy v3 — single-source event accounting
 
-Status: **prospective policy only; not implemented or formally adopted for Qualification**.
+Status: **implemented in `tools/h1-eval`; not formally adopted for Qualification**.
 Version: **`extraction-quality-v3`**. This decision owns the next H1 judge response
 contract, not production extraction or a provider quality claim. It inherits
 [v2](https://github.com/Wisdoverse/novelworld/blob/bda240656d145d4261a2f5bf204e1bc6da7c13e3/docs/EXTRACTION_QUALITY_V2.md)
 and its corpus at immutable main `bda240656d145d4261a2f5bf204e1bc6da7c13e3`.
-Implementation requires a separate reviewed change after this policy is merged.
+The separate [implementation](https://github.com/Wisdoverse/novelworld/issues/318)
+follows the reviewed policy delivery; its issue owns final acceptance evidence.
 
 ## Rationale and boundary
 
@@ -70,7 +71,7 @@ model-provided totals. No derived verdict array is needed.
 
 ## Versioned implementation and evidence
 
-The later implementation uses policy `extraction-quality-v3`, corpus
+The implementation uses policy `extraction-quality-v3`, corpus
 `h1-synthetic-v5`, response rubric identity `h1-extraction-v3` and judge prompt
 `h1-semantic-judge-v8`. The rubric identity records the response-contract change;
 scoring semantics remain unchanged. Corpus v5 changes only the three
@@ -100,7 +101,7 @@ before calls. This policy is not that approval.
 
 ## Delivery, rollback and review
 
-Policy-only delivery changes no runtime, public API, DDD/FSD boundary, deployment,
+Policy and evaluator delivery change no runtime, public API, DDD/FSD boundary, deployment,
 database or provider configuration. Retracting prospective authorization does not
 rewrite history; implementation rollback invalidates only affected new evidence.
 Never reclassify a Started v3 result as v2/v1 or turn an old failure into a pass.
@@ -109,6 +110,7 @@ The implementing agent owns this decision; a non-author agent reviews it under
 the private-iteration policy. Re-review before implementation, paid registration,
 formal adoption or changes to any versioned input. Human acceptance does not
 block private iteration; unperformed human and formal evidence stays unverified.
-The [work item](https://github.com/Wisdoverse/novelworld/issues/316) records review
-and delivery evidence. A merged policy is not Structural implementation or
-Release-qualified evidence.
+The [policy work item](https://github.com/Wisdoverse/novelworld/issues/316) and
+[implementation work item](https://github.com/Wisdoverse/novelworld/issues/318)
+record their separate review and delivery evidence. Neither policy delivery nor
+structural evaluator implementation is Release-qualified evidence.
