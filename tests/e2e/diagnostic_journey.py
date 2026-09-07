@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import selectors
@@ -419,6 +420,48 @@ def reconcile_snapshot(registration: Registration, snapshot: Any,
                 require(current == old, "diagnostic_settlement_changed")
     return {"charged": totals, "settled_attempts": settled,
             "unresolved_attempts": len(rows) - settled, "sealed": budget["sealed"]}
+
+
+def reconcile_metrics(registration: Registration, snapshot: Any, summary: Any) -> None:
+    """Compare settled receipts with all selected process-generation counters.
+
+    Usage-report counts are logical-call counters, not receipt counts: empty-JSON
+    retries record additional token usage without another usage-report sample.
+    """
+    aggregate = reconcile_snapshot(registration, snapshot)
+    require(aggregate["sealed"] and not aggregate["unresolved_attempts"],
+            "diagnostic_metrics_receipts_unresolved")
+    require(isinstance(summary, dict) and isinstance(summary.get("counter_totals"), list),
+            "diagnostic_metrics_missing")
+    expected, observed = {}, {}
+
+    def add(totals, operation, counter, value):
+        if value:
+            key = operation, counter
+            totals[key] = totals.get(key, 0) + value
+
+    for row in snapshot["receipts"]:
+        cached = row["cached_input_tokens"] or 0
+        values = {"attempts": 1, "tokens.input": row["input_tokens"],
+                  "tokens.output": row["output_tokens"], "tokens.cached_input": cached,
+                  "billable_tokens.cached_input": cached,
+                  "billable_tokens.uncached_input": row["input_tokens"] - cached,
+                  "billable_tokens.output": row["output_tokens"]}
+        for counter, value in values.items():
+            add(expected, row["operation"], counter, value)
+    for item in summary["counter_totals"]:
+        counter = item.get("counter", "")
+        if not counter.startswith(("attempts.", "tokens.", "billable_tokens.")):
+            continue
+        value = item.get("value")
+        require(item.get("provider_model") == "deepseek/" + MODEL
+                and item.get("operation") in registration.profile["operations"]
+                and type(value) in (int, float) and math.isfinite(value)
+                and value >= 0 and int(value) == value,
+                "diagnostic_metrics_invalid")
+        add(observed, item["operation"], "attempts" if counter.startswith("attempts.") else counter,
+            int(value))
+    require(observed == expected, "diagnostic_metrics_receipt_mismatch")
 
 
 def bounded_command(command: list[str], *, stdin: bytes = b"", timeout: float = 10,

@@ -232,6 +232,15 @@ budget; upgrade and restart reuse it. The runner reconciles complete PG
 receipts at lifecycle boundaries rather than treating process metrics as an
 authoritative balance.
 
+Before allowing PG deletion, the sealed, fully settled terminal receipts must
+also match the final selected process-generation counters by operation:
+HTTP attempts, input/output/cache tokens and billable token classes. Missing
+generations or mismatched counts fail closed; unknown reservations are not
+invented HTTP usage. Logical usage-report counts are not receipt counts because
+empty-JSON retries may add usage without another logical report. A late
+settlement/metric race may conservatively fail; it never permits filling in
+missing evidence or another paid run.
+
 Success, failure and INT/TERM enter the same terminal path: seal once, drain
 existing grants for at most 300 seconds, stop and verify the four exact paying
 containers, persist consistent private receipts, then perform bounded exact

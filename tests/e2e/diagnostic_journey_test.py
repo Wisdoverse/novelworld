@@ -171,6 +171,94 @@ class DiagnosticJourneyTest(unittest.TestCase):
             "charged_cost_micro_cny": 48 if settled else 3145800, "sealed": False}
         return registration, {"budget": budget, "receipts": [row]}
 
+    def test_reconcile_metrics_bounds_receipts_against_generation_counters(self):
+        registration, snapshot = self.snapshot(settled=True)
+        snapshot["budget"]["sealed"] = True
+
+        def metrics(rows):
+            totals = {"attempts": len(rows), "tokens.input": 0, "tokens.output": 0,
+                      "tokens.cached_input": 0, "billable_tokens.cached_input": 0,
+                      "billable_tokens.uncached_input": 0, "billable_tokens.output": 0}
+            for row in rows:
+                cached = row["cached_input_tokens"] or 0
+                totals["tokens.input"] += row["input_tokens"]
+                totals["tokens.output"] += row["output_tokens"]
+                totals["tokens.cached_input"] += cached
+                totals["billable_tokens.cached_input"] += cached
+                totals["billable_tokens.uncached_input"] += row["input_tokens"] - cached
+                totals["billable_tokens.output"] += row["output_tokens"]
+            return {"counter_totals": [
+                {"operation": "setup_connection", "provider_model": "deepseek/" + CONTROL.MODEL,
+                 "counter": "attempts.requests" if counter == "attempts" else counter,
+                 "value": value}
+                for counter, value in totals.items()
+            ]}
+
+        CONTROL.reconcile_metrics(registration, snapshot, metrics(snapshot["receipts"]))
+
+        second = copy.deepcopy(snapshot["receipts"][0])
+        second.update(attempt_id=str(uuid.uuid4()), ordinal=2)
+        snapshot["receipts"].append(second)
+        snapshot["budget"].update(charged_attempts=2, charged_tokens=24, charged_cost_micro_cny=96)
+        first_metrics = metrics([snapshot["receipts"][0]])["counter_totals"]
+        second_metrics = metrics([second])["counter_totals"]
+        CONTROL.reconcile_metrics(
+            registration, snapshot, {"counter_totals": [
+                {**left, "value": left["value"] + right["value"]}
+                for left, right in zip(first_metrics, second_metrics)
+            ]}
+        )
+
+        for summary in (
+            {"counter_totals": [item for item in metrics(snapshot["receipts"])["counter_totals"]
+                                 if item["counter"] != "attempts.requests"]},
+            {"counter_totals": [*metrics(snapshot["receipts"])["counter_totals"], {
+                "operation": "setup_connection", "provider_model": "deepseek/" + CONTROL.MODEL,
+                "counter": "attempts.requests", "value": 3}]},
+        ):
+            with self.assertRaises(CONTROL.DiagnosticFailure):
+                CONTROL.reconcile_metrics(registration, snapshot, summary)
+
+        changed = copy.deepcopy(snapshot)
+        changed["receipts"][0]["output_tokens"] += 1
+        changed["budget"]["charged_tokens"] += 1
+        changed["budget"]["charged_cost_micro_cny"] += 9
+        with self.assertRaises(CONTROL.DiagnosticFailure) as mismatch:
+            CONTROL.reconcile_metrics(registration, changed, metrics(snapshot["receipts"]))
+        self.assertEqual(mismatch.exception.code, "diagnostic_metrics_receipt_mismatch")
+
+        changed = copy.deepcopy(snapshot)
+        changed["receipts"][0]["cached_input_tokens"] = 2
+        with self.assertRaises(CONTROL.DiagnosticFailure):
+            CONTROL.reconcile_metrics(registration, changed, metrics(snapshot["receipts"]))
+        CONTROL.reconcile_metrics(registration, changed, metrics(changed["receipts"]))
+
+        # Final PG may contain a late settlement absent from the last scrape.
+        with self.assertRaises(CONTROL.DiagnosticFailure):
+            CONTROL.reconcile_metrics(registration, snapshot, metrics([second]))
+        _, unresolved = self.snapshot()
+        unresolved["budget"]["sealed"] = True
+        with self.assertRaises(CONTROL.DiagnosticFailure) as pending:
+            CONTROL.reconcile_metrics(registration, unresolved, metrics([second]))
+        self.assertEqual(pending.exception.code, "diagnostic_metrics_receipts_unresolved")
+
+        changed = copy.deepcopy(snapshot)
+        changed["receipts"][0]["operation"] = "unknown_operation"
+        with self.assertRaises(CONTROL.DiagnosticFailure):
+            CONTROL.reconcile_metrics(registration, changed, metrics(snapshot["receipts"]))
+
+        empty = copy.deepcopy(snapshot)
+        empty["receipts"] = []
+        empty["budget"].update(charged_attempts=0, charged_tokens=0, charged_cost_micro_cny=0)
+        CONTROL.reconcile_metrics(registration, empty, {"counter_totals": []})
+        with self.assertRaises(CONTROL.DiagnosticFailure):
+            CONTROL.reconcile_metrics(registration, empty, {
+                "counter_totals": [{
+                    "operation": "setup_connection", "provider_model": "deepseek/" + CONTROL.MODEL,
+                    "counter": "attempts.requests", "value": 1,
+                }]
+            })
+
     def test_exact_charges_and_one_time_late_settlement(self):
         registration, before = self.snapshot()
         before["budget"]["sealed"] = True
@@ -481,10 +569,22 @@ class DiagnosticJourneyTest(unittest.TestCase):
         self.assertEqual(ledger.read_bytes(), b"partial-started")
 
     def test_terminal_exact_payers_and_unresolved_drain_bound(self):
-        for scenario in ("complete", "missing", "unresolved", "recreated", "image-drift"):
+        for scenario in ("complete", "missing", "unresolved", "recreated", "image-drift", "metrics-drift"):
             with self.subTest(scenario=scenario):
                 journey = self.journey()
                 journey.cleanup_required = True
+                registration, snapshot = self.snapshot(settled=True)
+                snapshot["receipts"] = []
+                snapshot["budget"].update(sealed=True, charged_attempts=0, charged_tokens=0,
+                                          charged_cost_micro_cny=0)
+                journey.diagnostic_registration = registration
+                journey.diagnostic_last_snapshot = snapshot
+
+                def observability(*_):
+                    journey.report["llm_metrics"] = {"counter_totals": [] if scenario != "metrics-drift" else [{
+                        "operation": "setup_connection", "provider_model": "deepseek/" + CONTROL.MODEL,
+                        "counter": "attempts.success", "value": 1,
+                    }]}
                 ids = {service: f"{index:064x}" for index, service in enumerate(RUNNER.SERVICE_PORTS, 1)}
                 journey.private_report["release_images"] = {"base": {
                     service.upper().replace("-", "_") + "_IMAGE": {
@@ -515,7 +615,7 @@ class DiagnosticJourneyTest(unittest.TestCase):
                 tick = iter([0, 301, 302, 303])
                 with mock.patch.object(journey, "diagnostic_owner_control"), mock.patch.object(
                     journey, "diagnostic_checkpoint", return_value=aggregate
-                ), mock.patch.object(journey, "finalize_observability"), mock.patch.object(
+                ), mock.patch.object(journey, "finalize_observability", side_effect=observability), mock.patch.object(
                     RUNNER.diagnostic, "bounded_command", side_effect=bounded
                 ), mock.patch.object(RUNNER, "write_private"), mock.patch.object(
                     RUNNER.diagnostic, "sync_directory"
@@ -528,6 +628,8 @@ class DiagnosticJourneyTest(unittest.TestCase):
                     self.assertIn("diagnostic_unresolved_receipts", journey.diagnostic_failures)
                 if scenario == "image-drift":
                     self.assertIn("diagnostic_payer_stop_unproven", journey.diagnostic_failures)
+                if scenario == "metrics-drift":
+                    self.assertIn("diagnostic_metrics_receipt_mismatch", journey.diagnostic_failures)
 
     def test_source_identity_reads_actual_committed_prompts_and_schema(self):
         sha = RUNNER.git(ROOT, "rev-parse", "HEAD")

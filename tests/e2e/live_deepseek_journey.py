@@ -1931,6 +1931,7 @@ class Journey:
             # One last per-generation observation while the processes still exist.
             # A stuck scrape must not delay stopping paying processes indefinitely.
             self.diagnostic_evidence_deadline = time.monotonic() + 20
+            self.report.pop("llm_metrics", None)
             self.finalize_observability("diagnostic-terminal")
         except (QualificationFailure, diagnostic.DiagnosticFailure, OSError) as error:
             terminal_ok = False
@@ -2002,6 +2003,13 @@ class Journey:
             aggregate = self.diagnostic_checkpoint("terminal")
             if not aggregate["sealed"]:
                 raise QualificationFailure("diagnostic_terminal_not_sealed")
+            try:
+                diagnostic.reconcile_metrics(self.diagnostic_registration, self.diagnostic_last_snapshot,
+                                             self.report.get("llm_metrics"))
+                self.private_report["diagnostic_metrics_reconciled"] = True
+            except diagnostic.DiagnosticFailure as error:
+                terminal_ok = False
+                self.diagnostic_failure(error.code)
             # Durable full receipts plus the private pre-cleanup report are the
             # deletion prerequisite. Final cleanup disposition is written later.
             write_private(self.output / "pre-cleanup-private.json", diagnostic.canonical({
