@@ -176,6 +176,7 @@ cargo build --locked -p user-service -p novel-service -p agent-service -p narrat
 cargo build --locked -p llm-client --example diagnostic_budget_driver
 python3 tests/e2e/diagnostic_budget_lifecycle_test.py
 python3 tests/e2e/diagnostic_release_docker_spy_test.py
+python3 tests/e2e/diagnostic_journey_test.py
 python3 - <<'PY'
 import runpy
 import subprocess
@@ -211,6 +212,15 @@ not automatic checkout recovery.
 This proves release/capability refusal, dispatch/accounting and owner recreation
 boundaries, not release-built artifacts, a supported base-to-candidate release
 upgrade or live-model qualification.
+
+For Vision journey tooling changes, also run
+`python3 tests/e2e/live_deepseek_journey.py --self-test`. The separate
+`diagnostic_journey_test.py` checks single-start registration, committed source
+identity, synthetic receipt reconciliation, cancellation, bounded terminal
+handling and public-report privacy without Docker or provider calls. These
+checks do not replace the mandatory real release-image cold-adoption/Settings
+and lifecycle wiring evidence tracked in #322. No protected operator key is
+needed or authorized by these offline gates.
 
 Production Compose Smoke also invokes the same fixture with
 `--runtime-images <json-file> --client-binary <path>`: a map from each of the
