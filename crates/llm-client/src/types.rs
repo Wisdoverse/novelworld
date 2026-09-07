@@ -61,6 +61,7 @@ impl std::error::Error for LlmApiError {}
 pub(crate) struct JsonModeEmpty {
     pub(crate) model: String,
     pub(crate) usage: Option<Usage>,
+    pub(crate) complete_empty: bool,
 }
 
 impl std::fmt::Display for JsonModeEmpty {

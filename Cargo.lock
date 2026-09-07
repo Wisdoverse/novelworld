@@ -2039,6 +2039,7 @@ dependencies = [
  "agent-service",
  "anyhow",
  "async-trait",
+ "axum",
  "bytes",
  "chrono",
  "deadpool-redis",
@@ -2208,6 +2209,7 @@ dependencies = [
  "sha2 0.11.0",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

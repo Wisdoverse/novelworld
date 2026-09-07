@@ -6,11 +6,16 @@ The registry's mutable tag and first RepoDigests entry deliberately point at
 a different image from the build records.
 """
 import json
+import copy
+import hashlib
+import importlib.util
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/docker.yml"
@@ -22,6 +27,26 @@ PREFIX = "ghcr.io/wisdoverse/novelworld"
 BUILT = "sha256:" + "a" * 64
 MOVED = "sha256:" + "b" * 64
 LOCAL = "sha256:" + "c" * 64
+
+DIAGNOSTIC_BUDGET = ROOT / "infra/docker/diagnostic_budget.py"
+_budget_spec = importlib.util.spec_from_file_location("novelworld_diagnostic_budget", DIAGNOSTIC_BUDGET)
+assert _budget_spec and _budget_spec.loader
+BUDGET = importlib.util.module_from_spec(_budget_spec)
+_budget_spec.loader.exec_module(BUDGET)
+
+PROFILE_BYTES = (ROOT / "tools/llm-budget/diagnostic-v1.json").read_bytes()
+BUDGET_ID = "550e8400-e29b-41d4-a716-446655440000"
+TOKEN = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+REGISTERED_ENV = {
+    "LLM_DIAGNOSTIC_BUDGET_ID": BUDGET_ID,
+    "LLM_DIAGNOSTIC_BUDGET_LIMITS": json.dumps({
+        "profile": "vision-journey-diagnostic-v1",
+        "max_attempts": 2,
+        "max_tokens": 100,
+        "max_cost_micro_cny": 200,
+        "expires_at": "2099-01-01T00:00:00Z",
+    }, separators=(",", ":")),
+}
 
 DOCKER = r'''#!/usr/bin/env python3
 import json, os, pathlib, sys
@@ -157,6 +182,196 @@ class ReleaseImageDigestTest(unittest.TestCase):
                 result = self.sboms(output, [f"{PREFIX}-gateway@{BUILT}"])
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual((output / "digests.txt").read_text(), "")
+
+    def test_diagnostic_registration_is_strict_and_bounded(self):
+        registered = BUDGET.registration(PROFILE_BYTES, REGISTERED_ENV)
+        self.assertEqual(registered["binding"]["budget_id"], BUDGET_ID)
+        self.assertEqual(
+            registered["binding"]["profile_sha256"],
+            hashlib.sha256(PROFILE_BYTES).hexdigest(),
+        )
+        self.assertEqual(BUDGET.registration(PROFILE_BYTES, REGISTERED_ENV)["limits"],
+                         json.loads(REGISTERED_ENV["LLM_DIAGNOSTIC_BUDGET_LIMITS"]))
+
+        for key, value in (
+            ("LLM_DIAGNOSTIC_BUDGET_ID", BUDGET_ID.upper()),
+            ("LLM_DIAGNOSTIC_BUDGET_ID", "550e8400e29b41d4a716446655440000"),
+            ("LLM_DIAGNOSTIC_BUDGET_ID", "00000000-0000-0000-0000-000000000000"),
+        ):
+            invalid = dict(REGISTERED_ENV, **{key: value})
+            with self.subTest(key=key, value=value), self.assertRaises(BUDGET.Invalid):
+                BUDGET.registration(PROFILE_BYTES, invalid)
+
+        for extra in ("unexpected",):
+            limits = json.loads(REGISTERED_ENV["LLM_DIAGNOSTIC_BUDGET_LIMITS"])
+            limits[extra] = 1
+            invalid = dict(REGISTERED_ENV, LLM_DIAGNOSTIC_BUDGET_LIMITS=json.dumps(limits))
+            with self.subTest(extra=extra), self.assertRaises(BUDGET.Invalid):
+                BUDGET.registration(PROFILE_BYTES, invalid)
+        duplicate_limits = (
+            '{"profile":"vision-journey-diagnostic-v1","max_attempts":2,'
+            '"max_attempts":2,"max_tokens":100,"max_cost_micro_cny":200,'
+            '"expires_at":"2099-01-01T00:00:00Z"}'
+        )
+        with self.assertRaises(BUDGET.Invalid):
+            BUDGET.registration(
+                PROFILE_BYTES,
+                dict(REGISTERED_ENV, LLM_DIAGNOSTIC_BUDGET_LIMITS=duplicate_limits),
+            )
+
+        for key, value in (
+            ("max_attempts", json.loads(PROFILE_BYTES)["max_limits"]["attempts"] + 1),
+            ("max_tokens", json.loads(PROFILE_BYTES)["max_limits"]["tokens"] + 1),
+            ("max_cost_micro_cny", json.loads(PROFILE_BYTES)["max_limits"]["cost_micro_cny"] + 1),
+            ("max_attempts", -1),
+            ("max_tokens", 1.5),
+        ):
+            limits = json.loads(REGISTERED_ENV["LLM_DIAGNOSTIC_BUDGET_LIMITS"])
+            limits[key] = value
+            invalid = dict(REGISTERED_ENV, LLM_DIAGNOSTIC_BUDGET_LIMITS=json.dumps(limits))
+            with self.subTest(key=key, value=value), self.assertRaises(BUDGET.Invalid):
+                BUDGET.registration(PROFILE_BYTES, invalid)
+
+        for expiry in ("2099-01-01T00:00:00+00:00", "2099-02-30T00:00:00Z"):
+            limits = json.loads(REGISTERED_ENV["LLM_DIAGNOSTIC_BUDGET_LIMITS"])
+            limits["expires_at"] = expiry
+            invalid = dict(REGISTERED_ENV, LLM_DIAGNOSTIC_BUDGET_LIMITS=json.dumps(limits))
+            with self.subTest(expiry=expiry), self.assertRaises((BUDGET.Invalid, ValueError)):
+                BUDGET.registration(PROFILE_BYTES, invalid)
+
+    def test_diagnostic_marker_lifecycle_is_one_shot_and_binding_exact(self):
+        registered = BUDGET.registration(PROFILE_BYTES, REGISTERED_ENV)
+        state = self.root / "diagnostic-state"
+        state.mkdir()
+        BUDGET.marker_action("adopt", state, registered)
+        BUDGET.marker_action("provision-start", state, registered)
+        for action in ("upgrade", "rollback", "preflight"):
+            with self.subTest(action=action), self.assertRaises(BUDGET.Invalid):
+                BUDGET.marker_action(action, state, registered)
+        with self.assertRaises(OSError):
+            BUDGET.marker_action("provision-start", state, registered)
+        BUDGET.marker_action("provision-complete", state, registered)
+        self.assertEqual(BUDGET.read_marker(state / "diagnostic-provisioning.json"),
+                         {**registered, "completed": True})
+        for changed in (dict(registered, binding=dict(registered["binding"], budget_id="550e8400-e29b-41d4-a716-446655440001")),
+                        dict(registered, limits=dict(registered["limits"], max_tokens=99))):
+            with self.assertRaises(BUDGET.Invalid):
+                BUDGET.marker_action("upgrade", state, changed)
+
+    def test_diagnostic_preflight_validates_all_services_before_any_probe(self):
+        registered = BUDGET.registration(PROFILE_BYTES, REGISTERED_ENV)
+        images = {service: f"example/{service}@{BUILT}" for service in BUDGET.SERVICES}
+        manifest = {service.upper().replace("-", "_") + "_IMAGE": image
+                    for service, image in images.items()}
+        services = {}
+        for service in BUDGET.SERVICES:
+            environment = {
+                "LLM_DIAGNOSTIC_BUDGET_ID": BUDGET_ID,
+                "USER_SERVICE_URL": "http://127.0.0.1:8001" if service == "user-service" else "http://user-service:8001",
+                "INTERNAL_SERVICE_TOKEN": TOKEN,
+            }
+            if service == "user-service":
+                environment["LLM_DIAGNOSTIC_BUDGET_LIMITS"] = REGISTERED_ENV["LLM_DIAGNOSTIC_BUDGET_LIMITS"]
+            services[service] = {"environment": environment, "image": images[service]}
+        raw = json.dumps({"services": services}).encode()
+        with mock.patch.object(BUDGET, "probe") as probe:
+            BUDGET.preflight(raw, manifest, registered, "nwq-abcdef1234")
+            self.assertEqual(probe.call_count, 4)
+            self.assertEqual({call.args[0] for call in probe.call_args_list}, set(images.values()))
+
+        mutations = []
+        for service in BUDGET.SERVICES:
+            invalid = copy.deepcopy(services)
+            invalid[service]["environment"]["LLM_DIAGNOSTIC_BUDGET_ID"] = "550e8400-e29b-41d4-a716-446655440001"
+            mutations.append((f"{service} budget id", invalid, manifest))
+
+            invalid = copy.deepcopy(services)
+            invalid[service]["environment"]["USER_SERVICE_URL"] = "https://wrong.example"
+            mutations.append((f"{service} service URL", invalid, manifest))
+
+            invalid = copy.deepcopy(services)
+            invalid[service]["environment"]["INTERNAL_SERVICE_TOKEN"] = "f" * 64
+            mutations.append((f"{service} token", invalid, manifest))
+
+            invalid_manifest = dict(manifest)
+            invalid_manifest[service.upper().replace("-", "_") + "_IMAGE"] = f"example/wrong-{service}@{BUILT}"
+            mutations.append((f"{service} image", services, invalid_manifest))
+
+        invalid = copy.deepcopy(services)
+        invalid["user-service"]["environment"]["LLM_DIAGNOSTIC_BUDGET_LIMITS"] = json.dumps(
+            dict(json.loads(REGISTERED_ENV["LLM_DIAGNOSTIC_BUDGET_LIMITS"]), max_tokens=99)
+        )
+        mutations.append(("owner limits", invalid, manifest))
+        for service in BUDGET.SERVICES:
+            if service == "user-service":
+                continue
+            invalid = copy.deepcopy(services)
+            invalid[service]["environment"]["LLM_DIAGNOSTIC_BUDGET_LIMITS"] = REGISTERED_ENV["LLM_DIAGNOSTIC_BUDGET_LIMITS"]
+            mutations.append((f"{service} stray limits", invalid, manifest))
+
+        invalid = copy.deepcopy(services)
+        invalid["agent-service"]["environment"]["INTERNAL_SERVICE_TOKEN"] = "f" * 64
+        mutations.append(("token mismatch", invalid, manifest))
+
+        for label, invalid, invalid_manifest in mutations:
+            with self.subTest(configuration=label), mock.patch.object(BUDGET, "probe") as probe:
+                with self.assertRaises(BUDGET.Invalid):
+                    BUDGET.preflight(
+                        json.dumps({"services": invalid}).encode(),
+                        invalid_manifest,
+                        registered,
+                        "nwq-abcdef1234",
+                    )
+                probe.assert_not_called()
+
+    def test_bounded_output_success_failure_timeout_and_overflow(self):
+        self.assertEqual(BUDGET.bounded_output([sys.executable, "-c", "print('ok', end='')"], 2), b"ok")
+        with self.assertRaises(BUDGET.Invalid):
+            BUDGET.bounded_output([sys.executable, "-c", "raise SystemExit(3)"], 2)
+        with self.assertRaises(BUDGET.Invalid):
+            BUDGET.bounded_output([sys.executable, "-c", "import time; time.sleep(2)"], 0.05)
+        with self.assertRaises(BUDGET.Invalid):
+            BUDGET.bounded_output([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'x' * 4097)"], 2)
+
+    def test_probe_confirms_create_before_start_and_verifies_cleanup(self):
+        image = "registry/service@sha256:" + "a" * 64
+        for response in (b'{"contract":"ok"}', BUDGET.Invalid()):
+            with self.subTest(response=type(response).__name__), \
+                 mock.patch.object(BUDGET, "bounded_output", side_effect=[b"b" * 64 + b"\n", response, b""]) as output, \
+                 mock.patch.object(BUDGET.subprocess, "run") as cleanup:
+                cleanup.return_value.returncode = 0
+                if isinstance(response, Exception):
+                    with self.assertRaises(BUDGET.Invalid):
+                        BUDGET.probe(image, "nwq-abcdef1234", {"contract": "ok"})
+                else:
+                    BUDGET.probe(image, "nwq-abcdef1234", {"contract": "ok"})
+                create, start, verify = [call.args[0] for call in output.call_args_list]
+                self.assertEqual(create[:2], ["docker", "create"])
+                name = create[create.index("--name") + 1]
+                self.assertEqual(start, ["docker", "start", "--attach", name])
+                self.assertEqual(cleanup.call_args.args[0], ["docker", "rm", "--force", name])
+                self.assertEqual(verify, ["docker", "ps", "--all", "--quiet", "--filter", "name=^/" + name + "$"])
+                self.assertLess(output.call_args_list[1].args[1], 10)
+
+    def test_unconfirmed_create_or_failed_cleanup_is_not_capability_refusal(self):
+        image = "registry/service@sha256:" + "a" * 64
+        for responses in ([BUDGET.Invalid(), b""], [b"invalid-id", b""],
+                          [b"b" * 64, BUDGET.Invalid(), b"remaining-container"],
+                          [b"b" * 64, BUDGET.Invalid(), BUDGET.Invalid()]):
+            with self.subTest(responses=len(responses)), \
+                 mock.patch.object(BUDGET, "bounded_output", side_effect=responses), \
+                 mock.patch.object(BUDGET.subprocess, "run") as cleanup:
+                with self.assertRaises(OSError):
+                    BUDGET.probe(image, "nwq-abcdef1234", {})
+                cleanup.assert_called_once()
+
+    def test_failed_removal_is_unproven_even_when_query_is_empty(self):
+        with mock.patch.object(BUDGET, "bounded_output", side_effect=[b"b" * 64, b"{}", b""]) as output, \
+             mock.patch.object(BUDGET.subprocess, "run") as cleanup:
+            cleanup.return_value.returncode = 1
+            with self.assertRaises(OSError):
+                BUDGET.probe("registry/service@sha256:" + "a" * 64, "nwq-abcdef1234", {})
+            self.assertEqual(output.call_count, 3)
 
 
 if __name__ == "__main__":

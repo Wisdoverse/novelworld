@@ -115,6 +115,12 @@ done
 [ -n "$manifest" ] ||
   fail 'usage: restore.sh --manifest FILE [--newer-artifact M]... [--decisions FILE]'
 [ -n "$env_file" ] || env_file=$repo_root/.env
+# A database rewind also rewinds allowance. This mode cannot restore-and-resume,
+# even after an uncertain attempt; stop/seal it and start a separate registration.
+if [[ -n "${LLM_DIAGNOSTIC_BUDGET_ID:-}${LLM_DIAGNOSTIC_BUDGET_LIMITS:-}" ]] \
+  || { [[ -r "$env_file" ]] && grep -Eq '^[[:space:]]*(export[[:space:]]+)?LLM_DIAGNOSTIC_BUDGET_(ID|LIMITS)[[:space:]]*=[[:space:]]*[^[:space:]]' "$env_file"; }; then
+  fail 'diagnostic budget cannot restore and resume'
+fi
 [ -n "${BACKUP_ENCRYPTION_KEY:-}" ] || fail 'BACKUP_ENCRYPTION_KEY is required to decrypt the artifact'
 [ "${#BACKUP_ENCRYPTION_KEY}" -ge 32 ] || fail 'BACKUP_ENCRYPTION_KEY must be at least 32 characters'
 [ -f "$env_file" ] ||

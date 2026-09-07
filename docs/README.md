@@ -121,3 +121,4 @@ Accepted records:
 - [ADR 0001: Source-bound shared rules and server-owned D20 resolution](./adr/0001-source-bound-advanced-game-rules.md)
 - [ADR 0002: L0-L4 minimal bootstrap and deferred runtime configuration](./adr/0002-minimal-bootstrap-and-deferred-runtime-configuration.md)
 - [ADR 0003: H4 private-preview journey qualification](./adr/0003-h4-journey-qualification.md)
+- [ADR 0004: Durable diagnostic budget authority (implementation in progress)](./adr/0004-durable-diagnostic-budget.md)

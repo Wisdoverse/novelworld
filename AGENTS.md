@@ -250,6 +250,8 @@ Schema lives in `infra/postgres/init.sql`. Key tables:
 | `world_states` | JSONB world state per reader per novel |
 | `reading_progress` | Chapter position, reader identity |
 | `refresh_tokens` | JWT refresh token storage |
+| `diagnostic_llm_budgets` | User-service-owned immutable opt-in Diagnostic allowance |
+| `diagnostic_llm_attempts` | Per-attempt reservations and exact idempotent usage settlements |
 
 IDs are UUID v4 by default. The committed-world-turn journey-memory projection
 is the explicit exception: it uses a private, fixed UUID v5 namespace so a
@@ -277,6 +279,15 @@ unconfigured non-interactive launches fail closed. Bootstrap/runtime surfaces:
 `LLM_API_KEY` is optional: set it for an operator-managed environment override,
 or leave it empty, create the first administrator without a provider call, and
 complete DeepSeek/OpenAI setup later in protected Settings.
+
+`LLM_DIAGNOSTIC_BUDGET_ID` / `LLM_DIAGNOSTIC_BUDGET_LIMITS` are only for an
+explicitly registered isolated Diagnostic; leave both empty for ordinary use.
+The supported cold release provisions once. Every paying service reserves
+before provider I/O; restart never creates or refills allowance. Unknown usage
+retains its reservation, and control/evidence failures never trigger provider
+retry or successful SSE completion. Image/embedding calls and restore/resume
+are refused in this mode. See [ADR 0004](docs/adr/0004-durable-diagnostic-budget.md)
+for exact limits and evidence boundaries; the feature does not authorize a paid run.
 
 `S3_ENABLED` is optional. When true, configure `S3_BUCKET` and `S3_REGION`;
 `S3_ENDPOINT` and path-style addressing support S3-compatible providers. Use

@@ -6,6 +6,8 @@
     { "name": "refresh_tokens", "kind": "table", "owner": "user-service" },
     { "name": "runtime_llm_config", "kind": "table", "owner": "user-service" },
     { "name": "user_llm_configs", "kind": "table", "owner": "user-service" },
+    { "name": "diagnostic_llm_budgets", "kind": "table", "owner": "user-service" },
+    { "name": "diagnostic_llm_attempts", "kind": "table", "owner": "user-service" },
 
     { "name": "novels", "kind": "table", "owner": "novel-service" },
     { "name": "user_novels", "kind": "table", "owner": "novel-service" },

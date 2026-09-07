@@ -1,8 +1,11 @@
 use std::{sync::Arc, time::Duration};
 
+use crate::diagnostic_budget::{Binding, BudgetClient, BudgetControlError};
 use anyhow::{anyhow, Result};
+use futures::StreamExt;
 use serde::Deserialize;
 use tokio::sync::OnceCell;
+use tokio::time::Instant;
 
 use crate::{ChatRequest, ChatResponse, ChatStream, LlmClient};
 
@@ -18,6 +21,7 @@ impl std::fmt::Display for NotConfigured {
 impl std::error::Error for NotConfigured {}
 
 pub struct RuntimeLlmClient {
+    budget: std::result::Result<Option<Arc<BudgetClient>>, BudgetControlError>,
     source: ConfigSource,
     resolved: OnceCell<Arc<ResolvedClient>>,
 }
@@ -49,6 +53,7 @@ struct ResolvedClient {
 #[derive(Deserialize)]
 struct RemoteConfig {
     contract: u8,
+    diagnostic_budget: Option<Binding>,
     api_url: String,
     model: String,
     api_key: String,
@@ -66,11 +71,9 @@ impl RuntimeLlmClient {
         let allow_insecure_http = std::env::var("LLM_ALLOW_INSECURE_HTTP")
             .ok()
             .is_some_and(|value| value.eq_ignore_ascii_case("true"));
-        Ok(Self::remote_with_http_policy(
-            user_service_url,
-            token,
-            allow_insecure_http,
-        ))
+        let instance = Self::remote_with_http_policy(user_service_url, token, allow_insecure_http);
+        instance.budget.as_ref().map_err(|error| *error)?;
+        Ok(instance)
     }
 
     pub fn static_config(
@@ -80,6 +83,7 @@ impl RuntimeLlmClient {
         thinking_enabled: bool,
     ) -> Self {
         Self {
+            budget: BudgetClient::from_environment(),
             source: ConfigSource::Static(RuntimeConfig {
                 provider: provider_for_url(&api_url).into(),
                 api_url,
@@ -96,9 +100,20 @@ impl RuntimeLlmClient {
         token: String,
         allow_insecure_http: bool,
     ) -> Self {
+        let budget = BudgetClient::from_environment();
+        let client = if matches!(&budget, Ok(Some(_))) {
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
+                .build()
+                .expect("valid static runtime config HTTP policy")
+        } else {
+            reqwest::Client::new()
+        };
         Self {
+            budget,
             source: ConfigSource::Remote {
-                client: reqwest::Client::new(),
+                client,
                 user_service_url: user_service_url.trim_end_matches('/').into(),
                 token,
                 allow_insecure_http,
@@ -108,6 +123,7 @@ impl RuntimeLlmClient {
     }
 
     async fn resolved(&self, runtime_user_id: Option<&str>) -> Result<Arc<ResolvedClient>> {
+        let budget = self.budget.as_ref().map_err(|error| *error)?;
         if let ConfigSource::Remote {
             client,
             user_service_url,
@@ -119,10 +135,29 @@ impl RuntimeLlmClient {
                 .send()
                 .await?;
             validate_remote_status(response.status())?;
-            return Ok(Arc::new(build_resolved(validate_remote_config(
-                response.json().await?,
-                *allow_insecure_http,
-            )?)));
+            let config = if budget.is_some() {
+                let mut body = Vec::new();
+                let mut stream = response.bytes_stream();
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.map_err(|_| BudgetControlError)?;
+                    // Config includes the bounded API key; it is not the credential-free 4 KiB budget API.
+                    if body.len().saturating_add(chunk.len()) > 8192 {
+                        return Err(BudgetControlError.into());
+                    }
+                    body.extend_from_slice(&chunk);
+                }
+                serde_json::from_slice(&body).map_err(|_| BudgetControlError)?
+            } else {
+                response.json().await?
+            };
+            return Ok(Arc::new(build_resolved(
+                validate_remote_config(
+                    config,
+                    *allow_insecure_http,
+                    budget.as_ref().map(|budget| budget.binding()),
+                )?,
+                budget.clone(),
+            )));
         }
 
         self.resolved
@@ -137,28 +172,60 @@ impl RuntimeLlmClient {
                     },
                     ConfigSource::Remote { .. } => unreachable!(),
                 };
-                Ok(Arc::new(build_resolved(config)))
+                Ok(Arc::new(build_resolved(config, budget.clone())))
             })
             .await
             .cloned()
     }
 
     pub async fn chat(&self, mut request: ChatRequest) -> Result<ChatResponse> {
-        let resolved = self.resolved(request.runtime_user_id.as_deref()).await?;
+        let deadline = self
+            .budget
+            .as_ref()
+            .map_err(|error| *error)?
+            .as_ref()
+            .map(|_| Instant::now() + Duration::from_secs(300));
+        let resolved = self
+            .resolved_with_deadline(request.runtime_user_id.as_deref(), deadline)
+            .await?;
         request.model.clone_from(&resolved.model);
         if request.thinking.is_none() {
             request.thinking = Some(resolved.thinking_enabled);
         }
-        resolved.client.chat(request).await
+        resolved.client.chat_with_deadline(request, deadline).await
     }
 
     pub async fn chat_stream(&self, mut request: ChatRequest) -> Result<ChatStream> {
-        let resolved = self.resolved(request.runtime_user_id.as_deref()).await?;
+        let deadline = self
+            .budget
+            .as_ref()
+            .map_err(|error| *error)?
+            .as_ref()
+            .map(|_| Instant::now() + Duration::from_secs(300));
+        let resolved = self
+            .resolved_with_deadline(request.runtime_user_id.as_deref(), deadline)
+            .await?;
         request.model.clone_from(&resolved.model);
         if request.thinking.is_none() {
             request.thinking = Some(resolved.thinking_enabled);
         }
-        resolved.client.chat_stream(request).await
+        resolved
+            .client
+            .chat_stream_with_deadline(request, deadline)
+            .await
+    }
+
+    async fn resolved_with_deadline(
+        &self,
+        user_id: Option<&str>,
+        deadline: Option<Instant>,
+    ) -> Result<Arc<ResolvedClient>> {
+        match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, self.resolved(user_id))
+                .await
+                .map_err(|_| BudgetControlError)?,
+            None => self.resolved(user_id).await,
+        }
     }
 
     /// Generate prose where the output itself is the product. Reasoning mode
@@ -239,10 +306,11 @@ pub fn production_json_request(operation: crate::LlmOperation, prompt: &str) -> 
         .json()
 }
 
-fn build_resolved(config: RuntimeConfig) -> ResolvedClient {
+fn build_resolved(config: RuntimeConfig, budget: Option<Arc<BudgetClient>>) -> ResolvedClient {
     let model = format!("{}/{}", config.provider, config.model);
-    let client =
+    let mut client =
         LlmClient::new().with_openai_compatible(&config.provider, config.api_key, config.api_url);
+    client.budget = Ok(budget);
     ResolvedClient {
         client,
         model,
@@ -253,13 +321,31 @@ fn build_resolved(config: RuntimeConfig) -> ResolvedClient {
 fn validate_remote_config(
     config: RemoteConfig,
     allow_insecure_http: bool,
+    binding: Option<&Binding>,
 ) -> Result<RuntimeConfig> {
+    let contract_valid = match binding {
+        None => config.contract == 2 && config.diagnostic_budget.is_none(),
+        Some(expected) => {
+            config.contract == 3 && config.diagnostic_budget.as_ref() == Some(expected)
+        }
+    };
+    if binding.is_some() {
+        let profile = crate::diagnostic_budget::profile();
+        let origin = crate::diagnostic_budget::root_url(&config.api_url)?;
+        if !contract_valid
+            || origin.origin().ascii_serialization() != profile.origin
+            || config.model != profile.model
+            || config.thinking_enabled
+        {
+            return Err(BudgetControlError.into());
+        }
+    }
     let transport_allowed = reqwest::Url::parse(&config.api_url)
         .ok()
         .is_some_and(|url| {
             url.scheme() == "https" || (allow_insecure_http && url.scheme() == "http")
         });
-    if config.contract != 2
+    if !contract_valid
         || !transport_allowed
         || config.model.trim().is_empty()
         || config.model.len() > 200
@@ -306,19 +392,120 @@ fn provider_for_url(api_url: &str) -> &'static str {
 mod tests {
     use super::*;
 
+    fn diagnostic_binding() -> Binding {
+        Binding::new(uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap())
+    }
+
+    fn ordinary_config(api_url: &str) -> RemoteConfig {
+        RemoteConfig {
+            contract: 2,
+            diagnostic_budget: None,
+            api_url: api_url.into(),
+            model: "ordinary-model".into(),
+            api_key: "secret".into(),
+            thinking_enabled: false,
+        }
+    }
+
+    fn budget_config(binding: &Binding) -> RemoteConfig {
+        let profile = crate::diagnostic_budget::profile();
+        RemoteConfig {
+            contract: 3,
+            diagnostic_budget: Some(binding.clone()),
+            api_url: profile.origin.clone(),
+            model: profile.model.clone(),
+            api_key: "secret".into(),
+            thinking_enabled: false,
+        }
+    }
+
     #[test]
     fn remote_configuration_transport_is_fail_closed_by_default() {
         let config = |api_url: &str| RemoteConfig {
             contract: 2,
+            diagnostic_budget: None,
             api_url: api_url.into(),
             model: "model".into(),
             api_key: "secret".into(),
             thinking_enabled: false,
         };
 
-        assert!(validate_remote_config(config("http://llm-stub:18080"), false).is_err());
-        assert!(validate_remote_config(config("http://llm-stub:18080"), true).is_ok());
-        assert!(validate_remote_config(config("https://api.example.com"), false).is_ok());
+        assert!(validate_remote_config(config("http://llm-stub:18080"), false, None).is_err());
+        assert!(validate_remote_config(config("http://llm-stub:18080"), true, None).is_ok());
+        assert!(validate_remote_config(config("https://api.example.com"), false, None).is_ok());
+    }
+
+    #[test]
+    fn remote_configuration_contracts_are_bound_to_mode() {
+        let binding = diagnostic_binding();
+        assert!(
+            validate_remote_config(ordinary_config("https://api.example.com"), false, None).is_ok()
+        );
+        assert!(validate_remote_config(budget_config(&binding), false, Some(&binding)).is_ok());
+
+        assert!(validate_remote_config(budget_config(&binding), false, None).is_err());
+        assert!(validate_remote_config(
+            ordinary_config("https://api.example.com"),
+            false,
+            Some(&binding)
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn budget_remote_configuration_rejects_binding_and_profile_mismatches() {
+        let binding = diagnostic_binding();
+        let other_binding =
+            Binding::new(uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap());
+
+        let wrong_budget_id = budget_config(&other_binding);
+        assert!(validate_remote_config(wrong_budget_id, false, Some(&binding)).is_err());
+
+        let mut wrong_contract = budget_config(&binding);
+        wrong_contract.contract = 2;
+        assert!(validate_remote_config(wrong_contract, false, Some(&binding)).is_err());
+
+        let mut wrong_profile = budget_config(&binding);
+        wrong_profile.diagnostic_budget.as_mut().unwrap().profile = "other-profile".into();
+        assert!(validate_remote_config(wrong_profile, false, Some(&binding)).is_err());
+
+        let mut wrong_digest = budget_config(&binding);
+        wrong_digest
+            .diagnostic_budget
+            .as_mut()
+            .unwrap()
+            .profile_sha256 =
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into();
+        assert!(validate_remote_config(wrong_digest, false, Some(&binding)).is_err());
+    }
+
+    #[test]
+    fn budget_remote_configuration_remains_strict_with_insecure_http_enabled() {
+        let binding = diagnostic_binding();
+        for (api_url, model, thinking_enabled) in [
+            (
+                "http://api.deepseek.com/",
+                "deepseek-v4-flash-vision-exp",
+                false,
+            ),
+            (
+                "https://api.deepseek.com/v1",
+                "deepseek-v4-flash-vision-exp",
+                false,
+            ),
+            ("https://api.deepseek.com/", "other-model", false),
+            (
+                "https://api.deepseek.com/",
+                "deepseek-v4-flash-vision-exp",
+                true,
+            ),
+        ] {
+            let mut config = budget_config(&binding);
+            config.api_url = api_url.into();
+            config.model = model.into();
+            config.thinking_enabled = thinking_enabled;
+            assert!(validate_remote_config(config, true, Some(&binding)).is_err());
+        }
     }
 
     #[test]

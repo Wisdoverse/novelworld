@@ -204,6 +204,25 @@ jobs:
         run: python3 tools/capacity/run.py --self-test
       - name: Test
         run: cargo test --workspace --exclude integration-tests --locked
+      - name: Offline diagnostic budget lifecycle
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/e2e/diagnostic_budget_lifecycle_test.py
+          python3 tests/e2e/diagnostic_release_docker_spy_test.py
+          cargo build --locked -p user-service -p novel-service -p agent-service -p narrative-service
+          cargo build --locked -p llm-client --example diagnostic_budget_driver
+          python3 - <<'PY'
+          import runpy
+          import subprocess
+          fixture = runpy.run_path("tests/e2e/diagnostic_budget_lifecycle.py")
+          for name in ("PYTHON_IMAGE", "PG_IMAGE", "REGISTRY_IMAGE"):
+              subprocess.run(["docker", "pull", fixture[name]], check=True, timeout=180)
+          PY
+          python3 tests/e2e/diagnostic_budget_lifecycle.py \
+            --owner-binary target/debug/user-service \
+            --client-binary target/debug/examples/diagnostic_budget_driver
       - name: Clippy
         run: cargo clippy --workspace --exclude integration-tests --all-targets --locked -- -D warnings
       - name: Audit dependencies for known vulnerabilities
@@ -351,6 +370,24 @@ jobs:
           docker compose -f docker-compose.yml up -d --build --wait --wait-timeout 180
           test -z "$(docker ps -a --filter name=^/novel-redis$ --format '{{.Names}}')"
           test "$(docker exec novel-agent-service printenv CACHE_MODE)" = postgres
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify release-built diagnostic lifecycle and release refusal
+        timeout-minutes: 15
+        run: |
+          cargo build --locked -p llm-client --example diagnostic_budget_driver
+          python3 - <<'PY'
+          import json, pathlib, runpy, subprocess, tempfile
+          script = "tests/e2e/diagnostic_budget_lifecycle.py"
+          fixture = runpy.run_path(script)
+          for name in ("PYTHON_IMAGE", "PG_IMAGE", "REGISTRY_IMAGE"):
+              subprocess.run(["docker", "pull", fixture[name]], check=True, timeout=180)
+          with tempfile.TemporaryDirectory(prefix="nwq-capability-") as directory:
+              images = pathlib.Path(directory) / "images.json"
+              images.write_text(json.dumps({name: f"novel-world-{name}:local" for name in fixture["SERVICES"]}))
+              subprocess.run(["python3", script, "--runtime-images", str(images),
+                              "--client-binary", "target/debug/examples/diagnostic_budget_driver"], check=True)
+          PY
       - name: Verify public probes and rate-limit exemption
         run: |
           docker exec novel-nginx nginx -T 2>&1 | grep -F 'limit_req_zone $binary_remote_addr zone=api_per_client:'

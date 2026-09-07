@@ -32,6 +32,7 @@ pub struct ImageClient {
     api_url: String,
     api_key: String,
     model: String,
+    diagnostic_denied: bool,
 }
 
 impl ImageClient {
@@ -45,6 +46,10 @@ impl ImageClient {
             api_url,
             api_key,
             model,
+            diagnostic_denied: !matches!(
+                llm_client::diagnostic_budget::Binding::from_environment(),
+                Ok(None)
+            ),
         }
     }
 }
@@ -52,7 +57,7 @@ impl ImageClient {
 #[async_trait]
 impl ImagePort for ImageClient {
     async fn generate(&self, prompt: &str) -> Result<String> {
-        if self.api_key.trim().is_empty() {
+        if self.api_key.trim().is_empty() || self.diagnostic_denied {
             bail!("Image generation is not configured");
         }
         let req = ImageRequest {
@@ -93,6 +98,7 @@ impl ImagePort for ImageClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::TcpListener;
 
     #[tokio::test]
     async fn empty_key_fails_before_outbound_io() {
@@ -109,6 +115,33 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             "Image generation is not configured"
+        );
+    }
+
+    #[tokio::test]
+    async fn diagnostic_budget_denial_fails_before_outbound_io() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut client = ImageClient::new(
+            format!("http://{address}"),
+            "misconfigured-but-nonempty".into(),
+            "test".into(),
+        );
+        client.diagnostic_denied = true;
+
+        assert_eq!(
+            client
+                .generate("private prompt")
+                .await
+                .unwrap_err()
+                .to_string(),
+            "Image generation is not configured"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err(),
+            "diagnostic denial must not connect to the image API"
         );
     }
 }

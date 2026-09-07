@@ -8,8 +8,28 @@ use super::{
 };
 use crate::types::*;
 
+/// The HTTP attempt succeeded, but its response cannot support settlement.
+/// Keep the original error in the chain for ordinary-mode retry compatibility.
+#[derive(Debug)]
+pub(crate) struct InvalidCompletion(String);
+
+impl std::fmt::Display for InvalidCompletion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for InvalidCompletion {}
+
+fn invalid_completion(error: anyhow::Error) -> anyhow::Error {
+    let message = error.to_string();
+    error.context(InvalidCompletion(message))
+}
+
 pub struct OpenAIProvider {
     base_url: String,
+    #[cfg(test)]
+    pub(crate) test_dispatch_base: Option<String>,
 }
 
 /// Reuses the transport's envelope and usage schema for qualification checks.
@@ -21,10 +41,48 @@ pub fn chat_completion_response_metadata(body: &[u8]) -> Result<(String, Option<
 }
 
 impl OpenAIProvider {
+    pub(crate) fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    fn chat_body(&self, request: &ChatRequest, stream: bool) -> OpenAIRequest {
+        OpenAIRequest {
+            model: request.model.clone(),
+            messages: request.messages.clone(),
+            temperature: request.temperature,
+            max_tokens: request.max_tokens,
+            stream,
+            stream_options: stream.then_some(StreamOptions {
+                include_usage: true,
+            }),
+            response_format: (!stream && request.json_mode)
+                .then(|| serde_json::json!({"type": "json_object"})),
+            thinking: self.thinking_control(request.thinking),
+        }
+    }
+
+    pub(crate) fn chat_wire_bytes(&self, request: &ChatRequest) -> Result<Vec<u8>> {
+        Ok(serde_json::to_vec(
+            &self.chat_body(request, request.stream),
+        )?)
+    }
+
     pub fn new(base_url: Option<&str>) -> Self {
         Self {
             base_url: base_url.unwrap_or("https://api.openai.com").to_string(),
+            #[cfg(test)]
+            test_dispatch_base: None,
         }
+    }
+
+    fn endpoint(&self, path: &str) -> String {
+        // Test binaries alone can route a validated official-origin request to a loopback stub.
+        // No environment switch, production field, or insecure provider exception is compiled.
+        #[cfg(test)]
+        if let Some(base) = &self.test_dispatch_base {
+            return format!("{base}{path}");
+        }
+        format!("{}{path}", self.base_url)
     }
 
     fn is_deepseek(&self) -> bool {
@@ -342,7 +400,7 @@ impl OpenAIProvider {
             };
             let (hk, hv) = self.auth_header(api_key);
             let response = client
-                .post(format!("{}/v1/responses", self.base_url))
+                .post(self.endpoint("/v1/responses"))
                 .header(&hk, &hv)
                 .json(&body)
                 .send()
@@ -381,24 +439,11 @@ impl OpenAIProvider {
             });
         }
 
-        let body = OpenAIRequest {
-            model: request.model.clone(),
-            messages: request.messages.clone(),
-            temperature: request.temperature,
-            max_tokens: request.max_tokens,
-            stream: false,
-            stream_options: None,
-            response_format: if request.json_mode {
-                Some(serde_json::json!({"type": "json_object"}))
-            } else {
-                None
-            },
-            thinking: self.thinking_control(request.thinking),
-        };
+        let body = self.chat_body(request, false);
 
         let (hk, hv) = self.auth_header(api_key);
         let response = client
-            .post(format!("{}/v1/chat/completions", self.base_url))
+            .post(self.endpoint("/v1/chat/completions"))
             .header(&hk, &hv)
             .json(&body)
             .send()
@@ -408,10 +453,24 @@ impl OpenAIProvider {
             return Err(response_error_with_evidence(response, Some(request)).await);
         }
 
-        let resp: OpenAIResponse = json_response_with_evidence(response, Some(request)).await?;
+        let resp: OpenAIResponse = json_response_with_evidence(response, Some(request))
+            .await
+            .map_err(invalid_completion)?;
 
         let content = response_content(&resp);
-        let usage = resp.usage.map(OpenAIUsage::into_usage).transpose()?;
+        let complete_empty = resp.choices.first().is_some_and(|choice| {
+            choice.finish_reason.as_deref() == Some("stop")
+                && choice
+                    .message
+                    .content
+                    .as_ref()
+                    .is_none_or(|content| content.trim().is_empty())
+        });
+        let usage = resp
+            .usage
+            .map(OpenAIUsage::into_usage)
+            .transpose()
+            .map_err(invalid_completion)?;
         let content = match content {
             Ok(content) => content,
             Err(_) if request.json_mode => {
@@ -421,10 +480,11 @@ impl OpenAIProvider {
                 return Err(JsonModeEmpty {
                     model: resp.model,
                     usage,
+                    complete_empty,
                 }
                 .into());
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(invalid_completion(error)),
         };
 
         Ok(ChatResponse {
@@ -451,7 +511,7 @@ impl OpenAIProvider {
             };
             let (hk, hv) = self.auth_header(api_key);
             let response = client
-                .post(format!("{}/v1/responses", self.base_url))
+                .post(self.endpoint("/v1/responses"))
                 .header(&hk, &hv)
                 .json(&body)
                 .send()
@@ -465,22 +525,11 @@ impl OpenAIProvider {
             ));
         }
 
-        let body = OpenAIRequest {
-            model: request.model.clone(),
-            messages: request.messages.clone(),
-            temperature: request.temperature,
-            max_tokens: request.max_tokens,
-            stream: true,
-            stream_options: Some(StreamOptions {
-                include_usage: true,
-            }),
-            response_format: None,
-            thinking: self.thinking_control(request.thinking),
-        };
+        let body = self.chat_body(request, true);
 
         let (hk, hv) = self.auth_header(api_key);
         let response = client
-            .post(format!("{}/v1/chat/completions", self.base_url))
+            .post(self.endpoint("/v1/chat/completions"))
             .header(&hk, &hv)
             .json(&body)
             .send()
@@ -506,7 +555,7 @@ impl OpenAIProvider {
 
         let (hk, hv) = self.auth_header(api_key);
         let response = client
-            .post(format!("{}/v1/embeddings", self.base_url))
+            .post(self.endpoint("/v1/embeddings"))
             .header(&hk, &hv)
             .json(&body)
             .send()

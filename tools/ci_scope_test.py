@@ -131,7 +131,7 @@ def output_for(event, event_name, paths, full):
 
 def gate_script():
     workflow = Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
-    source = workflow.read_text()
+    source = workflow.read_text().split("\n  required:\n", 1)[1]
     return textwrap.dedent(source.split("          python3 - <<'PY'\n", 1)[1].split("\n          PY\n", 1)[0])
 
 def gate(results):
