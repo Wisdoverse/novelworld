@@ -248,6 +248,10 @@ Private output retains forwarding-process recovery metadata and the pre-adoption
 Docker inventory. A failed stop gets one bounded cleanup retry; unproven removal
 still fails the fixture. Production Compose Smoke runs this gate after the
 existing release-image dispatch/refusal matrix, without publishing private output.
+Cold-adoption stdout reports only the zero/nonzero case and fixed boolean stage
+presence/terminal flags after the journey's terminal handling, including failure;
+private reports and identifiers
+remain local. These flags do not replace the fixture's blocking assertions.
 Outer fallback cleanup shares a 60-second deadline, with Docker calls capped at
 10 seconds each. CI sends a soft TERM after 15 minutes, reserving 10 minutes for
 terminal handling before a hard kill; SIGKILL/host loss still has no cleanup

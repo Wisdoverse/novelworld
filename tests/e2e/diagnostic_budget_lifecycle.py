@@ -54,6 +54,36 @@ def require(condition, code):
         raise Failure(code)
 
 
+def report_cold_adoption_status(journey, zero):
+    """Best-effort stage presence only; never publish private diagnostic data."""
+    status = {"case": "zero" if zero else "nonzero",
+              "base_images_recorded": False,
+              **{name + "_snapshot_present": False
+                 for name in ("initial", "settings", "restart", "terminal")},
+              "payers_stopped": False, "metrics_reconciled": False,
+              "existing_stack_unchanged": False}
+    try:
+        private = journey.private_report
+        images = private.get("release_images", {})
+        snapshots = private.get("diagnostic_budget_snapshots", {})
+        environment = journey.report.get("environment", {})
+        status.update(
+            base_images_recorded=isinstance(images, dict) and "base" in images,
+            payers_stopped=private.get("diagnostic_payers_stopped") is True,
+            metrics_reconciled=private.get("diagnostic_metrics_reconciled") is True,
+            existing_stack_unchanged=isinstance(environment, dict)
+                and environment.get("existing_user_stack_unchanged") is True,
+            **{name + "_snapshot_present": isinstance(snapshots, dict) and name in snapshots
+               for name in ("initial", "settings", "restart", "terminal")})
+    except (AttributeError, TypeError):
+        pass
+    try:
+        print(json.dumps(status, sort_keys=True), flush=True)
+    except Exception:
+        # A broken CI output pipe must not replace the original failure or cleanup.
+        pass
+
+
 def ingress_address(network, project):
     configurations = [item for item in network["IPAM"]["Config"]
                       if ipaddress.ip_network(item["Subnet"]).version == 4]
@@ -658,6 +688,7 @@ class Lifecycle:
             try:
                 require(runner.run_diagnostic(journey) == 1, "partial_journey_must_not_pass")
             finally:
+                report_cold_adoption_status(journey, zero)
                 self.stop_ingresses()
             require(set(journey.diagnostic_failures) <= {
                 "response_model_observation_count_mismatch", "llm_budget_failed", "diagnostic_cleanup_residue",

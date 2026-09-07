@@ -1,6 +1,8 @@
 import importlib.util
 import ipaddress
 import os
+import contextlib
+import io
 from pathlib import Path
 import subprocess
 import sys
@@ -430,6 +432,86 @@ class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
                                side_effect=[LIFECYCLE.Failure("ingress"), None]) as stop:
             lifecycle.cleanup()
         self.assertEqual(stop.call_count, 2)
+
+    def test_cold_adoption_status_is_private_boolean_summary_and_best_effort(self):
+        def journey(complete=True):
+            private = {
+                "release_images": {"base": {"secret_id": "private-image-id"}},
+                "diagnostic_budget_snapshots": {
+                    name: {"private_budget_id": "private-budget-id"}
+                    for name in ("initial", "settings", "restart", "terminal")
+                },
+                "diagnostic_payers_stopped": True if complete else "yes",
+                "diagnostic_metrics_reconciled": True if complete else 1,
+                "unknown_private_field": "must-not-be-emitted",
+            }
+            report = {"environment": {
+                "existing_user_stack_unchanged": True if complete else "yes",
+                "internal_id": "private-report-id",
+            }}
+            return SimpleNamespace(private_report=private, report=report)
+
+        def read_line(text):
+            return next(json.loads(line) for line in text.splitlines()
+                        if line.lstrip().startswith("{"))
+
+        expected_keys = {
+            "case", "base_images_recorded", "initial_snapshot_present",
+            "settings_snapshot_present", "restart_snapshot_present",
+            "terminal_snapshot_present", "payers_stopped", "metrics_reconciled",
+            "existing_stack_unchanged",
+        }
+        for case in ("zero", "nonzero"):
+            with self.subTest(case=case):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    LIFECYCLE.report_cold_adoption_status(journey(), case == "zero")
+                encoded = output.getvalue()
+                summary = read_line(encoded)
+                self.assertEqual(set(summary), expected_keys)
+                self.assertEqual(summary["case"], case)
+                self.assertTrue(all(isinstance(summary[key], bool) for key in expected_keys - {"case"}))
+                self.assertNotIn("private-image-id", encoded)
+                self.assertNotIn("private-budget-id", encoded)
+                self.assertNotIn("must-not-be-emitted", encoded)
+
+        for malformed in (
+            SimpleNamespace(private_report={}, report={}),
+            SimpleNamespace(private_report={"release_images": [], "diagnostic_budget_snapshots": "bad",
+                                            "diagnostic_payers_stopped": True,
+                                            "diagnostic_metrics_reconciled": True},
+                            report={"environment": {"existing_user_stack_unchanged": True}}),
+        ):
+            with self.subTest(malformed=malformed):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    LIFECYCLE.report_cold_adoption_status(malformed, False)
+                summary = read_line(output.getvalue())
+                self.assertEqual(set(summary), expected_keys)
+                if not malformed.private_report:
+                    self.assertFalse(any(summary[key] for key in expected_keys - {"case"}))
+                else:
+                    self.assertFalse(summary["base_images_recorded"])
+                    self.assertFalse(any(summary[name + "_snapshot_present"]
+                                         for name in ("initial", "settings", "restart", "terminal")))
+                    self.assertTrue(summary["payers_stopped"])
+                    self.assertTrue(summary["metrics_reconciled"])
+                    self.assertTrue(summary["existing_stack_unchanged"])
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            LIFECYCLE.report_cold_adoption_status(journey(complete=False), False)
+        summary = read_line(output.getvalue())
+        self.assertTrue(all(isinstance(summary[key], bool) for key in expected_keys - {"case"}))
+        self.assertTrue(summary["base_images_recorded"])
+        self.assertTrue(all(summary[name + "_snapshot_present"]
+                            for name in ("initial", "settings", "restart", "terminal")))
+        self.assertFalse(summary["payers_stopped"])
+        self.assertFalse(summary["metrics_reconciled"])
+        self.assertFalse(summary["existing_stack_unchanged"])
+
+        with mock.patch("builtins.print", side_effect=BrokenPipeError):
+            LIFECYCLE.report_cold_adoption_status(journey(), False)
 
     def test_cleanup_docker_calls_are_clamped_to_remaining_deadline(self):
         lifecycle = self.ingress_lifecycle()
