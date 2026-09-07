@@ -1513,10 +1513,14 @@ class Journey:
         temporary_root = Path(self.runtime_temp.name)
         temporary_root.chmod(0o700)
         self.runtime_root = temporary_root / "repo"
-        self.release_tool = temporary_root / "release.sh"
-        self.release_tool.write_bytes(
-            (self.root / "infra" / "docker" / "release.sh").read_bytes()
-        )
+        # Keep the supported release adapter/profile outside the changing checkout.
+        tool_root = temporary_root / "release-tool"
+        for relative in ("infra/docker/release.sh", "infra/docker/diagnostic_budget.py",
+                         "tools/llm-budget/diagnostic-v1.json"):
+            target = tool_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((self.root / relative).read_bytes())
+        self.release_tool = tool_root / "infra/docker/release.sh"
         self.release_tool.chmod(0o700)
         self.release_state = temporary_root / "release-state"
         run(
@@ -1579,6 +1583,13 @@ class Journey:
     def compose(self, *args: str, capture: bool = True, check: bool = True) -> str:
         if not self.compose_env or self.runtime_root is None:
             raise QualificationFailure("compose_environment_missing")
+        if args and args[0] in ("up", "start", "restart", "run", "create"):
+            if self.release_tool is None:
+                raise QualificationFailure("release_environment_missing")
+            # Shared release preflight is a no-op for ordinary mode. Stopping and
+            # cleanup must remain possible even if an active budget cannot proceed.
+            run([self.release_shell, str(self.release_tool), "preflight", str(self.compose_manifest())],
+                cwd=self.runtime_root, env=self.compose_env)
         return run(
             [
                 "docker",

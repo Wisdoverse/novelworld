@@ -1,4 +1,5 @@
 use anyhow::Result;
+pub mod diagnostic_budget;
 use async_trait::async_trait;
 use uuid::Uuid;
 

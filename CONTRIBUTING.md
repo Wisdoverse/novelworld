@@ -168,6 +168,60 @@ database grants, complete timeout/drain behavior, recovery drills, alerting,
 capacity, multi-replica safety, horizontal scaling, or public deployment.
 Those claims require their own runtime or migration evidence.
 
+Changes to diagnostic LLM dispatch, its owner ledger, or lifecycle fixture also
+run the offline budget boundary gate on Linux with Docker and OpenSSL:
+
+```bash
+cargo build --locked -p user-service -p novel-service -p agent-service -p narrative-service
+cargo build --locked -p llm-client --example diagnostic_budget_driver
+python3 tests/e2e/diagnostic_budget_lifecycle_test.py
+python3 tests/e2e/diagnostic_release_docker_spy_test.py
+python3 - <<'PY'
+import runpy
+import subprocess
+fixture = runpy.run_path("tests/e2e/diagnostic_budget_lifecycle.py")
+for name in ("PYTHON_IMAGE", "PG_IMAGE", "REGISTRY_IMAGE"):
+    subprocess.run(["docker", "pull", fixture[name]], check=True, timeout=180)
+PY
+python3 tests/e2e/diagnostic_budget_lifecycle.py \
+  --owner-binary target/debug/user-service \
+  --client-binary target/debug/examples/diagnostic_budget_driver
+```
+
+Images are fetched before isolation. The fixture packages the four normal
+service binaries (from the same directory as `--owner-binary`) without source
+or credentials, uses a temporary loopback-only registry for real repository
+digests, and invokes the existing release capability preflight unchanged.
+The budget/provider test uses synthetic credentials, real PostgreSQL and
+production client constructors on a unique Docker internal network; it never
+loads an operator key or forwards to a provider. It removes only its own
+containers, anonymous volumes, image references and network, including on
+ordinary cancellation (not SIGKILL); shared base images/build cache remain.
+On hosts with exhausted Docker address pools,
+`--subnet` accepts an unused RFC1918 `/28` after Docker/host-route overlap checks.
+The same fixture executes real `release.sh`, Compose config/pull and digest
+probes against an explicitly synthetic Git/release-state fixture. Invalid
+candidate, current and previous artifacts must fail before any deployment
+command is attempted, preserving the ledger, running owner/PostgreSQL and
+provisioning marker. A command spy forwards permitted operations to real Docker
+and refuses unexpected deployment commands; it never substitutes fake success.
+Failed preflight leaves Git at the target metadata commit. A subsequent valid
+`preflight` succeeds without restoring that checkout; this is safe reentry,
+not automatic checkout recovery.
+This proves release/capability refusal, dispatch/accounting and owner recreation
+boundaries, not release-built artifacts, a supported base-to-candidate release
+upgrade or live-model qualification.
+
+Production Compose Smoke also invokes the same fixture with
+`--runtime-images <json-file> --client-binary <path>`: a map from each of the
+four service names to its existing local image built by `Dockerfile.rust-service`.
+This repeats the full dispatch, owner-recreation and release-refusal matrix
+without building replacement service images. Published test-local digests must
+retain the original image IDs, and cleanup preserves the source references.
+For a narrower capability-only diagnostic, `--capability-images <json-file>`
+does not provision a database or start the product. Neither mode proves a
+successful different-version upgrade/rollback journey; that remains #230.
+
 ### Frontend
 
 ```bash
