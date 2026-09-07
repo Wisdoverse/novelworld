@@ -54,6 +54,23 @@ def require(condition, code):
         raise Failure(code)
 
 
+def ingress_address(network, project):
+    configurations = [item for item in network["IPAM"]["Config"]
+                      if ipaddress.ip_network(item["Subnet"]).version == 4]
+    require(len(configurations) == 1 and network["Internal"] is True
+            and network["Name"] == project, "fixture_ingress_network_invalid")
+    config = configurations[0]
+    subnet = ipaddress.ip_network(config["Subnet"])
+    require(subnet.prefixlen <= 28 and any(subnet.subnet_of(ipaddress.ip_network(block))
+            for block in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")),
+            "fixture_ingress_network_invalid")
+    candidate = subnet[-2]
+    reserved = [config.get("Gateway"), *(config.get("AuxiliaryAddresses") or {}).values()]
+    reserved += [item["IPv4Address"].split("/")[0] for item in network["Containers"].values()]
+    require(str(candidate) not in reserved, "fixture_ingress_address_occupied")
+    return candidate
+
+
 def isolated_journey_compose(compose, project, ca_path, nginx_ip):
     network = "  novel-net:\n    driver: bridge\n"
     require(compose.count(network) == 1, "fixture_compose_network_shape_changed")
@@ -507,6 +524,7 @@ class Lifecycle:
         require(shutil.which("socat") is not None, "fixture_socat_required")
         evidence = control.private_path(evidence, ROOT, directory=True)
         require(not any(evidence.iterdir()), "journey_evidence_not_empty")
+        self.ingress_evidence = evidence
         self.journey_user_stack_before = runner.docker_inventory_snapshot()
         runner.write_private(evidence / "fixture-boundary.json", control.canonical({
             "kind": "offline-cold-adopt-wiring", "qualification_claim": False,
@@ -519,11 +537,7 @@ class Lifecycle:
         self.prepare_images(image_sources, journey=True)
         self.prepare_network_mock()
         network = runner.docker_inspect("network", self.project)
-        subnets = [ipaddress.ip_network(item["Subnet"]) for item in network["IPAM"]["Config"]
-                   if ipaddress.ip_network(item["Subnet"]).version == 4]
-        require(len(subnets) == 1 and subnets[0].prefixlen <= 28
-                and subnets[0].is_private and network["Internal"] is True, "fixture_ingress_network_invalid")
-        self.nginx_ip = subnets[0][-2]
+        self.nginx_ip = ingress_address(network, self.project)
         checkout = self.files / "cold-adopt-source"
         command(["git", "clone", "--no-hardlinks", str(ROOT), str(checkout)], timeout=60)
         # No runtime implementation or release script is replaced. The explicit
@@ -658,9 +672,7 @@ class Lifecycle:
 
     def start_ingress(self, port):
         network = json.loads(self.docker("network", "inspect", self.project).stdout)[0]
-        require(network["Internal"] is True and network["Name"] == self.project
-                and not any(item["IPv4Address"].split("/")[0] == str(self.nginx_ip)
-                            for item in network["Containers"].values()), "fixture_ingress_address_occupied")
+        require(ingress_address(network, self.project) == self.nginx_ip, "fixture_ingress_target_changed")
         # The listener must exist before release.sh's single cold readiness curl.
         # Only this synthetic Compose assigns nginx the reserved internal address.
         with socket.socket() as listener:
@@ -671,6 +683,13 @@ class Lifecycle:
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True)
         self.ingresses.append((process, port))
+        import live_deepseek_journey as runner
+        runner.write_private(self.ingress_evidence / f"ingress-{port}.json", runner.diagnostic.canonical({
+            "pid": process.pid, "pgid": process.pid, "bind": "127.0.0.1", "port": port,
+            "nginx_ip": str(self.nginx_ip), "target_port": 80, "network_id": network["Id"],
+            "network_name": self.project, "phase": "started; absence must be independently verified",
+        }) + b"\n")
+        runner.diagnostic.sync_directory(self.ingress_evidence)
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             require(process.poll() is None, "fixture_ingress_exited")
@@ -968,7 +987,10 @@ class Lifecycle:
         try:
             self.stop_ingresses()
         except Failure:
-            failures.append("ingress_cleanup_unproven")
+            try:
+                self.stop_ingresses()
+            except Failure:
+                failures.append("ingress_cleanup_unproven")
         # The runner normally cleans each child project. Also track its exact
         # residual container IDs for exceptional terminal/report/ledger paths.
         # Never delete a named PG volume here: unproven evidence stays retained.

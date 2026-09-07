@@ -1,4 +1,6 @@
 import importlib.util
+import ipaddress
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -261,28 +263,55 @@ class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
 
     def ingress_lifecycle(self, containers=(), network=True):
         lifecycle = self.lifecycle(containers, network)
-        lifecycle.nginx_ip = "10.254.241.14"
+        lifecycle.nginx_ip = ipaddress.ip_address("10.254.241.14")
         lifecycle.ingresses = []
+        evidence = tempfile.TemporaryDirectory(prefix="ingress-evidence-")
+        self.addCleanup(evidence.cleanup)
+        lifecycle.ingress_evidence = Path(evidence.name)
         return lifecycle
 
     @staticmethod
-    def ingress_network(ip=None):
+    def ingress_network(*, gateway=None, auxiliary=None, container=None):
+        reserved = {}
+        if container is not None:
+            reserved["container-id"] = {"IPv4Address": str(container) + "/28"}
         return SimpleNamespace(stdout=json.dumps([{
             "Name": "nwq-abcdef1234",
+            "Id": "network-id",
             "Internal": True,
-            "Containers": ({
-                "container-id": {"IPv4Address": ip + "/28"},
-            } if ip else {}),
+            "IPAM": {"Config": [{
+                "Subnet": "10.254.241.0/28",
+                "Gateway": gateway,
+                "AuxiliaryAddresses": auxiliary or {},
+            }]},
+            "Containers": reserved,
         }]).encode())
 
     def test_start_ingress_rejects_reserved_address_without_starting_process(self):
-        lifecycle = self.ingress_lifecycle()
-        lifecycle.docker = mock.Mock(return_value=self.ingress_network(lifecycle.nginx_ip))
-        with mock.patch.object(LIFECYCLE.subprocess, "Popen") as popen:
-            with self.assertRaises(LIFECYCLE.Failure):
-                lifecycle.start_ingress(80)
-        popen.assert_not_called()
-        self.assertEqual(lifecycle.ingresses, [])
+        for kind in ("gateway", "auxiliary", "container"):
+            with self.subTest(kind=kind):
+                lifecycle = self.ingress_lifecycle()
+                occupied = {kind: str(lifecycle.nginx_ip)}
+                if kind == "auxiliary":
+                    occupied[kind] = {"nginx": str(lifecycle.nginx_ip)}
+                lifecycle.docker = mock.Mock(return_value=self.ingress_network(**occupied))
+                with mock.patch.object(LIFECYCLE.subprocess, "Popen") as popen:
+                    with self.assertRaises(LIFECYCLE.Failure):
+                        lifecycle.start_ingress(80)
+                popen.assert_not_called()
+                self.assertEqual(lifecycle.ingresses, [])
+
+    @staticmethod
+    def fake_runner():
+        def write_private(path, value):
+            descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(value)
+        diagnostic = SimpleNamespace(
+            canonical=lambda value: json.dumps(value, sort_keys=True).encode(),
+            sync_directory=lambda _path: None,
+        )
+        return SimpleNamespace(write_private=write_private, diagnostic=diagnostic)
 
     def test_start_ingress_uses_loopback_fixed_port_and_new_process_group(self):
         lifecycle = self.ingress_lifecycle()
@@ -296,7 +325,8 @@ class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
         with mock.patch.object(LIFECYCLE.shutil, "which", return_value="/usr/bin/socat"), \
              mock.patch.object(LIFECYCLE.subprocess, "Popen", return_value=process) as popen, \
              mock.patch.object(LIFECYCLE.socket, "socket", return_value=listener) as socket_factory, \
-             mock.patch.object(LIFECYCLE.socket, "create_connection", return_value=connection):
+             mock.patch.object(LIFECYCLE.socket, "create_connection", return_value=connection), \
+             mock.patch.dict(sys.modules, {"live_deepseek_journey": self.fake_runner()}):
             lifecycle.start_ingress(80)
         popen.assert_called_once_with(
             ["/usr/bin/socat", "-T", "10",
@@ -310,6 +340,12 @@ class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
         socket_factory.assert_called_once_with()
         listener.bind.assert_called_once_with(("127.0.0.1", 80))
         self.assertEqual(lifecycle.ingresses, [(process, 80)])
+        metadata = json.loads((lifecycle.ingress_evidence / "ingress-80.json").read_bytes())
+        self.assertEqual(metadata, {"bind": "127.0.0.1", "network_id": "network-id",
+                                    "network_name": lifecycle.project, "nginx_ip": str(lifecycle.nginx_ip),
+                                    "phase": "started; absence must be independently verified",
+                                    "pgid": 1234, "pid": 1234, "port": 80, "target_port": 80})
+        self.assertEqual((lifecycle.ingress_evidence / "ingress-80.json").stat().st_mode & 0o777, 0o600)
 
     def test_start_failure_keeps_process_tracked_for_final_cleanup(self):
         lifecycle = self.ingress_lifecycle()
@@ -319,8 +355,28 @@ class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
         process = mock.Mock(pid=1234)
         process.poll.return_value = 1
         with mock.patch.object(LIFECYCLE.subprocess, "Popen", return_value=process), \
-             mock.patch.object(LIFECYCLE.socket, "socket", return_value=listener):
+             mock.patch.object(LIFECYCLE.socket, "socket", return_value=listener), \
+             mock.patch.dict(sys.modules, {"live_deepseek_journey": self.fake_runner()}):
             with self.assertRaises(LIFECYCLE.Failure):
+                lifecycle.start_ingress(80)
+        self.assertEqual(lifecycle.ingresses, [(process, 80)])
+
+    def test_start_metadata_failure_keeps_process_tracked(self):
+        lifecycle = self.ingress_lifecycle()
+        lifecycle.docker = mock.Mock(return_value=self.ingress_network())
+        listener = mock.MagicMock()
+        listener.__enter__.return_value = listener
+        connection = mock.MagicMock()
+        connection.__enter__.return_value = connection
+        process = mock.Mock(pid=1234)
+        process.poll.return_value = None
+        runner = self.fake_runner()
+        runner.write_private = mock.Mock(side_effect=OSError("evidence write failed"))
+        with mock.patch.object(LIFECYCLE.subprocess, "Popen", return_value=process), \
+             mock.patch.object(LIFECYCLE.socket, "socket", return_value=listener), \
+             mock.patch.object(LIFECYCLE.socket, "create_connection", return_value=connection), \
+             mock.patch.dict(sys.modules, {"live_deepseek_journey": runner}):
+            with self.assertRaises(OSError):
                 lifecycle.start_ingress(80)
         self.assertEqual(lifecycle.ingresses, [(process, 80)])
 
@@ -350,12 +406,30 @@ class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
             return SimpleNamespace(returncode=0, stdout=b"")
 
         lifecycle.docker = docker
-        with mock.patch.object(lifecycle, "stop_ingresses", side_effect=LIFECYCLE.Failure("ingress")):
+        with mock.patch.object(lifecycle, "stop_ingresses",
+                               side_effect=[LIFECYCLE.Failure("ingress"), LIFECYCLE.Failure("ingress")]):
             with self.assertRaises(LIFECYCLE.Failure):
                 lifecycle.cleanup()
         self.assertIn(("rm", "--force", "--volumes", "owned"), calls)
         self.assertIn(("network", "rm", lifecycle.project), calls)
         self.assertFalse(lifecycle.files.exists())
+
+    def test_cleanup_retries_ingress_failure_before_completing(self):
+        lifecycle = self.ingress_lifecycle(("owned",), network=True)
+        network_present = True
+
+        def docker(*args, **_):
+            nonlocal network_present
+            if args[:2] == ("network", "rm"):
+                network_present = False
+            return SimpleNamespace(returncode=0, stdout=(lifecycle.project + "\n").encode()
+                                   if args[:2] == ("network", "ls") and network_present else b"")
+
+        lifecycle.docker = mock.Mock(side_effect=docker)
+        with mock.patch.object(lifecycle, "stop_ingresses",
+                               side_effect=[LIFECYCLE.Failure("ingress"), None]) as stop:
+            lifecycle.cleanup()
+        self.assertEqual(stop.call_count, 2)
 
 
 if __name__ == "__main__":
