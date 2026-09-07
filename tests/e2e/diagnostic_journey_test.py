@@ -846,6 +846,98 @@ class DiagnosticJourneyTest(unittest.TestCase):
                 self.assertEqual(probes.call_count, failed_index + 1)
                 release.assert_not_called()
 
+    def test_batched_inventory_runner_preserves_projection_and_rejects_bad_batches(self):
+        project = "nwq-abcdef1234"
+        container_names = [f"{project}-service-{index:02d}" for index in range(33)]
+        volume_names = [f"{project}-volume-{index}" for index in range(2)]
+        network_names = [f"{project}-network-{index}" for index in range(2)]
+        calls = []
+
+        def runner(command):
+            calls.append(command)
+            if command[:4] == ["docker", "ps", "-a", "--format"]:
+                return "\n".join(reversed(container_names))
+            if command[:4] == ["docker", "volume", "ls", "--format"]:
+                return "\n".join(reversed(volume_names))
+            if command[:4] == ["docker", "network", "ls", "--format"]:
+                return "\n".join(reversed(network_names))
+            kind = command[1]
+            names = command[command.index("--format") + 2:]
+            values = []
+            for name in names:
+                if kind == "container":
+                    labels = {"com.docker.compose.project": project} if name.endswith("00") else {}
+                    values.append({
+                        "Id": "a" * 64, "Name": "/" + name, "Image": "sha256:" + "b" * 64,
+                        "State": {"Status": "running", "StartedAt": "now"}, "RestartCount": 2,
+                        "Config": {"Image": "service@sha256:" + "c" * 64, "Labels": labels},
+                        "HostConfig": {"RestartPolicy": {"Name": "unless-stopped"}},
+                        "NetworkSettings": {"Networks": {"z-net": {}, "a-net": {}}},
+                    })
+                elif kind == "volume":
+                    values.append({"Name": name, "Driver": "local", "Labels": {
+                        "com.docker.compose.project": project}, "Options": {}, "Scope": "local"})
+                else:
+                    values.append({"Name": name, "Id": "d" * 64, "Driver": "bridge",
+                                   "Scope": "local", "Internal": True, "Attachable": False,
+                                   "Ingress": False, "IPAM": {},
+                                   "Labels": {"com.docker.compose.project": project},
+                                   "Containers": {"e" * 64: {"Name": "/owner", "EndpointID": "f" * 64}}})
+            return "\n".join(json.dumps(value) for value in values)
+
+        snapshot = RUNNER.docker_inventory_snapshot(runner=runner)
+        self.assertEqual(list(snapshot["containers"]), sorted(container_names))
+        self.assertEqual(snapshot["containers"][container_names[0]]["networks"], ["a-net", "z-net"])
+        self.assertEqual(snapshot["containers"][container_names[0]]["labels"], {
+            "com.docker.compose.project": project
+        })
+        self.assertEqual(snapshot["networks"][network_names[0]]["containers"], {
+            "e" * 64: {"name": "/owner", "endpoint_id": "f" * 64}
+        })
+        self.assertEqual(
+            RUNNER.attempt_resources(snapshot, project, project),
+            sorted(
+                ["containers:" + name for name in container_names]
+                + ["networks:" + name for name in network_names]
+                + ["volumes:" + name for name in volume_names]
+            ),
+        )
+        inspect_commands = [command for command in calls if "inspect" in command]
+        self.assertEqual(len(inspect_commands), 4)
+        self.assertTrue(all("Config.Env" not in command for command in inspect_commands))
+        self.assertTrue(all("--format" in command for command in inspect_commands))
+        self.assertEqual(len([command for command in inspect_commands if command[1] == "container"]), 2)
+
+        def invalid_runner(command):
+            if command[:4] == ["docker", "ps", "-a", "--format"]:
+                return "\n".join(container_names)
+            if command[1] == "container":
+                names = command[command.index("--format") + 2:]
+                return json.dumps({"Name": "/wrong"}) + "\n" * len(names)
+            return ""
+
+        with self.assertRaises(RUNNER.QualificationFailure) as incomplete:
+            RUNNER.docker_inventory_snapshot(runner=invalid_runner)
+        self.assertIn(incomplete.exception.code, {"docker_inventory_incomplete", "docker_inspect_invalid"})
+
+        def reordered_runner(command):
+            if command[:4] == ["docker", "ps", "-a", "--format"]:
+                return "\n".join(container_names)
+            if command[1] == "container":
+                names = command[command.index("--format") + 2:]
+                return "\n".join(json.dumps({"Name": "/" + name}) for name in reversed(names))
+            return ""
+
+        with self.assertRaises(RUNNER.QualificationFailure) as reordered:
+            RUNNER.docker_inventory_snapshot(runner=reordered_runner)
+        self.assertEqual(reordered.exception.code, "docker_inventory_incomplete")
+
+        with self.assertRaises(RUNNER.QualificationFailure) as option_name:
+            RUNNER.docker_inventory_snapshot(
+                runner=lambda command: "--evil\n" if command[:4] == ["docker", "ps", "-a", "--format"] else ""
+            )
+        self.assertEqual(option_name.exception.code, "docker_inventory_name_invalid")
+
     def test_control_seal_rejects_integer_boolean_and_still_cannot_retry(self):
         journey = self.journey()
         journey.internal_service_token = "synthetic-internal-control-value"

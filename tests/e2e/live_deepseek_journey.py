@@ -1099,14 +1099,46 @@ def docker_inventory_snapshot(
 ) -> dict[str, Any]:
     if runner is None:
         runner = run
+
+    def inspect_many(kind: str, names: list[str]):
+        # Project only the existing inventory fields, never Config.Env/secrets.
+        fields = {
+            "container": '{"Id":{{json .Id}},"Name":{{json .Name}},"Image":{{json .Image}},'
+                '"State":{"Status":{{json .State.Status}},"StartedAt":{{json .State.StartedAt}}},'
+                '"RestartCount":{{json .RestartCount}},"Config":{"Image":{{json .Config.Image}},'
+                '"Labels":{{json .Config.Labels}}},"HostConfig":{"RestartPolicy":'
+                '{"Name":{{json .HostConfig.RestartPolicy.Name}}}},"NetworkSettings":'
+                '{"Networks":{{json .NetworkSettings.Networks}}}}',
+            "volume": '{"Name":{{json .Name}},"Driver":{{json .Driver}},"Labels":{{json .Labels}},'
+                '"Options":{{json .Options}},"Scope":{{json .Scope}}}',
+            "network": '{"Name":{{json .Name}},"Id":{{json .Id}},"Driver":{{json .Driver}},'
+                '"Scope":{{json .Scope}},"Internal":{{json .Internal}},"Attachable":{{json .Attachable}},'
+                '"Ingress":{{json .Ingress}},"IPAM":{{json .IPAM}},"Labels":{{json .Labels}},'
+                '"Containers":{{json .Containers}}}',
+        }
+        for start in range(0, len(names), 32):
+            batch = names[start:start + 32]
+            if not all(re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", name) for name in batch):
+                raise QualificationFailure("docker_inventory_name_invalid")
+            raw = runner(["docker", kind, "inspect", "--format", fields[kind], *batch])
+            try:
+                values = [json.loads(line) for line in raw.splitlines()]
+            except json.JSONDecodeError as error:
+                raise QualificationFailure("docker_inspect_invalid") from error
+            if len(values) != len(batch) or any(
+                not isinstance(value, dict) or value.get("Name") != ("/" + name if kind == "container" else name)
+                for name, value in zip(batch, values)
+            ):
+                raise QualificationFailure("docker_inventory_incomplete")
+            yield from zip(batch, values)
+
     containers: dict[str, Any] = {}
-    for name in sorted(
+    for name, value in inspect_many("container", sorted(
         filter(
             None,
             runner(["docker", "ps", "-a", "--format", "{{.Names}}"]).splitlines(),
         )
-    ):
-        value = docker_inspect("container", name, runner=runner)
+    )):
         state = value.get("State") or {}
         config = value.get("Config") or {}
         host = value.get("HostConfig") or {}
@@ -1123,25 +1155,23 @@ def docker_inventory_snapshot(
             "labels": config.get("Labels") or {},
         }
     volumes: dict[str, Any] = {}
-    for name in sorted(
+    for name, value in inspect_many("volume", sorted(
         filter(
             None,
             runner(["docker", "volume", "ls", "--format", "{{.Name}}"]).splitlines(),
         )
-    ):
-        value = docker_inspect("volume", name, runner=runner)
+    )):
         volumes[name] = {
             key.lower(): value.get(key)
             for key in ("Name", "Driver", "Labels", "Options", "Scope")
         }
     networks: dict[str, Any] = {}
-    for name in sorted(
+    for name, value in inspect_many("network", sorted(
         filter(
             None,
             runner(["docker", "network", "ls", "--format", "{{.Name}}"]).splitlines(),
         )
-    ):
-        value = docker_inspect("network", name, runner=runner)
+    )):
         networks[name] = {
             key.lower(): value.get(key)
             for key in (
