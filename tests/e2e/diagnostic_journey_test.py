@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import time
@@ -639,6 +640,79 @@ class DiagnosticJourneyTest(unittest.TestCase):
                     self.assertTrue(any(call.args[0][1] == "stop" for call in commands.call_args_list))
                     self.assertTrue(any(call.args[0].name == "pre-cleanup-private.json"
                                         for call in evidence.call_args_list))
+
+    def test_terminal_cancels_release_process_before_seal_and_stops_payers_on_failure(self):
+        journey = self.journey()
+        journey.cleanup_required = True
+        process = mock.Mock(pid=4242)
+        events = []
+
+        def wait(**kwargs):
+            events.append(("release_wait", kwargs["timeout"]))
+            raise subprocess.TimeoutExpired(["release"], kwargs["timeout"])
+
+        process.wait.side_effect = wait
+        journey.active_release_process = process
+        registration = self.load()
+        journey.diagnostic_registration = registration
+        journey.diagnostic_last_snapshot = {
+            "budget": {**registration.binding, **{
+                key: item for key, item in self.value["limits"].items() if key != "profile"},
+                "charged_attempts": 0, "charged_tokens": 0,
+                "charged_cost_micro_cny": 0, "sealed": True},
+            "receipts": [],
+        }
+        journey.report["llm_metrics"] = {"counter_totals": []}
+        journey.private_report["release_images"] = {"base": {
+            service.upper().replace("-", "_") + "_IMAGE": {
+                "container_id": f"{index:064x}", "image_id": "sha256:" + "a" * 64,
+                "repository_digest": "registry.invalid/service@sha256:" + "b" * 64,
+            }
+            for index, service in enumerate(RUNNER.SERVICE_PORTS, 1)
+        }}
+        ids = {service: f"{index:064x}" for index, service in enumerate(RUNNER.SERVICE_PORTS, 1)}
+
+        def owner_control(**kwargs):
+            if kwargs.get("seal"):
+                events.append("seal")
+
+        def bounded(command, **_kwargs):
+            if command[1:4] == ["ps", "--all", "--no-trunc"]:
+                events.append("payer_inventory")
+                return "".join(f"{identifier} {journey.prefix}-{service}\n"
+                               for service, identifier in ids.items()).encode()
+            if command[1] == "stop":
+                events.append("payer_stop")
+                return b""
+            if command[1:3] == ["ps", "--format"]:
+                return b""
+            if command[1] == "inspect":
+                identifier = command[-1]
+                return CONTROL.canonical([{
+                    "Id": identifier, "State": {"Running": False},
+                    "Image": "sha256:" + "a" * 64,
+                    "Config": {"Image": "registry.invalid/service@sha256:" + "b" * 64},
+                }])
+            return b""
+
+        def observability(*_args):
+            journey.report["llm_metrics"] = {"counter_totals": []}
+
+        with mock.patch.object(RUNNER.os, "killpg", side_effect=lambda pid, sig: events.append(("killpg", pid, sig))), \
+             mock.patch.object(journey, "diagnostic_owner_control", side_effect=owner_control), \
+             mock.patch.object(journey, "diagnostic_checkpoint", return_value={"unresolved_attempts": 0, "sealed": True}), \
+             mock.patch.object(journey, "finalize_observability", side_effect=observability), \
+             mock.patch.object(RUNNER.diagnostic, "bounded_command", side_effect=bounded):
+            journey.diagnostic_terminal()
+
+        self.assertEqual(events[:4], [("killpg", 4242, RUNNER.signal.SIGKILL),
+                                      ("release_wait", 10), "seal", "payer_inventory"])
+        self.assertIn("payer_stop", events)
+        self.assertFalse(journey.diagnostic_evidence_durable)
+        self.assertIn("diagnostic_release_stop_unproven", journey.diagnostic_failures)
+        self.assertTrue(journey.private_report["diagnostic_payers_stopped"])
+        self.assertEqual(journey.diagnostic_failures, ["diagnostic_release_stop_unproven"])
+        self.assertTrue((self.output / "pre-cleanup-private.json").is_file())
 
     def test_source_identity_reads_actual_committed_prompts_and_schema(self):
         sha = RUNNER.git(ROOT, "rev-parse", "HEAD")

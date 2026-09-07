@@ -338,7 +338,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.runtime == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     env:
       CACHE_MODE: postgres
       REDIS_URL: memory://
@@ -389,6 +389,28 @@ jobs:
               images.write_text(json.dumps({name: f"novel-world-{name}:local" for name in fixture["SERVICES"]}))
               subprocess.run(["python3", script, "--runtime-images", str(images),
                               "--client-binary", "target/debug/examples/diagnostic_budget_driver"], check=True)
+          PY
+      - name: Verify offline Vision cold-adoption wiring
+        timeout-minutes: 30
+        run: |
+          if ! command -v socat >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y socat
+          fi
+          python3 - <<'PY'
+          import json, pathlib, tempfile, subprocess
+          # Keep private synthetic evidence outside the checkout and do not upload it.
+          directory = pathlib.Path(tempfile.mkdtemp(prefix="nwq-cold-adopt-"))
+          evidence = directory / "evidence"
+          evidence.mkdir(mode=0o700)
+          images = directory / "images.json"
+          services = ("user-service", "novel-service", "agent-service", "narrative-service", "gateway", "frontend")
+          images.write_text(json.dumps({name: f"novel-world-{name}:local" for name in services}))
+          # Soft cancellation leaves 10 minutes for bounded terminal/outer cleanup
+          # before the hard kill; the step has another five minutes of headroom.
+          subprocess.run(["timeout", "--signal=TERM", "--kill-after=10m", "--", "15m",
+                          "python3", "tests/e2e/diagnostic_budget_lifecycle.py",
+                          "--journey-images", str(images), "--journey-output", str(evidence)], check=True)
           PY
       - name: Verify public probes and rate-limit exemption
         run: |

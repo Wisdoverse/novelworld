@@ -278,6 +278,11 @@ class Lifecycle:
         self.ingresses = []
 
     def docker(self, *args, **kwargs):
+        deadline = getattr(self, "cleanup_deadline", None)
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            require(remaining > 0, "fixture_cleanup_timeout")
+            kwargs["timeout"] = min(kwargs.get("timeout", 10), 10, remaining)
         return command(["docker", *args], **kwargs)
 
     def run(self, name, image, args, environment=None, mounts=(), alias=None):
@@ -716,11 +721,14 @@ class Lifecycle:
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                process.wait(timeout=5)
+                deadline = getattr(self, "cleanup_deadline", None)
+                remaining = 5 if deadline is None else min(5, deadline - time.monotonic())
+                require(remaining > 0, "fixture_cleanup_timeout")
+                process.wait(timeout=remaining)
                 with socket.socket() as listener:
                     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                     listener.bind(("127.0.0.1", port))
-            except (OSError, subprocess.SubprocessError):
+            except (Failure, OSError, subprocess.SubprocessError):
                 failures.append(port)
         if not failures:
             self.ingresses = []
@@ -990,6 +998,7 @@ class Lifecycle:
             print(f"diagnostic lifecycle: real release {scenario} rejection and safe preflight reentry passed", flush=True)
 
     def cleanup(self):
+        self.cleanup_deadline = time.monotonic() + 60
         failures = []
         try:
             self.stop_ingresses()
@@ -1052,7 +1061,10 @@ class Lifecycle:
                             == original_id, "source_image_reference_changed")
                 except (Failure, OSError, subprocess.SubprocessError):
                     failures.append(reference)
-            self.temporary.cleanup()
+            try:
+                self.temporary.cleanup()
+            finally:
+                self.cleanup_deadline = None
         require(not failures, "isolated_cleanup_failed")
 
 

@@ -244,6 +244,14 @@ fixture verifies the actual nginx address after adoption and stops the exact
 forwarder's process group on success or failure. This avoids relying on Docker
 internal-network port publishing without giving product containers public egress.
 Runtime images and release implementation are not replaced.
+Private output retains forwarding-process recovery metadata and the pre-adoption
+Docker inventory. A failed stop gets one bounded cleanup retry; unproven removal
+still fails the fixture. Production Compose Smoke runs this gate after the
+existing release-image dispatch/refusal matrix, without publishing private output.
+Outer fallback cleanup shares a 60-second deadline, with Docker calls capped at
+10 seconds each. CI sends a soft TERM after 15 minutes, reserving 10 minutes for
+terminal handling before a hard kill; SIGKILL/host loss still has no cleanup
+guarantee and never makes a failed registration resumable.
 Separate zero/nonzero registrations exercise Settings, the runner's generated
 environment, consistent owner/PG checkpoints and restart persistence. Since
 these are partial fixtures, the full journey's missing-quality-sample gate

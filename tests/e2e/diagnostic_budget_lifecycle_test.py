@@ -431,6 +431,47 @@ class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
             lifecycle.cleanup()
         self.assertEqual(stop.call_count, 2)
 
+    def test_cleanup_docker_calls_are_clamped_to_remaining_deadline(self):
+        lifecycle = self.ingress_lifecycle()
+        lifecycle.cleanup_deadline = 105
+        result = SimpleNamespace(returncode=0, stdout=b"")
+        with mock.patch.object(LIFECYCLE.time, "monotonic", return_value=100), \
+             mock.patch.object(LIFECYCLE, "command", return_value=result) as command:
+            lifecycle.docker("ps", timeout=30)
+        command.assert_called_once_with(["docker", "ps"], timeout=5, **{})
+
+    def test_expired_cleanup_deadline_fails_before_dispatch(self):
+        lifecycle = self.ingress_lifecycle()
+        lifecycle.cleanup_deadline = 100
+        with mock.patch.object(LIFECYCLE.time, "monotonic", return_value=100), \
+             mock.patch.object(LIFECYCLE, "command") as command:
+            with self.assertRaises(LIFECYCLE.Failure):
+                lifecycle.docker("ps")
+        command.assert_not_called()
+
+    def test_cleanup_resets_deadline_and_ordinary_calls_have_no_timeout(self):
+        lifecycle = self.ingress_lifecycle(network=False)
+        result = SimpleNamespace(returncode=0, stdout=b"")
+        with mock.patch.object(LIFECYCLE.time, "monotonic", return_value=100), \
+             mock.patch.object(LIFECYCLE, "command", return_value=result) as command:
+            lifecycle.cleanup()
+            self.assertIsNone(lifecycle.cleanup_deadline)
+            lifecycle.docker("ps")
+        command.assert_called_once_with(["docker", "ps"])
+
+    def test_ingress_wait_uses_same_cleanup_deadline(self):
+        lifecycle = self.ingress_lifecycle()
+        lifecycle.cleanup_deadline = 105
+        process = mock.Mock(pid=4321)
+        listener = mock.MagicMock()
+        listener.__enter__.return_value = listener
+        lifecycle.ingresses = [(process, 80)]
+        with mock.patch.object(LIFECYCLE.os, "killpg"), \
+             mock.patch.object(LIFECYCLE.time, "monotonic", return_value=102), \
+             mock.patch.object(LIFECYCLE.socket, "socket", return_value=listener):
+            lifecycle.stop_ingresses()
+        process.wait.assert_called_once_with(timeout=3)
+
 
 if __name__ == "__main__":
     unittest.main()
