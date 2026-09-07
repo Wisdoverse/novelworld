@@ -21,7 +21,7 @@ SPEC.loader.exec_module(LIFECYCLE)
 class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
     def test_journey_isolation_changes_services_not_nested_dependencies(self):
         original = (ROOT / "docker-compose.yml").read_text()
-        isolated = LIFECYCLE.isolated_journey_compose(original, "nwq-abcdef1234", Path("/private/ca.pem"))
+        isolated = LIFECYCLE.isolated_journey_compose(original, "nwq-abcdef1234", Path("/private/ca.pem"), "10.254.241.14")
         self.assertEqual(isolated.count("      SSL_CERT_FILE: /fixture/ca.pem\n"), 4)
         for service in LIFECYCLE.SERVICES:
             block = re.search(r"(?ms)^  " + re.escape(service) + r":\n(.*?)(?=^  [a-z]|\Z)", isolated)[1]
@@ -30,6 +30,8 @@ class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
         self.assertEqual(re.findall(r"(?ms)^    depends_on:\n.*?(?=^    [a-z]|\Z)", original),
                          re.findall(r"(?ms)^    depends_on:\n.*?(?=^    [a-z]|\Z)", isolated))
         self.assertIn("  novel-net:\n    external: true\n    name: nwq-abcdef1234\n", isolated)
+        self.assertIn("        ipv4_address: 10.254.241.14\n", isolated)
+        self.assertNotIn("${NGINX_HTTP_PORT:-80}", isolated)
 
     def lifecycle(self, containers, network=True):
         lifecycle = LIFECYCLE.Lifecycle.__new__(LIFECYCLE.Lifecycle)
@@ -39,6 +41,7 @@ class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
         lifecycle.source_images = {}
         lifecycle.network_created = network
         lifecycle.temporary = tempfile.TemporaryDirectory(prefix="cleanup-test-")
+        self.addCleanup(lifecycle.temporary.cleanup)
         lifecycle.files = Path(lifecycle.temporary.name)
         (lifecycle.files / "temporary").write_text("fixture")
         return lifecycle
@@ -255,6 +258,104 @@ class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
                     with self.assertRaises((LIFECYCLE.Failure, SystemExit)):
                         LIFECYCLE.main()
                     lifecycle.assert_not_called()
+
+    def ingress_lifecycle(self, containers=(), network=True):
+        lifecycle = self.lifecycle(containers, network)
+        lifecycle.nginx_ip = "10.254.241.14"
+        lifecycle.ingresses = []
+        return lifecycle
+
+    @staticmethod
+    def ingress_network(ip=None):
+        return SimpleNamespace(stdout=json.dumps([{
+            "Name": "nwq-abcdef1234",
+            "Internal": True,
+            "Containers": ({
+                "container-id": {"IPv4Address": ip + "/28"},
+            } if ip else {}),
+        }]).encode())
+
+    def test_start_ingress_rejects_reserved_address_without_starting_process(self):
+        lifecycle = self.ingress_lifecycle()
+        lifecycle.docker = mock.Mock(return_value=self.ingress_network(lifecycle.nginx_ip))
+        with mock.patch.object(LIFECYCLE.subprocess, "Popen") as popen:
+            with self.assertRaises(LIFECYCLE.Failure):
+                lifecycle.start_ingress(80)
+        popen.assert_not_called()
+        self.assertEqual(lifecycle.ingresses, [])
+
+    def test_start_ingress_uses_loopback_fixed_port_and_new_process_group(self):
+        lifecycle = self.ingress_lifecycle()
+        lifecycle.docker = mock.Mock(return_value=self.ingress_network())
+        listener = mock.MagicMock()
+        listener.__enter__.return_value = listener
+        connection = mock.MagicMock()
+        connection.__enter__.return_value = connection
+        process = mock.Mock(pid=1234)
+        process.poll.return_value = None
+        with mock.patch.object(LIFECYCLE.shutil, "which", return_value="/usr/bin/socat"), \
+             mock.patch.object(LIFECYCLE.subprocess, "Popen", return_value=process) as popen, \
+             mock.patch.object(LIFECYCLE.socket, "socket", return_value=listener) as socket_factory, \
+             mock.patch.object(LIFECYCLE.socket, "create_connection", return_value=connection):
+            lifecycle.start_ingress(80)
+        popen.assert_called_once_with(
+            ["/usr/bin/socat", "-T", "10",
+             "TCP4-LISTEN:80,bind=127.0.0.1,reuseaddr,fork",
+             "TCP4:10.254.241.14:80,connect-timeout=2"],
+            stdin=LIFECYCLE.subprocess.DEVNULL,
+            stdout=LIFECYCLE.subprocess.DEVNULL,
+            stderr=LIFECYCLE.subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        socket_factory.assert_called_once_with()
+        listener.bind.assert_called_once_with(("127.0.0.1", 80))
+        self.assertEqual(lifecycle.ingresses, [(process, 80)])
+
+    def test_start_failure_keeps_process_tracked_for_final_cleanup(self):
+        lifecycle = self.ingress_lifecycle()
+        lifecycle.docker = mock.Mock(return_value=self.ingress_network())
+        listener = mock.MagicMock()
+        listener.__enter__.return_value = listener
+        process = mock.Mock(pid=1234)
+        process.poll.return_value = 1
+        with mock.patch.object(LIFECYCLE.subprocess, "Popen", return_value=process), \
+             mock.patch.object(LIFECYCLE.socket, "socket", return_value=listener):
+            with self.assertRaises(LIFECYCLE.Failure):
+                lifecycle.start_ingress(80)
+        self.assertEqual(lifecycle.ingresses, [(process, 80)])
+
+    def test_stop_ingresses_kills_reaps_and_retains_failed_listener(self):
+        lifecycle = self.ingress_lifecycle()
+        process = mock.Mock(pid=4321)
+        lifecycle.ingresses = [(process, 80)]
+        listener = mock.MagicMock()
+        listener.__enter__.return_value = listener
+        listener.bind.side_effect = OSError("still listening")
+        with mock.patch.object(LIFECYCLE.os, "killpg") as killpg, \
+             mock.patch.object(LIFECYCLE.socket, "socket", return_value=listener):
+            with self.assertRaises(LIFECYCLE.Failure):
+                lifecycle.stop_ingresses()
+        killpg.assert_called_once_with(4321, LIFECYCLE.signal.SIGKILL)
+        process.wait.assert_called_once_with(timeout=5)
+        self.assertEqual(lifecycle.ingresses, [(process, 80)])
+
+    def test_cleanup_continues_resources_after_ingress_failure(self):
+        lifecycle = self.ingress_lifecycle(("owned",), network=True)
+        calls = []
+
+        def docker(*args, **kwargs):
+            calls.append(args)
+            if args[:2] == ("network", "ls"):
+                return SimpleNamespace(returncode=0, stdout=(lifecycle.project + "\n").encode())
+            return SimpleNamespace(returncode=0, stdout=b"")
+
+        lifecycle.docker = docker
+        with mock.patch.object(lifecycle, "stop_ingresses", side_effect=LIFECYCLE.Failure("ingress")):
+            with self.assertRaises(LIFECYCLE.Failure):
+                lifecycle.cleanup()
+        self.assertIn(("rm", "--force", "--volumes", "owned"), calls)
+        self.assertIn(("network", "rm", lifecycle.project), calls)
+        self.assertFalse(lifecycle.files.exists())
 
 
 if __name__ == "__main__":

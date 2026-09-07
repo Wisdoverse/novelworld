@@ -225,6 +225,7 @@ needed or authorized by these offline gates.
 The same lifecycle fixture has a separate `--journey-images` mode for actual
 cold-adoption wiring. Its JSON map contains the four paying services plus
 `gateway` and `frontend`, all built with the repository's release Dockerfiles.
+This Linux-only mode also requires `socat` on the host for loopback ingress.
 Use a pre-created mode-0700 output directory outside the checkout:
 
 ```bash
@@ -235,7 +236,13 @@ python3 tests/e2e/diagnostic_budget_lifecycle.py \
 
 This mode reuses the internal-network TLS fixture and supported `release.sh`
 cold adoption. Only a private synthetic checkout changes Compose network/CA/
-proxy wiring; runtime images and release implementation are not replaced.
+proxy wiring. It assigns nginx a checked unused internal IPv4 address and removes
+its Docker published port; a host `socat` listener starts on the random loopback
+port before adoption, forwarding only to that nginx address on port 80. The
+fixture verifies the actual nginx address after adoption and stops the exact
+forwarder's process group on success or failure. This avoids relying on Docker
+internal-network port publishing without giving product containers public egress.
+Runtime images and release implementation are not replaced.
 Separate zero/nonzero registrations exercise Settings, the runner's generated
 environment, consistent owner/PG checkpoints and restart persistence. Since
 these are partial fixtures, the full journey's missing-quality-sample gate
