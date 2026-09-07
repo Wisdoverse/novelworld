@@ -1,6 +1,6 @@
 # ADR 0004: Durable diagnostic budget authority
 
-- Status: Accepted decision / implementation in progress
+- Status: Accepted decision; delivery evidence is tracked in issue #320
 - Date: 2026-09-07
 - Owners: repository maintainers and affected service owners
 - Related: [issue #320](https://github.com/Wisdoverse/novelworld/issues/320),
@@ -201,43 +201,34 @@ precede database startup, migration and provisioning. Subsequent owner
 recreation runs the digest image without a binary mount. This image-packaged
 local run passes, but is not evidence from the production release Dockerfile.
 
-The same fixture's `--capability-images` mode reuses existing images without
-rebuilding them, checks that published digests preserve their source image IDs,
-and verifies that cleanup retains the original references. A prior local
-run also passes on all four images built from the current worktree with the
-actual `infra/docker/Dockerfile.rust-service` release profile: real four-digest
-preflight, mixed/non-capable/profile rejection, temporary registry/reference
-cleanup, and preservation of all four source references and image IDs. This is
-worktree-built evidence, not an immutable merged-commit release or remote CI.
-Production Compose Smoke now uses `--runtime-images` to repeat the full real-PG,
-Settings/client, owner-recreation and real release-refusal matrix on those
-release-built images, rather than stopping at capability-only checks.
+The same fixture's existing-image modes freeze source image IDs before creating
+test-local registry references and verify that cleanup preserves them.
+`--capability-images` performs only capability checks. `--runtime-images`, also
+used by Production Compose Smoke, repeats the complete matrix on images built
+with the actual `infra/docker/Dockerfile.rust-service` release profile.
 
-The normal-binary image run passed real `release.sh` rejection for invalid
-candidate, current and previous artifacts, including unchanged containers,
-ledger, receipts, provisioning marker and valid subsequent preflight reentry.
-Its Git/state fixture is explicitly negative metadata: it does not claim an
-actual adoption or two successful product versions. Failed preflight retains
-the attempted checkout; reentry does not automatically restore Git HEAD.
-The release-built full matrix is still pending: one run exposed a late-created
-probe left by `docker run --rm` (now replaced by acknowledged create/start),
-and another failed during reentry. Neither is counted as passing evidence.
-The exact leftover unstarted probe was removed; phase diagnostics now distinguish
-probe failure from release-state failure without exposing configuration.
+The full release-built local matrix passed on source `b7eab0b`, including real
+`release.sh` rejection for invalid candidate, current and previous artifacts,
+unchanged running containers/ledger/receipts/provisioning marker, safe preflight
+reentry, and exact cleanup with all four source image references preserved.
+Its Git/state fixture is explicitly negative metadata, not an actual adoption
+or two successful product versions. Failed preflight retains the attempted
+checkout; reentry does not automatically restore Git HEAD. Earlier failed runs
+and their corrections are retained in #320, not counted as passing evidence.
 
 Final Rust review also found malformed successful HTTP usage could enter the
 generic retry path. Budgeted sync now treats invalid completion/usage as a fixed
 evidence failure before retry or JSON fallback, retaining the reservation.
 Six malformed/contradictory usage cases plus an ordinary-mode retry comparison
-pass; the real-PG fixture includes corresponding sync/empty/SSE cases. The
-ordinary response error chain and display are preserved. Full affected gates
-and rebuilt release images must be verified after this correction.
+pass. Budgeted streaming likewise returns fixed evidence errors for malformed
+usage, model drift, duplicate usage, upstream failure and premature end, without
+settlement or Finished; ordinary error behavior is preserved. The passing
+release-built fixture includes corresponding sync/empty/SSE malformed-usage
+cases, each with exactly one provider attempt and no settlement or retry.
 
 A second successful budget-capable source version is not
 manufactured for this first protocol delivery: actual different-version
-successful upgrade journeys remain owned by #230. Current #320 must still prove
-that incompatible candidate/previous artifacts fail before stop, migration or
-provisioning, leaving the live ledger and release markers intact.
-Do not enable a funded diagnostic using
-these partial results. Required remote CI, full affected gates, secret scanning and independent
-final integrated reviews remain mandatory before completion.
+successful upgrade journeys remain owned by #230. Local image/test evidence
+does not replace required CI, final independent review or exact-main delivery
+evidence; #320 owns their current status. No funded Diagnostic or H1/H3/H4
+qualification is authorized by this structural control.
