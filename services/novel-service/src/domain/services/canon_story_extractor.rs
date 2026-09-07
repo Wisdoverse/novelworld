@@ -14,9 +14,9 @@ use crate::domain::entities::{
     character::Character,
 };
 
-pub const CANON_CHUNK_PROMPT_VERSION: &str = "canon-chunk-v8";
+pub const CANON_CHUNK_PROMPT_VERSION: &str = "canon-chunk-v9";
 pub const CANON_EVENT_SELECTION_PROMPT_VERSION: &str = "canon-event-grouping-v3";
-pub const CANON_EXTRACTION_PROMPT_VERSION: &str = "canon-chunk-v8+event-grouping-v3";
+pub const CANON_EXTRACTION_PROMPT_VERSION: &str = "canon-chunk-v9+event-grouping-v3";
 const MAX_SOURCE_CHUNK_BYTES: usize = 16_000;
 const MAX_CHARACTER_CONTEXT_BYTES: usize = 16_000;
 const MAX_EVENT_SELECTION_PROMPT_BYTES: usize = 16_000;
@@ -277,8 +277,9 @@ Keep each top-level fact array at {max_items} items or fewer and each nested eve
   "threads":[{{"key":"stable-key","description":"description","status":"open","evidence":{{"excerpt":"exact source text","confidence":0.0}}}}],
   "ending":null
 }}
+For the ending and each nested faction/location state, copy the evidence span first, then derive only the corresponding summary/state supported by that span.
 When FINAL_CHUNK is true, replace null with:
-{{"summary":"canonical ending","faction_states":[{{"name":"known faction","state":"final state","evidence":{{"excerpt":"exact source text","confidence":0.0}}}}],"location_states":[{{"name":"known location","state":"final state","evidence":{{"excerpt":"exact source text","confidence":0.0}}}}],"evidence":{{"excerpt":"exact source text","confidence":0.0}}}}
+{{"evidence":{{"excerpt":"exact source text","confidence":0.0}},"summary":"canonical ending","faction_states":[{{"evidence":{{"excerpt":"exact source text","confidence":0.0}},"name":"known faction","state":"final state"}}],"location_states":[{{"evidence":{{"excerpt":"exact source text","confidence":0.0}},"name":"known location","state":"final state"}}]}}
 
 NOVEL: {title}
 CHAPTER: {chapter}
@@ -1752,6 +1753,56 @@ mod tests {
     }
 
     #[test]
+    fn ending_evidence_accepts_both_key_orders_and_rejects_each_discontinuous_quote() {
+        let chunk = CanonSourceChunk {
+            chapter_number: 1,
+            chunk_index: 0,
+            is_final: true,
+            content: "夜雨过后城门打开。信使穿过广场。钟声停止人群离开。".into(),
+        };
+        let valid = base_extraction("夜雨过后城门打开。", true);
+        let old_json = serde_json::to_string(&valid).unwrap();
+        let ending = valid.ending.as_ref().unwrap();
+        let evidence_first = format!(
+            r#"{{"evidence":{},"summary":{},"faction_states":[{{"evidence":{},"name":{},"state":{}}}],"location_states":[{{"evidence":{},"name":{},"state":{}}}]}}"#,
+            serde_json::to_string(&ending.evidence).unwrap(),
+            serde_json::to_string(&ending.summary).unwrap(),
+            serde_json::to_string(&ending.faction_states[0].evidence).unwrap(),
+            serde_json::to_string(&ending.faction_states[0].name).unwrap(),
+            serde_json::to_string(&ending.faction_states[0].state).unwrap(),
+            serde_json::to_string(&ending.location_states[0].evidence).unwrap(),
+            serde_json::to_string(&ending.location_states[0].name).unwrap(),
+            serde_json::to_string(&ending.location_states[0].state).unwrap(),
+        );
+        let prefix = old_json.split_once(",\"ending\":").unwrap().0;
+        let new_json = format!("{prefix},\"ending\":{evidence_first}}}");
+        assert_ne!(old_json, new_json);
+        for raw in [&old_json, &new_json] {
+            let parsed = parse_chunk(raw, &chunk).unwrap();
+            assert_eq!(
+                serde_json::to_value(parsed).unwrap(),
+                serde_json::to_value(&valid).unwrap()
+            );
+        }
+
+        for path in [
+            "/ending/evidence/excerpt",
+            "/ending/faction_states/0/evidence/excerpt",
+            "/ending/location_states/0/evidence/excerpt",
+        ] {
+            let mut invalid = serde_json::to_value(&valid).unwrap();
+            // Each joined source span is eight normalized characters, below the 12-char anchor.
+            *invalid.pointer_mut(path).unwrap() = "夜雨过后城门打开。钟声停止人群离开。".into();
+            let error = parse_chunk(&serde_json::to_string(&invalid).unwrap(), &chunk).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "invalid canonical extraction: evidence excerpt must be a source-verbatim substring",
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
     fn prompt_bounds_output_and_rejects_unbounded_character_context() {
         let novel_id = Uuid::new_v4();
         let mut character = Character::new(novel_id, "Hero".into(), CharacterRole::Protagonist);
@@ -1766,11 +1817,23 @@ mod tests {
         };
 
         let prompt = build_prompt("Novel", &chunk, &[]).unwrap();
-        assert_eq!(CANON_CHUNK_PROMPT_VERSION, "canon-chunk-v8");
+        assert_eq!(CANON_CHUNK_PROMPT_VERSION, "canon-chunk-v9");
         assert_eq!(
             CANON_EXTRACTION_PROMPT_VERSION,
-            "canon-chunk-v8+event-grouping-v3"
+            "canon-chunk-v9+event-grouping-v3"
         );
+        let ending_example = prompt
+            .split_once("When FINAL_CHUNK is true, replace null with:\n")
+            .unwrap()
+            .1
+            .split_once("\n\nNOVEL:")
+            .unwrap()
+            .0;
+        serde_json::from_str::<ExtractedEnding>(ending_example).unwrap();
+        assert!(ending_example.starts_with(r#"{"evidence":{"#));
+        assert!(ending_example.contains(r#""faction_states":[{"evidence":{"#));
+        assert!(ending_example.contains(r#""location_states":[{"evidence":{"#));
+        assert!(prompt.contains("copy the evidence span first, then derive"));
         assert!(!prompt.contains("coverage_summary"));
         assert!(prompt.contains("Keep each top-level fact array at 4 items or fewer"));
         assert!(prompt.contains("event reference array at 16 items or fewer"));
