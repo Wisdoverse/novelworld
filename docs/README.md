@@ -68,6 +68,7 @@ roadmap status only when its required evidence exists.
 | [Account export](./ACCOUNT_EXPORT.md) | Export wire format and completeness contract | Exported fields, ordering, limits, or completion semantics change |
 | [Extraction quality](./EXTRACTION_QUALITY.md) | Supported slices and extraction thresholds | A parser slice, metric, judge rubric, or threshold changes |
 | [Extraction quality v2](./EXTRACTION_QUALITY_V2.md) | Implemented Structural oracle correction; not formally adopted for Qualification | The v2 corpus, policy identity, or separately reviewed adoption changes |
+| [Extraction quality v3](./EXTRACTION_QUALITY_V3.md) | Prospective single-source event accounting policy; not implemented or formally adopted | Judge response/accounting implementation, versioned inputs, or adoption changes |
 | [Import budget](./IMPORT_BUDGET.md) | Provider work limits during import | Provider calls, retry behavior, or budget evidence changes |
 
 ### Reliability, security, and operations
