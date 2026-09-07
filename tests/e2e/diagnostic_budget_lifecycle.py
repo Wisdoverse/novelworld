@@ -654,6 +654,8 @@ class Lifecycle:
                 "diagnostic_completion_unproven",
             }, "unexpected_journey_terminal_failure")
             require(journey.private_report.get("diagnostic_payers_stopped") is True, "payer_stop_not_proven")
+            require(journey.private_report.get("diagnostic_metrics_reconciled") is True,
+                    "terminal_metrics_not_reconciled")
             final_snapshot = json.loads((output / "budget-terminal.json").read_bytes())
             require(final_snapshot == journey.diagnostic_last_snapshot
                     and control.reconcile_snapshot(registration, final_snapshot)["sealed"] is True,
