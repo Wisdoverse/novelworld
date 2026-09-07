@@ -252,6 +252,9 @@ Outer fallback cleanup shares a 60-second deadline, with Docker calls capped at
 10 seconds each. CI sends a soft TERM after 15 minutes, reserving 10 minutes for
 terminal handling before a hard kill; SIGKILL/host loss still has no cleanup
 guarantee and never makes a failed registration resumable.
+Exact owned-container removal also removes its anonymous volumes (including
+the PostgreSQL image's parent mount). Named PostgreSQL volumes remain governed
+by the independent durable-evidence check; no volume pruning is used.
 Separate zero/nonzero registrations exercise Settings, the runner's generated
 environment, consistent owner/PG checkpoints and restart persistence. Since
 these are partial fixtures, the full journey's missing-quality-sample gate

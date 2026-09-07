@@ -1044,11 +1044,17 @@ class DiagnosticJourneyTest(unittest.TestCase):
         journey.diagnostic_evidence_durable = False
         project = journey.project
         container_id = "a" * 64
+        foreign_id = "c" * 64
+        foreign_name = project + "-foreign"
         before = {
             "containers": {
                 project + "-agent-service": {
                     "id": container_id,
                     "labels": {"com.docker.compose.project": project},
+                },
+                foreign_name: {
+                    "id": foreign_id,
+                    "labels": {"com.docker.compose.project": "other-project"},
                 }
             },
             "volumes": {
@@ -1063,7 +1069,8 @@ class DiagnosticJourneyTest(unittest.TestCase):
                 }
             },
         }
-        after = {"containers": {}, "volumes": before["volumes"], "networks": {}}
+        after = {"containers": {foreign_name: before["containers"][foreign_name]},
+                 "volumes": before["volumes"], "networks": {}}
         with mock.patch.object(
             RUNNER, "docker_inventory_snapshot", side_effect=[before, after]
         ), mock.patch.object(
@@ -1071,7 +1078,8 @@ class DiagnosticJourneyTest(unittest.TestCase):
         ) as command:
             journey.diagnostic_cleanup()
         commands = [call.args[0] for call in command.call_args_list]
-        self.assertIn(["docker", "rm", "--force", container_id], commands)
+        self.assertIn(["docker", "rm", "--force", "--volumes", container_id], commands)
+        self.assertNotIn(["docker", "rm", "--force", "--volumes", foreign_id], commands)
         self.assertIn(["docker", "network", "rm", "b" * 64], commands)
         self.assertNotIn(["docker", "volume", "rm", project + "-postgres"], commands)
         self.assertEqual(journey.report["environment"]["isolated_cleanup_completed"], False)

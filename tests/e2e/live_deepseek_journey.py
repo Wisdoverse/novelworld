@@ -2099,7 +2099,9 @@ class Journey:
                     identifier = item.get("id")
                     if not isinstance(identifier, str) or not re.fullmatch(r"[0-9a-f]{64}", identifier):
                         raise QualificationFailure("diagnostic_cleanup_identity_invalid")
-                    command = ["docker", "rm", "--force", identifier]
+                    # Docker removes only anonymous mounts here. The named PG
+                    # volume remains subject to the separate evidence gate.
+                    command = ["docker", "rm", "--force", "--volumes", identifier]
                 elif kind == "networks":
                     command = ["docker", "network", "rm", item["id"]]
                 else:
