@@ -703,6 +703,47 @@ class DiagnosticJourneyTest(unittest.TestCase):
                 CONTROL.verify_artifacts(registration, ROOT, base, candidate)
         self.assertEqual(rejected.exception.code, "diagnostic_artifact_identity_mismatch")
 
+    def test_capability_probe_failure_in_any_version_or_payer_blocks_adoption(self):
+        for failed_index in range(8):
+            with self.subTest(failed_index=failed_index):
+                journey = self.journey()
+                journey.diagnostic_ledger.descriptor = object()
+                probes = mock.Mock()
+                calls = 0
+
+                def probe(*_args):
+                    nonlocal calls
+                    calls += 1
+                    if calls - 1 == failed_index:
+                        raise RUNNER.diagnostic.DiagnosticFailure("synthetic_probe_failure")
+
+                probes.side_effect = probe
+                spec = mock.Mock()
+                adapter = mock.Mock(probe=probes)
+                with mock.patch.object(RUNNER, "docker_inventory_snapshot", return_value={
+                    "containers": {}, "volumes": {}, "networks": {}
+                }), mock.patch.object(
+                    RUNNER, "run", side_effect=lambda command, **_: (
+                        "fixture|linux|amd64" if command[:2] == ["docker", "version"]
+                        else "fixture-compose" if command[:4] == ["docker", "compose", "version", "--short"]
+                        else ""
+                    )
+                ), mock.patch.object(
+                    journey, "validate_release_inputs"
+                ), mock.patch.object(
+                    journey, "release"
+                ) as release, mock.patch.object(
+                    RUNNER.importlib.util, "spec_from_file_location", return_value=spec
+                ), mock.patch.object(
+                    RUNNER.importlib.util, "module_from_spec", return_value=adapter
+                ):
+                    spec.loader.exec_module = mock.Mock()
+                    with self.assertRaises(RUNNER.QualificationFailure) as rejected:
+                        journey.preflight()
+                self.assertEqual(rejected.exception.code, "diagnostic_artifact_capability_unproven")
+                self.assertEqual(probes.call_count, failed_index + 1)
+                release.assert_not_called()
+
     def test_control_seal_rejects_integer_boolean_and_still_cannot_retry(self):
         journey = self.journey()
         journey.internal_service_token = "synthetic-internal-control-value"

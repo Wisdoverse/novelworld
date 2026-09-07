@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import json
+import re
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -18,6 +19,18 @@ SPEC.loader.exec_module(LIFECYCLE)
 
 
 class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
+    def test_journey_isolation_changes_services_not_nested_dependencies(self):
+        original = (ROOT / "docker-compose.yml").read_text()
+        isolated = LIFECYCLE.isolated_journey_compose(original, "nwq-abcdef1234", Path("/private/ca.pem"))
+        self.assertEqual(isolated.count("      SSL_CERT_FILE: /fixture/ca.pem\n"), 4)
+        for service in LIFECYCLE.SERVICES:
+            block = re.search(r"(?ms)^  " + re.escape(service) + r":\n(.*?)(?=^  [a-z]|\Z)", isolated)[1]
+            self.assertIn("      HTTPS_PROXY: http://mock:3128\n", block)
+            self.assertIn('"/private/ca.pem:/fixture/ca.pem:ro"', block)
+        self.assertEqual(re.findall(r"(?ms)^    depends_on:\n.*?(?=^    [a-z]|\Z)", original),
+                         re.findall(r"(?ms)^    depends_on:\n.*?(?=^    [a-z]|\Z)", isolated))
+        self.assertIn("  novel-net:\n    external: true\n    name: nwq-abcdef1234\n", isolated)
+
     def lifecycle(self, containers, network=True):
         lifecycle = LIFECYCLE.Lifecycle.__new__(LIFECYCLE.Lifecycle)
         lifecycle.project = "nwq-abcdef1234"

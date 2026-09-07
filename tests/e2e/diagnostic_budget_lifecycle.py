@@ -54,6 +54,28 @@ def require(condition, code):
         raise Failure(code)
 
 
+def isolated_journey_compose(compose, project, ca_path):
+    network = "  novel-net:\n    driver: bridge\n"
+    require(compose.count(network) == 1, "fixture_compose_network_shape_changed")
+    compose = compose.replace(network, "  novel-net:\n    external: true\n    name: " + project + "\n")
+    for service in SERVICES:
+        # Anchor at exactly two spaces: dependencies also contain service names.
+        marker = re.search(r"(?m)^  " + re.escape(service) + r":\n", compose)
+        require(marker is not None, "fixture_service_missing")
+        start = marker.start()
+        following = re.search(r"(?m)^  [a-z][a-z-]*:\s*$", compose[marker.end():])
+        end = marker.end() + following.start() if following else len(compose)
+        block = compose[start:end]
+        require(block.count("    environment:\n") == 1 and "    volumes:\n" not in block,
+                "fixture_service_shape_changed")
+        block = block.replace("    environment:\n", "    volumes:\n      - " + json.dumps(
+            str(ca_path) + ":/fixture/ca.pem:ro") + "\n    environment:\n"
+            "      HTTPS_PROXY: http://mock:3128\n      NO_PROXY: localhost,127.0.0.1,user-service\n"
+            "      SSL_CERT_FILE: /fixture/ca.pem\n")
+        compose = compose[:start] + block + compose[end:]
+    return compose
+
+
 def command(args, *, timeout=30, input=None, check=True, cwd=None, env=None):
     result = subprocess.run(args, input=input, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, timeout=timeout, cwd=cwd, env=env)
@@ -343,7 +365,7 @@ class Lifecycle:
             for service in services:
                 require(self.docker("image", "inspect", "--format", "{{.Id}}", self.images[service]).stdout.decode().strip()
                         == sources[service], "published_image_identity_changed")
-        print("diagnostic lifecycle: four service images published only to isolated loopback registry", flush=True)
+        print(f"diagnostic lifecycle: {len(self.images)} service images published only to isolated loopback registry", flush=True)
 
     def preflight_images(self):
         spec = importlib.util.spec_from_file_location("diagnostic_release", ROOT / "infra/docker/diagnostic_budget.py")
@@ -487,25 +509,8 @@ class Lifecycle:
         command(["git", "clone", "--no-hardlinks", str(ROOT), str(checkout)], timeout=60)
         # No runtime implementation or release script is replaced. The explicit
         # test-only commit cannot be used as a genuine application upgrade pair.
-        compose = (checkout / "docker-compose.yml").read_text()
-        network = "  novel-net:\n    driver: bridge\n"
-        require(compose.count(network) == 1, "fixture_compose_network_shape_changed")
-        compose = compose.replace(network, "  novel-net:\n    external: true\n    name: " + self.project + "\n")
-        for service in SERVICES:
-            marker = "  " + service + ":\n"
-            start = compose.index(marker)
-            # Service attributes use four spaces; only another two-space key
-            # ends this block (comments between services are preserved).
-            matches = list(re.finditer(r"(?m)^  [a-z][a-z-]*:\s*$", compose[start + len(marker):]))
-            end = start + len(marker) + matches[0].start() if matches else len(compose)
-            block = compose[start:end]
-            require(block.count("    environment:\n") == 1 and "    volumes:\n" not in block,
-                    "fixture_service_shape_changed")
-            block = block.replace("    environment:\n", "    volumes:\n      - " + json.dumps(
-                str(self.files / "ca.pem") + ":/fixture/ca.pem:ro") + "\n    environment:\n"
-                "      HTTPS_PROXY: http://mock:3128\n      NO_PROXY: localhost,127.0.0.1,user-service\n"
-                "      SSL_CERT_FILE: /fixture/ca.pem\n")
-            compose = compose[:start] + block + compose[end:]
+        compose = isolated_journey_compose((checkout / "docker-compose.yml").read_text(),
+                                          self.project, self.files / "ca.pem")
         (checkout / "docker-compose.yml").write_text(compose)
         command(["git", "add", "docker-compose.yml"], cwd=checkout)
         command(["git", "-c", "user.name=Offline Fixture", "-c", "user.email=fixture@example.invalid",
