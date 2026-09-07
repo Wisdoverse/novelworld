@@ -33,7 +33,7 @@ const CORPUS: &str = include_str!("../corpus/v1.json");
 const POLICY_VERSION: &str = "extraction-quality-v2";
 const CORPUS_VERSION: &str = "h1-synthetic-v4";
 const RUBRIC_VERSION: &str = "h1-extraction-v2";
-const JUDGE_PROMPT_VERSION: &str = "h1-semantic-judge-v6";
+const JUDGE_PROMPT_VERSION: &str = "h1-semantic-judge-v7";
 const REPORT_SCHEMA_VERSION: u8 = 3;
 const MAX_CORPUS_BYTES: usize = 256 * 1024;
 const MAX_JUDGE_RESPONSE_BYTES: usize = 32 * 1024;
@@ -2575,6 +2575,9 @@ Exact shape: {{"rubric_version":"{RUBRIC_VERSION}","character_verdicts":[{{"expe
     let system = format!(
         "{system}\nWorld-rule coverage compares each expected constraint to what the extracted descriptions actually assert. Expected descriptions and source evidence cannot fill content omitted from an extracted description. A full match requires the complete expected constraint; partial earns no recall. Every expected world-rule match or partial requires a nonempty supports list; absent requires supports: []. Each support must reference an extracted world rule marked match and copy a non-whitespace continuous excerpt from that rule's description, verbatim without translation, normalization or repair. Do not repeat an identical token/excerpt pair within one verdict. Multiple distinct excerpts may reference one rule, and a compound rule may support multiple expected rules only when its description actually expresses each constraint. Faithful cross-language paraphrases remain valid; copy support excerpts in the extracted description's language. No one-to-one assignment or rule-count inequality applies to world rules."
     );
+    let system = format!(
+        "{system}\nEvent coverage: use match only when the single mapped extracted event conveys every material part of the expected event, including material actions, participants, identity revelations and conditions. Coverage of some but not all of those parts is partial; use absent when no extracted event provides supported overlap. Judge the mapped event's own fields; never borrow a missing part from another extracted event or surrounding story context. Preserve faithful cross-language paraphrases; do not require verbatim wording or unrelated source details. Partial earns no full-event recall."
+    );
     let user = format!(
         "EVAL_CASE:\n{}",
         serde_json::to_string(payload).context("cannot serialize semantic judge payload")?
@@ -3292,9 +3295,15 @@ mod tests {
     #[test]
     fn judge_prompt_requires_one_to_one_event_matches() {
         let request = judge_request(&serde_json::json!({"bounded": true})).unwrap();
-        assert_eq!(JUDGE_PROMPT_VERSION, "h1-semantic-judge-v6");
+        assert_eq!(JUDGE_PROMPT_VERSION, "h1-semantic-judge-v7");
         let system = &request.messages[0].content;
         assert!(system.contains("Event verdicts use stricter one-to-one mapping"));
+        assert!(system.contains("single mapped extracted event conveys every material part"));
+        assert!(system.contains("some but not all of those parts is partial"));
+        assert!(system.contains("no extracted event provides supported overlap"));
+        assert!(system.contains("Judge the mapped event's own fields"));
+        assert!(system.contains("never borrow a missing part from another extracted event"));
+        assert!(system.contains("do not require verbatim wording or unrelated source details"));
         assert!(system.contains("Every additional extracted event token must be hallucinated"));
         assert!(system.contains("without a distinct expected fact"));
         assert!(system.contains("expected characters marked match or partial must not exceed"));
@@ -3307,6 +3316,31 @@ mod tests {
         assert!(system.contains("verbatim without translation, normalization or repair"));
         assert!(system.contains("a compound rule may support multiple expected rules"));
         assert!(system.contains("Faithful cross-language paraphrases remain valid"));
+    }
+
+    #[test]
+    fn partial_event_mapping_is_valid_but_earns_no_complete_recall() {
+        let (case, contract) = fixture_contract();
+        let mut value = valid_judge_value(&contract, false);
+        for (verdict, coverage) in [("match", 100), ("partial", 66)] {
+            value["event_verdicts"][0]["verdict"] = serde_json::json!(verdict);
+            let verdicts = parse_judge_verdicts(&value.to_string(), &contract).unwrap();
+            let report = live_report(
+                &case,
+                &case.recorded.extraction,
+                &case.recorded.canon,
+                4,
+                &verdicts,
+                JudgeTrace::default(),
+            )
+            .unwrap();
+            assert_eq!(report.coverage["events"], coverage);
+            assert_eq!(report.passed, verdict == "match");
+            assert_eq!(
+                report.fact_counts["events"].matched_extracted,
+                contract.extracted_events
+            );
+        }
     }
 
     #[test]
