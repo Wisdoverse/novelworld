@@ -1,9 +1,9 @@
 # Horizon 1 extraction-quality evaluation gate
 
-This tool implements the structurally landed `extraction-quality-v2` policy
-(docs/EXTRACTION_QUALITY_V2.md) over the checked-in `h1-synthetic-v4` corpus
+This tool implements the `extraction-quality-v3` policy
+([policy](../../docs/EXTRACTION_QUALITY_V3.md)) over the checked-in `h1-synthetic-v5` corpus
 `corpus/v1.json` without writing runtime data. This is Structural evidence, not
-formal Qualification; the historical v1 policy, v3 corpus and failed reports
+formal Qualification; historical policies, corpora and failed reports
 are immutable and are not rescored or compared for quality.
 
 Public reports use schema 3 and explicitly carry policy/corpus identity; the
@@ -47,18 +47,32 @@ existing bounded identical-request retry. This is only a necessary cardinality
 constraint, not identity-by-identity or equal-count semantic matching; recorded
 scoring is unchanged.
 
-The active `h1-semantic-judge-v7` prompt explicitly distinguishes complete from
+The active `h1-semantic-judge-v8` prompt retains the distinction between complete and
 partial event coverage. A complete match requires every material part of the
 expected event in its single mapped extracted event's own fields; another event
 or surrounding story context cannot supply missing content. Faithful cross-language
 paraphrases remain valid, without requiring verbatim wording or unrelated source
 details. Partial mappings are valid but earn no full-event recall. The unchanged
-one-to-one rubric labels additional unmapped events `hallucinated` even when they
-are source-grounded finer-grained events; this label is not a count of fabricated
-facts. Prompt and scoring tests do not prove that a live judge follows these
-semantic instructions. Historical reports remain frozen; this clarification
-does not change the rubric, thresholds, corpus, schema or retry policy, authorize
-a paid run, or adopt v2 for formal Qualification.
+one-to-one scoring counts additional unmapped events toward hallucination even
+when they are source-grounded finer-grained events; this is not a count of
+fabricated facts. Prompt and scoring tests do not prove that a live judge follows
+these semantic instructions.
+
+V3 removes the redundant `extracted_event_verdicts` response array. The shared
+strict parser rejects that old key even when empty or consistent; there is no
+compatibility path, key deletion or response repair. Validated expected
+Match/Partial mappings determine the matched-extracted count; actual canon
+events determine its full denominator, including every unmapped event. Expected
+recall stays Match-only. Absent accepts an omitted or null mapping; Match/Partial
+requires a known, nonnull token unique across expected events. Other categories,
+mapped chronology, global rounding, zero/anti-vacuity and retry guards are retained.
+Synthetic regressions cover complete/Partial/Absent scores, unmapped prefixed
+events, empty extraction, invalid mappings and old-schema rejection. They prove
+mechanics, not semantic quality. Corpus v5 changes only policy/corpus/rubric
+identities from v4; sources, facts, cases and thresholds are unchanged. The new
+response rubric is `h1-extraction-v3`; public report schema 3 and private envelope
+2 stay fixed. Historical reports remain frozen, and no paid run or formal
+adoption follows from this implementation.
 
 Production and H1 share an event-selection parser that validates actual chunk
 boundaries before accepting, saving, or resuming a selection. A legacy invalid
@@ -112,9 +126,9 @@ World-rule verdicts use `world_rule_verdicts` supports: `[{extracted, excerpt}]`
 for `match`/`partial`, and an empty list for `absent`; each excerpt must be an
 exact raw substring of its referenced extracted description (whitespace-only
 support is invalid). Many-to-many and compound reuse are allowed; no
-injectivity or cardinality rule is added. The active v7 judge retains the
-description-bound support contract introduced in v6; rubric, thresholds, and
-recorded mode are unchanged. Supports stay in
+injectivity or cardinality rule is added. The active v8 judge retains the
+description-bound support contract introduced in v6; rule scoring, thresholds,
+and recorded scoring are unchanged. Supports stay in
 private responses and are excluded from public aggregates; an irrelevant but
 real excerpt may still be semantically misjudged. No paid run or qualification
 claim follows from this contract change.
@@ -177,8 +191,9 @@ reports contain only the profile, fixed ceilings, sanitized failure codes, and
 reserved/settled aggregates. See the [official DeepSeek pricing
 documentation](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/).
 
-The request and retry mechanics of `--recorded` and unflagged `--live` are
-unchanged, but all current reports identify policy v2 and corpus v4. They
+Recorded scoring and live transport and bounded retry mechanics are unchanged;
+the judge request/response contract changes under its new version identities.
+All current reports identify policy v3 and corpus v5. They
 cannot satisfy a frozen formal v1 cohort or authorize its replacement.
 This Diagnostic is non-qualifying evidence only: it does not rerun the failed
 #236 cohort, lower thresholds, establish model quality, authorize a production

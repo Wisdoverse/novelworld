@@ -4172,7 +4172,7 @@ def self_test_h1_cohort_boundary(root: Path) -> None:
 
         # Exercise the frozen digest branch without duplicating the old corpus
         # or changing its constant. Only this test's digest observation is fake;
-        # the v4 rejection below uses the actual checked-in bytes and SHA-256.
+        # the v5 rejection below uses the actual checked-in bytes and SHA-256.
         def frozen_digest(value: bytes) -> str:
             return H1_V1_CORPUS_SHA256 if value == corpus_bytes else digest(value)
 
@@ -4183,7 +4183,7 @@ def self_test_h1_cohort_boundary(root: Path) -> None:
         for name, observed_digest, registered, expected_error in (
             ("frozen", H1_V1_CORPUS_SHA256, True, None),
             ("modified", digest(corpus_bytes + b"\n"), True, "qualification_h1_corpus_not_adopted"),
-            ("v4", digest(corpus_bytes), True, "qualification_h1_corpus_not_adopted"),
+            ("v5", digest(corpus_bytes), True, "qualification_h1_corpus_not_adopted"),
             ("declared-drift", H1_V1_CORPUS_SHA256, True, "cohort_identity_mismatch"),
             ("allowlist-drift", H1_V1_CORPUS_SHA256, True, "cohort_identity_mismatch"),
             ("unregistered", digest(corpus_bytes), False, None),

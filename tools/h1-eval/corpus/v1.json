@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
-  "policy_version": "extraction-quality-v2",
-  "corpus_version": "h1-synthetic-v4",
-  "rubric_version": "h1-extraction-v2",
+  "policy_version": "extraction-quality-v3",
+  "corpus_version": "h1-synthetic-v5",
+  "rubric_version": "h1-extraction-v3",
   "thresholds": {
     "coverage_percent": 80,
     "precision_percent": 80,
