@@ -187,16 +187,73 @@ live execution approval or evidence that H3/H4 passed. The real release-upgrade
 and pending-projection result remains [#230](https://github.com/Wisdoverse/novelworld/issues/230).
 
 Before execution, independently review one private, secret-free registration
-with schema `vision-journey-registration-v1`. Its exact fields are `schema`,
+with schema `vision-journey-registration-v1` or the separate prospective-summary
+Diagnostic schema `vision-journey-registration-v2`. V1 has exactly these
+fields: `schema`,
 `budget_id`, `hypothesis`, `candidate_git_sha`, `base_manifest_sha256`,
 `candidate_manifest_sha256`, `base_application_image_ids`,
 `candidate_application_image_ids`, `profile_sha256`, `product_fixture_sha256`,
 `prompt_schema_identities`, `limits`, `output_dir`, and `ledger_path`.
+V2 additionally requires `network_subnet`: JSON null retains automatic Docker
+allocation; a string must be one canonical strict IPv4 RFC1918 /28. V1 rejects
+this extra field. The canonical registration hash binds this selection; it does
+not alter prompt/source identities or the fixed budget/product fixture.
+
+For explicit selection, the supported qualification adapter derives
+`RELEASE_QUALIFICATION_SUBNET` only from the registration, clearing inherited
+values. Before protected configuration and Started, it checks the default local
+Unix Docker endpoint, matching Linux host/kernel metadata, absence of Desktop
+and rootless modes, and the daemon default bridge's exact subnet/gateway/device
+in host IPv4 routes across all tables. Missing or ambiguous evidence fails
+closed. This is a bounded operator environment check, not attestation against
+malicious local root. Every other Docker allocation and non-default route is
+checked for overlap; no daemon, route or existing resource is modified.
+
+The adapter generates only `novel-net.ipam.config[0].subnet` in a fixed 0600
+Compose overlay under the owned external release-state directory. Exact bytes
+are checked on reuse; arbitrary paths/content and symlinks are refused. The
+original versioned Compose file and this same second `-f` serve cold adoption,
+upgrade and runner restart. Null/v1 retains the original one-file argv. The
+cold empty-project and clean-checkout gates remain mandatory. Creation rechecks
+topology, durably records an attempt, then binds the created Compose network's
+name, labels, subnet and immutable ID. Upgrade/restart must retain that identity;
+disappearance, drift or ambiguous creation stops without fallback allocation.
+Topology/overlay/attempt/observed identities stay in private evidence. Cleanup
+removes only proven owned resources; an unproven network identity is preserved.
+
 `prompt_schema_identities` must equal the source-derived result of
 `diagnostic_journey.source_identities(root, base_sha, candidate_sha)`; it binds
 the actual base/candidate prompt constants and domain/schema Git trees.
 The review freezes the SHA256 of the registration's UTF-8 canonical JSON
 (`ensure_ascii=False`, sorted keys, compact separators, no trailing newline).
+
+Registration v1 retains `h4-product-input-v1` and its original schedule. V2
+selects only `tests/e2e/fixtures/h4-journey-v2.json` (`h4-product-input-v2`): seven
+base chats stay unenrolled across the real upgrade, then ten newly committed
+self chats form one prospective summary window. Five fixed extra chats after
+world action 11 complete that window; one resumed chat gives eighteen chats,
+thirty-six messages and the same twelve world actions. V2 verifies exact source
+turns/message pairs, the sole fenced Mid result and its provenance before and
+after restart, and one logical summary across process generations (bounded
+transport retries remain allowed). Cross-version authority comparison removes
+only the seven new summary fields and separately proves every legacy default;
+ordinary same-schema replay/negative comparisons retain those fields. Failed or
+unknown windows stop the Diagnostic without reset or make-up calls. Mid selection
+is evidence of retrieval, not semantic quality or recovery of an interrupted
+summary call. V2 cannot be used for Flash, a Qualification cohort or the legacy
+character slice. Existing fixture bytes, failed ledgers and formal policies are
+unchanged; each Diagnostic still needs a new prospective approval and actual
+useful runtime artifact pair. Fixture validation precedes protected configuration.
+
+The optional real-schema regression check runs
+`NW_H4_TEST_POSTGRES=<owned-migrated-container> python3 tests/e2e/diagnostic_journey_test.py DiagnosticJourneyTest.test_v2_summary_snapshot_real_postgres_schema`.
+It requires an already-owned isolated PostgreSQL container with the standard
+`novel` role and `novel_world` database (or explicit `NW_H4_TEST_PGUSER` /
+`NW_H4_TEST_PGDATABASE` overrides). It executes the actual snapshot query
+against temporary copies of the real column definitions, rolls them back, and
+never starts a service, mutates public rows or calls a provider. Message persona
+provenance is projected from the matching durable turn; raw message values remain
+unchanged and mismatched scope, identity or chapter fails validation.
 
 The fixed profile is `tools/llm-budget/diagnostic-v1.json`: official DeepSeek
 origin, `deepseek-v4-flash-vision-exp`, thinking disabled. `limits` contains
@@ -270,8 +327,9 @@ ledger, successful exit and complete reports are all required; a
 INT/TERM arriving during the serialized final report/ledger commit is handled
 after that terminal decision, not as a request to rerun it.
 
-Only the schema-3 `h4-vision-diagnostic-v1` aggregate report may be considered
-for publication. It omits budget/receipt/run IDs, private registration hashes,
+Only the schema-3 `h4-vision-diagnostic-v1` or separately identified
+`h4-vision-diagnostic-v2` aggregate report may be considered for publication.
+V2 adds only numeric legacy/prospective chat and logical-summary counts. It omits budget/receipt/run IDs, private registration hashes,
 raw content and credentials. Limits, charged totals, settled/unresolved counts
 and seal status are explicit; a Diagnostic still makes no qualification claim.
 

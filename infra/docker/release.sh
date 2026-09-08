@@ -67,6 +67,24 @@ configure_qualification_scope
 readonly container_prefix qualification_project http_bind http_port health_origin qualification_scope
 readonly -a compose_project_args
 
+qualification_subnet=${RELEASE_QUALIFICATION_SUBNET:-}
+qualification_network_source=
+network_overlay_args=()
+network_guard() {
+  [[ -n "$qualification_subnet" ]] || return 0
+  python3 -c "$qualification_network_source" "$1" "$qualification_subnet" \
+    "$state_dir" "$qualification_project" "$repo_root"
+}
+if [[ -n "$qualification_subnet" ]]; then
+  [[ "$qualification_scope" == true ]] || die "network subnet requires qualification scope"
+  network_tool_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  [[ -r "$network_tool_dir/qualification_network.py" ]] || die "qualification network adapter missing"
+  IFS= read -r -d '' qualification_network_source < "$network_tool_dir/qualification_network.py" || true
+  # Validate before reading product secrets; capture helper before any checkout.
+  network_guard check
+fi
+readonly qualification_subnet qualification_network_source
+
 qualification_phase() {
   [[ "$qualification_scope" == true ]] || return 0
   printf 'qualification-phase %s %s %s\n' "$1" "$2" "$(date +%s%3N)"
@@ -426,6 +444,14 @@ require_pre_minimum_rollback_ready() {
 active_manifest=
 compose_deadline_args=()
 compose() (
+  local network_creating=false compose_result=0 network_overlay
+  if [[ -n "$qualification_subnet" ]]; then
+    network_overlay=$(network_guard overlay) || return $?
+    network_overlay_args=(-f "$network_overlay")
+    case "${1:-}" in
+      up|start|restart|run|create) network_creating=true; network_guard before || return $? ;;
+    esac
+  fi
   [[ -n "$cache_mode" ]] || die "cache mode was not initialized"
   export CACHE_MODE="$cache_mode"
   export REDIS_PASSWORD="$cache_redis_password"
@@ -439,16 +465,23 @@ compose() (
     export NGINX_HTTP_BIND="$http_bind"
     export NGINX_HTTP_PORT="$http_port"
   fi
-  env \
+  if env \
     -u COMPOSE_PROFILES \
     -u RELEASE_VERSION -u RELEASE_GIT_SHA \
     -u GATEWAY_IMAGE -u USER_SERVICE_IMAGE -u NOVEL_SERVICE_IMAGE \
     -u AGENT_SERVICE_IMAGE -u NARRATIVE_SERVICE_IMAGE -u FRONTEND_IMAGE \
     -u POSTGRES_IMAGE -u REDIS_IMAGE -u NGINX_IMAGE \
     "${compose_deadline_args[@]}" docker compose "${compose_project_args[@]}" \
-      --project-directory "$repo_root" -f "$repo_root/docker-compose.yml" \
+      --project-directory "$repo_root" -f "$repo_root/docker-compose.yml" "${network_overlay_args[@]}" \
       --env-file "$secrets_file" --env-file "$active_manifest" \
-      "${compose_profile_args[@]}" "$@"
+      "${compose_profile_args[@]}" "$@"; then
+    compose_result=0
+  else
+    compose_result=$?
+  fi
+  # Record/verify identity even when creation returned an ambiguous failure.
+  if [[ "$network_creating" == true ]]; then network_guard after || return $?; fi
+  return "$compose_result"
 )
 
 require_empty_qualification_project() {

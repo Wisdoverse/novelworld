@@ -1,9 +1,10 @@
-"""Offline registration/accounting checks; never opens provider or Docker I/O."""
+"""Offline checks; optional NW_H4_TEST_POSTGRES enables only a temporary-table PG probe."""
 import copy
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -1200,6 +1201,502 @@ class DiagnosticJourneyTest(unittest.TestCase):
         commands = [call.args[0] for call in command.call_args_list]
         self.assertIn(["docker", "stop", "--time", "0", "c" * 64], commands)
         self.assertTrue(journey.diagnostic_evidence_durable is False)
+
+    def test_v2_registered_subnet_shape_and_presecret_refusal(self):
+        value = copy.deepcopy(self.value)
+        with self.assertRaises(CONTROL.DiagnosticFailure):
+            self.load({**value, "network_subnet": None})  # V1 exact shape.
+        value.update(schema=CONTROL.REGISTRATION_SCHEMA_V2, network_subnet=None,
+                     product_fixture_sha256=CONTROL.digest((ROOT / CONTROL.product_fixture(
+                         CONTROL.REGISTRATION_SCHEMA_V2)).read_bytes()))
+        self.load(value)
+        for selected in (True, "", "10.2.3.1/28", " 10.2.3.0/28", "10.2.3.0/24",
+                         "8.8.8.0/28", "127.0.0.0/28", "2001:db8::/28", "10.02.3.0/28"):
+            with self.subTest(subnet=selected), self.assertRaises(CONTROL.DiagnosticFailure):
+                self.load({**value, "network_subnet": selected})
+        for mutation in ({key: val for key, val in value.items() if key != "network_subnet"},
+                         {**value, "overlay_path": "/arbitrary"}):
+            with self.assertRaises(CONTROL.DiagnosticFailure): self.load(mutation)
+        approved = CONTROL.digest(CONTROL.canonical(value))
+        value["network_subnet"] = "10.2.3.0/28"
+        with self.assertRaises(CONTROL.DiagnosticFailure): self.load(value, approved)
+        registration = self.load(value)
+        with mock.patch.object(RUNNER, "load_release_manifest", return_value={}), \
+                mock.patch.object(RUNNER, "load_config") as config, \
+                mock.patch.object(RUNNER.diagnostic.network, "preflight",
+                                  side_effect=CONTROL.network.NetworkFailure("overlap")), \
+                mock.patch.object(CONTROL.DiagnosticLedger, "start") as started:
+            with self.assertRaises(CONTROL.network.NetworkFailure):
+                RUNNER.Journey(ROOT, self.directory / "config", self.output, "a" * 40,
+                               self.base, self.candidate, None, None, "bash", "Diagnostic", "core",
+                               diagnostic_registration=registration)
+            config.assert_not_called()
+            started.assert_not_called()
+        self.assertNotIn("RELEASE_QUALIFICATION_SUBNET", RUNNER.qualification_environment(
+            ROOT, {"RELEASE_QUALIFICATION_SUBNET": "10.9.9.0/28"}))
+
+    def network_fixture(self):
+        project, selected = "nwq-abcdef1234", "10.2.3.0/28"
+        item = {"Id": "a" * 64, "Name": project + "_novel-net", "Driver": "bridge", "Scope": "local",
+                "Internal": False, "EnableIPv6": False, "Options": {},
+                "Labels": {"com.docker.compose.project": project, "com.docker.compose.network": "novel-net"},
+                "IPAM": {"Config": [{"Subnet": selected, "Gateway": "10.2.3.1"}]}}
+        return project, selected, item
+
+    def test_network_topology_all_tables_and_local_engine_fail_closed(self):
+        network = CONTROL.network
+        _, selected, item = self.network_fixture()
+        network.topology(selected, [], [{"dst": "default", "table": "main"}])
+        for route in ({"dst": "10.2.3.1", "table": "local"},
+                      {"dst": "10.2.0.0/16", "table": 100}, {"dst": "bad"}, {}):
+            with self.assertRaises(network.NetworkFailure): network.topology(selected, [], [route])
+        with self.assertRaises(network.NetworkFailure): network.topology(selected, [item], [])
+        for malformed in ({}, {"IPAM": {}}, {"IPAM": {"Config": [{}]}}):
+            with self.assertRaises(network.NetworkFailure): network.topology(selected, [malformed], [])
+        engine = {"os": "linux", "name": os.uname().nodename, "kernel": os.uname().release,
+                  "distribution": "Linux", "security": []}
+        outputs = [b'[{"Name":"default","Endpoints":{"docker":{"Host":"unix:///var/run/docker.sock"}}}]',
+                   json.dumps(engine).encode(), b"", b'[{"dst":"default"}]']
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(network, "read_command", side_effect=outputs) as command:
+            with self.assertRaises(network.NetworkFailure): network.inventory()  # no local bridge proof
+            self.assertFalse(any(call.args[0][:3] == ["docker", "network", "inspect"]
+                                 for call in command.call_args_list))
+            self.assertEqual(command.call_args.args[0], ["ip", "-j", "-4", "route", "show", "table", "all"])
+        for host in ("ssh://elsewhere", "tcp://127.0.0.1:2375"):
+            with mock.patch.dict(os.environ, {"DOCKER_HOST": host}, clear=True), \
+                    mock.patch.object(network, "read_command", return_value=outputs[0]):
+                with self.assertRaises(network.NetworkFailure): network.inventory()
+        for bad in (b"{}", b"[", b'[{"Endpoints":{}}]', b'[{"x":1,"x":2}]'):
+            with mock.patch.dict(os.environ, {}, clear=True), \
+                    mock.patch.object(network, "read_command", return_value=bad):
+                with self.assertRaises(network.NetworkFailure): network.inventory()
+        bridge = {"Id": "c" * 64, "Name": "bridge", "Driver": "bridge", "Scope": "local",
+                  "Options": {"com.docker.network.bridge.name": "docker0"},
+                  "IPAM": {"Config": [{"Subnet": "172.17.0.0/16", "Gateway": "172.17.0.1"}]}}
+        route = {"dev": "docker0", "dst": "172.17.0.0/16", "prefsrc": "172.17.0.1"}
+        valid = [outputs[0], outputs[1], b"c" * 64, json.dumps([bridge]).encode(), json.dumps([route]).encode()]
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(network, "read_command", side_effect=valid):
+            self.assertEqual(network.inventory(), ([bridge], [route]))
+        for changed in ({**engine, "name": "other-host"}, {**engine, "kernel": "other-kernel"},
+                        {**engine, "distribution": "Docker Desktop"}, {**engine, "security": ["name=rootless"]}):
+            with mock.patch.dict(os.environ, {}, clear=True), \
+                    mock.patch.object(network, "read_command", side_effect=[outputs[0], json.dumps(changed).encode()]):
+                with self.assertRaises(network.NetworkFailure): network.inventory()
+        for changed in ({**route, "dev": "other"}, {**route, "prefsrc": "172.17.0.2"},
+                        {**route, "dst": "172.18.0.0/16"}):
+            with mock.patch.dict(os.environ, {}, clear=True), \
+                    mock.patch.object(network, "read_command", side_effect=valid[:-1] + [json.dumps([changed]).encode()]):
+                with self.assertRaises(network.NetworkFailure): network.inventory()
+        with mock.patch.object(network.subprocess, "run", side_effect=subprocess.TimeoutExpired("docker", 5)):
+            with self.assertRaises(network.NetworkFailure): network.inventory()
+
+    def test_network_overlay_and_one_creation_identity_across_generations(self):
+        network = CONTROL.network
+        project, selected, item = self.network_fixture()
+        state = self.directory / "network-state"
+        state.mkdir(mode=0o700)
+        path = Path(network.guard("overlay", selected, state, project, ROOT))
+        self.assertEqual(path.read_bytes(), network.overlay_bytes(selected))
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        with mock.patch.object(network, "inventory", return_value=([], [])):
+            network.guard("check", selected, state, project, ROOT)
+            network.guard("before", selected, state, project, ROOT)
+            with self.assertRaises(network.NetworkFailure): network.guard("before", selected, state, project, ROOT)
+        own_routes = [{"dst": selected, "dev": "br-" + item["Id"][:12]},
+                      {"dst": "10.2.3.1", "table": "local", "dev": "br-" + item["Id"][:12]}]
+        with mock.patch.object(network, "inventory", return_value=([item], own_routes)):
+            network.guard("after", selected, state, project, ROOT)
+            for action in ("check", "before", "after", "before", "after"):
+                network.guard(action, selected, state, project, ROOT)
+        for mutation in ([], [{**item, "Id": "b" * 64}], [{**item, "Labels": {}}],
+                         [{**item, "IPAM": {"Config": [{"Subnet": "10.2.4.0/28"}]}}]):
+            with mock.patch.object(network, "inventory", return_value=(mutation, [])):
+                with self.assertRaises(network.NetworkFailure): network.guard("before", selected, state, project, ROOT)
+        with mock.patch.object(network, "inventory", return_value=([item], own_routes + [{"dst": selected, "dev": "other"}])):
+            with self.assertRaises(network.NetworkFailure): network.guard("check", selected, state, project, ROOT)
+        path.write_bytes(b"networks: changed")
+        with self.assertRaises(network.NetworkFailure): network.guard("overlay", selected, state, project, ROOT)
+        path.unlink()
+        path.symlink_to(self.base)
+        with self.assertRaises(network.NetworkFailure): network.guard("overlay", selected, state, project, ROOT)
+        fresh = self.directory / "network-fresh"
+        fresh.mkdir(mode=0o700)
+        with mock.patch.object(network, "inventory", return_value=([item], own_routes)):
+            with self.assertRaises(network.NetworkFailure): network.guard("check", selected, fresh, project, ROOT)
+
+    def test_journey_fixed_network_overlay_and_null_original_compose_argv(self):
+        journey = self.journey()
+        journey.runtime_root = self.directory / "repo"
+        journey.release_state = self.directory / "network-state"
+        journey.release_state.mkdir(mode=0o700)
+        journey.release_tool = self.directory / "release.sh"
+        journey.compose_env = {"RELEASE_QUALIFICATION_SUBNET": ""}
+        for selected in (None, "10.2.3.0/28"):
+            journey.network_subnet = selected
+            with mock.patch.object(RUNNER, "run", return_value="") as run, \
+                    mock.patch.object(RUNNER.diagnostic.network, "inventory", return_value=([], [])):
+                journey.compose("config", "--quiet")
+            argv = run.call_args.args[0]
+            files = [argv[index + 1] for index, value in enumerate(argv) if value == "-f"]
+            self.assertEqual(files, [str(journey.runtime_root / "docker-compose.yml")] +
+                             ([str(journey.release_state / "qualification-network.yml")] if selected else []))
+
+    def test_release_network_guard_propagates_inside_conditional_callers(self):
+        source = (ROOT / "infra/docker/release.sh").read_text()
+        function = source[source.index("compose() (\n"):source.index("\nrequire_empty_qualification_project()")]
+        bin_dir = self.directory / "bin"
+        bin_dir.mkdir()
+        docker = bin_dir / "docker"
+        docker.write_text('#!/bin/sh\nprintf "mutation\\n" >> "$TRACE"\n')
+        docker.chmod(0o700)
+        for failure in ("overlay", "before", "after"):
+            trace = self.directory / (failure + ".trace")
+            script = """set -euo pipefail
+cache_mode=postgres; cache_redis_password=; cache_redis_url=memory://
+diagnostic_enabled=false; qualification_scope=true; qualification_subnet=10.2.3.0/28
+container_prefix=nwq-abcdef1234; http_bind=127.0.0.1; http_port=18080
+repo_root=/synthetic; secrets_file=/synthetic/env; active_manifest=/synthetic/manifest
+compose_project_args=(); compose_deadline_args=(); compose_profile_args=(); network_overlay_args=()
+die() { return 1; }
+network_guard() {
+  if [[ "$1" == "$FAILURE" ]]; then return 23; fi
+  if [[ "$1" == overlay ]]; then printf '%s\n' /private/qualification-network.yml; fi
+}
+""" + function + "\nif ! compose run --rm --no-deps user-service; then exit 0; else exit 9; fi\n"
+            result = subprocess.run(["bash", "-c", script], capture_output=True, timeout=5,
+                env={**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+                     "TRACE": str(trace), "FAILURE": failure})
+            self.assertEqual(result.returncode, 0, failure)
+            self.assertEqual(trace.exists(), failure == "after")
+            if trace.exists(): self.assertEqual(trace.read_text().splitlines(), ["mutation"])
+
+    def test_v2_fixture_selection_and_frozen_v1_bytes(self):
+        self.assertEqual(CONTROL.digest((ROOT / "tests/e2e/fixtures/h4-journey-v1.json").read_bytes()),
+                         "e01d35e1bdad197876aefce1ae32f43dc93be185f9987c247ef2525c8ed0f9a9")
+        self.assertEqual(CONTROL.digest((ROOT / CONTROL.PROFILE_PATH).read_bytes()),
+                         "ce1b6a7ceade2a425abacb3c791fa410fbc67d9f5b011b6ff47ce602d018e5ef")
+        value = copy.deepcopy(self.value)
+        value["schema"] = CONTROL.REGISTRATION_SCHEMA_V2
+        value["network_subnet"] = None
+        path = ROOT / CONTROL.product_fixture(value["schema"])
+        value["product_fixture_sha256"] = CONTROL.digest(path.read_bytes())
+        registration = self.load(value)
+        fixture = RUNNER.load_product_input(path, prospective=True)
+        old = RUNNER.load_product_input(ROOT / CONTROL.product_fixture(CONTROL.REGISTRATION_SCHEMA))
+        self.assertEqual(len(fixture["post_adoption_chats"]), 5)
+        for key in old.keys() - {"manifest_version", "case_id"}:
+            self.assertEqual(fixture[key], old[key])
+        self.assertEqual(registration.binding["profile_sha256"], self.value["profile_sha256"])
+        for schema, digest in [("vision-journey-registration-v3", value["product_fixture_sha256"]),
+                               (CONTROL.REGISTRATION_SCHEMA_V2, self.value["product_fixture_sha256"])]:
+            invalid = {**value, "schema": schema, "product_fixture_sha256": digest}
+            with self.assertRaises(CONTROL.DiagnosticFailure):
+                self.load(invalid)
+
+    def test_v2_malformed_fixture_and_slice_reject_before_config(self):
+        value = {**self.value, "schema": CONTROL.REGISTRATION_SCHEMA_V2}
+        registration = CONTROL.Registration(CONTROL.canonical(value), self.profile)
+        fixture = json.loads((ROOT / CONTROL.product_fixture(value["schema"])).read_bytes())
+        path = ROOT / CONTROL.product_fixture(value["schema"])
+        original_read = Path.read_text
+        for mutation in ("missing", "sixth", "version", "case", "v1"):
+            invalid = copy.deepcopy(fixture)
+            if mutation == "missing": invalid.pop("post_adoption_chats")
+            elif mutation == "sixth": invalid["post_adoption_chats"].append("extra")
+            elif mutation == "version": invalid["manifest_version"] = "h4-product-input-v1"
+            elif mutation == "case": invalid["case_id"] = "zh-self-world"
+            else: invalid = json.loads((ROOT / "tests/e2e/fixtures/h4-journey-v1.json").read_bytes())
+            def read(selected, *args, **kwargs):
+                return json.dumps(invalid) if selected == path else original_read(selected, *args, **kwargs)
+            with self.subTest(mutation=mutation), mock.patch.object(Path, "read_text", read), \
+                    mock.patch.object(RUNNER, "load_release_manifest", return_value={}), \
+                    mock.patch.object(RUNNER, "load_config") as config, \
+                    mock.patch.object(RUNNER, "request_bytes") as provider:
+                with self.assertRaises(RUNNER.QualificationFailure):
+                    RUNNER.Journey(ROOT, self.directory / "config", self.output, "a" * 40,
+                                   self.base, self.candidate, None, None, "bash", "Diagnostic",
+                                   diagnostic_registration=registration)
+                config.assert_not_called()
+                provider.assert_not_called()
+        for evidence, slice_name, cohort in [("Qualification", "core", None),
+                                             ("Diagnostic", "legacy-character", None),
+                                             ("Diagnostic", "core", self.directory / "cohort")]:
+            with mock.patch.object(RUNNER, "load_release_manifest", return_value={}), \
+                    mock.patch.object(RUNNER, "load_cohort_manifest", return_value={}), \
+                    mock.patch.object(RUNNER, "load_config") as config:
+                with self.assertRaises(RUNNER.QualificationFailure):
+                    RUNNER.Journey(ROOT, self.directory / "config", self.output, "a" * 40,
+                                   self.base, self.candidate, cohort, self.directory / "ledger" if cohort else None,
+                                   "bash", evidence, slice_name, diagnostic_registration=registration)
+                config.assert_not_called()
+
+    def summary_fixture(self):
+        # These are projected snapshot DTOs, not raw chat_messages table rows.
+        scope = {key: str(uuid.uuid4()) for key in ("user_id", "novel_id", "character_id")}
+        legacy, candidate = ([str(uuid.uuid4()) for _ in range(count)] for count in (7, 11))
+        turns, messages = [], []
+        memory_id = str(uuid.uuid4())
+        for index, turn_id in enumerate(legacy + candidate):
+            sequence = index - 6 if index >= 7 else None
+            row = {**scope, **CONTROL.SUMMARY_DEFAULTS, "id": turn_id, "status": "completed",
+                   "reader_identity_type": "self", "reader_character_id": None,
+                   "reader_identity": "reader", "chapter_context": 4,
+                   "persona_source_chapter_high_water": 4, "summary_sequence": sequence}
+            if sequence == 10:
+                row.update(summary_state="saved", summary_memory_id=memory_id, summary_claim_attempt=2)
+            turns.append(row)
+            for role in ("user", "character"):
+                messages.append({**scope, "id": str(uuid.uuid4()), "turn_id": turn_id, "role": role,
+                                 "content": f"source {index} {role}", "reader_identity": "reader",
+                                 "chapter_context": 4, "persona_source_chapter_high_water": 4})
+        memory = {**scope, "id": memory_id, "layer": "mid", "importance": 6, "embedding": None,
+                  "content": "bounded summary", "chapter_number": 4, "persona_source_chapter_high_water": 4}
+        def snapshot(count=10, state="saved"):
+            ids = set(legacy + candidate[:count])
+            result = {"turns": [copy.deepcopy(row) for row in turns if row["id"] in ids],
+                      "messages": [copy.deepcopy(row) for row in messages if row["turn_id"] in ids],
+                      "mid": [copy.deepcopy(memory)] if count >= 10 and state == "saved" else []}
+            if count >= 10:
+                anchor = result["turns"][16]
+                anchor["summary_state"] = state
+                if state == "pending": anchor["summary_next_attempt_at"] = "2030-01-01T00:00:00Z"
+                if state in ("failed", "unknown"): anchor["summary_failure_code"] = "dispatch_unknown"
+            return result
+        return scope, legacy, candidate, snapshot
+
+    def test_v2_cross_schema_only_normalization_and_exact_window_negatives(self):
+        scope, legacy, candidate, snapshot = self.summary_fixture()
+        before = {"chat_turns": [{"id": item, "status": "completed"} for item in legacy]}
+        after = copy.deepcopy(before)
+        for row in after["chat_turns"]: row.update(CONTROL.SUMMARY_DEFAULTS)
+        self.assertEqual(CONTROL.upgrade_authority(json.dumps(before)),
+                         CONTROL.upgrade_authority(json.dumps(after)))
+        self.assertNotEqual(CONTROL.canonical(before), CONTROL.canonical(after))
+        after["chat_turns"][0]["status"] = "failed"
+        self.assertNotEqual(CONTROL.upgrade_authority(json.dumps(before)),
+                            CONTROL.upgrade_authority(json.dumps(after)))
+        self.assertIsNone(CONTROL.summary_window(snapshot(0), legacy, [], scope))
+        saved = CONTROL.summary_window(snapshot(), legacy, candidate[:10], scope)
+        self.assertEqual(saved["source_turn_ids"], candidate[:10])
+        self.assertEqual(len(saved["source_messages"]), 20)
+        mutations = [lambda data: data["turns"][0].update(summary_sequence=1),
+                     lambda data: data["turns"][0].pop("summary_state"),
+                     lambda data: data["turns"][7].update(summary_sequence=2),
+                     lambda data: data["turns"][7].update(reader_identity_type="character"),
+                     lambda data: data["messages"][14].update(turn_id=candidate[1]),
+                     lambda data: data["messages"][14].update(role="character"),
+                     lambda data: data["messages"][14].update(persona_source_chapter_high_water=None),
+                     lambda data: data["mid"][0].update(id=str(uuid.uuid4())),
+                     lambda data: data["mid"][0].update(chapter_number=3),
+                     lambda data: data["mid"][0].update(persona_source_chapter_high_water=3),
+                     lambda data: data["mid"].append(copy.deepcopy(data["mid"][0])),
+                     lambda data: data["turns"][15].update(summary_state="saved"),
+                     lambda data: data["turns"][16].update(summary_claim_attempt=0)]
+        for mutate in mutations:
+            data = snapshot(); mutate(data)
+            with self.assertRaises(CONTROL.DiagnosticFailure):
+                CONTROL.summary_window(data, legacy, candidate[:10], scope)
+        wrong = candidate[:10].copy(); wrong[0] = str(uuid.uuid4())
+        with self.assertRaises(CONTROL.DiagnosticFailure):
+            CONTROL.summary_window(snapshot(), legacy, wrong, scope)
+
+    def test_v2_actual_extra_chat_branch_and_restart_use_one_window(self):
+        scope, legacy, candidate, snapshot = self.summary_fixture()
+        journey = object.__new__(RUNNER.Journey)
+        journey.root, journey.expected_model = ROOT, CONTROL.MODEL
+        journey.summary_legacy_ids, journey.summary_candidate_ids = legacy, candidate[:5].copy()
+        journey.private_report, journey.report = {}, {"journey": {}}
+        journey.product_input = RUNNER.load_product_input(
+            ROOT / CONTROL.product_fixture(CONTROL.REGISTRATION_SCHEMA_V2), prospective=True)
+        reads, dispatched, resumed = [], [], [False]
+        def observe(*args, **kwargs):
+            reads.append(len(journey.summary_candidate_ids))
+            return snapshot(len(journey.summary_candidate_ids))
+        def metrics(*args):
+            logical = int(len(journey.summary_candidate_ids) >= 10 and not resumed[0])
+            dispatched.append(logical)
+            return (f'novelworld_llm_requests_started_total{{service="agent-service",contract="llm-observability-v1",provider="deepseek",'
+                    f'model="{CONTROL.MODEL}",operation="memory_summary",mode="sync"}} {logical}\n'
+                    f'novelworld_llm_attempts_total{{service="agent-service",contract="llm-observability-v1",provider="deepseek",'
+                    f'model="{CONTROL.MODEL}",operation="memory_summary",mode="sync",status="success"}} {logical * 2}\n').encode()
+        with mock.patch.object(journey, "authority_snapshot", return_value=json.dumps(
+                    {"chat_turns": [], "chat_messages": [], "world_state": {"turn": 11}, "journal": list(range(11))})), \
+                mock.patch.object(journey, "summary_snapshot", side_effect=observe), \
+                mock.patch.object(journey, "service_metrics", side_effect=metrics), \
+                mock.patch.object(journey, "internal_character_context", return_value={"world_revision": [0] * 32}), \
+                mock.patch.object(journey, "assert_chat_revision") as revision, \
+                mock.patch.object(journey, "chat", side_effect=lambda *args: {"turn_id": candidate[len(journey.summary_candidate_ids)]}) as chat:
+            journey.complete_prospective_summary("synthetic-token", **scope)
+            self.assertEqual(chat.call_count, 5)
+            self.assertEqual(revision.call_count, 5)
+            self.assertEqual(reads, [5, 6, 7, 8, 9, 10])
+            self.assertEqual(len(snapshot(10)["messages"]), 34)
+            self.assertEqual(dispatched, [0, 0, 0, 0, 0, 1])
+            resumed[0] = True
+            result = journey.chat("synthetic-token", scope["novel_id"], scope["character_id"], "resume")
+            journey.verify_summary_restart(**scope, resumed_turn_id=result["turn_id"], selected=1)
+            self.assertEqual(len(snapshot(11)["messages"]), 36)
+            self.assertEqual(len(journey.summary_legacy_ids + journey.summary_candidate_ids), 18)
+            self.assertEqual(len(journey.product_input["world_actions"]), 12)
+            self.assertEqual(dispatched[-1], 0)
+            self.assertEqual(journey.report["journey"]["summary_logical_calls"], 1)
+
+    def test_v2_terminal_and_timeout_do_not_make_up_chats(self):
+        for state in ("failed", "unknown", "pending"):
+            scope, legacy, candidate, snapshot = self.summary_fixture()
+            journey = object.__new__(RUNNER.Journey)
+            journey.summary_legacy_ids, journey.summary_candidate_ids = legacy, candidate[:5].copy()
+            journey.product_input = {"post_adoption_chats": ["fixed"] * 5}
+            clock = [0.0]
+            with mock.patch.object(journey, "authority_snapshot", return_value=json.dumps(
+                        {"chat_turns": [], "chat_messages": [], "world_state": {"turn": 11}})), \
+                    mock.patch.object(journey, "summary_snapshot", side_effect=lambda *a, **k: snapshot(len(journey.summary_candidate_ids), state)), \
+                    mock.patch.object(journey, "require_summary_calls"), \
+                    mock.patch.object(journey, "internal_character_context", return_value={"world_revision": [0] * 32}), \
+                    mock.patch.object(journey, "assert_chat_revision"), \
+                    mock.patch.object(journey, "chat", side_effect=lambda *a: {"turn_id": candidate[len(journey.summary_candidate_ids)]}) as chat, \
+                    mock.patch.object(RUNNER.time, "monotonic", side_effect=lambda: clock[0]), \
+                    mock.patch.object(RUNNER.time, "sleep", side_effect=lambda _: clock.__setitem__(0, 400.0)):
+                with self.assertRaisesRegex((RUNNER.QualificationFailure, RUNNER.diagnostic.DiagnosticFailure),
+                                            "summary_window_(terminal|timeout)"):
+                    journey.complete_prospective_summary("synthetic-token", **scope)
+                self.assertEqual(chat.call_count, 5)
+                self.assertEqual(len(journey.summary_candidate_ids), 10)
+
+    def test_v2_restart_rejects_fence_source_or_selection_drift(self):
+        scope, legacy, candidate, snapshot = self.summary_fixture()
+        for mutation in ("fence", "source", "selection", "extra_dispatch"):
+            journey = object.__new__(RUNNER.Journey)
+            journey.summary_legacy_ids, journey.summary_candidate_ids = legacy, candidate[:10].copy()
+            journey.summary_saved = CONTROL.summary_window(snapshot(), legacy, candidate[:10], scope)
+            journey.private_report, journey.report = {}, {"journey": {}}
+            value = snapshot(11)
+            if mutation == "fence": value["turns"][16]["summary_claim_attempt"] += 1
+            if mutation == "source": value["messages"][14]["content"] = "changed source"
+            with mock.patch.object(journey, "summary_snapshot", return_value=value), \
+                    mock.patch.object(journey, "require_summary_calls",
+                                      side_effect=RUNNER.QualificationFailure("summary_logical_dispatch_mismatch")
+                                      if mutation == "extra_dispatch" else None):
+                with self.assertRaises(RUNNER.QualificationFailure):
+                    journey.verify_summary_restart(**scope, resumed_turn_id=candidate[10],
+                                                    selected=2 if mutation == "selection" else 1)
+
+    def test_v2_summary_snapshot_is_bounded_and_scope_checked(self):
+        scope, _, _, snapshot = self.summary_fixture()
+        journey = object.__new__(RUNNER.Journey)
+        journey.prefix = "nwq-abcdef1234"
+        with mock.patch.object(RUNNER.diagnostic, "bounded_command",
+                               return_value=CONTROL.canonical(snapshot())) as command:
+            journey.summary_snapshot(**scope, timeout=1.5)
+            self.assertEqual(command.call_args.kwargs["timeout"], 1.5)
+            self.assertIn("PGOPTIONS=-c statement_timeout=3000", command.call_args.args[0])
+            self.assertIn(b":'user_id'::uuid", command.call_args.kwargs["stdin"])
+            self.assertNotIn(scope["user_id"].encode(), command.call_args.kwargs["stdin"])
+            command.reset_mock()
+            with self.assertRaises(RUNNER.QualificationFailure):
+                journey.summary_snapshot(**{**scope, "user_id": "untrusted'"})
+            command.assert_not_called()
+
+    @unittest.skipUnless(os.environ.get("NW_H4_TEST_POSTGRES"), "isolated PostgreSQL opt-in required")
+    def test_v2_summary_snapshot_real_postgres_schema(self):
+        """Use actual public column types, session-local tables and rollback only.
+
+        NW_H4_TEST_POSTGRES names an already-owned migrated PostgreSQL container
+        with the journey's novel/novel_world defaults (override via
+        NW_H4_TEST_PGUSER/NW_H4_TEST_PGDATABASE). No service is started.
+        """
+        scope, legacy, candidate, snapshot = self.summary_fixture()
+        journey = object.__new__(RUNNER.Journey)
+        journey.prefix = "nwq-schema-probe"
+        bounded = RUNNER.diagnostic.bounded_command
+        raw = None
+
+        def execute(command, *, stdin, timeout):
+            # The production method supplies the SQL and scope bindings verbatim.
+            command = list(command)
+            command[command.index("psql") - 1] = os.environ["NW_H4_TEST_POSTGRES"]
+            command[command.index("-U") + 1] = os.environ.get("NW_H4_TEST_PGUSER", "novel")
+            command[command.index("-d") + 1] = os.environ.get("NW_H4_TEST_PGDATABASE", "novel_world")
+            command += ["-q", "-v", "probe_fixture=" + json.dumps(raw)]
+            setup = b"""BEGIN;
+SET LOCAL standard_conforming_strings = on;
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_attribute
+             WHERE attrelid = 'public.chat_messages'::regclass
+               AND attname = 'persona_source_chapter_high_water' AND NOT attisdropped) THEN
+    RAISE EXCEPTION 'message provenance must come from the turn';
+  END IF;
+END $$;
+CREATE TEMP TABLE chat_turns AS SELECT * FROM public.chat_turns WITH NO DATA;
+CREATE TEMP TABLE chat_messages AS SELECT * FROM public.chat_messages WITH NO DATA;
+CREATE TEMP TABLE character_memories AS SELECT * FROM public.character_memories WITH NO DATA;
+INSERT INTO chat_turns SELECT * FROM jsonb_populate_recordset(NULL::chat_turns, :'probe_fixture'::jsonb->'turns');
+INSERT INTO chat_messages SELECT * FROM jsonb_populate_recordset(NULL::chat_messages, :'probe_fixture'::jsonb->'messages');
+INSERT INTO character_memories SELECT * FROM jsonb_populate_recordset(NULL::character_memories, :'probe_fixture'::jsonb->'mid');
+"""
+            return bounded(command, stdin=setup + stdin + b"ROLLBACK;\n", timeout=timeout)
+
+        with mock.patch.object(RUNNER.diagnostic, "bounded_command", side_effect=execute):
+            for count in (0, 10, 11):
+                raw = snapshot(count)
+                for row in raw["messages"]:
+                    row.pop("persona_source_chapter_high_water")
+                actual = journey.summary_snapshot(**scope)
+                saved = CONTROL.summary_window(actual, legacy, candidate[:count], scope)
+                self.assertEqual(saved is not None, count >= 10)
+                projected = {row["id"]: row for row in actual["messages"]}
+                for row in raw["messages"]:
+                    self.assertTrue(all(projected[row["id"]][key] == value for key, value in row.items()))
+                    self.assertEqual(projected[row["id"]]["persona_source_chapter_high_water"], 4)
+            for field, wrong in (("user_id", str(uuid.uuid4())), ("novel_id", str(uuid.uuid4())),
+                                 ("character_id", str(uuid.uuid4())), ("turn_id", str(uuid.uuid4())),
+                                 ("reader_identity", "different reader"), ("chapter_context", 3)):
+                raw = snapshot()
+                for row in raw["messages"]:
+                    row.pop("persona_source_chapter_high_water")
+                raw["messages"][14][field] = wrong
+                actual = journey.summary_snapshot(**scope)
+                with self.assertRaises(CONTROL.DiagnosticFailure, msg=field):
+                    CONTROL.summary_window(actual, legacy, candidate[:10], scope)
+                if field in ("reader_identity", "chapter_context", "turn_id"):
+                    row = next(row for row in actual["messages"] if row["id"] == raw["messages"][14]["id"])
+                    self.assertEqual(row[field], wrong)
+                    self.assertIsNone(row["persona_source_chapter_high_water"])
+
+    def test_v2_report_identity_and_numeric_only_summary_evidence(self):
+        self.value["schema"] = CONTROL.REGISTRATION_SCHEMA_V2
+        self.value["network_subnet"] = None
+        self.value["product_fixture_sha256"] = CONTROL.digest(
+            (ROOT / CONTROL.product_fixture(CONTROL.REGISTRATION_SCHEMA_V2)).read_bytes())
+        journey = self.journey()
+        private_id = str(uuid.uuid4())
+        journey.report["journey"].update(legacy_chat_turns=7, prospective_chat_turns=11,
+                                        summary_logical_calls=1, summary_memory_id=private_id)
+        journey.private_report["prospective_summary_before_restart"] = {"content": "private-summary"}
+        public = journey.public_report()
+        self.assertEqual(public["report_kind"], "h4-vision-diagnostic-v2")
+        self.assertEqual(public["schema_version"], 3)
+        self.assertEqual(public["aggregate"]["counts"]["summary_logical_calls"], 1)
+        self.assertNotIn(private_id, json.dumps(public))
+        self.assertNotIn("private-summary", json.dumps(public))
+        self.assertIsNone(journey.report["policy_identity"]["qualification"])
+        self.assertIsNone(journey.report["policy_identity"]["extraction"])
+
+    def test_v2_final_observation_rejects_extra_logical_summary_generation(self):
+        journey = self.journey()
+        journey.prospective_summary, journey.summary_saved = True, {"saved": True}
+        summary = {"counter_totals": [{"service": "agent-service", "operation": "memory_summary",
+                                     "counter": "requests_started.total", "value": 2}]}
+        parser = mock.Mock()
+        parser.verify_many.return_value = {"passed": True}
+        with mock.patch.object(journey, "collect_metrics"), \
+                mock.patch.object(journey, "collect_response_models"), \
+                mock.patch.object(RUNNER, "verify_response_models", return_value={}), \
+                mock.patch.object(RUNNER, "summarize_metrics", return_value=summary), \
+                mock.patch.object(RUNNER, "load_metric_parser", return_value=parser):
+            with self.assertRaisesRegex(RUNNER.QualificationFailure, "summary_logical_dispatch_mismatch"):
+                journey.finalize_observability("diagnostic-terminal")
 
 
 if __name__ == "__main__":
