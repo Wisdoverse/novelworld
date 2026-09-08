@@ -17,10 +17,74 @@ import uuid
 
 SERVICES = ("user-service", "novel-service", "agent-service", "narrative-service")
 MAX_OUTPUT = 4096
+PROBE_REASONS = frozenset(("child_nonzero", "deadline", "output_overflow", "spawn_error",
+                           "read_error", "wait_error", "invalid_capability", "create_ack_invalid",
+                           "create_unconfirmed", "cleanup_nonzero", "cleanup_timeout",
+                           "cleanup_query_deadline", "cleanup_query_error", "cleanup_residue",
+                           "reap_timeout", "reap_error", "unknown"))
+PROBE_PHASES = frozenset(("probe_create", "probe_start", "probe_expectation", "probe_cleanup_rm",
+                          "probe_cleanup_ps", "probe_cleanup_unproven"))
 
 
 class Invalid(Exception):
     pass
+
+
+class ProbeInvalid(Invalid):
+    """Closed, bounded evidence for a capability command refusal."""
+
+    def __init__(self, reason, *, exit_code=None, elapsed=None, container_id=None):
+        super().__init__()
+        self.reason = reason if reason in PROBE_REASONS else "unknown"
+        self.exit_code = exit_code if isinstance(exit_code, int) and -128 <= exit_code <= 255 else None
+        self.elapsed = round(min(max(float(elapsed or 0), 0), 10), 3)
+        self.container_id = container_id if isinstance(container_id, str) and re.fullmatch(r"[0-9a-f]{64}", container_id) else None
+
+
+def _probe_detail(error):
+    if isinstance(error, ProbeInvalid):
+        return {"reason": error.reason, "exit_code": error.exit_code,
+                "elapsed": error.elapsed, "container_id": error.container_id}
+    return None
+
+
+def _closed_detail(value):
+    if not isinstance(value, dict):
+        return {"reason": "unknown", "exit_code": None, "elapsed": 0, "container_id": None}
+    reason = value.get("reason") if value.get("reason") in PROBE_REASONS else "unknown"
+    exit_code = value.get("exit_code")
+    if not isinstance(exit_code, int) or not -128 <= exit_code <= 255:
+        exit_code = None
+    elapsed = value.get("elapsed", 0)
+    if not isinstance(elapsed, (int, float)) or not 0 <= elapsed <= 10:
+        elapsed = 0
+    container_id = value.get("container_id")
+    if not isinstance(container_id, str) or not re.fullmatch(r"[0-9a-f]{64}", container_id):
+        container_id = None
+    return {"reason": reason, "exit_code": exit_code, "elapsed": round(elapsed, 3),
+            "container_id": container_id}
+
+
+def probe_evidence(error):
+    """Return only closed fields suitable for the private journey report."""
+    primary = getattr(error, "primary_evidence", None)
+    cleanup = getattr(error, "cleanup_evidence", None)
+    phase = getattr(error, "probe_phase", None)
+    name = getattr(error, "probe_name", None)
+    container_id = getattr(error, "probe_container_id", None)
+    phase = phase if phase in PROBE_PHASES else "unknown"
+    name = name if isinstance(name, str) and re.fullmatch(r"nwq-[a-f0-9]{10}-budget-probe-[a-f0-9]{12}", name) else None
+    container_id = container_id if isinstance(container_id, str) and re.fullmatch(r"[0-9a-f]{64}", container_id) else None
+    if isinstance(error, ProbeInvalid):
+        primary = _probe_detail(error)
+        container_id = container_id or primary["container_id"]
+        return {"outcome": "invalid", "phase": phase, "name": name,
+                "container_id": container_id, "primary": primary}
+    if isinstance(error, OSError):
+        return {"outcome": "cleanup_uncertain", "phase": phase, "name": name,
+                "container_id": container_id, "primary": _closed_detail(primary),
+                "cleanup": _closed_detail(cleanup)}
+    return {"outcome": "unknown"}
 
 
 def require(condition):
@@ -105,8 +169,12 @@ def marker_action(action, state, registered):
 
 def bounded_output(command, timeout, limit=MAX_OUTPUT):
     """Bound output while reading, not after communicate() has buffered it."""
-    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                               stderr=subprocess.DEVNULL)
+    started = time.monotonic()
+    try:
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL)
+    except OSError:
+        raise ProbeInvalid("spawn_error", elapsed=time.monotonic() - started)
     output = bytearray()
     deadline = time.monotonic() + timeout
     try:
@@ -114,18 +182,57 @@ def bounded_output(command, timeout, limit=MAX_OUTPUT):
             selector.register(process.stdout, selectors.EVENT_READ)
             while True:
                 remaining = deadline - time.monotonic()
-                require(remaining > 0)
-                require(selector.select(remaining))
-                chunk = os.read(process.stdout.fileno(), min(4096, limit + 1 - len(output)))
+                if remaining <= 0:
+                    raise ProbeInvalid("deadline", elapsed=time.monotonic() - started)
+                try:
+                    ready = selector.select(remaining)
+                except OSError:
+                    raise ProbeInvalid("read_error", elapsed=time.monotonic() - started)
+                if not ready:
+                    raise ProbeInvalid("deadline", elapsed=time.monotonic() - started)
+                try:
+                    chunk = os.read(process.stdout.fileno(), min(4096, limit + 1 - len(output)))
+                except OSError:
+                    raise ProbeInvalid("read_error", elapsed=time.monotonic() - started)
                 if not chunk:
-                    require(process.wait(timeout=max(0.001, deadline - time.monotonic())) == 0)
+                    try:
+                        exit_code = process.wait(timeout=max(0.001, deadline - time.monotonic()))
+                    except subprocess.TimeoutExpired:
+                        raise ProbeInvalid("deadline", elapsed=time.monotonic() - started)
+                    except OSError:
+                        raise ProbeInvalid("wait_error", elapsed=time.monotonic() - started)
+                    if exit_code != 0:
+                        raise ProbeInvalid("child_nonzero", exit_code=exit_code,
+                                           elapsed=time.monotonic() - started)
                     return bytes(output)
                 output.extend(chunk)
-                require(len(output) <= limit)
+                if len(output) > limit:
+                    raise ProbeInvalid("output_overflow", elapsed=time.monotonic() - started)
     finally:
         if process.poll() is None:
             process.kill()
-        process.wait(timeout=5)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired as error:
+            failure = OSError("diagnostic probe process reap unproven")
+            active = sys.exc_info()[1]
+            failure.primary_evidence = (_probe_detail(active)
+                                        if isinstance(active, ProbeInvalid)
+                                        else {"reason": "deadline", "exit_code": None,
+                                              "elapsed": 0, "container_id": None})
+            failure.cleanup_evidence = {"reason": "reap_timeout", "exit_code": None,
+                                        "elapsed": 5, "container_id": None}
+            raise failure from error
+        except OSError as error:
+            failure = OSError("diagnostic probe process reap unproven")
+            active = sys.exc_info()[1]
+            failure.primary_evidence = (_probe_detail(active)
+                                        if isinstance(active, ProbeInvalid)
+                                        else {"reason": "wait_error", "exit_code": None,
+                                              "elapsed": 0, "container_id": None})
+            failure.cleanup_evidence = {"reason": "reap_error", "exit_code": None,
+                                        "elapsed": 0, "container_id": None}
+            raise failure from error
         process.stdout.close()
 
 
@@ -133,6 +240,8 @@ def probe(image, project, expected):
     require(isinstance(image, str) and re.fullmatch(r"[a-z0-9][a-z0-9._/:@-]*@sha256:[0-9a-f]{64}", image))
     name = project + "-budget-probe-" + uuid.uuid4().hex[:12]
     created = False
+    primary_error = None
+    acknowledged_id = None
     deadline = time.monotonic() + 10
     phase = "probe_create"
     try:
@@ -144,16 +253,34 @@ def probe(image, project, expected):
             "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
             "--entrypoint", "/app/service", image, "--diagnostic-budget-contract",
         ], 10)
-        require(re.fullmatch(rb"[0-9a-f]{64}\n?", identifier))
+        if not re.fullmatch(rb"[0-9a-f]{64}\n?", identifier):
+            raise ProbeInvalid("create_ack_invalid")
+        acknowledged_id = identifier.decode("ascii").strip()
         created = True
         remaining = deadline - time.monotonic()
-        require(remaining > 0)
+        if remaining <= 0:
+            raise ProbeInvalid("deadline", container_id=acknowledged_id)
         phase = "probe_start"
-        raw = bounded_output(["docker", "start", "--attach", name], remaining)
+        try:
+            raw = bounded_output(["docker", "start", "--attach", name], remaining)
+        except ProbeInvalid as error:
+            error.container_id = acknowledged_id
+            raise
         phase = "probe_expectation"
-        require(strict_json(raw) == expected)
-    except (Invalid, ValueError, OSError, subprocess.SubprocessError):
+        try:
+            observed = strict_json(raw)
+        except (Invalid, ValueError, TypeError, KeyError):
+            raise ProbeInvalid("invalid_capability")
+        if observed != expected:
+            raise ProbeInvalid("invalid_capability")
+    except (Invalid, ValueError, OSError, subprocess.SubprocessError) as error:
+        primary_error = error
+        error.probe_phase = phase
+        error.probe_name = name
+        error.probe_container_id = acknowledged_id
         print("diagnostic phase=" + phase, file=sys.stderr)
+        if isinstance(error, ProbeInvalid):
+            print("diagnostic reason=" + error.reason, file=sys.stderr)
         raise
     finally:
         # Exact random isolated name only. No volumes, credentials or user deployment involved.
@@ -165,12 +292,33 @@ def probe(image, project, expected):
             remaining = bounded_output(["docker", "ps", "--all", "--quiet", "--filter", "name=^/" + name + "$"], 5)
         except (Invalid, OSError, subprocess.SubprocessError) as error:
             print("diagnostic phase=" + phase, file=sys.stderr)
-            raise OSError("diagnostic probe cleanup unproven") from error
+            failure = OSError("diagnostic probe cleanup unproven")
+            failure.primary_evidence = _probe_detail(primary_error) if isinstance(primary_error, ProbeInvalid) else None
+            query_reason = "cleanup_query_deadline" if isinstance(error, ProbeInvalid) and error.reason == "deadline" else "cleanup_query_error"
+            failure.cleanup_evidence = {"reason": "cleanup_timeout" if isinstance(error, subprocess.TimeoutExpired)
+                                        else query_reason, "exit_code": getattr(error, "exit_code", None),
+                                        "elapsed": getattr(error, "elapsed", 5),
+                                        "container_id": acknowledged_id}
+            failure.probe_phase = phase
+            failure.probe_name = name
+            failure.probe_container_id = acknowledged_id
+            raise failure from error
         if not created or cleanup.returncode != 0 or remaining.strip():
             # Distinguish uncertain lifecycle cleanup from expected capability
             # refusal. Callers must not count it as a passing negative probe.
             print("diagnostic phase=probe_cleanup_unproven", file=sys.stderr)
-            raise OSError("diagnostic probe cleanup unproven")
+            failure = OSError("diagnostic probe cleanup unproven")
+            failure.primary_evidence = (_probe_detail(primary_error)
+                                        if isinstance(primary_error, ProbeInvalid)
+                                        else probe_evidence(primary_error)) if primary_error is not None else None
+            failure.cleanup_evidence = {"reason": "create_unconfirmed" if not created
+                                        else "cleanup_nonzero" if cleanup.returncode != 0
+                                        else "cleanup_residue", "exit_code": cleanup.returncode,
+                                        "elapsed": 0, "container_id": acknowledged_id}
+            failure.probe_phase = "probe_cleanup_unproven"
+            failure.probe_name = name
+            failure.probe_container_id = acknowledged_id
+            raise failure
 
 
 def preflight(raw, manifest, registered, project):

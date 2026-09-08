@@ -991,7 +991,14 @@ class DiagnosticJourneyTest(unittest.TestCase):
 
                 probes.side_effect = probe
                 spec = mock.Mock()
-                adapter = mock.Mock(probe=probes)
+                adapter = mock.Mock(
+                    probe=probes,
+                    probe_evidence=lambda _error: {
+                        "outcome": "invalid",
+                        "primary": {"reason": "child_nonzero", "exit_code": 3,
+                                     "elapsed": 0.2, "container_id": None},
+                    },
+                )
                 with mock.patch.object(RUNNER, "docker_inventory_snapshot", return_value={
                     "containers": {}, "volumes": {}, "networks": {}
                 }), mock.patch.object(
@@ -1015,6 +1022,10 @@ class DiagnosticJourneyTest(unittest.TestCase):
                 self.assertEqual(rejected.exception.code, "diagnostic_artifact_capability_unproven")
                 self.assertEqual(probes.call_count, failed_index + 1)
                 release.assert_not_called()
+                if failed_index == 0:
+                    self.assertEqual(journey.private_report["diagnostic_probe_evidence"][0]["primary"]["reason"],
+                                     "child_nonzero")
+                    self.assertNotIn("diagnostic_probe_evidence", journey.report)
 
     def test_batched_inventory_runner_preserves_projection_and_rejects_bad_batches(self):
         project = "nwq-abcdef1234"
