@@ -97,7 +97,8 @@ Do not generate registration values by copying a previous paid run.
 The registration is an owned 0600 regular file under a 0700 parent. Its parent
 and the output parent must be outside any enclosing Git checkout, with no
 symlink path components. The runner checks each exact parent through Git with
-inherited Git overrides cleared. Diagnostic checkout commands trust only the
+inherited Git overrides cleared and global/system Git configuration disabled for
+those Diagnostic commands. Diagnostic checkout commands trust only the
 canonical invocation directory through a process-local `safe.directory` setting;
 ordinary recorded/live commands preserve their prior scoped Git environment.
 It validates identities before reading the key,

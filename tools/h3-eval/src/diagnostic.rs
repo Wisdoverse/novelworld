@@ -101,7 +101,11 @@ pub fn git() -> Command {
             command.env_remove(key);
         }
     }
-    command.env("LC_ALL", "C");
+    // Protected global/system config can also grant wildcard trust (e.g. hosted CI).
+    command
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("LC_ALL", "C");
     command
 }
 pub fn checkout_git() -> Result<Command> {
@@ -1342,12 +1346,32 @@ mod tests {
         }
         assert!(Diagnostic::prepare(&path, &sha, &corpus).is_err());
         if scenario == "valid" {
+            // Reproduce hosted runners' wildcard trust without changing any real Git config.
+            let ambient_home = temp.0.join("ambient-home");
+            fs::create_dir(&ambient_home).unwrap();
+            let wildcard = ambient_home.join(".gitconfig");
+            fs::write(&wildcard, "[safe]\n\tdirectory = *\n").unwrap();
+            env::set_var("HOME", &ambient_home);
+            env::set_var("XDG_CONFIG_HOME", ambient_home.join("xdg"));
+            env::set_var("GIT_CONFIG_SYSTEM", &wildcard);
+            let ambient_accepted = git()
+                .env("GIT_CONFIG_NOSYSTEM", "0")
+                .env("GIT_CONFIG_SYSTEM", &wildcard)
+                .env("GIT_CONFIG_GLOBAL", &wildcard)
+                .env("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap();
+            assert!(ambient_accepted.status.success());
             let denied = git()
+                // Substitute only the system file path; NOSYSTEM must still block its wildcard.
+                .env("GIT_CONFIG_SYSTEM", &wildcard)
                 .env("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
                 .args(["rev-parse", "HEAD"])
                 .output()
                 .unwrap();
             assert!(!denied.status.success());
+            assert!(String::from_utf8_lossy(&denied.stderr).contains("dubious ownership"));
             let accepted = checkout_git()
                 .unwrap()
                 .env("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
@@ -1357,6 +1381,9 @@ mod tests {
             assert!(accepted.status.success());
             assert_eq!(String::from_utf8(accepted.stdout).unwrap().trim(), sha);
             // Ordinary mode continues to accept a process-scoped safe.directory override.
+            // Remove the synthetic wildcard for this check so only the exact override can pass.
+            env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+            env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
             env::set_var("GIT_CONFIG_COUNT", "1");
             env::set_var("GIT_CONFIG_KEY_0", "safe.directory");
             env::set_var("GIT_CONFIG_VALUE_0", &root);
