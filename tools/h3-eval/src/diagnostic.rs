@@ -116,6 +116,22 @@ pub fn checkout_git() -> Result<Command> {
 fn now() -> Result<u64> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }
+fn registration_deadline(
+    expires_unix: u64,
+    monotonic_now: Instant,
+    wall_now: SystemTime,
+) -> Result<Instant> {
+    let expiry = UNIX_EPOCH
+        .checked_add(Duration::from_secs(expires_unix))
+        .context("Diagnostic expiry overflow")?;
+    let remaining = expiry
+        .duration_since(wall_now)
+        .context("Diagnostic already expired")?;
+    ensure!(!remaining.is_zero(), "Diagnostic already expired");
+    monotonic_now
+        .checked_add(remaining.min(Duration::from_secs(MAX_LIFETIME)))
+        .context("Diagnostic deadline overflow")
+}
 fn hash_file(path: &Path) -> Result<String> {
     let mut file = File::open(path)?;
     let mut hash = Sha256::new();
@@ -421,13 +437,12 @@ impl Diagnostic {
                 models: BTreeSet::new(),
                 failed: false,
             }),
-            deadline: Instant::now()
-                + Duration::from_secs(
-                    registration
-                        .expires_unix
-                        .saturating_sub(now()?)
-                        .min(MAX_LIFETIME),
-                ),
+            // Sample monotonic time first: sampling delay can shorten, never extend expiry.
+            deadline: registration_deadline(
+                registration.expires_unix,
+                Instant::now(),
+                SystemTime::now(),
+            )?,
             expires_unix: registration.expires_unix,
             directory,
             metrics,
@@ -736,6 +751,7 @@ mod tests {
             "no_sixth",
             "malformed_judge",
             "cancelled",
+            "deadline",
             "reserve_write",
             "reserve_sync",
             "settle_sync",
@@ -769,7 +785,7 @@ mod tests {
     }
     async fn client_case(scenario: &str) {
         let temp = Temp::new();
-        let diagnostic = if scenario == "success" {
+        let mut diagnostic = if scenario == "success" {
             let (root, path, value) = registration_fixture(&temp.0);
             env::set_current_dir(&root).unwrap();
             env::set_var("H3_EVAL_PROVIDER", "deepseek");
@@ -861,6 +877,15 @@ mod tests {
         let source = super::super::load_corpus().unwrap();
         let cases = source.semantic_cases;
         let case_scenario = scenario.to_owned();
+        if scenario == "deadline" {
+            // Fixed subsecond wall-clock fixture; real transport must be cancelled at its deadline.
+            Arc::get_mut(&mut diagnostic).unwrap().deadline = registration_deadline(
+                101,
+                Instant::now(),
+                UNIX_EPOCH + Duration::from_millis(100_100),
+            )
+            .unwrap();
+        }
         let owned = diagnostic.clone();
         let server = tokio::spawn(async move {
             loop {
@@ -897,7 +922,7 @@ mod tests {
                 let rows = journal(&owned.directory.join("control.jsonl"));
                 assert_eq!(rows.last().unwrap()["event"], "reserve");
                 assert!(!rows.last().unwrap()["unreleased_reservation"].is_null());
-                if case_scenario == "cancelled" {
+                if matches!(case_scenario.as_str(), "cancelled" | "deadline") {
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     continue;
                 }
@@ -1401,6 +1426,27 @@ mod tests {
             assert!(!last["unreleased_reservation"].is_null());
         }
         assert!(Diagnostic::prepare(&path, &sha, &corpus).is_err());
+    }
+
+    #[test]
+    fn registration_expiry_preserves_subsecond_remaining_time() {
+        let monotonic = Instant::now();
+        let deadline =
+            registration_deadline(101, monotonic, UNIX_EPOCH + Duration::from_millis(100_900))
+                .unwrap();
+        assert_eq!(deadline - monotonic, Duration::from_millis(100));
+        assert!(
+            registration_deadline(101, monotonic, UNIX_EPOCH + Duration::from_secs(101)).is_err()
+        );
+        assert!(
+            registration_deadline(101, monotonic, UNIX_EPOCH + Duration::from_millis(101_001))
+                .is_err()
+        );
+        assert!(registration_deadline(u64::MAX, monotonic, UNIX_EPOCH).is_err());
+        assert_eq!(
+            registration_deadline(10_000, monotonic, UNIX_EPOCH).unwrap() - monotonic,
+            Duration::from_secs(MAX_LIFETIME)
+        );
     }
 
     #[test]
