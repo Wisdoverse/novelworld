@@ -123,6 +123,76 @@ def report_cold_release_status(journey, zero):
         pass  # Observability cannot supersede terminal failure or cleanup.
 
 
+def report_cold_startup_status(journey, zero):
+    """Failure-only, bounded hints before terminal cleanup removes containers."""
+    import diagnostic_journey as control
+    hints = {"budget_invalid": b"diagnostic_budget_invalid",
+             "budget_unavailable": b"diagnostic_budget_unavailable",
+             "budget_control_failed": b"diagnostic_budget_control_failed",
+             "permission_denied": b"permission denied", "certificate": b"certificate",
+             "client_builder_error": b"builder error", "panicked": b"panicked"}
+    status = {"case": "zero" if zero else "nonzero", "startup_observation_unproven": False,
+              "services": {service: {"observed": False, "present": False, "running": False,
+                                     "health": "unknown", "exit_nonzero": False, "oom_killed": False,
+                                     "logs_observed": False, **{key: False for key in hints}}
+                           for service in (*SERVICES, "gateway", "frontend", "nginx")}}
+    deadline = time.monotonic() + 15
+
+    def read(args):
+        remaining = deadline - time.monotonic()
+        require(remaining > 0, "startup_observation_timeout")
+        return control.bounded_command(args, timeout=min(2, remaining), maximum=65536)
+
+    try:
+        require(re.fullmatch(r"nwq-[a-f0-9]{10}", journey.project)
+                and journey.prefix == journey.project, "startup_observation_target_invalid")
+        names = read(["docker", "ps", "--all", "--format", "{{.Names}}"]).decode().splitlines()
+        template = ('{"id":{{json .Id}},"name":{{json .Name}},'
+                    '"project":{{json (index .Config.Labels "com.docker.compose.project")}},'
+                    '"running":{{json .State.Running}},"exit":{{json .State.ExitCode}},'
+                    '"oom":{{json .State.OOMKilled}},"health":'
+                    '{{with index .State "Health"}}{{json .Status}}{{else}}"none"{{end}}}')
+        for service, item in status["services"].items():
+            try:
+                name = journey.prefix + "-" + service
+                if name not in names:
+                    item["observed"] = True
+                    continue
+                value = json.loads(read(["docker", "container", "inspect", "--format", template, name]))
+                require(value.get("name") == "/" + name and value.get("project") == journey.project
+                        and isinstance(value.get("id"), str) and re.fullmatch(r"[0-9a-f]{64}", value["id"])
+                        and type(value.get("running")) is bool and type(value.get("oom")) is bool
+                        and type(value.get("exit")) is int, "startup_observation_identity_unproven")
+                item.update(observed=True, present=True, running=value["running"],
+                            exit_nonzero=value["exit"] != 0, oom_killed=value["oom"],
+                            health=value["health"] if value.get("health") in
+                            ("healthy", "unhealthy", "starting", "none") else "unknown")
+                # Merge only this verified container's two log streams into the
+                # bounded private pipe. No shell interpolation of names or logs.
+                raw = read(["sh", "-c", 'exec docker logs --tail 80 "$1" 2>&1', "startup", value["id"]]).lower()
+                item.update(logs_observed=True, **{key: needle in raw for key, needle in hints.items()})
+            except Exception:
+                status["startup_observation_unproven"] = True
+    except Exception:
+        status["startup_observation_unproven"] = True
+    try:
+        print(json.dumps(status, sort_keys=True), flush=True)
+    except Exception:
+        pass  # Never replace the original adopt failure or block terminal cleanup.
+
+
+def cold_adopt_release(journey, manifest, zero):
+    try:
+        journey.release("adopt", manifest, release_name="base")
+    except Exception as error:
+        if getattr(error, "code", None) == "release_adopt_failed":
+            try:
+                report_cold_startup_status(journey, zero)
+            except Exception:
+                pass
+        raise
+
+
 def ingress_address(network, project):
     configurations = [item for item in network["IPAM"]["Config"]
                       if ipaddress.ip_network(item["Subnet"]).version == 4]
@@ -682,7 +752,7 @@ class Lifecycle:
                 control.sync_directory(output)
                 journey.prepare_runtime()
                 self.start_ingress(journey.port)
-                journey.release("adopt", manifest_path, release_name="base")
+                cold_adopt_release(journey, manifest_path, zero)
                 journey.stack_started = True
                 journey.wait_gateway()
                 journey.verify_release_images("base", manifest)

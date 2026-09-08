@@ -596,6 +596,134 @@ class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
             LIFECYCLE.report_cold_release_status(SimpleNamespace(output=Path("/missing"),
                                                                   diagnostic_failures=[]), False)
 
+    def test_cold_startup_status_is_bounded_allowlisted_and_foreign_safe(self):
+        services = (*LIFECYCLE.SERVICES, "gateway", "frontend", "nginx")
+        expected_fields = {
+            "observed", "present", "running", "health", "exit_nonzero",
+            "oom_killed", "logs_observed", "budget_invalid", "budget_unavailable",
+            "budget_control_failed", "permission_denied", "certificate",
+            "client_builder_error", "panicked",
+        }
+        project = "nwq-abcdef1234"
+        names = [project + "-" + service for service in services if service != "nginx"]
+        foreign = project + "-gateway"
+        verified_ids = {name: f"{index:064x}" for index, name in enumerate(names, 1)}
+        calls = []
+        control = SimpleNamespace()
+
+        def bounded(command, **kwargs):
+            calls.append((command, kwargs))
+            if command[:4] == ["docker", "ps", "--all", "--format"]:
+                return ("\n".join(names)).encode()
+            if command[:3] == ["docker", "container", "inspect"]:
+                name = command[-1]
+                value = {
+                    "id": verified_ids[name], "name": "/" + name,
+                    "project": "foreign-project" if name == foreign else project,
+                    "running": True, "exit": 0, "oom": False,
+                    "health": "healthy",
+                }
+                return json.dumps(value).encode()
+            if command[:3] == ["sh", "-c", "exec docker logs --tail 80 \"$1\" 2>&1"]:
+                self.assertIn(command[-1], verified_ids.values())
+                return b"permission denied certificate builder error panicked private-key=/secret/key"
+            raise AssertionError(command)
+
+        control.bounded_command = bounded
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.dict(sys.modules, {"diagnostic_journey": control}), \
+             mock.patch.object(LIFECYCLE.time, "monotonic", side_effect=[0] + [14] * 100), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            journey = SimpleNamespace(project=project, prefix=project)
+            LIFECYCLE.report_cold_startup_status(journey, False)
+        summary = json.loads(output.getvalue())
+        self.assertEqual(set(summary), {"case", "startup_observation_unproven", "services"})
+        self.assertEqual(set(summary["services"]), set(services))
+        self.assertTrue(all(set(item) == expected_fields for item in summary["services"].values()))
+        self.assertEqual(summary["services"]["nginx"]["observed"], True)
+        self.assertFalse(summary["services"]["nginx"]["present"])
+        self.assertTrue(summary["startup_observation_unproven"])
+        self.assertTrue(all(item["health"] in {"healthy", "unhealthy", "starting", "none", "unknown"}
+                            for item in summary["services"].values()))
+        logs = [command for command, _ in calls if command[:2] == ["sh", "-c"]]
+        self.assertTrue(logs)
+        self.assertNotIn(verified_ids[foreign], [command[-1] for command in logs])
+        self.assertTrue(all(kwargs["timeout"] <= 2 and kwargs["maximum"] == 65536
+                            for _, kwargs in calls))
+        self.assertNotIn("private-key", output.getvalue())
+        self.assertNotIn("/secret/key", output.getvalue())
+        self.assertNotIn(f"{project}-gateway", output.getvalue())
+
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.dict(sys.modules, {"diagnostic_journey": control}), \
+             mock.patch.object(LIFECYCLE.time, "monotonic", return_value=0):
+            control.bounded_command = mock.Mock(side_effect=lambda command, **_: b"not-json"
+                                                if command[1] == "container" else b"\n".join(
+                                                    name.encode() for name in names))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                LIFECYCLE.report_cold_startup_status(SimpleNamespace(project=project, prefix=project), True)
+            malformed = json.loads(output.getvalue())
+            self.assertTrue(malformed["startup_observation_unproven"])
+
+        class TimeoutFailure(Exception):
+            pass
+
+        control.bounded_command = mock.Mock(side_effect=TimeoutFailure("timeout"))
+        with mock.patch.dict(sys.modules, {"diagnostic_journey": control}), \
+             mock.patch.object(LIFECYCLE.time, "monotonic", return_value=0):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                LIFECYCLE.report_cold_startup_status(SimpleNamespace(project=project, prefix=project), False)
+            self.assertTrue(json.loads(output.getvalue())["startup_observation_unproven"])
+
+        control.bounded_command = mock.Mock()
+        with mock.patch.dict(sys.modules, {"diagnostic_journey": control}), \
+             mock.patch.object(LIFECYCLE.time, "monotonic", side_effect=[0, 16]):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                LIFECYCLE.report_cold_startup_status(SimpleNamespace(project=project, prefix=project), False)
+        self.assertTrue(json.loads(output.getvalue())["startup_observation_unproven"])
+        control.bounded_command.assert_not_called()
+
+    def test_cold_adopt_release_preserves_original_error_and_skips_on_interrupt(self):
+        control_spec = importlib.util.spec_from_file_location(
+            "diagnostic_journey", ROOT / "tests/e2e/diagnostic_journey.py"
+        )
+        self.assertIsNotNone(control_spec and control_spec.loader)
+        control = importlib.util.module_from_spec(control_spec)
+        control_spec.loader.exec_module(control)
+        live_spec = importlib.util.spec_from_file_location(
+            "live_deepseek_journey_wrapper_test", ROOT / "tests/e2e/live_deepseek_journey.py"
+        )
+        self.assertIsNotNone(live_spec and live_spec.loader)
+        with mock.patch.dict(sys.modules, {"diagnostic_journey": control}):
+            live = importlib.util.module_from_spec(live_spec)
+            live_spec.loader.exec_module(live)
+
+        original = live.QualificationFailure("release_adopt_failed")
+        journey = SimpleNamespace(release=mock.Mock(side_effect=original))
+        with mock.patch.object(LIFECYCLE, "report_cold_startup_status",
+                               side_effect=BrokenPipeError) as observe:
+            with self.assertRaises(RuntimeError) as raised:
+                LIFECYCLE.cold_adopt_release(journey, Path("/private/manifest"), False)
+        self.assertIs(raised.exception, original)
+        observe.assert_called_once()
+
+        cancelled = live.QualificationFailure("diagnostic_cancelled")
+        journey.release.side_effect = cancelled
+        with mock.patch.object(LIFECYCLE, "report_cold_startup_status") as observe:
+            with self.assertRaises(type(cancelled)) as raised:
+                LIFECYCLE.cold_adopt_release(journey, Path("/private/manifest"), False)
+        self.assertIs(raised.exception, cancelled)
+        observe.assert_not_called()
+
+        journey.release.side_effect = KeyboardInterrupt()
+        with mock.patch.object(LIFECYCLE, "report_cold_startup_status") as observe:
+            with self.assertRaises(KeyboardInterrupt):
+                LIFECYCLE.cold_adopt_release(journey, Path("/private/manifest"), False)
+        observe.assert_not_called()
+
     def test_cleanup_docker_calls_are_clamped_to_remaining_deadline(self):
         lifecycle = self.ingress_lifecycle()
         lifecycle.cleanup_deadline = 105

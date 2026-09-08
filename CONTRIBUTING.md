@@ -255,6 +255,14 @@ remain local. These flags do not replace the fixture's blocking assertions.
 A second fixed boolean summary recognizes release phase markers and selected
 failure classes from at most 1 MiB of the private adoption log. Missing or larger
 logs do not produce phase evidence; raw lines and unknown values are never emitted.
+Failed adoption also observes the seven fixed application containers before
+terminal cleanup: exact name/project ownership precedes ID-addressed log reads.
+One 15-second deadline bounds all reads (at most two seconds and 64 KiB per call,
+80 log lines per container). Only fixed state fields, health enums and startup
+error-word booleans reach stdout; missing containers and unproven observations
+are distinct. Error-word matches are hints, not root-cause proof. Observation
+failure cannot replace the adoption failure or skip terminal cleanup; cancellation
+does not start this observation. No raw container logs are published or retained.
 Outer fallback cleanup shares a 60-second deadline, with Docker calls capped at
 10 seconds each. CI sends a soft TERM after 15 minutes, reserving 10 minutes for
 terminal handling before a hard kill; SIGKILL/host loss still has no cleanup
