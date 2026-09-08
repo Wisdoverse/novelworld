@@ -326,12 +326,15 @@ class ReleaseImageDigestTest(unittest.TestCase):
 
     def test_bounded_output_success_failure_timeout_and_overflow(self):
         self.assertEqual(BUDGET.bounded_output([sys.executable, "-c", "print('ok', end='')"], 2), b"ok")
-        with self.assertRaises(BUDGET.Invalid):
+        with self.assertRaises(BUDGET.ProbeInvalid) as rejected:
             BUDGET.bounded_output([sys.executable, "-c", "raise SystemExit(3)"], 2)
-        with self.assertRaises(BUDGET.Invalid):
+        self.assertEqual((rejected.exception.reason, rejected.exception.exit_code), ("child_nonzero", 3))
+        with self.assertRaises(BUDGET.ProbeInvalid) as rejected:
             BUDGET.bounded_output([sys.executable, "-c", "import time; time.sleep(2)"], 0.05)
-        with self.assertRaises(BUDGET.Invalid):
+        self.assertEqual(rejected.exception.reason, "deadline")
+        with self.assertRaises(BUDGET.ProbeInvalid) as rejected:
             BUDGET.bounded_output([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'x' * 4097)"], 2)
+        self.assertEqual(rejected.exception.reason, "output_overflow")
 
     def test_probe_confirms_create_before_start_and_verifies_cleanup(self):
         image = "registry/service@sha256:" + "a" * 64
@@ -372,6 +375,67 @@ class ReleaseImageDigestTest(unittest.TestCase):
             with self.assertRaises(OSError):
                 BUDGET.probe("registry/service@sha256:" + "a" * 64, "nwq-abcdef1234", {})
             self.assertEqual(output.call_count, 3)
+
+    def test_cleanup_uncertainty_preserves_primary_probe_evidence(self):
+        primary = BUDGET.ProbeInvalid("child_nonzero", exit_code=3, elapsed=0.2)
+        with mock.patch.object(BUDGET, "bounded_output", side_effect=[b"b" * 64, primary, b""]), \
+             mock.patch.object(BUDGET.subprocess, "run") as cleanup:
+            cleanup.return_value.returncode = 1
+            with self.assertRaises(OSError) as rejected:
+                BUDGET.probe("registry/service@sha256:" + "a" * 64, "nwq-abcdef1234", {})
+        self.assertEqual(rejected.exception.primary_evidence["reason"], "child_nonzero")
+        self.assertEqual(rejected.exception.cleanup_evidence["reason"], "cleanup_nonzero")
+
+    def test_probe_evidence_closes_identity_and_reason_fields(self):
+        error = BUDGET.ProbeInvalid("arbitrary-child-text", elapsed=999, container_id="secret")
+        error.probe_phase = "arbitrary"
+        error.probe_name = "child-output"
+        evidence = BUDGET.probe_evidence(error)
+        self.assertEqual(evidence["primary"]["reason"], "unknown")
+        self.assertEqual(evidence["primary"]["elapsed"], 10)
+        self.assertIsNone(evidence["name"])
+        self.assertIsNone(evidence["container_id"])
+
+    def test_probe_expectation_failure_retains_phase_name_and_acknowledged_id(self):
+        identifier = b"b" * 64
+        with mock.patch.object(BUDGET, "bounded_output", side_effect=[identifier, b"{}", b""]), \
+             mock.patch.object(BUDGET.subprocess, "run") as cleanup:
+            cleanup.return_value.returncode = 0
+            with self.assertRaises(BUDGET.ProbeInvalid) as rejected:
+                BUDGET.probe("registry/service@sha256:" + "a" * 64, "nwq-abcdef1234", {"contract": "ok"})
+        evidence = BUDGET.probe_evidence(rejected.exception)
+        self.assertEqual(evidence["phase"], "probe_expectation")
+        self.assertEqual(evidence["name"].split("-budget-probe-")[0], "nwq-abcdef1234")
+        self.assertEqual(evidence["container_id"], "b" * 64)
+
+    def test_cleanup_query_deadline_is_distinct_and_retains_identity(self):
+        with mock.patch.object(BUDGET, "bounded_output", side_effect=[b"b" * 64, BUDGET.ProbeInvalid("child_nonzero", exit_code=3), BUDGET.ProbeInvalid("deadline")]), \
+             mock.patch.object(BUDGET.subprocess, "run") as cleanup:
+            cleanup.return_value.returncode = 0
+            with self.assertRaises(OSError) as rejected:
+                BUDGET.probe("registry/service@sha256:" + "a" * 64, "nwq-abcdef1234", {})
+        evidence = BUDGET.probe_evidence(rejected.exception)
+        self.assertEqual(evidence["primary"]["reason"], "child_nonzero")
+        self.assertEqual(evidence["cleanup"]["reason"], "cleanup_query_deadline")
+        self.assertEqual(evidence["phase"], "probe_cleanup_ps")
+        self.assertEqual(evidence["container_id"], "b" * 64)
+
+    def test_reap_timeout_is_uncertain_and_preserves_primary(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.wait.side_effect = [subprocess.TimeoutExpired(["x"], 1), subprocess.TimeoutExpired(["x"], 5)]
+        process.stdout.fileno.return_value = 1
+        selector = mock.Mock()
+        selector.__enter__ = mock.Mock(return_value=selector)
+        selector.__exit__ = mock.Mock(return_value=False)
+        selector.select.return_value = [object()]
+        with mock.patch.object(BUDGET.subprocess, "Popen", return_value=process), \
+             mock.patch.object(BUDGET.selectors, "DefaultSelector", return_value=selector), \
+             mock.patch.object(BUDGET.os, "read", return_value=b""):
+            with self.assertRaises(OSError) as rejected:
+                BUDGET.bounded_output(["docker", "start"], 1)
+        self.assertEqual(rejected.exception.primary_evidence["reason"], "deadline")
+        self.assertEqual(rejected.exception.cleanup_evidence["reason"], "reap_timeout")
 
 
 if __name__ == "__main__":
