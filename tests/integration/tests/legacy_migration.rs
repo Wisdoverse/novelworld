@@ -65,6 +65,8 @@ const CHAT_WORLD_REVISION_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0025_chat_world_revision.sql");
 const DIAGNOSTIC_LLM_BUDGET_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0026_diagnostic_llm_budget.sql");
+const CHAT_SUMMARY_WINDOWS_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0027_chat_summary_windows.sql");
 
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
@@ -98,6 +100,7 @@ const ALL_MIGRATIONS: &[&str] = &[
     PERSONA_PROVENANCE_MIGRATION,
     CHAT_WORLD_REVISION_MIGRATION,
     DIAGNOSTIC_LLM_BUDGET_MIGRATION,
+    CHAT_SUMMARY_WINDOWS_MIGRATION,
 ];
 
 #[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
@@ -1988,6 +1991,7 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
         "0024_persona_provenance.sql",
         "0025_chat_world_revision.sql",
         "0026_diagnostic_llm_budget.sql",
+        "0027_chat_summary_windows.sql",
     ] {
         let migration_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../infra/postgres/migrations")
@@ -2128,6 +2132,10 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
             .await
             .unwrap();
         sqlx::raw_sql(DIAGNOSTIC_LLM_BUDGET_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
+        sqlx::raw_sql(CHAT_SUMMARY_WINDOWS_MIGRATION)
             .execute(&mut *non_default_path)
             .await
             .unwrap();

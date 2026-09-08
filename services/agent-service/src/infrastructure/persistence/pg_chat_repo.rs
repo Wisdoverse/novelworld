@@ -15,7 +15,7 @@ fn is_active_turn_conflict(error: &sqlx::Error) -> bool {
 }
 
 #[derive(Debug, FromRow)]
-struct ChatMessageRow {
+pub(super) struct ChatMessageRow {
     id: Uuid,
     turn_id: Option<Uuid>,
     user_id: Uuid,
@@ -104,7 +104,7 @@ impl ChatTurnRow {
 }
 
 pub struct PgChatRepository {
-    pool: PgPool,
+    pub(super) pool: PgPool,
 }
 
 impl PgChatRepository {
@@ -378,6 +378,34 @@ impl ChatRepository for PgChatRepository {
         .execute(&mut *transaction)
         .await?;
         ensure!(claimed.rows_affected() == 1, "chat turn claim was fenced");
+
+        // The active-scope claim above is the serialization point. Historical
+        // and character-mode turns are deliberately outside this prospective epoch.
+        sqlx::query_as::<_, (String,)>(
+            "SELECT pg_catalog.set_config('statement_timeout', '3000', true)",
+        )
+        .fetch_one(&mut *transaction)
+        .await?;
+        if claim.reader_identity_type == "self" && claim.reader_character_id.is_none() {
+            sqlx::query(
+                r#"
+                UPDATE chat_turns SET
+                    summary_sequence = next.sequence,
+                    summary_state = CASE WHEN next.sequence % 10 = 0 THEN 'pending' ELSE 'none' END,
+                    summary_memory_id = CASE WHEN next.sequence % 10 = 0 THEN $4::uuid ELSE NULL END,
+                    summary_next_attempt_at = CASE WHEN next.sequence % 10 = 0 THEN clock_timestamp() ELSE NULL END
+                FROM (
+                    SELECT COALESCE(MAX(summary_sequence), 0) + 1 AS sequence
+                    FROM chat_turns
+                    WHERE user_id = $1 AND novel_id = $2 AND character_id = $3
+                ) AS next
+                WHERE id = $5
+                "#,
+            )
+            .bind(claim.user_id).bind(claim.novel_id).bind(claim.character_id)
+            .bind(Uuid::new_v4()).bind(claim.id)
+            .execute(&mut *transaction).await?;
+        }
 
         for message in [user_message, character_message] {
             sqlx::query(

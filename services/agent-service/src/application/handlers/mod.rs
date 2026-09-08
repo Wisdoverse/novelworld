@@ -1,3 +1,5 @@
+pub mod summary_recovery;
+
 use anyhow::Result;
 use futures::{Stream, StreamExt};
 use sha2::{Digest, Sha256};
@@ -82,6 +84,20 @@ pub type AgentStream = Pin<Box<dyn Stream<Item = Result<AgentStreamEvent>> + Sen
 pub struct ChatResult {
     pub message: String,
     pub replayed: bool,
+}
+
+async fn project_chat_cache(
+    manager: &MemoryManager,
+    user: ChatMessage,
+    character: ChatMessage,
+    reader: Option<Uuid>,
+    persona: Option<i32>,
+) -> Result<()> {
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        manager.project_completed_turn(user, character, reader, persona),
+    )
+    .await?
 }
 
 struct AcquiredTurn {
@@ -1113,8 +1129,7 @@ impl AgentCommandHandler {
             tokio::spawn(
                 async move {
                     let _admission = admission;
-                    if let Err(error) = memory_manager
-                        .project_completed_turn(
+                    if let Err(error) = project_chat_cache(memory_manager.as_ref(),
                             user_message,
                             character_message,
                             turn.claim.reader_character_id,
@@ -1300,8 +1315,7 @@ impl AgentCommandHandler {
         tokio::spawn(
             async move {
                 let _admission = admission;
-                if let Err(error) = memory_manager
-                    .project_completed_turn(
+                if let Err(error) = project_chat_cache(memory_manager.as_ref(),
                         user_message,
                         character_message,
                         turn.claim.reader_character_id,

@@ -202,6 +202,13 @@ async fn run_body() -> Result<()> {
             active_chat_users: Arc::new(Mutex::new(HashSet::new())),
         });
 
+        let (summary_stop, summary_stopped) = tokio::sync::watch::channel(false);
+        let mut summary_worker =
+            agent_service::application::handlers::summary_recovery::spawn_summary_worker(
+                handler.clone(),
+                chat_repo,
+                summary_stopped,
+            );
         let state = AppState {
             handler,
             postgres_readiness: Arc::new(PgReadinessProbe::new(pool)),
@@ -230,7 +237,17 @@ async fn run_body() -> Result<()> {
 
         let listener = tokio::net::TcpListener::bind(&addr).await?;
         axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal())
+            .with_graceful_shutdown(async move {
+                shutdown_signal().await;
+                let _ = summary_stop.send(true);
+                if tokio::time::timeout(std::time::Duration::from_secs(5), &mut summary_worker)
+                    .await
+                    .is_err()
+                {
+                    summary_worker.abort();
+                    let _ = summary_worker.await;
+                }
+            })
             .await?;
 
         Ok(())
