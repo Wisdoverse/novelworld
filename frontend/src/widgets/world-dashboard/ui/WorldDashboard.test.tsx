@@ -72,6 +72,8 @@ describe('WorldDashboard', () => {
     const page = render(<WorldDashboard novelId="novel" view={view} />);
 
     expect(screen.getAllByText(/原著主线/).length).toBeGreaterThan(0);
+    expect(screen.getByText('原著抽取')).toBeTruthy();
+    expect(screen.getByText('事件由模型从原著中抽取，可能存在遗漏或误读，请结合来源章节核对。')).toBeTruthy();
     expect(screen.getByText(/来源章节 2/)).toBeTruthy();
     // The journey keeps the committed branch prefix before living-world turns
     // and distinguishes reader decisions from generated prose projections.
@@ -107,6 +109,27 @@ describe('WorldDashboard', () => {
     expect(mocks.submit.mock.calls[1][0].idempotencyKey)
       .toBe(mocks.submit.mock.calls[0][0].idempotencyKey);
     expect(mocks.submit.mock.calls[1][0].expectedTurnNumber).toBe(1);
+  });
+
+  it('discloses extraction provenance while preserving event status and source chapters', () => {
+    const withPlayerAffectedEvent = {
+      ...view,
+      session: {
+        ...view.session,
+        canonical_events: [
+          ...view.session.canonical_events,
+          { id: 'scheduled-event', sequence: 2, summary: '尚未发生的事件', character_ids: [], location_ids: ['gate'], faction_ids: [], death_character_ids: [], source_chapters: [5], status: 'scheduled' as const, reason: '尚未触发' },
+          { id: 'assisted-event', sequence: 3, summary: '玩家影响的事件', character_ids: [], location_ids: ['gate'], faction_ids: [], death_character_ids: [], source_chapters: [3, 4], status: 'assisted' as const, reason: '读者守住城门' },
+        ],
+      },
+    } satisfies OpenWorldView;
+    render(<WorldDashboard novelId="novel" view={withPlayerAffectedEvent} />);
+
+    const rows = screen.getAllByRole('listitem').map(row => row.textContent ?? '');
+    expect(rows.some(row => row.includes('围城开始') && row.includes('原著抽取') && row.includes('被延迟') && row.includes('来源章节 2') && row.includes('城门未开'))).toBe(true);
+    expect(rows.some(row => row.includes('尚未发生的事件') && row.includes('原著抽取') && row.includes('等待发生') && row.includes('来源章节 5') && row.includes('尚未触发'))).toBe(true);
+    expect(rows.some(row => row.includes('玩家影响的事件') && row.includes('原著抽取') && row.includes('玩家协助') && row.includes('来源章节 3、4') && row.includes('读者守住城门'))).toBe(true);
+    expect(screen.getByText('事件由模型从原著中抽取，可能存在遗漏或误读，请结合来源章节核对。')).toBeTruthy();
   });
 
   it('labels only explicit thread provenance as canon or player', () => {

@@ -287,17 +287,20 @@ export function WorldDashboard({
           <BookOpen size={14} /> 原著事件时间线
         </h3>
         {view.session.canonical_events.length ? (
-          <ol className="mt-3 space-y-3">
-            {view.session.canonical_events.map(event => (
-              <li key={event.id} className="rounded-lg border border-[#e1e3e8] bg-white p-3 text-sm text-[#3c4043]">
-                <span className="mr-2 text-xs font-semibold text-[#0b57d0]">原著主线</span>
-                {event.summary}
-                <div className="mt-1 text-xs text-[#5f6368]">
-                  {eventStatus[event.status]} · 来源章节 {event.source_chapters.join('、')}{event.reason ? ` · ${event.reason}` : ''}
-                </div>
-              </li>
-            ))}
-          </ol>
+          <>
+            <p className="mt-2 text-xs text-[#5f6368]">事件由模型从原著中抽取，可能存在遗漏或误读，请结合来源章节核对。</p>
+            <ol className="mt-3 space-y-3">
+              {view.session.canonical_events.map(event => (
+                <li key={event.id} className="rounded-lg border border-[#e1e3e8] bg-white p-3 text-sm text-[#3c4043]">
+                  <span className="mr-2 text-xs font-semibold text-[#0b57d0]">原著抽取</span>
+                  {event.summary}
+                  <div className="mt-1 text-xs text-[#5f6368]">
+                    {eventStatus[event.status]} · 来源章节 {event.source_chapters.join('、')}{event.reason ? ` · ${event.reason}` : ''}
+                  </div>
+                </li>
+              ))}
+            </ol>
+          </>
         ) : <p className="mt-3 text-sm text-[#5f6368]">当前解锁范围内没有待运行的原著事件。</p>}
       </div>
 
