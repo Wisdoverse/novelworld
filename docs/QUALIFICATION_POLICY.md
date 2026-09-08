@@ -178,6 +178,93 @@ the code that ran while `evidence_commit` identifies the commit that packages
 that evidence; they cannot be the same self-referential value. A Diagnostic run
 cannot repair a failed cohort or substitute for Qualification and human review.
 
+### Vision journey Diagnostic — separate single-start registration
+
+The selected rapid-iteration model uses an explicit, separate path in the same
+runner. It does not change the Flash entrypoint or frozen Qualification cohort.
+Tooling work [#322](https://github.com/Wisdoverse/novelworld/issues/322) is not a
+live execution approval or evidence that H3/H4 passed. The real release-upgrade
+and pending-projection result remains [#230](https://github.com/Wisdoverse/novelworld/issues/230).
+
+Before execution, independently review one private, secret-free registration
+with schema `vision-journey-registration-v1`. Its exact fields are `schema`,
+`budget_id`, `hypothesis`, `candidate_git_sha`, `base_manifest_sha256`,
+`candidate_manifest_sha256`, `base_application_image_ids`,
+`candidate_application_image_ids`, `profile_sha256`, `product_fixture_sha256`,
+`prompt_schema_identities`, `limits`, `output_dir`, and `ledger_path`.
+`prompt_schema_identities` must equal the source-derived result of
+`diagnostic_journey.source_identities(root, base_sha, candidate_sha)`; it binds
+the actual base/candidate prompt constants and domain/schema Git trees.
+The review freezes the SHA256 of the registration's UTF-8 canonical JSON
+(`ensure_ascii=False`, sorted keys, compact separators, no trailing newline).
+
+The fixed profile is `tools/llm-budget/diagnostic-v1.json`: official DeepSeek
+origin, `deepseek-v4-flash-vision-exp`, thinking disabled. `limits` contains
+exactly `profile`, `max_attempts`, `max_tokens`, `max_cost_micro_cny`, and an
+absolute UTC `expires_at`. Zero allowance is valid; no renewal or refill is
+performed. Keep registration/config files mode 0600, output and ledger parent
+directories mode 0700, outside Git. Paths must be canonical absolute paths
+without symlinks. Pre-create an empty output directory, but **do not create the
+ledger**: its name must be `<budget_id>.jsonl` in a separate private directory.
+
+Only after the separate prospective approval, invoke the existing entrypoint
+with its normal config/output/SHA/base/candidate arguments plus:
+
+```text
+--evidence-class Diagnostic --slice core
+--diagnostic-registration /private/path/vision-registration.json
+--diagnostic-registration-sha256 <approved-canonical-registration-sha256>
+```
+
+Do not supply a cohort or Qualification ledger. Pre-pull the registered images
+beforehand: read-only source/image checks precede reading protected model
+configuration. Both versions must be strict-ancestor, genuinely different
+application artifacts, with exact registered image IDs/repository digests and
+different filesystem layers. Tooling-only changes and metadata-only rebuilds
+are rejected. These mechanical checks cannot prove the semantic value of a
+change; prospective review must reject fabricated version pairs. All four
+paying-service capability probes for both versions pass before cold adoption.
+
+Exclusive creation and file/directory fsync of `Started` precede deployment or
+provider work. Any existing ledger, including an empty or truncated file,
+prohibits reuse. The supported cold release provisions the single durable
+budget; upgrade and restart reuse it. The runner reconciles complete PG
+receipts at lifecycle boundaries rather than treating process metrics as an
+authoritative balance.
+
+Before allowing PG deletion, the sealed, fully settled terminal receipts must
+also match the final selected process-generation counters by operation:
+HTTP attempts, input/output/cache tokens and billable token classes. Missing
+generations or mismatched counts fail closed; unknown reservations are not
+invented HTTP usage. Logical usage-report counts are not receipt counts because
+empty-JSON retries may add usage without another logical report. A late
+settlement/metric race may conservatively fail; it never permits filling in
+missing evidence or another paid run.
+
+Success, failure and INT/TERM enter the same terminal path: seal once, drain
+existing grants for at most 300 seconds, stop and verify the four exact paying
+containers, persist consistent private receipts, then perform bounded exact
+cleanup. Unresolved calls after the bound fail the attempt while retaining
+their conservative charges. Missing stop/accounting/durable evidence retains
+the owned PG volume; never resume it to make provider calls. Cleanup commands
+have individual 10-second and combined 60-second bounds. SIGKILL/host loss has
+no cleanup guarantee and never permits restarting an existing registration.
+
+Final reports are fsynced before the terminal ledger. Report/ledger failure
+after safe PG removal cannot restore that volume: retained pre-cleanup and
+per-operation cleanup evidence are the recovery source. A terminal-write
+failure attempts to mark both reports failed; if storage also refuses that,
+an apparently completed report is **not** success. A durable matching `Passed`
+ledger, successful exit and complete reports are all required; a
+`terminal-failure.json` marker or incomplete ledger overrides a report.
+INT/TERM arriving during the serialized final report/ledger commit is handled
+after that terminal decision, not as a request to rerun it.
+
+Only the schema-3 `h4-vision-diagnostic-v1` aggregate report may be considered
+for publication. It omits budget/receipt/run IDs, private registration hashes,
+raw content and credentials. Limits, charged totals, settled/unresolved counts
+and seal status are explicit; a Diagnostic still makes no qualification claim.
+
 ## H4 journey qualification — `h4-journey-qualification-v1`
 
 This policy is approved before the implementation and live runs that it

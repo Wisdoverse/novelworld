@@ -115,6 +115,30 @@ class BudgetVerifierTest(unittest.TestCase):
             report["failures"],
         )
 
+    def test_new_terminal_error_statuses_fail_closed_and_count_as_errors(self):
+        terminal = (
+            'novelworld_llm_requests_total{contract="llm-observability-v1",'
+            'service="narrative-service",provider="environment",model="e2e",'
+            'operation="branch_generation",mode="sync",status="success"} 1'
+        )
+        for status in ("budget_error", "evidence_error", "timeout", "setup_timeout"):
+            with self.subTest(status=status):
+                sample = self.sample.replace(terminal, terminal.replace('status="success"', f'status="{status}"'))
+                report = self.run_verify(sample=sample)
+                self.assertFalse(report["passed"], report)
+                self.assertEqual(report["operations"]["branch_generation"]["errors"], 1)
+
+    def test_unknown_terminal_status_is_rejected(self):
+        terminal = (
+            'novelworld_llm_requests_total{contract="llm-observability-v1",'
+            'service="narrative-service",provider="environment",model="e2e",'
+            'operation="branch_generation",mode="sync",status="success"} 1'
+        )
+        sample = terminal.replace('status="success"', 'status="bogus"')
+        sample = self.sample.replace(terminal, sample)
+        with self.assertRaises(BudgetError):
+            self.run_verify(sample=sample)
+
     def test_malformed_or_sensitive_samples_are_rejected(self):
         for sample in [
             self.sample.replace("} 80\n", '} NaN\n'),

@@ -27,7 +27,9 @@ expect_scan() {
 # The planted token is generated at runtime: a committed ghp_-shaped literal
 # would trip the repository's current-history scan in CI.
 plant_token="ghp_$(python3 -c 'import secrets,string; print("".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(36)))')"
-provider_token="sk-$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
+# Generic-key detection applies entropy and stopword filters. Use a known
+# positive, constructed at runtime, rather than a randomly filtered sample.
+provider_token="sk-$(python3 -c 'print("".join(format(i, "x") for i in range(15, -1, -1)) * 2)')"
 plant="$GITLEAKS_WORK/plant"
 mkdir -p "$plant"
 (
