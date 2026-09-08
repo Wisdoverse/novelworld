@@ -135,7 +135,7 @@ def qualification_environment(
     return {
         key: value
         for key, value in host_environment.items()
-        if key not in product_keys
+        if key not in product_keys and key != "RELEASE_QUALIFICATION_SUBNET"
     }
 
 
@@ -332,9 +332,10 @@ def load_release_manifest(path: Path) -> dict[str, str]:
     return values
 
 
-def load_product_input(path: Path) -> dict[str, Any]:
+def load_product_input(path: Path, *, prospective: bool = False) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        raw = path.read_text(encoding="utf-8")
+        value = diagnostic.strict_json(raw.encode()) if prospective else json.loads(raw)
     except (OSError, json.JSONDecodeError) as error:
         raise QualificationFailure("invalid_product_input") from error
     if set(value) != {
@@ -349,13 +350,13 @@ def load_product_input(path: Path) -> dict[str, Any]:
         "world_actions",
         "world_chats",
         "post_restart_chat",
-    }:
+    } | ({"post_adoption_chats"} if prospective else set()):
         raise QualificationFailure("invalid_product_input_shape")
     chapters = value.get("chapters")
     player = value.get("player")
     if (
-        value.get("manifest_version") != "h4-product-input-v1"
-        or value.get("case_id") != "zh-self-world"
+        value.get("manifest_version") != ("h4-product-input-v2" if prospective else "h4-product-input-v1")
+        or value.get("case_id") != ("zh-self-world-prospective-summary" if prospective else "zh-self-world")
         or value.get("deviation_mode") != "creative"
         or any(
             not isinstance(value.get(key), str) or not value[key].strip()
@@ -390,6 +391,10 @@ def load_product_input(path: Path) -> dict[str, Any]:
         or len(value["world_chats"]) != 11
         or not all(isinstance(item, str) and item.strip() for item in value["world_chats"])
     ):
+        raise QualificationFailure("product_input_outside_slice")
+    if prospective and (not isinstance(value.get("post_adoption_chats"), list)
+            or len(value["post_adoption_chats"]) != 5
+            or not all(isinstance(item, str) and item.strip() for item in value["post_adoption_chats"])):
         raise QualificationFailure("product_input_outside_slice")
     return value
 
@@ -1213,6 +1218,7 @@ def attempt_resources(
 
 
 class Journey:
+    network_subnet = None
     expected_model = EXPECTED_MODEL
     diagnostic_registration = None
     diagnostic_ledger = None
@@ -1262,12 +1268,23 @@ class Journey:
             self.diagnostic_registration = diagnostic_registration
             self.diagnostic_ledger = diagnostic.DiagnosticLedger(diagnostic_registration)
             self.expected_model = diagnostic.MODEL
+        self.prospective_summary = (diagnostic_registration is not None and
+            diagnostic_registration.value["schema"] == diagnostic.REGISTRATION_SCHEMA_V2)
+        self.product_input_path = self.root / (
+            diagnostic.product_fixture(diagnostic_registration.value["schema"])
+            if diagnostic_registration is not None else PRODUCT_INPUT)
+        self.product_input = load_product_input(
+            self.product_input_path, prospective=self.prospective_summary)
+        self.network_subnet = (diagnostic_registration.value.get("network_subnet")
+                               if diagnostic_registration is not None else None)
+        diagnostic.network.preflight(self.network_subnet)
         self.config = load_config(
             config_path, expected_model=self.expected_model,
             thinking_enabled=diagnostic_registration is None,
         )
-        self.product_input_path = self.root / PRODUCT_INPUT
-        self.product_input = load_product_input(self.product_input_path)
+        self.summary_legacy_ids: list[str] = []
+        self.summary_candidate_ids: list[str] = []
+        self.summary_saved = None
         suffix = secrets.token_hex(5)
         self.project = f"nwq-{suffix}"
         self.prefix = self.project
@@ -1356,10 +1373,11 @@ class Journey:
             "journey": {},
         }
         if diagnostic_registration is not None:
-            self.report.update(schema_version=3, report_kind="h4-vision-diagnostic-v1")
+            self.report.update(schema_version=3, report_kind=(
+                "h4-vision-diagnostic-v2" if self.prospective_summary else "h4-vision-diagnostic-v1"))
             self.report["policy_identity"].update(
                 qualification=None, extraction=None,
-                journey="h4-vision-diagnostic-v1",
+                journey=self.report["report_kind"],
                 diagnostic_budget=diagnostic.PROFILE,
                 diagnostic_profile_sha256=diagnostic_registration.binding["profile_sha256"],
             )
@@ -1541,6 +1559,8 @@ class Journey:
 
     def preflight(self) -> None:
         self.validate_release_inputs()
+        if self.network_subnet is not None:
+            self.prepare_runtime()
         docker_engine = run(
             [
                 "docker",
@@ -1579,6 +1599,7 @@ class Journey:
                 str(self.root),
                 "-f",
                 str(self.root / "docker-compose.yml"),
+                *self.network_compose_args(),
                 "--env-file",
                 str(self.candidate_manifest_path),
                 "config",
@@ -1638,6 +1659,7 @@ class Journey:
         # Keep the supported release adapter/profile outside the changing checkout.
         tool_root = temporary_root / "release-tool"
         for relative in ("infra/docker/release.sh", "infra/docker/diagnostic_budget.py",
+                         "infra/docker/qualification_network.py",
                          "tools/llm-budget/diagnostic-v1.json"):
             target = tool_root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -1699,7 +1721,13 @@ class Journey:
             "RELEASE_CONTAINER_PREFIX": self.prefix,
             "RELEASE_HTTP_BIND": "127.0.0.1",
             "RELEASE_HTTP_PORT": str(self.port),
+            "RELEASE_QUALIFICATION_SUBNET": self.network_subnet or "",
         }
+        if self.network_subnet is not None:
+            path = diagnostic.network.guard("overlay", self.network_subnet, self.release_state,
+                                            self.project, self.runtime_root)
+            self.private_report["network"] = {"subnet": self.network_subnet,
+                "overlay_sha256": sha256_bytes(Path(path).read_bytes())}
 
     def compose_manifest(self) -> Path:
         if self.release_state is not None:
@@ -1707,6 +1735,12 @@ class Journey:
             if current.is_file():
                 return current
         return self.candidate_manifest_path
+
+    def network_compose_args(self) -> list[str]:
+        if self.network_subnet is None:
+            return []
+        return ["-f", diagnostic.network.guard("overlay", self.network_subnet,
+                    self.release_state, self.project, self.runtime_root)]
 
     def compose(self, *args: str, capture: bool = True, check: bool = True) -> str:
         if not self.compose_env or self.runtime_root is None:
@@ -1718,27 +1752,38 @@ class Journey:
             # cleanup must remain possible even if an active budget cannot proceed.
             run([self.release_shell, str(self.release_tool), "preflight", str(self.compose_manifest())],
                 cwd=self.runtime_root, env=self.compose_env)
-        return run(
-            [
-                "docker",
-                "compose",
-                "--project-name",
-                self.project,
-                "--project-directory",
-                str(self.runtime_root),
-                "-f",
-                str(self.runtime_root / "docker-compose.yml"),
-                "--env-file",
-                str(self.runtime_root / ".env"),
-                "--env-file",
-                str(self.compose_manifest()),
-                *args,
-            ],
-            cwd=self.runtime_root,
-            env=self.compose_env,
-            capture=capture,
-            check=check,
-        )
+        network_creating = self.network_subnet is not None and args and args[0] in (
+            "up", "start", "restart", "run", "create")
+        if network_creating:
+            diagnostic.network.guard("before", self.network_subnet, self.release_state,
+                                     self.project, self.runtime_root)
+        try:
+            return run(
+                [
+                    "docker",
+                    "compose",
+                    "--project-name",
+                    self.project,
+                    "--project-directory",
+                    str(self.runtime_root),
+                    "-f",
+                    str(self.runtime_root / "docker-compose.yml"),
+                    *self.network_compose_args(),
+                    "--env-file",
+                    str(self.runtime_root / ".env"),
+                    "--env-file",
+                    str(self.compose_manifest()),
+                    *args,
+                ],
+                cwd=self.runtime_root,
+                env=self.compose_env,
+                capture=capture,
+                check=check,
+            )
+        finally:
+            if network_creating:
+                diagnostic.network.guard("after", self.network_subnet, self.release_state,
+                                         self.project, self.runtime_root)
 
     def verify_release_images(
         self, stage: str, manifest: dict[str, str]
@@ -1812,7 +1857,8 @@ class Journey:
     def prepare_compose(self) -> None:
         if not PROJECT_PATTERN.fullmatch(self.project):
             raise QualificationFailure("unsafe_compose_project")
-        self.prepare_runtime()
+        if self.runtime_root is None:
+            self.prepare_runtime()
 
     def wait_gateway(self, attempts: int = 180) -> None:
         for _ in range(attempts):
@@ -1841,6 +1887,110 @@ class Journey:
                 sql,
             ]
         )
+
+    def summary_snapshot(self, user_id: str, novel_id: str, character_id: str,
+                         *, timeout: float = 5) -> dict[str, Any]:
+        scope = {"user_id": user_id, "novel_id": novel_id, "character_id": character_id}
+        if not all(diagnostic.uuid4(value) for value in scope.values()):
+            raise QualificationFailure("summary_scope_invalid")
+        def where(alias: str) -> str:
+            return " AND ".join(f"{alias}.{key} = :'{key}'::uuid" for key in scope)
+
+        # Provenance belongs to the claim, not chat_messages. Keep every raw
+        # message field and row: a mismatched claim yields NULL provenance and
+        # fails validation instead of silently dropping or repairing the source.
+        sql = ("SELECT jsonb_build_object("
+               "'turns', (SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY t.created_at, t.id), '[]') "
+               f"FROM chat_turns t WHERE {where('t')}), "
+               "'messages', (SELECT COALESCE(jsonb_agg(to_jsonb(m) || jsonb_build_object("
+               "'persona_source_chapter_high_water', t.persona_source_chapter_high_water) "
+               "ORDER BY m.created_at, m.id), '[]') FROM chat_messages m LEFT JOIN chat_turns t "
+               "ON t.id = m.turn_id AND t.user_id = m.user_id AND t.novel_id = m.novel_id "
+               "AND t.character_id = m.character_id AND t.chapter_context = m.chapter_context "
+               "AND t.reader_identity IS NOT DISTINCT FROM m.reader_identity "
+               f"WHERE {where('m')}), "
+               "'mid', (SELECT COALESCE(jsonb_agg(to_jsonb(m) ORDER BY m.id), '[]') "
+               f"FROM character_memories m WHERE {where('m')} AND layer = 'mid'))::text")
+        return diagnostic.strict_json(diagnostic.bounded_command(
+            ["docker", "exec", "-i", "-e", "PGOPTIONS=-c statement_timeout=3000",
+             self.prefix + "-postgres", "psql", "-U", "novel", "-d", "novel_world",
+             "-v", "ON_ERROR_STOP=1", "-v", "user_id=" + user_id,
+             "-v", "novel_id=" + novel_id, "-v", "character_id=" + character_id, "-At"],
+            stdin=(sql + ";\n").encode(), timeout=timeout))
+
+    def require_summary_calls(self, expected: int) -> None:
+        observed = provider_started_delta(
+            self.root, b"", self.service_metrics("agent-service"), service="agent-service",
+            operation="memory_summary", expected_model=self.expected_model)
+        if observed != expected:
+            raise QualificationFailure("summary_logical_dispatch_mismatch")
+
+    def validate_summary_window(self, value: dict[str, Any], user_id: str,
+                                novel_id: str, character_id: str) -> dict[str, Any] | None:
+        return diagnostic.summary_window(
+            value, self.summary_legacy_ids, self.summary_candidate_ids,
+            {"user_id": user_id, "novel_id": novel_id, "character_id": character_id})
+
+    def complete_prospective_summary(self, token: str, user_id: str,
+                                     novel_id: str, character_id: str) -> None:
+        if len(self.summary_candidate_ids) != 5:
+            raise QualificationFailure("summary_candidate_schedule_invalid")
+        world_before = json.loads(self.authority_snapshot(user_id, novel_id))
+        for key in ("chat_turns", "chat_messages"):
+            world_before.pop(key)
+        for message in self.product_input["post_adoption_chats"]:
+            self.validate_summary_window(self.summary_snapshot(user_id, novel_id, character_id),
+                                         user_id, novel_id, character_id)
+            self.require_summary_calls(0)
+            context = self.internal_character_context(user_id, novel_id, character_id)
+            result = self.chat(token, novel_id, character_id, message)
+            self.summary_candidate_ids.append(result["turn_id"])
+            after = self.internal_character_context(user_id, novel_id, character_id)
+            if after != context:
+                raise QualificationFailure("summary_chat_changed_world")
+            self.assert_chat_revision(result["turn_id"], context["world_revision"])
+            world_after = json.loads(self.authority_snapshot(user_id, novel_id))
+            for key in ("chat_turns", "chat_messages"):
+                world_after.pop(key)
+            if world_after != world_before:
+                raise QualificationFailure("summary_chat_changed_world")
+        deadline = time.monotonic() + 360
+        binding = None
+        attempt = 0
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            snapshot = self.summary_snapshot(user_id, novel_id, character_id,
+                                             timeout=min(5, remaining))
+            saved = self.validate_summary_window(snapshot, user_id, novel_id, character_id)
+            anchor = next(row for row in snapshot["turns"] if row["id"] == self.summary_candidate_ids[9])
+            observed_binding = (anchor["id"], anchor["summary_memory_id"])
+            if ((binding is not None and binding != observed_binding)
+                    or anchor["summary_claim_attempt"] < attempt):
+                raise QualificationFailure("summary_window_fence_changed")
+            binding, attempt = observed_binding, anchor["summary_claim_attempt"]
+            if saved is not None:
+                self.require_summary_calls(1)
+                self.summary_saved = saved
+                self.private_report["prospective_summary_before_restart"] = saved
+                return
+            time.sleep(min(2, max(0, deadline - time.monotonic())))
+        raise QualificationFailure("summary_window_timeout")
+
+    def verify_summary_restart(self, user_id: str, novel_id: str, character_id: str,
+                               resumed_turn_id: str, selected: int) -> None:
+        self.summary_candidate_ids.append(resumed_turn_id)
+        saved = self.validate_summary_window(self.summary_snapshot(user_id, novel_id, character_id),
+                                             user_id, novel_id, character_id)
+        if saved != self.summary_saved or saved is None or selected != 1:
+            raise QualificationFailure("summary_restart_identity_mismatch")
+        # The pre-restart generation was checked at one and retained by collect_metrics.
+        # Transport retries may exceed one; only logical dispatches are constrained here.
+        self.require_summary_calls(0)
+        self.private_report["prospective_summary_after_restart"] = saved
+        self.report["journey"].update(legacy_chat_turns=7, prospective_chat_turns=11,
+                                        summary_logical_calls=1)
 
     def diagnostic_checkpoint(self, name: str, *, persist: bool = True,
                               timeout: float = 10) -> dict[str, Any] | None:
@@ -2066,6 +2216,16 @@ class Journey:
 
         log = None
         try:
+            if self.network_subnet is not None and self.release_state is not None:
+                evidence = {"subnet": self.network_subnet,
+                    "overlay_sha256": sha256_bytes(diagnostic.network.overlay_bytes(self.network_subnet))}
+                for name in ("qualification-network-attempt.json", "qualification-network.json"):
+                    path = self.release_state / name
+                    if os.path.lexists(path):
+                        evidence[name] = diagnostic.network.decode(diagnostic.network.private_file(path))
+                self.private_report["network"] = evidence
+                write_private(self.output / "network-evidence.json", diagnostic.canonical(evidence))
+                diagnostic.sync_directory(self.output)
             if not PROJECT_PATTERN.fullmatch(self.project) or self.prefix != self.project:
                 raise QualificationFailure("diagnostic_cleanup_target_invalid")
             before = docker_inventory_snapshot(runner=bounded_run)
@@ -2103,6 +2263,14 @@ class Journey:
                     # volume remains subject to the separate evidence gate.
                     command = ["docker", "rm", "--force", "--volumes", identifier]
                 elif kind == "networks":
+                    if self.network_subnet is not None:
+                        receipt = self.private_report.get("network", {}).get("qualification-network.json", {})
+                        if (receipt.get("id") != item.get("id") or receipt.get("name") != name
+                                or (item.get("ipam") or {}).get("Config", [{}])[0].get("Subnet")
+                                != self.network_subnet):
+                            self.diagnostic_failure("diagnostic_cleanup_network_identity_unproven")
+                            record({"resource": resource, "status": "preserved", "code": "identity_unproven"})
+                            continue
                     command = ["docker", "network", "rm", item["id"]]
                 else:
                     command = ["docker", "volume", "rm", name]
@@ -2135,7 +2303,8 @@ class Journey:
                 self.diagnostic_failure("diagnostic_cleanup_residue")
             if not unchanged:
                 self.diagnostic_failure("existing_user_stack_changed")
-        except (QualificationFailure, diagnostic.DiagnosticFailure, OSError, KeyError, UnicodeError) as error:
+        except (QualificationFailure, diagnostic.DiagnosticFailure, diagnostic.network.NetworkFailure,
+                OSError, KeyError, UnicodeError) as error:
             self.diagnostic_failure(getattr(error, "code", "diagnostic_cleanup_unproven"))
             self.report["environment"]["isolated_cleanup_completed"] = False
         finally:
@@ -2649,6 +2818,13 @@ class Journey:
             self.report["llm_metrics"] = summarize_metrics(
                 self.root, windows, expected_model=self.expected_model
             )
+            if self.prospective_summary:
+                summary_calls = sum(row["value"] for row in self.report["llm_metrics"]["counter_totals"]
+                                    if row["service"] == "agent-service"
+                                    and row["operation"] == "memory_summary"
+                                    and row["counter"] == "requests_started.total")
+                if summary_calls > 1 or (self.summary_saved is not None and summary_calls != 1):
+                    errors.append("summary_logical_dispatch_mismatch")
         except (QualificationFailure, OSError, ValueError):
             errors.append("llm_metrics_invalid")
         try:
@@ -3668,6 +3844,8 @@ class Journey:
                 character_id,
                 self.product_input["branch_chat"],
             )
+            if self.prospective_summary:
+                self.summary_legacy_ids.append(branch_chat["turn_id"])
             branch_chat_after = self.service_metrics("agent-service")
             if provider_started_delta(
                 self.root,
@@ -3795,6 +3973,8 @@ class Journey:
                     self.product_input["world_chats"][number - 1],
                 )
                 chat_turns += 1
+                if self.prospective_summary:
+                    self.summary_legacy_ids.append(chat_result["turn_id"])
                 current = self.internal_character_context(
                     user_id, novel_id, character_id
                 )
@@ -3806,6 +3986,14 @@ class Journey:
         self.collect_response_models("base")
         self.diagnostic_checkpoint("before_upgrade")
         pre_upgrade_authority = self.authority_snapshot(user_id, novel_id)
+        if self.prospective_summary:
+            self.require_summary_calls(0)
+            before_summary = self.summary_snapshot(user_id, novel_id, character_id)
+            if (before_summary["mid"] or len(before_summary["turns"]) != 7
+                    or {row["id"] for row in before_summary["turns"]} != set(self.summary_legacy_ids)
+                    or len(before_summary["messages"]) != 14):
+                raise QualificationFailure("summary_base_not_empty")
+            self.private_report["summary_before_upgrade"] = before_summary
         self.private_report["pre_upgrade_authority_sha256"] = sha256_bytes(
             pre_upgrade_authority.encode("utf-8")
         )
@@ -3854,7 +4042,13 @@ class Journey:
                 "candidate": candidate_postgres_volume,
             }
             post_upgrade_authority = self.authority_snapshot(user_id, novel_id)
-            if post_upgrade_authority != pre_upgrade_authority:
+            if self.prospective_summary:
+                if diagnostic.upgrade_authority(post_upgrade_authority) != diagnostic.upgrade_authority(pre_upgrade_authority):
+                    raise QualificationFailure("upgrade_authority_changed")
+                self.validate_summary_window(self.summary_snapshot(user_id, novel_id, character_id),
+                                             user_id, novel_id, character_id)
+                self.require_summary_calls(0)
+            elif post_upgrade_authority != pre_upgrade_authority:
                 raise QualificationFailure("upgrade_authority_changed")
             self.private_report["post_upgrade_authority_sha256"] = sha256_bytes(
                 post_upgrade_authority.encode("utf-8")
@@ -3878,6 +4072,8 @@ class Journey:
                 self.product_input["world_chats"][6],
             )
             chat_turns += 1
+            if self.prospective_summary:
+                self.summary_candidate_ids.append(chat_result["turn_id"])
             current = self.internal_character_context(
                 user_id, novel_id, character_id
             )
@@ -4033,13 +4229,18 @@ class Journey:
                     self.product_input["world_chats"][number - 1],
                 )
                 chat_turns += 1
+                if self.prospective_summary:
+                    self.summary_candidate_ids.append(chat_result["turn_id"])
+                    self.validate_summary_window(self.summary_snapshot(user_id, novel_id, character_id),
+                                                 user_id, novel_id, character_id)
+                    self.require_summary_calls(0)
                 current = self.internal_character_context(
                     user_id, novel_id, character_id
                 )
                 self.assert_chat_revision(
                     chat_result["turn_id"], current["world_revision"]
                 )
-                if number == 9:
+                if number == 9 and not self.prospective_summary:
                     for _ in range(180):
                         mid_count = int(
                             self.db_scalar(
@@ -4058,6 +4259,11 @@ class Journey:
                             "mid_memory_window_not_projected"
                         )
 
+        if self.prospective_summary:
+            with self.stage("prospective_summary_window"):
+                self.complete_prospective_summary(token, user_id, novel_id, character_id)
+                chat_turns += 5
+                mid_count = 1
         self.collect_metrics(
             "candidate-agent-before-restart", ["agent-service"]
         )
@@ -4247,13 +4453,16 @@ class Journey:
                 f"{self.api}/chat/{character_id}/history?limit=100&offset=0",
                 token=token,
             )
-            if history.get("count") != 26:
+            if self.prospective_summary:
+                self.verify_summary_restart(user_id, novel_id, character_id,
+                                            resumed_chat["turn_id"], marker_count)
+            if history.get("count") != (36 if self.prospective_summary else 26):
                 raise QualificationFailure("restart_chat_history_incomplete")
             self.report["journey"].update(
                 {
                     "pre_restart_chat_turns": chat_turns,
                     "post_restart_chat_turns": 1,
-                    "total_chat_turns": 13,
+                    "total_chat_turns": 18 if self.prospective_summary else 13,
                     "mid_memory_windows": mid_count,
                     "mid_candidates_selected": marker_count,
                     "mid_selection_trace_correlated": True,
@@ -4469,6 +4678,9 @@ class Journey:
             "pre_restart_chat_turns",
             "post_restart_chat_turns",
             "total_chat_turns",
+            "legacy_chat_turns",
+            "prospective_chat_turns",
+            "summary_logical_calls",
             "mid_memory_windows",
             "mid_candidates_selected",
             "durable_chat_messages",
@@ -4581,7 +4793,7 @@ class Journey:
             "aggregate": aggregate,
         }
         if self.diagnostic_registration is not None:
-            public.update(schema_version=3, report_kind="h4-vision-diagnostic-v1")
+            public.update(schema_version=3, report_kind=self.report["report_kind"])
             public.pop("attempt_id", None)
             public["diagnostic_profile"] = diagnostic.PROFILE
             public["thinking_enabled"] = False
@@ -4667,6 +4879,7 @@ def run_diagnostic(journey: Journey) -> int:
         # Refusal of an existing/partial Started never writes to its output or
         # invokes cleanup. The ledger owns the descriptor after exclusive create.
         try:
+            diagnostic.network.preflight(journey.network_subnet)
             journey.diagnostic_ledger.start()
         except (Exception, KeyboardInterrupt) as error:
             failure(error, "diagnostic_start_failed")
@@ -5479,6 +5692,9 @@ def main() -> int:
                 root, base["RELEASE_GIT_SHA"], args.git_sha,
             ),
         )
+        load_product_input(root / diagnostic.product_fixture(registration.value["schema"]),
+                           prospective=registration.value["schema"] == diagnostic.REGISTRATION_SCHEMA_V2)
+        diagnostic.network.preflight(registration.value.get("network_subnet"))
         if any(base[key] != candidate[key] for key in INFRASTRUCTURE_IMAGE_KEYS):
             raise QualificationFailure("release_infrastructure_changed")
         diagnostic.verify_artifacts(registration, root, base, candidate)
