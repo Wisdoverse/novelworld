@@ -1649,6 +1649,8 @@ class Journey:
                         adapter.probe(manifest[service.upper().replace("-", "_") + "_IMAGE"],
                                       self.project, expected)
             except Exception as error:
+                evidence = adapter.probe_evidence(error)
+                self.private_report.setdefault("diagnostic_probe_evidence", []).append(evidence)
                 raise QualificationFailure("diagnostic_artifact_capability_unproven") from error
 
     def prepare_runtime(self) -> None:
