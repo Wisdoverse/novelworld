@@ -171,7 +171,8 @@ state in two places.
   is retained for export and lifecycle deletion but excluded from online
   history, prompt, count, and replay. Self mode
   assigns each newly committed self turn a durable sequence and registers one
-  exact twenty-message summary window per ten new turns. A bounded worker
+  exact twenty-message summary window per ten new turns, with a fixed Mid result
+  identity and exact source, scope, provenance, and claim/lease fences. A bounded worker
   recovers only known-unsent work; dispatched errors/expiry retain terminal
   unknown state without another logical model call. Mid insertion and saved
   state share one fenced transaction. Historical and rollback-period chat are
