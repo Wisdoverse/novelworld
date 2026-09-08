@@ -7,11 +7,12 @@ use crate::domain::ports::{EmbeddingGenerator, MessageCache, TextSummarizer};
 use crate::domain::repositories::{ChatRepository, MemoryRepository};
 
 const SHORT_TERM_LIMIT: usize = 10;
+#[cfg(test)]
 const MID_TERM_TRIGGER: usize = 20;
 /// Maximum number of semantically similar memories to inject into context.
 const SEMANTIC_SEARCH_LIMIT: usize = 5;
 const PERMANENT_CANDIDATE_LIMIT: i64 = 10;
-const MAX_MEMORY_BLOCK_CHARS: usize = 4_000;
+pub const MAX_MEMORY_BLOCK_CHARS: usize = 4_000;
 /// pgvector column width (vector(1536)); promotion tolerates any other
 /// provider dimension by skipping rather than failing the projection.
 const EMBEDDING_DIMS: usize = 1536;
@@ -626,7 +627,6 @@ impl MemoryManager {
         );
         let character_id = user_msg.character_id;
         let user_id = user_msg.user_id;
-        let novel_id = user_msg.novel_id;
         let chapter_context = user_msg
             .chapter_context
             .ok_or_else(|| anyhow::anyhow!("missing chapter context"))?;
@@ -641,10 +641,9 @@ impl MemoryManager {
             char_msg.turn_id == Some(committed_turn_id),
             "committed chat messages have inconsistent turn id"
         );
-        let committed_persona_source_chapter_high_water =
-            committed_persona_source_chapter_high_water
-                .filter(|high_water| (1..=chapter_context).contains(high_water))
-                .ok_or_else(|| anyhow::anyhow!("missing safe persona provenance"))?;
+        committed_persona_source_chapter_high_water
+            .filter(|high_water| (1..=chapter_context).contains(high_water))
+            .ok_or_else(|| anyhow::anyhow!("missing safe persona provenance"))?;
         // PostgreSQL is the durable source of truth. This projection runs only
         // after the atomic turn transaction commits.
         let projected = self
@@ -655,129 +654,40 @@ impl MemoryManager {
             return Ok(());
         }
 
-        // 检查是否需要触发中期记忆摘要
-        let total_count = self
-            .chat_repo
-            .count(character_id, user_id, novel_id, None, chapter_context)
-            .await?;
-
-        if total_count != 0 && total_count % MID_TERM_TRIGGER == 0 {
-            self.consolidate_to_mid_term(
-                character_id,
-                user_id,
-                novel_id,
-                chapter_context,
-                committed_turn_id,
-                committed_persona_source_chapter_high_water,
-            )
-            .await?;
-        }
-
         Ok(())
     }
 
-    /// 将最近 N 条对话摘要为中期记忆
-    async fn consolidate_to_mid_term(
+    pub async fn summarize_window(
         &self,
-        character_id: Uuid,
-        user_id: Uuid,
-        novel_id: Uuid,
-        chapter_context: i32,
-        committed_turn_id: Uuid,
-        committed_persona_source_chapter_high_water: i32,
-    ) -> Result<()> {
-        let recent = self
-            .chat_repo
-            .find_recent(
-                character_id,
-                user_id,
-                novel_id,
-                None,
-                chapter_context,
-                MID_TERM_TRIGGER,
-            )
-            .await?;
-        ensure!(!recent.is_empty(), "no committed chat to summarize");
-        ensure!(
-            recent
-                .iter()
-                .all(|message| chat_has_safe_persona_provenance(message, chapter_context)),
-            "chat summary source is missing safe persona provenance"
-        );
-        ensure!(
-            recent.iter().any(|message| {
-                message.turn_id == Some(committed_turn_id)
-                    && message.persona_source_chapter_high_water
-                        == Some(committed_persona_source_chapter_high_water)
-            }),
-            "committed chat turn is absent from summary source"
-        );
-        let persona_source_chapter_high_water = recent
+        window: &crate::domain::repositories::SummaryWindow,
+        sources: &[crate::domain::repositories::SummarySource],
+    ) -> Result<String> {
+        window.validate_sources(sources)?;
+        let messages = sources
             .iter()
-            .filter_map(|message| message.persona_source_chapter_high_water)
-            .max()
-            .ok_or_else(|| anyhow::anyhow!("chat summary source is unproven"))?;
-
-        let conversation = build_summary_input(&recent);
-
-        let summary = self
-            .llm
+            .map(|source| source.message.clone())
+            .collect::<Vec<_>>();
+        self.llm
             .summarize(
-                user_id,
+                window.user_id,
                 "你是一个对话摘要助手。请将以下对话压缩为2-3句话的摘要，保留关键信息和情感变化。",
-                &conversation,
+                &build_summary_input(&messages),
             )
-            .await?;
-
-        let memory = Memory {
-            id: uuid::Uuid::new_v4(),
-            character_id,
-            user_id,
-            novel_id,
-            layer: MemoryLayer::Mid,
-            content: summary,
-            importance: 6,
-            chapter_number: Some(chapter_context),
-            persona_source_chapter_high_water: Some(persona_source_chapter_high_water),
-            embedding: None,
-            created_at: chrono::Utc::now(),
-        };
-
-        self.memory_repo.save(&memory).await?;
-
-        // Long-term producer: promote the committed mid-term summary into the
-        // long-term layer so continuity is semantically retrievable across
-        // sessions. A promotion happens only with a correctly-dimensioned
-        // embedding: generation failure or a non-1536 provider vector skips
-        // the promotion (SPEC 6.2.3 requires an embedding on every long
-        // entry; an embedding-less row would be unreachable). The Mid record
-        // already preserves the summary either way.
-        let embedding = match self
-            .embedding
-            .generate_embedding(memory.content.as_str())
             .await
-        {
-            Ok(vector) if vector.len() == EMBEDDING_DIMS => Some(vector),
-            _ => None,
+    }
+
+    /// Best effort only after one fenced Mid commit. A restart never repeats it.
+    pub async fn promote_summary(&self, memory: &Memory) -> Result<Option<Memory>> {
+        let embedding = match self.embedding.generate_embedding(&memory.content).await {
+            Ok(vector) if vector.len() == EMBEDDING_DIMS => vector,
+            _ => return Ok(None),
         };
-        let Some(embedding) = embedding else {
-            return Ok(());
-        };
-        let promoted = Memory {
-            id: uuid::Uuid::new_v4(),
-            character_id,
-            user_id,
-            novel_id,
-            layer: MemoryLayer::Long,
-            content: memory.content.clone(),
-            importance: memory.importance,
-            chapter_number: Some(chapter_context),
-            persona_source_chapter_high_water: memory.persona_source_chapter_high_water,
-            embedding: Some(embedding),
-            created_at: chrono::Utc::now(),
-        };
-        self.memory_repo.save(&promoted).await?;
-        Ok(())
+        let mut promoted = memory.clone();
+        promoted.id = Uuid::new_v4();
+        promoted.layer = MemoryLayer::Long;
+        promoted.embedding = Some(embedding);
+        promoted.created_at = chrono::Utc::now();
+        Ok(Some(promoted))
     }
 
     /// 保存永久记忆（重大选择、关系变化）。
@@ -2314,132 +2224,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mid_consolidation_promotes_a_long_term_memory_with_embedding() {
+    async fn summary_promotion_preserves_mid_and_requires_the_vector_dimension() {
         let repo = Arc::new(RecordingMemoryRepo {
             saved: Mutex::new(vec![]),
         });
-        let manager = manager(
-            repo.clone(),
-            Arc::new(FakeEmbedding {
-                dims: 1536,
-                fail: false,
-            }),
-        );
-        let (character_id, user_id, novel_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
-        manager
-            .consolidate_to_mid_term(character_id, user_id, novel_id, 3, Uuid::from_u128(1), 3)
-            .await
-            .unwrap();
-        let saved = repo.saved.lock().unwrap().clone();
-        assert_eq!(
-            saved.len(),
-            2,
-            "expected a Mid record and its Long promotion"
-        );
-        let mid = saved.iter().find(|m| m.layer == MemoryLayer::Mid).unwrap();
-        let long = saved.iter().find(|m| m.layer == MemoryLayer::Long).unwrap();
-        assert_eq!(mid.content, long.content);
-        assert_eq!(mid.chapter_number, long.chapter_number);
-        assert_eq!(mid.persona_source_chapter_high_water, Some(3));
-        assert_eq!(long.persona_source_chapter_high_water, Some(3));
-        assert_eq!(mid.importance, long.importance);
-        assert_eq!(mid.embedding, None);
-        assert_eq!(long.embedding.as_deref().map(|e| e.len()), Some(1536));
-    }
-
-    #[tokio::test]
-    async fn consolidation_uses_the_maximum_marker_from_its_proven_source_rows() {
-        let repo = Arc::new(RecordingMemoryRepo {
-            saved: Mutex::new(vec![]),
-        });
-        let manager = MemoryManager {
-            memory_repo: repo.clone(),
-            chat_repo: Arc::new(CountingChatRepo {
-                count: usize::MAX - 1,
-            }),
-            cache: Arc::new(NoopCache),
-            llm: Arc::new(FakeSummarizer("summary".into())),
-            embedding: Arc::new(FakeEmbedding {
-                dims: EMBEDDING_DIMS,
-                fail: true,
-            }),
-        };
-
-        manager
-            .consolidate_to_mid_term(
-                Uuid::new_v4(),
-                Uuid::new_v4(),
-                Uuid::new_v4(),
-                3,
-                Uuid::from_u128(1),
-                1,
-            )
-            .await
-            .unwrap();
-
-        let saved = repo.saved.lock().unwrap();
-        assert_eq!(saved.len(), 1);
-        assert_eq!(saved[0].persona_source_chapter_high_water, Some(3));
-    }
-
-    #[tokio::test]
-    async fn consolidation_rejects_any_unproven_source_before_summary_write() {
-        let repo = Arc::new(RecordingMemoryRepo {
-            saved: Mutex::new(vec![]),
-        });
-        let manager = MemoryManager {
-            memory_repo: repo.clone(),
-            chat_repo: Arc::new(CountingChatRepo { count: usize::MAX }),
-            cache: Arc::new(NoopCache),
-            llm: Arc::new(FakeSummarizer("must not be saved".into())),
-            embedding: Arc::new(FakeEmbedding {
-                dims: EMBEDDING_DIMS,
-                fail: false,
-            }),
-        };
-
-        let error = manager
-            .consolidate_to_mid_term(
-                Uuid::new_v4(),
-                Uuid::new_v4(),
-                Uuid::new_v4(),
-                3,
-                Uuid::from_u128(1),
-                3,
-            )
-            .await
-            .unwrap_err();
-
-        assert!(error
-            .to_string()
-            .contains("chat summary source is missing safe persona provenance"));
-        assert!(repo.saved.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn failed_embedding_skips_the_long_promotion() {
-        let repo = Arc::new(RecordingMemoryRepo {
-            saved: Mutex::new(vec![]),
-        });
-        let manager = manager(
-            repo.clone(),
-            Arc::new(FakeEmbedding {
-                dims: 1536,
-                fail: true,
-            }),
-        );
-        let (character_id, user_id, novel_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
-        manager
-            .consolidate_to_mid_term(character_id, user_id, novel_id, 3, Uuid::from_u128(1), 3)
-            .await
-            .unwrap();
-        let saved = repo.saved.lock().unwrap().clone();
-        // SPEC 6.2.3: no embedding-less long entries; the Mid summary alone
-        // preserves continuity when embedding generation fails.
-        assert_eq!(saved.len(), 1);
-        assert_eq!(saved[0].layer, MemoryLayer::Mid);
-        assert_eq!(saved[0].persona_source_chapter_high_water, Some(3));
-        assert_eq!(saved[0].embedding, None);
+        let mid = memory(MemoryLayer::Mid, "one fenced Mid");
+        for (dims, fail, expected) in [
+            (1536, false, true),
+            (768, false, false),
+            (1536, true, false),
+        ] {
+            let manager = manager(repo.clone(), Arc::new(FakeEmbedding { dims, fail }));
+            let promoted = manager.promote_summary(&mid).await.unwrap();
+            assert_eq!(promoted.is_some(), expected);
+            if let Some(promoted) = promoted {
+                assert_eq!(promoted.layer, MemoryLayer::Long);
+                assert_ne!(promoted.id, mid.id);
+                assert_eq!(promoted.content, mid.content);
+                assert_eq!(promoted.chapter_number, mid.chapter_number);
+                assert_eq!(
+                    promoted.persona_source_chapter_high_water,
+                    mid.persona_source_chapter_high_water
+                );
+                assert_eq!(promoted.embedding.unwrap().len(), 1536);
+            }
+            assert!(
+                repo.saved.lock().unwrap().is_empty(),
+                "publication belongs to the bounded application path"
+            );
+            assert_eq!(mid.layer, MemoryLayer::Mid);
+        }
     }
 
     #[tokio::test]
@@ -2661,30 +2475,5 @@ mod tests {
         replay.unwrap();
         assert_eq!(embedding_calls.load(Ordering::SeqCst), 0);
         assert_eq!(repo.saved.lock().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn wrong_dimension_embedding_skips_the_long_promotion() {
-        let repo = Arc::new(RecordingMemoryRepo {
-            saved: Mutex::new(vec![]),
-        });
-        // A provider returning a non-1536 vector must not poison the
-        // vector(1536) column; promotion is skipped, Mid remains.
-        let manager = manager(
-            repo.clone(),
-            Arc::new(FakeEmbedding {
-                dims: 1024,
-                fail: false,
-            }),
-        );
-        let (character_id, user_id, novel_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
-        manager
-            .consolidate_to_mid_term(character_id, user_id, novel_id, 3, Uuid::from_u128(1), 3)
-            .await
-            .unwrap();
-        let saved = repo.saved.lock().unwrap().clone();
-        assert_eq!(saved.len(), 1);
-        assert_eq!(saved[0].layer, MemoryLayer::Mid);
-        assert_eq!(saved[0].persona_source_chapter_high_water, Some(3));
     }
 }
