@@ -60,6 +60,62 @@ class DiagnosticJourneyTest(unittest.TestCase):
             "ledger_path": str(self.directory / (budget_id + ".jsonl")),
         }
 
+    def test_v2_final_world_view_capture_is_exact_private_and_bounded(self):
+        view = {"session": {"turn_number": 12}, "world_state": {"state": {"threads": {"x": {"origin": "player"}}}}}
+        def make_journey(output, prospective_summary):
+            journey = object.__new__(RUNNER.Journey)
+            journey.prospective_summary = prospective_summary
+            journey.output = output
+            journey.private_report = {}
+            return journey
+
+        legacy = make_journey(self.directory / "legacy", False)
+        legacy.output.mkdir(mode=0o700)
+        with mock.patch.object(RUNNER.diagnostic, "canonical") as canonical:
+            legacy.capture_final_world_view(view)
+        canonical.assert_not_called()
+        self.assertEqual(list(legacy.output.iterdir()), [])
+        self.assertEqual(legacy.private_report, {})
+
+        journey = make_journey(self.output, True)
+        payload = CONTROL.canonical(view) + b"\n"
+        journey.capture_final_world_view(view)
+        captured = journey.output / "final-world-view.json"
+        self.assertEqual(captured.read_bytes(), payload)
+        self.assertEqual(captured.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(journey.private_report["final_world_view"], {"sha256": CONTROL.digest(payload), "byte_count": len(payload)})
+        with self.assertRaises(FileExistsError):
+            journey.capture_final_world_view(view)
+        self.assertEqual(captured.read_bytes(), payload)
+        self.assertEqual(journey.private_report["final_world_view"]["byte_count"], len(payload))
+
+        exact = self.directory / "exact"
+        exact.mkdir(mode=0o700)
+        exact_journey = make_journey(exact, True)
+        with mock.patch.object(RUNNER.diagnostic, "canonical", return_value=b"x" * (4 * 1024 * 1024 - 1)):
+            exact_journey.capture_final_world_view(view)
+        self.assertEqual((exact / "final-world-view.json").stat().st_size, 4 * 1024 * 1024)
+        self.assertEqual(exact_journey.private_report["final_world_view"]["byte_count"], 4 * 1024 * 1024)
+
+        oversized = self.directory / "oversized"
+        oversized.mkdir(mode=0o700)
+        oversized_journey = make_journey(oversized, True)
+        with mock.patch.object(RUNNER.diagnostic, "canonical", return_value=b"x" * (4 * 1024 * 1024)):
+            with self.assertRaises(RUNNER.QualificationFailure) as rejected:
+                oversized_journey.capture_final_world_view(view)
+        self.assertEqual(rejected.exception.args[0], "final_world_view_oversized")
+        self.assertEqual(list(oversized.iterdir()), [])
+        self.assertEqual(oversized_journey.private_report, {})
+
+        failed = self.directory / "writer-failure"
+        failed.mkdir(mode=0o700)
+        failed_journey = make_journey(failed, True)
+        with mock.patch.object(RUNNER, "write_private", side_effect=OSError("synthetic")) as writer:
+            with self.assertRaises(OSError):
+                failed_journey.capture_final_world_view(view)
+        writer.assert_called_once()
+        self.assertEqual(failed_journey.private_report, {})
+
     def load(self, value=None, approved=None):
         value = self.value if value is None else value
         encoded = CONTROL.canonical(value)
