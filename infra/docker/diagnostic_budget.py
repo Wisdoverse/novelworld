@@ -6,6 +6,7 @@ Compose JSON (including credentials) is consumed only in memory, never reported.
 import datetime
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -17,10 +18,64 @@ import uuid
 
 SERVICES = ("user-service", "novel-service", "agent-service", "narrative-service")
 MAX_OUTPUT = 4096
+PROBE_REASONS = frozenset(("child_nonzero", "deadline", "output_overflow", "spawn_error",
+                           "read_error", "wait_error", "invalid_capability", "create_ack_invalid",
+                           "create_unconfirmed", "cleanup_nonzero", "cleanup_timeout",
+                           "cleanup_query_deadline", "cleanup_query_error", "cleanup_residue",
+                           "reap_timeout", "reap_error", "unknown"))
+PROBE_PHASES = frozenset(("probe_create", "probe_start", "probe_expectation", "probe_cleanup_rm",
+                          "probe_cleanup_ps", "probe_cleanup_unproven"))
 
 
 class Invalid(Exception):
     pass
+
+
+def _closed_detail(value):
+    if value is None:
+        return None
+    value = value if isinstance(value, dict) else {}
+    reason, phase = value.get("reason"), value.get("phase")
+    exit_code, elapsed = value.get("exit_code"), value.get("elapsed")
+    return {
+        "reason": reason if isinstance(reason, str) and reason in PROBE_REASONS else "unknown",
+        "phase": phase if isinstance(phase, str) and phase in PROBE_PHASES else "unknown",
+        "exit_code": exit_code if type(exit_code) is int and -128 <= exit_code <= 255 else None,
+        "elapsed": round(elapsed, 3) if type(elapsed) in (int, float)
+        and 0 <= elapsed <= 86400 and math.isfinite(elapsed) else None,
+    }
+
+
+class ProbeInvalid(Invalid):
+    """A capability refusal; arbitrary child text never enters its evidence."""
+
+    def __init__(self, reason, *, exit_code=None, elapsed=None):
+        super().__init__()
+        self.primary_evidence = _closed_detail({"reason": reason, "exit_code": exit_code,
+                                               "elapsed": elapsed})
+        self.reason = self.primary_evidence["reason"]
+        self.exit_code = self.primary_evidence["exit_code"]
+        self.elapsed = self.primary_evidence["elapsed"]
+
+
+def probe_evidence(error):
+    """Allowlist every exported field, including error attributes and nested outcomes."""
+    phase, name = getattr(error, "probe_phase", None), getattr(error, "probe_name", None)
+    identifier = getattr(error, "probe_container_id", None)
+    cleanup = getattr(error, "cleanup_evidence", None)
+    return {
+        "outcome": "invalid" if isinstance(error, ProbeInvalid) else
+                   "cleanup_uncertain" if isinstance(error, OSError) else "unknown",
+        "phase": phase if isinstance(phase, str) and phase in PROBE_PHASES else "unknown",
+        "name": name if isinstance(name, str) and re.fullmatch(
+            r"nwq-[a-f0-9]{10}-budget-probe-[a-f0-9]{12}", name) else None,
+        "container_id": identifier if isinstance(identifier, str) and re.fullmatch(
+            r"[0-9a-f]{64}", identifier) else None,
+        "primary": _closed_detail(getattr(error, "primary_evidence", None)),
+        "reap": _closed_detail(getattr(error, "reap_evidence", None)),
+        "cleanup": [_closed_detail(item) for item in cleanup[:4]]
+                   if isinstance(cleanup, list) else [],
+    }
 
 
 def require(condition):
@@ -105,8 +160,12 @@ def marker_action(action, state, registered):
 
 def bounded_output(command, timeout, limit=MAX_OUTPUT):
     """Bound output while reading, not after communicate() has buffered it."""
-    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                               stderr=subprocess.DEVNULL)
+    started = time.monotonic()
+    try:
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL)
+    except OSError:
+        raise ProbeInvalid("spawn_error", elapsed=time.monotonic() - started)
     output = bytearray()
     deadline = time.monotonic() + timeout
     try:
@@ -114,25 +173,60 @@ def bounded_output(command, timeout, limit=MAX_OUTPUT):
             selector.register(process.stdout, selectors.EVENT_READ)
             while True:
                 remaining = deadline - time.monotonic()
-                require(remaining > 0)
-                require(selector.select(remaining))
-                chunk = os.read(process.stdout.fileno(), min(4096, limit + 1 - len(output)))
+                if remaining <= 0:
+                    raise ProbeInvalid("deadline", elapsed=time.monotonic() - started)
+                try:
+                    ready = selector.select(remaining)
+                except OSError:
+                    raise ProbeInvalid("read_error", elapsed=time.monotonic() - started)
+                if not ready:
+                    raise ProbeInvalid("deadline", elapsed=time.monotonic() - started)
+                try:
+                    chunk = os.read(process.stdout.fileno(), min(4096, limit + 1 - len(output)))
+                except OSError:
+                    raise ProbeInvalid("read_error", elapsed=time.monotonic() - started)
                 if not chunk:
-                    require(process.wait(timeout=max(0.001, deadline - time.monotonic())) == 0)
+                    try:
+                        exit_code = process.wait(timeout=max(0.001, deadline - time.monotonic()))
+                    except subprocess.TimeoutExpired:
+                        raise ProbeInvalid("deadline", elapsed=time.monotonic() - started)
+                    except OSError:
+                        raise ProbeInvalid("wait_error", elapsed=time.monotonic() - started)
+                    if exit_code != 0:
+                        raise ProbeInvalid("child_nonzero", exit_code=exit_code,
+                                           elapsed=time.monotonic() - started)
                     return bytes(output)
                 output.extend(chunk)
-                require(len(output) <= limit)
+                if len(output) > limit:
+                    raise ProbeInvalid("output_overflow", elapsed=time.monotonic() - started)
+    except OSError as error:
+        raise ProbeInvalid("read_error", elapsed=time.monotonic() - started) from error
     finally:
-        if process.poll() is None:
-            process.kill()
-        process.wait(timeout=5)
-        process.stdout.close()
+        # Capture the original exception before handling any stop/reap exception.
+        active = sys.exc_info()[1]
+        stop_started = time.monotonic()
+        try:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+        except (OSError, subprocess.SubprocessError) as error:
+            failure = OSError("diagnostic probe process reap unproven")
+            failure.primary_evidence = _closed_detail(getattr(active, "primary_evidence", None))
+            failure.reap_evidence = _closed_detail({
+                "reason": "reap_timeout" if isinstance(error, subprocess.TimeoutExpired) else "reap_error",
+                "elapsed": time.monotonic() - stop_started,
+            })
+            raise failure from error
+        finally:
+            process.stdout.close()
 
 
 def probe(image, project, expected):
     require(isinstance(image, str) and re.fullmatch(r"[a-z0-9][a-z0-9._/:@-]*@sha256:[0-9a-f]{64}", image))
     name = project + "-budget-probe-" + uuid.uuid4().hex[:12]
     created = False
+    primary_error = None
+    acknowledged_id = None
     deadline = time.monotonic() + 10
     phase = "probe_create"
     try:
@@ -144,33 +238,85 @@ def probe(image, project, expected):
             "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
             "--entrypoint", "/app/service", image, "--diagnostic-budget-contract",
         ], 10)
-        require(re.fullmatch(rb"[0-9a-f]{64}\n?", identifier))
+        if not re.fullmatch(rb"[0-9a-f]{64}\n?", identifier):
+            raise ProbeInvalid("create_ack_invalid")
+        acknowledged_id = identifier.decode("ascii").strip()
         created = True
         remaining = deadline - time.monotonic()
-        require(remaining > 0)
+        if remaining <= 0:
+            raise ProbeInvalid("deadline", elapsed=10 - remaining)
         phase = "probe_start"
         raw = bounded_output(["docker", "start", "--attach", name], remaining)
         phase = "probe_expectation"
-        require(strict_json(raw) == expected)
-    except (Invalid, ValueError, OSError, subprocess.SubprocessError):
+        try:
+            observed = strict_json(raw)
+        except (Invalid, ValueError, TypeError, KeyError):
+            raise ProbeInvalid("invalid_capability")
+        if observed != expected:
+            raise ProbeInvalid("invalid_capability")
+    except (Invalid, ValueError, OSError, subprocess.SubprocessError) as error:
+        primary_error = error
+        for attribute in ("primary_evidence", "reap_evidence"):
+            detail = _closed_detail(getattr(error, attribute, None))
+            if detail is not None:
+                detail["phase"] = phase
+                setattr(error, attribute, detail)
+        error.probe_phase = phase
+        error.probe_name = name
+        error.probe_container_id = acknowledged_id
         print("diagnostic phase=" + phase, file=sys.stderr)
+        if isinstance(error, ProbeInvalid):
+            print("diagnostic reason=" + error.reason, file=sys.stderr)
         raise
     finally:
-        # Exact random isolated name only. No volumes, credentials or user deployment involved.
+        # Exact random isolated name only. Keep every bounded uncertainty independently.
+        cleanup_details = []
+        cleanup_cause = None
         try:
             phase = "probe_cleanup_rm"
+            started = time.monotonic()
             cleanup = subprocess.run(["docker", "rm", "--force", name], stdin=subprocess.DEVNULL,
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+            if cleanup.returncode != 0:
+                cleanup_details.append({"reason": "cleanup_nonzero", "phase": phase,
+                                        "exit_code": cleanup.returncode,
+                                        "elapsed": time.monotonic() - started})
             phase = "probe_cleanup_ps"
+            started = time.monotonic()
             remaining = bounded_output(["docker", "ps", "--all", "--quiet", "--filter", "name=^/" + name + "$"], 5)
+            if remaining.strip():
+                cleanup_details.append({"reason": "cleanup_residue", "phase": phase,
+                                        "elapsed": time.monotonic() - started})
         except (Invalid, OSError, subprocess.SubprocessError) as error:
+            cleanup_cause = error
             print("diagnostic phase=" + phase, file=sys.stderr)
-            raise OSError("diagnostic probe cleanup unproven") from error
-        if not created or cleanup.returncode != 0 or remaining.strip():
-            # Distinguish uncertain lifecycle cleanup from expected capability
-            # refusal. Callers must not count it as a passing negative probe.
-            print("diagnostic phase=probe_cleanup_unproven", file=sys.stderr)
-            raise OSError("diagnostic probe cleanup unproven")
+            detail = _closed_detail(getattr(error, "primary_evidence", None))
+            if detail is None:
+                detail = _closed_detail({"reason": "cleanup_timeout"
+                    if isinstance(error, subprocess.TimeoutExpired) else "cleanup_query_error",
+                    "elapsed": time.monotonic() - started})
+            if detail["reason"] == "deadline":
+                detail["reason"] = "cleanup_query_deadline"
+            detail["phase"] = phase
+            cleanup_details.append(detail)
+            reap = _closed_detail(getattr(error, "reap_evidence", None))
+            if reap is not None:
+                reap["phase"] = phase
+                cleanup_details.append(reap)
+        if not created:
+            cleanup_details.append({"reason": "create_unconfirmed", "phase": "probe_create"})
+        if cleanup_details:
+            # Still OSError: missing create ACK and cleanup uncertainty cannot pass a negative probe.
+            if cleanup_cause is None:
+                phase = "probe_cleanup_unproven"
+                print("diagnostic phase=" + phase, file=sys.stderr)
+            failure = OSError("diagnostic probe cleanup unproven")
+            failure.primary_evidence = _closed_detail(getattr(primary_error, "primary_evidence", None))
+            failure.reap_evidence = _closed_detail(getattr(primary_error, "reap_evidence", None))
+            failure.cleanup_evidence = cleanup_details
+            failure.probe_phase, failure.probe_name = phase, name
+            failure.probe_container_id = acknowledged_id
+            raise failure from cleanup_cause
 
 
 def preflight(raw, manifest, registered, project):
