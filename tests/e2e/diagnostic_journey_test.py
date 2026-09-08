@@ -161,13 +161,20 @@ class DiagnosticJourneyTest(unittest.TestCase):
         with mock.patch.object(RUNNER, "unseen_response_models",
                                side_effect=RUNNER.QualificationFailure("synthetic_parser_failure")):
             with self.assertRaises(RUNNER.QualificationFailure):
-                journey.collect_response_models("candidate-agent-before-restart", services=("user-service",))
-        parser_artifact = output / "diagnostic-log-candidate-agent-before-restart-user-service.log"
+                journey.collect_response_models("candidate-agent-before-restart", services=("agent-service",))
+        parser_artifact = output / "diagnostic-log-candidate-agent-before-restart-agent-service.log"
         self.assertTrue(parser_artifact.is_file())
         self.assertEqual(len(journey.private_report["response_model_logs"]), 2)
 
         journey.collect_response_models("candidate-final", services=("user-service",))
         self.assertTrue((output / "diagnostic-log-candidate-final-user-service.log").is_file())
+        self.assertEqual(len(journey.response_model_observations), 1)
+        self.assertEqual(journey.response_model_log_offsets["user-service"], ("a" * 64, 1))
+        journey.evidence_command = lambda command: "b" * 64 if command[1] == "inspect" else observed
+        journey.collect_response_models("diagnostic-terminal", services=("user-service",))
+        self.assertEqual(len(journey.response_model_observations), 2)
+        self.assertEqual(journey.response_model_log_offsets["user-service"], ("b" * 64, 1))
+        self.assertEqual(journey.private_report["response_model_logs"][-1]["container_id"], "b" * 64)
         with self.assertRaises(RUNNER.QualificationFailure):
             journey.collect_response_models("base", services=("user-service",))
         self.assertEqual(artifact.read_bytes(), payload)
@@ -177,6 +184,12 @@ class DiagnosticJourneyTest(unittest.TestCase):
         ordinary.collect_response_models("base", services=("novel-service",))
         self.assertEqual(list(ordinary.output.iterdir()), [])
         self.assertNotIn("response_model_logs", ordinary.private_report)
+
+        exact = make_journey("exact-logs")
+        exact.evidence_command = lambda command: "a" * 64 if command[1] == "inspect" else "x" * (4 * 1024 * 1024)
+        exact.collect_response_models("base", services=("user-service",))
+        self.assertEqual((exact.output / "diagnostic-log-base-user-service.log").stat().st_size, 4 * 1024 * 1024)
+        self.assertEqual(exact.private_report["response_model_logs"][0]["byte_count"], 4 * 1024 * 1024)
 
         oversized = make_journey("oversized-logs")
         oversized.evidence_command = lambda command: "a" * 64 if command[1] == "inspect" else "x" * (4 * 1024 * 1024 + 1)
@@ -213,6 +226,25 @@ class DiagnosticJourneyTest(unittest.TestCase):
         self.assertTrue((fsync_failed.output / "diagnostic-log-base-user-service.log").exists())
         self.assertNotIn("response_model_logs", fsync_failed.private_report)
 
+        for phase, ticks, exists in (("before", [10], False), ("after", [9, 10], True)):
+            with self.subTest(deadline=phase):
+                expired = make_journey("deadline-" + phase)
+                expired.diagnostic_evidence_deadline = 10
+                expired.evidence_command = evidence
+                with mock.patch.object(RUNNER.time, "monotonic", side_effect=ticks):
+                    with self.assertRaises(RUNNER.QualificationFailure):
+                        expired.collect_response_models("base", services=("user-service",))
+                self.assertEqual((expired.output / "diagnostic-log-base-user-service.log").exists(), exists)
+                self.assertNotIn("response_model_logs", expired.private_report)
+                self.assertEqual(expired.private_report["response_model_collection_errors"], {
+                    "base": ["user-service:diagnostic_observability_timeout"]
+                })
+
+        public_journey = self.journey()
+        baseline_public = public_journey.public_report()
+        public_journey.private_report.update(journey.private_report)
+        self.assertEqual(public_journey.public_report(), baseline_public)
+        self.assertNotIn("response_model_logs", json.dumps(public_journey.public_report()))
 
     def load(self, value=None, approved=None):
         value = self.value if value is None else value
