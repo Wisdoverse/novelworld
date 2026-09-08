@@ -176,6 +176,8 @@ cargo build --locked -p user-service -p novel-service -p agent-service -p narrat
 cargo build --locked -p llm-client --example diagnostic_budget_driver
 python3 tests/e2e/diagnostic_budget_lifecycle_test.py
 python3 tests/e2e/diagnostic_release_docker_spy_test.py
+python3 tests/e2e/diagnostic_journey_test.py
+python3 tools/llm-budget/test_verify.py
 python3 - <<'PY'
 import runpy
 import subprocess
@@ -211,6 +213,77 @@ not automatic checkout recovery.
 This proves release/capability refusal, dispatch/accounting and owner recreation
 boundaries, not release-built artifacts, a supported base-to-candidate release
 upgrade or live-model qualification.
+
+For Vision journey tooling changes, also run
+`python3 tests/e2e/live_deepseek_journey.py --self-test`. The separate
+`diagnostic_journey_test.py` checks single-start registration, committed source
+identity, synthetic receipt reconciliation, cancellation, bounded terminal
+handling and public-report privacy without Docker or provider calls. These
+checks do not replace the mandatory real release-image cold-adoption/Settings
+and lifecycle wiring evidence tracked in #322. No protected operator key is
+needed or authorized by these offline gates.
+
+The same lifecycle fixture has a separate `--journey-images` mode for actual
+cold-adoption wiring. Its JSON map contains the four paying services plus
+`gateway` and `frontend`, all built with the repository's release Dockerfiles.
+This Linux-only mode requires `socat` and an explicitly selected unused RFC1918
+`/28` subnet for static loopback ingress. Docker requires an explicitly configured
+network subnet for a static container IP; an automatically allocated default
+pool is insufficient. The fixture rejects overlap with Docker networks or host
+routes. The subnet below is an example; select a free subnet on your host.
+Use a pre-created mode-0700 output directory outside the checkout:
+
+```bash
+python3 tests/e2e/diagnostic_budget_lifecycle.py \
+  --journey-images /private/path/six-release-images.json \
+  --journey-output /private/path/empty-cold-adopt-evidence \
+  --subnet 10.254.241.0/28
+```
+
+This mode reuses the internal-network TLS fixture and supported `release.sh`
+cold adoption. Only a private synthetic checkout changes Compose network/CA/
+proxy wiring. It assigns nginx a checked unused internal IPv4 address and removes
+its Docker published port; a host `socat` listener starts on the random loopback
+port before adoption, forwarding only to that nginx address on port 80. The
+fixture verifies the actual nginx address after adoption and stops the exact
+forwarder's process group on success or failure. This avoids relying on Docker
+internal-network port publishing without giving product containers public egress.
+Runtime images and release implementation are not replaced.
+Private output retains forwarding-process recovery metadata and the pre-adoption
+Docker inventory. A failed stop gets one bounded cleanup retry; unproven removal
+still fails the fixture. Production Compose Smoke runs this gate after the
+existing release-image dispatch/refusal matrix, without publishing private output.
+Cold-adoption stdout reports only the zero/nonzero case and fixed boolean stage
+presence/terminal flags after the journey's terminal handling, including failure;
+private reports and identifiers
+remain local. These flags do not replace the fixture's blocking assertions.
+A second fixed boolean summary recognizes release phase markers and selected
+failure classes from at most 1 MiB of the private adoption log. Missing or larger
+logs do not produce phase evidence; raw lines and unknown values are never emitted.
+Failed adoption also observes the seven fixed application containers before
+terminal cleanup: exact name/project ownership precedes ID-addressed log reads.
+One 15-second deadline bounds all reads (at most two seconds and 64 KiB per call,
+80 log lines per container). Only fixed state fields, health enums and startup
+error-word booleans reach stdout; missing containers and unproven observations
+are distinct. Error-word matches are hints, not root-cause proof. Observation
+failure cannot replace the adoption failure or skip terminal cleanup; cancellation
+does not start this observation. No raw container logs are published or retained.
+Outer fallback cleanup shares a 60-second deadline, with Docker calls capped at
+10 seconds each. CI sends a soft TERM after 15 minutes, reserving 10 minutes for
+terminal handling before a hard kill; SIGKILL/host loss still has no cleanup
+guarantee and never makes a failed registration resumable.
+Exact owned-container removal also removes its anonymous volumes (including
+the PostgreSQL image's parent mount). Named PostgreSQL volumes remain governed
+by the independent durable-evidence check; no volume pruning is used.
+Separate zero/nonzero registrations exercise Settings, the runner's generated
+environment, consistent owner/PG checkpoints and restart persistence. Since
+these are partial fixtures, the full journey's missing-quality-sample gate
+must fail; terminal handling preserves the owned PG volume. After checking
+the durable receipts and exact retained-volume ownership, the fixture performs
+non-paid cleanup of that volume. Private evidence remains in the output
+directory. A single-image cold adoption is not a genuine version upgrade or
+a live-model/whole-journey PASS. Run the existing `--runtime-images` matrix
+separately as well; cold adoption does not replace its dispatch/ACK-loss cases.
 
 Production Compose Smoke also invokes the same fixture with
 `--runtime-images <json-file> --client-binary <path>`: a map from each of the
