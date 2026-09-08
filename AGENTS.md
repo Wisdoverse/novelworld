@@ -302,6 +302,15 @@ Use the narrow commands above while iterating. Before review, follow the
 affected-gate matrix in [`CONTRIBUTING.md`](./CONTRIBUTING.md#verification);
 CI remains the authoritative required gate.
 
+For complex tasks, state deliverables, evidence entrypoints, allowed actions,
+and stopping conditions at the start. For routine, well-defined changes,
+proceed directly using the relevant existing plan/review; do not add another
+formal confirmation round. Read material by relevance, retain necessary
+contract wording and real acceptance evidence, save long reports to files,
+and rerun only affected checks. Independent review and applicable blocking
+gates still apply; an unchanged check's prior result is not evidence of new
+behavior.
+
 ## GitHub Project Governance
 
 - `docs/ROADMAP.md` owns product direction, invariants, horizon ordering, and
@@ -314,9 +323,12 @@ CI remains the authoritative required gate.
 - Add active roadmap issues and their pull requests to the Project. Set
   `Horizon`, `Priority`, and `Status`; use `In Progress` only while work is
   actively owned.
-- Roadmap pull requests must link their issue with `Closes #<issue>`. `Done`
-  means the final commit is merged to `main` and required CI is green. A pushed
-  branch, open pull request, or delegated auto-merge is not done.
+- Roadmap pull requests must link their issue with `Closes #<issue>`. An issue
+  is `Done` when its own acceptance evidence is satisfied, its final commit is
+  merged to `main`, and required CI is green. A structural child can be Done
+  while its live-evidence parent remains open; a horizon still requires its
+  roadmap exit evidence. A pushed branch, open pull request, or delegated
+  auto-merge is not done.
 - Update the roadmap status only when its stated evidence or exit criteria are
   true. Record blockers on the issue instead of reporting optimistic status.
 
