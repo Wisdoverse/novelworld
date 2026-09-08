@@ -7,6 +7,7 @@ Only synthetic callers may use this module before a separately approved live run
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -22,7 +23,14 @@ from pathlib import Path
 from typing import Any
 
 
+_network_spec = importlib.util.spec_from_file_location(
+    "qualification_network", Path(__file__).resolve().parents[2] / "infra/docker/qualification_network.py")
+network = importlib.util.module_from_spec(_network_spec)
+_network_spec.loader.exec_module(network)
+
+
 REGISTRATION_SCHEMA = "vision-journey-registration-v1"
+REGISTRATION_SCHEMA_V2 = "vision-journey-registration-v2"
 LEDGER_SCHEMA = "vision-journey-ledger-v1"
 PROFILE_PATH = Path("tools/llm-budget/diagnostic-v1.json")
 MODEL = "deepseek-v4-flash-vision-exp"
@@ -149,6 +157,12 @@ class Registration:
                 "LLM_DIAGNOSTIC_BUDGET_LIMITS": canonical(value["limits"]).decode()}
 
 
+def product_fixture(schema: str) -> Path:
+    require(schema in (REGISTRATION_SCHEMA, REGISTRATION_SCHEMA_V2))
+    version = 2 if schema == REGISTRATION_SCHEMA_V2 else 1
+    return Path(f"tests/e2e/fixtures/h4-journey-v{version}.json")
+
+
 def load_registration(
     path: Path, approved_sha256: str, *, root: Path, git_sha: str,
     output: Path, base_manifest: Path, candidate_manifest: Path,
@@ -162,10 +176,17 @@ def load_registration(
             raw = stream.read(65537)
         require(len(raw) <= 65536)
         value = strict_json(raw)
-        require(isinstance(value, dict) and set(value) == REGISTRATION_KEYS)
+        require(isinstance(value, dict))
+        expected_keys = REGISTRATION_KEYS | ({"network_subnet"}
+            if value.get("schema") == REGISTRATION_SCHEMA_V2 else set())
+        require(set(value) == expected_keys)
         encoded = canonical(value)
         require(digest(encoded) == approved_sha256, "diagnostic_registration_digest_mismatch")
-        require(value["schema"] == REGISTRATION_SCHEMA and uuid4(value["budget_id"]))
+        require(value["schema"] in (REGISTRATION_SCHEMA, REGISTRATION_SCHEMA_V2) and uuid4(value["budget_id"]))
+        try:
+            network.subnet(value.get("network_subnet"))
+        except network.NetworkFailure as error:
+            raise DiagnosticFailure("diagnostic_subnet_invalid") from error
         hypothesis = value["hypothesis"]
         require(isinstance(hypothesis, str) and 1 <= len(hypothesis) <= 2000
                 and hypothesis == hypothesis.strip() and all(char.isprintable() for char in hypothesis))
@@ -181,7 +202,7 @@ def load_registration(
                 and profile["origin"] == "https://api.deepseek.com"
                 and profile["thinking_enabled"] is False, "diagnostic_profile_mismatch")
         require(value["product_fixture_sha256"] == digest(
-            (root / "tests/e2e/fixtures/h4-journey-v1.json").read_bytes()),
+            (root / product_fixture(value["schema"])).read_bytes()),
             "diagnostic_fixture_mismatch")
         require(value["prompt_schema_identities"] == prompt_schema_identities,
                 "diagnostic_prompt_identity_mismatch")
@@ -212,6 +233,105 @@ def load_registration(
         return Registration(encoded, profile)
     except (OSError, KeyError, TypeError, ValueError, RecursionError) as error:
         raise DiagnosticFailure("diagnostic_registration_invalid") from error
+
+
+SUMMARY_DEFAULTS = {
+    "summary_sequence": None, "summary_state": "none", "summary_memory_id": None,
+    "summary_claim_attempt": 0, "summary_lease_expires_at": None,
+    "summary_next_attempt_at": None, "summary_failure_code": None,
+}
+
+
+def upgrade_authority(raw: str) -> bytes:
+    """Cross-schema comparison only; ordinary replay snapshots keep all fields."""
+    value = strict_json(raw.encode())
+    require(isinstance(value, dict) and isinstance(value.get("chat_turns"), list),
+            "summary_upgrade_snapshot_invalid")
+    for turn in value["chat_turns"]:
+        require(isinstance(turn, dict), "summary_upgrade_snapshot_invalid")
+        for key in SUMMARY_DEFAULTS:
+            turn.pop(key, None)
+    return canonical(value)
+
+
+def summary_window(value: Any, legacy_ids: list[str], candidate_ids: list[str],
+                   scope: dict[str, str]) -> dict[str, Any] | None:
+    """Validate the one fixed prospective window against the chats actually sent."""
+    def check(condition: bool) -> None:
+        require(condition, "summary_window_evidence_invalid")
+
+    check(len(legacy_ids) == 7 and 0 <= len(candidate_ids) <= 11)
+    ids = legacy_ids + candidate_ids
+    check(len(set(ids)) == len(ids) and all(uuid4(item) for item in ids))
+    check(isinstance(value, dict) and set(value) == {"turns", "messages", "mid"})
+    turns, messages, mid = (value[key] for key in ("turns", "messages", "mid"))
+    check(all(isinstance(rows, list) for rows in (turns, messages, mid)))
+    check(len(turns) == len(ids) and len(messages) == len(ids) * 2)
+    check(all(isinstance(row, dict) for row in turns + messages + mid))
+    by_id = {row.get("id"): row for row in turns}
+    check(set(by_id) == set(ids) and len(by_id) == len(turns))
+    check(all(all(row.get(key) == val for key, val in scope.items()) for row in turns + messages + mid))
+    check(len({row.get("id") for row in messages}) == len(messages))
+    check(all(uuid4(row.get("id")) for row in messages))
+    for turn_id in legacy_ids:
+        row = by_id[turn_id]
+        check(all(key in row and type(row[key]) is type(default) and row[key] == default
+                  for key, default in SUMMARY_DEFAULTS.items()))
+    for sequence, turn_id in enumerate(candidate_ids, 1):
+        row = by_id[turn_id]
+        check(type(row.get("summary_sequence")) is int and row["summary_sequence"] == sequence)
+        if sequence != 10:
+            check(all(key in row and type(row[key]) is type(default) and row[key] == default
+                      for key, default in SUMMARY_DEFAULTS.items() if key != "summary_sequence"))
+    source_messages = []
+    for turn_id in ids:
+        row = by_id[turn_id]
+        check(row.get("status") == "completed" and row.get("reader_identity_type") == "self"
+              and "reader_character_id" in row and row["reader_character_id"] is None)
+        pair = [message for message in messages if message.get("turn_id") == turn_id]
+        check(len(pair) == 2 and {message.get("role") for message in pair} == {"user", "character"})
+        chapter, persona = row.get("chapter_context"), row.get("persona_source_chapter_high_water")
+        check(type(chapter) is int and type(persona) is int and 1 <= persona <= chapter)
+        check(all(message.get("chapter_context") == chapter
+                  and message.get("persona_source_chapter_high_water") == persona
+                  and message.get("reader_identity") == row.get("reader_identity") for message in pair))
+        if turn_id in candidate_ids[:10]:
+            source_messages.extend(sorted(pair, key=lambda message: message["role"] != "user"))
+    if len(candidate_ids) < 10:
+        check(not mid)
+        return None
+    anchor = by_id[candidate_ids[9]]
+    state, attempt = anchor.get("summary_state"), anchor.get("summary_claim_attempt")
+    check(uuid4(anchor.get("summary_memory_id")) and type(attempt) is int and attempt >= 0)
+    if state in ("failed", "unknown"):
+        raise DiagnosticFailure("summary_window_terminal")
+    check(state in ("pending", "claimed", "dispatched", "saved"))
+    check(anchor.get("summary_failure_code") is None)
+    if state == "pending":
+        check(anchor.get("summary_lease_expires_at") is None
+              and isinstance(anchor.get("summary_next_attempt_at"), str))
+    else:
+        check(attempt > 0 and anchor.get("summary_next_attempt_at") is None)
+        check((anchor.get("summary_lease_expires_at") is None) if state == "saved"
+              else isinstance(anchor.get("summary_lease_expires_at"), str))
+    if state != "saved":
+        check(not mid)
+        return None
+    check(len(mid) == 1)
+    memory = mid[0]
+    check(memory.get("id") == anchor["summary_memory_id"] and memory.get("layer") == "mid"
+          and memory.get("importance") == 6 and memory.get("embedding") is None)
+    check(isinstance(memory.get("content"), str) and 0 < len(memory["content"].strip())
+          and len(memory["content"]) <= 4000)
+    check(memory.get("chapter_number") == max(row["chapter_context"] for row in source_messages)
+          and memory.get("persona_source_chapter_high_water") == max(
+              row["persona_source_chapter_high_water"] for row in source_messages))
+    # Capture only immutable fields: read-access counters can change after retrieval.
+    return {"anchor": {key: anchor[key] for key in ("id", *SUMMARY_DEFAULTS)},
+            "memory": {key: memory[key] for key in (
+                "id", "user_id", "novel_id", "character_id", "layer", "content", "importance",
+                "chapter_number", "persona_source_chapter_high_water")},
+            "source_turn_ids": candidate_ids[:10], "source_messages": source_messages}
 
 
 def source_identities(root: Path, base_sha: str, candidate_sha: str) -> dict[str, Any]:

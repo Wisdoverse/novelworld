@@ -494,6 +494,11 @@ printf '%s\n' \
 cat >"$roll_bin/docker" <<'EOF'
 #!/usr/bin/env bash
 [ -z "${MOCK_DOCKER_LOG:-}" ] || printf '%s\n' "$*" >>"$MOCK_DOCKER_LOG"
+if [[ -n "${MOCK_NETWORK_SPY:-}" ]]; then
+  python3 "$MOCK_NETWORK_SPY" "$@"
+  status=$?
+  [[ "$status" == 99 ]] || exit "$status"
+fi
 if [ -n "${MOCK_DOCKER_FAIL_MATCH:-}" ] \
   && [[ " $* " == *"$MOCK_DOCKER_FAIL_MATCH"* ]]; then
   exit 70
@@ -672,6 +677,77 @@ cmp -s "$roll_marker" "$cold_state/current.env" \
 test ! -e "$cold_state/schema-transition.pending" \
   || { printf 'drill: FAIL qualification cold adopt left a schema marker\n' >&2; exit 1; }
 printf 'drill: ok   qualification cold adopt starts a fresh isolated release without a legacy gate\n'
+
+# Fixed IPAM overlay survives original base/candidate checkouts. Only Docker/IP
+# reads and Compose commands are spies; Git, release adapter and state are real.
+network_state=$(new_state)
+network_log="$work/network-docker.log"
+network_observed="$work/network-observed.json"
+network_spy="$work/network-spy.py"
+cat >"$network_spy" <<'PYNET'
+import json, os, pathlib, sys
+args = sys.argv[1:]
+path = pathlib.Path(os.environ['MOCK_NETWORK_OBSERVED'])
+project = os.environ['RELEASE_COMPOSE_PROJECT']
+network = {'Id': 'a'*64, 'Name': project+'_novel-net', 'Driver':'bridge', 'Scope':'local',
+           'Internal':False, 'EnableIPv6':False, 'Options':{},
+           'Labels':{'com.docker.compose.project':project, 'com.docker.compose.network':'novel-net'},
+           'IPAM':{'Config':[{'Subnet':os.environ['RELEASE_QUALIFICATION_SUBNET']}]}}
+current = json.loads(path.read_bytes()) if path.exists() else None
+if args == ['context', 'inspect']:
+    print(json.dumps([{'Name':'default','Endpoints':{'docker':{'Host':'unix:///var/run/docker.sock'}}}]))
+elif args[:1] == ['info']:
+    print(json.dumps({'os':'linux','name':os.uname().nodename,'kernel':os.uname().release,
+                      'distribution':'Linux','security':[]}))
+elif args[:2] == ['network', 'ls']:
+    if '--filter' not in args: print('c'*64)
+    if current: print(current['Id'])
+elif args[:2] == ['network', 'inspect']:
+    default = {'Id':'c'*64,'Name':'bridge','Driver':'bridge','Scope':'local',
+               'Options':{'com.docker.network.bridge.name':'docker0'},
+               'IPAM':{'Config':[{'Subnet':'172.17.0.0/16','Gateway':'172.17.0.1'}]}}
+    print(json.dumps([default] + ([current] if current else [])))
+elif args[:1] == ['compose']:
+    files = [args[i+1] for i, x in enumerate(args) if x == '-f']
+    assert len(files) == 2
+    expected = pathlib.Path(os.environ['RELEASE_STATE_DIR']) / 'qualification-network.yml'
+    assert pathlib.Path(files[1]) == expected
+    assert expected.read_text() == 'networks:\n  novel-net:\n    ipam:\n      config:\n        - subnet: '+os.environ['RELEASE_QUALIFICATION_SUBNET']+'\n'
+    if any(x in args for x in ('up','run','create','start','restart')) and not current:
+        path.write_text(json.dumps(network))
+    sys.exit(99)
+else:
+    sys.exit(99)
+PYNET
+cat >"$roll_bin/ip" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '[{"dst":"default"},{"dst":"172.17.0.0/16","dev":"docker0","prefsrc":"172.17.0.1"}]'
+EOF
+chmod +x "$roll_bin/ip"
+network_candidate="$work/network-candidate.env"
+write_manifest "$network_candidate" "$roll_new_sha"
+(
+  cd "$roll_repo"
+  export PATH="$roll_bin:$PATH" RELEASE_STATE_DIR="$network_state"
+  export RELEASE_COMPOSE_PROJECT=nwq-0123456789 RELEASE_CONTAINER_PREFIX=nwq-0123456789
+  export RELEASE_HTTP_BIND=127.0.0.1 RELEASE_HTTP_PORT=18080
+  export RELEASE_QUALIFICATION_SUBNET=10.2.3.0/28
+  export MOCK_NETWORK_SPY="$network_spy" MOCK_NETWORK_OBSERVED="$network_observed" MOCK_DOCKER_LOG="$network_log"
+  unset DOCKER_HOST DOCKER_CONTEXT
+  "$release" adopt "$roll_marker"
+  [[ "$(git rev-parse HEAD)" == "$roll_sha" && -z "$(git status --porcelain=v1)" ]]
+  cp "$network_state/qualification-network.json" "$work/network-receipt-before"
+  printf '%s\n' "$roll_new_sha" | "$release" upgrade "$network_candidate"
+  [[ "$(git rev-parse HEAD)" == "$roll_new_sha" && -z "$(git status --porcelain=v1)" ]]
+  cmp "$network_state/qualification-network.json" "$work/network-receipt-before"
+  "$release" preflight "$network_candidate"
+  # Deletion cannot turn a restart/upgrade into a second network creation.
+  rm "$network_observed"
+  expect_fail 'registered network disappearance blocks reuse' \
+    'qualification network guard failed' "$release" preflight "$network_candidate"
+)
+[[ "$(git -C "$roll_repo" show "$roll_sha:docker-compose.yml")" == 'services: {}' ]]
+printf 'drill: ok   fixed network overlay preserves clean original revisions and one network identity\n'
 
 # Same real release entrypoint and filesystem state machine, mocked Docker only.
 # This proves order/freeze semantics, NOT a container/DB/provider lifecycle.
