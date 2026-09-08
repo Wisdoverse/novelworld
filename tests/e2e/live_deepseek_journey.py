@@ -1223,6 +1223,17 @@ class Journey:
     diagnostic_registration = None
     diagnostic_ledger = None
 
+    def capture_final_world_view(self, world_view: Any) -> None:
+        if not self.prospective_summary:
+            return
+        payload = diagnostic.canonical(world_view) + b"\n"
+        if len(payload) > 4 * 1024 * 1024:
+            raise QualificationFailure("final_world_view_oversized")
+        write_private(self.output / "final-world-view.json", payload)
+        self.private_report["final_world_view"] = {
+            "sha256": sha256_bytes(payload), "byte_count": len(payload)
+        }
+
     def __init__(
         self,
         root: Path,
@@ -4477,6 +4488,7 @@ class Journey:
             world_view = request_json(
                 f"{self.api}/narrative/{novel_id}/world", token=token
             )
+            self.capture_final_world_view(world_view)
             if (
                 world_view.get("session", {}).get("turn_number") != 12
                 or len(world_view.get("journal", [])) != 12
