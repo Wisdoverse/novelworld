@@ -44,6 +44,7 @@ class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
         lifecycle.image_refs = set()
         lifecycle.source_images = {}
         lifecycle.network_created = network
+        lifecycle.subnet = None
         lifecycle.temporary = tempfile.TemporaryDirectory(prefix="cleanup-test-")
         self.addCleanup(lifecycle.temporary.cleanup)
         lifecycle.files = Path(lifecycle.temporary.name)
@@ -723,6 +724,60 @@ class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 LIFECYCLE.cold_adopt_release(journey, Path("/private/manifest"), False)
         observe.assert_not_called()
+
+    def test_journey_mode_requires_subnet_before_reading_inputs_or_constructing_lifecycle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "missing-images.json"
+            output_path = Path(directory) / "evidence"
+            with mock.patch.object(LIFECYCLE, "Lifecycle") as lifecycle, \
+                 mock.patch.object(sys, "argv", [str(SCRIPT), "--journey-images", str(image_path),
+                                                   "--journey-output", str(output_path)]):
+                with self.assertRaises(LIFECYCLE.Failure) as failure:
+                    LIFECYCLE.main()
+            self.assertEqual(str(failure.exception), "journey_static_ingress_requires_explicit_subnet")
+            lifecycle.assert_not_called()
+
+    def test_journey_wiring_requires_subnet_without_docker_or_evidence_write(self):
+        lifecycle = self.ingress_lifecycle(network=False)
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = Path(directory) / "evidence"
+            evidence.mkdir(mode=0o700)
+            lifecycle.docker = mock.Mock()
+            with self.assertRaises(LIFECYCLE.Failure) as failure:
+                lifecycle.journey_wiring(None, evidence)
+            self.assertEqual(str(failure.exception), "journey_static_ingress_requires_explicit_subnet")
+            lifecycle.docker.assert_not_called()
+            self.assertEqual(list(evidence.iterdir()), [])
+
+    def test_explicit_subnet_rejects_docker_overlap_and_host_route_before_create(self):
+        for route_kind in ("docker", "host"):
+            with self.subTest(route_kind=route_kind):
+                lifecycle = self.ingress_lifecycle(network=False)
+                lifecycle.subnet = "10.254.241.0/28"
+                network = [{"IPAM": {"Config": [{"Subnet": "10.254.241.0/28"}]}}]
+                if route_kind == "docker":
+                    routes = []
+                else:
+                    network = [{"IPAM": {"Config": []}}]
+                    routes = [{"dst": "10.254.241.0/28"}]
+
+                def docker(*args, **_kwargs):
+                    if args[:3] == ("network", "ls", "--quiet"):
+                        return SimpleNamespace(stdout=b"network-id\n")
+                    if args[:2] == ("network", "inspect"):
+                        return SimpleNamespace(stdout=json.dumps(network).encode())
+                    return SimpleNamespace(stdout=b"", returncode=0)
+
+                lifecycle.docker = mock.Mock(side_effect=docker)
+                with mock.patch.object(LIFECYCLE, "command",
+                                       return_value=SimpleNamespace(stdout=json.dumps(routes).encode())) as command:
+                    with self.assertRaises(LIFECYCLE.Failure) as failure:
+                        lifecycle.prepare_network_mock()
+                self.assertEqual(str(failure.exception), "fixture_subnet_overlaps_existing_route")
+                self.assertFalse(any(call.args[:2] == ("network", "create")
+                                     for call in lifecycle.docker.call_args_list))
+                if route_kind == "docker":
+                    command.assert_called_once_with(["ip", "-j", "route"])
 
     def test_cleanup_docker_calls_are_clamped_to_remaining_deadline(self):
         lifecycle = self.ingress_lifecycle()

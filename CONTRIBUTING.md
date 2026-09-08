@@ -226,13 +226,18 @@ needed or authorized by these offline gates.
 The same lifecycle fixture has a separate `--journey-images` mode for actual
 cold-adoption wiring. Its JSON map contains the four paying services plus
 `gateway` and `frontend`, all built with the repository's release Dockerfiles.
-This Linux-only mode also requires `socat` on the host for loopback ingress.
+This Linux-only mode requires `socat` and an explicitly selected unused RFC1918
+`/28` subnet for static loopback ingress. Docker requires an explicitly configured
+network subnet for a static container IP; an automatically allocated default
+pool is insufficient. The fixture rejects overlap with Docker networks or host
+routes. The subnet below is an example; select a free subnet on your host.
 Use a pre-created mode-0700 output directory outside the checkout:
 
 ```bash
 python3 tests/e2e/diagnostic_budget_lifecycle.py \
   --journey-images /private/path/six-release-images.json \
-  --journey-output /private/path/empty-cold-adopt-evidence
+  --journey-output /private/path/empty-cold-adopt-evidence \
+  --subnet 10.254.241.0/28
 ```
 
 This mode reuses the internal-network TLS fixture and supported `release.sh`

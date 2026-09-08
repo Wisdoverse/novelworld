@@ -410,7 +410,8 @@ jobs:
           # before the hard kill; the step has another five minutes of headroom.
           subprocess.run(["timeout", "--signal=TERM", "--kill-after=10m", "--", "15m",
                           "python3", "tests/e2e/diagnostic_budget_lifecycle.py",
-                          "--journey-images", str(images), "--journey-output", str(evidence)], check=True)
+                          "--journey-images", str(images), "--journey-output", str(evidence),
+                          "--subnet", "10.254.241.0/28"], check=True)
           PY
       - name: Verify public probes and rate-limit exemption
         run: |

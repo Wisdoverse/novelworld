@@ -663,6 +663,7 @@ class Lifecycle:
         wiring. Full-journey quality gates intentionally fail on these partial
         fixtures, exercising retained PG evidence rather than inventing samples.
         """
+        require(self.subnet, "journey_static_ingress_requires_explicit_subnet")
         import live_deepseek_journey as runner
         control = runner.diagnostic
         require(shutil.which("socat") is not None, "fixture_socat_required")
@@ -1222,7 +1223,7 @@ def main():
                         help="Cold-adopt wiring only: six release-built application images, no semantic journey")
     parser.add_argument("--journey-output", type=Path,
                         help="Pre-created empty private directory for retained cold-adopt evidence")
-    parser.add_argument("--subnet", help="Optional unused RFC1918 /28 for hosts with exhausted Docker default pools")
+    parser.add_argument("--subnet", help="Unused RFC1918 /28; required for journey static ingress, optional in other modes")
     args = parser.parse_args()
     if args.mock:
         mock_server()
@@ -1231,6 +1232,7 @@ def main():
         require(args.journey_images and args.journey_output
                 and not any((args.owner_binary, args.client_binary, args.capability_images, args.runtime_images)),
                 "journey_fixture_inputs_required")
+        require(args.subnet, "journey_static_ingress_requires_explicit_subnet")
         lifecycle = Lifecycle(None, None, args.subnet)
         def cancel_journey(*_):
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
