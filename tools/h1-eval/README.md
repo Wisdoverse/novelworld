@@ -58,6 +58,11 @@ when they are source-grounded finer-grained events; this is not a count of
 fabricated facts. Prompt and scoring tests do not prove that a live judge follows
 these semantic instructions.
 
+The [prospective measurement design](../../docs/H1_MEASUREMENT_DESIGN.md)
+separates gold coverage, source support and event completeness with fresh
+counterexamples. It is not adopted scoring, a rescore of frozen failures, or
+evidence that the live judge/model passes; the current policy stays unchanged.
+
 V3 removes the redundant `extracted_event_verdicts` response array. The shared
 strict parser rejects that old key even when empty or consistent; there is no
 compatibility path, key deletion or response repair. Validated expected

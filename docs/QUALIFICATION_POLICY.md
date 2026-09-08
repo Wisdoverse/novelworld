@@ -220,9 +220,19 @@ Do not supply a cohort or Qualification ledger. Pre-pull the registered images
 beforehand: read-only source/image checks precede reading protected model
 configuration. Both versions must be strict-ancestor, genuinely different
 application artifacts, with exact registered image IDs/repository digests and
-different filesystem layers. Tooling-only changes and metadata-only rebuilds
-are rejected. These mechanical checks cannot prove the semantic value of a
-change; prospective review must reject fabricated version pairs. All four
+different filesystem layers in an image corresponding to a changed application
+build input. The runner maps known inputs from the current release Dockerfiles:
+runtime source, Cargo manifests/lockfile and Rust image inputs; frontend
+package/lock/workspace files, build configuration, assets and image inputs.
+The compiled `tools/llm-budget/diagnostic-v1.json` is an exact four-payer input
+exception, not permission to change the frozen profile or bypass registration
+and capability equality. Ordinary docs/test/tool changes do not qualify.
+Dependency-only changes can be candidates, but unchanged corresponding layers,
+metadata-only rebuilds or a change only in an unrelated image are rejected.
+This bounded mapping is not a dependency graph or proof of causality: build
+inputs can include development dependencies or produce identical runtime
+output. Prospective review must establish a useful change and reject fabricated
+version pairs. All six image identities remain checked. All four
 paying-service capability probes for both versions pass before cold adoption.
 
 Exclusive creation and file/directory fsync of `Started` precede deployment or
@@ -384,7 +394,7 @@ permitted as evidence for this contract.
 
 | Package | Current use | Explicit limit |
 |---|---|---|
-| Required [CI](../.github/workflows/ci.yml) | PRs run structural build, unit, frontend, browser accessibility, PostgreSQL/Redis, Windows launcher, and a production Compose smoke; `main`, manual verification, and release calls additionally run the deterministic recovery, outage, backup/restore, secret-rotation, and capacity drills | Not a live provider, target-environment, manual accessibility, or user-quality report |
+| Required [CI](../.github/workflows/ci.yml) | PR and main push jobs follow the [affected-gate matrix](../CONTRIBUTING.md#verification); documentation-only changes may run only policy checks. Manual verification and reusable release CI select the full suite. Cite the exact commit/run and actually executed jobs/steps for recovery, outage, backup/restore, rotation and capacity evidence | A green aggregate does not prove skipped jobs ran. Not a live provider, target-environment, manual accessibility, or user-quality report |
 | [`single-node-v1`](./SLOS.md) | Deterministic admission, latency, replay, persistence, and Redis bounds on recorded CI hardware | Not a public-traffic or sustained availability SLO |
 | [`h3-synthetic-v1`](../tools/h3-eval/README.md) | Positive/adversarial calibration for extraction coverage, chronology, causality, character consistency, spoilers, memory, coherence, and replay | Recorded judgments do not qualify a provider/model or representative novel corpus |
 | [DeepSeek v4 Flash live baseline](./evidence/deepseek-v4-flash-live-baseline.json) | At exact code SHA `ddefaa8c023019fb2cbf6b279444215795ef5f48`, an isolated production-Compose reader journey completed, including branch-to-chat revision binding, 12 world turns, restart recovery, export, and deletion; H3 passed 24/24 final-SHA samples | H1 failed 5/6 slices, human quality approval is absent, and no qualification claim is made |

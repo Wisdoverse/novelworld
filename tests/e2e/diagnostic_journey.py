@@ -248,11 +248,45 @@ def source_identities(root: Path, base_sha: str, candidate_sha: str) -> dict[str
     return result
 
 
+def affected_application_images(paths: list[str]) -> set[str]:
+    """Known inputs to the two release Dockerfiles, not a build dependency graph.
+
+    Eligibility is conservative; the corresponding image must still change,
+    and prospective review must establish a useful change rather than churn.
+    """
+    rust_images = APP_KEYS - {"FRONTEND_IMAGE"}
+    affected = set()
+    frontend_inputs = {
+        "Dockerfile", ".dockerignore", "package.json", "pnpm-lock.yaml",
+        "pnpm-workspace.yaml", "vite.config.ts", "postcss.config.js",
+        "tsconfig.json", "tsconfig.node.json", "index.html", "nginx-spa.conf",
+    }
+    for path in paths:
+        if path in {"Cargo.toml", "Cargo.lock", ".dockerignore",
+                    "infra/docker/Dockerfile.rust-service"} or re.fullmatch(
+                        r"crates/[^/]+/(?:src/.*|Cargo\.toml|build\.rs)", path
+                    ):
+            affected.update(rust_images)
+        if path == PROFILE_PATH.as_posix():
+            # Compiled by llm-client and user-service; ordinary tools are not inputs.
+            # Existing registration/profile and all payer capability checks still apply.
+            affected.update(rust_images - {"GATEWAY_IMAGE"})
+        for service in ("gateway", "user-service", "novel-service", "agent-service", "narrative-service"):
+            prefix = "gateway/" if service == "gateway" else f"services/{service}/"
+            if path.startswith(prefix + "src/") or path in {prefix + "Cargo.toml", prefix + "build.rs"}:
+                affected.add(service.upper().replace("-", "_") + "_IMAGE")
+        if path.startswith(("frontend/src/", "frontend/public/")) or (
+            path.startswith("frontend/") and path.removeprefix("frontend/") in frontend_inputs
+        ):
+            affected.add("FRONTEND_IMAGE")
+    return affected
+
+
 def verify_artifacts(registration: Registration, root: Path,
                      base: dict[str, str], candidate: dict[str, str]) -> None:
     """Read-only, locally pre-pulled artifact checks before protected config read.
 
-    Changed source trees and filesystem layers are necessary, not a semantic
+    Changed application inputs and filesystem layers are necessary, not a semantic
     proof of a meaningful version change; prospective review still owns that.
     """
     value = registration.value
@@ -260,14 +294,14 @@ def verify_artifacts(registration: Registration, root: Path,
     require(base_sha != candidate_sha and candidate_sha == value["candidate_git_sha"],
             "diagnostic_release_identity_invalid")
     bounded_command(["git", "-C", str(root), "merge-base", "--is-ancestor", base_sha, candidate_sha])
-    runtime_paths = ["gateway/src", "frontend/src", "crates"] + [
-        "services/" + service + "/src"
-        for service in ("user-service", "novel-service", "agent-service", "narrative-service")
-    ]
-    source_change = bounded_command([
-        "git", "-C", str(root), "diff", "--name-only", base_sha, candidate_sha, "--", *runtime_paths,
+    changed_paths = bounded_command([
+        "git", "-C", str(root), "diff", "--no-renames", "--name-only", "-z",
+        base_sha, candidate_sha, "--",
     ])
-    require(bool(source_change.strip()), "diagnostic_application_source_unchanged")
+    affected = affected_application_images([
+        os.fsdecode(path) for path in changed_paths.split(b"\0") if path
+    ])
+    require(bool(affected), "diagnostic_application_source_unchanged")
     observed = {}
     for label, manifest in (("base", base), ("candidate", candidate)):
         observed[label] = {}
@@ -290,7 +324,7 @@ def verify_artifacts(registration: Registration, root: Path,
     require(any(base[key] != candidate[key]
                 and value["base_application_image_ids"][key] != value["candidate_application_image_ids"][key]
                 and observed["base"][key] != observed["candidate"][key]
-                for key in APP_KEYS), "diagnostic_application_content_unchanged")
+                for key in affected), "diagnostic_application_content_unchanged")
 
 
 class DiagnosticLedger:
