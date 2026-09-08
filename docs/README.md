@@ -69,6 +69,7 @@ roadmap status only when its required evidence exists.
 | [Extraction quality](./EXTRACTION_QUALITY.md) | Supported slices and extraction thresholds | A parser slice, metric, judge rubric, or threshold changes |
 | [Extraction quality v2](./EXTRACTION_QUALITY_V2.md) | Implemented Structural oracle correction; not formally adopted for Qualification | The v2 corpus, policy identity, or separately reviewed adoption changes |
 | [Extraction quality v3](./EXTRACTION_QUALITY_V3.md) | Implemented single-source event accounting policy; not formally adopted | Judge response/accounting implementation, versioned inputs, or adoption changes |
+| [H1 measurement v4](./EXTRACTION_QUALITY_V4.md) | Gold alignment and judge-reported source support; measurement-only, not Qualification | Measurement schema, rubric, input bounds or separately reviewed adoption changes |
 | [Import budget](./IMPORT_BUDGET.md) | Provider work limits during import | Provider calls, retry behavior, or budget evidence changes |
 
 ### Reliability, security, and operations

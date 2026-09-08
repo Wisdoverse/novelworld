@@ -1,11 +1,11 @@
 # H1 semantic measurement: prospective design
 
-Status: design only, not an adopted scoring policy or quality result. This
-addresses the distinction between gold alignment and source support described
-below, not the frozen provider failure itself. Current
-[v3 policy](EXTRACTION_QUALITY_V3.md), corpus,
-rubric, thresholds, denominators and historical reports remain unchanged.
-There is no authorization for a paid run or retrospective rescore here.
+The [v4 measurement contract](EXTRACTION_QUALITY_V4.md) implements the distinction
+below as separate gold alignment and judge-reported source observations, not
+a new source-quality threshold or a model quality result. The historical
+[v3 policy](EXTRACTION_QUALITY_V3.md), old corpus and reports remain frozen;
+gold arithmetic is preserved under new version identities. There is no
+authorization for a paid run or retrospective rescore here.
 
 ## Three distinct questions
 
@@ -35,15 +35,15 @@ They specify semantic expectations, not a new judge response schema.
 | Source: “The unsigned letter claimed that every gate opens at dawn. Mei doubted it.” Gold: the letter's claim and Mei's doubt. | “Every gate always opens at dawn.” | Unsupported unconditional world rule; drops attribution and uncertainty. A literal quotation from the letter would not entail this rule. |
 | Source: “雨停后，林舟把钥匙交给阿宁。” Gold: after the rain stopped, Lin Zhou handed A Ning the key. | “Once the rain ended, Lin Zhou gave A Ning the key.” | Complete source-supported cross-language match; spelling/wording differences alone are not omissions. |
 | Source: “Bo touched the bell. The door stayed shut.” Gold: touching the bell and the unchanged door. | “Touching the bell opened the door,” citing those exact sentences. | Real, locatable citation but contradicted assertion; fails source support and complete gold coverage. |
+| Source: “Mei handed Bo the map. Bo did not burn it.” Gold: the handover and retained map. | “Mei handed Bo the map, and Bo burned it.” | Mixed true/false assertion: partial gold coverage at most, never source-supported as a whole. |
 
 ## Smallest implementation path and acceptance
 
-Keep the existing evaluator. First review a versioned policy proposal that
-separates the three questions above, explicitly defines split/duplicate-event
-treatment, denominators and anti-vacuity, and declares prospective thresholds.
-Do not change thresholds to fit #229 or reinterpret its existing failed result.
-Then update only the affected evaluator/rubric paths with offline tests for
-these counterexamples and the existing mapping/chronology/empty-output guards.
+V4 keeps the existing evaluator and gold thresholds, adds exact-payload repeat
+counts without deduplication, and preserves unknown source judgments. It does
+not invent a source-quality threshold to fit #229 or reinterpret its failed
+result. Offline tests cover the affected evaluator/rubric paths and existing
+mapping/chronology/empty-output guards.
 
 Mechanical checks can prove identifier uniqueness, shapes, arithmetic and
 locatable quotations. Independent semantic review must judge entailment and
@@ -53,6 +53,6 @@ new version-bound evidence, with disagreements recorded rather than hidden by
 an aggregate pass. Any provider run needs its own prospective immutable
 registration and enforceable budget under the existing qualification policy.
 
-Until that work passes, this is a reviewed design direction only. H1 semantic
-measurement reliability, #229's model quality and #222's formal qualification
-remain unresolved; this document closes none of those outcomes.
+The implementation of a measurement contract does not establish semantic
+reliability. H1 measurement reliability, #229's model quality and #222's formal
+qualification remain unresolved; this document closes none of those outcomes.

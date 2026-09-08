@@ -1,15 +1,20 @@
-# Horizon 1 extraction-quality evaluation gate
+# Horizon 1 extraction-quality measurement
 
-This tool implements the `extraction-quality-v3` policy
-([policy](../../docs/EXTRACTION_QUALITY_V3.md)) over the checked-in `h1-synthetic-v5` corpus
-`corpus/v1.json` without writing runtime data. This is Structural evidence, not
-formal Qualification; historical policies, corpora and failed reports
-are immutable and are not rescored or compared for quality.
+`tools/h1-eval` implements the `extraction-quality-v4` policy
+([policy](../../docs/EXTRACTION_QUALITY_V4.md)) over the checked-in
+`h1-synthetic-v6` corpus (`corpus/v6.json`). It is Structural, measurement-only
+evidence, not formal Qualification or a provider-quality claim. Historical
+policy files, the v1 corpus, frozen H4 cohort guard, and failed reports remain
+immutable and are not rescored or compared.
 
-Public reports use schema 3 and explicitly carry policy/corpus identity; the
-private HTTP response envelope remains schema 2. The registered H4 cohort keeps
-its fixed v3 corpus-hash guard, while an unregistered Diagnostic is unaffected.
-This corpus change does not authorize a paid run.
+Active identities: policy `extraction-quality-v4`, corpus `h1-synthetic-v6`,
+response rubric `h1-extraction-v4`, semantic judge `h1-semantic-judge-v9`,
+public report schema `4`, and private HTTP response envelope `2`.
+
+Public reports explicitly carry these identities and distinguish gold alignment
+from source-support measurements. `quality_status` is always
+`measurement_only`; exit status 0 means `measurement_completed`, not that a
+quality threshold passed.
 
 Recorded mode is deterministic and required in CI:
 
@@ -17,132 +22,61 @@ Recorded mode is deterministic and required in CI:
 cargo run -p h1-eval -- --recorded --git-sha "$(git rev-parse HEAD)"
 ```
 
-It proves the production structural gate (the deterministic chapter splitter,
-the extraction schema validator, and the canon-model validator), corpus and
-rubric integrity (versions, composition minimums, and thresholds must equal
-the policy's), and calibration self-consistency: each recorded calibration
-artifact must meet every policy threshold, and each adversarial mutation must
-fail the exact threshold it targets (per-category coverage, precision and the
-hallucination ceiling, provenance, chronology). It does **not** claim that a
-current provider meets the semantic thresholds.
+Recorded mode proves structural extraction/splitter/canon validation, corpus and
+rubric integrity, calibration self-consistency, and adversarial controls. It
+does not produce source-support measurements or claim a provider meets semantic
+thresholds.
 
 Live mode reuses the production domain prompts, JSON request builder, chunk
 scan/merge, first-appearance proof, canon reference canonicalization,
-assembly, and validation. It intentionally does not reproduce the
-application handler's fresh-response schema-repair loops: a schema-invalid
-character or canon response fails the qualification case. An
-OpenAI-compatible judge scores each category against the source-grounded
-expected-fact tables with the fixed rubric (match / partial / absent /
-hallucinated). Judge inputs contain semantic facts and opaque response tokens,
-not fixture or runtime IDs. Expected-to-extracted event mappings make
-relative event order a deterministic check; production canon validation
-separately rejects structurally forward causes. The evidence is bounded to the
-versioned corpus facts and does not independently prove every possible
-semantic cause/death-continuity pattern. Thresholds remain exactly as
-versioned, and the hallucination ceiling rounds up so no fraction above the
-policy bound can pass. Live character judging also requires the number of
-expected `match` plus `partial` verdicts to be no greater than the number of
-extracted `match` verdicts; violation is `judge_rubric_invalid` and uses the
-existing bounded identical-request retry. This is only a necessary cardinality
-constraint, not identity-by-identity or equal-count semantic matching; recorded
-scoring is unchanged.
+assembly, event-selection validation, and existing transport retry contract.
+It intentionally does not reproduce application fresh-response schema-repair
+loops: a schema-invalid character or canon response fails the case. Existing
+event mapping, chronology, provenance, anti-vacuity, and gold thresholds remain
+unchanged.
 
-The active `h1-semantic-judge-v8` prompt retains the distinction between complete and
-partial event coverage. A complete match requires every material part of the
-expected event in its single mapped extracted event's own fields; another event
-or surrounding story context cannot supply missing content. Faithful cross-language
-paraphrases remain valid, without requiring verbatim wording or unrelated source
-details. Partial mappings are valid but earn no full-event recall. The unchanged
-one-to-one scoring counts additional unmapped events toward hallucination even
-when they are source-grounded finer-grained events; this is not a count of
-fabricated facts. Prompt and scoring tests do not prove that a live judge follows
-these semantic instructions.
+The judge receives the complete fixed case source plus semantic facts and opaque
+response tokens, never fixture/runtime IDs. Complete serialized system and user
+messages, including JSON escaping, must remain within 128 KiB; inputs above
+that bound fail before judge I/O and are never truncated. The corpus whole-file
+bound remains 256 KiB. Judge output remains capped at 800 tokens and 32 KiB
+response bytes. These are contract limits; this README does not claim a live
+provider has been verified against the new 800-token shape.
 
-The [prospective measurement design](../../docs/H1_MEASUREMENT_DESIGN.md)
-separates gold coverage, source support and event completeness with fresh
-counterexamples. It is not adopted scoring, a rescore of frozen failures, or
-evidence that the live judge/model passes; the current policy stays unchanged.
+Each semantic case reports gold alignment independently from support. Public
+gold fields are `gold_precision_percent`, `unaligned_percent`, and
+`alignment_passed`; there are no bare `passed`, `observed_pass`,
+`precision_percent`, or `hallucination_percent` public keys. Splitter and
+malformed cases omit semantic fields and report only `case_check_passed`.
+Recorded adversarial cases retain their measured alignment and expected-failure
+control. No aggregate semantic pass count includes the local splitter.
 
-V3 removes the redundant `extracted_event_verdicts` response array. The shared
-strict parser rejects that old key even when empty or consistent; there is no
-compatibility path, key deletion or response repair. Validated expected
-Match/Partial mappings determine the matched-extracted count; actual canon
-events determine its full denominator, including every unmapped event. Expected
-recall stays Match-only. Absent accepts an omitted or null mapping; Match/Partial
-requires a known, nonnull token unique across expected events. Other categories,
-mapped chronology, global rounding, zero/anti-vacuity and retry guards are retained.
-Synthetic regressions cover complete/Partial/Absent scores, unmapped prefixed
-events, empty extraction, invalid mappings and old-schema rejection. They prove
-mechanics, not semantic quality. Corpus v5 changes only policy/corpus/rubric
-identities from v4; sources, facts, cases and thresholds are unchanged. The new
-response rubric is `h1-extraction-v3`; public report schema 3 and private envelope
-2 stay fixed. Historical reports remain frozen, and no paid run or formal
-adoption follows from this implementation.
+The `source_support` measurement has four raw category counts (characters,
+relationships, events, and world rules); each retains `supported`,
+`unsupported`, and `undetermined` results in its denominator. Local exact
+payload repeats are reported as
+`exact_payload_repeats`; they retain category payload identity including
+sequence/chapter/claim/evidence and are not semantically deduplicated. Support
+and gold alignment may disagree. These counts describe judge judgments, not
+independently proven truth. Non-semantic, measurement-failed and recorded cases
+have no source-support result; they must not be fabricated as zero or supported.
+A completed live case with low alignment retains its source-support counts.
 
-Production and H1 share an event-selection parser that validates actual chunk
-boundaries before accepting, saving, or resuming a selection. A legacy invalid
-runtime checkpoint is rejected in memory and replaced by the existing
-attempt-fenced upsert after regeneration; if regeneration is invalid too, the
-old row remains and is rejected again. The two-schema-attempt limit is unchanged,
-and the first cross-chunk rejection may use the existing second attempt. This
-boundary fix changes no prompt version, diagnostic immutability, or quality claim.
+The judge contract requires complete token coverage for all four actual output
+universes and rejects old/missing/extra fields and old rubric labels. A
+schema-valid low alignment score, unsupported result, or undetermined result is
+completed measurement and is not retried. The one identical application-level
+retry remains only for malformed JSON/schema/rubric/token/explanation or other
+contract violations. Transport retries remain owned by the production LLM
+client. No source-quality threshold or pass is inferred from support counts.
 
-The active selection prompt `canon-event-grouping-v5` retains v4's nesting inside
-their source chunks while retaining whole-novel selection, global event/causal
-indexes, all candidate facts, and the unchanged output schema and validator.
-It makes legal grouping boundaries explicit; this is an input-presentation
-hypothesis, not proof that a live model follows the boundary. Invalid groups
-are still rejected, never split or repaired into accepted outputs. Empty chunks
-are omitted, and zero/one total candidate still skips selection. The same byte
-ceiling and fallback apply, but changed input lengths can move near-limit inputs
-across that ceiling; there is no new call stage, not a guarantee of identical
-call counts. Selection v5 plus the exact prompt isolate older selection checkpoints;
-chunk v10 does not reuse v9 chunk checkpoints. Committed canon stays readable
-without automatic re-import. The deterministic mock still retains all candidates
-as singletons and is not a semantic-quality oracle. No paid run, historical
-rescore, formal v2 adoption or H4 qualification follows from this change.
+The evaluator's source-support and exact-repeat logic is a measurement contract,
+not semantic proof. Prompt and recorded tests prove mechanics only. The
+[prospective measurement design](../../docs/H1_MEASUREMENT_DESIGN.md) supplies
+the distinction between gold coverage, source support, and event completeness;
+it does not authorize a paid run or formal adoption by itself.
 
-Chunk v10 replaces the broad instruction to omit observations/dialogue with a
-material-versus-incidental distinction. Retained milestones must preserve their
-source-established actions, identity, participants, targets, quantities and
-conditions; a quoted claim alone does not establish truth. Selection v5 clarifies
-that same-source candidates supplying material parts of one retained beat belong
-in a legal group, not a representative fragment. It cannot invent missing chunk
-content. Existing grouping, source, size, causal/death and retry validation is
-unchanged. Prompt assertions and composer tests prove only instructions and
-mechanics, not live completeness or causal quality improvement. The failed bda2406
-Diagnostic stays frozen; no judge/schema, policy or paid-run change is included.
-
-Production prompts distinguish explicitly established relationships and persistent
-world rules from unsupported inference, without treating dialogue alone as proof.
-The judge targets one short explanatory sentence of at most 200 characters;
-hard validation remains 500 printable characters on one line. Offline prompt tests
-prove wording/shape only, not recall improvement or paid-run authorization.
-
-The shared `canon-chunk-v10+event-grouping-v5` prompt retains v9's evidence before the
-ending summary and each nested faction/location state. This is a generation-order
-hypothesis, not measured quality improvement. Both JSON key orders remain valid;
-source validation, the 12-character partial-repair anchor and retry limits are
-unchanged. Versioned checkpoint keys prevent v10 from reusing older chunk results;
-committed canon remains readable without automatic re-import. Recorded tests
-prove structure only, and all historical live reports remain frozen.
-
-World-rule verdicts use `world_rule_verdicts` supports: `[{extracted, excerpt}]`
-for `match`/`partial`, and an empty list for `absent`; each excerpt must be an
-exact raw substring of its referenced extracted description (whitespace-only
-support is invalid). Many-to-many and compound reuse are allowed; no
-injectivity or cardinality rule is added. The active v8 judge retains the
-description-bound support contract introduced in v6; rule scoring, thresholds,
-and recorded scoring are unchanged. Supports stay in
-private responses and are excluded from public aggregates; an irrelevant but
-real excerpt may still be semantically misjudged. No paid run or qualification
-claim follows from this contract change.
-
-The application makes one judge request. It repeats that identical request
-once only when the response violates the judge JSON/schema/rubric/token/
-explanation contract. It does not add a retry for a transport failure or a
-valid low score. The production LLM client retains its documented transport
-retry contract.
+Live mode requires fresh private evidence outputs:
 
 ```bash
 H1_EVAL_PROVIDER=deepseek \
@@ -155,11 +89,20 @@ cargo run -p h1-eval -- --live --git-sha "$(git rev-parse HEAD)" \
   --private-responses-output /private/h1-responses.jsonl
 ```
 
+Both paths must be absolute, fresh, outside the checkout, and inside existing
+directories. Metrics retain `llm-observability-v1` attempts, retries, usage and
+latency. Private response envelope schema 2 records every non-streaming HTTP
+response before parsing/fallback/retry, with bounded body bytes and 0600 Unix
+permissions. Raw responses and metrics can contain model output or stable
+fingerprints and must never be committed; publish only a sanitized aggregate.
+Missing/inconsistent usage or evidence, timeout, request/write error, or private
+write failure stops further provider calls and retains the unproven reservation.
+
 ## Bounded Vision Diagnostic (opt-in)
 
-The current private rapid-iteration goal may run a new paid Diagnostic only
-with `--bounded-diagnostic` together with `--live` and both private output
-paths, using the fixed `vision-diagnostic-budget-v1` profile:
+New paid Diagnostic work is allowed only with `--live --bounded-diagnostic`, both
+private output paths, and a separately registered immutable input/model/budget
+under the fixed `vision-diagnostic-budget-v1` profile:
 
 ```bash
 H1_EVAL_PROVIDER=deepseek \
@@ -173,82 +116,30 @@ cargo run -p h1-eval -- --live --bounded-diagnostic \
   --private-responses-output /private/vision-diagnostic-responses.jsonl
 ```
 
-This mode is the only mode for new paid Diagnostics in the current goal. It
-uses the fixed DeepSeek provider, URL and Vision model above, non-streaming
-JSON requests with `thinking_enabled: false`, and a request output limit of at
-most 8192 tokens. Its per-invocation ceilings are 40 logical calls, 200 actual
-HTTP attempts, 20,000,000 cumulative reserved/settled tokens, and 35,000,000
-micro-CNY (CNY 35). Before each logical call, five attempts reserve the
-worst-case `2^20` input tokens plus the request output limit, with conservative
-peak pricing of 3 micro-CNY per input token and 9 per output token. Only
-complete counter and private response-envelope/usage reconciliation releases
-unused reservation and settles actual usage. Missing or inconsistent evidence,
-timeout, request/write error, or any other uncertain accounting permanently
-stops new dispatches and retains the unproven reservation.
+This is non-qualifying evidence only. It cannot rerun or repair the frozen
+formal cohort, lower thresholds, authorize a production model switch, or unlock
+H4/formal Qualification. Profile ceilings and accounting remain enforced; they
+are not account-wide or provider-enforced caps.
 
-These are per-invocation dispatch and evidence bounds under the frozen provider
-context and billing contract, not an account-wide, provider-enforced, or
-cross-process spending cap. A restart does not resume a run or replenish its
-budget. Revalidate the provider's current context, output and pricing contract
-at registration; if it cannot be established, stop before generation. Keep
-credentials and raw responses in the required private locations; public
-reports contain only the profile, fixed ceilings, sanitized failure codes, and
-reserved/settled aggregates. See the [official DeepSeek pricing
-documentation](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/).
+The fixed per-invocation profile permits at most 40 logical calls, 200 HTTP
+attempts, 20,000,000 cumulative reserved/settled tokens and 35,000,000 micro-CNY
+(CNY 35). Each logical call reserves five attempts at worst-case `2^20` input
+tokens plus the request output cap, using the profile's conservative pricing.
+Only complete metrics/private usage reconciliation releases unused reservation.
+Uncertain accounting stops dispatch; restarting does not authorize another run.
+The profile's 8192-token maximum for other operations does not raise the judge's
+800-token cap. Revalidate provider context, output and prices at registration;
+these frozen accounting assumptions are not a statement of current prices.
+See [Qualification policy](../../docs/QUALIFICATION_POLICY.md) and
+[`budget.rs`](src/budget.rs) for the registration and enforcement contract.
 
-Recorded scoring and live transport and bounded retry mechanics are unchanged;
-the judge request/response contract changes under its new version identities.
-All current reports identify policy v3 and corpus v5. They
-cannot satisfy a frozen formal v1 cohort or authorize its replacement.
-This Diagnostic is non-qualifying evidence only: it does not rerun the failed
-#236 cohort, lower thresholds, establish model quality, authorize a production
-model switch, or unlock H4/formal Qualification.
+No current v4 live quality result is implied here. Fresh registration,
+independent review, private evidence, and prospective approval are required
+before any provider call. Existing formal Qualification remains on its frozen
+v1 identity and cannot silently adopt v4.
 
-Every live run requires both evidence outputs. `--metrics-output` retains the
-existing `llm-observability-v1` counters and latency summaries, including
-failed attempts and retries. The report records
-`thinking_enabled: false` because these schema-bound JSON calls deliberately
-disable DeepSeek thinking. Production character and canon extraction also use
-temperature 0.0 to make qualification and accepted imports deterministic. Raw
-metrics contain a stable usage-key fingerprint;
-keep them in the private evidence directory. Both output paths must be
-absolute, outside the Git checkout, inside existing directories, and fresh:
-the evaluator creates each file exclusively before any provider call.
-`--private-responses-output` records every non-streaming HTTP response before
-parsing, JSON fallback or transport retry, and flushes each JSONL record. Private
-schema version 2 stores `sequence`, `case_id`, `operation`, `logical_attempt`,
-`http_status`, `complete` and exact `body` bytes (a JSON integer array). The body
-is capped at 1 MiB; truncated, oversized or deadline-cancelled bodies retain the
-available prefix with `complete: false`. No envelope exists when a request fails
-before response headers. Files are created exclusively; Unix permissions are 0600. Writes use synchronous
-local filesystem I/O with no retry; the HTTP deadline cannot preempt a stuck
-filesystem, and flush is not an fsync durability guarantee.
-
-Every complete successful envelope, including an empty JSON-mode reply, must
-contain an allowed model and valid usage. Invalid or incomplete evidence, a
-private-write failure or a total timeout stops further provider calls across the
-run. Complete HTTP errors remain subject to the existing bounded retry policy.
-`private_response_count` counts flushed HTTP envelopes, including failed replies;
-it is not the logical-request or judge-attempt denominator. The public model set
-includes all validated observed aliases, even before fallback or a later failure.
-Rejected-envelope tokens may be absent from metrics: reconcile the private bytes
-when diagnosing cost; such a run cannot qualify. These private files may contain model output
-or stable fingerprints and must never be committed; publish only the
-sanitized aggregate produced for the reviewed evidence package. The public
-report records only the configured model, allowlisted observed response-model
-identifiers, attempt counts, typed failure codes, and aggregate scores.
-
-Both modes fail closed on malformed corpus data, threshold drift from the
-policy, missing or duplicate judge tokens, an unregistered response-model
-identifier, a non-commit SHA, a dirty checkout, or a provider that violates
-the extraction schema. Reports record corpus/rubric/prompt versions, the git
-SHA, provider/model identity, and no secrets, prompts, raw responses, or user
-data.
-
-Malformed and unsupported inputs are labeled and never scored. The empty and
-gapped-provenance labels exercise the production splitter and canon validator
-directly; the oversized, invalid-encoding, and unsupported-format labels
-assert the declared-limit contracts whose production rejection paths are
-covered by the novel-service parser and handler tests. The GBK and BOM UTF-16
-slices store decoded text with their slice identity; the decode paths
-themselves are exercised by the novel-service document tests.
+Both modes fail closed on malformed corpus data, threshold drift, missing or
+duplicate tokens, unregistered response models, non-commit SHA, dirty checkout,
+provider schema violations, or evidence/accounting failures. Reports contain
+versions, git SHA, provider/model identity, measurement status and sanitized
+aggregates only; they contain no secrets, prompts, raw responses, or user data.
