@@ -732,7 +732,7 @@ class DiagnosticJourneyTest(unittest.TestCase):
         def command(argv, **_):
             if argv[0] == "git":
                 if "diff" in argv:
-                    return b"" if mode == "tooling-only" else b"services/agent-service/src/main.rs\n"
+                    return b"docs/ROADMAP.md\0" if mode == "tooling-only" else b"services/agent-service/src/main.rs\0"
                 return b""
             self.assertEqual(argv[:3], ["docker", "image", "inspect"])
             reference = argv[-1]
@@ -748,6 +748,92 @@ class DiagnosticJourneyTest(unittest.TestCase):
             CONTROL.verify_artifacts(registration, ROOT, journey.base_manifest, journey.candidate_manifest)
             for mode in ("metadata-only", "wrong-id", "tooling-only"):
                 with self.subTest(mode=mode), self.assertRaises(CONTROL.DiagnosticFailure):
+                    CONTROL.verify_artifacts(registration, ROOT, journey.base_manifest, journey.candidate_manifest)
+
+    def test_build_input_mapping_and_real_git_path_boundaries(self):
+        rust = CONTROL.APP_KEYS - {"FRONTEND_IMAGE"}
+        for path, expected in (
+            ("Cargo.lock", rust), ("Cargo.toml", rust),
+            ("infra/docker/Dockerfile.rust-service", rust), (".dockerignore", rust),
+            ("crates/llm-client/src/lib.rs", rust),
+            ("services/agent-service/Cargo.toml", {"AGENT_SERVICE_IMAGE"}),
+            ("services/novel-service/build.rs", {"NOVEL_SERVICE_IMAGE"}),
+            ("gateway/src/main.rs", {"GATEWAY_IMAGE"}),
+            (CONTROL.PROFILE_PATH.as_posix(), rust - {"GATEWAY_IMAGE"}),
+            *(("frontend/" + name, {"FRONTEND_IMAGE"}) for name in (
+                "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "Dockerfile",
+                ".dockerignore", "vite.config.ts", "postcss.config.js", "tsconfig.json",
+                "tsconfig.node.json", "index.html", "nginx-spa.conf", "public/icon.svg",
+            )),
+            ("docs/ROADMAP.md", set()), ("tests/e2e/diagnostic_journey.py", set()),
+            ("tools/h1-eval/policy-v2.json", set()),
+            ("crates/llm-client/README.md", set()),
+            ("crates/llm-client/examples/diagnostic_budget_driver.rs", set()),
+            ("frontend/eslint.config.js", set()),
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(CONTROL.affected_application_images([path]), expected)
+
+        repo = self.directory / "git-history"
+        repo.mkdir()
+
+        def git(*args):
+            return CONTROL.bounded_command(["git", "-C", str(repo), *args])
+
+        git("init", "-q")
+        git("config", "user.name", "Offline Test")
+        git("config", "user.email", "test@example.invalid")
+        (repo / "frontend").mkdir()
+        package = repo / "frontend/package.json"
+        package.write_text("{}\n")
+        git("add", ".")
+        git("-c", "commit.gpgsign=false", "commit", "-qm", "base")
+        package.write_text('{"private":true}\n')
+        (repo / "docs").mkdir()
+        (repo / "docs/newline\nfrontend.txt").write_text("not an application input\n")
+
+        def changed_images():
+            paths = git("diff", "--no-renames", "--name-only", "-z", "HEAD", "--")
+            return CONTROL.affected_application_images([
+                CONTROL.os.fsdecode(path) for path in paths.split(b"\0") if path
+            ])
+
+        git("add", ".")
+        self.assertEqual(changed_images(), {"FRONTEND_IMAGE"})
+        git("-c", "commit.gpgsign=false", "commit", "-qm", "dependency input")
+        package.rename(repo / "docs/moved-package.json")
+        git("add", "-A")
+        self.assertEqual(changed_images(), {"FRONTEND_IMAGE"})
+        git("-c", "commit.gpgsign=false", "commit", "-qm", "remove application input")
+        (repo / "docs/newline\nfrontend.txt").write_text("docs only\n")
+        self.assertEqual(changed_images(), set())
+
+    def test_build_input_requires_corresponding_image_content_change(self):
+        journey = self.journey()
+        registration = journey.diagnostic_registration
+        changed_image = "FRONTEND_IMAGE"
+        for manifest in (journey.base_manifest, journey.candidate_manifest):
+            for key in CONTROL.APP_KEYS:
+                manifest[key] = manifest[key].replace("@sha256:", "/" + key.lower() + "@sha256:")
+
+        def command(argv, **_):
+            if argv[0] == "git":
+                return b"frontend/pnpm-lock.yaml\0" if "diff" in argv else b""
+            reference = argv[-1]
+            label = "base" if reference.endswith("b" * 64) else "candidate"
+            manifest = journey.base_manifest if label == "base" else journey.candidate_manifest
+            key = next(key for key in CONTROL.APP_KEYS if manifest[key] == reference)
+            changed = label == "candidate" and key == changed_image
+            return CONTROL.canonical([{
+                "Id": registration.value[label + "_application_image_ids"][key],
+                "RepoDigests": [reference],
+                "RootFS": {"Layers": ["sha256:" + ("d" if changed else "c") * 64]},
+            }])
+
+        with mock.patch.object(CONTROL, "bounded_command", side_effect=command):
+            CONTROL.verify_artifacts(registration, ROOT, journey.base_manifest, journey.candidate_manifest)
+            for changed_image in ("GATEWAY_IMAGE", None):
+                with self.subTest(changed_image=changed_image), self.assertRaises(CONTROL.DiagnosticFailure):
                     CONTROL.verify_artifacts(registration, ROOT, journey.base_manifest, journey.candidate_manifest)
 
     def test_diagnostic_cli_refuses_mixed_modes_before_config_or_execution(self):
@@ -877,7 +963,7 @@ class DiagnosticJourneyTest(unittest.TestCase):
 
         def no_digest(argv, **_kwargs):
             if argv[0] == "git":
-                return b"changed-source\n"
+                return b"services/agent-service/src/main.rs\0" if "diff" in argv else b""
             return CONTROL.canonical([{
                 "Id": registration.value["base_application_image_ids"]["GATEWAY_IMAGE"],
                 "RepoDigests": [], "RootFS": {"Layers": ["sha256:" + "c" * 64]},

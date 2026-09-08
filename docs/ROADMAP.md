@@ -208,10 +208,16 @@ flowchart LR
     H5 --> H6["H6 · Evidence-led expansion and scale"]
 ```
 
-H1 and H2 may proceed in parallel after their relevant H0 contracts are
-approved. H3's local structural implementation may start after H0 and H1; live
-or private-data evaluation waits only for the relevant H2 provider, privacy,
-and corpus controls, not every supply-chain control. A bounded public canary is
+The graph describes qualification dependencies, not a requirement to complete
+every earlier horizon before any later implementation. During private iteration,
+prioritize independently deliverable H3/H4 outcomes once their relevant H0
+contracts and actual H1/H2 prerequisites are satisfied. An unresolved extraction
+quality claim blocks conclusions that depend on it, not unrelated structural
+work. Live or private-data evaluation also requires the relevant H2 provider,
+privacy, corpus and enforceable-budget controls, not every supply-chain control.
+A missing upgrade candidate blocks upgrade evidence, not every other journey
+check; any narrower result must explicitly leave upgrade unverified.
+A bounded public canary is
 blocked until H1, all of H2, and every exposed product path are
 **Release-qualified**. Public general availability is blocked until H5 is
 **Observed**. H6 has no start date: it begins only when demand or a named
@@ -220,8 +226,9 @@ objective supplies its trigger.
 ## H0 — Product and contract truth
 
 **Outcome:** every README core promise and release-relevant SPEC requirement is
-intentional, testable, owned, and honest about its evidence. This is the next
-horizon; later work starts only after its relevant H0 contract is approved.
+intentional, testable, owned, and honest about its evidence. H0 supplies the
+relevant contracts for each outcome; reopen the affected contract when it is
+unclear or changes, rather than restarting a whole-roadmap review.
 
 Scope:
 
@@ -605,19 +612,23 @@ Exit evidence for any slice:
 
 ## Planning rule
 
-- H0 contract truth is next. H1 or H2 may start as soon as its release-blocking
-  H0 contracts are approved; unrelated draft-spec bookkeeping cannot delay
-  known data-loss or security work. No other horizon is active merely because
-  it appears here.
+- Prioritize the current private-iteration H3/H4 outcomes and resolve their
+  actual H0/H1/H2 dependencies. Unrelated specification bookkeeping or formal
+  horizon qualification must not block an independently verifiable change.
+  No horizon is active merely because it appears here; the Project records
+  actual ownership and execution.
 - One roadmap issue owns one independently mergeable outcome and records current
   truth, scope/non-goals, SPEC references, invariants, acceptance policy,
   dependencies, rollout, observability, migration, and rollback.
 - Do not pre-create speculative implementation issues for an inactive horizon.
 - Project status tracks execution; this document changes only when outcome
   ordering, evidence, or exit criteria change.
-- `Done` requires the horizon's stated evidence on the final commit and target
-  environment. A pushed branch, open PR, merged PR, recorded fixture, or green
-  synthetic benchmark alone is not `Done`.
+- An issue is `Done` only when its own acceptance evidence is satisfied, its
+  final commit is merged, and required CI is green. A structural child can be
+  Done while its live-evidence parent remains open.
+- A horizon is complete only with its stated exit evidence on the final commit
+  and applicable target environment. A merged structural PR or green synthetic
+  benchmark cannot substitute for required live, upgrade or observation evidence.
 
 ## Engineering bar references
 
