@@ -292,6 +292,13 @@ output. Prospective review must establish a useful change and reject fabricated
 version pairs. All six image identities remain checked. All four
 paying-service capability probes for both versions pass before cold adoption.
 
+For a registered Diagnostic only, the runner may retain the already decoded and
+stripped service stdout observed during response-model collection as bounded
+private evidence. This is observed text for application diagnosis, not a raw
+provider response or stderr capture. Exclusive 0600 writes and the existing
+cleanup synchronization provide the stated persistence boundary; no independent
+hard filesystem fsync deadline is claimed.
+
 Exclusive creation and file/directory fsync of `Started` precede deployment or
 provider work. Any existing ledger, including an empty or truncated file,
 prohibits reuse. The supported cold release provisions the single durable

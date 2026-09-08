@@ -116,6 +116,104 @@ class DiagnosticJourneyTest(unittest.TestCase):
         writer.assert_called_once()
         self.assertEqual(failed_journey.private_report, {})
 
+    def test_diagnostic_response_log_retention_uses_existing_collection_path(self):
+        def make_journey(name, registered=True):
+            output = self.directory / name
+            output.mkdir(mode=0o700)
+            journey = object.__new__(RUNNER.Journey)
+            journey.prefix = "synthetic"
+            journey.output = output
+            journey.diagnostic_registration = object() if registered else None
+            journey.expected_model = "deepseek-v4-flash"
+            journey.response_model_observations = []
+            journey.response_model_log_offsets = {}
+            journey.private_report = {}
+            return journey
+
+        journey = make_journey("response-logs")
+        output = journey.output
+        calls = []
+        observed = json.dumps({"fields": {
+            "message": "LLM response model observed", "provider": "deepseek",
+            "configured_model": "deepseek-v4-flash", "response_model": "deepseek-v4-flash",
+            "operation": "chat", "mode": "stream"
+        }})
+
+        def evidence(command):
+            calls.append(command)
+            return "a" * 64 if command[1] == "inspect" else observed
+
+        journey.evidence_command = evidence
+        journey.collect_response_models("base", services=("user-service",))
+        artifact = output / "diagnostic-log-base-user-service.log"
+        payload = observed.encode()
+        self.assertEqual(artifact.read_bytes(), payload)
+        self.assertEqual(artifact.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(journey.private_report["response_model_logs"][0], {
+            "phase": "base", "service": "user-service", "container_id": "a" * 64,
+            "artifact": artifact.name, "byte_count": len(payload),
+            "sha256": CONTROL.digest(payload),
+            "format": "utf8_decoded_stripped_stdout",
+        })
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(journey.response_model_observations[0]["response_model"], "deepseek-v4-flash")
+
+        with mock.patch.object(RUNNER, "unseen_response_models",
+                               side_effect=RUNNER.QualificationFailure("synthetic_parser_failure")):
+            with self.assertRaises(RUNNER.QualificationFailure):
+                journey.collect_response_models("candidate-agent-before-restart", services=("user-service",))
+        parser_artifact = output / "diagnostic-log-candidate-agent-before-restart-user-service.log"
+        self.assertTrue(parser_artifact.is_file())
+        self.assertEqual(len(journey.private_report["response_model_logs"]), 2)
+
+        journey.collect_response_models("candidate-final", services=("user-service",))
+        self.assertTrue((output / "diagnostic-log-candidate-final-user-service.log").is_file())
+        with self.assertRaises(RUNNER.QualificationFailure):
+            journey.collect_response_models("base", services=("user-service",))
+        self.assertEqual(artifact.read_bytes(), payload)
+
+        ordinary = make_journey("ordinary", registered=False)
+        ordinary.evidence_command = evidence
+        ordinary.collect_response_models("base", services=("novel-service",))
+        self.assertEqual(list(ordinary.output.iterdir()), [])
+        self.assertNotIn("response_model_logs", ordinary.private_report)
+
+        oversized = make_journey("oversized-logs")
+        oversized.evidence_command = lambda command: "a" * 64 if command[1] == "inspect" else "x" * (4 * 1024 * 1024 + 1)
+        with self.assertRaises(RUNNER.QualificationFailure):
+            oversized.collect_response_models("base", services=("user-service",))
+        self.assertEqual(list(oversized.output.iterdir()), [])
+        self.assertNotIn("response_model_logs", oversized.private_report)
+
+        failed = make_journey("writer-failure")
+        failed.evidence_command = evidence
+        with mock.patch.object(RUNNER, "write_private", side_effect=OSError("private")) as writer:
+            with self.assertRaises(RUNNER.QualificationFailure):
+                failed.collect_response_models("base", services=("user-service",))
+        writer.assert_called_once()
+        self.assertEqual(failed.private_report["response_model_collection_errors"], {
+            "base": ["user-service:response_model_log_capture_failed"]
+        })
+
+        read_failed = make_journey("read-failure")
+        def failing_evidence(command):
+            if command[1] == "inspect":
+                return "a" * 64
+            raise RUNNER.QualificationFailure("docker_logs_failed")
+        read_failed.evidence_command = failing_evidence
+        with self.assertRaises(RUNNER.QualificationFailure):
+            read_failed.collect_response_models("base", services=("user-service",))
+        self.assertEqual(list(read_failed.output.iterdir()), [])
+
+        fsync_failed = make_journey("fsync-failure")
+        fsync_failed.evidence_command = evidence
+        with mock.patch.object(RUNNER.os, "fsync", side_effect=OSError("sync")):
+            with self.assertRaises(RUNNER.QualificationFailure):
+                fsync_failed.collect_response_models("base", services=("user-service",))
+        self.assertTrue((fsync_failed.output / "diagnostic-log-base-user-service.log").exists())
+        self.assertNotIn("response_model_logs", fsync_failed.private_report)
+
+
     def load(self, value=None, approved=None):
         value = self.value if value is None else value
         encoded = CONTROL.canonical(value)
@@ -631,7 +729,7 @@ class DiagnosticJourneyTest(unittest.TestCase):
 
     def test_terminal_exact_payers_and_unresolved_drain_bound(self):
         for scenario in ("complete", "missing", "unresolved", "recreated", "image-drift", "metrics-drift",
-                         "parser-error", "interrupt"):
+                         "parser-error", "interrupt", "response-log-error"):
             with self.subTest(scenario=scenario):
                 journey = self.journey()
                 journey.cleanup_required = True
@@ -659,6 +757,10 @@ class DiagnosticJourneyTest(unittest.TestCase):
                 }}
                 if scenario in ("recreated", "image-drift"):
                     ids["agent-service"] = "d" * 64
+                if scenario == "response-log-error":
+                    journey.private_report["response_model_collection_errors"] = {
+                        "base": ["user-service:response_model_log_capture_failed"]
+                    }
 
                 def bounded(command, **_):
                     if command[1:4] == ["ps", "--all", "--no-trunc"]:
@@ -686,6 +788,10 @@ class DiagnosticJourneyTest(unittest.TestCase):
                 ), mock.patch.object(RUNNER.time, "monotonic", side_effect=lambda: next(tick, 304)):
                     journey.diagnostic_terminal()
                 self.assertEqual(journey.diagnostic_evidence_durable, scenario in ("complete", "recreated"))
+                if scenario == "response-log-error":
+                    self.assertFalse(journey.diagnostic_evidence_durable)
+                    self.assertTrue(journey.private_report["diagnostic_payers_stopped"])
+                    self.assertTrue(any(call.args[0][1] == "stop" for call in commands.call_args_list))
                 if scenario == "missing":
                     self.assertIn("diagnostic_payer_inventory_unproven", journey.diagnostic_failures)
                 if scenario == "unresolved":
