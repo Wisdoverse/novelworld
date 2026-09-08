@@ -45,8 +45,9 @@ Browser POST /api/chat/:characterId/stream
   → Agent Service retrieves relevant lore up to the reader's current chapter
   → Agent Service builds system prompt (character + lore + memories + anti-spoiler)
   → Agent Service streams LLM response via SSE
-  → Atomically store both messages and complete the turn
-  → Emit done only after commit; then project Redis memory/compression
+  → Atomically store both messages, complete the turn, and register any new summary window
+  → Emit done only after commit; then project optional Redis cache
+  → Agent worker recovers known-unsent summary windows; dispatched unknown outcomes stay terminal
 ```
 
 ## Repository Map
