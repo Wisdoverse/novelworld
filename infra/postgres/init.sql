@@ -408,6 +408,47 @@ CREATE TABLE chat_turns (
     created_at             TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.now(),
     updated_at             TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.now(),
     completed_at           TIMESTAMPTZ,
+    summary_sequence       BIGINT,
+    summary_state          VARCHAR(16) NOT NULL DEFAULT 'none',
+    summary_memory_id      UUID,
+    summary_claim_attempt  BIGINT NOT NULL DEFAULT 0,
+    summary_lease_expires_at TIMESTAMPTZ,
+    summary_next_attempt_at TIMESTAMPTZ,
+    summary_failure_code   VARCHAR(64),
+    CONSTRAINT chat_summary_sequence_check CHECK (
+        summary_sequence IS NULL OR (
+            summary_sequence > 0 AND status = 'completed'
+            AND reader_identity_type = 'self' AND reader_character_id IS NULL
+            AND persona_source_chapter_high_water IS NOT NULL
+        )
+    ),
+    CONSTRAINT chat_summary_state_check CHECK (
+        summary_claim_attempt >= 0 AND (
+            (summary_state = 'none'
+                AND (summary_sequence IS NULL OR summary_sequence % 10 <> 0)
+                AND summary_memory_id IS NULL AND summary_claim_attempt = 0
+                AND summary_lease_expires_at IS NULL
+                AND summary_next_attempt_at IS NULL AND summary_failure_code IS NULL)
+            OR (
+                summary_sequence IS NOT NULL AND summary_sequence % 10 = 0
+                AND summary_memory_id IS NOT NULL AND (
+                    (summary_state = 'pending' AND summary_lease_expires_at IS NULL
+                        AND summary_next_attempt_at IS NOT NULL AND summary_failure_code IS NULL)
+                    OR (summary_state IN ('claimed', 'dispatched') AND summary_claim_attempt > 0
+                        AND summary_lease_expires_at IS NOT NULL
+                        AND summary_next_attempt_at IS NULL AND summary_failure_code IS NULL)
+                    OR (summary_state = 'saved' AND summary_claim_attempt > 0
+                        AND summary_lease_expires_at IS NULL
+                        AND summary_next_attempt_at IS NULL AND summary_failure_code IS NULL)
+                    OR (summary_state IN ('failed', 'unknown') AND summary_claim_attempt > 0
+                        AND summary_lease_expires_at IS NULL AND summary_next_attempt_at IS NULL
+                        AND summary_failure_code IS NOT NULL
+                        AND summary_failure_code IN ('source_invalid', 'output_invalid',
+                            'eligibility_changed', 'dispatch_unknown'))
+                )
+            )
+        )
+    ),
     CONSTRAINT chat_turns_request_fingerprint_check
         CHECK (pg_catalog.octet_length(request_fingerprint) = 32),
     CONSTRAINT chat_turns_world_revision_check CHECK (
@@ -463,6 +504,16 @@ CREATE TABLE chat_turns (
 CREATE UNIQUE INDEX idx_chat_turns_one_in_progress
     ON chat_turns(user_id, character_id, novel_id)
     WHERE status = 'in_progress';
+
+CREATE UNIQUE INDEX idx_chat_summary_sequence
+    ON chat_turns(user_id, novel_id, character_id, summary_sequence)
+    WHERE summary_sequence IS NOT NULL;
+CREATE INDEX idx_chat_summary_due
+    ON chat_turns(summary_next_attempt_at, id)
+    WHERE summary_state = 'pending';
+CREATE INDEX idx_chat_summary_leases
+    ON chat_turns(summary_lease_expires_at, id)
+    WHERE summary_state IN ('claimed', 'dispatched');
 
 CREATE TABLE chat_messages (
     id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

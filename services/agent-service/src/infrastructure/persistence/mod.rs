@@ -1,6 +1,7 @@
 pub mod account_export;
 pub mod pg_chat_repo;
 pub mod pg_memory_repo;
+mod pg_summary_repo;
 
 use crate::domain::ports::ReadinessProbe;
 use async_trait::async_trait;
@@ -28,6 +29,7 @@ impl ReadinessProbe for PgReadinessProbe {
                     (
                         Option<uuid::Uuid>,
                         Option<uuid::Uuid>,
+                        Option<serde_json::Value>,
                         bool,
                         bool,
                         bool,
@@ -43,6 +45,10 @@ impl ReadinessProbe for PgReadinessProbe {
                     SELECT
                         (SELECT id FROM public.chat_turns LIMIT 1),
                         (SELECT turn_id FROM public.chat_messages LIMIT 1),
+                        (SELECT jsonb_build_array(summary_sequence, summary_state,
+                            summary_memory_id, summary_claim_attempt, summary_lease_expires_at,
+                            summary_next_attempt_at, summary_failure_code)
+                         FROM public.chat_turns LIMIT 1),
                         EXISTS (
                             SELECT 1
                             FROM pg_catalog.pg_attribute AS attribute
@@ -214,7 +220,7 @@ impl ReadinessProbe for PgReadinessProbe {
             )
             .await,
             Ok(Ok((
-                _, _, true, true, true, true, true, true, true, true, true
+                _, _, _, true, true, true, true, true, true, true, true, true
             )))
         )
     }

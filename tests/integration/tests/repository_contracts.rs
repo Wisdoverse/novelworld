@@ -7083,3 +7083,754 @@ async fn world_turn_multi_turn_journal_rebuilds_equivalent_state() {
         .await
         .unwrap();
 }
+
+static SUMMARY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+struct RecordingSummary {
+    inputs: Mutex<Vec<String>>,
+    fail: bool,
+    output: Option<String>,
+}
+
+#[async_trait::async_trait]
+impl TextSummarizer for RecordingSummary {
+    async fn summarize(&self, _: Uuid, _: &str, text: &str) -> anyhow::Result<String> {
+        self.inputs.lock().unwrap().push(text.to_owned());
+        anyhow::ensure!(!self.fail, "synthetic summary failure");
+        Ok(self.output.clone().unwrap_or_else(|| text.to_owned()))
+    }
+}
+
+async fn summary_test_scope(pool: &PgPool) -> (Uuid, Uuid, Uuid) {
+    let (user, novel, character) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    sqlx::query("INSERT INTO users (id, email, password_hash) VALUES ($1, $2, 'synthetic')")
+        .bind(user)
+        .bind(format!("summary-{user}@test.invalid"))
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO novels (id, user_id, title) VALUES ($1, $2, 'Summary lifecycle')")
+        .bind(novel)
+        .bind(user)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO characters (id, novel_id, name) VALUES ($1, $2, 'Summary witness')")
+        .bind(character)
+        .bind(novel)
+        .execute(pool)
+        .await
+        .unwrap();
+    (user, novel, character)
+}
+
+async fn commit_summary_test_turn(
+    repository: &PgChatRepository,
+    scope: (Uuid, Uuid, Uuid),
+    number: i32,
+    chapter: i32,
+    as_character: bool,
+) -> (ChatTurnClaim, [ChatMessage; 2]) {
+    let (user, novel, character) = scope;
+    let claim = ChatTurnClaim {
+        id: Uuid::new_v4(),
+        user_id: user,
+        novel_id: novel,
+        character_id: character,
+        request_fingerprint: vec![1; 32],
+        chapter_context: chapter,
+        persona_source_chapter_high_water: Some(1),
+        reader_identity: Some("Reader".into()),
+        reader_identity_type: if as_character { "character" } else { "self" }.into(),
+        reader_character_id: as_character.then_some(character),
+        deviation_mode: "canon".into(),
+        world_revision: [1; 32],
+    };
+    let BeginChatTurn::Acquired { attempt, .. } = repository.begin_turn(&claim).await.unwrap()
+    else {
+        panic!("expected test chat claim");
+    };
+    let messages = ["user", "character"].map(|role| {
+        let mut message = ChatMessage::new(
+            user,
+            character,
+            novel,
+            role.into(),
+            format!("window-{}-turn-{number}-{role}", (number - 1) / 10 + 1),
+            Some("Reader".into()),
+            Some(chapter),
+        )
+        .with_turn_id(claim.id);
+        message.persona_source_chapter_high_water = Some(1);
+        message
+    });
+    repository
+        .complete_turn(&claim, attempt, &messages[0], &messages[1])
+        .await
+        .unwrap();
+    (claim, messages)
+}
+
+fn summary_test_handler(
+    pool: &PgPool,
+    scope: (Uuid, Uuid, Uuid),
+    summarizer: Arc<RecordingSummary>,
+) -> AgentCommandHandler {
+    let mut handler = causal_chat_handler(
+        pool,
+        scope.0,
+        scope.1,
+        scope.2,
+        Arc::new(BlockingChatCompletion::default()),
+    );
+    handler.memory_manager = Arc::new(MemoryManager {
+        memory_repo: Arc::new(PgMemoryRepository::new(pool.clone())),
+        chat_repo: Arc::new(PgChatRepository::new(pool.clone())),
+        cache: Arc::new(NoopMessageCache),
+        llm: summarizer,
+        embedding: Arc::new(NoopEmbeddingGenerator),
+    });
+    handler
+}
+
+#[tokio::test]
+async fn summary_windows_recover_unsent_sources_and_fence_terminal_outcomes() {
+    let _summary_test = SUMMARY_TEST_LOCK.lock().await;
+    use agent_service::domain::repositories::{SummaryOutcome, SummaryWindowRepository};
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let scope = summary_test_scope(&pool).await;
+    let repository = PgChatRepository::new(pool.clone());
+    let summary = Arc::new(RecordingSummary {
+        inputs: Mutex::new(vec![]),
+        fail: false,
+        output: None,
+    });
+    let handler = summary_test_handler(&pool, scope, summary.clone());
+    let (_, stopped) = tokio::sync::watch::channel(false);
+
+    // A legacy completed row and a new character turn never enter the epoch.
+    let legacy = Uuid::new_v4();
+    sqlx::query("INSERT INTO chat_turns (id, user_id, novel_id, character_id, request_fingerprint, world_revision, chapter_context, persona_source_chapter_high_water, reader_identity_type, deviation_mode, status, completed_at) VALUES ($1,$2,$3,$4,$5,$5,1,1,'self','canon','completed',NOW())")
+        .bind(legacy).bind(scope.0).bind(scope.1).bind(scope.2).bind(vec![1u8;32])
+        .execute(&pool).await.unwrap();
+    let (character_claim, _) = commit_summary_test_turn(&repository, scope, 99, 1, true).await;
+    let mut claims = Vec::new();
+    for number in 1..=10 {
+        let (claim, messages) =
+            commit_summary_test_turn(&repository, scope, number, 1, false).await;
+        handler
+            .memory_manager
+            .project_completed_turn(messages[0].clone(), messages[1].clone(), None, Some(1))
+            .await
+            .unwrap();
+        claims.push(claim);
+    }
+    assert!(
+        summary.inputs.lock().unwrap().is_empty(),
+        "post-commit projection is cache-only"
+    );
+    let unenrolled: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM chat_turns WHERE id IN ($1,$2) AND summary_sequence IS NULL AND summary_state='none'")
+        .bind(legacy).bind(character_claim.id).fetch_one(&pool).await.unwrap();
+    assert_eq!(unenrolled.0, 2);
+    let first = repository
+        .due_windows()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|w| w.user_id == scope.0)
+        .unwrap();
+    assert_eq!(first.sequence, 10);
+    let (a, b) = tokio::join!(
+        repository.claim_window(&first),
+        repository.claim_window(&first)
+    );
+    let owners: Vec<_> = [a.unwrap(), b.unwrap()].into_iter().flatten().collect();
+    assert_eq!(owners.len(), 1);
+    let stale = owners[0].clone();
+    sqlx::query(
+        "UPDATE chat_turns SET summary_lease_expires_at = NOW() - INTERVAL '1 second' WHERE id=$1",
+    )
+    .bind(first.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(!repository.start_summary_dispatch(&stale).await.unwrap());
+    assert!(!repository.defer_window(&stale, true).await.unwrap());
+    assert!(!repository
+        .fail_summary(&stale, SummaryOutcome::SourceInvalid)
+        .await
+        .unwrap());
+    repository.due_windows().await.unwrap();
+
+    // Retained first window is not replaced when later commits cross another boundary.
+    drop(handler);
+    for number in 11..=20 {
+        commit_summary_test_turn(&repository, scope, number, 1, false).await;
+    }
+    let handler = summary_test_handler(&pool, scope, summary.clone());
+    let restarted = PgChatRepository::new(pool.clone());
+    handler
+        .recover_summary_windows(&restarted, &stopped)
+        .await
+        .unwrap();
+    handler
+        .recover_summary_windows(&restarted, &stopped)
+        .await
+        .unwrap();
+    {
+        let inputs = summary.inputs.lock().unwrap();
+        assert_eq!(inputs.len(), 2);
+        assert!(inputs[0].contains("window-1-turn-1-user"));
+        assert!(!inputs[0].contains("window-2"));
+        assert!(inputs[1].contains("window-2-turn-11-user"));
+        assert!(!inputs[1].contains("window-1"));
+        assert!(inputs.iter().all(|text| text.lines().count() == 20));
+    }
+    let saved: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM character_memories WHERE user_id=$1 AND layer='mid'")
+            .bind(scope.0)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(saved.0, 2);
+    assert!(matches!(
+        repository.begin_turn(&claims[9]).await.unwrap(),
+        BeginChatTurn::Completed { .. }
+    ));
+    assert_eq!(
+        summary.inputs.lock().unwrap().len(),
+        2,
+        "exact replay schedules no summary"
+    );
+
+    // A dispatched provider failure is retained unknown, never another logical call.
+    for number in 21..=30 {
+        commit_summary_test_turn(&repository, scope, number, 1, false).await;
+    }
+    let failing = Arc::new(RecordingSummary {
+        inputs: Mutex::new(vec![]),
+        fail: true,
+        output: None,
+    });
+    let handler = summary_test_handler(&pool, scope, failing.clone());
+    handler
+        .recover_summary_windows(&repository, &stopped)
+        .await
+        .unwrap();
+    handler
+        .recover_summary_windows(&repository, &stopped)
+        .await
+        .unwrap();
+    assert_eq!(failing.inputs.lock().unwrap().len(), 1);
+    let unknown: (String, String) = sqlx::query_as("SELECT summary_state, summary_failure_code FROM chat_turns WHERE user_id=$1 AND summary_sequence=30")
+        .bind(scope.0).fetch_one(&pool).await.unwrap();
+    assert_eq!(unknown, ("unknown".into(), "dispatch_unknown".into()));
+
+    // An expired dispatched owner cannot publish or obtain a new dispatch.
+    for number in 31..=40 {
+        commit_summary_test_turn(&repository, scope, number, 1, false).await;
+    }
+    let candidate = repository
+        .due_windows()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|w| w.user_id == scope.0)
+        .unwrap();
+    let dispatched = repository.claim_window(&candidate).await.unwrap().unwrap();
+    assert!(repository
+        .start_summary_dispatch(&dispatched)
+        .await
+        .unwrap());
+    let sources = repository.summary_sources(&dispatched).await.unwrap();
+    let result = dispatched
+        .memory("bounded summary".into(), &sources)
+        .unwrap();
+    sqlx::query(
+        "UPDATE chat_turns SET summary_lease_expires_at = NOW() - INTERVAL '1 second' WHERE id=$1",
+    )
+    .bind(dispatched.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(!repository
+        .finish_summary(&dispatched, &result)
+        .await
+        .unwrap());
+    assert!(!repository
+        .start_summary_dispatch(&dispatched)
+        .await
+        .unwrap());
+    repository.due_windows().await.unwrap();
+    assert!(repository.claim_window(&candidate).await.unwrap().is_none());
+    assert!(!repository.defer_window(&dispatched, true).await.unwrap());
+
+    // A successful save whose caller loses the ACK remains one atomic result.
+    for number in 41..=50 {
+        commit_summary_test_turn(&repository, scope, number, 1, false).await;
+    }
+    let candidate = repository
+        .due_windows()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|w| w.user_id == scope.0)
+        .unwrap();
+    let owner = repository.claim_window(&candidate).await.unwrap().unwrap();
+    repository.start_summary_dispatch(&owner).await.unwrap();
+    let result = owner
+        .memory(
+            "one durable result".into(),
+            &repository.summary_sources(&owner).await.unwrap(),
+        )
+        .unwrap();
+    assert!(repository.finish_summary(&owner, &result).await.unwrap());
+    assert!(!repository.finish_summary(&owner, &result).await.unwrap());
+    assert!(!repository
+        .fail_summary(&owner, SummaryOutcome::DispatchUnknown)
+        .await
+        .unwrap());
+    let exact: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM character_memories WHERE id=$1")
+        .bind(owner.memory_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(exact.0, 1);
+
+    // Deleting the principal prevents late publication and removes already saved Mid.
+    for number in 51..=60 {
+        commit_summary_test_turn(&repository, scope, number, 1, false).await;
+    }
+    let candidate = repository
+        .due_windows()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|w| w.user_id == scope.0)
+        .unwrap();
+    let owner = repository.claim_window(&candidate).await.unwrap().unwrap();
+    repository.start_summary_dispatch(&owner).await.unwrap();
+    let result = owner
+        .memory(
+            "cannot orphan".into(),
+            &repository.summary_sources(&owner).await.unwrap(),
+        )
+        .unwrap();
+    sqlx::query("DELETE FROM users WHERE id=$1")
+        .bind(scope.0)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(!repository.finish_summary(&owner, &result).await.unwrap());
+    let remaining: (i64, i64) = sqlx::query_as("SELECT (SELECT COUNT(*) FROM chat_turns WHERE user_id=$1), (SELECT COUNT(*) FROM character_memories WHERE user_id=$1)")
+        .bind(scope.0).fetch_one(&pool).await.unwrap();
+    assert_eq!(remaining, (0, 0));
+}
+
+/// Simulates a lost control/result ACK after the real owner transaction commits.
+struct SummaryLostAck {
+    repository: PgChatRepository,
+    dispatch: bool,
+    save: bool,
+}
+
+#[async_trait::async_trait]
+impl agent_service::domain::repositories::SummaryWindowRepository for SummaryLostAck {
+    async fn due_windows(
+        &self,
+    ) -> anyhow::Result<Vec<agent_service::domain::repositories::SummaryWindow>> {
+        self.repository.due_windows().await
+    }
+    async fn claim_window(
+        &self,
+        window: &agent_service::domain::repositories::SummaryWindow,
+    ) -> anyhow::Result<Option<agent_service::domain::repositories::SummaryWindow>> {
+        self.repository.claim_window(window).await
+    }
+    async fn defer_window(
+        &self,
+        window: &agent_service::domain::repositories::SummaryWindow,
+        claimed: bool,
+    ) -> anyhow::Result<bool> {
+        self.repository.defer_window(window, claimed).await
+    }
+    async fn summary_sources(
+        &self,
+        window: &agent_service::domain::repositories::SummaryWindow,
+    ) -> anyhow::Result<Vec<agent_service::domain::repositories::SummarySource>> {
+        self.repository.summary_sources(window).await
+    }
+    async fn start_summary_dispatch(
+        &self,
+        window: &agent_service::domain::repositories::SummaryWindow,
+    ) -> anyhow::Result<bool> {
+        let changed = self.repository.start_summary_dispatch(window).await?;
+        anyhow::ensure!(!self.dispatch, "synthetic lost dispatch ACK");
+        Ok(changed)
+    }
+    async fn finish_summary(
+        &self,
+        window: &agent_service::domain::repositories::SummaryWindow,
+        memory: &Memory,
+    ) -> anyhow::Result<bool> {
+        let changed = self.repository.finish_summary(window, memory).await?;
+        anyhow::ensure!(!self.save, "synthetic lost save ACK");
+        Ok(changed)
+    }
+    async fn fail_summary(
+        &self,
+        window: &agent_service::domain::repositories::SummaryWindow,
+        outcome: agent_service::domain::repositories::SummaryOutcome,
+    ) -> anyhow::Result<bool> {
+        self.repository.fail_summary(window, outcome).await
+    }
+}
+
+#[tokio::test]
+async fn summary_worker_lost_ack_never_creates_a_second_logical_call() {
+    let _summary_test = SUMMARY_TEST_LOCK.lock().await;
+    use agent_service::domain::repositories::SummaryWindowRepository;
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (_, stopped) = tokio::sync::watch::channel(false);
+    for dispatch in [true, false] {
+        let scope = summary_test_scope(&pool).await;
+        let repository = PgChatRepository::new(pool.clone());
+        for number in 1..=10 {
+            commit_summary_test_turn(&repository, scope, number, 1, false).await;
+        }
+        let summary = Arc::new(RecordingSummary {
+            inputs: Mutex::new(vec![]),
+            fail: false,
+            output: None,
+        });
+        let handler = summary_test_handler(&pool, scope, summary.clone());
+        let lost = SummaryLostAck {
+            repository: PgChatRepository::new(pool.clone()),
+            dispatch,
+            save: !dispatch,
+        };
+        assert!(handler
+            .recover_summary_windows(&lost, &stopped)
+            .await
+            .is_err());
+        handler
+            .recover_summary_windows(&repository, &stopped)
+            .await
+            .unwrap();
+        assert_eq!(summary.inputs.lock().unwrap().len(), usize::from(!dispatch));
+        let state: (String,) = sqlx::query_as(
+            "SELECT summary_state FROM chat_turns WHERE user_id=$1 AND summary_sequence=10",
+        )
+        .bind(scope.0)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(state.0, if dispatch { "dispatched" } else { "saved" });
+        if dispatch {
+            sqlx::query("UPDATE chat_turns SET summary_lease_expires_at=NOW()-INTERVAL '1 second' WHERE user_id=$1 AND summary_state='dispatched'")
+                .bind(scope.0).execute(&pool).await.unwrap();
+            handler
+                .recover_summary_windows(&repository, &stopped)
+                .await
+                .unwrap();
+            assert!(repository
+                .due_windows()
+                .await
+                .unwrap()
+                .iter()
+                .all(|w| w.user_id != scope.0));
+            assert!(summary.inputs.lock().unwrap().is_empty());
+        }
+        sqlx::query("DELETE FROM users WHERE id=$1")
+            .bind(scope.0)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+}
+
+struct SummaryReading(Mutex<ReadingContext>);
+#[async_trait::async_trait]
+impl ReadingContextPort for SummaryReading {
+    async fn find(&self, novel: Uuid, user: Uuid) -> anyhow::Result<Option<ReadingContext>> {
+        let reading = self.0.lock().unwrap();
+        Ok((reading.novel_id == novel && reading.user_id == user).then(|| reading.clone()))
+    }
+}
+struct SwitchDuringSummary(Arc<SummaryReading>);
+#[async_trait::async_trait]
+impl TextSummarizer for SwitchDuringSummary {
+    async fn summarize(&self, _: Uuid, _: &str, _: &str) -> anyhow::Result<String> {
+        self.0 .0.lock().unwrap().current_chapter = 1;
+        Ok("response before a concurrent rewind".into())
+    }
+}
+struct MisroutedSummaryCharacter(CharacterInfo);
+#[async_trait::async_trait]
+impl CharacterInfoRepository for MisroutedSummaryCharacter {
+    async fn find_by_id(&self, _: Uuid, _: Uuid) -> anyhow::Result<Option<CharacterInfo>> {
+        Ok(Some(self.0.clone()))
+    }
+}
+struct UnavailableSummaryCache(bool);
+#[async_trait::async_trait]
+impl agent_service::domain::ports::MessageCache for UnavailableSummaryCache {
+    async fn push_turn(
+        &self,
+        _: Uuid,
+        _: Uuid,
+        _: &ChatMessage,
+        _: &ChatMessage,
+    ) -> anyhow::Result<bool> {
+        anyhow::ensure!(!self.0, "synthetic cache unavailable");
+        Ok(false)
+    }
+    async fn clear(&self, _: Uuid, _: Uuid) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn clear_user(&self, _: Uuid) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn clear_novel(&self, _: Uuid, _: Uuid) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn allow_user(&self, _: Uuid) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn allow_novel(&self, _: Uuid, _: Uuid) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn summary_worker_preserves_eligibility_and_optional_cache_boundaries() {
+    let _summary_test = SUMMARY_TEST_LOCK.lock().await;
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let scope = summary_test_scope(&pool).await;
+    let repository = PgChatRepository::new(pool.clone());
+    let (_, stopped) = tokio::sync::watch::channel(false);
+    let mut last = None;
+    for number in 1..=10 {
+        last = Some(
+            commit_summary_test_turn(
+                &repository,
+                scope,
+                number,
+                if number == 1 { 3 } else { 2 },
+                false,
+            )
+            .await,
+        );
+    }
+    let summary = Arc::new(RecordingSummary {
+        inputs: Mutex::new(vec![]),
+        fail: false,
+        output: None,
+    });
+    let mut handler = summary_test_handler(&pool, scope, summary.clone());
+    let reading = Arc::new(SummaryReading(Mutex::new(ReadingContext {
+        user_id: scope.0,
+        novel_id: scope.1,
+        current_chapter: 1,
+        reader_identity: Some("Reader".into()),
+        reader_identity_type: "self".into(),
+        reader_character_id: None,
+        deviation_mode: "canon".into(),
+    })));
+    handler.reading_context = reading.clone();
+    let (_, messages) = last.unwrap();
+    for cache_error in [false, true] {
+        Arc::get_mut(&mut handler.memory_manager).unwrap().cache =
+            Arc::new(UnavailableSummaryCache(cache_error));
+        let projected = handler
+            .memory_manager
+            .project_completed_turn(messages[0].clone(), messages[1].clone(), None, Some(1))
+            .await;
+        assert_eq!(projected.is_err(), cache_error);
+        handler
+            .recover_summary_windows(&repository, &stopped)
+            .await
+            .unwrap();
+        assert!(
+            summary.inputs.lock().unwrap().is_empty(),
+            "rewind defers regardless of cache status"
+        );
+        sqlx::query("UPDATE chat_turns SET summary_next_attempt_at=NOW() WHERE user_id=$1 AND summary_state='pending'")
+            .bind(scope.0).execute(&pool).await.unwrap();
+    }
+    // Even a plausible same-novel response with the wrong character ID is refused.
+    reading.0.lock().unwrap().current_chapter = 3;
+    let original = handler.character_repo.clone();
+    let mut wrong = original
+        .find_by_id(scope.2, scope.0)
+        .await
+        .unwrap()
+        .unwrap();
+    wrong.id = Uuid::new_v4();
+    handler.character_repo = Arc::new(MisroutedSummaryCharacter(wrong));
+    handler
+        .recover_summary_windows(&repository, &stopped)
+        .await
+        .unwrap();
+    assert!(summary.inputs.lock().unwrap().is_empty());
+    handler.character_repo = original;
+    sqlx::query("UPDATE chat_turns SET summary_next_attempt_at=NOW() WHERE user_id=$1 AND summary_state='pending'")
+        .bind(scope.0).execute(&pool).await.unwrap();
+    // A switched identity is valid but cannot authorize self-memory projection.
+    {
+        let mut current = reading.0.lock().unwrap();
+        current.reader_identity_type = "character".into();
+        current.reader_character_id = Some(scope.2);
+        current.reader_identity = Some("Revision Witness".into());
+    }
+    handler
+        .recover_summary_windows(&repository, &stopped)
+        .await
+        .unwrap();
+    assert!(summary.inputs.lock().unwrap().is_empty());
+    {
+        let mut current = reading.0.lock().unwrap();
+        current.reader_identity_type = "self".into();
+        current.reader_character_id = None;
+        current.reader_identity = Some("Reader".into());
+    }
+    sqlx::query("UPDATE chat_turns SET summary_next_attempt_at=NOW() WHERE user_id=$1 AND summary_state='pending'")
+        .bind(scope.0).execute(&pool).await.unwrap();
+    handler
+        .recover_summary_windows(&repository, &stopped)
+        .await
+        .unwrap();
+    assert_eq!(summary.inputs.lock().unwrap().len(), 1);
+    let provenance:(i32,i32)=sqlx::query_as("SELECT chapter_number,persona_source_chapter_high_water FROM character_memories WHERE user_id=$1 AND layer='mid'")
+        .bind(scope.0).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        provenance,
+        (3, 1),
+        "rewind cannot lower the actual source high-water"
+    );
+
+    for number in 11..=20 {
+        commit_summary_test_turn(&repository, scope, number, 3, false).await;
+    }
+    Arc::get_mut(&mut handler.memory_manager).unwrap().llm =
+        Arc::new(SwitchDuringSummary(reading.clone()));
+    handler
+        .recover_summary_windows(&repository, &stopped)
+        .await
+        .unwrap();
+    let state:(String,String)=sqlx::query_as("SELECT summary_state,summary_failure_code FROM chat_turns WHERE user_id=$1 AND summary_sequence=20")
+        .bind(scope.0).fetch_one(&pool).await.unwrap();
+    assert_eq!(state, ("failed".into(), "eligibility_changed".into()));
+    let count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM character_memories WHERE user_id=$1 AND layer='mid'")
+            .bind(scope.0)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count.0, 1);
+    sqlx::query("DELETE FROM users WHERE id=$1")
+        .bind(scope.0)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn summary_worker_invalid_sources_outputs_and_collision_are_terminal() {
+    use agent_service::domain::repositories::SummaryWindowRepository;
+    let _summary_test = SUMMARY_TEST_LOCK.lock().await;
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (_, stopped) = tokio::sync::watch::channel(false);
+    for (case, output) in [
+        ("source", None),
+        ("empty", Some(String::new())),
+        ("oversize", Some("x".repeat(4001))),
+        ("collision", Some("new summary".into())),
+    ] {
+        let scope = summary_test_scope(&pool).await;
+        let repository = PgChatRepository::new(pool.clone());
+        for number in 1..=10 {
+            commit_summary_test_turn(&repository, scope, number, 1, false).await;
+        }
+        let window = repository
+            .due_windows()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|w| w.user_id == scope.0)
+            .unwrap();
+        if case == "source" {
+            sqlx::query("DELETE FROM chat_messages WHERE id=(SELECT id FROM chat_messages WHERE user_id=$1 LIMIT 1)")
+                .bind(scope.0).execute(&pool).await.unwrap();
+        }
+        if case == "collision" {
+            sqlx::query("INSERT INTO character_memories (id,user_id,novel_id,character_id,layer,content,importance,chapter_number,persona_source_chapter_high_water) VALUES ($1,$2,$3,$4,'mid','existing fact',6,1,1)")
+                .bind(window.memory_id).bind(scope.0).bind(scope.1).bind(scope.2).execute(&pool).await.unwrap();
+        }
+        let summary = Arc::new(RecordingSummary {
+            inputs: Mutex::new(vec![]),
+            fail: false,
+            output,
+        });
+        let handler = summary_test_handler(&pool, scope, summary.clone());
+        let result = handler.recover_summary_windows(&repository, &stopped).await;
+        assert_eq!(result.is_err(), case == "collision");
+        if case == "collision" {
+            let stored: (String,) =
+                sqlx::query_as("SELECT content FROM character_memories WHERE id=$1")
+                    .bind(window.memory_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                stored.0, "existing fact",
+                "a fixed-ID collision cannot UPSERT private memory"
+            );
+            sqlx::query("UPDATE chat_turns SET summary_lease_expires_at=NOW()-INTERVAL '1 second' WHERE id=$1")
+                .bind(window.id).execute(&pool).await.unwrap();
+        }
+        handler
+            .recover_summary_windows(&repository, &stopped)
+            .await
+            .unwrap();
+        assert_eq!(
+            summary.inputs.lock().unwrap().len(),
+            usize::from(case != "source")
+        );
+        let status: (String, String) =
+            sqlx::query_as("SELECT summary_state,summary_failure_code FROM chat_turns WHERE id=$1")
+                .bind(window.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            status,
+            match case {
+                "source" => ("failed".into(), "source_invalid".into()),
+                "collision" => ("unknown".into(), "dispatch_unknown".into()),
+                _ => ("failed".into(), "output_invalid".into()),
+            }
+        );
+        sqlx::query("DELETE FROM users WHERE id=$1")
+            .bind(scope.0)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+}
