@@ -320,6 +320,7 @@ impl WorldState {
                     serde_json::json!({
                         "status": change.status.to_str(),
                         "description": change.description,
+                        "origin": "player",
                     }),
                 );
             }
@@ -1058,6 +1059,50 @@ fn object_section<'a>(
 #[cfg(test)]
 mod causality_tests {
     use super::*;
+    use crate::domain::entities::player_entity::PlayerEntity;
+    use crate::domain::entities::world_session::WorldEntityRef;
+    use crate::domain::services::narrative_transition::{
+        NarrativeTransition, ThreadChange, ThreadStatus, TransitionEvent,
+    };
+
+    fn transition(thread_id: &str) -> NarrativeTransition {
+        NarrativeTransition {
+            schema_version: 1,
+            prompt_version: "narrative-transition-v1".into(),
+            canon_model_version: 1,
+            canonical_checkpoint_chapter: 1,
+            rendered_narrative: "分支后续".into(),
+            events: vec![TransitionEvent {
+                summary: "事件".into(),
+                actor_character_ids: vec![],
+                location_id: None,
+            }],
+            relationship_changes: vec![],
+            location_changes: vec![],
+            thread_changes: vec![ThreadChange {
+                thread_id: thread_id.into(),
+                status: ThreadStatus::Open,
+                description: "新的事件线".into(),
+            }],
+        }
+    }
+
+    fn state_with_player(user_id: Uuid, novel_id: Uuid) -> WorldState {
+        let mut state = WorldState::new(user_id, novel_id);
+        let player = PlayerEntity::new(
+            user_id,
+            novel_id,
+            1,
+            "云舟".into(),
+            "学徒".into(),
+            vec!["识图".into()],
+            "gate".into(),
+            vec![],
+        )
+        .unwrap();
+        state.state["player_entity"] = serde_json::to_value(player).unwrap();
+        state
+    }
 
     #[test]
     fn fingerprint_is_stable_and_changes_with_prompt_visible_state() {
@@ -1079,5 +1124,73 @@ mod causality_tests {
 
         assert_eq!(state.latest_choice_chapter().unwrap(), Some(4));
         assert_eq!(state.source_chapter_high_water().unwrap(), Some(4));
+    }
+
+    #[test]
+    fn generated_choice_thread_is_player_provenance_and_exact_replay_is_noop() {
+        let user_id = Uuid::new_v4();
+        let novel_id = Uuid::new_v4();
+        let node_id = Uuid::new_v4();
+        let mut state = state_with_player(user_id, novel_id);
+        state.state["threads"]["siege"] =
+            serde_json::json!({"status": "open", "origin": "canon", "description": "旧线"});
+        let change = transition("siege");
+        assert!(state
+            .apply_choice_transition(node_id, 1, 0, "前往城门", &change)
+            .unwrap());
+        assert_eq!(state.state["threads"]["siege"]["origin"], "player");
+        let committed = state.clone();
+        assert!(!state
+            .apply_choice_transition(node_id, 1, 0, "不同文本", &transition("other"))
+            .unwrap());
+        assert_eq!(state.state, committed.state);
+        assert_eq!(state.updated_at, committed.updated_at);
+    }
+
+    #[test]
+    fn legacy_choice_reconstruction_writes_player_thread_provenance() {
+        let user_id = Uuid::new_v4();
+        let novel_id = Uuid::new_v4();
+        let mut state = state_with_player(user_id, novel_id);
+        state.state["choices"] = serde_json::json!([{"chapter": 1, "choice": "前往城门"}]);
+        let node_id = Uuid::new_v4();
+        assert!(state
+            .apply_choice_transition(node_id, 1, 0, "前往城门", &transition("siege"))
+            .unwrap());
+        assert_eq!(state.state["threads"]["siege"]["origin"], "player");
+        let snapshot = state.state.clone();
+        assert!(!state
+            .apply_choice_transition(node_id, 1, 0, "前往城门", &transition("other"))
+            .unwrap());
+        assert_eq!(state.state, snapshot);
+    }
+
+    #[test]
+    fn open_world_entry_preserves_player_thread_and_seeds_untouched_canon_thread() {
+        let user_id = Uuid::new_v4();
+        let novel_id = Uuid::new_v4();
+        let mut state = state_with_player(user_id, novel_id);
+        state.state["threads"] = serde_json::json!({
+            "branch": {"status": "open", "description": "玩家后续", "origin": "player"}
+        });
+        let context = WorldEntryContext {
+            model_version: 1,
+            checkpoint_chapter: 1,
+            unlocked_through_chapter: 1,
+            characters: vec![],
+            locations: vec![],
+            factions: vec![],
+            hard_rules: vec![],
+            dead_character_ids: vec![],
+            threads: vec![WorldEntityRef {
+                id: "canon".into(),
+                name: "原著线".into(),
+            }],
+            scheduled_events: vec![],
+            character_goals: vec![],
+        };
+        state.start_open_world(&context).unwrap();
+        assert_eq!(state.state["threads"]["branch"]["origin"], "player");
+        assert_eq!(state.state["threads"]["canon"]["origin"], "canon");
     }
 }

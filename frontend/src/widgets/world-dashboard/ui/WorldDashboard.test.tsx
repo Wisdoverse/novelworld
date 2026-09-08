@@ -109,6 +109,31 @@ describe('WorldDashboard', () => {
     expect(mocks.submit.mock.calls[1][0].expectedTurnNumber).toBe(1);
   });
 
+  it('labels only explicit thread provenance as canon or player', () => {
+    const unmarked = {
+      ...view,
+      world_state: {
+        ...view.world_state,
+        state: {
+          ...view.world_state.state,
+          threads: {
+            canon: { status: 'open', description: '原著线', origin: 'canon' },
+            player: { status: 'open', description: '玩家线', origin: 'player' },
+            absent: { status: 'open', description: '未标记线' },
+            unexpected: { status: 'open', description: '异常线', origin: 'model' as never },
+          },
+        },
+      },
+    } satisfies OpenWorldView;
+    render(<WorldDashboard novelId="novel" view={unmarked} />);
+
+    const rows = screen.getAllByRole('listitem').map(row => row.textContent);
+    expect(rows).toContain('原著线 · 原著主线');
+    expect(rows).toContain('玩家线 · 玩家创造');
+    expect(rows).toContain('未标记线 · 来源未确认');
+    expect(rows).toContain('异常线 · 来源未确认');
+  });
+
   it('unlocks the form after a terminal rejection', async () => {
     mocks.submit.mockRejectedValue({ outcomeUnknown: false });
     render(<WorldDashboard novelId="novel" view={view} />);

@@ -261,7 +261,7 @@ export function WorldDashboard({
           {activeThreads.length ? (
             <ul className="mt-3 space-y-2 text-sm text-[#3c4043]">
               {activeThreads.map(([id, thread]) => (
-                <li key={id}>{thread.description} <span className="text-xs text-[#5f6368]">· {thread.origin === 'player' ? '玩家创造' : '原著主线'}</span></li>
+                <li key={id}>{thread.description} <span className="text-xs text-[#5f6368]">· {thread.origin === 'canon' ? '原著主线' : thread.origin === 'player' ? '玩家创造' : '来源未确认'}</span></li>
               ))}
             </ul>
           ) : <p className="mt-3 text-sm text-[#5f6368]">暂无活跃事件线</p>}
