@@ -6,6 +6,7 @@ Compose JSON (including credentials) is consumed only in memory, never reported.
 import datetime
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -30,61 +31,51 @@ class Invalid(Exception):
     pass
 
 
-class ProbeInvalid(Invalid):
-    """Closed, bounded evidence for a capability command refusal."""
-
-    def __init__(self, reason, *, exit_code=None, elapsed=None, container_id=None):
-        super().__init__()
-        self.reason = reason if reason in PROBE_REASONS else "unknown"
-        self.exit_code = exit_code if isinstance(exit_code, int) and -128 <= exit_code <= 255 else None
-        self.elapsed = round(min(max(float(elapsed or 0), 0), 10), 3)
-        self.container_id = container_id if isinstance(container_id, str) and re.fullmatch(r"[0-9a-f]{64}", container_id) else None
-
-
-def _probe_detail(error):
-    if isinstance(error, ProbeInvalid):
-        return {"reason": error.reason, "exit_code": error.exit_code,
-                "elapsed": error.elapsed, "container_id": error.container_id}
-    return None
-
-
 def _closed_detail(value):
-    if not isinstance(value, dict):
-        return {"reason": "unknown", "exit_code": None, "elapsed": 0, "container_id": None}
-    reason = value.get("reason") if value.get("reason") in PROBE_REASONS else "unknown"
-    exit_code = value.get("exit_code")
-    if not isinstance(exit_code, int) or not -128 <= exit_code <= 255:
-        exit_code = None
-    elapsed = value.get("elapsed", 0)
-    if not isinstance(elapsed, (int, float)) or not 0 <= elapsed <= 10:
-        elapsed = 0
-    container_id = value.get("container_id")
-    if not isinstance(container_id, str) or not re.fullmatch(r"[0-9a-f]{64}", container_id):
-        container_id = None
-    return {"reason": reason, "exit_code": exit_code, "elapsed": round(elapsed, 3),
-            "container_id": container_id}
+    if value is None:
+        return None
+    value = value if isinstance(value, dict) else {}
+    reason, phase = value.get("reason"), value.get("phase")
+    exit_code, elapsed = value.get("exit_code"), value.get("elapsed")
+    return {
+        "reason": reason if isinstance(reason, str) and reason in PROBE_REASONS else "unknown",
+        "phase": phase if isinstance(phase, str) and phase in PROBE_PHASES else "unknown",
+        "exit_code": exit_code if type(exit_code) is int and -128 <= exit_code <= 255 else None,
+        "elapsed": round(elapsed, 3) if type(elapsed) in (int, float)
+        and 0 <= elapsed <= 86400 and math.isfinite(elapsed) else None,
+    }
+
+
+class ProbeInvalid(Invalid):
+    """A capability refusal; arbitrary child text never enters its evidence."""
+
+    def __init__(self, reason, *, exit_code=None, elapsed=None):
+        super().__init__()
+        self.primary_evidence = _closed_detail({"reason": reason, "exit_code": exit_code,
+                                               "elapsed": elapsed})
+        self.reason = self.primary_evidence["reason"]
+        self.exit_code = self.primary_evidence["exit_code"]
+        self.elapsed = self.primary_evidence["elapsed"]
 
 
 def probe_evidence(error):
-    """Return only closed fields suitable for the private journey report."""
-    primary = getattr(error, "primary_evidence", None)
+    """Allowlist every exported field, including error attributes and nested outcomes."""
+    phase, name = getattr(error, "probe_phase", None), getattr(error, "probe_name", None)
+    identifier = getattr(error, "probe_container_id", None)
     cleanup = getattr(error, "cleanup_evidence", None)
-    phase = getattr(error, "probe_phase", None)
-    name = getattr(error, "probe_name", None)
-    container_id = getattr(error, "probe_container_id", None)
-    phase = phase if phase in PROBE_PHASES else "unknown"
-    name = name if isinstance(name, str) and re.fullmatch(r"nwq-[a-f0-9]{10}-budget-probe-[a-f0-9]{12}", name) else None
-    container_id = container_id if isinstance(container_id, str) and re.fullmatch(r"[0-9a-f]{64}", container_id) else None
-    if isinstance(error, ProbeInvalid):
-        primary = _probe_detail(error)
-        container_id = container_id or primary["container_id"]
-        return {"outcome": "invalid", "phase": phase, "name": name,
-                "container_id": container_id, "primary": primary}
-    if isinstance(error, OSError):
-        return {"outcome": "cleanup_uncertain", "phase": phase, "name": name,
-                "container_id": container_id, "primary": _closed_detail(primary),
-                "cleanup": _closed_detail(cleanup)}
-    return {"outcome": "unknown"}
+    return {
+        "outcome": "invalid" if isinstance(error, ProbeInvalid) else
+                   "cleanup_uncertain" if isinstance(error, OSError) else "unknown",
+        "phase": phase if isinstance(phase, str) and phase in PROBE_PHASES else "unknown",
+        "name": name if isinstance(name, str) and re.fullmatch(
+            r"nwq-[a-f0-9]{10}-budget-probe-[a-f0-9]{12}", name) else None,
+        "container_id": identifier if isinstance(identifier, str) and re.fullmatch(
+            r"[0-9a-f]{64}", identifier) else None,
+        "primary": _closed_detail(getattr(error, "primary_evidence", None)),
+        "reap": _closed_detail(getattr(error, "reap_evidence", None)),
+        "cleanup": [_closed_detail(item) for item in cleanup[:4]]
+                   if isinstance(cleanup, list) else [],
+    }
 
 
 def require(condition):
@@ -208,32 +199,26 @@ def bounded_output(command, timeout, limit=MAX_OUTPUT):
                 output.extend(chunk)
                 if len(output) > limit:
                     raise ProbeInvalid("output_overflow", elapsed=time.monotonic() - started)
+    except OSError as error:
+        raise ProbeInvalid("read_error", elapsed=time.monotonic() - started) from error
     finally:
-        if process.poll() is None:
-            process.kill()
+        # Capture the original exception before handling any stop/reap exception.
+        active = sys.exc_info()[1]
+        stop_started = time.monotonic()
         try:
+            if process.poll() is None:
+                process.kill()
             process.wait(timeout=5)
-        except subprocess.TimeoutExpired as error:
+        except (OSError, subprocess.SubprocessError) as error:
             failure = OSError("diagnostic probe process reap unproven")
-            active = sys.exc_info()[1]
-            failure.primary_evidence = (_probe_detail(active)
-                                        if isinstance(active, ProbeInvalid)
-                                        else {"reason": "deadline", "exit_code": None,
-                                              "elapsed": 0, "container_id": None})
-            failure.cleanup_evidence = {"reason": "reap_timeout", "exit_code": None,
-                                        "elapsed": 5, "container_id": None}
+            failure.primary_evidence = _closed_detail(getattr(active, "primary_evidence", None))
+            failure.reap_evidence = _closed_detail({
+                "reason": "reap_timeout" if isinstance(error, subprocess.TimeoutExpired) else "reap_error",
+                "elapsed": time.monotonic() - stop_started,
+            })
             raise failure from error
-        except OSError as error:
-            failure = OSError("diagnostic probe process reap unproven")
-            active = sys.exc_info()[1]
-            failure.primary_evidence = (_probe_detail(active)
-                                        if isinstance(active, ProbeInvalid)
-                                        else {"reason": "wait_error", "exit_code": None,
-                                              "elapsed": 0, "container_id": None})
-            failure.cleanup_evidence = {"reason": "reap_error", "exit_code": None,
-                                        "elapsed": 0, "container_id": None}
-            raise failure from error
-        process.stdout.close()
+        finally:
+            process.stdout.close()
 
 
 def probe(image, project, expected):
@@ -259,13 +244,9 @@ def probe(image, project, expected):
         created = True
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise ProbeInvalid("deadline", container_id=acknowledged_id)
+            raise ProbeInvalid("deadline", elapsed=10 - remaining)
         phase = "probe_start"
-        try:
-            raw = bounded_output(["docker", "start", "--attach", name], remaining)
-        except ProbeInvalid as error:
-            error.container_id = acknowledged_id
-            raise
+        raw = bounded_output(["docker", "start", "--attach", name], remaining)
         phase = "probe_expectation"
         try:
             observed = strict_json(raw)
@@ -275,6 +256,11 @@ def probe(image, project, expected):
             raise ProbeInvalid("invalid_capability")
     except (Invalid, ValueError, OSError, subprocess.SubprocessError) as error:
         primary_error = error
+        for attribute in ("primary_evidence", "reap_evidence"):
+            detail = _closed_detail(getattr(error, attribute, None))
+            if detail is not None:
+                detail["phase"] = phase
+                setattr(error, attribute, detail)
         error.probe_phase = phase
         error.probe_name = name
         error.probe_container_id = acknowledged_id
@@ -283,42 +269,54 @@ def probe(image, project, expected):
             print("diagnostic reason=" + error.reason, file=sys.stderr)
         raise
     finally:
-        # Exact random isolated name only. No volumes, credentials or user deployment involved.
+        # Exact random isolated name only. Keep every bounded uncertainty independently.
+        cleanup_details = []
+        cleanup_cause = None
         try:
             phase = "probe_cleanup_rm"
+            started = time.monotonic()
             cleanup = subprocess.run(["docker", "rm", "--force", name], stdin=subprocess.DEVNULL,
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+            if cleanup.returncode != 0:
+                cleanup_details.append({"reason": "cleanup_nonzero", "phase": phase,
+                                        "exit_code": cleanup.returncode,
+                                        "elapsed": time.monotonic() - started})
             phase = "probe_cleanup_ps"
+            started = time.monotonic()
             remaining = bounded_output(["docker", "ps", "--all", "--quiet", "--filter", "name=^/" + name + "$"], 5)
+            if remaining.strip():
+                cleanup_details.append({"reason": "cleanup_residue", "phase": phase,
+                                        "elapsed": time.monotonic() - started})
         except (Invalid, OSError, subprocess.SubprocessError) as error:
+            cleanup_cause = error
             print("diagnostic phase=" + phase, file=sys.stderr)
+            detail = _closed_detail(getattr(error, "primary_evidence", None))
+            if detail is None:
+                detail = _closed_detail({"reason": "cleanup_timeout"
+                    if isinstance(error, subprocess.TimeoutExpired) else "cleanup_query_error",
+                    "elapsed": time.monotonic() - started})
+            if detail["reason"] == "deadline":
+                detail["reason"] = "cleanup_query_deadline"
+            detail["phase"] = phase
+            cleanup_details.append(detail)
+            reap = _closed_detail(getattr(error, "reap_evidence", None))
+            if reap is not None:
+                reap["phase"] = phase
+                cleanup_details.append(reap)
+        if not created:
+            cleanup_details.append({"reason": "create_unconfirmed", "phase": "probe_create"})
+        if cleanup_details:
+            # Still OSError: missing create ACK and cleanup uncertainty cannot pass a negative probe.
+            if cleanup_cause is None:
+                phase = "probe_cleanup_unproven"
+                print("diagnostic phase=" + phase, file=sys.stderr)
             failure = OSError("diagnostic probe cleanup unproven")
-            failure.primary_evidence = _probe_detail(primary_error) if isinstance(primary_error, ProbeInvalid) else None
-            query_reason = "cleanup_query_deadline" if isinstance(error, ProbeInvalid) and error.reason == "deadline" else "cleanup_query_error"
-            failure.cleanup_evidence = {"reason": "cleanup_timeout" if isinstance(error, subprocess.TimeoutExpired)
-                                        else query_reason, "exit_code": getattr(error, "exit_code", None),
-                                        "elapsed": getattr(error, "elapsed", 5),
-                                        "container_id": acknowledged_id}
-            failure.probe_phase = phase
-            failure.probe_name = name
+            failure.primary_evidence = _closed_detail(getattr(primary_error, "primary_evidence", None))
+            failure.reap_evidence = _closed_detail(getattr(primary_error, "reap_evidence", None))
+            failure.cleanup_evidence = cleanup_details
+            failure.probe_phase, failure.probe_name = phase, name
             failure.probe_container_id = acknowledged_id
-            raise failure from error
-        if not created or cleanup.returncode != 0 or remaining.strip():
-            # Distinguish uncertain lifecycle cleanup from expected capability
-            # refusal. Callers must not count it as a passing negative probe.
-            print("diagnostic phase=probe_cleanup_unproven", file=sys.stderr)
-            failure = OSError("diagnostic probe cleanup unproven")
-            failure.primary_evidence = (_probe_detail(primary_error)
-                                        if isinstance(primary_error, ProbeInvalid)
-                                        else probe_evidence(primary_error)) if primary_error is not None else None
-            failure.cleanup_evidence = {"reason": "create_unconfirmed" if not created
-                                        else "cleanup_nonzero" if cleanup.returncode != 0
-                                        else "cleanup_residue", "exit_code": cleanup.returncode,
-                                        "elapsed": 0, "container_id": acknowledged_id}
-            failure.probe_phase = "probe_cleanup_unproven"
-            failure.probe_name = name
-            failure.probe_container_id = acknowledged_id
-            raise failure
+            raise failure from cleanup_cause
 
 
 def preflight(raw, manifest, registered, project):

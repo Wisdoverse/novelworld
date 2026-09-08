@@ -6,6 +6,11 @@ The registry's mutable tag and first RepoDigests entry deliberately point at
 a different image from the build records.
 """
 import json
+import ast
+import contextlib
+import io
+import re
+from types import SimpleNamespace
 import copy
 import hashlib
 import importlib.util
@@ -384,15 +389,16 @@ class ReleaseImageDigestTest(unittest.TestCase):
             with self.assertRaises(OSError) as rejected:
                 BUDGET.probe("registry/service@sha256:" + "a" * 64, "nwq-abcdef1234", {})
         self.assertEqual(rejected.exception.primary_evidence["reason"], "child_nonzero")
-        self.assertEqual(rejected.exception.cleanup_evidence["reason"], "cleanup_nonzero")
+        self.assertEqual(rejected.exception.cleanup_evidence[0]["reason"], "cleanup_nonzero")
 
     def test_probe_evidence_closes_identity_and_reason_fields(self):
-        error = BUDGET.ProbeInvalid("arbitrary-child-text", elapsed=999, container_id="secret")
+        error = BUDGET.ProbeInvalid("arbitrary-child-text", elapsed=float("nan"))
         error.probe_phase = "arbitrary"
         error.probe_name = "child-output"
         evidence = BUDGET.probe_evidence(error)
         self.assertEqual(evidence["primary"]["reason"], "unknown")
-        self.assertEqual(evidence["primary"]["elapsed"], 10)
+        self.assertIsNone(evidence["primary"]["elapsed"])
+        json.dumps(evidence, allow_nan=False)
         self.assertIsNone(evidence["name"])
         self.assertIsNone(evidence["container_id"])
 
@@ -416,14 +422,14 @@ class ReleaseImageDigestTest(unittest.TestCase):
                 BUDGET.probe("registry/service@sha256:" + "a" * 64, "nwq-abcdef1234", {})
         evidence = BUDGET.probe_evidence(rejected.exception)
         self.assertEqual(evidence["primary"]["reason"], "child_nonzero")
-        self.assertEqual(evidence["cleanup"]["reason"], "cleanup_query_deadline")
+        self.assertEqual(evidence["cleanup"][0]["reason"], "cleanup_query_deadline")
         self.assertEqual(evidence["phase"], "probe_cleanup_ps")
         self.assertEqual(evidence["container_id"], "b" * 64)
 
     def test_reap_timeout_is_uncertain_and_preserves_primary(self):
         process = mock.Mock()
         process.poll.return_value = None
-        process.wait.side_effect = [subprocess.TimeoutExpired(["x"], 1), subprocess.TimeoutExpired(["x"], 5)]
+        process.wait.side_effect = [3, subprocess.TimeoutExpired(["x"], 5)]
         process.stdout.fileno.return_value = 1
         selector = mock.Mock()
         selector.__enter__ = mock.Mock(return_value=selector)
@@ -434,8 +440,121 @@ class ReleaseImageDigestTest(unittest.TestCase):
              mock.patch.object(BUDGET.os, "read", return_value=b""):
             with self.assertRaises(OSError) as rejected:
                 BUDGET.bounded_output(["docker", "start"], 1)
-        self.assertEqual(rejected.exception.primary_evidence["reason"], "deadline")
-        self.assertEqual(rejected.exception.cleanup_evidence["reason"], "reap_timeout")
+        self.assertEqual(rejected.exception.primary_evidence["reason"], "child_nonzero")
+        self.assertEqual(rejected.exception.primary_evidence["exit_code"], 3)
+        self.assertEqual(rejected.exception.reap_evidence["reason"], "reap_timeout")
+        process.stdout.close.assert_called_once()
+
+    def test_ack_deadline_and_residue_classification(self):
+        for kind in ("bad_ack", "shared_deadline", "residue"):
+            with self.subTest(kind=kind):
+                responses = [b"invalid" if kind == "bad_ack" else b"b" * 64]
+                if kind == "residue":
+                    responses += [b"{}", b"present"]
+                else:
+                    responses += [b""]
+                ticks = iter([0, 11] if kind == "shared_deadline" else [0, 0])
+                with mock.patch.object(BUDGET, "bounded_output", side_effect=responses), \
+                     mock.patch.object(BUDGET.time, "monotonic", side_effect=lambda: next(ticks, 11)), \
+                     mock.patch.object(BUDGET.subprocess, "run") as cleanup:
+                    cleanup.return_value.returncode = 0
+                    exception = BUDGET.ProbeInvalid if kind == "shared_deadline" else OSError
+                    with self.assertRaises(exception) as rejected:
+                        BUDGET.probe("registry/service@sha256:" + "a" * 64, "nwq-abcdef1234", {})
+                evidence = BUDGET.probe_evidence(rejected.exception)
+                self.assertIsNotNone(evidence["name"])
+                self.assertEqual(evidence["container_id"], None if kind == "bad_ack" else "b" * 64)
+                if kind == "bad_ack":
+                    self.assertEqual(evidence["primary"]["reason"], "create_ack_invalid")
+                    self.assertEqual(evidence["cleanup"][0]["reason"], "create_unconfirmed")
+                elif kind == "shared_deadline":
+                    self.assertEqual(evidence["primary"]["reason"], "deadline")
+                    self.assertEqual(evidence["primary"]["phase"], "probe_create")
+                else:
+                    self.assertIsNone(evidence["primary"])
+                    self.assertEqual(evidence["cleanup"][0]["reason"], "cleanup_residue")
+
+    def test_compound_overflow_reap_and_cleanup_failure_preserve_all_causes(self):
+        original = BUDGET.bounded_output
+        process, selector = mock.Mock(), mock.MagicMock()
+        process.poll.return_value = None
+        process.wait.side_effect = subprocess.TimeoutExpired(["private-command"], 5)
+        selector.__enter__.return_value = selector
+        selector.select.return_value = [object()]
+
+        def command(argv, timeout):
+            if argv[1] == "create":
+                return b"b" * 64
+            if argv[1] == "start":
+                return original(argv, timeout)
+            raise BUDGET.ProbeInvalid("deadline", elapsed=5)
+
+        with mock.patch.object(BUDGET, "bounded_output", side_effect=command), \
+             mock.patch.object(BUDGET.subprocess, "Popen", return_value=process), \
+             mock.patch.object(BUDGET.subprocess, "run") as cleanup, \
+             mock.patch.object(BUDGET.selectors, "DefaultSelector", return_value=selector), \
+             mock.patch.object(BUDGET.os, "read", return_value=b"x" * 4097):
+            cleanup.return_value.returncode = 7
+            with self.assertRaises(OSError) as rejected:
+                BUDGET.probe("registry/service@sha256:" + "a" * 64, "nwq-abcdef1234", {})
+        evidence = BUDGET.probe_evidence(rejected.exception)
+        self.assertEqual(evidence["primary"]["reason"], "output_overflow")
+        self.assertEqual(evidence["primary"]["phase"], "probe_start")
+        self.assertEqual(evidence["reap"]["reason"], "reap_timeout")
+        self.assertEqual([d["reason"] for d in evidence["cleanup"]],
+                         ["cleanup_nonzero", "cleanup_query_deadline"])
+        self.assertEqual(evidence["cleanup"][0]["exit_code"], 7)
+        self.assertEqual(evidence["container_id"], "b" * 64)
+        self.assertNotIn("private-command", json.dumps(evidence, allow_nan=False))
+        process.stdout.close.assert_called_once()
+
+    def test_evidence_revalidates_mutated_and_malformed_fields(self):
+        for value in ([], {"reason": [], "phase": {}, "elapsed": float("nan"),
+                           "exit_code": True, "raw": "private-child-text"}):
+            for error in (BUDGET.ProbeInvalid("deadline"), OSError("private-child-text")):
+                error.primary_evidence = value
+                error.reap_evidence = value
+                error.cleanup_evidence = [value] * 10
+                error.probe_phase = []
+                error.probe_name = "private-child-text"
+                error.probe_container_id = "private-child-text"
+                evidence = BUDGET.probe_evidence(error)
+                encoded = json.dumps(evidence, allow_nan=False)
+                self.assertNotIn("private-child-text", encoded)
+                self.assertEqual(len(evidence["cleanup"]), 4)
+                self.assertIsNone(evidence["primary"]["exit_code"])
+
+    def test_probe_phase_lines_still_feed_both_anchored_lifecycle_consumers(self):
+        log = io.StringIO()
+        with contextlib.redirect_stderr(log), \
+             mock.patch.object(BUDGET, "bounded_output", side_effect=[
+                 b"b" * 64, BUDGET.ProbeInvalid("child_nonzero", exit_code=3),
+                 BUDGET.ProbeInvalid("deadline")]), \
+             mock.patch.object(BUDGET.subprocess, "run") as cleanup:
+            cleanup.return_value.returncode = 0
+            with self.assertRaises(OSError):
+                BUDGET.probe("registry/service@sha256:" + "a" * 64, "nwq-abcdef1234", {})
+        source = ROOT / "tests/e2e/diagnostic_budget_lifecycle.py"
+        spec = importlib.util.spec_from_file_location("probe_lifecycle_test", source)
+        lifecycle = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(lifecycle)
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "release-adopt.log").write_text(log.getvalue())
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                lifecycle.report_cold_release_status(
+                    SimpleNamespace(output=Path(directory), diagnostic_failures=[]), False)
+            self.assertTrue(json.loads(output.getvalue())["capability_probe_failed"])
+        # Evaluate the actual reentry consumer's literal, without copying its pattern.
+        patterns = [node.args[0].value for node in ast.walk(ast.parse(source.read_text()))
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "findall" and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, bytes)
+                    and b"diagnostic phase=" in node.args[0].value]
+        self.assertEqual(len(patterns), 1)
+        self.assertEqual(re.findall(patterns[0], log.getvalue().encode()),
+                         [b"probe_start", b"probe_cleanup_ps"])
 
 
 if __name__ == "__main__":

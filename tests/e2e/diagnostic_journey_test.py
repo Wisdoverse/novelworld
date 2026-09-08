@@ -22,6 +22,9 @@ SPEC.loader.exec_module(CONTROL)
 RUNNER_SPEC = importlib.util.spec_from_file_location("live_deepseek_journey", Path(__file__).with_name("live_deepseek_journey.py"))
 RUNNER = importlib.util.module_from_spec(RUNNER_SPEC)
 RUNNER_SPEC.loader.exec_module(RUNNER)
+BUDGET_SPEC = importlib.util.spec_from_file_location("journey_probe_budget", ROOT / "infra/docker/diagnostic_budget.py")
+BUDGET = importlib.util.module_from_spec(BUDGET_SPEC)
+BUDGET_SPEC.loader.exec_module(BUDGET)
 
 
 class DiagnosticJourneyTest(unittest.TestCase):
@@ -987,18 +990,17 @@ class DiagnosticJourneyTest(unittest.TestCase):
                     nonlocal calls
                     calls += 1
                     if calls - 1 == failed_index:
-                        raise RUNNER.diagnostic.DiagnosticFailure("synthetic_probe_failure")
+                        # Real helper validation/context/serializer, with only Docker I/O mocked.
+                        with mock.patch.object(BUDGET, "bounded_output", side_effect=[
+                            b"b" * 64, b"arbitrary-private-child-text", b""]), \
+                             mock.patch.object(BUDGET.subprocess, "run") as cleanup:
+                            cleanup.return_value.returncode = 0
+                            BUDGET.probe("registry/service@sha256:" + "a" * 64,
+                                         journey.project, {})
 
                 probes.side_effect = probe
                 spec = mock.Mock()
-                adapter = mock.Mock(
-                    probe=probes,
-                    probe_evidence=lambda _error: {
-                        "outcome": "invalid",
-                        "primary": {"reason": "child_nonzero", "exit_code": 3,
-                                     "elapsed": 0.2, "container_id": None},
-                    },
-                )
+                adapter = mock.Mock(probe=probes, probe_evidence=BUDGET.probe_evidence)
                 with mock.patch.object(RUNNER, "docker_inventory_snapshot", return_value={
                     "containers": {}, "volumes": {}, "networks": {}
                 }), mock.patch.object(
@@ -1022,10 +1024,16 @@ class DiagnosticJourneyTest(unittest.TestCase):
                 self.assertEqual(rejected.exception.code, "diagnostic_artifact_capability_unproven")
                 self.assertEqual(probes.call_count, failed_index + 1)
                 release.assert_not_called()
-                if failed_index == 0:
-                    self.assertEqual(journey.private_report["diagnostic_probe_evidence"][0]["primary"]["reason"],
-                                     "child_nonzero")
-                    self.assertNotIn("diagnostic_probe_evidence", journey.report)
+                evidence = journey.private_report["diagnostic_probe_evidence"][0]
+                self.assertEqual(evidence["primary"]["reason"], "invalid_capability")
+                self.assertEqual(evidence["container_id"], "b" * 64)
+                self.assertTrue(evidence["name"].startswith(journey.project + "-budget-probe-"))
+                private = json.dumps(evidence, allow_nan=False)
+                public = json.dumps(journey.public_report(), allow_nan=False)
+                self.assertNotIn("arbitrary-private-child-text", private)
+                for sensitive in ("diagnostic_probe_evidence", evidence["name"],
+                                  evidence["container_id"], "arbitrary-private-child-text"):
+                    self.assertNotIn(sensitive, public)
 
     def test_batched_inventory_runner_preserves_projection_and_rejects_bad_batches(self):
         project = "nwq-abcdef1234"
