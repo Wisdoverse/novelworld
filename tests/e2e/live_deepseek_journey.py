@@ -2094,7 +2094,7 @@ class Journey:
         self.diagnostic_terminal_entered = True
         if not self.cleanup_required:
             return
-        terminal_ok = True
+        terminal_ok = not bool(self.private_report.get("response_model_collection_errors"))
         # Abort an interrupted release coordinator before observing/stopping its
         # containers. Killing its CLI is not itself proof those containers stopped.
         process = self.active_release_process
@@ -2771,6 +2771,24 @@ class Journey:
                     ["docker", "inspect", "--format", "{{.Id}}", container]
                 )
                 raw = self.evidence_command(["docker", "logs", container])
+                if self.diagnostic_registration is not None:
+                    if (getattr(self, "diagnostic_evidence_deadline", None) is not None
+                            and time.monotonic() >= self.diagnostic_evidence_deadline):
+                        raise QualificationFailure("diagnostic_observability_timeout")
+                    payload = raw.encode("utf-8")
+                    if len(payload) > 4 * 1024 * 1024:
+                        raise QualificationFailure("response_model_log_oversized")
+                    artifact = f"diagnostic-log-{generation}-{service}.log"
+                    write_private(self.output / artifact, payload)
+                    if (getattr(self, "diagnostic_evidence_deadline", None) is not None
+                            and time.monotonic() >= self.diagnostic_evidence_deadline):
+                        raise QualificationFailure("diagnostic_observability_timeout")
+                    self.private_report.setdefault("response_model_logs", []).append({
+                        "phase": generation, "service": service,
+                        "container_id": container_id, "artifact": artifact,
+                        "byte_count": len(payload), "sha256": sha256_bytes(payload),
+                        "format": "utf8_decoded_stripped_stdout",
+                    })
                 previous_id, previous_count = self.response_model_log_offsets.get(
                     service, ("", 0)
                 )
@@ -2781,8 +2799,8 @@ class Journey:
                 )
                 self.response_model_observations.extend(new)
                 self.response_model_log_offsets[service] = (container_id, total)
-            except QualificationFailure as error:
-                errors.append(f"{service}:{error.code}")
+            except (QualificationFailure, OSError, UnicodeError) as error:
+                errors.append(f"{service}:{getattr(error, 'code', 'response_model_log_capture_failed')}")
         self.private_report.setdefault("response_model_marker_counts", {})[
             generation
         ] = len(self.response_model_observations) - before
