@@ -67,6 +67,8 @@ const DIAGNOSTIC_LLM_BUDGET_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0026_diagnostic_llm_budget.sql");
 const CHAT_SUMMARY_WINDOWS_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0027_chat_summary_windows.sql");
+const DEEPSEEK_V41_DIAGNOSTIC_COST_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0028_deepseek_v41_diagnostic_cost.sql");
 
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
@@ -101,6 +103,7 @@ const ALL_MIGRATIONS: &[&str] = &[
     CHAT_WORLD_REVISION_MIGRATION,
     DIAGNOSTIC_LLM_BUDGET_MIGRATION,
     CHAT_SUMMARY_WINDOWS_MIGRATION,
+    DEEPSEEK_V41_DIAGNOSTIC_COST_MIGRATION,
 ];
 
 #[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
@@ -605,6 +608,10 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
             .execute(&fresh)
             .await
             .unwrap();
+        sqlx::raw_sql(DEEPSEEK_V41_DIAGNOSTIC_COST_MIGRATION)
+            .execute(&fresh)
+            .await
+            .unwrap();
     }
 
     let fresh_diagnostic_schema = diagnostic_budget_schema_signature(&fresh).await;
@@ -618,6 +625,10 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
         .unwrap();
     for _ in 0..2 {
         sqlx::raw_sql(DIAGNOSTIC_LLM_BUDGET_MIGRATION)
+            .execute(&fresh)
+            .await
+            .unwrap();
+        sqlx::raw_sql(DEEPSEEK_V41_DIAGNOSTIC_COST_MIGRATION)
             .execute(&fresh)
             .await
             .unwrap();
@@ -1992,6 +2003,7 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
         "0025_chat_world_revision.sql",
         "0026_diagnostic_llm_budget.sql",
         "0027_chat_summary_windows.sql",
+        "0028_deepseek_v41_diagnostic_cost.sql",
     ] {
         let migration_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../infra/postgres/migrations")
@@ -2136,6 +2148,10 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
             .await
             .unwrap();
         sqlx::raw_sql(CHAT_SUMMARY_WINDOWS_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
+        sqlx::raw_sql(DEEPSEEK_V41_DIAGNOSTIC_COST_MIGRATION)
             .execute(&mut *non_default_path)
             .await
             .unwrap();

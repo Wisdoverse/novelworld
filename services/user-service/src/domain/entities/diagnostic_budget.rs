@@ -324,7 +324,7 @@ mod tests {
             Amount {
                 attempts: 1,
                 tokens: 1_048_584,
-                cost_micro_cny: 3_145_800
+                cost_micro_cny: 4_194_400
             }
         );
         assert_eq!(Amount::default().reserve(quote, quote), Ok(quote));
@@ -355,7 +355,7 @@ mod tests {
             Amount {
                 attempts: 1,
                 tokens: 12,
-                cost_micro_cny: 48
+                cost_micro_cny: 64
             }
         );
         let charged = quote

@@ -52,7 +52,7 @@ mod tests {
         assert_eq!(value["profile"], "vision-journey-diagnostic-v1");
         assert_eq!(
             value["profile_sha256"],
-            "ce1b6a7ceade2a425abacb3c791fa410fbc67d9f5b011b6ff47ce602d018e5ef"
+            "a589b4cb0e4968f5624f8d4039c262ab330ecd5f9524204b39cfa868c8257839"
         );
         assert_eq!(capability_probe(["--unknown"]), None);
         assert_eq!(

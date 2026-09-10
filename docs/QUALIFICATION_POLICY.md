@@ -37,9 +37,11 @@ decision, not a change to the frozen Qualification contract below.
   causal hypothesis and independent agent plan review. Do not repeatedly
   sample an unchanged failed revision to obtain a pass or tune historical
   cohorts after seeing their results.
-- The selected iteration model is `deepseek-v4-flash-vision-exp`; the
-  unregistered Pro proposal is not executed. Selection is not evidence of
-  qualification and does not change runtime defaults or past model identities.
+- The selected iteration model is [`deepseek-flash` (DeepSeek-V4.1-Flash)](https://api-docs.deepseek.com/);
+  the
+  retired Flash aliases and the unregistered Pro proposal are not selected for
+  a new run. Selection is not evidence of provider acceptance or qualification
+  and does not change past model identities.
 - Before any paid Diagnostic, register the hypothesis, immutable commit,
   corpus/policy/prompt identities, configured and allowed response models,
   and enforceable request/token/spend ceilings. Reserve a conservative
@@ -256,7 +258,11 @@ provenance is projected from the matching durable turn; raw message values remai
 unchanged and mismatched scope, identity or chapter fails validation.
 
 The fixed profile is `tools/llm-budget/diagnostic-v1.json`: official DeepSeek
-origin, `deepseek-v4-flash-vision-exp`, thinking disabled. `limits` contains
+origin, `deepseek-flash`, thinking disabled. Its 4 input / 12 output micro-CNY
+per-token reservations cover the [official 2026-09-10 peak Flash prices](https://api-docs.deepseek.com/quick_start/pricing/)
+under a hard 10 CNY/USD bound. Recheck the official price and an authoritative
+reference FX rate before every registration, and stop if either implied
+coefficient is higher; never loosen the bound after observing a result. `limits` contains
 exactly `profile`, `max_attempts`, `max_tokens`, `max_cost_micro_cny`, and an
 absolute UTC `expires_at`. Zero allowance is valid; no renewal or refill is
 performed. Keep registration/config files mode 0600, output and ledger parent

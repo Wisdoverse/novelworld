@@ -116,7 +116,7 @@ async fn settlement_refunds_once_and_compares_the_entire_usage_tuple() {
     registration.limits = Amount {
         attempts: 2,
         tokens: quote.tokens + 12,
-        cost_micro_cny: quote.cost_micro_cny + 48,
+        cost_micro_cny: quote.cost_micro_cny + 64,
     };
     repo.provision(&registration).await.unwrap();
     let duplicates = join_all((0..8).map(|_| repo.reserve(&registration, &attempt))).await;
@@ -644,7 +644,7 @@ async fn authenticated_http_control_is_strict_scoped_and_durable() {
     assert_eq!(snapshot["binding"], binding);
     assert_eq!(
         snapshot["charged"],
-        serde_json::json!({"attempts":1,"tokens":12,"cost_micro_cny":48})
+        serde_json::json!({"attempts":1,"tokens":12,"cost_micro_cny":64})
     );
     assert_eq!(snapshot["sealed"], true);
     server.abort();

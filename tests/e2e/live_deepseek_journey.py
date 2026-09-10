@@ -5144,7 +5144,7 @@ def self_test(root: Path) -> None:
         )
         assert load_config(config_path)["model"] == EXPECTED_MODEL
         valid_config = config_path.read_text(encoding="utf-8")
-        vision_model = "deepseek-v4-flash-vision-exp"
+        vision_model = "deepseek-flash"
         config_path.write_text(
             json.dumps(
                 {
