@@ -169,7 +169,7 @@ export function useNarrativeNode(novelId: string, chapter: number, enabled: bool
   return useQuery({
     queryKey: narrativeKeys.node(novelId, chapter),
     queryFn: () => apiClient
-      .get<NarrativeNode>(`/narrative/${novelId}/${chapter}`, { timeout: 90_000 })
+      .get<NarrativeNode>(`/narrative/${novelId}/${chapter}`, { timeout: 290_000 })
       .then(response => response.data),
     enabled: enabled && !!novelId && chapter >= 1,
     staleTime: 5 * 60_000,
