@@ -19,7 +19,7 @@ fn reserve_json() -> String {
             "binding":{},
             "attempt_id":"{}",
             "provider":"deepseek",
-            "model":"deepseek-v4-flash-vision-exp",
+            "model":"deepseek-flash",
             "origin":"diagnostic",
             "operation":"judge",
             "output_limit":8192
@@ -35,7 +35,7 @@ fn settle_json() -> String {
             "binding":{},
             "attempt_id":"{}",
             "usage":{{
-                "model":"deepseek-v4-flash-vision-exp",
+                "model":"deepseek-flash",
                 "input_tokens":10,
                 "output_tokens":20,
                 "cached_input_tokens":null
@@ -125,12 +125,11 @@ fn integer_fields_reject_negative_float_and_overflow_values() {
 
 #[test]
 fn required_fields_are_required_but_cached_usage_is_optional() {
-    let missing_reserve_model =
-        reserve_json().replace("\"model\":\"deepseek-v4-flash-vision-exp\",", "");
+    let missing_reserve_model = reserve_json().replace("\"model\":\"deepseek-flash\",", "");
     assert!(serde_json::from_str::<ReserveRequest>(&missing_reserve_model).is_err());
 
     let missing_settle_usage = settle_json().replace(
-        ",\n            \"usage\":{\n                \"model\":\"deepseek-v4-flash-vision-exp\",\n                \"input_tokens\":10,\n                \"output_tokens\":20,\n                \"cached_input_tokens\":null\n            }",
+        ",\n            \"usage\":{\n                \"model\":\"deepseek-flash\",\n                \"input_tokens\":10,\n                \"output_tokens\":20,\n                \"cached_input_tokens\":null\n            }",
         "",
     );
     assert!(serde_json::from_str::<serde_json::Value>(&missing_settle_usage).is_ok());

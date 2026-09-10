@@ -196,7 +196,7 @@ async fn account_erasure_fails_closed_cascades_owned_data_and_resets_final_setup
     assert_eq!(repo.save(&target).await.unwrap(), UserSave::Saved);
     assert_eq!(repo.save(&remaining).await.unwrap(), UserSave::Saved);
     repo.save_runtime_llm_config(
-        &RuntimeLlmConfig::for_settings("deepseek", "deepseek-v4-flash", "privacy-secret", false)
+        &RuntimeLlmConfig::for_settings("deepseek", "deepseek-flash", "privacy-secret", false)
             .unwrap(),
     )
     .await

@@ -21,14 +21,18 @@ type LlmSettings = {
 
 const MODELS = {
   deepseek: [
-    { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash', hint: '速度与成本优先' },
-    { id: 'deepseek-v4-flash-vision-exp', label: 'DeepSeek V4 Flash Vision', hint: '实验模型 · 兼容接口' },
-    { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro', hint: '质量与复杂推理优先' },
+    { id: 'deepseek-flash', label: 'DeepSeek V4.1 Flash', hint: '文字与图像 · 速度与成本优先' },
   ],
   openai: [
     { id: 'gpt-4o-mini', label: 'GPT-4o mini', hint: '通用轻量模型' },
   ],
 } as const;
+
+const LEGACY_DEEPSEEK_MODELS = new Set([
+  'deepseek-v4-flash',
+  'deepseek-v4-flash-vision-exp',
+  'deepseek-v4-pro',
+]);
 
 type EditableProvider = keyof typeof MODELS;
 
@@ -47,6 +51,10 @@ export function SettingsPage() {
   const isAdmin = user?.role === 'admin';
   const models = settings && settings.provider !== 'environment' ? MODELS[settings.provider] : [];
   const isEnvironmentManaged = isAdmin && settings?.provider === 'environment';
+  const legacyDeepSeekModel = settings?.provider === 'deepseek'
+    && LEGACY_DEEPSEEK_MODELS.has(settings.model)
+    ? settings.model
+    : null;
 
   const loadSettings = useCallback(async () => {
     const principalId = user?.id;
@@ -115,7 +123,7 @@ export function SettingsPage() {
     try {
       const response = await apiClient.put<LlmSettings>('/settings/llm', {
         provider: settings.provider,
-        model: settings.model,
+        model: legacyDeepSeekModel ? MODELS.deepseek[0].id : settings.model,
         thinking_enabled: settings.thinking_enabled,
         api_key: trimmedApiKey || undefined,
       });
@@ -262,6 +270,11 @@ export function SettingsPage() {
             <label className="block text-sm font-medium text-[#3c4043]">
               模型
               <select value={settings.model} onChange={event => setSettings({ ...settings, model: event.target.value })} className="field-control mt-2">
+                {legacyDeepSeekModel && (
+                  <option value={legacyDeepSeekModel} disabled>
+                    {legacyDeepSeekModel} — 旧标识；保存后改用 DeepSeek V4.1 Flash
+                  </option>
+                )}
                 {models.map(model => <option key={model.id} value={model.id}>{model.label} — {model.hint}</option>)}
               </select>
             </label>

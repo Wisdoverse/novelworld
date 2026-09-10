@@ -352,14 +352,14 @@ class DiagnosticJourneyTest(unittest.TestCase):
         registration = self.load()
         row = {"budget_id": self.value["budget_id"], "attempt_id": str(uuid.uuid4()),
                "ordinal": 1, "operation": "setup_connection", "output_limit": 8,
-               "reservation_tokens": 1048584, "reservation_cost_micro_cny": 3145800,
+               "reservation_tokens": 1048584, "reservation_cost_micro_cny": 4194400,
                "settled": settled, "settlement_model": CONTROL.MODEL if settled else None,
                "input_tokens": 10 if settled else None, "output_tokens": 2 if settled else None,
                "cached_input_tokens": None}
         budget = {**registration.binding, **{
             key: item for key, item in self.value["limits"].items() if key != "profile"},
             "charged_attempts": 1, "charged_tokens": 12 if settled else 1048584,
-            "charged_cost_micro_cny": 48 if settled else 3145800, "sealed": False}
+            "charged_cost_micro_cny": 64 if settled else 4194400, "sealed": False}
         return registration, {"budget": budget, "receipts": [row]}
 
     def test_reconcile_metrics_bounds_receipts_against_generation_counters(self):
@@ -390,7 +390,7 @@ class DiagnosticJourneyTest(unittest.TestCase):
         second = copy.deepcopy(snapshot["receipts"][0])
         second.update(attempt_id=str(uuid.uuid4()), ordinal=2)
         snapshot["receipts"].append(second)
-        snapshot["budget"].update(charged_attempts=2, charged_tokens=24, charged_cost_micro_cny=96)
+        snapshot["budget"].update(charged_attempts=2, charged_tokens=24, charged_cost_micro_cny=128)
         first_metrics = metrics([snapshot["receipts"][0]])["counter_totals"]
         second_metrics = metrics([second])["counter_totals"]
         CONTROL.reconcile_metrics(
@@ -413,7 +413,7 @@ class DiagnosticJourneyTest(unittest.TestCase):
         changed = copy.deepcopy(snapshot)
         changed["receipts"][0]["output_tokens"] += 1
         changed["budget"]["charged_tokens"] += 1
-        changed["budget"]["charged_cost_micro_cny"] += 9
+        changed["budget"]["charged_cost_micro_cny"] += 12
         with self.assertRaises(CONTROL.DiagnosticFailure) as mismatch:
             CONTROL.reconcile_metrics(registration, changed, metrics(snapshot["receipts"]))
         self.assertEqual(mismatch.exception.code, "diagnostic_metrics_receipt_mismatch")
@@ -458,9 +458,9 @@ class DiagnosticJourneyTest(unittest.TestCase):
         after = copy.deepcopy(before)
         after["receipts"][0].update(settled=True, settlement_model=CONTROL.MODEL,
                                       input_tokens=10, output_tokens=2, cached_input_tokens=3)
-        after["budget"].update(charged_tokens=12, charged_cost_micro_cny=48, sealed=True)
+        after["budget"].update(charged_tokens=12, charged_cost_micro_cny=64, sealed=True)
         settled = CONTROL.reconcile_snapshot(registration, after, before)
-        self.assertEqual(settled["charged"], {"attempts": 1, "tokens": 12, "cost_micro_cny": 48})
+        self.assertEqual(settled["charged"], {"attempts": 1, "tokens": 12, "cost_micro_cny": 64})
         self.assertEqual(settled["unresolved_attempts"], 0)
         self.assertEqual(CONTROL.reconcile_snapshot(registration, after, after), settled)
         with self.assertRaises(CONTROL.DiagnosticFailure):
@@ -1584,11 +1584,11 @@ network_guard() {
             self.assertEqual(trace.exists(), failure == "after")
             if trace.exists(): self.assertEqual(trace.read_text().splitlines(), ["mutation"])
 
-    def test_v2_fixture_selection_and_frozen_v1_bytes(self):
+    def test_v2_fixture_selection_and_current_profile_identity(self):
         self.assertEqual(CONTROL.digest((ROOT / "tests/e2e/fixtures/h4-journey-v1.json").read_bytes()),
                          "e01d35e1bdad197876aefce1ae32f43dc93be185f9987c247ef2525c8ed0f9a9")
         self.assertEqual(CONTROL.digest((ROOT / CONTROL.PROFILE_PATH).read_bytes()),
-                         "ce1b6a7ceade2a425abacb3c791fa410fbc67d9f5b011b6ff47ce602d018e5ef")
+                         "a589b4cb0e4968f5624f8d4039c262ab330ecd5f9524204b39cfa868c8257839")
         value = copy.deepcopy(self.value)
         value["schema"] = CONTROL.REGISTRATION_SCHEMA_V2
         value["network_subnet"] = None
