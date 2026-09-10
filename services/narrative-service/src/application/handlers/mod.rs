@@ -39,6 +39,7 @@ use crate::domain::services::narrative_transition::{
 
 const MAX_NARRATIVE_PROMPT_BYTES: usize = 32 * 1024;
 const MAX_NARRATIVE_PROMPT_CHARS: usize = 16_000;
+const BRANCH_NODE_TIMEOUT: Duration = Duration::from_secs(280);
 const MAX_CONSEQUENCE_BYTES: usize = 32 * 1024;
 const MAX_CONSEQUENCE_CHARS: usize = 8_000;
 const MAX_TRANSITION_BYTES: usize = 128 * 1024;
@@ -1857,6 +1858,20 @@ impl NarrativeCommandHandler {
         chapter_number: i32,
         user_id: Uuid,
     ) -> NarrativeResult<Option<NarrativeNode>> {
+        tokio::time::timeout(
+            BRANCH_NODE_TIMEOUT,
+            self.get_branch_node_within_deadline(novel_id, chapter_number, user_id),
+        )
+        .await
+        .map_err(|_| NarrativeError::Llm(anyhow::anyhow!("branch request timed out")))?
+    }
+
+    async fn get_branch_node_within_deadline(
+        &self,
+        novel_id: Uuid,
+        chapter_number: i32,
+        user_id: Uuid,
+    ) -> NarrativeResult<Option<NarrativeNode>> {
         if chapter_number < 1 {
             return Err(NarrativeError::Validation(
                 "chapter must be at least 1".into(),
@@ -1934,21 +1949,78 @@ impl NarrativeCommandHandler {
                 "branch prompt exceeded its budget"
             )));
         }
-        let generated = self
-            .llm
-            .chat_json(user_id, NarrativeLlmTask::BranchGeneration, &prompt)
-            .await
-            .map_err(NarrativeError::Llm)
-            .and_then(|json| {
-                parse_generated_branch(&json)
-                    .map_err(|error| NarrativeError::Llm(anyhow::anyhow!(error)))
-            })?;
-        self.require_self_reader_identity(user_id, novel_id).await?;
-        if !chapter.content.contains(&generated.anchor_quote) {
-            return Err(NarrativeError::Llm(anyhow::anyhow!(
-                "generated branch anchor was not present in chapter source"
-            )));
+        let mut generated = None;
+        let mut last_error = None;
+        for attempt in 0..3 {
+            if attempt > 0 {
+                self.require_source_chapter_visible(user_id, novel_id, chapter_number)
+                    .await?;
+                self.require_self_reader_identity(user_id, novel_id).await?;
+                if let Some(committed) = self
+                    .committed_branch_node(user_id, novel_id, chapter_number)
+                    .await?
+                {
+                    return self
+                        .branch_node_if_visible(user_id, novel_id, chapter_number, Some(committed))
+                        .await;
+                }
+                if let Some(winner) = self
+                    .node_repo
+                    .find_by_chapter(novel_id, chapter_number, node_owner)
+                    .await
+                    .map_err(NarrativeError::Internal)?
+                {
+                    return self
+                        .finalize_uncommitted_branch_node(
+                            user_id,
+                            novel_id,
+                            chapter_number,
+                            Some(winner),
+                        )
+                        .await;
+                }
+                let latest_world_state = self
+                    .world_state_repo
+                    .get_or_create(user_id, novel_id)
+                    .await
+                    .map_err(NarrativeError::Internal)?;
+                if !Self::uncommitted_branch_is_eligible(&latest_world_state, chapter_number)? {
+                    return Ok(None);
+                }
+            }
+
+            let json = self
+                .llm
+                .chat_json(user_id, NarrativeLlmTask::BranchGeneration, &prompt)
+                .await
+                .map_err(NarrativeError::Llm)?;
+            let candidate = parse_generated_branch(&json).and_then(|candidate| {
+                if chapter.content.contains(&candidate.anchor_quote) {
+                    Ok(candidate)
+                } else {
+                    Err("generated branch anchor was not present in chapter source".into())
+                }
+            });
+            match candidate {
+                Ok(candidate) => {
+                    generated = Some(candidate);
+                    break;
+                }
+                Err(error) => {
+                    if attempt < 2 {
+                        tracing::debug!(%error, attempt, "branch generation failed validation; retrying");
+                    }
+                    last_error = Some(error);
+                }
+            }
         }
+        let generated = generated.ok_or_else(|| {
+            NarrativeError::Llm(anyhow::anyhow!(
+                "branch generation failed validation after 3 attempts: {:?}",
+                last_error
+            ))
+        })?;
+        self.require_self_reader_identity(user_id, novel_id).await?;
         let node = NarrativeNode::new(
             novel_id,
             chapter_number,

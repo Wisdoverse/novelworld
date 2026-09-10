@@ -1,6 +1,7 @@
 use anyhow::{bail, ensure, Result};
 use async_trait::async_trait;
 use chrono::Utc;
+use std::collections::VecDeque;
 use std::sync::{
     atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicUsize, Ordering},
     Arc, Mutex,
@@ -34,6 +35,11 @@ use crate::domain::services::narrative_transition::{
 
 const ANCHOR: &str = "城门在暮色中缓缓关闭，守卫举起火把照亮石阶。";
 
+enum BranchReply {
+    Response(String),
+    Error,
+}
+
 struct ToctouFixture {
     user_id: Uuid,
     other_user_id: Uuid,
@@ -60,6 +66,7 @@ struct ToctouFixture {
     player_chapter_read_release: Notify,
     provider_calls: AtomicUsize,
     invalid_world_transition: AtomicBool,
+    branch_replies: Mutex<VecDeque<BranchReply>>,
     provider_prompts: Mutex<Vec<String>>,
     provider_entered: Notify,
     provider_release: Notify,
@@ -182,6 +189,7 @@ impl ToctouFixture {
             player_chapter_read_release: Notify::new(),
             provider_calls: AtomicUsize::new(0),
             invalid_world_transition: AtomicBool::new(false),
+            branch_replies: Mutex::new(VecDeque::new()),
             provider_prompts: Mutex::new(vec![]),
             provider_entered: Notify::new(),
             provider_release: Notify::new(),
@@ -248,6 +256,22 @@ impl ToctouFixture {
         tokio::time::timeout(Duration::from_secs(2), self.provider_entered.notified())
             .await
             .expect("provider was not called");
+    }
+
+    fn request_branch(
+        self: &Arc<Self>,
+    ) -> tokio::task::JoinHandle<crate::application::handlers::NarrativeResult<Option<NarrativeNode>>>
+    {
+        let handler = self.handler();
+        let user_id = self.user_id;
+        let novel_id = self.novel_id;
+        let chapter = self.source_chapter;
+        tokio::spawn(async move { handler.get_branch_node(novel_id, chapter, user_id).await })
+    }
+
+    async fn release_provider(&self) {
+        self.wait_for_provider().await;
+        self.provider_release.notify_one();
     }
 
     async fn wait_for_character_list(&self) {
@@ -856,6 +880,12 @@ impl LlmPort for ToctouFixture {
         self.provider_release.notified().await;
         Ok(match task {
             NarrativeLlmTask::BranchGeneration => {
+                if let Some(reply) = self.branch_replies.lock().unwrap().pop_front() {
+                    match reply {
+                        BranchReply::Response(response) => return Ok(response),
+                        BranchReply::Error => bail!("synthetic provider error"),
+                    }
+                }
                 let private_variant = prompt.contains("霜璃")
                     && prompt.contains("只向自己公开身份的旧廷密探")
                     && prompt.contains("creative");
@@ -1970,6 +2000,197 @@ async fn branch_generation_rechecks_progress_before_returning_options() {
     assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 1);
     assert_eq!(replay.id, durable_node.id);
     assert_eq!(replay.choices.len(), 2);
+}
+
+#[tokio::test]
+async fn branch_generation_retries_each_contract_invalid_response_class() {
+    let invalid_responses = [
+        "not json".into(),
+        serde_json::json!({
+            "anchor_quote": ANCHOR,
+            "description": "",
+            "choices": []
+        })
+        .to_string(),
+        serde_json::json!({
+            "anchor_quote": "这段文字长度足够但是并不存在于章节原文之中。",
+            "description": "城门关闭前必须作出决定。",
+            "choices": [
+                {"text": "留在城内追查", "hint": "接近真相"},
+                {"text": "趁夜离开古城", "hint": "避开守卫"}
+            ]
+        })
+        .to_string(),
+    ];
+
+    for response in invalid_responses {
+        let fixture = Arc::new(ToctouFixture::new(false));
+        fixture
+            .branch_replies
+            .lock()
+            .unwrap()
+            .push_back(BranchReply::Response(response));
+        let request = fixture.request_branch();
+
+        for _ in 0..2 {
+            fixture.release_provider().await;
+        }
+        let node = request.await.unwrap().unwrap().unwrap();
+
+        assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 2);
+        let nodes = fixture.nodes.lock().unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].id, node.id);
+    }
+}
+
+#[tokio::test]
+async fn branch_generation_stops_after_three_invalid_responses() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    fixture
+        .branch_replies
+        .lock()
+        .unwrap()
+        .extend((0..3).map(|_| BranchReply::Response("not json".into())));
+    let request = fixture.request_branch();
+
+    for _ in 0..3 {
+        fixture.release_provider().await;
+    }
+    assert!(matches!(
+        request.await.unwrap(),
+        Err(NarrativeError::Llm(_))
+    ));
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 3);
+    assert!(fixture.nodes.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn branch_generation_does_not_redrive_provider_errors() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    fixture
+        .branch_replies
+        .lock()
+        .unwrap()
+        .push_back(BranchReply::Error);
+    let request = fixture.request_branch();
+
+    fixture.release_provider().await;
+    assert!(matches!(
+        request.await.unwrap(),
+        Err(NarrativeError::Llm(_))
+    ));
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 1);
+    assert!(fixture.nodes.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn branch_generation_does_not_retry_after_progress_rewind() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    fixture
+        .branch_replies
+        .lock()
+        .unwrap()
+        .push_back(BranchReply::Response("not json".into()));
+    let request = fixture.request_branch();
+
+    fixture.wait_for_provider().await;
+    fixture.current_chapter.store(1, Ordering::SeqCst);
+    fixture.provider_release.notify_one();
+
+    assert!(matches!(
+        request.await.unwrap(),
+        Err(NarrativeError::ReadingProgressBehindWorld)
+    ));
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn branch_generation_does_not_retry_after_identity_switch() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    fixture
+        .branch_replies
+        .lock()
+        .unwrap()
+        .push_back(BranchReply::Response("not json".into()));
+    let request = fixture.request_branch();
+
+    fixture.wait_for_provider().await;
+    fixture.self_identity.store(false, Ordering::SeqCst);
+    fixture.provider_release.notify_one();
+
+    assert!(matches!(
+        request.await.unwrap(),
+        Err(NarrativeError::Conflict(_))
+    ));
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn branch_generation_does_not_retry_after_world_entry() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    fixture
+        .branch_replies
+        .lock()
+        .unwrap()
+        .push_back(BranchReply::Response("not json".into()));
+    let chapter = fixture.source_chapter;
+    let request = fixture.request_branch();
+
+    fixture.wait_for_provider().await;
+    fixture
+        .world_state
+        .lock()
+        .unwrap()
+        .start_open_world(&fixture.entry_context(chapter, None))
+        .unwrap();
+    fixture.provider_release.notify_one();
+
+    assert!(request.await.unwrap().unwrap().is_none());
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn branch_generation_returns_a_concurrent_winner_without_retrying() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    fixture
+        .branch_replies
+        .lock()
+        .unwrap()
+        .push_back(BranchReply::Response("not json".into()));
+    let user_id = fixture.user_id;
+    let novel_id = fixture.novel_id;
+    let chapter = fixture.source_chapter;
+    let request = fixture.request_branch();
+
+    fixture.wait_for_provider().await;
+    let winner = NarrativeNode::new(
+        novel_id,
+        chapter,
+        "另一个请求已生成分支。".into(),
+        vec![
+            NarrativeChoice {
+                index: 0,
+                text: "留在城内追查线索".into(),
+                hint: "接近真相".into(),
+                generated_consequence: None,
+            },
+            NarrativeChoice {
+                index: 1,
+                text: "趁夜离开古城".into(),
+                hint: "避开守卫".into(),
+                generated_consequence: None,
+            },
+        ],
+    )
+    .with_anchor_quote(ANCHOR.into())
+    .for_user(user_id);
+    fixture.nodes.lock().unwrap().push(winner.clone());
+    fixture.provider_release.notify_one();
+
+    let returned = request.await.unwrap().unwrap().unwrap();
+    assert_eq!(returned.id, winner.id);
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

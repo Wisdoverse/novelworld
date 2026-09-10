@@ -11,6 +11,7 @@ import {
   useGenerateGameRules,
   useCreatePlayerEntity,
   useEffectiveChapter,
+  useNarrativeNode,
   useOpenWorld,
   useStartOpenWorld,
   useSubmitNarrativeChoice,
@@ -130,6 +131,18 @@ describe('narrative error recovery', () => {
       data: { chapter_number: 2, content: 'canon chapter', generated: false },
     });
     await waitFor(() => expect(result.current.data?.content).toBe('canon chapter'));
+  });
+
+  it('keeps the branch request alive beyond the bounded server deadline', async () => {
+    vi.spyOn(apiClient, 'get').mockResolvedValue({ data: null });
+
+    renderHook(() => useNarrativeNode('novel', 7, true), { wrapper });
+
+    await waitFor(() => {
+      expect(apiClient.get).toHaveBeenCalledWith('/narrative/novel/7', {
+        timeout: 290_000,
+      });
+    });
   });
 
   it('keeps a world-turn mutation pending until the authoritative view refreshes', async () => {
