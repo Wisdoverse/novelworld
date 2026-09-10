@@ -483,22 +483,10 @@ mod tests {
     fn budget_remote_configuration_remains_strict_with_insecure_http_enabled() {
         let binding = diagnostic_binding();
         for (api_url, model, thinking_enabled) in [
-            (
-                "http://api.deepseek.com/",
-                "deepseek-v4-flash-vision-exp",
-                false,
-            ),
-            (
-                "https://api.deepseek.com/v1",
-                "deepseek-v4-flash-vision-exp",
-                false,
-            ),
+            ("http://api.deepseek.com/", "deepseek-flash", false),
+            ("https://api.deepseek.com/v1", "deepseek-flash", false),
             ("https://api.deepseek.com/", "other-model", false),
-            (
-                "https://api.deepseek.com/",
-                "deepseek-v4-flash-vision-exp",
-                true,
-            ),
+            ("https://api.deepseek.com/", "deepseek-flash", true),
         ] {
             let mut config = budget_config(&binding);
             config.api_url = api_url.into();

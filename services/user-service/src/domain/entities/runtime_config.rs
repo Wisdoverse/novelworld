@@ -28,7 +28,10 @@ impl RuntimeLlmConfig {
         let (provider, api_url) = match (provider.trim().to_lowercase().as_str(), model) {
             (
                 "deepseek",
-                "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp" | "deepseek-v4-pro",
+                "deepseek-flash"
+                | "deepseek-v4-flash"
+                | "deepseek-v4-flash-vision-exp"
+                | "deepseek-v4-pro",
             ) => ("deepseek", "https://api.deepseek.com"),
             ("openai", "gpt-4o-mini") => ("openai", "https://api.openai.com"),
             ("deepseek", _) | ("openai", _) => {
@@ -68,10 +71,9 @@ mod tests {
     #[test]
     fn provider_presets_cannot_be_used_for_ssrf() {
         let deepseek =
-            RuntimeLlmConfig::for_settings("deepseek", "deepseek-v4-flash", "secret", false)
-                .unwrap();
+            RuntimeLlmConfig::for_settings("deepseek", "deepseek-flash", "secret", false).unwrap();
         assert_eq!(deepseek.api_url, "https://api.deepseek.com");
-        assert_eq!(deepseek.model, "deepseek-v4-flash");
+        assert_eq!(deepseek.model, "deepseek-flash");
         assert!(!deepseek.thinking_enabled);
         assert!(
             RuntimeLlmConfig::for_settings("deepseek", "deepseek-v4-pro", "secret", true)
@@ -80,24 +82,31 @@ mod tests {
         );
         assert!(RuntimeLlmConfig::for_settings(
             "http://127.0.0.1",
-            "deepseek-v4-flash",
+            "deepseek-flash",
             "secret",
             false,
+        )
+        .is_err());
+        assert!(RuntimeLlmConfig::for_settings(
+            "deepseek",
+            "deepseek-flash-custom",
+            "secret",
+            false
         )
         .is_err());
     }
 
     #[test]
-    fn experimental_vision_model_uses_the_fixed_deepseek_endpoint() {
-        let config = RuntimeLlmConfig::for_settings(
-            "deepseek",
+    fn legacy_deepseek_models_keep_the_fixed_endpoint() {
+        for model in [
+            "deepseek-v4-flash",
             "deepseek-v4-flash-vision-exp",
-            "secret",
-            false,
-        )
-        .unwrap();
-
-        assert_eq!(config.api_url, "https://api.deepseek.com");
-        assert_eq!(config.model, "deepseek-v4-flash-vision-exp");
+            "deepseek-v4-pro",
+        ] {
+            let config =
+                RuntimeLlmConfig::for_settings("deepseek", model, "secret", false).unwrap();
+            assert_eq!(config.api_url, "https://api.deepseek.com");
+            assert_eq!(config.model, model);
+        }
     }
 }

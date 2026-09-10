@@ -157,7 +157,7 @@ fn control_reply(path: &str, request: &Value) -> Option<(u16, &'static str, Vec<
     if path.ends_with("/reserve") {
         json_reply(
             json!({"binding": request["binding"], "attempt_id": request["attempt_id"], "ordinal":1,
-            "reservation":{"attempts":1,"tokens":1048584,"cost_micro_cny":3145800}}),
+            "reservation":{"attempts":1,"tokens":1048584,"cost_micro_cny":4194400}}),
         )
     } else {
         assert!(path.ends_with("/settle"));

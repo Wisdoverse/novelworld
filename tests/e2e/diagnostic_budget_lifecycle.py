@@ -33,7 +33,7 @@ import urllib.request
 import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
-MODEL = "deepseek-v4-flash-vision-exp"
+MODEL = "deepseek-flash"
 KEY = "test-only"
 TOKEN = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 PROFILE = "vision-journey-diagnostic-v1"
@@ -784,7 +784,7 @@ class Lifecycle:
                                        "api_key_configured": True, "scope": "platform"}, "settings_identity_changed")
                 budget = journey.diagnostic_checkpoint("settings")
                 require(budget["charged"] == {"attempts": 0 if zero else 1, "tokens": 0 if zero else 12,
-                                              "cost_micro_cny": 0 if zero else 48}, "settings_receipts_differ")
+                                              "cost_micro_cny": 0 if zero else 64}, "settings_receipts_differ")
                 # Readiness and ledger persistence, not a second paid call.
                 journey.collect_metrics("before-restart", ["user-service", "agent-service"])
                 journey.collect_response_models("before-restart", ["user-service", "agent-service"])
@@ -924,7 +924,7 @@ class Lifecycle:
         for row in receipts:
             require(row["operation"] == "setup_connection" and row["output_limit"] == 8
                     and row["reservation_tokens"] == 1048584
-                    and row["reservation_cost_micro_cny"] == 3145800, "receipt_reservation_mismatch")
+                    and row["reservation_cost_micro_cny"] == 4194400, "receipt_reservation_mismatch")
             actual = tuple(row[key] for key in ("settlement_model", "input_tokens", "output_tokens", "cached_input_tokens"))
             require(actual == ((MODEL, 10, 2, None) if row["settled"] else (None,) * 4),
                     "receipt_usage_mismatch")
@@ -950,25 +950,32 @@ class Lifecycle:
         self.register()
         before, stats = self.charged(), self.state()
         require(http(self.owner_origin, "/settings/llm", "PUT", settings, headers)[0] == 200, "settings_test_failed")
-        self.verify_delta(before, stats, (1, 12, 48), 1, 1)
+        self.verify_delta(before, stats, (1, 12, 64), 1, 1)
         for kind, mode, provider_mode, control_mode, expect, delta, count, settles in (
-            ("direct", "sync", "ok", "ok", "success", (1, 12, 48), 1, 1),
-            ("static", "sync", "ok", "ok", "success", (1, 12, 48), 1, 1),
-            ("runtime", "sync", "ok", "ok", "success", (1, 12, 48), 1, 1),
-            ("runtime", "stream", "ok", "ok", "success", (1, 12, 48), 1, 1),
-            ("direct", "sync", "empty", "ok", "success", (2, 24, 96), 2, 2),
-            ("direct", "sync", "retry", "ok", "success", (2, 1048596, 3145848), 2, 1),
-            ("direct", "drop", "ok", "ok", "success", (1, 1048584, 3145800), 1, 0),
-            ("direct", "sync", "missing", "ok", "evidence", (1, 1048584, 3145800), 1, 0),
-            ("direct", "sync", "malformed", "ok", "evidence", (1, 1048584, 3145800), 1, 0),
-            ("direct", "sync", "conflicting", "ok", "evidence", (1, 1048584, 3145800), 1, 0),
-            ("direct", "sync", "empty-malformed", "ok", "evidence", (1, 1048584, 3145800), 1, 0),
-            ("direct", "sync", "ok", "lose_reserve", "control", (1, 1048584, 3145800), 0, 0),
-            ("direct", "sync", "ok", "lose_settle", "evidence", (1, 12, 48), 1, 1),
-            ("runtime", "stream", "missing", "ok", "evidence", (1, 1048584, 3145800), 1, 0),
-            ("runtime", "stream", "malformed", "ok", "evidence", (1, 1048584, 3145800), 1, 0),
-            ("runtime", "stream", "ok", "lose_settle", "evidence", (1, 12, 48), 1, 1),
+            ("direct", "sync", "ok", "ok", "success", (1, 12, 64), 1, 1),
+            ("static", "sync", "ok", "ok", "success", (1, 12, 64), 1, 1),
+            ("runtime", "sync", "ok", "ok", "success", (1, 12, 64), 1, 1),
+            ("runtime", "stream", "ok", "ok", "success", (1, 12, 64), 1, 1),
+            ("direct", "sync", "empty", "ok", "success", (2, 24, 128), 2, 2),
+            ("direct", "sync", "retry", "ok", "success", (2, 1048596, 4194464), 2, 1),
+            ("direct", "drop", "ok", "ok", "success", (1, 1048584, 4194400), 1, 0),
+            ("direct", "sync", "missing", "ok", "evidence", (1, 1048584, 4194400), 1, 0),
+            ("direct", "sync", "malformed", "ok", "evidence", (1, 1048584, 4194400), 1, 0),
+            ("direct", "sync", "conflicting", "ok", "evidence", (1, 1048584, 4194400), 1, 0),
+            ("direct", "sync", "empty-malformed", "ok", "evidence", (1, 1048584, 4194400), 1, 0),
+            ("direct", "sync", "ok", "lose_reserve", "control", (1, 1048584, 4194400), 0, 0),
+            ("direct", "sync", "ok", "lose_settle", "evidence", (1, 12, 64), 1, 1),
+            ("runtime", "stream", "missing", "ok", "evidence", (1, 1048584, 4194400), 1, 0),
+            ("runtime", "stream", "malformed", "ok", "evidence", (1, 1048584, 4194400), 1, 0),
+            ("runtime", "stream", "ok", "lose_settle", "evidence", (1, 12, 64), 1, 1),
         ):
+            if (kind, mode, provider_mode, control_mode) == ("runtime", "stream", "missing", "ok"):
+                # Unknown outcomes retain their full reservation. Continue the
+                # remaining cases under a newly provisioned synthetic budget;
+                # never weaken the profile's 35 CNY authorization ceiling.
+                self.remove(self.owner)
+                self.register()
+                print("diagnostic lifecycle: fresh synthetic budget explicitly provisioned", flush=True)
             self.mode(provider_mode, control_mode)
             before, stats = self.charged(), self.state()
             self.driver(kind, mode, expect, provider_mode.startswith("empty"))
@@ -983,7 +990,7 @@ class Lifecycle:
         require(self.charged() == retained, "recreation_refilled_budget")
         before, stats = self.charged(), self.state()
         self.driver("runtime")
-        self.verify_delta(before, stats, (1, 12, 48), 1, 1)
+        self.verify_delta(before, stats, (1, 12, 64), 1, 1)
         self.release_refusal_checks()
         # Missing registration refuses normal startup; it cannot recreate the row.
         self.remove(self.owner)

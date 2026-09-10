@@ -31,7 +31,7 @@ vi.mock('@/features/llm-usage', () => ({
 const settingsForCurrentUser = () => ({
   scope: 'platform',
   provider: 'deepseek',
-  model: 'deepseek-v4-flash',
+  model: 'deepseek-flash',
   thinking_enabled: false,
   api_key_configured: useAuthStore.getState().user?.role === 'admin',
 });
@@ -67,12 +67,12 @@ describe('SettingsPage', () => {
     });
   });
 
-  it('updates the DeepSeek model and thinking mode without resending the key', async () => {
+  it('updates DeepSeek thinking mode without resending the key', async () => {
     mocks.put.mockResolvedValue({
       data: {
         scope: 'platform',
         provider: 'deepseek',
-        model: 'deepseek-v4-pro',
+        model: 'deepseek-flash',
         thinking_enabled: true,
         api_key_configured: true,
       },
@@ -81,13 +81,14 @@ describe('SettingsPage', () => {
 
     await screen.findByRole('heading', { name: '平台模型设置' });
     expect(screen.getByText('platform usage for admin')).toBeTruthy();
-    fireEvent.change(screen.getByLabelText('模型'), { target: { value: 'deepseek-v4-pro' } });
+    expect(Array.from((screen.getByLabelText('模型') as HTMLSelectElement).options)
+      .map(option => option.value)).toEqual(['deepseek-flash']);
     fireEvent.click(screen.getByRole('checkbox'));
     fireEvent.click(screen.getByRole('button', { name: '保存平台设置' }));
 
     await waitFor(() => expect(mocks.put).toHaveBeenCalledWith('/settings/llm', {
       provider: 'deepseek',
-      model: 'deepseek-v4-pro',
+      model: 'deepseek-flash',
       thinking_enabled: true,
       api_key: undefined,
     }));
@@ -99,7 +100,7 @@ describe('SettingsPage', () => {
       data: {
         scope: 'platform',
         provider: 'deepseek',
-        model: 'deepseek-v4-flash',
+        model: 'deepseek-flash',
         thinking_enabled: false,
         api_key_configured: true,
       },
@@ -114,18 +115,31 @@ describe('SettingsPage', () => {
 
     await waitFor(() => expect(mocks.put).toHaveBeenCalledWith('/settings/llm', {
       provider: 'deepseek',
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-flash',
       thinking_enabled: false,
       api_key: 'first-platform-key',
     }));
   });
 
-  it('offers and saves the DeepSeek V4 Flash Vision experimental model', async () => {
+  it.each([
+    'deepseek-v4-flash',
+    'deepseek-v4-flash-vision-exp',
+    'deepseek-v4-pro',
+  ])('discloses legacy model %s and canonicalizes only an explicit save', async legacyModel => {
+    mocks.get.mockResolvedValue({
+      data: {
+        scope: 'platform',
+        provider: 'deepseek',
+        model: legacyModel,
+        thinking_enabled: false,
+        api_key_configured: true,
+      },
+    });
     mocks.put.mockResolvedValue({
       data: {
         scope: 'platform',
         provider: 'deepseek',
-        model: 'deepseek-v4-flash-vision-exp',
+        model: 'deepseek-flash',
         thinking_enabled: false,
         api_key_configured: true,
       },
@@ -133,14 +147,16 @@ describe('SettingsPage', () => {
     render(<MemoryRouter><SettingsPage /></MemoryRouter>);
 
     await screen.findByRole('heading', { name: '平台模型设置' });
-    fireEvent.change(screen.getByLabelText('模型'), {
-      target: { value: 'deepseek-v4-flash-vision-exp' },
-    });
+    const select = screen.getByLabelText('模型') as HTMLSelectElement;
+    expect(select.value).toBe(legacyModel);
+    expect(select.selectedOptions[0]?.textContent).toContain(legacyModel);
+    expect(select.selectedOptions[0]?.disabled).toBe(true);
+    expect(mocks.put).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: '保存平台设置' }));
 
     await waitFor(() => expect(mocks.put).toHaveBeenCalledWith('/settings/llm', {
       provider: 'deepseek',
-      model: 'deepseek-v4-flash-vision-exp',
+      model: 'deepseek-flash',
       thinking_enabled: false,
       api_key: undefined,
     }));
@@ -205,7 +221,7 @@ describe('SettingsPage', () => {
       data: {
         scope: 'user',
         provider: 'deepseek',
-        model: 'deepseek-v4-flash',
+        model: 'deepseek-flash',
         thinking_enabled: false,
         api_key_configured: true,
       },
@@ -235,7 +251,7 @@ describe('SettingsPage', () => {
     render(<MemoryRouter><SettingsPage /></MemoryRouter>);
 
     await screen.findByRole('heading', { name: '个人模型设置' });
-    expect((screen.getByLabelText('模型') as HTMLSelectElement).value).toBe('deepseek-v4-flash');
+    expect((screen.getByLabelText('模型') as HTMLSelectElement).value).toBe('deepseek-flash');
     expect(screen.getByLabelText('个人 API Key').hasAttribute('required')).toBe(true);
     expect(screen.queryByText(/usage for reader/)).toBeNull();
   });
@@ -268,7 +284,7 @@ describe('SettingsPage', () => {
       data: {
         scope: 'user',
         provider: 'deepseek',
-        model: 'deepseek-v4-flash',
+        model: 'deepseek-flash',
         thinking_enabled: false,
         api_key_configured: true,
       },
@@ -285,7 +301,7 @@ describe('SettingsPage', () => {
 
     await waitFor(() => expect(mocks.put).toHaveBeenCalledWith('/settings/llm', {
       provider: 'deepseek',
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-flash',
       thinking_enabled: false,
       api_key: 'sk-reader',
     }));
