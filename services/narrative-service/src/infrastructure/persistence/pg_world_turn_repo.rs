@@ -7,8 +7,8 @@ use uuid::Uuid;
 use crate::domain::{
     entities::{narrative_node::WorldState, world_session::WorldEntryContext},
     repositories::{
-        BeginWorldTurn, MemoryProjectionStatus, WorldTurnClaim, WorldTurnJournalEntry,
-        WorldTurnRepository, WorldTurnResult,
+        BeginWorldTurn, MemoryProjectionStatus, RecoverableWorldTurn, WorldTurnClaim,
+        WorldTurnJournalEntry, WorldTurnRepository, WorldTurnResult,
     },
 };
 
@@ -79,6 +79,27 @@ struct WorldStateRow {
     novel_id: Uuid,
     state: serde_json::Value,
     updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, FromRow)]
+struct RecoverableTurnRow {
+    turn_id: Uuid,
+    action: serde_json::Value,
+    expected_turn_number: i64,
+}
+
+impl TryFrom<RecoverableTurnRow> for RecoverableWorldTurn {
+    type Error = anyhow::Error;
+
+    fn try_from(row: RecoverableTurnRow) -> Result<Self> {
+        ensure!(!row.turn_id.is_nil() && row.expected_turn_number >= 0);
+        Ok(Self {
+            turn_id: row.turn_id,
+            action: serde_json::from_value(row.action)
+                .context("recoverable world action is invalid")?,
+            expected_turn_number: row.expected_turn_number,
+        })
+    }
 }
 
 impl From<WorldStateRow> for WorldState {
@@ -339,6 +360,26 @@ impl WorldTurnRepository for PgWorldTurnRepository {
         Ok(BeginWorldTurn::InProgress {
             retry_after_seconds: self.active_retry_after(claim).await?,
         })
+    }
+
+    async fn recoverable_turn(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+    ) -> Result<Option<RecoverableWorldTurn>> {
+        sqlx::query_as::<_, RecoverableTurnRow>(
+            r#"
+            SELECT id AS turn_id, action, expected_turn_number
+            FROM world_turns
+            WHERE user_id = $1 AND novel_id = $2 AND status = 'in_progress'
+            "#,
+        )
+        .bind(user_id)
+        .bind(novel_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(TryInto::try_into)
+        .transpose()
     }
 
     async fn rotate_pending_memory_projections(

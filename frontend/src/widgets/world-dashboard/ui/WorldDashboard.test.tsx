@@ -340,6 +340,47 @@ describe('WorldDashboard', () => {
     }
   });
 
+  it('recovers an active server turn after reload when session storage is unavailable', async () => {
+    const turnId = 'e3744cac-e557-4d78-9d91-9ba060e81c5f';
+    const action = { kind: 'travel' as const, target_id: 'gate', intent: '穿过旧城门' };
+    const getItem = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new Error('storage blocked');
+    });
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('storage blocked');
+    });
+    mocks.submit.mockResolvedValue({ memory_projection_status: 'saved' });
+    try {
+      render(
+        <WorldDashboard
+          novelId="novel"
+          view={{
+            ...view,
+            journal: [],
+            recoverable_turn: {
+              turn_id: turnId,
+              action,
+              expected_turn_number: 1,
+            },
+          }}
+        />,
+      );
+
+      expect(mocks.submit).not.toHaveBeenCalled();
+      expect(screen.getByRole('button', { name: '执行行动' }).hasAttribute('disabled')).toBe(true);
+      fireEvent.click(screen.getByRole('button', { name: '继续确认结果' }));
+      await waitFor(() => expect(mocks.submit).toHaveBeenCalledOnce());
+      expect(mocks.submit.mock.calls[0][0]).toEqual({
+        action,
+        idempotencyKey: turnId,
+        expectedTurnNumber: 1,
+      });
+    } finally {
+      getItem.mockRestore();
+      setItem.mockRestore();
+    }
+  });
+
   it('reconstructs the same pending request after tab storage is lost', async () => {
     mocks.submit.mockRejectedValue({ outcomeUnknown: true, message: 'connection lost' });
     const page = render(<WorldDashboard novelId="novel" view={view} />);

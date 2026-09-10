@@ -5073,6 +5073,39 @@ async fn production_repositories_match_fresh_schema() {
         BeginWorldTurn::Acquired { attempt, .. } => attempt,
         result => panic!("unexpected world turn reservation: {result:?}"),
     };
+    let recoverable = world_turn_repo
+        .recoverable_turn(user_id, novel_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recoverable.turn_id, claim.id);
+    assert_eq!(recoverable.action, action);
+    assert_eq!(recoverable.expected_turn_number, 0);
+    assert!(world_turn_repo
+        .recoverable_turn(Uuid::new_v4(), novel_id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(world_turn_repo
+        .recoverable_turn(user_id, Uuid::new_v4())
+        .await
+        .unwrap()
+        .is_none());
+    sqlx::query("UPDATE world_turns SET action = '{\"kind\":\"travel\"}'::jsonb WHERE id = $1")
+        .bind(claim.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(world_turn_repo
+        .recoverable_turn(user_id, novel_id)
+        .await
+        .is_err());
+    sqlx::query("UPDATE world_turns SET action = $2 WHERE id = $1")
+        .bind(claim.id)
+        .bind(serde_json::to_value(&action).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
     let competing = WorldTurnClaim {
         id: Uuid::new_v4(),
         request_fingerprint: vec![8; 32],
@@ -5115,6 +5148,11 @@ async fn production_repositories_match_fresh_schema() {
         .complete_turn(&claim, attempt, &world_transition, &world_context)
         .await
         .unwrap();
+    assert!(world_turn_repo
+        .recoverable_turn(user_id, novel_id)
+        .await
+        .unwrap()
+        .is_none());
     assert_eq!(
         completed
             .world_state
@@ -5218,6 +5256,15 @@ async fn production_repositories_match_fresh_schema() {
         BeginWorldTurn::Acquired { attempt, .. } => attempt,
         result => panic!("unexpected rollback reservation: {result:?}"),
     };
+    assert_eq!(
+        world_turn_repo
+            .recoverable_turn(user_id, novel_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .turn_id,
+        rollback_claim.id
+    );
     let rollback_transition = WorldTurnTransition {
         inventory_additions: vec![],
         inventory_removals: vec!["不存在的物品".into()],
@@ -5258,6 +5305,11 @@ async fn production_repositories_match_fresh_schema() {
         .fail_turn(rollback_claim.id, rollback_attempt, "test_cleanup")
         .await
         .unwrap());
+    assert!(world_turn_repo
+        .recoverable_turn(user_id, novel_id)
+        .await
+        .unwrap()
+        .is_none());
 
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)

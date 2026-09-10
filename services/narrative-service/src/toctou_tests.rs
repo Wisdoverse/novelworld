@@ -25,9 +25,9 @@ use crate::domain::repositories::{
     BeginWorldTurn, ChapterInfo, ChapterReadRepository, CharacterBrief, CharacterContextReadModel,
     CharacterContextSnapshotRepository, ChoiceCommit, ChoiceCommitResult, MemoryProjectionStatus,
     NarrativeNodeRepository, NovelInfo, PlayerChapter, PlayerChapterOrigin,
-    PlayerChapterRepository, PlayerEntryContext, ReadingProgressSnapshot, UserChoiceRecord,
-    UserChoiceRepository, WorldStateRepository, WorldTurnClaim, WorldTurnJournalEntry,
-    WorldTurnRepository, WorldTurnResult,
+    PlayerChapterRepository, PlayerEntryContext, ReadingProgressSnapshot, RecoverableWorldTurn,
+    UserChoiceRecord, UserChoiceRepository, WorldStateRepository, WorldTurnClaim,
+    WorldTurnJournalEntry, WorldTurnRepository, WorldTurnResult,
 };
 use crate::domain::services::narrative_transition::{
     CanonContext, CanonEntityRef, NarrativeTransition, TransitionEvent,
@@ -58,6 +58,7 @@ struct ToctouFixture {
     characters: Mutex<Vec<CharacterBrief>>,
     world_state: Mutex<WorldState>,
     other_world_state: Mutex<WorldState>,
+    world_state_read_sequence: Mutex<VecDeque<WorldState>>,
     nodes: Mutex<Vec<NarrativeNode>>,
     choice: Mutex<Option<UserChoiceRecord>>,
     player_chapter: Mutex<Option<PlayerChapter>>,
@@ -75,6 +76,7 @@ struct ToctouFixture {
     journal_entered: Notify,
     journal_release: Notify,
     journal: Mutex<Vec<WorldTurnJournalEntry>>,
+    recoverable_turn: Mutex<Option<RecoverableWorldTurn>>,
     block_next_node_read: AtomicBool,
     node_read_entered: Notify,
     node_read_release: Notify,
@@ -181,6 +183,7 @@ impl ToctouFixture {
             characters: Mutex::new(vec![]),
             world_state: Mutex::new(world_state),
             other_world_state: Mutex::new(other_world_state),
+            world_state_read_sequence: Mutex::new(VecDeque::new()),
             nodes: Mutex::new(node.into_iter().collect()),
             choice: Mutex::new(None),
             player_chapter: Mutex::new(None),
@@ -198,6 +201,7 @@ impl ToctouFixture {
             journal_entered: Notify::new(),
             journal_release: Notify::new(),
             journal: Mutex::new(vec![]),
+            recoverable_turn: Mutex::new(None),
             block_next_node_read: AtomicBool::new(false),
             node_read_entered: Notify::new(),
             node_read_release: Notify::new(),
@@ -441,6 +445,14 @@ impl ToctouFixture {
             completed_at: now,
         }
     }
+
+    fn with_turn_number(mut state: WorldState, turn_number: i64) -> WorldState {
+        let mut session = state.open_world().unwrap().unwrap();
+        session.turn_number = turn_number;
+        session.world_time = turn_number;
+        state.state["open_world"] = serde_json::to_value(session).unwrap();
+        state
+    }
 }
 
 #[async_trait]
@@ -582,6 +594,9 @@ impl WorldStateRepository for ToctouFixture {
     async fn get_or_create(&self, user_id: Uuid, novel_id: Uuid) -> Result<WorldState> {
         ensure!(novel_id == self.novel_id);
         if user_id == self.user_id {
+            if let Some(state) = self.world_state_read_sequence.lock().unwrap().pop_front() {
+                return Ok(state);
+            }
             Ok(self.world_state.lock().unwrap().clone())
         } else if user_id == self.other_user_id {
             Ok(self.other_world_state.lock().unwrap().clone())
@@ -1011,6 +1026,15 @@ impl WorldTurnRepository for ToctouFixture {
             result: Box::new(result),
             memory_projection: *self.memory_projection_status.lock().unwrap(),
         })
+    }
+
+    async fn recoverable_turn(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+    ) -> Result<Option<RecoverableWorldTurn>> {
+        ensure!(user_id == self.user_id && novel_id == self.novel_id);
+        Ok(self.recoverable_turn.lock().unwrap().clone())
     }
 
     async fn rotate_pending_memory_projections(
@@ -2439,6 +2463,127 @@ async fn open_world_view_does_not_mix_a_future_journal_with_an_older_state_snaps
             .collect::<Vec<_>>(),
         vec![1]
     );
+}
+
+#[tokio::test]
+async fn open_world_view_recovers_a_context_valid_active_turn_only() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    let entry_context = fixture.entry_context(fixture.source_chapter, None);
+    fixture
+        .world_state
+        .lock()
+        .unwrap()
+        .start_open_world(&entry_context)
+        .unwrap();
+    let turn_id = Uuid::new_v4();
+    let valid = RecoverableWorldTurn {
+        turn_id,
+        action: WorldAction {
+            kind: WorldActionKind::PursueGoal,
+            target_id: None,
+            intent: "寻找下一步线索".into(),
+        },
+        expected_turn_number: 0,
+    };
+    *fixture.recoverable_turn.lock().unwrap() = Some(valid.clone());
+
+    let view = fixture
+        .handler()
+        .get_open_world(fixture.user_id, fixture.novel_id)
+        .await
+        .unwrap();
+    assert_eq!(view.recoverable_turn, Some(valid));
+    let serialized = serde_json::to_value(&view).unwrap();
+    let recovery = serialized["recoverable_turn"].as_object().unwrap();
+    assert_eq!(recovery.len(), 3);
+    assert!(recovery.contains_key("turn_id"));
+    assert!(recovery.contains_key("action"));
+    assert!(recovery.contains_key("expected_turn_number"));
+
+    *fixture.recoverable_turn.lock().unwrap() = Some(RecoverableWorldTurn {
+        turn_id,
+        action: WorldAction {
+            kind: WorldActionKind::Travel,
+            target_id: Some("unknown-place".into()),
+            intent: "越过未验证目标".into(),
+        },
+        expected_turn_number: 0,
+    });
+    let invalid = fixture
+        .handler()
+        .get_open_world(fixture.user_id, fixture.novel_id)
+        .await
+        .unwrap();
+    assert_eq!(invalid.recoverable_turn, None);
+    assert!(serde_json::to_value(invalid)
+        .unwrap()
+        .get("recoverable_turn")
+        .is_none());
+}
+
+#[tokio::test]
+async fn open_world_view_retries_when_a_turn_completes_between_reads() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    let entry_context = fixture.entry_context(fixture.source_chapter, None);
+    fixture
+        .world_state
+        .lock()
+        .unwrap()
+        .start_open_world(&entry_context)
+        .unwrap();
+    fixture.block_next_journal.store(true, Ordering::SeqCst);
+    let handler = Arc::new(fixture.handler());
+    let reader = handler.clone();
+    let user_id = fixture.user_id;
+    let novel_id = fixture.novel_id;
+    let in_flight = tokio::spawn(async move { reader.get_open_world(user_id, novel_id).await });
+
+    fixture.wait_for_journal().await;
+    let next = ToctouFixture::with_turn_number(fixture.world_state.lock().unwrap().clone(), 1);
+    *fixture.world_state.lock().unwrap() = next;
+    fixture
+        .journal
+        .lock()
+        .unwrap()
+        .push(ToctouFixture::journal_entry(1));
+    fixture.journal_release.notify_one();
+
+    let view = in_flight.await.unwrap().unwrap();
+    assert_eq!(view.session.turn_number, 1);
+    assert_eq!(
+        view.journal
+            .iter()
+            .map(|entry| entry.turn_number)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert_eq!(fixture.journal_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn open_world_view_fails_closed_after_repeated_state_drift() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    let entry_context = fixture.entry_context(fixture.source_chapter, None);
+    fixture
+        .world_state
+        .lock()
+        .unwrap()
+        .start_open_world(&entry_context)
+        .unwrap();
+    let initial = fixture.world_state.lock().unwrap().clone();
+    fixture.world_state_read_sequence.lock().unwrap().extend([
+        initial.clone(),
+        ToctouFixture::with_turn_number(initial.clone(), 1),
+        ToctouFixture::with_turn_number(initial, 2),
+    ]);
+
+    let error = fixture
+        .handler()
+        .get_open_world(fixture.user_id, fixture.novel_id)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, NarrativeError::Conflict(_)));
+    assert_eq!(fixture.journal_calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
