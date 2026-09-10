@@ -27,8 +27,9 @@ use crate::domain::repositories::{
     BeginWorldTurn, ChapterInfo, ChapterReadRepository, CharacterBrief,
     CharacterContextSnapshotRepository, ChoiceCommit, GameRuleTemplateRequestError,
     MemoryProjectionStatus, NarrativeNodeRepository, NovelInfo, PlayerChapter, PlayerChapterOrigin,
-    PlayerChapterRepository, UserChoiceRecord, UserChoiceRepository, WorldStateRepository,
-    WorldTurnClaim, WorldTurnJournalEntry, WorldTurnRepository, WorldTurnResult,
+    PlayerChapterRepository, RecoverableWorldTurn, UserChoiceRecord, UserChoiceRepository,
+    WorldStateRepository, WorldTurnClaim, WorldTurnJournalEntry, WorldTurnRepository,
+    WorldTurnResult,
 };
 use crate::domain::services::narrative_engine::{
     build_branch_prompt, build_player_chapter_prompt, is_chinese_narrative, parse_generated_branch,
@@ -496,6 +497,8 @@ pub struct OpenWorldView {
     pub session: WorldSession,
     pub world_state: WorldState,
     pub journal: Vec<WorldTurnJournalEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recoverable_turn: Option<RecoverableWorldTurn>,
 }
 
 /// HTTP-facing completion view. The committed result remains the single
@@ -1378,36 +1381,65 @@ impl NarrativeCommandHandler {
         &self,
         user_id: Uuid,
         novel_id: Uuid,
-        world_state: WorldState,
+        mut world_state: WorldState,
     ) -> NarrativeResult<OpenWorldView> {
-        let player = world_state
-            .player_entity()
-            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
-            .ok_or(NarrativeError::NotFound)?;
-        let session = world_state
-            .open_world()
-            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
-            .ok_or(NarrativeError::NotFound)?;
-        self.require_world_source_visible(user_id, novel_id, &world_state)
-            .await?;
-        let journal = self
-            .world_turn_repo
-            .journal(user_id, novel_id, MAX_WORLD_JOURNAL_ENTRIES)
-            .await
-            .map_err(NarrativeError::Internal)?
-            .into_iter()
-            .filter(|entry| entry.turn_number <= session.turn_number)
-            .collect();
-        self.require_self_reader_identity(user_id, novel_id).await?;
-        self.require_world_source_visible(user_id, novel_id, &world_state)
-            .await?;
-        self.require_self_reader_identity(user_id, novel_id).await?;
-        Ok(OpenWorldView {
-            player,
-            session,
-            world_state,
-            journal,
-        })
+        for attempt in 0..2 {
+            let player = world_state
+                .player_entity()
+                .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
+                .ok_or(NarrativeError::NotFound)?;
+            let session = world_state
+                .open_world()
+                .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
+                .ok_or(NarrativeError::NotFound)?;
+            self.require_world_source_visible(user_id, novel_id, &world_state)
+                .await?;
+            let journal = self
+                .world_turn_repo
+                .journal(user_id, novel_id, MAX_WORLD_JOURNAL_ENTRIES)
+                .await
+                .map_err(NarrativeError::Internal)?
+                .into_iter()
+                .filter(|entry| entry.turn_number <= session.turn_number)
+                .collect();
+            let recoverable_turn = self
+                .world_turn_repo
+                .recoverable_turn(user_id, novel_id)
+                .await
+                .map_err(NarrativeError::Internal)?
+                .filter(|turn| {
+                    turn.expected_turn_number == session.turn_number
+                        && world_state
+                            .validate_world_action(&turn.action, &session.entry_context)
+                            .is_ok()
+                });
+            let latest_world_state = self
+                .world_state_repo
+                .get_or_create(user_id, novel_id)
+                .await
+                .map_err(NarrativeError::Internal)?;
+            if latest_world_state.fingerprint() != world_state.fingerprint() {
+                if attempt == 0 {
+                    world_state = latest_world_state;
+                    continue;
+                }
+                return Err(NarrativeError::Conflict(
+                    "World state changed while building the view; reload and retry".into(),
+                ));
+            }
+            self.require_self_reader_identity(user_id, novel_id).await?;
+            self.require_world_source_visible(user_id, novel_id, &world_state)
+                .await?;
+            self.require_self_reader_identity(user_id, novel_id).await?;
+            return Ok(OpenWorldView {
+                player,
+                session,
+                world_state,
+                journal,
+                recoverable_turn,
+            });
+        }
+        unreachable!("open-world view retry loop always returns")
     }
 
     /// A successful response implies that the eligible permanent fact reached

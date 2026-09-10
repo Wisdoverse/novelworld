@@ -159,9 +159,21 @@ pub struct WorldTurnJournalEntry {
     pub completed_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoverableWorldTurn {
+    pub turn_id: Uuid,
+    pub action: WorldAction,
+    pub expected_turn_number: i64,
+}
+
 #[async_trait]
 pub trait WorldTurnRepository: Send + Sync {
     async fn begin_turn(&self, claim: &WorldTurnClaim) -> Result<BeginWorldTurn>;
+    async fn recoverable_turn(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+    ) -> Result<Option<RecoverableWorldTurn>>;
     /// Return the next bounded recovery batch and durably rotate its scan
     /// position. This is not an exclusive lease; projection writes remain
     /// idempotent and terminal acknowledgement remains compare-and-set.

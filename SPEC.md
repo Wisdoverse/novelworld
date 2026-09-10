@@ -1208,7 +1208,14 @@ rejection of the original POST establishes that no commit occurred. When local
 storage is absent but the authoritative bounded journal contains its unique
 `pending` row, the browser MUST reconstruct the exact action, turn UUID, and
 `turn_number - 1` expected revision, lock the form, and offer same-key
-compensation. A failed
+compensation. When the journal is not yet committed, the authoritative view MAY
+return the exact `in_progress` action, turn UUID, and expected revision only if
+the revision matches the current session and the action remains semantically
+valid against its sealed entry context. The view MUST reject repeated world-
+state drift rather than mix that claim with another revision. The browser MUST
+prefer either server-owned pending form over stale browser storage, lock the
+form, and require explicit same-key confirmation; expired-lease supersession
+remains unchanged. A failed
 confirmation refresh after a successful POST remains ambiguous regardless of
 that refresh response's status. `sessionStorage` covers the interval before a
 commit becomes journal-visible; committed-pending recovery does not depend on
