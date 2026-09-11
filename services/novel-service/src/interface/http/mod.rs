@@ -82,6 +82,10 @@ fn routes() -> Router<AppState> {
             get(get_canon_context),
         )
         .route(
+            "/internal/novels/{id}/characters/{character_id}/grounding-v1/{chapter}",
+            get(get_character_canon_grounding),
+        )
+        .route(
             "/internal/novels/{id}/player-entry",
             post(get_player_entry_context),
         )
@@ -359,6 +363,28 @@ async fn get_canon_context(
                 .into_response()
         }
     }
+}
+
+async fn get_character_canon_grounding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((novel_id, character_id, checkpoint)): Path<(Uuid, Uuid, i32)>,
+) -> Response {
+    if !internal_request_authorized(&state, &headers) {
+        return private_no_store(api_error(
+            StatusCode::UNAUTHORIZED,
+            "Invalid internal service identity",
+        ));
+    }
+    let Some(user_id) = extract_user_id(&headers) else {
+        return private_no_store(StatusCode::UNAUTHORIZED.into_response());
+    };
+    progress_bound_read_response(
+        state
+            .progress_handler
+            .get_character_canon_grounding(user_id, novel_id, character_id, checkpoint)
+            .await,
+    )
 }
 
 #[derive(Debug, Deserialize)]

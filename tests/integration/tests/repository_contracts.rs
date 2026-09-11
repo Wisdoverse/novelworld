@@ -8,8 +8,8 @@ use agent_service::{
             TextSummarizer, WorldContextPort,
         },
         repositories::{
-            BeginChatTurn, CharacterInfo, CharacterInfoRepository, ChatRepository, ChatTurnClaim,
-            MemoryRepository,
+            BeginChatTurn, CharacterCanonGrounding, CharacterInfo, CharacterInfoRepository,
+            ChatRepository, ChatTurnClaim, MemoryRepository,
         },
         services::memory_manager::MemoryManager,
     },
@@ -100,6 +100,26 @@ struct CausalChatCharacter {
 impl CharacterInfoRepository for CausalChatCharacter {
     async fn find_by_id(&self, id: Uuid, user_id: Uuid) -> anyhow::Result<Option<CharacterInfo>> {
         Ok((id == self.character.id && user_id == self.user_id).then(|| self.character.clone()))
+    }
+
+    async fn find_canon_grounding(
+        &self,
+        novel_id: Uuid,
+        character_id: Uuid,
+        checkpoint_chapter: i32,
+        user_id: Uuid,
+    ) -> anyhow::Result<Option<CharacterCanonGrounding>> {
+        Ok((novel_id == self.character.novel_id
+            && character_id == self.character.id
+            && user_id == self.user_id)
+            .then(|| CharacterCanonGrounding {
+                novel_id,
+                model_version: 1,
+                checkpoint_chapter,
+                character_id,
+                goals: vec![],
+                relationships: vec![],
+            }))
     }
 }
 
@@ -7631,6 +7651,23 @@ struct MisroutedSummaryCharacter(CharacterInfo);
 impl CharacterInfoRepository for MisroutedSummaryCharacter {
     async fn find_by_id(&self, _: Uuid, _: Uuid) -> anyhow::Result<Option<CharacterInfo>> {
         Ok(Some(self.0.clone()))
+    }
+
+    async fn find_canon_grounding(
+        &self,
+        novel_id: Uuid,
+        character_id: Uuid,
+        checkpoint_chapter: i32,
+        _user_id: Uuid,
+    ) -> anyhow::Result<Option<CharacterCanonGrounding>> {
+        Ok(Some(CharacterCanonGrounding {
+            novel_id,
+            model_version: 1,
+            checkpoint_chapter,
+            character_id,
+            goals: vec![],
+            relationships: vec![],
+        }))
     }
 }
 struct UnavailableSummaryCache(bool);

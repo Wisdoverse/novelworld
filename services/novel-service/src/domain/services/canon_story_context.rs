@@ -9,6 +9,12 @@ use crate::domain::entities::{
 };
 
 const MAX_CONTEXT_ITEMS: usize = 256;
+const MAX_CHARACTER_GOALS: usize = 6;
+const MAX_CHARACTER_RELATIONSHIPS: usize = 8;
+const MAX_CHARACTER_NAME_CHARS: usize = 100;
+const MAX_RELATIONSHIP_KIND_CHARS: usize = 50;
+const MAX_GROUNDING_DESCRIPTION_CHARS: usize = 200;
+const MAX_GROUNDING_SOURCE_CHAPTERS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -65,6 +71,35 @@ pub struct CanonCharacterGoalRef {
     pub source_chapters: Vec<i32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CharacterCanonGrounding {
+    pub novel_id: Uuid,
+    pub model_version: i32,
+    pub checkpoint_chapter: i32,
+    pub character_id: Uuid,
+    pub goals: Vec<CharacterCanonGoal>,
+    pub relationships: Vec<CharacterCanonRelationship>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CharacterCanonGoal {
+    pub description: String,
+    pub source_chapters: Vec<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CharacterCanonRelationship {
+    pub other_character_id: Uuid,
+    pub other_character_name: String,
+    pub direction: String,
+    pub kind: String,
+    pub description: String,
+    pub source_chapters: Vec<i32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorldEntryContext {
@@ -89,6 +124,8 @@ pub enum CanonContextError {
     TooLarge(&'static str),
     #[error("world checkpoint must be within the unlocked chapter range")]
     InvalidWorldRange,
+    #[error("character is not visible at the checkpoint")]
+    UnknownCharacter,
 }
 
 pub fn build_canon_context(
@@ -178,6 +215,83 @@ pub fn build_canon_context(
         hard_rules,
         dead_character_ids,
         threads,
+    })
+}
+
+pub fn build_character_canon_grounding(
+    model: &CanonStoryModel,
+    characters: &[Character],
+    character_id: Uuid,
+    checkpoint_chapter: i32,
+) -> Result<CharacterCanonGrounding, CanonContextError> {
+    let context = build_canon_context(model, characters, checkpoint_chapter)?;
+    let visible_characters = context
+        .characters
+        .iter()
+        .map(|character| (character.id, character.name.as_str()))
+        .collect::<std::collections::HashMap<_, _>>();
+    if !visible_characters.contains_key(&character_id) {
+        return Err(CanonContextError::UnknownCharacter);
+    }
+
+    let goals = model
+        .content
+        .character_goals
+        .iter()
+        .filter(|goal| {
+            goal.character_id == character_id && visible_at(&goal.evidence, checkpoint_chapter)
+        })
+        .take(MAX_CHARACTER_GOALS)
+        .map(|goal| CharacterCanonGoal {
+            description: truncate_chars(&goal.description, MAX_GROUNDING_DESCRIPTION_CHARS),
+            source_chapters: source_chapters_through(&goal.evidence, checkpoint_chapter),
+        })
+        .collect();
+    let relationships = model
+        .content
+        .relationships
+        .iter()
+        .filter_map(|relationship| {
+            if !visible_at(&relationship.evidence, checkpoint_chapter) {
+                return None;
+            }
+            let (other_character_id, direction) = if relationship.from_character_id == character_id
+            {
+                (relationship.to_character_id, "outgoing")
+            } else if relationship.to_character_id == character_id {
+                (relationship.from_character_id, "incoming")
+            } else {
+                return None;
+            };
+            let other_character_name = visible_characters.get(&other_character_id)?;
+            Some(CharacterCanonRelationship {
+                other_character_id,
+                other_character_name: truncate_chars(
+                    other_character_name,
+                    MAX_CHARACTER_NAME_CHARS,
+                ),
+                direction: direction.into(),
+                kind: truncate_chars(&relationship.kind, MAX_RELATIONSHIP_KIND_CHARS),
+                description: truncate_chars(
+                    &relationship.description,
+                    MAX_GROUNDING_DESCRIPTION_CHARS,
+                ),
+                source_chapters: source_chapters_through(
+                    &relationship.evidence,
+                    checkpoint_chapter,
+                ),
+            })
+        })
+        .take(MAX_CHARACTER_RELATIONSHIPS)
+        .collect();
+
+    Ok(CharacterCanonGrounding {
+        novel_id: model.novel_id,
+        model_version: model.model_version,
+        checkpoint_chapter,
+        character_id,
+        goals,
+        relationships,
     })
 }
 
@@ -305,6 +419,23 @@ fn source_chapters(evidence: &SourceEvidence) -> Vec<i32> {
     chapters
 }
 
+fn source_chapters_through(evidence: &SourceEvidence, checkpoint_chapter: i32) -> Vec<i32> {
+    let mut chapters = evidence
+        .provenance
+        .iter()
+        .map(|citation| citation.chapter_number)
+        .filter(|chapter| *chapter <= checkpoint_chapter)
+        .collect::<Vec<_>>();
+    chapters.sort_unstable();
+    chapters.dedup();
+    chapters.truncate(MAX_GROUNDING_SOURCE_CHAPTERS);
+    chapters
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
 fn normalize(value: &str) -> String {
     value
         .split_whitespace()
@@ -315,11 +446,14 @@ fn normalize(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_world_entry_context, original_player_name_available, visible_at};
+    use super::{
+        build_character_canon_grounding, build_world_entry_context, original_player_name_available,
+        visible_at,
+    };
     use crate::domain::entities::canon_story_model::{
         CanonDeath, CanonEndingSnapshot, CanonEvent, CanonFaction, CanonLocation,
-        CanonStoryContent, CanonStoryModel, CharacterGoal, SourceCitation, SourceEvidence,
-        StoryArc, UnresolvedThread, WorldRule, CANON_STORY_SCHEMA_VERSION,
+        CanonRelationship, CanonStoryContent, CanonStoryModel, CharacterGoal, SourceCitation,
+        SourceEvidence, StoryArc, UnresolvedThread, WorldRule, CANON_STORY_SCHEMA_VERSION,
     };
     use crate::domain::{entities::character::Character, value_objects::CharacterRole};
     use chrono::Utc;
@@ -480,5 +614,95 @@ mod tests {
         assert_eq!(context.character_goals[0].id, "goal");
         assert_eq!(context.factions[0].id, "guard");
         assert!(build_world_entry_context(&model, &[], 3, 2).is_err());
+    }
+
+    #[test]
+    fn character_grounding_is_scoped_bounded_and_source_ordered() {
+        let novel_id = Uuid::new_v4();
+        let character_id = Uuid::new_v4();
+        let other_id = Uuid::new_v4();
+        let evidence = |chapters: &[i32]| SourceEvidence {
+            provenance: chapters
+                .iter()
+                .map(|chapter_number| SourceCitation {
+                    chapter_number: *chapter_number,
+                    excerpt: format!("第{chapter_number}章证据"),
+                })
+                .collect(),
+            confidence: 1.0,
+        };
+        let model = CanonStoryModel {
+            id: Uuid::new_v4(),
+            novel_id,
+            model_version: 1,
+            schema_version: CANON_STORY_SCHEMA_VERSION,
+            prompt_version: "canon-extraction-v1".into(),
+            content: CanonStoryContent {
+                arcs: vec![],
+                events: vec![],
+                locations: vec![],
+                factions: vec![],
+                world_rules: vec![],
+                character_goals: vec![
+                    CharacterGoal {
+                        id: "goal-visible".into(),
+                        character_id,
+                        description: "守住城门".into(),
+                        evidence: evidence(&[2, 1, 2]),
+                    },
+                    CharacterGoal {
+                        id: "goal-other".into(),
+                        character_id: other_id,
+                        description: "离开城门".into(),
+                        evidence: evidence(&[1]),
+                    },
+                ],
+                relationships: vec![
+                    CanonRelationship {
+                        id: "relationship-visible".into(),
+                        from_character_id: character_id,
+                        to_character_id: other_id,
+                        kind: "盟友".into(),
+                        description: "共同守城".into(),
+                        evidence: evidence(&[2, 1, 2]),
+                    },
+                    CanonRelationship {
+                        id: "relationship-future".into(),
+                        from_character_id: other_id,
+                        to_character_id: character_id,
+                        kind: "敌手".into(),
+                        description: "后来反目".into(),
+                        evidence: evidence(&[3]),
+                    },
+                ],
+                deaths: vec![],
+                unresolved_threads: vec![],
+                ending: CanonEndingSnapshot {
+                    summary: "故事结束".into(),
+                    character_states: BTreeMap::new(),
+                    faction_states: BTreeMap::new(),
+                    location_states: BTreeMap::new(),
+                    unresolved_thread_ids: vec![],
+                    evidence: evidence(&[3]),
+                },
+            },
+            created_at: Utc::now(),
+        };
+        let mut character = Character::new(novel_id, "守门人".into(), CharacterRole::Protagonist);
+        character.id = character_id;
+        character.first_appearance_chapter = Some(1);
+        let mut other = Character::new(novel_id, "同伴".into(), CharacterRole::Supporting);
+        other.id = other_id;
+        other.first_appearance_chapter = Some(1);
+
+        let grounding =
+            build_character_canon_grounding(&model, &[character, other], character_id, 2).unwrap();
+
+        assert_eq!(grounding.goals.len(), 1);
+        assert_eq!(grounding.goals[0].source_chapters, vec![1, 2]);
+        assert_eq!(grounding.relationships.len(), 1);
+        assert_eq!(grounding.relationships[0].other_character_name, "同伴");
+        assert_eq!(grounding.relationships[0].direction, "outgoing");
+        assert_eq!(grounding.relationships[0].source_chapters, vec![1, 2]);
     }
 }

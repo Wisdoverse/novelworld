@@ -169,6 +169,7 @@ async fn run_body() -> Result<()> {
             novel_repo: novel_repo.clone(),
             chapter_repo: chapter_repo.clone(),
             character_repo: character_repo.clone(),
+            canon_repo: canon_repo.clone(),
             progress_repo,
         });
         let translation_handler = Arc::new(TranslateChapterHandler {
