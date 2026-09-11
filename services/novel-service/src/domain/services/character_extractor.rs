@@ -12,7 +12,7 @@ pub const CHARACTER_EXTRACTION_PROMPT_VERSION: &str = "character-extraction-v6";
 /// provider cost.
 const MAX_EXTRACTED_CHARACTERS: usize = 50;
 /// SPEC 5.5: the stored world summary must not exceed 2000 characters.
-const MAX_WORLD_SUMMARY_CHARS: usize = 2_000;
+pub(crate) const MAX_WORLD_SUMMARY_CHARS: usize = 2_000;
 
 /// Truncate a string to at most `max_bytes` bytes without splitting a UTF-8
 /// codepoint.  Always returns a valid `&str`.

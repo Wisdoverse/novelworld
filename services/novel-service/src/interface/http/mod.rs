@@ -1811,6 +1811,7 @@ mod ownership_tests {
             avatar_url: None,
             avatar_status: None,
             persona_source_chapter_high_water: None,
+            world_summary: None,
             created_at: None,
             updated_at: None,
         };
@@ -1820,6 +1821,7 @@ mod ownership_tests {
             description: Some("完整角色资料".into()),
             avatar_status: Some(AvatarStatus::Ready),
             persona_source_chapter_high_water: Some(2),
+            world_summary: Some("完整世界摘要".into()),
             created_at: Some(now),
             updated_at: Some(now),
             ..partial.clone()
@@ -1858,6 +1860,7 @@ mod ownership_tests {
                 1 => {
                     assert_eq!(body["role"], "protagonist");
                     assert_eq!(body["persona_source_chapter_high_water"], 2);
+                    assert_eq!(body["world_summary"], "完整世界摘要");
                 }
                 _ => assert_eq!(body["error"]["code"], error_code.unwrap()),
             }

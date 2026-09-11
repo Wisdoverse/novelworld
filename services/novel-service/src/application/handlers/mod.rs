@@ -42,7 +42,7 @@ use crate::domain::services::{
         build_chunk_extraction_prompt, build_extraction_prompt, build_representative_sample,
         build_scan_plan, find_first_appearance, json_object_payload, merge_extractions,
         needs_chunk_scan, text_contains_name, validate_chunk_extraction, validate_extraction,
-        ChunkExtractionResult, ExtractionResult,
+        ChunkExtractionResult, ExtractionResult, MAX_WORLD_SUMMARY_CHARS,
     },
     novel_parser::NovelParserService,
 };
@@ -2555,6 +2555,8 @@ pub struct ProgressBoundCharacter {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub persona_source_chapter_high_water: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub world_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<DateTime<Utc>>,
@@ -2577,12 +2579,18 @@ impl ProgressBoundCharacter {
             avatar_url: None,
             avatar_status: None,
             persona_source_chapter_high_water: None,
+            world_summary: None,
             created_at: None,
             updated_at: None,
         }
     }
 
-    fn full(character: &Character, first_appearance_chapter: i32, total_chapters: i32) -> Self {
+    fn full(
+        character: &Character,
+        first_appearance_chapter: i32,
+        total_chapters: i32,
+        world_summary: &str,
+    ) -> Self {
         Self {
             id: character.id,
             novel_id: character.novel_id,
@@ -2598,6 +2606,7 @@ impl ProgressBoundCharacter {
             avatar_url: character.avatar_url.clone(),
             avatar_status: Some(character.avatar_status.clone()),
             persona_source_chapter_high_water: Some(total_chapters),
+            world_summary: Some(world_summary.to_owned()),
             created_at: Some(character.created_at),
             updated_at: Some(character.updated_at),
         }
@@ -2624,10 +2633,14 @@ fn progress_bound_character(
         .filter(|chapter| (1..=current_chapter).contains(chapter))?;
 
     if persona_is_complete(novel, current_chapter) {
+        let world_summary = novel.world_summary.as_deref().filter(|summary| {
+            !summary.trim().is_empty() && summary.chars().count() <= MAX_WORLD_SUMMARY_CHARS
+        })?;
         Some(ProgressBoundCharacter::full(
             character,
             first_appearance_chapter,
             novel.total_chapters,
+            world_summary,
         ))
     } else {
         canonical_name_source_proven
@@ -3242,6 +3255,7 @@ mod reading_progress_validation_tests {
         assert_eq!(json["description"], "她在第二章继承王位。");
         assert_eq!(json["avatar_status"], "ready");
         assert_eq!(json["persona_source_chapter_high_water"], 2);
+        assert_eq!(json["world_summary"], "世界");
         assert!(json.get("system_prompt").is_none());
         assert!(json.get("created_at").is_some());
         assert!(json.get("updated_at").is_some());
@@ -3269,12 +3283,25 @@ mod reading_progress_validation_tests {
             serde_json::to_value(progress_bound_character(&character, &novel, 2, true).unwrap())
                 .unwrap();
         assert!(full.get("role").is_some());
+        assert_eq!(full["world_summary"], "世界");
 
         let rewound =
             serde_json::to_value(progress_bound_character(&character, &novel, 1, true).unwrap())
                 .unwrap();
         assert!(rewound.get("role").is_none());
         assert!(rewound.get("persona_source_chapter_high_water").is_none());
+        assert!(rewound.get("world_summary").is_none());
+    }
+
+    #[test]
+    fn full_character_rejects_invalid_world_summary() {
+        let character = persona_character();
+        let mut novel = ready_novel(character.novel_id, 2);
+
+        for summary in [None, Some(" ".into()), Some("界".repeat(2_001))] {
+            novel.world_summary = summary;
+            assert!(progress_bound_character(&character, &novel, 2, true).is_none());
+        }
     }
 
     #[test]
@@ -3729,6 +3756,7 @@ mod reading_progress_handler_tests {
         .unwrap();
         assert_eq!(full_json["role"], "protagonist");
         assert_eq!(full_json["persona_source_chapter_high_water"], 2);
+        assert_eq!(full_json["world_summary"], "世界");
         assert!(full_json.get("system_prompt").is_none());
 
         calls.clear();
