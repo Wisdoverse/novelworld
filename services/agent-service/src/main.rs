@@ -136,7 +136,10 @@ async fn run_body() -> Result<()> {
         // Character info via HTTP to novel-service (replaces direct DB coupling)
         let novel_service_url = std::env::var("NOVEL_SERVICE_URL")
             .unwrap_or_else(|_| "http://novel-service:8002".into());
-        let novel_client = Arc::new(NovelServiceClient::new(novel_service_url));
+        let novel_client = Arc::new(NovelServiceClient::new(
+            novel_service_url,
+            internal_service_token.clone(),
+        ));
         let character_repo: Arc<dyn domain::repositories::CharacterInfoRepository> =
             novel_client.clone();
         let reading_context: Arc<dyn domain::ports::ReadingContextPort> = novel_client.clone();
