@@ -1,4 +1,4 @@
-"""Offline checks; optional NW_H4_TEST_POSTGRES enables only a temporary-table PG probe."""
+"""Offline checks; CI also supplies an isolated disposable PostgreSQL."""
 import copy
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -1876,6 +1876,142 @@ INSERT INTO character_memories SELECT * FROM jsonb_populate_recordset(NULL::char
                     row = next(row for row in actual["messages"] if row["id"] == raw["messages"][14]["id"])
                     self.assertEqual(row[field], wrong)
                     self.assertIsNone(row["persona_source_chapter_high_water"])
+
+    @unittest.skipUnless(
+        os.environ.get("NW_H4_TEST_POSTGRES_DISPOSABLE") == "1",
+        "dedicated disposable PostgreSQL required",
+    )
+    def test_player_entry_checkpoint_uses_latest_source_visible_location(self):
+        container = os.environ["NW_H4_TEST_POSTGRES"]
+        user = os.environ.get("NW_H4_TEST_PGUSER", "novel")
+        database = os.environ.get("NW_H4_TEST_PGDATABASE", "novel_world")
+        novel_id, uploader_id = str(uuid.uuid4()), str(uuid.uuid4())
+
+        def psql(sql):
+            result = subprocess.run(
+                ["docker", "exec", "-e",
+                 "PGOPTIONS=-c statement_timeout=8000 -c lock_timeout=2000",
+                 container, "psql", "-Xq", "-U", user, "-d", database,
+                 "-v", "ON_ERROR_STOP=1", "-At", "-c", sql],
+                check=False, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout.strip()
+
+        def model(chapter, future_chapter=None):
+            evidence = {"provenance": [{"chapter_number": chapter,
+                                         "excerpt": f"source-{chapter}"}],
+                        "confidence": 1.0}
+            location_evidence = copy.deepcopy(evidence)
+            if future_chapter is not None:
+                location_evidence["provenance"].append(
+                    {"chapter_number": future_chapter,
+                     "excerpt": f"source-{future_chapter}"}
+                )
+            return {
+                "arcs": [{"id": "arc-1", "title": "Arc", "summary": "Arc",
+                          "event_ids": ["event-1"], "evidence": evidence}],
+                "events": [{"id": "event-1", "sequence": 1, "summary": "Event",
+                            "caused_by": [], "location_ids": ["location-1"],
+                            "character_ids": [], "faction_ids": [], "evidence": evidence}],
+                "locations": [{"id": "location-1", "name": "Location",
+                               "description": "Location", "evidence": location_evidence}],
+                "factions": [], "world_rules": [], "character_goals": [],
+                "relationships": [], "deaths": [], "unresolved_threads": [],
+                "ending": {"summary": "Ending", "character_states": {},
+                           "faction_states": {}, "location_states": {},
+                           "unresolved_thread_ids": [], "evidence": evidence},
+            }
+
+        values = [json.dumps(value, separators=(",", ":")) for value in (
+            model(1), model(2, 3), model(3)
+        )]
+        seed = f"""
+INSERT INTO novels (id, user_id, title, total_chapters, status)
+VALUES ('{novel_id}', '{uploader_id}', 'checkpoint probe', 4, 'ready');
+INSERT INTO chapters (novel_id, chapter_number, content, is_key_node) VALUES
+  ('{novel_id}', 1, 'source-1', TRUE),
+  ('{novel_id}', 2, 'source-2', TRUE),
+  ('{novel_id}', 3, 'source-3', FALSE),
+  ('{novel_id}', 4, 'source-4', FALSE);
+INSERT INTO characters (novel_id, name, first_appearance_chapter)
+VALUES ('{novel_id}', 'Probe Character', 1);
+INSERT INTO canon_story_models
+  (novel_id, model_version, schema_version, prompt_version, content) VALUES
+  ('{novel_id}', 1, 1, 'checkpoint-probe-v1', $model${values[0]}$model$::jsonb),
+  ('{novel_id}', 2, 1, 'checkpoint-probe-v2', $model${values[1]}$model$::jsonb);
+"""
+        journey = object.__new__(RUNNER.Journey)
+        journey.prefix = "rewritten-by-test"
+        bounded_command = RUNNER.diagnostic.bounded_command
+
+        def run_in_disposable_postgres(command, **kwargs):
+            rewritten = list(command)
+            self.assertEqual(kwargs.get("timeout"), 10)
+            self.assertIn("PGOPTIONS=-c statement_timeout=8000 -c lock_timeout=2000", rewritten)
+            rewritten[rewritten.index("psql") - 1] = container
+            rewritten[rewritten.index("-U") + 1] = user
+            rewritten[rewritten.index("-d") + 1] = database
+            return bounded_command(rewritten, **kwargs)
+
+        try:
+            psql(seed)
+            with mock.patch.object(
+                RUNNER.diagnostic, "bounded_command", side_effect=run_in_disposable_postgres
+            ):
+                self.assertEqual(
+                    journey.player_entry_checkpoint(
+                        novel_id, 4, "player_entry_has_no_location"
+                    ),
+                    2,
+                )
+                psql(
+                    "INSERT INTO canon_story_models "
+                    "(novel_id, model_version, schema_version, prompt_version, content) "
+                    f"VALUES ('{novel_id}', 3, 1, 'checkpoint-probe-v3', "
+                    f"$model${values[2]}$model$::jsonb)"
+                )
+                for code in (
+                    "player_entry_has_no_location",
+                    "compatibility_player_entry_has_no_location",
+                ):
+                    with self.subTest(code=code), self.assertRaisesRegex(
+                        RUNNER.QualificationFailure, f"^{code}$"
+                    ):
+                        journey.player_entry_checkpoint(novel_id, 4, code)
+        finally:
+            self.assertEqual(
+                psql(
+                    f"DELETE FROM novels WHERE id = '{novel_id}'; "
+                    "DELETE FROM erasure_records WHERE subject_type = 'novel' "
+                    f"AND subject_id = '{novel_id}'; "
+                    "SELECT (SELECT count(*) FROM canon_story_models "
+                    f"WHERE novel_id = '{novel_id}') || ':' || "
+                    f"(SELECT count(*) FROM chapters WHERE novel_id = '{novel_id}') || ':' || "
+                    f"(SELECT count(*) FROM characters WHERE novel_id = '{novel_id}') || ':' || "
+                    f"(SELECT count(*) FROM novels WHERE id = '{novel_id}') || ':' || "
+                    "(SELECT count(*) FROM erasure_records WHERE subject_type = 'novel' "
+                    f"AND subject_id = '{novel_id}')"
+                ),
+                "0:0:0:0:0",
+            )
+
+    def test_player_entry_location_preserves_slice_errors(self):
+        for code in (
+            "player_entry_has_no_location",
+            "compatibility_player_entry_has_no_location",
+        ):
+            for response in ({"locations": [None]}, []):
+                with self.subTest(code=code, response=response), self.assertRaisesRegex(
+                    RUNNER.QualificationFailure, f"^{code}$"
+                ):
+                    RUNNER.Journey.player_entry_location(response, code)
+        self.assertEqual(
+            RUNNER.Journey.player_entry_location(
+                {"locations": [{"id": "location-1"}]}, "unused"
+            ),
+            "location-1",
+        )
 
     def test_v2_report_identity_and_numeric_only_summary_evidence(self):
         self.value["schema"] = CONTROL.REGISTRATION_SCHEMA_V2

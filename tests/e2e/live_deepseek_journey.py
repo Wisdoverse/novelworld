@@ -1883,23 +1883,70 @@ class Journey:
         raise QualificationFailure("gateway_not_ready")
 
     def db_scalar(self, sql: str) -> str:
-        return run(
+        return diagnostic.bounded_command(
             [
                 "docker",
                 "exec",
+                "-e",
+                "PGOPTIONS=-c statement_timeout=8000 -c lock_timeout=2000",
                 f"{self.prefix}-postgres",
                 "psql",
+                "-XqAt",
                 "-U",
                 "novel",
                 "-d",
                 "novel_world",
                 "-v",
                 "ON_ERROR_STOP=1",
-                "-At",
                 "-c",
                 sql,
-            ]
+            ],
+            timeout=10,
+        ).decode().strip()
+
+    @staticmethod
+    def player_entry_location(entry: Any, no_location_error: str) -> str:
+        locations = entry.get("locations") if isinstance(entry, dict) else None
+        if (
+            not isinstance(locations, list)
+            or not locations
+            or not isinstance(locations[0], dict)
+            or not isinstance(locations[0].get("id"), str)
+        ):
+            raise QualificationFailure(no_location_error)
+        return locations[0]["id"]
+
+    def player_entry_checkpoint(
+        self, novel_id: str, total_chapters: int, no_location_error: str
+    ) -> int:
+        first_key_node = self.db_scalar(
+            "SELECT MIN(chapter_number) FROM chapters "
+            f"WHERE novel_id = '{novel_id}' AND is_key_node"
         )
+        if not first_key_node.isdigit():
+            raise QualificationFailure("canonical_key_node_missing")
+        checkpoint_value = self.db_scalar(
+            "WITH latest_model AS MATERIALIZED ("
+            "SELECT content FROM canon_story_models "
+            f"WHERE novel_id = '{novel_id}' "
+            "ORDER BY model_version DESC LIMIT 1) "
+            "SELECT MIN(chapter.chapter_number) FROM chapters AS chapter "
+            "CROSS JOIN latest_model AS model "
+            f"WHERE chapter.novel_id = '{novel_id}' AND chapter.is_key_node "
+            f"AND chapter.chapter_number < {total_chapters} AND EXISTS ("
+            "SELECT 1 FROM jsonb_array_elements(model.content -> 'locations') "
+            "AS location(value) CROSS JOIN LATERAL "
+            "jsonb_array_elements(location.value -> 'evidence' -> 'provenance') "
+            "AS citation(value) WHERE "
+            "(citation.value ->> 'chapter_number')::integer "
+            "<= chapter.chapter_number)"
+        )
+        if not checkpoint_value.isdigit():
+            raise QualificationFailure(no_location_error)
+        checkpoint = int(checkpoint_value)
+        if checkpoint < 1 or checkpoint >= total_chapters:
+            raise QualificationFailure("branch_checkpoint_unusable")
+        return checkpoint
 
     def summary_snapshot(self, user_id: str, novel_id: str, character_id: str,
                          *, timeout: float = 5) -> dict[str, Any]:
@@ -3021,13 +3068,9 @@ class Journey:
                 + urllib.parse.urlencode({"checkpoint_chapter": checkpoint}),
                 token=compatibility_token,
             )
-            compatibility_locations = compatibility_entry.get("locations")
-            if (
-                not isinstance(compatibility_locations, list)
-                or not compatibility_locations
-                or not isinstance(compatibility_locations[0].get("id"), str)
-            ):
-                raise QualificationFailure("compatibility_player_entry_has_no_location")
+            compatibility_location_id = self.player_entry_location(
+                compatibility_entry, "compatibility_player_entry_has_no_location"
+            )
             request_json(
                 f"{self.api}/narrative/{novel_id}/player-entry",
                 method="PUT",
@@ -3037,7 +3080,7 @@ class Journey:
                     "name": self.product_input["player"]["name"],
                     "background": self.product_input["player"]["background"],
                     "capabilities": self.product_input["player"]["capabilities"],
-                    "location_id": compatibility_locations[0]["id"],
+                    "location_id": compatibility_location_id,
                     "inventory": self.product_input["player"]["inventory"],
                 },
             )
@@ -3329,7 +3372,7 @@ class Journey:
                     "name": self.product_input["player"]["name"],
                     "background": self.product_input["player"]["background"],
                     "capabilities": self.product_input["player"]["capabilities"],
-                    "location_id": compatibility_locations[0]["id"],
+                    "location_id": compatibility_location_id,
                     "inventory": self.product_input["player"]["inventory"],
                 },
                 expected=(409,),
@@ -3689,15 +3732,11 @@ class Journey:
             )
 
         if self.journey_slice == "legacy-character":
-            checkpoint_value = self.db_scalar(
-                "SELECT MIN(chapter_number) FROM chapters "
-                f"WHERE novel_id = '{novel_id}' AND is_key_node"
+            checkpoint = self.player_entry_checkpoint(
+                novel_id,
+                total_chapters,
+                "compatibility_player_entry_has_no_location",
             )
-            if not checkpoint_value.isdigit():
-                raise QualificationFailure("canonical_key_node_missing")
-            checkpoint = int(checkpoint_value)
-            if checkpoint < 1 or checkpoint >= total_chapters:
-                raise QualificationFailure("branch_checkpoint_unusable")
             self.run_legacy_character_slice(
                 password=password,
                 novel_id=novel_id,
@@ -3711,15 +3750,11 @@ class Journey:
             return
 
         with self.stage("branch_and_player_entry"):
-            checkpoint_value = self.db_scalar(
-                "SELECT MIN(chapter_number) FROM chapters "
-                f"WHERE novel_id = '{novel_id}' AND is_key_node"
+            checkpoint = self.player_entry_checkpoint(
+                novel_id,
+                total_chapters,
+                "player_entry_has_no_location",
             )
-            if not checkpoint_value.isdigit():
-                raise QualificationFailure("canonical_key_node_missing")
-            checkpoint = int(checkpoint_value)
-            if checkpoint < 1 or checkpoint >= total_chapters:
-                raise QualificationFailure("branch_checkpoint_unusable")
             request_no_content(
                 f"{self.api}/progress/{novel_id}/identity",
                 method="PUT",
@@ -3740,15 +3775,7 @@ class Journey:
                 f"{self.api}/narrative/{novel_id}/player-entry?{urllib.parse.urlencode({'checkpoint_chapter': checkpoint})}",
                 token=token,
             )
-            locations = entry.get("locations")
-            if (
-                not isinstance(locations, list)
-                or not locations
-                or not isinstance(locations[0], dict)
-                or not isinstance(locations[0].get("id"), str)
-            ):
-                raise QualificationFailure("player_entry_has_no_location")
-            location_id = locations[0]["id"]
+            location_id = self.player_entry_location(entry, "player_entry_has_no_location")
             player = request_json(
                 f"{self.api}/narrative/{novel_id}/player-entry",
                 method="PUT",
