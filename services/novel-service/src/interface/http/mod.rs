@@ -1403,7 +1403,7 @@ async fn list_characters(
         Some(user_id) => user_id,
         None => return private_no_store(StatusCode::UNAUTHORIZED.into_response()),
     };
-    character_read_response(
+    progress_bound_read_response(
         state
             .progress_handler
             .list_available_characters(user_id, novel_id)
@@ -1420,7 +1420,7 @@ async fn get_character_by_id(
         Some(user_id) => user_id,
         None => return private_no_store(StatusCode::UNAUTHORIZED.into_response()),
     };
-    character_read_response(
+    progress_bound_read_response(
         state
             .progress_handler
             .get_available_character(user_id, id)
@@ -1428,7 +1428,7 @@ async fn get_character_by_id(
     )
 }
 
-fn character_read_response<T: Serialize>(
+fn progress_bound_read_response<T: Serialize>(
     result: std::result::Result<T, ReadingProgressError>,
 ) -> Response {
     private_no_store(match result {
@@ -1448,20 +1448,17 @@ async fn list_relationships(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(novel_id): Path<Uuid>,
-) -> impl IntoResponse {
-    if let Err(response) = owned_novel(&state, &headers, novel_id).await {
-        return *response;
-    }
-    match state.character_repo.find_relationships(novel_id).await {
-        Ok(rels) => (StatusCode::OK, Json(rels)).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
-    }
+) -> Response {
+    let user_id = match extract_user_id(&headers) {
+        Some(user_id) => user_id,
+        None => return private_no_store(StatusCode::UNAUTHORIZED.into_response()),
+    };
+    progress_bound_read_response(
+        state
+            .progress_handler
+            .list_available_relationships(user_id, novel_id)
+            .await,
+    )
 }
 
 async fn get_parse_status(
@@ -1827,12 +1824,12 @@ mod ownership_tests {
             ..partial.clone()
         };
         let responses = [
-            character_read_response(Ok(vec![partial])),
-            character_read_response(Ok(full)),
-            character_read_response(Err::<ProgressBoundCharacter, _>(
+            progress_bound_read_response(Ok(vec![partial])),
+            progress_bound_read_response(Ok(full)),
+            progress_bound_read_response(Err::<ProgressBoundCharacter, _>(
                 ReadingProgressError::CharacterNotFound,
             )),
-            character_read_response(Err::<ProgressBoundCharacter, _>(
+            progress_bound_read_response(Err::<ProgressBoundCharacter, _>(
                 ReadingProgressError::IdentityUnavailable,
             )),
         ];
@@ -1863,6 +1860,44 @@ mod ownership_tests {
                     assert_eq!(body["world_summary"], "完整世界摘要");
                 }
                 _ => assert_eq!(body["error"]["code"], error_code.unwrap()),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn relationship_responses_are_private_and_hide_internal_failures() {
+        use crate::domain::repositories::CharacterRelationshipRecord;
+
+        let relationship = CharacterRelationshipRecord {
+            id: Uuid::new_v4(),
+            novel_id: Uuid::new_v4(),
+            from_character_id: Uuid::new_v4(),
+            to_character_id: Uuid::new_v4(),
+            relationship_type: "同盟".into(),
+            description: Some("完整关系".into()),
+            strength: 80,
+        };
+        let responses = [
+            progress_bound_read_response(Ok(vec![relationship])),
+            progress_bound_read_response(Err::<Vec<CharacterRelationshipRecord>, _>(
+                ReadingProgressError::Internal(anyhow::anyhow!("private database detail")),
+            )),
+        ];
+
+        for (index, response) in responses.into_iter().enumerate() {
+            assert_eq!(
+                response.headers().get(CACHE_CONTROL),
+                Some(&HeaderValue::from_static("private, no-store"))
+            );
+            let body = axum::body::to_bytes(response.into_body(), 4_096)
+                .await
+                .unwrap();
+            let body = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+            if index == 0 {
+                assert_eq!(body[0]["relationship_type"], "同盟");
+            } else {
+                assert_eq!(body["error"]["code"], "internal_error");
+                assert!(!body.to_string().contains("private database detail"));
             }
         }
     }

@@ -3030,6 +3030,38 @@ impl ReadingProgressHandler {
             .collect())
     }
 
+    pub async fn list_available_relationships(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+    ) -> std::result::Result<Vec<CharacterRelationshipRecord>, ReadingProgressError> {
+        let novel = self.owned_novel(user_id, novel_id).await?;
+        if novel.status != NovelStatus::Ready {
+            return Ok(Vec::new());
+        }
+        let validated_progress = self.progress_for_novel(user_id, &novel).await?;
+        if !persona_is_complete(&novel, validated_progress.current_chapter) {
+            return Ok(Vec::new());
+        }
+
+        let relationships = self
+            .character_repo
+            .find_relationships(novel_id)
+            .await
+            .map_err(ReadingProgressError::Internal)?;
+        // Relationship provenance is not persisted, so the whole-novel graph
+        // is authorized only at exact completion. Recheck after its final I/O.
+        let progress = self.persisted_progress_for_novel(user_id, &novel).await?;
+        if progress.current_chapter != validated_progress.current_chapter
+            || !persona_is_complete(&novel, progress.current_chapter)
+        {
+            return Err(ReadingProgressError::Internal(anyhow::anyhow!(
+                "persisted reading progress changed during relationship validation"
+            )));
+        }
+        Ok(relationships)
+    }
+
     pub async fn get_available_character(
         &self,
         user_id: Uuid,
@@ -3511,6 +3543,8 @@ mod reading_progress_handler_tests {
     struct TestCharacterRepository {
         novel_id: Uuid,
         characters: Vec<Character>,
+        relationships: Mutex<Vec<CharacterRelationshipRecord>>,
+        relationship_error: Mutex<bool>,
         calls: CallLog,
     }
 
@@ -3550,9 +3584,18 @@ mod reading_progress_handler_tests {
 
         async fn find_relationships(
             &self,
-            _novel_id: Uuid,
+            novel_id: Uuid,
         ) -> Result<Vec<CharacterRelationshipRecord>> {
-            unreachable!("unused test repository method")
+            self.calls.push("relationships");
+            anyhow::ensure!(
+                !*self.relationship_error.lock().unwrap(),
+                "synthetic relationship failure"
+            );
+            Ok(if novel_id == self.novel_id {
+                self.relationships.lock().unwrap().clone()
+            } else {
+                Vec::new()
+            })
         }
     }
 
@@ -3680,6 +3723,8 @@ mod reading_progress_handler_tests {
         let character_repo = Arc::new(TestCharacterRepository {
             novel_id: novel.id,
             characters,
+            relationships: Mutex::new(Vec::new()),
+            relationship_error: Mutex::new(false),
             calls: calls.clone(),
         });
         let progress_repo = Arc::new(TestProgressRepository {
@@ -3818,6 +3863,123 @@ mod reading_progress_handler_tests {
             character_repo.characters[0].system_prompt.as_deref(),
             Some("never-public")
         );
+    }
+
+    #[tokio::test]
+    async fn relationships_require_exact_full_progress_and_recheck_after_io() {
+        let novel_id = Uuid::new_v4();
+        let from = persona_character(novel_id);
+        let mut to = Character::new(novel_id, "顾远".into(), CharacterRole::Supporting);
+        to.first_appearance_chapter = Some(2);
+        let relationship = CharacterRelationshipRecord {
+            id: Uuid::new_v4(),
+            novel_id,
+            from_character_id: from.id,
+            to_character_id: to.id,
+            relationship_type: "同盟".into(),
+            description: Some("第二章才建立的关系。".into()),
+            strength: 80,
+        };
+        let full_user = Uuid::new_v4();
+        let partial_user = Uuid::new_v4();
+        let rewinding_user = Uuid::new_v4();
+        let full = progress(full_user, novel_id, 2, None);
+        let partial = progress(partial_user, novel_id, 1, None);
+        let before_rewind = progress(rewinding_user, novel_id, 2, None);
+        let after_rewind = progress(rewinding_user, novel_id, 1, None);
+        let (handler, calls, character_repo, _) = handler(
+            ready_novel(novel_id, 2),
+            &[full_user, partial_user, rewinding_user],
+            vec![from, to],
+            vec![
+                Chapter::new(novel_id, 1, None, "第一章。".into()),
+                Chapter::new(novel_id, 2, None, "第二章。".into()),
+            ],
+            vec![full, partial, before_rewind, after_rewind],
+        );
+        character_repo
+            .relationships
+            .lock()
+            .unwrap()
+            .push(relationship.clone());
+
+        assert!(handler
+            .list_available_relationships(partial_user, novel_id)
+            .await
+            .unwrap()
+            .is_empty());
+        calls.assert_eq(&["novel", "progress:1", "chapter:1"]);
+
+        calls.clear();
+        let full_relationships = handler
+            .list_available_relationships(full_user, novel_id)
+            .await
+            .unwrap();
+        assert_eq!(full_relationships.len(), 1);
+        assert_eq!(full_relationships[0].id, relationship.id);
+        assert_eq!(full_relationships[0].description, relationship.description);
+        calls.assert_eq(&[
+            "novel",
+            "progress:2",
+            "chapter:2",
+            "relationships",
+            "progress:2",
+        ]);
+
+        calls.clear();
+        assert!(matches!(
+            handler
+                .list_available_relationships(rewinding_user, novel_id)
+                .await,
+            Err(ReadingProgressError::Internal(_))
+        ));
+        calls.assert_eq(&[
+            "novel",
+            "progress:2",
+            "chapter:2",
+            "relationships",
+            "progress:1",
+        ]);
+
+        *character_repo.relationship_error.lock().unwrap() = true;
+        calls.clear();
+        assert!(matches!(
+            handler
+                .list_available_relationships(full_user, novel_id)
+                .await,
+            Err(ReadingProgressError::Internal(_))
+        ));
+        calls.assert_eq(&["novel", "progress:2", "chapter:2", "relationships"]);
+    }
+
+    #[tokio::test]
+    async fn non_ready_novel_never_reads_or_exposes_relationships() {
+        let novel_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let mut novel = Novel::create(Uuid::new_v4(), "故事".into(), None);
+        novel.id = novel_id;
+        let (handler, calls, character_repo, _) =
+            handler(novel, &[user_id], Vec::new(), Vec::new(), Vec::new());
+        character_repo
+            .relationships
+            .lock()
+            .unwrap()
+            .push(CharacterRelationshipRecord {
+                id: Uuid::new_v4(),
+                novel_id,
+                from_character_id: Uuid::new_v4(),
+                to_character_id: Uuid::new_v4(),
+                relationship_type: "秘密".into(),
+                description: Some("不可见".into()),
+                strength: 100,
+            });
+
+        assert!(handler
+            .list_available_relationships(user_id, novel_id)
+            .await
+            .unwrap()
+            .is_empty());
+        calls.assert_eq(&["novel"]);
     }
 
     #[tokio::test]
