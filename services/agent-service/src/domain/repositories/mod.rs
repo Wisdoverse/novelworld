@@ -144,6 +144,9 @@ pub struct CharacterInfo {
     /// within the reading context captured for the chat turn.
     #[serde(default)]
     pub persona_source_chapter_high_water: Option<i32>,
+    /// Whole-novel context; accepted only at the exact source high-water.
+    #[serde(default)]
+    pub world_summary: Option<String>,
     pub first_appearance_chapter: Option<i32>,
 }
 
