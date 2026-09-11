@@ -628,17 +628,16 @@ mod authz_matrix_tests {
         method: Method,
         path: &str,
         bearer: Option<&str>,
-    ) -> StatusCode {
+    ) -> Response {
         let mut builder = Request::builder().method(method).uri(path);
         if let Some(token) = bearer {
             builder = builder.header("Authorization", format!("Bearer {token}"));
         }
-        let response = router
+        router
             .clone()
             .oneshot(builder.body(Body::empty()).expect("request builds"))
             .await
-            .expect("router responds");
-        response.status()
+            .expect("router responds")
     }
 
     fn protected_representatives() -> [(Method, &'static str); 11] {
@@ -721,15 +720,23 @@ mod authz_matrix_tests {
         for (method, path) in protected_representatives() {
             let missing = request(&router, method.clone(), path, None).await;
             assert_eq!(
-                missing,
+                missing.status(),
                 StatusCode::UNAUTHORIZED,
                 "{path} without a token must be 401"
             );
+            assert_eq!(
+                missing.headers()[header::CACHE_CONTROL],
+                "private, no-store"
+            );
             let garbage = request(&router, method, path, Some("garbage.token.value")).await;
             assert_eq!(
-                garbage,
+                garbage.status(),
                 StatusCode::UNAUTHORIZED,
                 "{path} with a garbage token must be 401"
+            );
+            assert_eq!(
+                garbage.headers()[header::CACHE_CONTROL],
+                "private, no-store"
             );
         }
     }
@@ -750,9 +757,9 @@ mod authz_matrix_tests {
             (Method::GET, "/metrics"),
         ];
         for (method, path) in cases {
-            let status = request(&router, method, path, None).await;
+            let response = request(&router, method, path, None).await;
             assert_ne!(
-                status,
+                response.status(),
                 StatusCode::UNAUTHORIZED,
                 "{path} must skip authentication"
             );
@@ -762,9 +769,9 @@ mod authz_matrix_tests {
     #[tokio::test]
     async fn valid_tokens_pass_the_gate() {
         let router = build_router(test_state()).unwrap();
-        let status = request(&router, Method::GET, "/api/novels", Some(&valid_token())).await;
+        let response = request(&router, Method::GET, "/api/novels", Some(&valid_token())).await;
         assert_ne!(
-            status,
+            response.status(),
             StatusCode::UNAUTHORIZED,
             "a valid token must pass authentication"
         );

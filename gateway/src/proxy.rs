@@ -40,7 +40,7 @@ pub fn api_error_response(status: StatusCode, code: &str, message: &str) -> Resp
         .into_response();
     response
         .headers_mut()
-        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        .insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
     response
 }
 
@@ -1054,7 +1054,7 @@ mod tests {
             let response =
                 normalized_error_response(status, &HeaderMap::new(), b"not a json envelope");
             assert_eq!(response.status(), status, "status for {code}");
-            assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+            assert_eq!(response.headers()[CACHE_CONTROL], "private, no-store");
             let body = to_bytes(response.into_body(), 4096).await.unwrap();
             assert!(has_stable_error_envelope(&body), "envelope for {code}");
             let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
