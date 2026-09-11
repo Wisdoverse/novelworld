@@ -82,8 +82,8 @@ Live mode requires fresh private evidence outputs:
 H1_EVAL_PROVIDER=deepseek \
 LLM_API_URL=https://api.deepseek.com \
 LLM_API_KEY=... \
-LLM_MODEL=deepseek-v4-flash \
-H1_EVAL_ALLOWED_RESPONSE_MODELS=deepseek-v4-flash \
+LLM_MODEL=deepseek-flash \
+H1_EVAL_ALLOWED_RESPONSE_MODELS=deepseek-flash \
 cargo run -p h1-eval -- --live --git-sha "$(git rev-parse HEAD)" \
   --metrics-output /private/h1-metrics.prom \
   --private-responses-output /private/h1-responses.jsonl
@@ -102,14 +102,14 @@ write failure stops further provider calls and retains the unproven reservation.
 
 New paid Diagnostic work is allowed only with `--live --bounded-diagnostic`, both
 private output paths, and a separately registered immutable input/model/budget
-under the fixed `vision-diagnostic-budget-v1` profile:
+under the prospective fixed `vision-diagnostic-budget-v2` profile:
 
 ```bash
 H1_EVAL_PROVIDER=deepseek \
 LLM_API_URL=https://api.deepseek.com \
 LLM_API_KEY=... \
-LLM_MODEL=deepseek-v4-flash-vision-exp \
-H1_EVAL_ALLOWED_RESPONSE_MODELS=deepseek-v4-flash-vision-exp \
+LLM_MODEL=deepseek-flash \
+H1_EVAL_ALLOWED_RESPONSE_MODELS=deepseek-flash \
 cargo run -p h1-eval -- --live --bounded-diagnostic \
   --git-sha "$(git rev-parse HEAD)" \
   --metrics-output /private/vision-diagnostic-metrics.prom \
@@ -124,7 +124,9 @@ are not account-wide or provider-enforced caps.
 The fixed per-invocation profile permits at most 40 logical calls, 200 HTTP
 attempts, 20,000,000 cumulative reserved/settled tokens and 35,000,000 micro-CNY
 (CNY 35). Each logical call reserves five attempts at worst-case `2^20` input
-tokens plus the request output cap, using the profile's conservative pricing.
+tokens plus the request output cap, using four input and twelve output
+micro-CNY per token. These coefficients conservatively cover the selected
+DeepSeek V4.1 Flash peak prices under the policy's hard 10 CNY/USD bound.
 Only complete metrics/private usage reconciliation releases unused reservation.
 Uncertain accounting stops dispatch; restarting does not authorize another run.
 The profile's 8192-token maximum for other operations does not raise the judge's

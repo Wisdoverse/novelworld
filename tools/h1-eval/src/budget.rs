@@ -3,12 +3,12 @@ use std::sync::Mutex;
 use llm_client::{MetricsHandle, Usage};
 use serde::Serialize;
 
-pub const MODEL: &str = "deepseek-v4-flash-vision-exp";
-pub const PROFILE: &str = "vision-diagnostic-budget-v1";
+pub const MODEL: &str = "deepseek-flash";
+pub const PROFILE: &str = "vision-diagnostic-budget-v2";
 const INPUT_CEILING: u64 = 1 << 20;
 const ATTEMPTS_PER_CALL: u64 = 5;
-const INPUT_MICRO_CNY: u64 = 3;
-const OUTPUT_MICRO_CNY: u64 = 9;
+const INPUT_MICRO_CNY: u64 = 4;
+const OUTPUT_MICRO_CNY: u64 = 12;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Amount {
@@ -282,10 +282,12 @@ mod tests {
 
     #[test]
     fn reserves_before_dispatch_and_only_settles_complete_evidence() {
+        assert_eq!(MODEL, "deepseek-flash");
+        assert_eq!(PROFILE, "vision-diagnostic-budget-v2");
         let mut ledger = Ledger::default();
         let ticket = ledger.reserve(8192, Counters::default()).unwrap();
         assert_eq!(ledger.charged.tokens, 5_283_840);
-        assert_eq!(ledger.charged.cost_micro_cny, 16_097_280);
+        assert_eq!(ledger.charged.cost_micro_cny, 21_463_040);
         assert_eq!(ledger.charged.attempts, 5);
         assert!(ledger.reserve(8192, Counters::default()).is_err());
         ledger
@@ -297,7 +299,7 @@ mod tests {
                 logical_calls: 1,
                 attempts: 2,
                 tokens: 9,
-                cost_micro_cny: 39,
+                cost_micro_cny: 52,
             }
         );
         assert!(ledger.pending.is_none());
@@ -496,7 +498,7 @@ mod tests {
                 assert_eq!(count, expected);
                 assert_eq!(report.charged.logical_calls, 1);
                 assert_eq!(report.charged.attempts, expected as u64);
-                assert_eq!(report.charged.cost_micro_cny, expected as u64 * 27);
+                assert_eq!(report.charged.cost_micro_cny, expected as u64 * 36);
                 assert_eq!(report.charged.tokens, expected as u64 * 5);
                 assert!(report.unreleased_reservation.is_none());
                 assert!(report.stopped.is_none());

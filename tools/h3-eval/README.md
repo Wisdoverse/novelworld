@@ -64,7 +64,7 @@ production conversation quality, durable-memory usefulness, or formal H3's
 separate 72/72 final-cohort requirement.
 
 Set `H3_EVAL_PROVIDER=deepseek`, `LLM_API_URL=https://api.deepseek.com`, and
-`LLM_MODEL=deepseek-v4-flash-vision-exp`; the approved execution mechanism supplies
+`LLM_MODEL=deepseek-flash`; the approved execution mechanism supplies
 `LLM_API_KEY` without putting it in the registration. Runtime
 `LLM_DIAGNOSTIC_BUDGET_ID`/`LLM_DIAGNOSTIC_BUDGET_LIMITS` must be absent or empty.
 This standalone control does not provision or reuse a service-owned allowance.
@@ -74,13 +74,13 @@ The registration is a strict JSON object (no unknown or duplicate fields):
 
 | Field | Exact contract |
 | --- | --- |
-| `schema_version`, `profile` | `1`, `h3-vision-calibration-diagnostic-v1` |
+| `schema_version`, `profile` | `1`, `h3-vision-calibration-diagnostic-v2` |
 | `hypothesis` | Nonempty, printable, at most 2,000 bytes |
 | `git_sha`, `executable_sha256` | Exact clean commit and SHA256 of the running executable |
 | `source_sha256` | Exact path-to-SHA256 map for the eight files listed below |
 | `prompt_sha256` | SHA256 of compact JSON containing the eight request message arrays in corpus order, each message serialized as `role` then `content` |
-| `provider`, `api_url`, `model` | `deepseek`, `https://api.deepseek.com`, `deepseek-v4-flash-vision-exp` |
-| `allowed_response_models` | Exactly `["deepseek-v4-flash-vision-exp"]` |
+| `provider`, `api_url`, `model` | `deepseek`, `https://api.deepseek.com`, `deepseek-flash` |
+| `allowed_response_models` | Exactly `["deepseek-flash"]` |
 | `semantic_cases` | The eight `semantic_cases` IDs from the unchanged corpus, in its original order |
 | `limits` | Exactly `{"logical_calls":8,"attempts":40,"tokens":20000000,"cost_micro_cny":35000000}` |
 | `not_before_unix`, `expires_unix` | Integer UTC Unix seconds; current time must be in this half-open interval, whose length is at most 86,400 seconds |
@@ -110,11 +110,12 @@ The local control adapts H1's conservative reservation and complete-usage
 reconciliation. Before each logical call it syncs a reservation for all five
 possible HTTP attempts to `control.jsonl`. It syncs settlement before releasing
 unused allowance. Each attempt is conservatively quoted at at most 1,048,576
-input tokens and 800 output tokens, using three and nine micro-CNY per respective
-token. These are inherited control assumptions, not a claim about current
-invoiced prices; the later paid registration must independently verify official
-context/pricing assumptions. Outer limits may stop the run before eight calls
-complete; they are never increased to fill the sample count.
+input tokens and 800 output tokens, using four and twelve micro-CNY per respective
+token. These coefficients conservatively cover the selected DeepSeek V4.1 Flash
+peak prices under the policy's hard 10 CNY/USD bound; a later paid registration
+must independently reverify official context/pricing assumptions. Outer limits
+may stop the run before eight calls complete; they are never increased to fill
+the sample count.
 
 The observer retains responses before validating complete envelopes, exact
 returned model, and usage bounds, including responses that could trigger JSON

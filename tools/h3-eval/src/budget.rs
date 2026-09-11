@@ -3,12 +3,12 @@ use std::{fs::File, io::Write, sync::Mutex};
 use llm_client::{MetricsHandle, Usage};
 use serde::Serialize;
 
-pub const MODEL: &str = "deepseek-v4-flash-vision-exp";
-pub const PROFILE: &str = "h3-vision-calibration-diagnostic-v1";
+pub const MODEL: &str = "deepseek-flash";
+pub const PROFILE: &str = "h3-vision-calibration-diagnostic-v2";
 pub const INPUT_CEILING: u64 = 1 << 20;
 const ATTEMPTS_PER_CALL: u64 = 5;
-const INPUT_MICRO_CNY: u64 = 3;
-const OUTPUT_MICRO_CNY: u64 = 9;
+const INPUT_MICRO_CNY: u64 = 4;
+const OUTPUT_MICRO_CNY: u64 = 12;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Amount {
@@ -390,10 +390,12 @@ mod tests {
 
     #[test]
     fn reserves_before_dispatch_and_only_settles_complete_evidence() {
+        assert_eq!(MODEL, "deepseek-flash");
+        assert_eq!(PROFILE, "h3-vision-calibration-diagnostic-v2");
         let mut ledger = Ledger::default();
         let ticket = ledger.reserve(800, Counters::default()).unwrap();
         assert_eq!(ledger.charged.tokens, 5_246_880);
-        assert_eq!(ledger.charged.cost_micro_cny, 15_764_640);
+        assert_eq!(ledger.charged.cost_micro_cny, 21_019_520);
         assert_eq!(ledger.charged.attempts, 5);
         assert!(ledger.reserve(800, Counters::default()).is_err());
         ledger
@@ -405,7 +407,7 @@ mod tests {
                 logical_calls: 1,
                 attempts: 2,
                 tokens: 9,
-                cost_micro_cny: 39,
+                cost_micro_cny: 52,
             }
         );
         assert!(ledger.pending.is_none());
