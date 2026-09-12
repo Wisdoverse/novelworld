@@ -247,15 +247,16 @@ character slice. Existing fixture bytes, failed ledgers and formal policies are
 unchanged; each Diagnostic still needs a new prospective approval and actual
 useful runtime artifact pair. Fixture validation precedes protected configuration.
 
-The optional real-schema regression check runs
-`NW_H4_TEST_POSTGRES=<owned-migrated-container> python3 tests/e2e/diagnostic_journey_test.py DiagnosticJourneyTest.test_v2_summary_snapshot_real_postgres_schema`.
-It requires an already-owned isolated PostgreSQL container with the standard
-`novel` role and `novel_world` database (or explicit `NW_H4_TEST_PGUSER` /
-`NW_H4_TEST_PGDATABASE` overrides). It executes the actual snapshot query
-against temporary copies of the real column definitions, rolls them back, and
-never starts a service, mutates public rows or calls a provider. Message persona
-provenance is projected from the matching durable turn; raw message values remain
-unchanged and mismatched scope, identity or chapter fails validation.
+CI runs the real-schema regressions against its digest-pinned disposable
+`test-postgres` database. Local runs name the container with
+`NW_H4_TEST_POSTGRES` and may override `NW_H4_TEST_PGUSER` /
+`NW_H4_TEST_PGDATABASE`. The player-entry selector test also requires
+`NW_H4_TEST_POSTGRES_DISPOSABLE=1`: it mutates public rows, removes and verifies
+its exact random subject rows, and must never target a shared database. The
+snapshot check uses temporary copies of real column definitions and rolls back.
+Neither test starts a service or calls a provider. Message persona provenance is
+projected from the matching durable turn; raw message values remain unchanged
+and mismatched scope, identity or chapter fails validation.
 
 The fixed profile is `tools/llm-budget/diagnostic-v1.json`: official DeepSeek
 origin, `deepseek-flash`, thinking disabled. Its 4 input / 12 output micro-CNY
