@@ -1925,6 +1925,8 @@ class Journey:
         )
         if not first_key_node.isdigit():
             raise QualificationFailure("canonical_key_node_missing")
+        if int(first_key_node) < 1 or int(first_key_node) >= total_chapters:
+            raise QualificationFailure("branch_checkpoint_unusable")
         checkpoint_value = self.db_scalar(
             "WITH latest_model AS MATERIALIZED ("
             "SELECT content FROM canon_story_models "

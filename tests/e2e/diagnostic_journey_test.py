@@ -1979,6 +1979,18 @@ INSERT INTO canon_story_models
                         RUNNER.QualificationFailure, f"^{code}$"
                     ):
                         journey.player_entry_checkpoint(novel_id, 4, code)
+                psql(
+                    "UPDATE chapters SET is_key_node = (chapter_number = 4) "
+                    f"WHERE novel_id = '{novel_id}'"
+                )
+                for code in (
+                    "player_entry_has_no_location",
+                    "compatibility_player_entry_has_no_location",
+                ):
+                    with self.subTest(final_only=code), self.assertRaisesRegex(
+                        RUNNER.QualificationFailure, "^branch_checkpoint_unusable$"
+                    ):
+                        journey.player_entry_checkpoint(novel_id, 4, code)
         finally:
             self.assertEqual(
                 psql(
