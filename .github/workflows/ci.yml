@@ -7,6 +7,10 @@ on:
     branches: [main]
   workflow_dispatch:
   workflow_call:
+    inputs:
+      full:
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -21,8 +25,44 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Change Scope & Policy
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.scope.outputs.backend }}
+      frontend: ${{ steps.scope.outputs.frontend }}
+      desktop: ${{ steps.scope.outputs.desktop }}
+      integration: ${{ steps.scope.outputs.integration }}
+      runtime: ${{ steps.scope.outputs.runtime }}
+      launchers: ${{ steps.scope.outputs.launchers }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Test CI scope selection
+        run: python3 tools/ci_scope_test.py
+      - name: Select affected jobs
+        id: scope
+        env:
+          CI_FULL: ${{ inputs.full }}
+        run: python3 tools/ci_scope.py
+      - name: Specification conformance ledger
+        run: sha256sum --check docs/SPEC_CONFORMANCE.sha256
+      - name: Scan for committed secrets
+        # gitleaks-action requires a paid GITLEAKS_LICENSE for
+        # organization repositories, so CI and the local self-test share the
+        # open-source, digest-pinned Docker scanner and completion gate.
+        timeout-minutes: 6
+        run: bash tools/scan-secrets.sh
+      - name: Self-test the secret-scanning gate
+        if: steps.scope.outputs.backend == 'true'
+        timeout-minutes: 10
+        run: tests/e2e/gitleaks_self_test.sh
+
   unix-launcher:
     name: Unix Launcher
+    needs: changes
+    if: needs.changes.outputs.launchers == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -31,6 +71,8 @@ jobs:
 
   windows-launcher:
     name: Windows Launcher
+    needs: changes
+    if: needs.changes.outputs.launchers == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -40,6 +82,8 @@ jobs:
 
   desktop-contract:
     name: Desktop Shell Contract
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -68,15 +112,15 @@ jobs:
       - name: Test desktop runtime contracts
         run: cargo test --manifest-path frontend/src-tauri/Cargo.toml --locked
 
-  rust:
-    name: Rust Build & Test
+  backend:
+    name: Backend Build & Test
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
-      - name: Specification conformance ledger
-        run: sha256sum --check docs/SPEC_CONFORMANCE.sha256
       - name: Dependabot auto-merge policy contract
         run: >-
           grep -Fq "contains(fromJSON('[\"cargo\",\"npm_and_yarn\",\"docker\"]'), steps.metadata.outputs.package-ecosystem)"
@@ -155,11 +199,32 @@ jobs:
             --commit "$GITHUB_SHA" > /tmp/llm-budget-b.json
           cmp /tmp/llm-budget-a.json /tmp/llm-budget-b.json
       - name: Live qualification runner contract
-        run: python3 tests/e2e/live_deepseek_journey.py --self-test
+        run: |
+          python3 tests/e2e/live_deepseek_journey.py --self-test
+          python3 tests/e2e/diagnostic_journey_test.py
       - name: Horizon 5 capacity policy contract
         run: python3 tools/capacity/run.py --self-test
       - name: Test
         run: cargo test --workspace --exclude integration-tests --locked
+      - name: Offline diagnostic budget lifecycle
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/e2e/diagnostic_budget_lifecycle_test.py
+          python3 tests/e2e/diagnostic_release_docker_spy_test.py
+          cargo build --locked -p user-service -p novel-service -p agent-service -p narrative-service
+          cargo build --locked -p llm-client --example diagnostic_budget_driver
+          python3 - <<'PY'
+          import runpy
+          import subprocess
+          fixture = runpy.run_path("tests/e2e/diagnostic_budget_lifecycle.py")
+          for name in ("PYTHON_IMAGE", "PG_IMAGE", "REGISTRY_IMAGE"):
+              subprocess.run(["docker", "pull", fixture[name]], check=True, timeout=180)
+          PY
+          python3 tests/e2e/diagnostic_budget_lifecycle.py \
+            --owner-binary target/debug/user-service \
+            --client-binary target/debug/examples/diagnostic_budget_driver
       - name: Clippy
         run: cargo clippy --workspace --exclude integration-tests --all-targets --locked -- -D warnings
       - name: Audit dependencies for known vulnerabilities
@@ -181,18 +246,11 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2.1.1
         with:
           command-arguments: licenses sources
-      - name: Scan for committed secrets
-        # gitleaks-action requires a paid GITLEAKS_LICENSE for
-        # organization repositories, so CI and the local self-test share the
-        # open-source, digest-pinned Docker scanner and completion gate.
-        timeout-minutes: 6
-        run: bash tools/scan-secrets.sh
-      - name: Self-test the secret-scanning gate
-        timeout-minutes: 10
-        run: tests/e2e/gitleaks_self_test.sh
 
   frontend:
     name: Frontend Build
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -219,6 +277,8 @@ jobs:
 
   frontend-a11y-browser:
     name: Frontend Browser A11y
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -250,6 +310,8 @@ jobs:
 
   integration:
     name: PostgreSQL & Redis Integration
+    needs: changes
+    if: needs.changes.outputs.integration == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -273,8 +335,10 @@ jobs:
 
   runtime:
     name: Production Compose Smoke
+    needs: changes
+    if: needs.changes.outputs.runtime == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     env:
       CACHE_MODE: postgres
       REDIS_URL: memory://
@@ -284,10 +348,10 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 2
-      - name: Include extended drills for backup and restore changes
+      - name: Include extended drills for backup and core journey changes
         if: github.event_name == 'pull_request'
         run: |
-          if ! git diff --quiet HEAD^1 HEAD -- infra/backup/ tests/e2e/backup_restore_drill.sh .github/workflows/ci.yml; then
+          if ! git diff --quiet HEAD^1 HEAD -- infra/backup/ tests/e2e/backup_restore_drill.sh tests/e2e/core_reader_loop.sh .github/workflows/ci.yml; then
             echo "RUN_EXTENDED_DRILLS=true" >> "$GITHUB_ENV"
           fi
       - name: Generate minimum-profile bootstrap roots
@@ -308,6 +372,47 @@ jobs:
           docker compose -f docker-compose.yml up -d --build --wait --wait-timeout 180
           test -z "$(docker ps -a --filter name=^/novel-redis$ --format '{{.Names}}')"
           test "$(docker exec novel-agent-service printenv CACHE_MODE)" = postgres
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify release-built diagnostic lifecycle and release refusal
+        timeout-minutes: 15
+        run: |
+          cargo build --locked -p llm-client --example diagnostic_budget_driver
+          python3 - <<'PY'
+          import json, pathlib, runpy, subprocess, tempfile
+          script = "tests/e2e/diagnostic_budget_lifecycle.py"
+          fixture = runpy.run_path(script)
+          for name in ("PYTHON_IMAGE", "PG_IMAGE", "REGISTRY_IMAGE"):
+              subprocess.run(["docker", "pull", fixture[name]], check=True, timeout=180)
+          with tempfile.TemporaryDirectory(prefix="nwq-capability-") as directory:
+              images = pathlib.Path(directory) / "images.json"
+              images.write_text(json.dumps({name: f"novel-world-{name}:local" for name in fixture["SERVICES"]}))
+              subprocess.run(["python3", script, "--runtime-images", str(images),
+                              "--client-binary", "target/debug/examples/diagnostic_budget_driver"], check=True)
+          PY
+      - name: Verify offline Vision cold-adoption wiring
+        timeout-minutes: 30
+        run: |
+          if ! command -v socat >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y socat
+          fi
+          python3 - <<'PY'
+          import json, pathlib, tempfile, subprocess
+          # Keep private synthetic evidence outside the checkout and do not upload it.
+          directory = pathlib.Path(tempfile.mkdtemp(prefix="nwq-cold-adopt-"))
+          evidence = directory / "evidence"
+          evidence.mkdir(mode=0o700)
+          images = directory / "images.json"
+          services = ("user-service", "novel-service", "agent-service", "narrative-service", "gateway", "frontend")
+          images.write_text(json.dumps({name: f"novel-world-{name}:local" for name in services}))
+          # Soft cancellation leaves 10 minutes for bounded terminal/outer cleanup
+          # before the hard kill; the step has another five minutes of headroom.
+          subprocess.run(["timeout", "--signal=TERM", "--kill-after=10m", "--", "15m",
+                          "python3", "tests/e2e/diagnostic_budget_lifecycle.py",
+                          "--journey-images", str(images), "--journey-output", str(evidence),
+                          "--subnet", "10.254.241.0/28"], check=True)
+          PY
       - name: Verify public probes and rate-limit exemption
         run: |
           docker exec novel-nginx nginx -T 2>&1 | grep -F 'limit_req_zone $binary_remote_addr zone=api_per_client:'
@@ -546,3 +651,23 @@ jobs:
       - name: Stop production topology
         if: always()
         run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml --profile redis down -v
+
+  required:
+    # Preserve the existing required-check name; never turn detector/policy
+    # failures or failed selected jobs into a successful skipped check.
+    name: Rust Build & Test
+    needs: [changes, unix-launcher, windows-launcher, desktop-contract, backend, frontend, frontend-a11y-browser, integration, runtime]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require policy checks and every selected job to pass
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          results = json.loads(os.environ['RESULTS'])
+          assert results['changes']['result'] == 'success', 'CI scope/policy check failed'
+          for name, job in results.items():
+              assert job['result'] in {'success', 'skipped'}, f'{name}: {job["result"]}'
+          PY

@@ -131,8 +131,8 @@ list:
 
 | Promise or contract | Current evidence | Owning horizon |
 |---|---|---|
-| Character personality and voice drive chat | Novel service still extracts persona from the whole novel, but [#220](https://github.com/Wisdoverse/novelworld/issues/220) bounds publication and consumption: before `Ready && current == total`, list/detail expose only `id`, `novel_id`, source-proven canonical name, and first appearance; full persona carries `persona_source_chapter_high_water`, while `system_prompt` is never public and responses are `private, no-store`. Agent persists a marker bounded by the new turn's chapter and requires exact marker equality when reclaiming before prompt/provider work. Pre-contract unmarked chat and Mid/Long summaries remain exportable/deletable but cannot enter online history, prompts, counts, semantic retrieval, or replay. The FSD browser code only allowlists fields and fences stale same-id objects; it does not authorize. Legacy alias-only identity rewinds return a typed conflict and offer an explicit switch to self without a GET-side rewrite. Migration 0024 is a release barrier: post-0024 rollback cannot revive a pre-0024 Agent or Novel without a separate compatibility procedure. The [DeepSeek v4 Flash baseline](./evidence/deepseek-v4-flash-live-baseline.json) proves the partial/full persona boundary in one live journey and passed final-SHA H3 calibration, but H1 extraction failed and no human voice review exists. Relationships, world summaries, export-wide spoiler safety, release upgrade, and H4 inferred-visibility evidence remain open | H3, H4 |
-| Four-layer memory provides cross-session continuity | The current H3 structural candidate adds authenticated, fact-first permanent journey memory with durable `pending`/`saved`/`skipped` projection state, private deterministic UUIDv5, explicit protagonist-witness filtering, chapter-bounded direct retrieval, independent journey/legacy candidate buckets, and whole-entry budget before legacy prose. One database slot spans execution and committed-pending projection, so a different key cannot overtake an unresolved fact while exact-key replay or Narrative's bounded durably rotating scan compensates through the same HTTP/idempotency/CAS path without allowing an unrecoverable oldest batch to starve later rows. Journey facts enter direct or semantic prompts only for a persisted `self` identity snapshot. New Mid/Long summaries require every actual source chat row to carry bounded persona provenance and persist the maximum source marker; unmarked legacy summaries stay out of direct and semantic online paths. Because memory rows still lack durable reader-identity provenance, character mode fails closed: it omits mid/long/permanent/semantic memory and projection, and keeps only recent chat backed by persona-proven completed claims for the exact same character. First adoption terminal-skips unverifiable pre-contract turns, retains their memory rows, and quarantines the former permanent/importance-7/UUID-v4 producer class from direct and semantic prompts; this can hide a legitimate legacy row in that narrow class and does not invent historical facts. Continuous-window, live semantic/provider/lifecycle, and human evidence remain open, so H3 is not complete | H0 decides the contract; H3 proves the outcome |
+| Character personality and voice drive chat | Novel service extracts persona and `world_summary` from the whole novel. Before `Ready && current == total`, list/detail expose only `id`, `novel_id`, source-proven canonical name, and first appearance; new chat fails before claim/provider work because whole-novel context is not authorized. At exact full progress, full persona and the non-empty, at-most-2,000-character summary share an exact `persona_source_chapter_high_water`; Agent independently rechecks that marker against final persisted progress and injects the summary only as bounded JSON-quoted data. Agent also reads a bounded, requested-character-only projection of goals and relationships from immutable Canon v1 after acquiring a turn; Novel requires owned `Ready` state and exact full progress before and after Canon I/O, while Agent strictly validates scope and quotes the projection as untrusted JSON. Later committed per-reader world state takes precedence over that source-history block. `system_prompt` remains private and responses remain `private, no-store`. The public relationship graph is withheld until exact full progress, rechecked after relationship I/O, and always `private, no-store`; its unchanged whole-graph response cannot support gradual publication because relationship provenance is not persisted. Old or malformed Novel responses fail closed. Pre-contract unmarked chat and Mid/Long summaries remain exportable/deletable but cannot enter online history, prompts, counts, semantic retrieval, or replay. The FSD browser allowlist is a cache/race fence, not authorization. Migration 0024 remains a release barrier. The existing DeepSeek baseline predates this prompt contract; gradual/source-cited public relationship publication, live goal/relationship/summary/voice quality, export-wide spoiler safety, release upgrade, and H4 inferred-visibility evidence remain open, so neither H3 nor H4 is complete | H3, H4 |
+| Four-layer memory provides cross-session continuity | The current H3 structural candidate adds authenticated, fact-first permanent journey memory with durable `pending`/`saved`/`skipped` projection state, private deterministic UUIDv5, explicit protagonist-witness filtering, chapter-bounded direct retrieval, independent journey/legacy candidate buckets, and whole-entry budget before legacy prose. One database slot spans execution and committed-pending projection, so a different key cannot overtake an unresolved fact while exact-key replay or Narrative's bounded durably rotating scan compensates through the same HTTP/idempotency/CAS path without allowing an unrecoverable oldest batch to starve later rows. Journey facts enter direct or semantic prompts only for a persisted `self` identity snapshot. Prospective self-chat windows are now registered with chat completion; bounded recovery handles known-unsent work, while dispatched failure/uncertainty stays terminal without a new logical provider call. Fenced publication preserves exact sources and a single Mid result; historical/rollback-period chat is not backfilled and old-Agent rollback suspends this guarantee. New Mid/Long summaries require every actual source chat row to carry bounded persona provenance and persist the maximum source marker; unmarked legacy summaries stay out of direct and semantic online paths. Because memory rows still lack durable reader-identity provenance, character mode fails closed: it omits mid/long/permanent/semantic memory and projection, and keeps only recent chat backed by persona-proven completed claims for the exact same character. First adoption terminal-skips unverifiable pre-contract turns, retains their memory rows, and quarantines the former permanent/importance-7/UUID-v4 producer class from direct and semantic prompts; this can hide a legitimate legacy row in that narrow class and does not invent historical facts. Continuous-window, live semantic/provider/lifecycle, and human evidence remain open, so H3 is not complete | H0 decides the contract; H3 proves the outcome |
 | “Any language” interactive world | Ingestion accepts multiple document types, while narrative-node and generated-world paths require Simplified Chinese | H0 defines support; H4 verifies it |
 | Reader may assume a canonical character's identity | The original `PlayerEntity` is the product actor. Character identity now fails closed to in-character conversation plus exact read/replay of an already committed branch result: Player/open-world endpoints and every new node/choice are refused before provider/write work, WorldState is choices-only, while internal V4 reads return only an opaque causal revision and no Player branch/world content. Durable node identity-provenance keys and general cross-service identity-revision fencing remain open; this is not a character-play product promise | H0 resolves the contract; H4 verifies any retained mode |
 | Consecutive player actions remain causally connected | The authoritative `world_turns` journal is per-reader total order; one database authority slot spans an in-progress turn and committed `pending` projection, preventing another key from overtaking it. Choice commits use locked fingerprints and chronology, Player/open-world entry seals prior branch authority, rewinds fail closed to canon, and derived context is explicit-witness and source-bounded. Before open-world entry, self-mode character chat consumes only a bounded, progress-filtered projection of committed transition events that explicitly name that character; producer and consumer both reject scope, ordering, actor, size, or high-water drift, and no UUID reaches the provider prompt. Every new chat claim also persists the V4 `WorldState` fingerprint returned with its one-snapshot context and rechecks it after provider generation; a concurrent committed branch/world change produces zero chat messages and no completion event. This deliberately does not claim linearizability across the final Narrative read and Agent commit. Same-tab exact recovery plus Narrative's bounded pending scan retain ambiguous authority and reconcile eligible rows; identity/progress-ineligible or invalid rows remain `pending` but durably rotate without starving later rows. Character mode cannot create new branches without durable identity provenance. The DeepSeek baseline proves branch-to-chat visibility, exact revision binding, 12 ordered world turns, bounded direct-action visibility, restart replay, and final-SHA H3 calibration. H1 still blocks provider qualification; release upgrade, inferred visibility, continuous-window recovery, and human accessibility remain open. PostgreSQL is sufficient and no graph database is required | H4 |
@@ -151,6 +151,13 @@ Retain plan review, implementation, non-author agent review and all affected
 automated gates. Deferred human evidence is unverified, not passed; human-only
 work is not planned for this phase. The horizon exit requirements below remain
 the formal qualification contract, not a reason to block rapid iteration.
+
+This private iteration direction prioritizes H3/H4: believable cross-session
+character memory and a coherent, durable world journey. H1 remains a required
+dependency where a change relies on its source-to-world guarantees, but this
+priority does not change H1's formal exit criteria or supersede the repository
+Project as the authority for execution status and priority. It is not evidence
+that H3 or H4 has reached its horizon exit state.
 
 Every horizon exit has at least three recorded perspectives. Each record names
 the reviewer, commit, evidence, unresolved risks, and disposition. A
@@ -201,10 +208,16 @@ flowchart LR
     H5 --> H6["H6 · Evidence-led expansion and scale"]
 ```
 
-H1 and H2 may proceed in parallel after their relevant H0 contracts are
-approved. H3's local structural implementation may start after H0 and H1; live
-or private-data evaluation waits only for the relevant H2 provider, privacy,
-and corpus controls, not every supply-chain control. A bounded public canary is
+The graph describes qualification dependencies, not a requirement to complete
+every earlier horizon before any later implementation. During private iteration,
+prioritize independently deliverable H3/H4 outcomes once their relevant H0
+contracts and actual H1/H2 prerequisites are satisfied. An unresolved extraction
+quality claim blocks conclusions that depend on it, not unrelated structural
+work. Live or private-data evaluation also requires the relevant H2 provider,
+privacy, corpus and enforceable-budget controls, not every supply-chain control.
+A missing upgrade candidate blocks upgrade evidence, not every other journey
+check; any narrower result must explicitly leave upgrade unverified.
+A bounded public canary is
 blocked until H1, all of H2, and every exposed product path are
 **Release-qualified**. Public general availability is blocked until H5 is
 **Observed**. H6 has no start date: it begins only when demand or a named
@@ -213,8 +226,9 @@ objective supplies its trigger.
 ## H0 — Product and contract truth
 
 **Outcome:** every README core promise and release-relevant SPEC requirement is
-intentional, testable, owned, and honest about its evidence. This is the next
-horizon; later work starts only after its relevant H0 contract is approved.
+intentional, testable, owned, and honest about its evidence. H0 supplies the
+relevant contracts for each outcome; reopen the affected contract when it is
+unclear or changes, rather than restarting a whole-roadmap review.
 
 Scope:
 
@@ -566,6 +580,13 @@ predicate, reproduce it on comparable hardware/workload, quantify expected
 gain and cost, and include migration, compatibility, rollback, and post-change
 evidence.
 
+- **Future mainstream-LLM direction:** expand across vendors incrementally
+  through a versioned provider/model/capability matrix, covering
+  OpenAI-compatible and, where needed, native APIs. Reuse the domain ports and
+  qualify streaming, structured output, retry, deadlines, budgets, secrets,
+  and applicable live quality for each slice; this does not claim current
+  universal support, start H6, create a new H6 issue, or justify empty adapters.
+
 | Candidate mechanism or feature | Eligible only when |
 |---|---|
 | Another language, format, provider, model, or client | A named user outcome justifies it and the new slice adds versioned live/adversarial evidence |
@@ -591,19 +612,23 @@ Exit evidence for any slice:
 
 ## Planning rule
 
-- H0 contract truth is next. H1 or H2 may start as soon as its release-blocking
-  H0 contracts are approved; unrelated draft-spec bookkeeping cannot delay
-  known data-loss or security work. No other horizon is active merely because
-  it appears here.
+- Prioritize the current private-iteration H3/H4 outcomes and resolve their
+  actual H0/H1/H2 dependencies. Unrelated specification bookkeeping or formal
+  horizon qualification must not block an independently verifiable change.
+  No horizon is active merely because it appears here; the Project records
+  actual ownership and execution.
 - One roadmap issue owns one independently mergeable outcome and records current
   truth, scope/non-goals, SPEC references, invariants, acceptance policy,
   dependencies, rollout, observability, migration, and rollback.
 - Do not pre-create speculative implementation issues for an inactive horizon.
 - Project status tracks execution; this document changes only when outcome
   ordering, evidence, or exit criteria change.
-- `Done` requires the horizon's stated evidence on the final commit and target
-  environment. A pushed branch, open PR, merged PR, recorded fixture, or green
-  synthetic benchmark alone is not `Done`.
+- An issue is `Done` only when its own acceptance evidence is satisfied, its
+  final commit is merged, and required CI is green. A structural child can be
+  Done while its live-evidence parent remains open.
+- A horizon is complete only with its stated exit evidence on the final commit
+  and applicable target environment. A merged structural PR or green synthetic
+  benchmark cannot substitute for required live, upgrade or observation evidence.
 
 ## Engineering bar references
 

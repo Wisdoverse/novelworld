@@ -43,6 +43,7 @@ ENUM_LABELS = {
         "client_or_transport_error", "consumer_dropped", "empty_json_mode",
         "error", "missing", "present", "provider_error", "rate_limited",
         "rejected", "setup_error", "stream_error", "success",
+        "budget_error", "evidence_error", "timeout", "setup_timeout",
     },
     "reason": {
         "client_or_transport_error", "json_mode_fallback", "provider_error",

@@ -96,12 +96,17 @@ function storePendingRequest(userId: string, novelId: string, request: PendingRe
 
 function pendingRequestFromView(view: OpenWorldView): PendingRequest | null {
   const entry = view.journal.find(item => item.memory_projection_status === 'pending');
-  if (!entry || entry.turn_number < 1) return null;
-  const request: PendingRequest = {
-    action: entry.action,
-    idempotencyKey: entry.turn_id,
-    expectedTurnNumber: entry.turn_number - 1,
-  };
+  const request = entry && entry.turn_number >= 1
+    ? {
+      action: entry.action,
+      idempotencyKey: entry.turn_id,
+      expectedTurnNumber: entry.turn_number - 1,
+    }
+    : view.recoverable_turn && {
+      action: view.recoverable_turn.action,
+      idempotencyKey: view.recoverable_turn.turn_id,
+      expectedTurnNumber: view.recoverable_turn.expected_turn_number,
+    };
   return isPendingRequest(request) ? request : null;
 }
 
@@ -124,21 +129,21 @@ export function WorldDashboard({
 }: WorldDashboardProps) {
   const turn = useSubmitWorldTurn(novelId);
   const storageKey = worldTurnPendingStorageKey(view.player.user_id, novelId);
-  const journalPendingRequest = pendingRequestFromView(view);
+  const serverPendingRequest = pendingRequestFromView(view);
   const [pendingState, setPendingState] = useState(() => ({
     storageKey,
-    request: journalPendingRequest
+    request: serverPendingRequest
       ?? readStoredPendingRequest(view.player.user_id, novelId),
   }));
   const restoredPendingRequest = pendingState.storageKey === storageKey
     ? pendingState.request
     : readStoredPendingRequest(view.player.user_id, novelId);
-  // The server journal owns the unresolved authority slot. A stale request
-  // from another tab can never overtake a different committed pending turn.
-  const pendingRequest = journalPendingRequest ?? restoredPendingRequest;
-  const journalPendingAction = journalPendingRequest?.action;
-  const journalPendingKey = journalPendingRequest?.idempotencyKey;
-  const journalPendingRevision = journalPendingRequest?.expectedTurnNumber;
+  // The server owns the unresolved authority slot. A stale request from
+  // another tab can never overtake its active or committed pending turn.
+  const pendingRequest = serverPendingRequest ?? restoredPendingRequest;
+  const serverPendingAction = serverPendingRequest?.action;
+  const serverPendingKey = serverPendingRequest?.idempotencyKey;
+  const serverPendingRevision = serverPendingRequest?.expectedTurnNumber;
   const [errorState, setErrorState] = useState<{ novelId: string; message?: string }>(() => ({
     novelId,
   }));
@@ -162,11 +167,11 @@ export function WorldDashboard({
   const setError = (message?: string) => setErrorState({ novelId, message });
 
   useEffect(() => {
-    if (!journalPendingAction || !journalPendingKey || journalPendingRevision === undefined) return;
+    if (!serverPendingAction || !serverPendingKey || serverPendingRevision === undefined) return;
     const authoritative = {
-      action: journalPendingAction,
-      idempotencyKey: journalPendingKey,
-      expectedTurnNumber: journalPendingRevision,
+      action: serverPendingAction,
+      idempotencyKey: serverPendingKey,
+      expectedTurnNumber: serverPendingRevision,
     };
     storePendingRequest(view.player.user_id, novelId, authoritative);
     setPendingState(current => (
@@ -176,9 +181,9 @@ export function WorldDashboard({
         : { storageKey, request: authoritative }
     ));
   }, [
-    journalPendingAction,
-    journalPendingKey,
-    journalPendingRevision,
+    serverPendingAction,
+    serverPendingKey,
+    serverPendingRevision,
     novelId,
     storageKey,
     view.player.user_id,
@@ -261,7 +266,7 @@ export function WorldDashboard({
           {activeThreads.length ? (
             <ul className="mt-3 space-y-2 text-sm text-[#3c4043]">
               {activeThreads.map(([id, thread]) => (
-                <li key={id}>{thread.description} <span className="text-xs text-[#5f6368]">· {thread.origin === 'player' ? '玩家创造' : '原著主线'}</span></li>
+                <li key={id}>{thread.description} <span className="text-xs text-[#5f6368]">· {thread.origin === 'canon' ? '原著主线' : thread.origin === 'player' ? '玩家创造' : '来源未确认'}</span></li>
               ))}
             </ul>
           ) : <p className="mt-3 text-sm text-[#5f6368]">暂无活跃事件线</p>}
@@ -287,17 +292,20 @@ export function WorldDashboard({
           <BookOpen size={14} /> 原著事件时间线
         </h3>
         {view.session.canonical_events.length ? (
-          <ol className="mt-3 space-y-3">
-            {view.session.canonical_events.map(event => (
-              <li key={event.id} className="rounded-lg border border-[#e1e3e8] bg-white p-3 text-sm text-[#3c4043]">
-                <span className="mr-2 text-xs font-semibold text-[#0b57d0]">原著主线</span>
-                {event.summary}
-                <div className="mt-1 text-xs text-[#5f6368]">
-                  {eventStatus[event.status]} · 来源章节 {event.source_chapters.join('、')}{event.reason ? ` · ${event.reason}` : ''}
-                </div>
-              </li>
-            ))}
-          </ol>
+          <>
+            <p className="mt-2 text-xs text-[#5f6368]">事件由模型从原著中抽取，可能存在遗漏或误读，请结合来源章节核对。</p>
+            <ol className="mt-3 space-y-3">
+              {view.session.canonical_events.map(event => (
+                <li key={event.id} className="rounded-lg border border-[#e1e3e8] bg-white p-3 text-sm text-[#3c4043]">
+                  <span className="mr-2 text-xs font-semibold text-[#0b57d0]">原著抽取</span>
+                  {event.summary}
+                  <div className="mt-1 text-xs text-[#5f6368]">
+                    {eventStatus[event.status]} · 来源章节 {event.source_chapters.join('、')}{event.reason ? ` · ${event.reason}` : ''}
+                  </div>
+                </li>
+              ))}
+            </ol>
+          </>
         ) : <p className="mt-3 text-sm text-[#5f6368]">当前解锁范围内没有待运行的原著事件。</p>}
       </div>
 

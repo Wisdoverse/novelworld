@@ -37,9 +37,11 @@ decision, not a change to the frozen Qualification contract below.
   causal hypothesis and independent agent plan review. Do not repeatedly
   sample an unchanged failed revision to obtain a pass or tune historical
   cohorts after seeing their results.
-- The selected iteration model is `deepseek-v4-flash-vision-exp`; the
-  unregistered Pro proposal is not executed. Selection is not evidence of
-  qualification and does not change runtime defaults or past model identities.
+- The selected iteration model is [`deepseek-flash` (DeepSeek-V4.1-Flash)](https://api-docs.deepseek.com/);
+  the
+  retired Flash aliases and the unregistered Pro proposal are not selected for
+  a new run. Selection is not evidence of provider acceptance or qualification
+  and does not change past model identities.
 - Before any paid Diagnostic, register the hypothesis, immutable commit,
   corpus/policy/prompt identities, configured and allowed response models,
   and enforceable request/token/spend ceilings. Reserve a conservative
@@ -178,6 +180,172 @@ the code that ran while `evidence_commit` identifies the commit that packages
 that evidence; they cannot be the same self-referential value. A Diagnostic run
 cannot repair a failed cohort or substitute for Qualification and human review.
 
+### Vision journey Diagnostic — separate single-start registration
+
+The selected rapid-iteration model uses an explicit, separate path in the same
+runner. It does not change the Flash entrypoint or frozen Qualification cohort.
+Tooling work [#322](https://github.com/Wisdoverse/novelworld/issues/322) is not a
+live execution approval or evidence that H3/H4 passed. The real release-upgrade
+and pending-projection result remains [#230](https://github.com/Wisdoverse/novelworld/issues/230).
+
+Before execution, independently review one private, secret-free registration
+with schema `vision-journey-registration-v1` or the separate prospective-summary
+Diagnostic schema `vision-journey-registration-v2`. V1 has exactly these
+fields: `schema`,
+`budget_id`, `hypothesis`, `candidate_git_sha`, `base_manifest_sha256`,
+`candidate_manifest_sha256`, `base_application_image_ids`,
+`candidate_application_image_ids`, `profile_sha256`, `product_fixture_sha256`,
+`prompt_schema_identities`, `limits`, `output_dir`, and `ledger_path`.
+V2 additionally requires `network_subnet`: JSON null retains automatic Docker
+allocation; a string must be one canonical strict IPv4 RFC1918 /28. V1 rejects
+this extra field. The canonical registration hash binds this selection; it does
+not alter prompt/source identities or the fixed budget/product fixture.
+
+For explicit selection, the supported qualification adapter derives
+`RELEASE_QUALIFICATION_SUBNET` only from the registration, clearing inherited
+values. Before protected configuration and Started, it checks the default local
+Unix Docker endpoint, matching Linux host/kernel metadata, absence of Desktop
+and rootless modes, and the daemon default bridge's exact subnet/gateway/device
+in host IPv4 routes across all tables. Missing or ambiguous evidence fails
+closed. This is a bounded operator environment check, not attestation against
+malicious local root. Every other Docker allocation and non-default route is
+checked for overlap; no daemon, route or existing resource is modified.
+
+The adapter generates only `novel-net.ipam.config[0].subnet` in a fixed 0600
+Compose overlay under the owned external release-state directory. Exact bytes
+are checked on reuse; arbitrary paths/content and symlinks are refused. The
+original versioned Compose file and this same second `-f` serve cold adoption,
+upgrade and runner restart. Null/v1 retains the original one-file argv. The
+cold empty-project and clean-checkout gates remain mandatory. Creation rechecks
+topology, durably records an attempt, then binds the created Compose network's
+name, labels, subnet and immutable ID. Upgrade/restart must retain that identity;
+disappearance, drift or ambiguous creation stops without fallback allocation.
+Topology/overlay/attempt/observed identities stay in private evidence. Cleanup
+removes only proven owned resources; an unproven network identity is preserved.
+
+`prompt_schema_identities` must equal the source-derived result of
+`diagnostic_journey.source_identities(root, base_sha, candidate_sha)`; it binds
+the actual base/candidate prompt constants and domain/schema Git trees.
+The review freezes the SHA256 of the registration's UTF-8 canonical JSON
+(`ensure_ascii=False`, sorted keys, compact separators, no trailing newline).
+
+Registration v1 retains `h4-product-input-v1` and its original schedule. V2
+selects only `tests/e2e/fixtures/h4-journey-v2.json` (`h4-product-input-v2`): seven
+base chats stay unenrolled across the real upgrade, then ten newly committed
+self chats form one prospective summary window. Five fixed extra chats after
+world action 11 complete that window; one resumed chat gives eighteen chats,
+thirty-six messages and the same twelve world actions. V2 verifies exact source
+turns/message pairs, the sole fenced Mid result and its provenance before and
+after restart, and one logical summary across process generations (bounded
+transport retries remain allowed). Cross-version authority comparison removes
+only the seven new summary fields and separately proves every legacy default;
+ordinary same-schema replay/negative comparisons retain those fields. Failed or
+unknown windows stop the Diagnostic without reset or make-up calls. Mid selection
+is evidence of retrieval, not semantic quality or recovery of an interrupted
+summary call. V2 cannot be used for Flash, a Qualification cohort or the legacy
+character slice. Existing fixture bytes, failed ledgers and formal policies are
+unchanged; each Diagnostic still needs a new prospective approval and actual
+useful runtime artifact pair. Fixture validation precedes protected configuration.
+
+The optional real-schema regression check runs
+`NW_H4_TEST_POSTGRES=<owned-migrated-container> python3 tests/e2e/diagnostic_journey_test.py DiagnosticJourneyTest.test_v2_summary_snapshot_real_postgres_schema`.
+It requires an already-owned isolated PostgreSQL container with the standard
+`novel` role and `novel_world` database (or explicit `NW_H4_TEST_PGUSER` /
+`NW_H4_TEST_PGDATABASE` overrides). It executes the actual snapshot query
+against temporary copies of the real column definitions, rolls them back, and
+never starts a service, mutates public rows or calls a provider. Message persona
+provenance is projected from the matching durable turn; raw message values remain
+unchanged and mismatched scope, identity or chapter fails validation.
+
+The fixed profile is `tools/llm-budget/diagnostic-v1.json`: official DeepSeek
+origin, `deepseek-flash`, thinking disabled. Its 4 input / 12 output micro-CNY
+per-token reservations cover the [official 2026-09-10 peak Flash prices](https://api-docs.deepseek.com/quick_start/pricing/)
+under a hard 10 CNY/USD bound. Recheck the official price and an authoritative
+reference FX rate before every registration, and stop if either implied
+coefficient is higher; never loosen the bound after observing a result. `limits` contains
+exactly `profile`, `max_attempts`, `max_tokens`, `max_cost_micro_cny`, and an
+absolute UTC `expires_at`. Zero allowance is valid; no renewal or refill is
+performed. Keep registration/config files mode 0600, output and ledger parent
+directories mode 0700, outside Git. Paths must be canonical absolute paths
+without symlinks. Pre-create an empty output directory, but **do not create the
+ledger**: its name must be `<budget_id>.jsonl` in a separate private directory.
+
+Only after the separate prospective approval, invoke the existing entrypoint
+with its normal config/output/SHA/base/candidate arguments plus:
+
+```text
+--evidence-class Diagnostic --slice core
+--diagnostic-registration /private/path/vision-registration.json
+--diagnostic-registration-sha256 <approved-canonical-registration-sha256>
+```
+
+Do not supply a cohort or Qualification ledger. Pre-pull the registered images
+beforehand: read-only source/image checks precede reading protected model
+configuration. Both versions must be strict-ancestor, genuinely different
+application artifacts, with exact registered image IDs/repository digests and
+different filesystem layers in an image corresponding to a changed application
+build input. The runner maps known inputs from the current release Dockerfiles:
+runtime source, Cargo manifests/lockfile and Rust image inputs; frontend
+package/lock/workspace files, build configuration, assets and image inputs.
+The compiled `tools/llm-budget/diagnostic-v1.json` is an exact four-payer input
+exception, not permission to change the frozen profile or bypass registration
+and capability equality. Ordinary docs/test/tool changes do not qualify.
+Dependency-only changes can be candidates, but unchanged corresponding layers,
+metadata-only rebuilds or a change only in an unrelated image are rejected.
+This bounded mapping is not a dependency graph or proof of causality: build
+inputs can include development dependencies or produce identical runtime
+output. Prospective review must establish a useful change and reject fabricated
+version pairs. All six image identities remain checked. All four
+paying-service capability probes for both versions pass before cold adoption.
+
+For a registered Diagnostic only, the runner may retain the already decoded and
+stripped service stdout observed during response-model collection as bounded
+private evidence. This is observed text for application diagnosis, not a raw
+provider response or stderr capture. Exclusive 0600 writes and the existing
+cleanup synchronization provide the stated persistence boundary; no independent
+hard filesystem fsync deadline is claimed.
+
+Exclusive creation and file/directory fsync of `Started` precede deployment or
+provider work. Any existing ledger, including an empty or truncated file,
+prohibits reuse. The supported cold release provisions the single durable
+budget; upgrade and restart reuse it. The runner reconciles complete PG
+receipts at lifecycle boundaries rather than treating process metrics as an
+authoritative balance.
+
+Before allowing PG deletion, the sealed, fully settled terminal receipts must
+also match the final selected process-generation counters by operation:
+HTTP attempts, input/output/cache tokens and billable token classes. Missing
+generations or mismatched counts fail closed; unknown reservations are not
+invented HTTP usage. Logical usage-report counts are not receipt counts because
+empty-JSON retries may add usage without another logical report. A late
+settlement/metric race may conservatively fail; it never permits filling in
+missing evidence or another paid run.
+
+Success, failure and INT/TERM enter the same terminal path: seal once, drain
+existing grants for at most 300 seconds, stop and verify the four exact paying
+containers, persist consistent private receipts, then perform bounded exact
+cleanup. Unresolved calls after the bound fail the attempt while retaining
+their conservative charges. Missing stop/accounting/durable evidence retains
+the owned PG volume; never resume it to make provider calls. Cleanup commands
+have individual 10-second and combined 60-second bounds. SIGKILL/host loss has
+no cleanup guarantee and never permits restarting an existing registration.
+
+Final reports are fsynced before the terminal ledger. Report/ledger failure
+after safe PG removal cannot restore that volume: retained pre-cleanup and
+per-operation cleanup evidence are the recovery source. A terminal-write
+failure attempts to mark both reports failed; if storage also refuses that,
+an apparently completed report is **not** success. A durable matching `Passed`
+ledger, successful exit and complete reports are all required; a
+`terminal-failure.json` marker or incomplete ledger overrides a report.
+INT/TERM arriving during the serialized final report/ledger commit is handled
+after that terminal decision, not as a request to rerun it.
+
+Only the schema-3 `h4-vision-diagnostic-v1` or separately identified
+`h4-vision-diagnostic-v2` aggregate report may be considered for publication.
+V2 adds only numeric legacy/prospective chat and logical-summary counts. It omits budget/receipt/run IDs, private registration hashes,
+raw content and credentials. Limits, charged totals, settled/unresolved counts
+and seal status are explicit; a Diagnostic still makes no qualification claim.
+
 ## H4 journey qualification — `h4-journey-qualification-v1`
 
 This policy is approved before the implementation and live runs that it
@@ -297,7 +465,7 @@ permitted as evidence for this contract.
 
 | Package | Current use | Explicit limit |
 |---|---|---|
-| Required [CI](../.github/workflows/ci.yml) | PRs run structural build, unit, frontend, browser accessibility, PostgreSQL/Redis, Windows launcher, and a production Compose smoke; `main`, manual verification, and release calls additionally run the deterministic recovery, outage, backup/restore, secret-rotation, and capacity drills | Not a live provider, target-environment, manual accessibility, or user-quality report |
+| Required [CI](../.github/workflows/ci.yml) | PR and main push jobs follow the [affected-gate matrix](../CONTRIBUTING.md#verification); documentation-only changes may run only policy checks. Manual verification and reusable release CI select the full suite. Cite the exact commit/run and actually executed jobs/steps for recovery, outage, backup/restore, rotation and capacity evidence | A green aggregate does not prove skipped jobs ran. Not a live provider, target-environment, manual accessibility, or user-quality report |
 | [`single-node-v1`](./SLOS.md) | Deterministic admission, latency, replay, persistence, and Redis bounds on recorded CI hardware | Not a public-traffic or sustained availability SLO |
 | [`h3-synthetic-v1`](../tools/h3-eval/README.md) | Positive/adversarial calibration for extraction coverage, chronology, causality, character consistency, spoilers, memory, coherence, and replay | Recorded judgments do not qualify a provider/model or representative novel corpus |
 | [DeepSeek v4 Flash live baseline](./evidence/deepseek-v4-flash-live-baseline.json) | At exact code SHA `ddefaa8c023019fb2cbf6b279444215795ef5f48`, an isolated production-Compose reader journey completed, including branch-to-chat revision binding, 12 world turns, restart recovery, export, and deletion; H3 passed 24/24 final-SHA samples | H1 failed 5/6 slices, human quality approval is absent, and no qualification claim is made |

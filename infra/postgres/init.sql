@@ -408,6 +408,47 @@ CREATE TABLE chat_turns (
     created_at             TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.now(),
     updated_at             TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.now(),
     completed_at           TIMESTAMPTZ,
+    summary_sequence       BIGINT,
+    summary_state          VARCHAR(16) NOT NULL DEFAULT 'none',
+    summary_memory_id      UUID,
+    summary_claim_attempt  BIGINT NOT NULL DEFAULT 0,
+    summary_lease_expires_at TIMESTAMPTZ,
+    summary_next_attempt_at TIMESTAMPTZ,
+    summary_failure_code   VARCHAR(64),
+    CONSTRAINT chat_summary_sequence_check CHECK (
+        summary_sequence IS NULL OR (
+            summary_sequence > 0 AND status = 'completed'
+            AND reader_identity_type = 'self' AND reader_character_id IS NULL
+            AND persona_source_chapter_high_water IS NOT NULL
+        )
+    ),
+    CONSTRAINT chat_summary_state_check CHECK (
+        summary_claim_attempt >= 0 AND (
+            (summary_state = 'none'
+                AND (summary_sequence IS NULL OR summary_sequence % 10 <> 0)
+                AND summary_memory_id IS NULL AND summary_claim_attempt = 0
+                AND summary_lease_expires_at IS NULL
+                AND summary_next_attempt_at IS NULL AND summary_failure_code IS NULL)
+            OR (
+                summary_sequence IS NOT NULL AND summary_sequence % 10 = 0
+                AND summary_memory_id IS NOT NULL AND (
+                    (summary_state = 'pending' AND summary_lease_expires_at IS NULL
+                        AND summary_next_attempt_at IS NOT NULL AND summary_failure_code IS NULL)
+                    OR (summary_state IN ('claimed', 'dispatched') AND summary_claim_attempt > 0
+                        AND summary_lease_expires_at IS NOT NULL
+                        AND summary_next_attempt_at IS NULL AND summary_failure_code IS NULL)
+                    OR (summary_state = 'saved' AND summary_claim_attempt > 0
+                        AND summary_lease_expires_at IS NULL
+                        AND summary_next_attempt_at IS NULL AND summary_failure_code IS NULL)
+                    OR (summary_state IN ('failed', 'unknown') AND summary_claim_attempt > 0
+                        AND summary_lease_expires_at IS NULL AND summary_next_attempt_at IS NULL
+                        AND summary_failure_code IS NOT NULL
+                        AND summary_failure_code IN ('source_invalid', 'output_invalid',
+                            'eligibility_changed', 'dispatch_unknown'))
+                )
+            )
+        )
+    ),
     CONSTRAINT chat_turns_request_fingerprint_check
         CHECK (pg_catalog.octet_length(request_fingerprint) = 32),
     CONSTRAINT chat_turns_world_revision_check CHECK (
@@ -463,6 +504,16 @@ CREATE TABLE chat_turns (
 CREATE UNIQUE INDEX idx_chat_turns_one_in_progress
     ON chat_turns(user_id, character_id, novel_id)
     WHERE status = 'in_progress';
+
+CREATE UNIQUE INDEX idx_chat_summary_sequence
+    ON chat_turns(user_id, novel_id, character_id, summary_sequence)
+    WHERE summary_sequence IS NOT NULL;
+CREATE INDEX idx_chat_summary_due
+    ON chat_turns(summary_next_attempt_at, id)
+    WHERE summary_state = 'pending';
+CREATE INDEX idx_chat_summary_leases
+    ON chat_turns(summary_lease_expires_at, id)
+    WHERE summary_state IN ('claimed', 'dispatched');
 
 CREATE TABLE chat_messages (
     id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -851,6 +902,65 @@ CREATE TABLE user_llm_configs (
     api_key_ciphertext BYTEA NOT NULL,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ─── Durable opt-in diagnostic budget (user-service owned) ────────────────
+
+CREATE TABLE diagnostic_llm_budgets (
+    budget_id              UUID PRIMARY KEY,
+    contract               TEXT NOT NULL,
+    profile                TEXT NOT NULL,
+    profile_sha256         TEXT NOT NULL CHECK (
+        profile_sha256 ~ '^[0-9a-f]{64}$'
+    ),
+    max_attempts           BIGINT NOT NULL CHECK (max_attempts BETWEEN 0 AND 2000),
+    max_tokens             BIGINT NOT NULL CHECK (max_tokens BETWEEN 0 AND 20000000),
+    max_cost_micro_cny     BIGINT NOT NULL CHECK (max_cost_micro_cny BETWEEN 0 AND 35000000),
+    charged_attempts       BIGINT NOT NULL DEFAULT 0 CHECK (
+        charged_attempts BETWEEN 0 AND max_attempts
+    ),
+    charged_tokens         BIGINT NOT NULL DEFAULT 0 CHECK (
+        charged_tokens BETWEEN 0 AND max_tokens
+    ),
+    charged_cost_micro_cny BIGINT NOT NULL DEFAULT 0 CHECK (
+        charged_cost_micro_cny BETWEEN 0 AND max_cost_micro_cny
+    ),
+    expires_at             TIMESTAMPTZ NOT NULL,
+    sealed                 BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at             TIMESTAMPTZ NOT NULL DEFAULT CLOCK_TIMESTAMP()
+);
+
+CREATE TABLE diagnostic_llm_attempts (
+    budget_id                  UUID NOT NULL REFERENCES diagnostic_llm_budgets(budget_id),
+    attempt_id                 UUID NOT NULL,
+    ordinal                    BIGINT NOT NULL CHECK (ordinal BETWEEN 1 AND 2000),
+    operation                  TEXT NOT NULL,
+    output_limit               INTEGER NOT NULL CHECK (output_limit BETWEEN 1 AND 8192),
+    reservation_tokens         BIGINT NOT NULL CHECK (reservation_tokens BETWEEN 1 AND 1056768),
+    reservation_cost_micro_cny BIGINT NOT NULL CHECK (reservation_cost_micro_cny BETWEEN 1 AND 4292608),
+    settled                    BOOLEAN NOT NULL DEFAULT FALSE,
+    settlement_model           TEXT,
+    input_tokens               BIGINT CHECK (input_tokens BETWEEN 0 AND 1048576),
+    output_tokens              BIGINT CHECK (
+        output_tokens BETWEEN 0 AND output_limit
+    ),
+    cached_input_tokens        BIGINT CHECK (
+        cached_input_tokens BETWEEN 0 AND input_tokens
+    ),
+    PRIMARY KEY (budget_id, attempt_id),
+    UNIQUE (budget_id, ordinal),
+    CHECK (
+        (NOT settled
+            AND settlement_model IS NULL
+            AND input_tokens IS NULL
+            AND output_tokens IS NULL
+            AND cached_input_tokens IS NULL)
+        OR
+        (settled
+            AND settlement_model IS NOT NULL
+            AND input_tokens IS NOT NULL
+            AND output_tokens IS NOT NULL)
+    )
 );
 
 -- ─── 触发器：自动更新 updated_at ──────────────────────────────────────────

@@ -77,6 +77,58 @@ sys.exit(92)
 
 
 class RestorePreflight(unittest.TestCase):
+    def test_diagnostic_dotenv_syntax_cannot_bypass_release_or_restore_guards(self):
+        # Actual Compose parser and actual shell entrypoints, but no container or DB.
+        with tempfile.TemporaryDirectory(prefix="nw-diagnostic-mode-") as directory:
+            root = Path(directory)
+            clean_env = {"PATH": os.environ["PATH"],
+                         "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "safe.directory",
+                         "GIT_CONFIG_VALUE_0": str(root)}
+            subprocess.run(["git", "init", "--quiet", str(root)], env=clean_env,
+                           check=True, capture_output=True, timeout=5)
+            compose = root / "compose.yml"
+            compose.write_text("services:\n  fixture:\n    image: unused\n    environment:\n"
+                               "      LLM_DIAGNOSTIC_BUDGET_ID: ${LLM_DIAGNOSTIC_BUDGET_ID:-}\n")
+            env_file = root / ".env"
+            state = root / "state"
+            state.mkdir()
+            pending = state / "rollback.pending"
+            pending.write_text("must remain untouched")
+            release_env = dict(clean_env, RELEASE_STATE_DIR=str(state),
+                               RELEASE_COMPOSE_PROJECT="nwq-0123456789",
+                               RELEASE_CONTAINER_PREFIX="nwq-0123456789",
+                               RELEASE_HTTP_BIND="127.0.0.1", RELEASE_HTTP_PORT="18080")
+            for assignment in (f"LLM_DIAGNOSTIC_BUDGET_ID={TOKEN}",
+                               f"export LLM_DIAGNOSTIC_BUDGET_ID={TOKEN}",
+                               f"  LLM_DIAGNOSTIC_BUDGET_ID={TOKEN}",
+                               f"LLM_DIAGNOSTIC_BUDGET_ID = {TOKEN}"):
+                with self.subTest(assignment=assignment):
+                    env_file.write_text(assignment + "\n")
+                    resolved = subprocess.run(["docker", "compose", "--env-file", str(env_file),
+                                               "-f", str(compose), "config", "--format", "json"],
+                                              env=clean_env, capture_output=True, timeout=10)
+                    self.assertEqual(resolved.returncode, 0)
+                    self.assertEqual(json.loads(resolved.stdout)["services"]["fixture"]["environment"]
+                                     ["LLM_DIAGNOSTIC_BUDGET_ID"], TOKEN)
+                    for command in (["restore"], ["preflight", str(root / "missing.env")]):
+                        result = subprocess.run(["bash", str(ROOT / "infra/docker/release.sh"), *command],
+                                                cwd=root, env=release_env, capture_output=True, timeout=10)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn(b"diagnostic", result.stderr)
+                        self.assertEqual(result.stdout, b"")
+                    result = subprocess.run(["bash", str(SCRIPT), "--manifest", str(root / "missing"),
+                                             "--env-file", str(env_file)],
+                                            env=clean_env, capture_output=True, timeout=5)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(b"diagnostic budget cannot restore and resume", result.stderr)
+                    self.assertEqual(pending.read_text(), "must remain untouched")
+                    self.assertEqual({item.name for item in state.iterdir()}, {"rollback.pending"})
+            env_file.write_text("LLM_DIAGNOSTIC_BUDGET_ID=\nLLM_DIAGNOSTIC_BUDGET_LIMITS=\n")
+            result = subprocess.run(["bash", str(ROOT / "infra/docker/release.sh"),
+                                     "preflight", str(root / "missing.env")],
+                                    cwd=root, env=release_env, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     @classmethod
     def setUpClass(cls):
         cls.directory = tempfile.TemporaryDirectory(prefix="nw-restore-preflight-")

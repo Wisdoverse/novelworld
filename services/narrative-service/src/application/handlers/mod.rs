@@ -27,8 +27,9 @@ use crate::domain::repositories::{
     BeginWorldTurn, ChapterInfo, ChapterReadRepository, CharacterBrief,
     CharacterContextSnapshotRepository, ChoiceCommit, GameRuleTemplateRequestError,
     MemoryProjectionStatus, NarrativeNodeRepository, NovelInfo, PlayerChapter, PlayerChapterOrigin,
-    PlayerChapterRepository, UserChoiceRecord, UserChoiceRepository, WorldStateRepository,
-    WorldTurnClaim, WorldTurnJournalEntry, WorldTurnRepository, WorldTurnResult,
+    PlayerChapterRepository, RecoverableWorldTurn, UserChoiceRecord, UserChoiceRepository,
+    WorldStateRepository, WorldTurnClaim, WorldTurnJournalEntry, WorldTurnRepository,
+    WorldTurnResult,
 };
 use crate::domain::services::narrative_engine::{
     build_branch_prompt, build_player_chapter_prompt, is_chinese_narrative, parse_generated_branch,
@@ -39,6 +40,7 @@ use crate::domain::services::narrative_transition::{
 
 const MAX_NARRATIVE_PROMPT_BYTES: usize = 32 * 1024;
 const MAX_NARRATIVE_PROMPT_CHARS: usize = 16_000;
+const BRANCH_NODE_TIMEOUT: Duration = Duration::from_secs(280);
 const MAX_CONSEQUENCE_BYTES: usize = 32 * 1024;
 const MAX_CONSEQUENCE_CHARS: usize = 8_000;
 const MAX_TRANSITION_BYTES: usize = 128 * 1024;
@@ -495,6 +497,8 @@ pub struct OpenWorldView {
     pub session: WorldSession,
     pub world_state: WorldState,
     pub journal: Vec<WorldTurnJournalEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recoverable_turn: Option<RecoverableWorldTurn>,
 }
 
 /// HTTP-facing completion view. The committed result remains the single
@@ -1377,36 +1381,65 @@ impl NarrativeCommandHandler {
         &self,
         user_id: Uuid,
         novel_id: Uuid,
-        world_state: WorldState,
+        mut world_state: WorldState,
     ) -> NarrativeResult<OpenWorldView> {
-        let player = world_state
-            .player_entity()
-            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
-            .ok_or(NarrativeError::NotFound)?;
-        let session = world_state
-            .open_world()
-            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
-            .ok_or(NarrativeError::NotFound)?;
-        self.require_world_source_visible(user_id, novel_id, &world_state)
-            .await?;
-        let journal = self
-            .world_turn_repo
-            .journal(user_id, novel_id, MAX_WORLD_JOURNAL_ENTRIES)
-            .await
-            .map_err(NarrativeError::Internal)?
-            .into_iter()
-            .filter(|entry| entry.turn_number <= session.turn_number)
-            .collect();
-        self.require_self_reader_identity(user_id, novel_id).await?;
-        self.require_world_source_visible(user_id, novel_id, &world_state)
-            .await?;
-        self.require_self_reader_identity(user_id, novel_id).await?;
-        Ok(OpenWorldView {
-            player,
-            session,
-            world_state,
-            journal,
-        })
+        for attempt in 0..2 {
+            let player = world_state
+                .player_entity()
+                .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
+                .ok_or(NarrativeError::NotFound)?;
+            let session = world_state
+                .open_world()
+                .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
+                .ok_or(NarrativeError::NotFound)?;
+            self.require_world_source_visible(user_id, novel_id, &world_state)
+                .await?;
+            let journal = self
+                .world_turn_repo
+                .journal(user_id, novel_id, MAX_WORLD_JOURNAL_ENTRIES)
+                .await
+                .map_err(NarrativeError::Internal)?
+                .into_iter()
+                .filter(|entry| entry.turn_number <= session.turn_number)
+                .collect();
+            let recoverable_turn = self
+                .world_turn_repo
+                .recoverable_turn(user_id, novel_id)
+                .await
+                .map_err(NarrativeError::Internal)?
+                .filter(|turn| {
+                    turn.expected_turn_number == session.turn_number
+                        && world_state
+                            .validate_world_action(&turn.action, &session.entry_context)
+                            .is_ok()
+                });
+            let latest_world_state = self
+                .world_state_repo
+                .get_or_create(user_id, novel_id)
+                .await
+                .map_err(NarrativeError::Internal)?;
+            if latest_world_state.fingerprint() != world_state.fingerprint() {
+                if attempt == 0 {
+                    world_state = latest_world_state;
+                    continue;
+                }
+                return Err(NarrativeError::Conflict(
+                    "World state changed while building the view; reload and retry".into(),
+                ));
+            }
+            self.require_self_reader_identity(user_id, novel_id).await?;
+            self.require_world_source_visible(user_id, novel_id, &world_state)
+                .await?;
+            self.require_self_reader_identity(user_id, novel_id).await?;
+            return Ok(OpenWorldView {
+                player,
+                session,
+                world_state,
+                journal,
+                recoverable_turn,
+            });
+        }
+        unreachable!("open-world view retry loop always returns")
     }
 
     /// A successful response implies that the eligible permanent fact reached
@@ -1857,6 +1890,20 @@ impl NarrativeCommandHandler {
         chapter_number: i32,
         user_id: Uuid,
     ) -> NarrativeResult<Option<NarrativeNode>> {
+        tokio::time::timeout(
+            BRANCH_NODE_TIMEOUT,
+            self.get_branch_node_within_deadline(novel_id, chapter_number, user_id),
+        )
+        .await
+        .map_err(|_| NarrativeError::Llm(anyhow::anyhow!("branch request timed out")))?
+    }
+
+    async fn get_branch_node_within_deadline(
+        &self,
+        novel_id: Uuid,
+        chapter_number: i32,
+        user_id: Uuid,
+    ) -> NarrativeResult<Option<NarrativeNode>> {
         if chapter_number < 1 {
             return Err(NarrativeError::Validation(
                 "chapter must be at least 1".into(),
@@ -1934,21 +1981,78 @@ impl NarrativeCommandHandler {
                 "branch prompt exceeded its budget"
             )));
         }
-        let generated = self
-            .llm
-            .chat_json(user_id, NarrativeLlmTask::BranchGeneration, &prompt)
-            .await
-            .map_err(NarrativeError::Llm)
-            .and_then(|json| {
-                parse_generated_branch(&json)
-                    .map_err(|error| NarrativeError::Llm(anyhow::anyhow!(error)))
-            })?;
-        self.require_self_reader_identity(user_id, novel_id).await?;
-        if !chapter.content.contains(&generated.anchor_quote) {
-            return Err(NarrativeError::Llm(anyhow::anyhow!(
-                "generated branch anchor was not present in chapter source"
-            )));
+        let mut generated = None;
+        let mut last_error = None;
+        for attempt in 0..3 {
+            if attempt > 0 {
+                self.require_source_chapter_visible(user_id, novel_id, chapter_number)
+                    .await?;
+                self.require_self_reader_identity(user_id, novel_id).await?;
+                if let Some(committed) = self
+                    .committed_branch_node(user_id, novel_id, chapter_number)
+                    .await?
+                {
+                    return self
+                        .branch_node_if_visible(user_id, novel_id, chapter_number, Some(committed))
+                        .await;
+                }
+                if let Some(winner) = self
+                    .node_repo
+                    .find_by_chapter(novel_id, chapter_number, node_owner)
+                    .await
+                    .map_err(NarrativeError::Internal)?
+                {
+                    return self
+                        .finalize_uncommitted_branch_node(
+                            user_id,
+                            novel_id,
+                            chapter_number,
+                            Some(winner),
+                        )
+                        .await;
+                }
+                let latest_world_state = self
+                    .world_state_repo
+                    .get_or_create(user_id, novel_id)
+                    .await
+                    .map_err(NarrativeError::Internal)?;
+                if !Self::uncommitted_branch_is_eligible(&latest_world_state, chapter_number)? {
+                    return Ok(None);
+                }
+            }
+
+            let json = self
+                .llm
+                .chat_json(user_id, NarrativeLlmTask::BranchGeneration, &prompt)
+                .await
+                .map_err(NarrativeError::Llm)?;
+            let candidate = parse_generated_branch(&json).and_then(|candidate| {
+                if chapter.content.contains(&candidate.anchor_quote) {
+                    Ok(candidate)
+                } else {
+                    Err("generated branch anchor was not present in chapter source".into())
+                }
+            });
+            match candidate {
+                Ok(candidate) => {
+                    generated = Some(candidate);
+                    break;
+                }
+                Err(error) => {
+                    if attempt < 2 {
+                        tracing::debug!(%error, attempt, "branch generation failed validation; retrying");
+                    }
+                    last_error = Some(error);
+                }
+            }
         }
+        let generated = generated.ok_or_else(|| {
+            NarrativeError::Llm(anyhow::anyhow!(
+                "branch generation failed validation after 3 attempts: {:?}",
+                last_error
+            ))
+        })?;
+        self.require_self_reader_identity(user_id, novel_id).await?;
         let node = NarrativeNode::new(
             novel_id,
             chapter_number,

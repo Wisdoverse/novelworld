@@ -67,15 +67,36 @@ configure_qualification_scope
 readonly container_prefix qualification_project http_bind http_port health_origin qualification_scope
 readonly -a compose_project_args
 
+qualification_subnet=${RELEASE_QUALIFICATION_SUBNET:-}
+qualification_network_source=
+network_overlay_args=()
+network_guard() {
+  [[ -n "$qualification_subnet" ]] || return 0
+  python3 -c "$qualification_network_source" "$1" "$qualification_subnet" \
+    "$state_dir" "$qualification_project" "$repo_root"
+}
+if [[ -n "$qualification_subnet" ]]; then
+  [[ "$qualification_scope" == true ]] || die "network subnet requires qualification scope"
+  network_tool_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  [[ -r "$network_tool_dir/qualification_network.py" ]] || die "qualification network adapter missing"
+  IFS= read -r -d '' qualification_network_source < "$network_tool_dir/qualification_network.py" || true
+  # Validate before reading product secrets; capture helper before any checkout.
+  network_guard check
+fi
+readonly qualification_subnet qualification_network_source
+
 qualification_phase() {
   [[ "$qualification_scope" == true ]] || return 0
   printf 'qualification-phase %s %s %s\n' "$1" "$2" "$(date +%s%3N)"
 }
 
 acquire_release_lock() {
+  load_diagnostic_mode
+  diagnostic "$command"
   install -d -m 700 "$state_dir"
   exec 9>"$state_dir/release.lock"
   flock -n 9 || die "another release operation is running"
+  diagnostic "$command" # recheck under the lock before recovery can modify state
   recover_pending_rollback
 }
 
@@ -96,6 +117,81 @@ secret_value() {
   [[ "$count" -le 1 ]] || die "duplicate $wanted in production secrets"
   [[ "$count" -eq 1 ]] || return 1
   printf '%s\n' "$found"
+}
+
+diagnostic_enabled=false
+diagnostic_loaded=false
+diagnostic_id=
+diagnostic_limits=
+diagnostic_helper_source=
+diagnostic_profile_source=
+
+diagnostic_value() {
+  local wanted=$1 key value count=0 found=
+  if [[ -v "$wanted" ]]; then
+    printf '%s' "${!wanted}"
+    return
+  fi
+  [[ -r "$secrets_file" ]] || return 0
+  while IFS='=' read -r key value || [[ -n "$key$value" ]]; do
+    if [[ "$key" == "$wanted" ]]; then
+      count=$((count + 1))
+      found=$value
+    elif [[ "$key" =~ ^[[:space:]]*(export[[:space:]]+)?${wanted}[[:space:]]*$ ]]; then
+      die "diagnostic configuration requires canonical KEY=value syntax"
+    fi
+  done < "$secrets_file"
+  [[ "$count" -le 1 ]] || die "duplicate diagnostic configuration"
+  printf '%s' "$found"
+}
+
+load_diagnostic_mode() {
+  local tool_dir
+  [[ "$diagnostic_loaded" == false ]] || return 0
+  diagnostic_id=$(diagnostic_value LLM_DIAGNOSTIC_BUDGET_ID)
+  diagnostic_limits=$(diagnostic_value LLM_DIAGNOSTIC_BUDGET_LIMITS)
+  diagnostic_loaded=true
+  [[ -n "$diagnostic_id$diagnostic_limits" ]] || return 0
+  diagnostic_enabled=true
+  [[ "$qualification_scope" == true ]] || die "diagnostic budget requires isolated qualification scope"
+  # Capture exact bytes before checkout. The journey copies this same tool layout
+  # outside its changing runtime checkout; no code/profile is loaded from old images.
+  tool_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  [[ -r "$tool_dir/diagnostic_budget.py" && -r "$tool_dir/../../tools/llm-budget/diagnostic-v1.json" ]] \
+    || die "diagnostic release adapter missing"
+  IFS= read -r -d '' diagnostic_helper_source < "$tool_dir/diagnostic_budget.py" || true
+  IFS= read -r -d '' diagnostic_profile_source < "$tool_dir/../../tools/llm-budget/diagnostic-v1.json" || true
+}
+
+diagnostic() {
+  [[ "$diagnostic_enabled" == true ]] || return 0
+  [[ "$1" != restore ]] || die "diagnostic budget cannot restore and resume"
+  env LLM_DIAGNOSTIC_BUDGET_ID="$diagnostic_id" LLM_DIAGNOSTIC_BUDGET_LIMITS="$diagnostic_limits" \
+    python3 -c "$diagnostic_helper_source" "$diagnostic_profile_source" "$1" \
+      "$state_dir" "$qualification_project" "${@:2}"
+}
+
+diagnostic_preflight() {
+  [[ "$diagnostic_enabled" == true ]] || return 0
+  # Credentials in resolved Compose config stay on this private pipe. Never echo
+  # config or raw child errors. Only a network-none capability process runs;
+  # application services/listeners are not started by the probe.
+  (compose_deadline_args=(timeout --kill-after=5s 30s); compose config --format json) \
+    2>/dev/null | diagnostic probe "$active_manifest"
+}
+
+provision_diagnostic_budget() {
+  [[ "$diagnostic_enabled" == true ]] || return 0
+  diagnostic provision-start
+  # A failed/lost acknowledgement retains the started marker permanently. Only
+  # the fresh cold-adopt path calls this; restart/upgrade/rollback never do.
+  if ! (compose_deadline_args=(timeout --kill-after=5s 15s)
+    compose run --rm --no-deps --name "$qualification_project-budget-provision" \
+      user-service /app/service --provision-diagnostic-budget) >/dev/null 2>&1; then
+    timeout --kill-after=2s 5s docker rm --force "$qualification_project-budget-provision" >/dev/null 2>&1 || true
+    die "diagnostic provisioning uncertain; attempt frozen"
+  fi
+  diagnostic provision-complete
 }
 
 set_secret_value() {
@@ -346,26 +442,46 @@ require_pre_minimum_rollback_ready() {
 }
 
 active_manifest=
+compose_deadline_args=()
 compose() (
+  local network_creating=false compose_result=0 network_overlay
+  if [[ -n "$qualification_subnet" ]]; then
+    network_overlay=$(network_guard overlay) || return $?
+    network_overlay_args=(-f "$network_overlay")
+    case "${1:-}" in
+      up|start|restart|run|create) network_creating=true; network_guard before || return $? ;;
+    esac
+  fi
   [[ -n "$cache_mode" ]] || die "cache mode was not initialized"
   export CACHE_MODE="$cache_mode"
   export REDIS_PASSWORD="$cache_redis_password"
   export REDIS_URL="$cache_redis_url"
+  if [[ "$diagnostic_enabled" == true ]]; then
+    export LLM_DIAGNOSTIC_BUDGET_ID="$diagnostic_id"
+    export LLM_DIAGNOSTIC_BUDGET_LIMITS="$diagnostic_limits"
+  fi
   if [[ "$qualification_scope" == true ]]; then
     export CONTAINER_PREFIX="$container_prefix"
     export NGINX_HTTP_BIND="$http_bind"
     export NGINX_HTTP_PORT="$http_port"
   fi
-  env \
+  if env \
     -u COMPOSE_PROFILES \
     -u RELEASE_VERSION -u RELEASE_GIT_SHA \
     -u GATEWAY_IMAGE -u USER_SERVICE_IMAGE -u NOVEL_SERVICE_IMAGE \
     -u AGENT_SERVICE_IMAGE -u NARRATIVE_SERVICE_IMAGE -u FRONTEND_IMAGE \
     -u POSTGRES_IMAGE -u REDIS_IMAGE -u NGINX_IMAGE \
-    docker compose "${compose_project_args[@]}" \
-      --project-directory "$repo_root" -f "$repo_root/docker-compose.yml" \
+    "${compose_deadline_args[@]}" docker compose "${compose_project_args[@]}" \
+      --project-directory "$repo_root" -f "$repo_root/docker-compose.yml" "${network_overlay_args[@]}" \
       --env-file "$secrets_file" --env-file "$active_manifest" \
-      "${compose_profile_args[@]}" "$@"
+      "${compose_profile_args[@]}" "$@"; then
+    compose_result=0
+  else
+    compose_result=$?
+  fi
+  # Record/verify identity even when creation returned an ambiguous failure.
+  if [[ "$network_creating" == true ]]; then network_guard after || return $?; fi
+  return "$compose_result"
 )
 
 require_empty_qualification_project() {
@@ -413,6 +529,7 @@ deploy_initial_manifest() {
     postgres-migrate nginx frontend user-service novel-service agent-service \
     narrative-service gateway # qualification cold pull
   qualification_phase pull end
+  diagnostic_preflight # cold capability check before database/migration/start
   if [[ -f "$schema_transition_manifest" ]]; then
     manifests_equal "$schema_transition_manifest" "$manifest" \
       || die "initial schema transition does not match its recovery target"
@@ -429,6 +546,7 @@ deploy_initial_manifest() {
   qualification_phase migration start
   compose run --rm --no-deps postgres-migrate # qualification cold migration
   qualification_phase migration end
+  provision_diagnostic_budget
   qualification_phase application_deployment start
   compose up -d --wait --wait-timeout 120 --no-build --no-deps \
     user-service novel-service
@@ -465,6 +583,7 @@ recover_client_after_gate_failure() {
     fail_stop_client "client contract gate was not confirmed and current client checkout failed"
   fi
   active_manifest="$current_manifest"
+  diagnostic_preflight || fail_stop_client "current diagnostic capability was not confirmed"
   if ! compose up -d --wait --wait-timeout 120 --no-build --no-deps --force-recreate \
     narrative-service frontend nginx; then
     fail_stop_client "client contract gate was not confirmed and current client restore failed"
@@ -492,6 +611,12 @@ deploy_manifest() {
     postgres-migrate nginx frontend user-service novel-service agent-service \
     narrative-service gateway
   qualification_phase pull end
+  diagnostic_preflight # candidate compatibility before stops/migration/start
+  if [[ "$diagnostic_enabled" == true && -f "$current_manifest" ]]; then
+    active_manifest="$current_manifest"
+    diagnostic_preflight # previous artifact set must also remain capable
+    active_manifest="$manifest"
+  fi
   [[ "$(docker inspect --format '{{.State.Health.Status}}' "${container_prefix}-postgres")" == healthy ]] \
     || die "PostgreSQL is not healthy"
   if [[ "$cache_mode" == redis ]]; then
@@ -740,7 +865,17 @@ case "$command" in
     [[ $# -eq 2 ]] || die "usage: $0 validate /path/to/release.env"
     validate_manifest "$2"
     ;;
+  preflight)
+    [[ $# -eq 2 ]] || die "usage: $0 preflight /path/to/release.env"
+    load_diagnostic_mode
+    [[ "$diagnostic_enabled" == true ]] || exit 0
+    diagnostic preflight
+    validate_manifest "$2"
+    active_manifest="$2"
+    load_cache_mode
+    diagnostic_preflight
+    ;;
   *)
-    die "usage: $0 adopt /path/to/release.env | upgrade /path/to/release.env | restore | rollback RELEASE_GIT_SHA | validate /path/to/release.env"
+    die "usage: $0 adopt /path/to/release.env | upgrade /path/to/release.env | restore | rollback RELEASE_GIT_SHA | validate /path/to/release.env | preflight /path/to/release.env"
     ;;
 esac

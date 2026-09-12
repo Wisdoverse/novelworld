@@ -323,7 +323,7 @@ export const CHOICE_RESULT = {
 export const LLM_SETTINGS = {
   scope: 'platform',
   provider: 'deepseek',
-  model: 'deepseek-v4-flash',
+  model: 'deepseek-flash',
   thinking_enabled: false,
   api_key_configured: true,
 };

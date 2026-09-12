@@ -1627,6 +1627,7 @@ dependencies = [
  "novel-service",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tokio",
  "uuid",
 ]
@@ -2039,6 +2040,7 @@ dependencies = [
  "agent-service",
  "anyhow",
  "async-trait",
+ "axum",
  "bytes",
  "chrono",
  "deadpool-redis",
@@ -2208,6 +2210,7 @@ dependencies = [
  "sha2 0.11.0",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

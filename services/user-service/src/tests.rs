@@ -5,6 +5,21 @@ use crate::{
 };
 
 #[test]
+fn diagnostic_profile_operations_match_the_transport_contract() {
+    let profile = crate::domain::entities::diagnostic_budget::Profile::compiled();
+    assert_eq!(profile.model, "deepseek-flash");
+    assert_eq!(profile.origin, "https://api.deepseek.com");
+    assert!(!profile.thinking_enabled);
+    assert_eq!(profile.input_micro_cny, 4);
+    assert_eq!(profile.output_micro_cny, 12);
+    let expected = llm_client::LlmOperation::ALL
+        .into_iter()
+        .map(|operation| (operation.to_str().to_owned(), operation.max_output_tokens()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(profile.operations, expected);
+}
+
+#[test]
 fn test_email_validation() {
     use crate::application::handlers::is_valid_email;
 

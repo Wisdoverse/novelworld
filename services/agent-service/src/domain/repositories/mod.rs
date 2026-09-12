@@ -1,3 +1,6 @@
+pub mod summary_window;
+pub use self::summary_window::*;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -141,10 +144,49 @@ pub struct CharacterInfo {
     /// within the reading context captured for the chat turn.
     #[serde(default)]
     pub persona_source_chapter_high_water: Option<i32>,
+    /// Whole-novel context; accepted only at the exact source high-water.
+    #[serde(default)]
+    pub world_summary: Option<String>,
     pub first_appearance_chapter: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CharacterCanonGrounding {
+    pub novel_id: Uuid,
+    pub model_version: i32,
+    pub checkpoint_chapter: i32,
+    pub character_id: Uuid,
+    pub goals: Vec<CharacterCanonGoal>,
+    pub relationships: Vec<CharacterCanonRelationship>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CharacterCanonGoal {
+    pub description: String,
+    pub source_chapters: Vec<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CharacterCanonRelationship {
+    pub other_character_id: Uuid,
+    pub other_character_name: String,
+    pub direction: String,
+    pub kind: String,
+    pub description: String,
+    pub source_chapters: Vec<i32>,
 }
 
 #[async_trait]
 pub trait CharacterInfoRepository: Send + Sync {
     async fn find_by_id(&self, id: Uuid, user_id: Uuid) -> Result<Option<CharacterInfo>>;
+    async fn find_canon_grounding(
+        &self,
+        novel_id: Uuid,
+        character_id: Uuid,
+        checkpoint_chapter: i32,
+        user_id: Uuid,
+    ) -> Result<Option<CharacterCanonGrounding>>;
 }

@@ -31,11 +31,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+import diagnostic_journey as diagnostic
+
 
 EXPECTED_PROVIDER = "deepseek"
 EXPECTED_MODEL = "deepseek-v4-flash"
 EXPECTED_API_URL = "https://api.deepseek.com"
-EXPECTED_CANON_PROMPT = "canon-chunk-v7+event-grouping-v3"
+EXPECTED_CANON_PROMPT = "canon-chunk-v10+event-grouping-v5"
 EXPECTED_BRANCH_PROMPT = "narrative-transition-v1"
 EXPECTED_WORLD_PROMPT = "world-turn-v2"
 PROJECT_PATTERN = re.compile(r"^nwq-[a-f0-9]{10}$")
@@ -65,6 +67,8 @@ APPLICATION_CONTAINERS = {
 }
 RELEASE_KEYS = {"RELEASE_VERSION", "RELEASE_GIT_SHA", *RELEASE_IMAGE_KEYS}
 PRODUCT_INPUT = Path("tests/e2e/fixtures/h4-journey-v1.json")
+# Frozen Qualification v1 input; adopting a new oracle needs a new policy.
+H1_V1_CORPUS_SHA256 = "90dc9be0ca422f4a2c79b8912e5d5f19a0a14b5581c9ffc51292ea14d225c1cf"
 PRIVATE_TABLES = (
     "user_novels",
     "reading_progress",
@@ -131,7 +135,7 @@ def qualification_environment(
     return {
         key: value
         for key, value in host_environment.items()
-        if key not in product_keys
+        if key not in product_keys and key != "RELEASE_QUALIFICATION_SUBNET"
     }
 
 
@@ -275,7 +279,12 @@ def git(root: Path, *args: str) -> str:
     return run(["git", *args], cwd=root)
 
 
-def load_config(path: Path) -> dict[str, Any]:
+def load_config(
+    path: Path,
+    *,
+    expected_model: str = EXPECTED_MODEL,
+    thinking_enabled: bool = True,
+) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -288,8 +297,8 @@ def load_config(path: Path) -> dict[str, Any]:
     if (
         value.get("provider") != EXPECTED_PROVIDER
         or value.get("api_url") != EXPECTED_API_URL
-        or value.get("model") != EXPECTED_MODEL
-        or value.get("thinking_enabled") is not True
+        or value.get("model") != expected_model
+        or value.get("thinking_enabled") is not thinking_enabled
         or not isinstance(key, str)
         or not key
         or len(key.encode("utf-8")) > 4096
@@ -323,9 +332,10 @@ def load_release_manifest(path: Path) -> dict[str, str]:
     return values
 
 
-def load_product_input(path: Path) -> dict[str, Any]:
+def load_product_input(path: Path, *, prospective: bool = False) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        raw = path.read_text(encoding="utf-8")
+        value = diagnostic.strict_json(raw.encode()) if prospective else json.loads(raw)
     except (OSError, json.JSONDecodeError) as error:
         raise QualificationFailure("invalid_product_input") from error
     if set(value) != {
@@ -340,13 +350,13 @@ def load_product_input(path: Path) -> dict[str, Any]:
         "world_actions",
         "world_chats",
         "post_restart_chat",
-    }:
+    } | ({"post_adoption_chats"} if prospective else set()):
         raise QualificationFailure("invalid_product_input_shape")
     chapters = value.get("chapters")
     player = value.get("player")
     if (
-        value.get("manifest_version") != "h4-product-input-v1"
-        or value.get("case_id") != "zh-self-world"
+        value.get("manifest_version") != ("h4-product-input-v2" if prospective else "h4-product-input-v1")
+        or value.get("case_id") != ("zh-self-world-prospective-summary" if prospective else "zh-self-world")
         or value.get("deviation_mode") != "creative"
         or any(
             not isinstance(value.get(key), str) or not value[key].strip()
@@ -381,6 +391,10 @@ def load_product_input(path: Path) -> dict[str, Any]:
         or len(value["world_chats"]) != 11
         or not all(isinstance(item, str) and item.strip() for item in value["world_chats"])
     ):
+        raise QualificationFailure("product_input_outside_slice")
+    if prospective and (not isinstance(value.get("post_adoption_chats"), list)
+            or len(value["post_adoption_chats"]) != 5
+            or not all(isinstance(item, str) and item.strip() for item in value["post_adoption_chats"])):
         raise QualificationFailure("product_input_outside_slice")
     return value
 
@@ -780,7 +794,12 @@ def load_metric_parser(root: Path):
     return module
 
 
-def summarize_metrics(root: Path, named_paths: list[tuple[str, Path]]) -> dict[str, Any]:
+def summarize_metrics(
+    root: Path,
+    named_paths: list[tuple[str, Path]],
+    *,
+    expected_model: str = EXPECTED_MODEL,
+) -> dict[str, Any]:
     parser = load_metric_parser(root)
     windows = []
     counter_totals: dict[tuple[str, str, str, str], float] = defaultdict(float)
@@ -804,7 +823,7 @@ def summarize_metrics(root: Path, named_paths: list[tuple[str, Path]]) -> dict[s
     for name, path in named_paths:
         raw = path.read_bytes()
         samples = parser.parse_metrics(raw)
-        assert_metric_identity(samples)
+        assert_metric_identity(samples, expected_model=expected_model)
         operations: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         for metric, labels, value in samples:
             operation = labels.get("operation")
@@ -869,6 +888,7 @@ def assert_metric_identity(
     *,
     service: str | None = None,
     operation: str | None = None,
+    expected_model: str = EXPECTED_MODEL,
 ) -> None:
     for metric, labels, _ in samples:
         if not metric.startswith("novelworld_llm_"):
@@ -881,7 +901,7 @@ def assert_metric_identity(
             continue
         if (
             labels.get("provider") != EXPECTED_PROVIDER
-            or labels.get("model") != EXPECTED_MODEL
+            or labels.get("model") != expected_model
         ):
             raise QualificationFailure("provider_identity_changed")
 
@@ -905,18 +925,25 @@ def provider_started_delta(
     *,
     service: str,
     operation: str | None = None,
+    expected_model: str = EXPECTED_MODEL,
 ) -> int:
     parser = load_metric_parser(root)
     assert_metric_identity(
-        parser.parse_metrics(before), service=service, operation=operation
+        parser.parse_metrics(before),
+        service=service,
+        operation=operation,
+        expected_model=expected_model,
     )
     assert_metric_identity(
-        parser.parse_metrics(after), service=service, operation=operation
+        parser.parse_metrics(after),
+        service=service,
+        operation=operation,
+        expected_model=expected_model,
     )
     labels = {
         "service": service,
         "provider": EXPECTED_PROVIDER,
-        "model": EXPECTED_MODEL,
+        "model": expected_model,
     }
     if operation is not None:
         labels["operation"] = operation
@@ -964,7 +991,12 @@ def selected_mid_from_logs(raw: str, trace_id: str) -> int:
     return selected[0]
 
 
-def response_models_from_logs(raw: str, service: str) -> list[dict[str, str]]:
+def response_models_from_logs(
+    raw: str,
+    service: str,
+    *,
+    expected_model: str = EXPECTED_MODEL,
+) -> list[dict[str, str]]:
     observed = []
     for line in raw.splitlines():
         try:
@@ -984,7 +1016,7 @@ def response_models_from_logs(raw: str, service: str) -> list[dict[str, str]]:
         }
         if (
             record["provider"] != EXPECTED_PROVIDER
-            or record["configured_model"] != EXPECTED_MODEL
+            or record["configured_model"] != expected_model
             or record["mode"] not in ("sync", "stream")
             or any(not isinstance(value, str) or not value for value in record.values())
         ):
@@ -994,9 +1026,13 @@ def response_models_from_logs(raw: str, service: str) -> list[dict[str, str]]:
 
 
 def unseen_response_models(
-    raw: str, service: str, previous_count: int
+    raw: str,
+    service: str,
+    previous_count: int,
+    *,
+    expected_model: str = EXPECTED_MODEL,
 ) -> tuple[list[dict[str, str]], int]:
-    observed = response_models_from_logs(raw, service)
+    observed = response_models_from_logs(raw, service, expected_model=expected_model)
     if previous_count < 0 or previous_count > len(observed):
         raise QualificationFailure("response_model_log_rewound")
     return observed[previous_count:], len(observed)
@@ -1007,6 +1043,8 @@ def verify_response_models(
     named_paths: list[tuple[str, Path]],
     observations: list[dict[str, str]],
     allowed: list[str],
+    *,
+    expected_model: str = EXPECTED_MODEL,
 ) -> dict[str, Any]:
     if not allowed or not all(valid_public_model(model) for model in allowed):
         raise QualificationFailure("response_model_allowlist_invalid")
@@ -1016,7 +1054,7 @@ def verify_response_models(
         for metric, labels, value in parser.parse_metrics(path.read_bytes()):
             if metric != "novelworld_llm_requests_total" or labels.get("status") != "success":
                 continue
-            if labels.get("provider") != EXPECTED_PROVIDER or labels.get("model") != EXPECTED_MODEL:
+            if labels.get("provider") != EXPECTED_PROVIDER or labels.get("model") != expected_model:
                 raise QualificationFailure("successful_provider_identity_invalid")
             if value < 0 or not value.is_integer():
                 raise QualificationFailure("successful_provider_count_invalid")
@@ -1043,13 +1081,17 @@ def reserve_port() -> int:
         return int(listener.getsockname()[1])
 
 
-def docker_inspect(kind: str, name: str) -> dict[str, Any]:
+def docker_inspect(
+    kind: str, name: str, *, runner: Callable[[list[str]], str] | None = None
+) -> dict[str, Any]:
+    if runner is None:
+        runner = run
     command = ["docker"]
     if kind != "container":
         command.append(kind)
     command.extend(["inspect", name])
     try:
-        value = json.loads(run(command))
+        value = json.loads(runner(command))
     except json.JSONDecodeError as error:
         raise QualificationFailure("docker_inspect_invalid") from error
     if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
@@ -1057,12 +1099,49 @@ def docker_inspect(kind: str, name: str) -> dict[str, Any]:
     return value[0]
 
 
-def docker_inventory_snapshot() -> dict[str, Any]:
+def docker_inventory_snapshot(
+    *, runner: Callable[[list[str]], str] | None = None
+) -> dict[str, Any]:
+    if runner is None:
+        runner = run
+
+    def inspect_many(kind: str, names: list[str]):
+        # Project only the existing inventory fields, never Config.Env/secrets.
+        fields = {
+            "container": '{"Id":{{json .Id}},"Name":{{json .Name}},"Image":{{json .Image}},'
+                '"State":{"Status":{{json .State.Status}},"StartedAt":{{json .State.StartedAt}}},'
+                '"RestartCount":{{json .RestartCount}},"Config":{"Image":{{json .Config.Image}},'
+                '"Labels":{{json .Config.Labels}}},"HostConfig":{"RestartPolicy":'
+                '{"Name":{{json .HostConfig.RestartPolicy.Name}}}},"NetworkSettings":'
+                '{"Networks":{{json .NetworkSettings.Networks}}}}',
+            "volume": '{"Name":{{json .Name}},"Driver":{{json .Driver}},"Labels":{{json .Labels}},'
+                '"Options":{{json .Options}},"Scope":{{json .Scope}}}',
+            "network": '{"Name":{{json .Name}},"Id":{{json .Id}},"Driver":{{json .Driver}},'
+                '"Scope":{{json .Scope}},"Internal":{{json .Internal}},"Attachable":{{json .Attachable}},'
+                '"Ingress":{{json .Ingress}},"IPAM":{{json .IPAM}},"Labels":{{json .Labels}},'
+                '"Containers":{{json .Containers}}}',
+        }
+        for start in range(0, len(names), 32):
+            batch = names[start:start + 32]
+            raw = runner(["docker", kind, "inspect", "--format", fields[kind], "--", *batch])
+            try:
+                values = [json.loads(line) for line in raw.splitlines()]
+            except json.JSONDecodeError as error:
+                raise QualificationFailure("docker_inspect_invalid") from error
+            if len(values) != len(batch) or any(
+                not isinstance(value, dict) or value.get("Name") != ("/" + name if kind == "container" else name)
+                for name, value in zip(batch, values)
+            ):
+                raise QualificationFailure("docker_inventory_incomplete")
+            yield from zip(batch, values)
+
     containers: dict[str, Any] = {}
-    for name in sorted(
-        filter(None, run(["docker", "ps", "-a", "--format", "{{.Names}}"]).splitlines())
-    ):
-        value = docker_inspect("container", name)
+    for name, value in inspect_many("container", sorted(
+        filter(
+            None,
+            runner(["docker", "ps", "-a", "--format", "{{.Names}}"]).splitlines(),
+        )
+    )):
         state = value.get("State") or {}
         config = value.get("Config") or {}
         host = value.get("HostConfig") or {}
@@ -1079,25 +1158,23 @@ def docker_inventory_snapshot() -> dict[str, Any]:
             "labels": config.get("Labels") or {},
         }
     volumes: dict[str, Any] = {}
-    for name in sorted(
+    for name, value in inspect_many("volume", sorted(
         filter(
             None,
-            run(["docker", "volume", "ls", "--format", "{{.Name}}"]).splitlines(),
+            runner(["docker", "volume", "ls", "--format", "{{.Name}}"]).splitlines(),
         )
-    ):
-        value = docker_inspect("volume", name)
+    )):
         volumes[name] = {
             key.lower(): value.get(key)
             for key in ("Name", "Driver", "Labels", "Options", "Scope")
         }
     networks: dict[str, Any] = {}
-    for name in sorted(
+    for name, value in inspect_many("network", sorted(
         filter(
             None,
-            run(["docker", "network", "ls", "--format", "{{.Name}}"]).splitlines(),
+            runner(["docker", "network", "ls", "--format", "{{.Name}}"]).splitlines(),
         )
-    ):
-        value = docker_inspect("network", name)
+    )):
         networks[name] = {
             key.lower(): value.get(key)
             for key in (
@@ -1141,6 +1218,22 @@ def attempt_resources(
 
 
 class Journey:
+    network_subnet = None
+    expected_model = EXPECTED_MODEL
+    diagnostic_registration = None
+    diagnostic_ledger = None
+
+    def capture_final_world_view(self, world_view: Any) -> None:
+        if not self.prospective_summary:
+            return
+        payload = diagnostic.canonical(world_view) + b"\n"
+        if len(payload) > 4 * 1024 * 1024:
+            raise QualificationFailure("final_world_view_oversized")
+        write_private(self.output / "final-world-view.json", payload)
+        self.private_report["final_world_view"] = {
+            "sha256": sha256_bytes(payload), "byte_count": len(payload)
+        }
+
     def __init__(
         self,
         root: Path,
@@ -1154,6 +1247,8 @@ class Journey:
         release_shell: str,
         evidence_class: str,
         journey_slice: str = "core",
+        *,
+        diagnostic_registration: diagnostic.Registration | None = None,
     ):
         self.root = root
         self.config_path = config_path
@@ -1178,9 +1273,29 @@ class Journey:
         self.release_shell = release_shell
         self.evidence_class = evidence_class
         self.journey_slice = journey_slice
-        self.config = load_config(config_path)
-        self.product_input_path = self.root / PRODUCT_INPUT
-        self.product_input = load_product_input(self.product_input_path)
+        if diagnostic_registration is not None:
+            if evidence_class != "Diagnostic" or journey_slice != "core" or cohort_manifest_path is not None:
+                raise QualificationFailure("diagnostic_registration_outside_slice")
+            self.diagnostic_registration = diagnostic_registration
+            self.diagnostic_ledger = diagnostic.DiagnosticLedger(diagnostic_registration)
+            self.expected_model = diagnostic.MODEL
+        self.prospective_summary = (diagnostic_registration is not None and
+            diagnostic_registration.value["schema"] == diagnostic.REGISTRATION_SCHEMA_V2)
+        self.product_input_path = self.root / (
+            diagnostic.product_fixture(diagnostic_registration.value["schema"])
+            if diagnostic_registration is not None else PRODUCT_INPUT)
+        self.product_input = load_product_input(
+            self.product_input_path, prospective=self.prospective_summary)
+        self.network_subnet = (diagnostic_registration.value.get("network_subnet")
+                               if diagnostic_registration is not None else None)
+        diagnostic.network.preflight(self.network_subnet)
+        self.config = load_config(
+            config_path, expected_model=self.expected_model,
+            thinking_enabled=diagnostic_registration is None,
+        )
+        self.summary_legacy_ids: list[str] = []
+        self.summary_candidate_ids: list[str] = []
+        self.summary_saved = None
         suffix = secrets.token_hex(5)
         self.project = f"nwq-{suffix}"
         self.prefix = self.project
@@ -1197,6 +1312,14 @@ class Journey:
         self.metric_windows: dict[tuple[str, str], tuple[str, Path]] = {}
         self.response_model_observations: list[dict[str, str]] = []
         self.response_model_log_offsets: dict[str, tuple[str, int]] = {}
+        self.diagnostic_last_snapshot = None
+        self.diagnostic_seal_attempted = False
+        self.diagnostic_terminal_entered = False
+        self.diagnostic_failures: list[str] = []
+        self.diagnostic_evidence_durable = False
+        self.diagnostic_evidence_deadline = None
+        self.active_release_process = None
+        self.internal_service_token = ""
         self.user_stack_before: dict[str, Any] = {}
         self.inventory_captured = False
         self.attempt_id = str(uuid.uuid4())
@@ -1215,7 +1338,8 @@ class Journey:
             ),
             "provider": {
                 "api_origin": EXPECTED_API_URL,
-                "product_thinking_enabled": True,
+                "configured_model": self.expected_model,
+                "product_thinking_enabled": self.config["thinking_enabled"],
             },
         }
         self.report: dict[str, Any] = {
@@ -1230,7 +1354,7 @@ class Journey:
             "outcome": "failed",
             "provider": {
                 "name": EXPECTED_PROVIDER,
-                "configured_model": EXPECTED_MODEL,
+                "configured_model": self.expected_model,
             },
             "environment": {
                 "deployment": "production-compose",
@@ -1259,6 +1383,16 @@ class Journey:
             "stages": [],
             "journey": {},
         }
+        if diagnostic_registration is not None:
+            self.report.update(schema_version=3, report_kind=(
+                "h4-vision-diagnostic-v2" if self.prospective_summary else "h4-vision-diagnostic-v1"))
+            self.report["policy_identity"].update(
+                qualification=None, extraction=None,
+                journey=self.report["report_kind"],
+                diagnostic_budget=diagnostic.PROFILE,
+                diagnostic_profile_sha256=diagnostic_registration.binding["profile_sha256"],
+            )
+            self.private_report["diagnostic_registration"] = diagnostic_registration.value
 
     @contextlib.contextmanager
     def stage(self, name: str):
@@ -1306,6 +1440,9 @@ class Journey:
     def cohort_identity(
         self, docker_engine: str, docker_compose: str, declared: dict[str, Any]
     ) -> dict[str, Any]:
+        h1_digest = sha256_bytes((self.root / "tools/h1-eval/corpus/v1.json").read_bytes())
+        if h1_digest != H1_V1_CORPUS_SHA256:
+            raise QualificationFailure("qualification_h1_corpus_not_adopted")
         controlled_keys = {
             "allowed_response_models",
             "base_application_image_ids",
@@ -1377,6 +1514,7 @@ class Journey:
         }
         return {
             "evaluated_git_sha": self.git_sha,
+            "allowed_response_models": declared["allowed_response_models"],
             "clean_tree_proof": True,
             "compose_sha256": sha256_bytes((self.root / "docker-compose.yml").read_bytes()),
             "schema_barriers": schema_barriers,
@@ -1417,9 +1555,7 @@ class Journey:
             "versions": COHORT_VERSIONS,
             "registered_inputs": {
                 "product": sha256_bytes(self.product_input_path.read_bytes()),
-                "h1": sha256_bytes(
-                    (self.root / "tools/h1-eval/corpus/v1.json").read_bytes()
-                ),
+                "h1": h1_digest,
                 "h3": sha256_bytes(
                     (self.root / "tools/h3-eval/corpus/v1.json").read_bytes()
                 ),
@@ -1434,6 +1570,8 @@ class Journey:
 
     def preflight(self) -> None:
         self.validate_release_inputs()
+        if self.network_subnet is not None:
+            self.prepare_runtime()
         docker_engine = run(
             [
                 "docker",
@@ -1472,6 +1610,7 @@ class Journey:
                 str(self.root),
                 "-f",
                 str(self.root / "docker-compose.yml"),
+                *self.network_compose_args(),
                 "--env-file",
                 str(self.candidate_manifest_path),
                 "config",
@@ -1503,16 +1642,42 @@ class Journey:
             self.report["attempt_sequence"] = sequence
             self.private_report["attempt_sequence"] = sequence
         self.cleanup_required = True
+        if self.diagnostic_registration is not None:
+            if self.diagnostic_ledger.descriptor is None:
+                raise QualificationFailure("diagnostic_ledger_not_started")
+            # Reuse the supported release probe: no network, mounts, credentials
+            # or provider work. Check both versions before adopting either one.
+            spec = importlib.util.spec_from_file_location(
+                "journey_release_budget", self.root / "infra/docker/diagnostic_budget.py"
+            )
+            adapter = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(adapter)
+            expected = {key: value for key, value in self.diagnostic_registration.binding.items()
+                        if key != "budget_id"}
+            try:
+                for manifest in (self.base_manifest, self.candidate_manifest):
+                    for service in SERVICE_PORTS:
+                        adapter.probe(manifest[service.upper().replace("-", "_") + "_IMAGE"],
+                                      self.project, expected)
+            except Exception as error:
+                evidence = adapter.probe_evidence(error)
+                self.private_report.setdefault("diagnostic_probe_evidence", []).append(evidence)
+                raise QualificationFailure("diagnostic_artifact_capability_unproven") from error
 
     def prepare_runtime(self) -> None:
         self.runtime_temp = tempfile.TemporaryDirectory(prefix=f"{self.project}-")
         temporary_root = Path(self.runtime_temp.name)
         temporary_root.chmod(0o700)
         self.runtime_root = temporary_root / "repo"
-        self.release_tool = temporary_root / "release.sh"
-        self.release_tool.write_bytes(
-            (self.root / "infra" / "docker" / "release.sh").read_bytes()
-        )
+        # Keep the supported release adapter/profile outside the changing checkout.
+        tool_root = temporary_root / "release-tool"
+        for relative in ("infra/docker/release.sh", "infra/docker/diagnostic_budget.py",
+                         "infra/docker/qualification_network.py",
+                         "tools/llm-budget/diagnostic-v1.json"):
+            target = tool_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((self.root / relative).read_bytes())
+        self.release_tool = tool_root / "infra/docker/release.sh"
         self.release_tool.chmod(0o700)
         self.release_state = temporary_root / "release-state"
         run(
@@ -1527,6 +1692,7 @@ class Journey:
         )
         git(self.runtime_root, "checkout", "--detach", self.git_sha)
         secrets_file = self.runtime_root / ".env"
+        self.internal_service_token = secrets.token_urlsafe(48)
         secret_lines = [
             "BOOTSTRAP_L0_COMPLETE=true",
             "POSTGRES_USER=novel",
@@ -1534,7 +1700,7 @@ class Journey:
             f"POSTGRES_PASSWORD={secrets.token_urlsafe(32)}",
             f"JWT_SECRET={secrets.token_urlsafe(48)}",
             f"RUNTIME_CONFIG_KEY={secrets.token_hex(32)}",
-            f"INTERNAL_SERVICE_TOKEN={secrets.token_urlsafe(48)}",
+            f"INTERNAL_SERVICE_TOKEN={self.internal_service_token}",
             "LLM_API_KEY=",
             "CACHE_MODE=postgres",
             "REDIS_PASSWORD=",
@@ -1548,6 +1714,11 @@ class Journey:
             f"CORS_ORIGINS=http://127.0.0.1:{self.port}",
             "",
         ]
+        if self.diagnostic_registration is not None:
+            secret_lines.extend(
+                f"{key}={value}" for key, value in self.diagnostic_registration.environment().items()
+            )
+            secret_lines.append("")
         descriptor = os.open(
             secrets_file,
             os.O_CREAT | os.O_EXCL | os.O_WRONLY,
@@ -1563,7 +1734,13 @@ class Journey:
             "RELEASE_CONTAINER_PREFIX": self.prefix,
             "RELEASE_HTTP_BIND": "127.0.0.1",
             "RELEASE_HTTP_PORT": str(self.port),
+            "RELEASE_QUALIFICATION_SUBNET": self.network_subnet or "",
         }
+        if self.network_subnet is not None:
+            path = diagnostic.network.guard("overlay", self.network_subnet, self.release_state,
+                                            self.project, self.runtime_root)
+            self.private_report["network"] = {"subnet": self.network_subnet,
+                "overlay_sha256": sha256_bytes(Path(path).read_bytes())}
 
     def compose_manifest(self) -> Path:
         if self.release_state is not None:
@@ -1572,30 +1749,54 @@ class Journey:
                 return current
         return self.candidate_manifest_path
 
+    def network_compose_args(self) -> list[str]:
+        if self.network_subnet is None:
+            return []
+        return ["-f", diagnostic.network.guard("overlay", self.network_subnet,
+                    self.release_state, self.project, self.runtime_root)]
+
     def compose(self, *args: str, capture: bool = True, check: bool = True) -> str:
         if not self.compose_env or self.runtime_root is None:
             raise QualificationFailure("compose_environment_missing")
-        return run(
-            [
-                "docker",
-                "compose",
-                "--project-name",
-                self.project,
-                "--project-directory",
-                str(self.runtime_root),
-                "-f",
-                str(self.runtime_root / "docker-compose.yml"),
-                "--env-file",
-                str(self.runtime_root / ".env"),
-                "--env-file",
-                str(self.compose_manifest()),
-                *args,
-            ],
-            cwd=self.runtime_root,
-            env=self.compose_env,
-            capture=capture,
-            check=check,
-        )
+        if args and args[0] in ("up", "start", "restart", "run", "create"):
+            if self.release_tool is None:
+                raise QualificationFailure("release_environment_missing")
+            # Shared release preflight is a no-op for ordinary mode. Stopping and
+            # cleanup must remain possible even if an active budget cannot proceed.
+            run([self.release_shell, str(self.release_tool), "preflight", str(self.compose_manifest())],
+                cwd=self.runtime_root, env=self.compose_env)
+        network_creating = self.network_subnet is not None and args and args[0] in (
+            "up", "start", "restart", "run", "create")
+        if network_creating:
+            diagnostic.network.guard("before", self.network_subnet, self.release_state,
+                                     self.project, self.runtime_root)
+        try:
+            return run(
+                [
+                    "docker",
+                    "compose",
+                    "--project-name",
+                    self.project,
+                    "--project-directory",
+                    str(self.runtime_root),
+                    "-f",
+                    str(self.runtime_root / "docker-compose.yml"),
+                    *self.network_compose_args(),
+                    "--env-file",
+                    str(self.runtime_root / ".env"),
+                    "--env-file",
+                    str(self.compose_manifest()),
+                    *args,
+                ],
+                cwd=self.runtime_root,
+                env=self.compose_env,
+                capture=capture,
+                check=check,
+            )
+        finally:
+            if network_creating:
+                diagnostic.network.guard("after", self.network_subnet, self.release_state,
+                                         self.project, self.runtime_root)
 
     def verify_release_images(
         self, stage: str, manifest: dict[str, str]
@@ -1606,6 +1807,8 @@ class Journey:
             declared_ids = self.cohort_manifest["identity"][
                 f"{stage}_application_image_ids"
             ]
+        elif self.diagnostic_registration is not None:
+            declared_ids = self.diagnostic_registration.value[f"{stage}_application_image_ids"]
         for key, service in APPLICATION_CONTAINERS.items():
             reference = manifest[key]
             image_value = docker_inspect("image", reference)
@@ -1667,7 +1870,8 @@ class Journey:
     def prepare_compose(self) -> None:
         if not PROJECT_PATTERN.fullmatch(self.project):
             raise QualificationFailure("unsafe_compose_project")
-        self.prepare_runtime()
+        if self.runtime_root is None:
+            self.prepare_runtime()
 
     def wait_gateway(self, attempts: int = 180) -> None:
         for _ in range(attempts):
@@ -1696,6 +1900,432 @@ class Journey:
                 sql,
             ]
         )
+
+    def summary_snapshot(self, user_id: str, novel_id: str, character_id: str,
+                         *, timeout: float = 5) -> dict[str, Any]:
+        scope = {"user_id": user_id, "novel_id": novel_id, "character_id": character_id}
+        if not all(diagnostic.uuid4(value) for value in scope.values()):
+            raise QualificationFailure("summary_scope_invalid")
+        def where(alias: str) -> str:
+            return " AND ".join(f"{alias}.{key} = :'{key}'::uuid" for key in scope)
+
+        # Provenance belongs to the claim, not chat_messages. Keep every raw
+        # message field and row: a mismatched claim yields NULL provenance and
+        # fails validation instead of silently dropping or repairing the source.
+        sql = ("SELECT jsonb_build_object("
+               "'turns', (SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY t.created_at, t.id), '[]') "
+               f"FROM chat_turns t WHERE {where('t')}), "
+               "'messages', (SELECT COALESCE(jsonb_agg(to_jsonb(m) || jsonb_build_object("
+               "'persona_source_chapter_high_water', t.persona_source_chapter_high_water) "
+               "ORDER BY m.created_at, m.id), '[]') FROM chat_messages m LEFT JOIN chat_turns t "
+               "ON t.id = m.turn_id AND t.user_id = m.user_id AND t.novel_id = m.novel_id "
+               "AND t.character_id = m.character_id AND t.chapter_context = m.chapter_context "
+               "AND t.reader_identity IS NOT DISTINCT FROM m.reader_identity "
+               f"WHERE {where('m')}), "
+               "'mid', (SELECT COALESCE(jsonb_agg(to_jsonb(m) ORDER BY m.id), '[]') "
+               f"FROM character_memories m WHERE {where('m')} AND layer = 'mid'))::text")
+        return diagnostic.strict_json(diagnostic.bounded_command(
+            ["docker", "exec", "-i", "-e", "PGOPTIONS=-c statement_timeout=3000",
+             self.prefix + "-postgres", "psql", "-U", "novel", "-d", "novel_world",
+             "-v", "ON_ERROR_STOP=1", "-v", "user_id=" + user_id,
+             "-v", "novel_id=" + novel_id, "-v", "character_id=" + character_id, "-At"],
+            stdin=(sql + ";\n").encode(), timeout=timeout))
+
+    def require_summary_calls(self, expected: int) -> None:
+        observed = provider_started_delta(
+            self.root, b"", self.service_metrics("agent-service"), service="agent-service",
+            operation="memory_summary", expected_model=self.expected_model)
+        if observed != expected:
+            raise QualificationFailure("summary_logical_dispatch_mismatch")
+
+    def validate_summary_window(self, value: dict[str, Any], user_id: str,
+                                novel_id: str, character_id: str) -> dict[str, Any] | None:
+        return diagnostic.summary_window(
+            value, self.summary_legacy_ids, self.summary_candidate_ids,
+            {"user_id": user_id, "novel_id": novel_id, "character_id": character_id})
+
+    def complete_prospective_summary(self, token: str, user_id: str,
+                                     novel_id: str, character_id: str) -> None:
+        if len(self.summary_candidate_ids) != 5:
+            raise QualificationFailure("summary_candidate_schedule_invalid")
+        world_before = json.loads(self.authority_snapshot(user_id, novel_id))
+        for key in ("chat_turns", "chat_messages"):
+            world_before.pop(key)
+        for message in self.product_input["post_adoption_chats"]:
+            self.validate_summary_window(self.summary_snapshot(user_id, novel_id, character_id),
+                                         user_id, novel_id, character_id)
+            self.require_summary_calls(0)
+            context = self.internal_character_context(user_id, novel_id, character_id)
+            result = self.chat(token, novel_id, character_id, message)
+            self.summary_candidate_ids.append(result["turn_id"])
+            after = self.internal_character_context(user_id, novel_id, character_id)
+            if after != context:
+                raise QualificationFailure("summary_chat_changed_world")
+            self.assert_chat_revision(result["turn_id"], context["world_revision"])
+            world_after = json.loads(self.authority_snapshot(user_id, novel_id))
+            for key in ("chat_turns", "chat_messages"):
+                world_after.pop(key)
+            if world_after != world_before:
+                raise QualificationFailure("summary_chat_changed_world")
+        deadline = time.monotonic() + 360
+        binding = None
+        attempt = 0
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            snapshot = self.summary_snapshot(user_id, novel_id, character_id,
+                                             timeout=min(5, remaining))
+            saved = self.validate_summary_window(snapshot, user_id, novel_id, character_id)
+            anchor = next(row for row in snapshot["turns"] if row["id"] == self.summary_candidate_ids[9])
+            observed_binding = (anchor["id"], anchor["summary_memory_id"])
+            if ((binding is not None and binding != observed_binding)
+                    or anchor["summary_claim_attempt"] < attempt):
+                raise QualificationFailure("summary_window_fence_changed")
+            binding, attempt = observed_binding, anchor["summary_claim_attempt"]
+            if saved is not None:
+                self.require_summary_calls(1)
+                self.summary_saved = saved
+                self.private_report["prospective_summary_before_restart"] = saved
+                return
+            time.sleep(min(2, max(0, deadline - time.monotonic())))
+        raise QualificationFailure("summary_window_timeout")
+
+    def verify_summary_restart(self, user_id: str, novel_id: str, character_id: str,
+                               resumed_turn_id: str, selected: int) -> None:
+        self.summary_candidate_ids.append(resumed_turn_id)
+        saved = self.validate_summary_window(self.summary_snapshot(user_id, novel_id, character_id),
+                                             user_id, novel_id, character_id)
+        if saved != self.summary_saved or saved is None or selected != 1:
+            raise QualificationFailure("summary_restart_identity_mismatch")
+        # The pre-restart generation was checked at one and retained by collect_metrics.
+        # Transport retries may exceed one; only logical dispatches are constrained here.
+        self.require_summary_calls(0)
+        self.private_report["prospective_summary_after_restart"] = saved
+        self.report["journey"].update(legacy_chat_turns=7, prospective_chat_turns=11,
+                                        summary_logical_calls=1)
+
+    def diagnostic_checkpoint(self, name: str, *, persist: bool = True,
+                              timeout: float = 10) -> dict[str, Any] | None:
+        if self.diagnostic_registration is None:
+            return None
+        if not re.fullmatch(r"[a-z_]{1,50}", name):
+            raise QualificationFailure("diagnostic_checkpoint_name_invalid")
+        command, sql = diagnostic.snapshot_command(
+            self.prefix, self.diagnostic_registration.value["budget_id"]
+        )
+        raw = diagnostic.bounded_command(command, stdin=sql, timeout=timeout)
+        snapshot = diagnostic.strict_json(raw)
+        aggregate = diagnostic.reconcile_snapshot(
+            self.diagnostic_registration, snapshot, self.diagnostic_last_snapshot
+        )
+        if name == "initial" and (aggregate["charged"]["attempts"] != 0 or aggregate["sealed"]):
+            raise QualificationFailure("diagnostic_initial_budget_not_empty")
+        if persist:
+            write_private(self.output / f"budget-{name}.json", diagnostic.canonical(snapshot) + b"\n")
+            diagnostic.sync_directory(self.output)
+        self.private_report.setdefault("diagnostic_budget_snapshots", {})[name] = snapshot
+        self.diagnostic_last_snapshot = snapshot
+        self.report.setdefault("diagnostic_budget", {})[name] = aggregate
+        return aggregate
+
+    def diagnostic_owner_control(self, *, seal: bool = False) -> dict[str, Any]:
+        if self.diagnostic_registration is None or not self.internal_service_token:
+            raise QualificationFailure("diagnostic_owner_control_unavailable")
+        binding = self.diagnostic_registration.binding
+        if seal:
+            if self.diagnostic_seal_attempted:
+                raise QualificationFailure("diagnostic_seal_already_attempted")
+            self.diagnostic_seal_attempted = True
+        url = f"http://127.0.0.1:8001/internal/llm-budget/{binding['budget_id']}"
+        if seal:
+            url += "/seal"
+        options = [
+            "silent", "fail-with-body", "max-time = 4", "max-redirs = 0", 'noproxy = "*"',
+            "url = " + json.dumps(url),
+            "header = " + json.dumps("X-LLM-Budget-Contract: " + diagnostic.CONTRACT),
+            "header = " + json.dumps("X-Internal-Service-Token: " + self.internal_service_token),
+        ]
+        if seal:
+            options.extend([
+                'request = "POST"', 'header = "Content-Type: application/json"',
+                "data = " + json.dumps(diagnostic.canonical({"binding": binding}).decode()),
+            ])
+        response = diagnostic.strict_json(diagnostic.bounded_command(
+            ["docker", "exec", "-i", self.prefix + "-user-service", "curl", "--disable", "--config", "-"],
+            stdin=("\n".join(options) + "\n").encode(), timeout=5, maximum=4096,
+        ))
+        if not isinstance(response, dict) or response.get("binding") != binding:
+            raise QualificationFailure("diagnostic_control_binding_mismatch")
+        if seal:
+            if response != {"binding": binding, "sealed": True} or response.get("sealed") is not True:
+                raise QualificationFailure("diagnostic_seal_unproven")
+        else:
+            expected_limits = {
+                key: self.diagnostic_registration.value["limits"]["max_" + key]
+                for key in ("attempts", "tokens", "cost_micro_cny")
+            }
+            if (set(response) != {"binding", "limits", "charged", "expires_at", "sealed"}
+                    or response["limits"] != expected_limits
+                    or not isinstance(response["limits"], dict)
+                    or not all(type(value) is int for value in response["limits"].values())
+                    or not isinstance(response["charged"], dict)
+                    or set(response["charged"]) != set(expected_limits)
+                    or not all(diagnostic.integer(value, expected_limits[key])
+                               for key, value in response["charged"].items())
+                    or response["expires_at"] != self.diagnostic_registration.value["limits"]["expires_at"]
+                    or type(response["sealed"]) is not bool):
+                raise QualificationFailure("diagnostic_control_snapshot_invalid")
+        return response
+
+    def diagnostic_failure(self, code: str) -> None:
+        if not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,100}", code):
+            code = "unexpected_diagnostic_failure"
+        if code not in self.diagnostic_failures:
+            self.diagnostic_failures.append(code)
+        self.report["outcome"] = "failed"
+        self.report.setdefault("failure", {"stage": self.current_stage, "code": code})
+        self.private_report["diagnostic_failures"] = list(self.diagnostic_failures)
+
+    def diagnostic_terminal(self) -> None:
+        """No new product request after entry; preserve PG unless evidence is durable."""
+        if self.diagnostic_registration is None or self.diagnostic_terminal_entered:
+            return
+        self.diagnostic_terminal_entered = True
+        if not self.cleanup_required:
+            return
+        terminal_ok = not bool(self.private_report.get("response_model_collection_errors"))
+        # Abort an interrupted release coordinator before observing/stopping its
+        # containers. Killing its CLI is not itself proof those containers stopped.
+        process = self.active_release_process
+        if process is not None:
+            try:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                terminal_ok = False
+                self.diagnostic_failure("diagnostic_release_stop_unproven")
+        try:
+            self.diagnostic_owner_control(seal=True)
+            deadline = time.monotonic() + 300
+            aggregate = self.diagnostic_checkpoint("sealed")
+            while aggregate["unresolved_attempts"] and time.monotonic() < deadline:
+                time.sleep(min(5, max(0, deadline - time.monotonic())))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                aggregate = self.diagnostic_checkpoint("drain", persist=False, timeout=min(10, remaining))
+            if aggregate["unresolved_attempts"]:
+                terminal_ok = False
+                self.diagnostic_failure("diagnostic_unresolved_receipts")
+            # One last per-generation observation while the processes still exist.
+            # A stuck scrape must not delay stopping paying processes indefinitely.
+            self.diagnostic_evidence_deadline = time.monotonic() + 20
+            self.report.pop("llm_metrics", None)
+            self.finalize_observability("diagnostic-terminal")
+        except (Exception, KeyboardInterrupt) as error:
+            terminal_ok = False
+            self.diagnostic_failure(getattr(error, "code", "diagnostic_terminal_evidence_failed"))
+        finally:
+            self.diagnostic_evidence_deadline = None
+
+        stop_deadline = time.monotonic() + 30
+
+        def stop_run(command):
+            remaining = stop_deadline - time.monotonic()
+            if remaining <= 0:
+                raise QualificationFailure("diagnostic_stop_timeout")
+            return diagnostic.bounded_command(command, timeout=min(10, remaining)).decode()
+
+        try:
+            names = {self.prefix + "-" + service for service in SERVICE_PORTS}
+            observed = stop_run([
+                "docker", "ps", "--all", "--no-trunc", "--filter",
+                "label=com.docker.compose.project=" + self.project,
+                "--format", "{{.ID}} {{.Names}}",
+            ])
+            identifiers = []
+            observed_ids = {}
+            for line in observed.splitlines():
+                parts = line.split()
+                if len(parts) != 2:
+                    raise QualificationFailure("diagnostic_stop_inventory_invalid")
+                identifier, name = parts
+                if name in names:
+                    if not re.fullmatch(r"[0-9a-f]{64}", identifier):
+                        raise QualificationFailure("diagnostic_stop_inventory_invalid")
+                    identifiers.append(identifier)
+                    observed_ids[name] = identifier
+            if identifiers:
+                # Existing grants have already received their bounded drain.
+                stop_run(["docker", "stop", "--time", "0", *identifiers])
+            # Inspect every named payer that exists, including an unexpected label
+            # collision; such a collision is never permission to stop its owner.
+            remaining_names = stop_run(["docker", "ps", "--format", "{{.Names}}"])
+            if names.intersection(remaining_names.splitlines()):
+                raise QualificationFailure("diagnostic_payers_still_running")
+            releases = self.private_report.get("release_images", {})
+            latest = releases.get("candidate", releases.get("base", {}))
+            expected_images = {
+                self.prefix + "-" + service:
+                    latest.get(service.upper().replace("-", "_") + "_IMAGE", {})
+                for service in SERVICE_PORTS
+            }
+            if set(observed_ids) != names or not all(
+                image.get("repository_digest") and image.get("image_id")
+                for image in expected_images.values()
+            ):
+                raise QualificationFailure("diagnostic_payer_inventory_unproven")
+            for name, identifier in observed_ids.items():
+                stopped = diagnostic.strict_json(stop_run(["docker", "inspect", identifier]))
+                if (not isinstance(stopped, list) or len(stopped) != 1
+                        or stopped[0].get("Id") != identifier
+                        or (stopped[0].get("State") or {}).get("Running") is not False
+                        or stopped[0].get("Image") != expected_images[name]["image_id"]
+                        or (stopped[0].get("Config") or {}).get("Image")
+                            != expected_images[name]["repository_digest"]):
+                    raise QualificationFailure("diagnostic_payer_stop_unproven")
+            self.private_report["diagnostic_payers_stopped"] = True
+        except (QualificationFailure, diagnostic.DiagnosticFailure, OSError, UnicodeError) as error:
+            self.diagnostic_failure(getattr(error, "code", "diagnostic_stop_unproven"))
+            return
+        try:
+            aggregate = self.diagnostic_checkpoint("terminal")
+            if not aggregate["sealed"]:
+                raise QualificationFailure("diagnostic_terminal_not_sealed")
+            try:
+                diagnostic.reconcile_metrics(self.diagnostic_registration, self.diagnostic_last_snapshot,
+                                             self.report.get("llm_metrics"))
+                self.private_report["diagnostic_metrics_reconciled"] = True
+            except diagnostic.DiagnosticFailure as error:
+                terminal_ok = False
+                self.diagnostic_failure(error.code)
+            # Durable full receipts plus the private pre-cleanup report are the
+            # deletion prerequisite. Final cleanup disposition is written later.
+            write_private(self.output / "pre-cleanup-private.json", diagnostic.canonical({
+                "phase": "before_cleanup", "private": self.private_report,
+                "runner": self.report,
+            }) + b"\n")
+            diagnostic.sync_directory(self.output)
+            self.diagnostic_evidence_durable = terminal_ok
+        except (QualificationFailure, diagnostic.DiagnosticFailure, OSError) as error:
+            self.diagnostic_failure(getattr(error, "code", "diagnostic_private_evidence_failed"))
+
+    def diagnostic_cleanup(self) -> None:
+        """Fixed owned inventory; no unconditional Compose down --volumes."""
+        if not self.inventory_captured or not self.cleanup_required:
+            if self.runtime_temp is not None:
+                self.runtime_temp.cleanup()
+                self.runtime_temp = None
+            return
+        deadline = time.monotonic() + 60
+
+        def bounded_run(command):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise QualificationFailure("diagnostic_cleanup_timeout")
+            return diagnostic.bounded_command(command, timeout=min(10, remaining)).decode()
+
+        log = None
+        try:
+            if self.network_subnet is not None and self.release_state is not None:
+                evidence = {"subnet": self.network_subnet,
+                    "overlay_sha256": sha256_bytes(diagnostic.network.overlay_bytes(self.network_subnet))}
+                for name in ("qualification-network-attempt.json", "qualification-network.json"):
+                    path = self.release_state / name
+                    if os.path.lexists(path):
+                        evidence[name] = diagnostic.network.decode(diagnostic.network.private_file(path))
+                self.private_report["network"] = evidence
+                write_private(self.output / "network-evidence.json", diagnostic.canonical(evidence))
+                diagnostic.sync_directory(self.output)
+            if not PROJECT_PATTERN.fullmatch(self.project) or self.prefix != self.project:
+                raise QualificationFailure("diagnostic_cleanup_target_invalid")
+            before = docker_inventory_snapshot(runner=bounded_run)
+            owned = attempt_resources(before, self.project, self.prefix)
+            descriptor = os.open(self.output / "cleanup-results.jsonl",
+                                 os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+            log = os.fdopen(descriptor, "wb")
+
+            def record(value):
+                log.write(diagnostic.canonical(value) + b"\n")
+                log.flush()
+                os.fsync(log.fileno())
+
+            record({"phase": "inventory", "owned": owned,
+                    "allow_volume_deletion": self.diagnostic_evidence_durable})
+            diagnostic.sync_directory(self.output)
+            allow_volume_deletion = self.diagnostic_evidence_durable
+            for resource in owned:
+                kind, name = resource.split(":", 1)
+                item = before[kind][name]
+                labels = item.get("labels") or {}
+                if labels.get("com.docker.compose.project") != self.project:
+                    self.diagnostic_failure("diagnostic_cleanup_ownership_unproven")
+                    allow_volume_deletion = False
+                    record({"resource": resource, "status": "preserved", "code": "ownership_unproven"})
+                    continue
+                if kind == "volumes" and not allow_volume_deletion:
+                    record({"resource": resource, "status": "preserved", "code": "private_evidence_required"})
+                    continue
+                if kind == "containers":
+                    identifier = item.get("id")
+                    if not isinstance(identifier, str) or not re.fullmatch(r"[0-9a-f]{64}", identifier):
+                        raise QualificationFailure("diagnostic_cleanup_identity_invalid")
+                    # Docker removes only anonymous mounts here. The named PG
+                    # volume remains subject to the separate evidence gate.
+                    command = ["docker", "rm", "--force", "--volumes", identifier]
+                elif kind == "networks":
+                    if self.network_subnet is not None:
+                        receipt = self.private_report.get("network", {}).get("qualification-network.json", {})
+                        if (receipt.get("id") != item.get("id") or receipt.get("name") != name
+                                or (item.get("ipam") or {}).get("Config", [{}])[0].get("Subnet")
+                                != self.network_subnet):
+                            self.diagnostic_failure("diagnostic_cleanup_network_identity_unproven")
+                            record({"resource": resource, "status": "preserved", "code": "identity_unproven"})
+                            continue
+                    command = ["docker", "network", "rm", item["id"]]
+                else:
+                    command = ["docker", "volume", "rm", name]
+                record({"resource": resource, "status": "removal_started"})
+                try:
+                    bounded_run(command)
+                except (QualificationFailure, diagnostic.DiagnosticFailure, OSError) as error:
+                    code = getattr(error, "code", "diagnostic_cleanup_command_failed")
+                    self.diagnostic_failure(code)
+                    allow_volume_deletion = False
+                    record({"resource": resource, "status": "unknown", "code": code})
+                else:
+                    record({"resource": resource, "status": "removed"})
+            after = docker_inventory_snapshot(runner=bounded_run)
+            residue = attempt_resources(after, self.project, self.prefix)
+            unrelated = {kind: {name: value for name, value in after[kind].items()
+                                if f"{kind}:{name}" not in residue}
+                         for kind in ("containers", "volumes", "networks")}
+            unchanged = unrelated == self.user_stack_before
+            record({"phase": "verification", "residue": residue, "existing_stack_unchanged": unchanged})
+            self.private_report.setdefault("environment", {}).update(
+                existing_stack_after=after, attempt_resource_residue=residue,
+            )
+            self.report["environment"].update(
+                isolated_cleanup_completed=not residue,
+                isolated_resource_residue_count=len(residue),
+                existing_user_stack_unchanged=unchanged,
+            )
+            if residue:
+                self.diagnostic_failure("diagnostic_cleanup_residue")
+            if not unchanged:
+                self.diagnostic_failure("existing_user_stack_changed")
+        except (QualificationFailure, diagnostic.DiagnosticFailure, diagnostic.network.NetworkFailure,
+                OSError, KeyError, UnicodeError) as error:
+            self.diagnostic_failure(getattr(error, "code", "diagnostic_cleanup_unproven"))
+            self.report["environment"]["isolated_cleanup_completed"] = False
+        finally:
+            if log is not None:
+                log.close()
+            if self.runtime_temp is not None:
+                self.runtime_temp.cleanup()
+                self.runtime_temp = None
 
     def authority_snapshot(
         self, user_id: str, novel_id: str, *, include_failed_turns: bool = True
@@ -2029,11 +2659,13 @@ class Journey:
             agent_before,
             self.service_metrics("agent-service"),
             service="agent-service",
+            expected_model=self.expected_model,
         ) + provider_started_delta(
             self.root,
             narrative_before,
             self.service_metrics("narrative-service"),
             service="narrative-service",
+            expected_model=self.expected_model,
         )
         private_counts = self.db_scalar(
             f"SELECT (SELECT COUNT(*) FROM users WHERE id = '{user_id}') + "
@@ -2046,6 +2678,19 @@ class Journey:
             raise QualificationFailure("account_erasure_incomplete")
         return {"negative_cases": 6, "provider_calls": provider_calls, "private_rows": 0}
 
+    def evidence_command(self, command: list[str]) -> str:
+        if self.diagnostic_registration is None:
+            return run(command)
+        remaining = 10 if self.diagnostic_evidence_deadline is None else (
+            self.diagnostic_evidence_deadline - time.monotonic()
+        )
+        if remaining <= 0:
+            raise QualificationFailure("diagnostic_observability_timeout")
+        try:
+            return diagnostic.bounded_command(command, timeout=min(10, remaining)).decode().strip()
+        except (diagnostic.DiagnosticFailure, OSError, UnicodeError) as error:
+            raise QualificationFailure(getattr(error, "code", "diagnostic_observability_failed")) from error
+
     def collect_metrics(
         self,
         name: str,
@@ -2057,7 +2702,7 @@ class Journey:
         for service in services:
             try:
                 container = f"{self.prefix}-{service}"
-                generation = run(
+                generation = self.evidence_command(
                     [
                         "docker",
                         "inspect",
@@ -2098,7 +2743,7 @@ class Journey:
 
     def service_metrics(self, service: str) -> bytes:
         port = SERVICE_PORTS[service]
-        return run(
+        return self.evidence_command(
             [
                 "docker",
                 "exec",
@@ -2122,20 +2767,40 @@ class Journey:
         for service in services:
             try:
                 container = f"{self.prefix}-{service}"
-                container_id = run(
+                container_id = self.evidence_command(
                     ["docker", "inspect", "--format", "{{.Id}}", container]
                 )
-                raw = run(["docker", "logs", container])
+                raw = self.evidence_command(["docker", "logs", container])
+                if self.diagnostic_registration is not None:
+                    if (getattr(self, "diagnostic_evidence_deadline", None) is not None
+                            and time.monotonic() >= self.diagnostic_evidence_deadline):
+                        raise QualificationFailure("diagnostic_observability_timeout")
+                    payload = raw.encode("utf-8")
+                    if len(payload) > 4 * 1024 * 1024:
+                        raise QualificationFailure("response_model_log_oversized")
+                    artifact = f"diagnostic-log-{generation}-{service}.log"
+                    write_private(self.output / artifact, payload)
+                    if (getattr(self, "diagnostic_evidence_deadline", None) is not None
+                            and time.monotonic() >= self.diagnostic_evidence_deadline):
+                        raise QualificationFailure("diagnostic_observability_timeout")
+                    self.private_report.setdefault("response_model_logs", []).append({
+                        "phase": generation, "service": service,
+                        "container_id": container_id, "artifact": artifact,
+                        "byte_count": len(payload), "sha256": sha256_bytes(payload),
+                        "format": "utf8_decoded_stripped_stdout",
+                    })
                 previous_id, previous_count = self.response_model_log_offsets.get(
                     service, ("", 0)
                 )
                 if previous_id != container_id:
                     previous_count = 0
-                new, total = unseen_response_models(raw, service, previous_count)
+                new, total = unseen_response_models(
+                    raw, service, previous_count, expected_model=self.expected_model
+                )
                 self.response_model_observations.extend(new)
                 self.response_model_log_offsets[service] = (container_id, total)
-            except QualificationFailure as error:
-                errors.append(f"{service}:{error.code}")
+            except (QualificationFailure, OSError, UnicodeError) as error:
+                errors.append(f"{service}:{getattr(error, 'code', 'response_model_log_capture_failed')}")
         self.private_report.setdefault("response_model_marker_counts", {})[
             generation
         ] = len(self.response_model_observations) - before
@@ -2166,7 +2831,7 @@ class Journey:
         allowed = (
             self.cohort_manifest["identity"]["allowed_response_models"]
             if self.cohort_manifest is not None
-            else [EXPECTED_MODEL]
+            else [self.expected_model]
         )
         try:
             self.report["provider"].update(
@@ -2175,12 +2840,22 @@ class Journey:
                     windows,
                     self.response_model_observations,
                     allowed,
+                    expected_model=self.expected_model,
                 )
             )
-        except QualificationFailure as error:
-            errors.append(error.code)
+        except (QualificationFailure, OSError, ValueError) as error:
+            errors.append(getattr(error, "code", "llm_metrics_invalid"))
         try:
-            self.report["llm_metrics"] = summarize_metrics(self.root, windows)
+            self.report["llm_metrics"] = summarize_metrics(
+                self.root, windows, expected_model=self.expected_model
+            )
+            if self.prospective_summary:
+                summary_calls = sum(row["value"] for row in self.report["llm_metrics"]["counter_totals"]
+                                    if row["service"] == "agent-service"
+                                    and row["operation"] == "memory_summary"
+                                    and row["counter"] == "requests_started.total")
+                if summary_calls > 1 or (self.summary_saved is not None and summary_calls != 1):
+                    errors.append("summary_logical_dispatch_mismatch")
         except (QualificationFailure, OSError, ValueError):
             errors.append("llm_metrics_invalid")
         try:
@@ -2234,6 +2909,7 @@ class Journey:
                 ),
                 start_new_session=os.name != "nt",
             )
+            self.active_release_process = process
             if gate is not None:
                 prompt = f"then enter {self.git_sha}:"
                 deadline = time.monotonic() + 1_800
@@ -2272,6 +2948,7 @@ class Journey:
                 raise QualificationFailure(f"release_{command}_timeout") from error
         if return_code:
             raise QualificationFailure(f"release_{command}_failed")
+        self.active_release_process = None
         duration = round((time.monotonic() - started) * 1000)
         expected = {"pull", "migration", "application_deployment", "readiness"}
         if command == "adopt":
@@ -2426,6 +3103,7 @@ class Journey:
                     cached_narrative_before,
                     self.service_metrics("narrative-service"),
                     service="narrative-service",
+                    expected_model=self.expected_model,
                 )
                 != 0
                 or self.authority_snapshot(compatibility_user_id, novel_id)
@@ -2465,6 +3143,7 @@ class Journey:
                 self.service_metrics("narrative-service"),
                 service="narrative-service",
                 operation="narrative_transition",
+                expected_model=self.expected_model,
             ) != 1:
                 raise QualificationFailure("compatibility_branch_provider_delta_invalid")
             if (
@@ -2550,6 +3229,7 @@ class Journey:
                 agent_after,
                 service="agent-service",
                 operation="character_chat",
+                expected_model=self.expected_model,
             ) != 1:
                 raise QualificationFailure("compatibility_chat_provider_delta_invalid")
             compatibility_chat_authority = self.chat_authority(
@@ -2693,6 +3373,7 @@ class Journey:
                 narrative_before,
                 self.service_metrics("narrative-service"),
                 service="narrative-service",
+                expected_model=self.expected_model,
             )
             if (
                 negative_provider_calls != 0
@@ -2744,6 +3425,7 @@ class Journey:
                     compatibility_replay_before,
                     self.service_metrics("agent-service"),
                     service="agent-service",
+                    expected_model=self.expected_model,
                 )
                 != 0
                 or self.chat_authority(compatibility_user_id, novel_id)
@@ -2909,6 +3591,7 @@ class Journey:
             self.report["journey"][f"{release_label}_adoption_duration_ms"] = duration
             if self.journey_slice == "core":
                 base_postgres_volume = release_postgres_volume
+            self.diagnostic_checkpoint("initial")
 
         admin_email = f"admin-{secrets.token_hex(8)}@qualification.invalid"
         reader_email = f"reader-{secrets.token_hex(8)}@qualification.invalid"
@@ -2927,7 +3610,7 @@ class Journey:
                 token=admin_token,
                 value={
                     "provider": self.config["provider"],
-                    "model": self.config["model"],
+                    "model": self.expected_model,
                     "thinking_enabled": self.config["thinking_enabled"],
                     "api_key": self.config["api_key"],
                 },
@@ -2935,8 +3618,8 @@ class Journey:
             )
             if settings != {
                 "provider": EXPECTED_PROVIDER,
-                "model": EXPECTED_MODEL,
-                "thinking_enabled": True,
+                "model": self.expected_model,
+                "thinking_enabled": self.config["thinking_enabled"],
                 "api_key_configured": True,
                 "scope": "platform",
             }:
@@ -3099,6 +3782,7 @@ class Journey:
                 self.service_metrics("narrative-service"),
                 service="narrative-service",
                 operation="narrative_transition",
+                expected_model=self.expected_model,
             ) != 1:
                 raise QualificationFailure("branch_provider_delta_invalid")
             transition = choice.get("transition", {})
@@ -3125,6 +3809,7 @@ class Journey:
                     branch_replay_before,
                     self.service_metrics("narrative-service"),
                     service="narrative-service",
+                    expected_model=self.expected_model,
                 )
                 != 0
                 or self.authority_snapshot(user_id, novel_id) != branch_authority
@@ -3190,6 +3875,8 @@ class Journey:
                 character_id,
                 self.product_input["branch_chat"],
             )
+            if self.prospective_summary:
+                self.summary_legacy_ids.append(branch_chat["turn_id"])
             branch_chat_after = self.service_metrics("agent-service")
             if provider_started_delta(
                 self.root,
@@ -3197,6 +3884,7 @@ class Journey:
                 branch_chat_after,
                 service="agent-service",
                 operation="character_chat",
+                expected_model=self.expected_model,
             ) != 1:
                 raise QualificationFailure("branch_chat_provider_delta_invalid")
             self.assert_chat_revision(branch_chat["turn_id"], context["world_revision"])
@@ -3218,6 +3906,7 @@ class Journey:
                     replay_before,
                     self.service_metrics("agent-service"),
                     service="agent-service",
+                    expected_model=self.expected_model,
                 )
                 != 0
                 or self.chat_authority(user_id, novel_id) != branch_chat_authority
@@ -3270,6 +3959,7 @@ class Journey:
                     after,
                     service="narrative-service",
                     operation="narrative_transition",
+                    expected_model=self.expected_model,
                 ) != 1:
                     raise QualificationFailure("world_turn_provider_delta_invalid")
                 if (
@@ -3300,6 +3990,7 @@ class Journey:
                             before,
                             after,
                             service="narrative-service",
+                            expected_model=self.expected_model,
                         )
                         != 0
                         or self.authority_snapshot(user_id, novel_id)
@@ -3313,6 +4004,8 @@ class Journey:
                     self.product_input["world_chats"][number - 1],
                 )
                 chat_turns += 1
+                if self.prospective_summary:
+                    self.summary_legacy_ids.append(chat_result["turn_id"])
                 current = self.internal_character_context(
                     user_id, novel_id, character_id
                 )
@@ -3322,7 +4015,16 @@ class Journey:
 
         self.collect_metrics("base")
         self.collect_response_models("base")
+        self.diagnostic_checkpoint("before_upgrade")
         pre_upgrade_authority = self.authority_snapshot(user_id, novel_id)
+        if self.prospective_summary:
+            self.require_summary_calls(0)
+            before_summary = self.summary_snapshot(user_id, novel_id, character_id)
+            if (before_summary["mid"] or len(before_summary["turns"]) != 7
+                    or {row["id"] for row in before_summary["turns"]} != set(self.summary_legacy_ids)
+                    or len(before_summary["messages"]) != 14):
+                raise QualificationFailure("summary_base_not_empty")
+            self.private_report["summary_before_upgrade"] = before_summary
         self.private_report["pre_upgrade_authority_sha256"] = sha256_bytes(
             pre_upgrade_authority.encode("utf-8")
         )
@@ -3371,7 +4073,13 @@ class Journey:
                 "candidate": candidate_postgres_volume,
             }
             post_upgrade_authority = self.authority_snapshot(user_id, novel_id)
-            if post_upgrade_authority != pre_upgrade_authority:
+            if self.prospective_summary:
+                if diagnostic.upgrade_authority(post_upgrade_authority) != diagnostic.upgrade_authority(pre_upgrade_authority):
+                    raise QualificationFailure("upgrade_authority_changed")
+                self.validate_summary_window(self.summary_snapshot(user_id, novel_id, character_id),
+                                             user_id, novel_id, character_id)
+                self.require_summary_calls(0)
+            elif post_upgrade_authority != pre_upgrade_authority:
                 raise QualificationFailure("upgrade_authority_changed")
             self.private_report["post_upgrade_authority_sha256"] = sha256_bytes(
                 post_upgrade_authority.encode("utf-8")
@@ -3384,6 +4092,7 @@ class Journey:
                     "client_gate_fail_stopped": True,
                 }
             )
+            self.diagnostic_checkpoint("after_upgrade")
 
         with self.stage("candidate_world_and_negative_matrix"):
             submit_committed(7, turn_seven_id)
@@ -3394,6 +4103,8 @@ class Journey:
                 self.product_input["world_chats"][6],
             )
             chat_turns += 1
+            if self.prospective_summary:
+                self.summary_candidate_ids.append(chat_result["turn_id"])
             current = self.internal_character_context(
                 user_id, novel_id, character_id
             )
@@ -3500,11 +4211,13 @@ class Journey:
                 narrative_provider_before,
                 self.service_metrics("narrative-service"),
                 service="narrative-service",
+                expected_model=self.expected_model,
             ) + provider_started_delta(
                 self.root,
                 novel_provider_before,
                 self.service_metrics("novel-service"),
                 service="novel-service",
+                expected_model=self.expected_model,
             )
             ids = ",".join(f"'{turn_id}'" for turn_id in negative_turn_ids)
             if self.db_scalar(
@@ -3547,13 +4260,18 @@ class Journey:
                     self.product_input["world_chats"][number - 1],
                 )
                 chat_turns += 1
+                if self.prospective_summary:
+                    self.summary_candidate_ids.append(chat_result["turn_id"])
+                    self.validate_summary_window(self.summary_snapshot(user_id, novel_id, character_id),
+                                                 user_id, novel_id, character_id)
+                    self.require_summary_calls(0)
                 current = self.internal_character_context(
                     user_id, novel_id, character_id
                 )
                 self.assert_chat_revision(
                     chat_result["turn_id"], current["world_revision"]
                 )
-                if number == 9:
+                if number == 9 and not self.prospective_summary:
                     for _ in range(180):
                         mid_count = int(
                             self.db_scalar(
@@ -3572,6 +4290,11 @@ class Journey:
                             "mid_memory_window_not_projected"
                         )
 
+        if self.prospective_summary:
+            with self.stage("prospective_summary_window"):
+                self.complete_prospective_summary(token, user_id, novel_id, character_id)
+                chat_turns += 5
+                mid_count = 1
         self.collect_metrics(
             "candidate-agent-before-restart", ["agent-service"]
         )
@@ -3580,6 +4303,7 @@ class Journey:
         )
 
         with self.stage("pending_projection_recovery"):
+            self.diagnostic_checkpoint("before_restart")
             permanent_before = int(
                 self.db_scalar(
                     "SELECT COUNT(*) FROM character_memories "
@@ -3609,6 +4333,7 @@ class Journey:
                 narrative_after_commit,
                 service="narrative-service",
                 operation="narrative_transition",
+                expected_model=self.expected_model,
             ) != 1:
                 raise QualificationFailure("pending_turn_provider_delta_invalid")
             row = self.db_scalar(
@@ -3633,7 +4358,7 @@ class Journey:
                 token,
                 novel_id,
                 overtaking_id,
-                pending_action,
+                dict(pending_action, expected_turn_number=12),
                 expected=(409,),
             )
             self.require_error(overtaking, "turn_in_progress")
@@ -3650,6 +4375,7 @@ class Journey:
                     self.service_metrics("narrative-service"),
                     service="narrative-service",
                     operation="narrative_transition",
+                    expected_model=self.expected_model,
                 )
                 != 0
             ):
@@ -3657,6 +4383,7 @@ class Journey:
 
             self.compose("up", "-d", "--no-deps", "agent-service")
             ready_at = self.wait_agent_ready()
+            self.diagnostic_checkpoint("after_restart")
             deadline = ready_at + 90
             projection_status = "pending"
             while time.monotonic() <= deadline:
@@ -3700,6 +4427,7 @@ class Journey:
                     replay_before,
                     replay_after,
                     service="narrative-service",
+                    expected_model=self.expected_model,
                 )
                 != 0
                 or permanent_after != permanent_before + 1
@@ -3742,6 +4470,7 @@ class Journey:
                 agent_after,
                 service="agent-service",
                 operation="character_chat",
+                expected_model=self.expected_model,
             ) != 1:
                 raise QualificationFailure("post_restart_chat_provider_delta_invalid")
             marker_count = selected_mid_from_logs(
@@ -3755,13 +4484,16 @@ class Journey:
                 f"{self.api}/chat/{character_id}/history?limit=100&offset=0",
                 token=token,
             )
-            if history.get("count") != 26:
+            if self.prospective_summary:
+                self.verify_summary_restart(user_id, novel_id, character_id,
+                                            resumed_chat["turn_id"], marker_count)
+            if history.get("count") != (36 if self.prospective_summary else 26):
                 raise QualificationFailure("restart_chat_history_incomplete")
             self.report["journey"].update(
                 {
                     "pre_restart_chat_turns": chat_turns,
                     "post_restart_chat_turns": 1,
-                    "total_chat_turns": 13,
+                    "total_chat_turns": 18 if self.prospective_summary else 13,
                     "mid_memory_windows": mid_count,
                     "mid_candidates_selected": marker_count,
                     "mid_selection_trace_correlated": True,
@@ -3774,6 +4506,7 @@ class Journey:
             world_view = request_json(
                 f"{self.api}/narrative/{novel_id}/world", token=token
             )
+            self.capture_final_world_view(world_view)
             if (
                 world_view.get("session", {}).get("turn_number") != 12
                 or len(world_view.get("journal", [])) != 12
@@ -3905,6 +4638,9 @@ class Journey:
         self.report["outcome"] = "completed"
 
     def cleanup(self) -> None:
+        if self.diagnostic_registration is not None:
+            self.diagnostic_cleanup()
+            return
         if not self.inventory_captured:
             if self.runtime_temp is not None:
                 self.runtime_temp.cleanup()
@@ -3974,6 +4710,9 @@ class Journey:
             "pre_restart_chat_turns",
             "post_restart_chat_turns",
             "total_chat_turns",
+            "legacy_chat_turns",
+            "prospective_chat_turns",
+            "summary_logical_calls",
             "mid_memory_windows",
             "mid_candidates_selected",
             "durable_chat_messages",
@@ -4027,7 +4766,7 @@ class Journey:
 
         provider = {
             "name": EXPECTED_PROVIDER,
-            "configured_model": EXPECTED_MODEL,
+            "configured_model": self.expected_model,
         }
         successful_calls = self.report["provider"].get("successful_calls")
         if isinstance(successful_calls, int) and not isinstance(successful_calls, bool):
@@ -4085,6 +4824,22 @@ class Journey:
             ),
             "aggregate": aggregate,
         }
+        if self.diagnostic_registration is not None:
+            public.update(schema_version=3, report_kind=self.report["report_kind"])
+            public.pop("attempt_id", None)
+            public["diagnostic_profile"] = diagnostic.PROFILE
+            public["thinking_enabled"] = False
+            if self.diagnostic_last_snapshot is not None:
+                reconciled = diagnostic.reconcile_snapshot(
+                    self.diagnostic_registration, self.diagnostic_last_snapshot
+                )
+                limits = self.diagnostic_registration.value["limits"]
+                names = {"attempts": "attempts", "tokens": "tokens", "micro_cny": "cost_micro_cny"}
+                public["diagnostic_budget"] = {
+                    "limits": {name: limits["max_" + source] for name, source in names.items()},
+                    "charged": {name: reconciled["charged"][source] for name, source in names.items()},
+                    **{name: reconciled[name] for name in ("settled_attempts", "unresolved_attempts", "sealed")},
+                }
         failure = self.report.get("failure")
         if failure is not None:
             code = failure.get("code") if isinstance(failure, dict) else None
@@ -4116,10 +4871,242 @@ class Journey:
             + b"\n",
         )
         os.replace(temporary, path)
-        print(f"live qualification report: {path}")
+        if self.diagnostic_registration is not None:
+            diagnostic.sync_directory(self.output)
+            print("live diagnostic report written")
+        else:
+            print(f"live qualification report: {path}")
+
+
+def run_diagnostic(journey: Journey) -> int:
+    """Single-start execution and one cancellation-safe terminal path.
+
+    Reports/terminal ledger are serialized with INT/TERM blocked. Cancellation
+    already pending at that boundary fails the attempt; a later signal is
+    delivered after the terminal decision, not a request to resume it.
+    """
+    if journey.diagnostic_ledger is None:
+        raise QualificationFailure("diagnostic_ledger_missing")
+    signals = {signal.SIGINT, signal.SIGTERM}
+    previous = {number: signal.getsignal(number) for number in signals}
+    cancelled = False
+    terminating = False
+    finished = False
+
+    def cancel(_number, _frame):
+        nonlocal cancelled
+        if finished or cancelled:
+            return
+        cancelled = True
+        journey.diagnostic_failure("diagnostic_cancelled")
+        if not terminating:
+            raise QualificationFailure("diagnostic_cancelled")
+
+    def failure(error, fallback):
+        journey.diagnostic_failure(getattr(error, "code", fallback))
+
+    for number in signals:
+        signal.signal(number, cancel)
+    try:
+        # Refusal of an existing/partial Started never writes to its output or
+        # invokes cleanup. The ledger owns the descriptor after exclusive create.
+        try:
+            diagnostic.network.preflight(journey.network_subnet)
+            journey.diagnostic_ledger.start()
+        except (Exception, KeyboardInterrupt) as error:
+            failure(error, "diagnostic_start_failed")
+            return 1
+        try:
+            journey.execute()
+        except (Exception, KeyboardInterrupt) as error:
+            failure(error, "unexpected_diagnostic_failure")
+        finally:
+            terminating = True
+            try:
+                journey.diagnostic_terminal()
+            except (Exception, KeyboardInterrupt) as error:
+                journey.diagnostic_evidence_durable = False
+                failure(error, "diagnostic_terminal_unproven")
+            try:
+                journey.cleanup()
+            except (Exception, KeyboardInterrupt) as error:
+                failure(error, "diagnostic_cleanup_unproven")
+
+        environment = journey.report.get("environment", {})
+        if not (journey.report["outcome"] == "completed"
+                and journey.diagnostic_evidence_durable
+                and environment.get("isolated_cleanup_completed") is True
+                and environment.get("existing_user_stack_unchanged") is True):
+            journey.diagnostic_failure("diagnostic_completion_unproven")
+
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, signals)
+        try:
+            if signal.sigpending().intersection(signals):
+                cancel(None, None)
+            if journey.diagnostic_failures:
+                journey.report["outcome"] = "failed"
+            try:
+                journey.write_report()
+            except Exception as error:
+                failure(error, "diagnostic_report_write_failed")
+            passed = not journey.diagnostic_failures
+            try:
+                journey.diagnostic_ledger.finish(passed, journey.diagnostic_failures)
+            except Exception as error:
+                failure(error, "diagnostic_terminal_write_failed")
+                # A report written before a failed ledger fsync is not success.
+                # Replace only this attempt's exact reports; if the filesystem
+                # also refuses this, Started/failure marker take precedence.
+                journey.private_report["runner_report"] = journey.report
+                for name, value in (
+                    ("journey-report.json", journey.public_report),
+                    ("journey-private.json", lambda: journey.private_report),
+                ):
+                    try:
+                        temporary = journey.output / (".failed-" + name)
+                        write_private(temporary, diagnostic.canonical(value()) + b"\n")
+                        os.replace(temporary, journey.output / name)
+                        diagnostic.sync_directory(journey.output)
+                    except Exception:
+                        pass
+            if journey.diagnostic_failures:
+                # Never retry a partially written terminal ledger or overwrite
+                # previous evidence. PG may already have been removed safely.
+                try:
+                    write_private(journey.output / "terminal-failure.json", diagnostic.canonical({
+                        "outcome": "failed", "failure_codes": journey.diagnostic_failures,
+                        "pre_cleanup_evidence_durable": journey.diagnostic_evidence_durable,
+                    }) + b"\n")
+                    diagnostic.sync_directory(journey.output)
+                except Exception:
+                    pass  # Started and any durable pre-cleanup evidence remain frozen.
+            finished = True
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        return 1 if journey.diagnostic_failures else 0
+    finally:
+        journey.diagnostic_ledger.close()
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+
+
+def self_test_h1_cohort_boundary(root: Path) -> None:
+    from unittest.mock import patch
+
+    corpus_bytes = (root / "tools/h1-eval/corpus/v1.json").read_bytes()
+    digest = sha256_bytes
+    assert digest(corpus_bytes) != H1_V1_CORPUS_SHA256
+    engine, compose = "fixture|linux|amd64", "fixture-compose"
+
+    def fake_run(command: list[str], **_kwargs: Any) -> str:
+        if command[:2] == ["docker", "version"]:
+            return engine
+        if command == ["docker", "compose", "version", "--short"]:
+            return compose
+        if command[:2] == ["docker", "compose"] and command[-2:] == ["config", "--quiet"]:
+            return ""
+        raise AssertionError("unexpected external work in preflight")
+
+    with tempfile.TemporaryDirectory() as directory:
+        temporary = Path(directory)
+        journey = Journey.__new__(Journey)
+        journey.root = root
+        journey.git_sha = "b" * 40
+        journey.project = journey.prefix = "nwq-0123456789"
+        journey.port = 12345
+        journey.attempt_id = str(uuid.uuid4())
+        journey.journey_slice = "core"
+        journey.base_manifest = {key: "base" for key in APPLICATION_IMAGE_KEYS}
+        journey.candidate_manifest = {key: "candidate" for key in APPLICATION_IMAGE_KEYS}
+        journey.base_manifest_path = temporary / "base.env"
+        journey.candidate_manifest_path = temporary / "candidate.env"
+        journey.base_manifest_path.write_text("base", encoding="utf-8")
+        journey.candidate_manifest_path.write_text("candidate", encoding="utf-8")
+        journey.product_input_path = root / PRODUCT_INPUT
+        declared = {
+            key: ["fixture"] for key in (
+                "browser_matrix", "assistive_technology_matrix",
+                "viewport_device_matrix", "manual_review_role_matrix",
+            )
+        }
+        declared["allowed_response_models"] = [EXPECTED_MODEL]
+        declared["base_application_image_ids"] = {
+            key: "sha256:" + "a" * 64 for key in APPLICATION_IMAGE_KEYS
+        }
+        declared["candidate_application_image_ids"] = {
+            key: "sha256:" + "b" * 64 for key in APPLICATION_IMAGE_KEYS
+        }
+
+        # Exercise the frozen digest branch without duplicating the old corpus
+        # or changing its constant. Only this test's digest observation is fake;
+        # the v5 rejection below uses the actual checked-in bytes and SHA-256.
+        def frozen_digest(value: bytes) -> str:
+            return H1_V1_CORPUS_SHA256 if value == corpus_bytes else digest(value)
+
+        with patch.dict(globals(), {"sha256_bytes": frozen_digest}):
+            declared = journey.cohort_identity(engine, compose, declared)
+        assert declared["registered_inputs"]["h1"] == H1_V1_CORPUS_SHA256
+
+        for name, observed_digest, registered, expected_error in (
+            ("frozen", H1_V1_CORPUS_SHA256, True, None),
+            ("modified", digest(corpus_bytes + b"\n"), True, "qualification_h1_corpus_not_adopted"),
+            ("v5", digest(corpus_bytes), True, "qualification_h1_corpus_not_adopted"),
+            ("declared-drift", H1_V1_CORPUS_SHA256, True, "cohort_identity_mismatch"),
+            ("allowlist-drift", H1_V1_CORPUS_SHA256, True, "cohort_identity_mismatch"),
+            ("unregistered", digest(corpus_bytes), False, None),
+        ):
+            journey.private_report, journey.report = {}, {}
+            journey.ledger = None
+            journey.cleanup_required = False
+            journey.evidence_class = "Qualification" if registered else "Diagnostic"
+            journey.ledger_path = temporary / f"{name}.jsonl" if registered else None
+            if journey.ledger_path is not None:
+                journey.ledger_path.write_text("", encoding="utf-8")
+            identity = json.loads(json.dumps(declared))
+            if name == "declared-drift":
+                identity["docker_engine"] = "unregistered-engine"
+            if name == "allowlist-drift":
+                identity["provider"]["allowed_response_models"] = ["different-model"]
+            journey.cohort_manifest = {
+                "identity": identity,
+                "cohort_id": digest(canonical_json(identity)),
+            } if registered else None
+
+            def observed(value: bytes) -> str:
+                return observed_digest if value == corpus_bytes else digest(value)
+
+            with (
+                patch.dict(globals(), {
+                    "run": fake_run,
+                    "docker_inventory_snapshot": lambda: {"containers": {}, "volumes": {}, "networks": {}},
+                    "sha256_bytes": digest if name == "v4" else observed,
+                }),
+                patch.object(Journey, "validate_release_inputs"),
+                patch.object(Journey, "prepare_compose") as prepare,
+            ):
+                if expected_error is not None:
+                    try:
+                        journey.execute()
+                    except QualificationFailure as error:
+                        assert error.code == expected_error
+                    else:
+                        raise AssertionError("unadopted cohort reached runtime work")
+                    prepare.assert_not_called()
+                    assert journey.ledger is None
+                    assert journey.ledger_path.read_text(encoding="utf-8") == ""
+                else:
+                    journey.preflight()
+                    assert journey.cleanup_required
+                    if registered:
+                        records = journey.ledger_path.read_text(encoding="utf-8").splitlines()
+                        assert len(records) == 1 and json.loads(records[0])["status"] == "Started"
+                        journey.ledger.finish(True, None)
+                    else:
+                        assert journey.ledger is None and journey.ledger_path is None
 
 
 def self_test(root: Path) -> None:
+    self_test_h1_cohort_boundary(root)
     sanitized = qualification_environment(
         root,
         {
@@ -4157,6 +5144,29 @@ def self_test(root: Path) -> None:
         )
         assert load_config(config_path)["model"] == EXPECTED_MODEL
         valid_config = config_path.read_text(encoding="utf-8")
+        vision_model = "deepseek-flash"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "provider": EXPECTED_PROVIDER,
+                    "api_url": EXPECTED_API_URL,
+                    "model": vision_model,
+                    "thinking_enabled": False,
+                    "api_key": "test-only-key",
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert load_config(
+            config_path, expected_model=vision_model, thinking_enabled=False
+        )["model"] == vision_model
+        try:
+            load_config(config_path)
+        except QualificationFailure as error:
+            assert error.code == "provider_config_outside_slice"
+        else:
+            raise AssertionError("Vision config crossed into legacy Flash mode")
+        config_path.write_text(valid_config, encoding="utf-8")
         config_path.write_text("[]", encoding="utf-8")
         try:
             load_config(config_path)
@@ -4369,6 +5379,59 @@ def self_test(root: Path) -> None:
             "successful_calls": 1,
             "observed_response_models": {EXPECTED_MODEL: 1},
         }
+        vision_labels = labels.replace(EXPECTED_MODEL, vision_model)
+        vision_before = (
+            "# TYPE novelworld_llm_requests_started_total counter\n"
+            f"novelworld_llm_requests_started_total{{{vision_labels}}} 7\n"
+        ).encode()
+        vision_after = vision_before.replace(b"} 7", b"} 8")
+        assert provider_started_delta(
+            root,
+            vision_before,
+            vision_after,
+            service="narrative-service",
+            operation="narrative_transition",
+            expected_model=vision_model,
+        ) == 1
+        try:
+            provider_started_delta(
+                root,
+                vision_before,
+                vision_after,
+                service="narrative-service",
+                operation="narrative_transition",
+            )
+        except QualificationFailure as error:
+            assert error.code == "provider_identity_changed"
+        else:
+            raise AssertionError("Vision metrics crossed into legacy Flash mode")
+
+        vision_log = model_log.replace(EXPECTED_MODEL, vision_model)
+        vision_observations = response_models_from_logs(
+            vision_log, "narrative-service", expected_model=vision_model
+        )
+        vision_metrics = Path(directory) / "vision.prom"
+        vision_metrics.write_text(
+            "# TYPE novelworld_llm_requests_total counter\n"
+            f"novelworld_llm_requests_total{{{vision_labels},status=\"success\"}} 1\n",
+            encoding="utf-8",
+        )
+        assert verify_response_models(
+            root,
+            [("vision", vision_metrics)],
+            vision_observations,
+            [vision_model],
+            expected_model=vision_model,
+        ) == {
+            "successful_calls": 1,
+            "observed_response_models": {vision_model: 1},
+        }
+        try:
+            response_models_from_logs(model_log, "narrative-service", expected_model=vision_model)
+        except QualificationFailure as error:
+            assert error.code == "response_model_marker_invalid"
+        else:
+            raise AssertionError("legacy marker was accepted in Vision mode")
         wrong_metrics = Path(directory) / "wrong.prom"
         wrong_metrics.write_bytes(success_metrics.read_bytes().replace(
             EXPECTED_MODEL.encode(), b"other-model"
@@ -4593,6 +5656,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--candidate-manifest", type=Path)
     parser.add_argument("--cohort-manifest", type=Path)
     parser.add_argument("--ledger", type=Path)
+    parser.add_argument("--diagnostic-registration", type=Path)
+    parser.add_argument("--diagnostic-registration-sha256")
     parser.add_argument("--release-shell", default="bash")
     parser.add_argument(
         "--evidence-class",
@@ -4611,6 +5676,12 @@ def main() -> int:
     if args.self_test:
         self_test(root)
         return 0
+    vision = args.diagnostic_registration is not None
+    if vision != (args.diagnostic_registration_sha256 is not None):
+        raise QualificationFailure("diagnostic_registration_and_digest_required_together")
+    if vision and (args.evidence_class != "Diagnostic" or args.slice != "core"
+                   or args.cohort_manifest is not None or args.ledger is not None):
+        raise QualificationFailure("diagnostic_registration_outside_slice")
     required = (
         args.config,
         args.output_dir,
@@ -4637,7 +5708,29 @@ def main() -> int:
         for path in private_paths
     ):
         raise QualificationFailure("private_input_must_be_outside_checkout")
-    if args.evidence_class == "Qualification":
+    registration = None
+    if vision:
+        # Do not canonicalize away symlinks or create output for an invalid
+        # registration. These read-only checks precede protected config loading.
+        diagnostic.private_path(args.output_dir, root, directory=True)
+        diagnostic.private_path(args.config, root)
+        base = load_release_manifest(args.base_manifest)
+        candidate = load_release_manifest(args.candidate_manifest)
+        registration = diagnostic.load_registration(
+            args.diagnostic_registration, args.diagnostic_registration_sha256,
+            root=root, git_sha=args.git_sha, output=output,
+            base_manifest=args.base_manifest, candidate_manifest=args.candidate_manifest,
+            prompt_schema_identities=diagnostic.source_identities(
+                root, base["RELEASE_GIT_SHA"], args.git_sha,
+            ),
+        )
+        load_product_input(root / diagnostic.product_fixture(registration.value["schema"]),
+                           prospective=registration.value["schema"] == diagnostic.REGISTRATION_SCHEMA_V2)
+        diagnostic.network.preflight(registration.value.get("network_subnet"))
+        if any(base[key] != candidate[key] for key in INFRASTRUCTURE_IMAGE_KEYS):
+            raise QualificationFailure("release_infrastructure_changed")
+        diagnostic.verify_artifacts(registration, root, base, candidate)
+    elif args.evidence_class == "Qualification":
         if not output.is_dir() or any(output.iterdir()):
             raise QualificationFailure("qualification_output_must_be_precreated_and_empty")
     else:
@@ -4656,7 +5749,10 @@ def main() -> int:
         args.release_shell,
         args.evidence_class,
         args.slice,
+        diagnostic_registration=registration,
     )
+    if registration is not None:
+        return run_diagnostic(journey)
     try:
         journey.execute()
     except QualificationFailure as error:
@@ -4698,6 +5794,6 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except QualificationFailure as error:
+    except (QualificationFailure, diagnostic.DiagnosticFailure) as error:
         print(f"live qualification failed: {error.code}", file=sys.stderr)
         raise SystemExit(1)

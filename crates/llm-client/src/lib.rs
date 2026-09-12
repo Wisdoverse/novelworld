@@ -1,4 +1,6 @@
 mod client;
+pub mod diagnostic_budget;
+pub mod diagnostic_capability;
 mod providers;
 pub(crate) mod retry;
 mod runtime;
@@ -15,3 +17,9 @@ pub use types::*;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod diagnostic_budget_tests;
+
+#[cfg(test)]
+mod diagnostic_transport_tests;

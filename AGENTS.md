@@ -45,8 +45,9 @@ Browser POST /api/chat/:characterId/stream
   → Agent Service retrieves relevant lore up to the reader's current chapter
   → Agent Service builds system prompt (character + lore + memories + anti-spoiler)
   → Agent Service streams LLM response via SSE
-  → Atomically store both messages and complete the turn
-  → Emit done only after commit; then project Redis memory/compression
+  → Atomically store both messages, complete the turn, and register any new summary window
+  → Emit done only after commit; then project optional Redis cache
+  → Agent worker recovers known-unsent summary windows; dispatched unknown outcomes stay terminal
 ```
 
 ## Repository Map
@@ -250,6 +251,8 @@ Schema lives in `infra/postgres/init.sql`. Key tables:
 | `world_states` | JSONB world state per reader per novel |
 | `reading_progress` | Chapter position, reader identity |
 | `refresh_tokens` | JWT refresh token storage |
+| `diagnostic_llm_budgets` | User-service-owned immutable opt-in Diagnostic allowance |
+| `diagnostic_llm_attempts` | Per-attempt reservations and exact idempotent usage settlements |
 
 IDs are UUID v4 by default. The committed-world-turn journey-memory projection
 is the explicit exception: it uses a private, fixed UUID v5 namespace so a
@@ -278,6 +281,15 @@ unconfigured non-interactive launches fail closed. Bootstrap/runtime surfaces:
 or leave it empty, create the first administrator without a provider call, and
 complete DeepSeek/OpenAI setup later in protected Settings.
 
+`LLM_DIAGNOSTIC_BUDGET_ID` / `LLM_DIAGNOSTIC_BUDGET_LIMITS` are only for an
+explicitly registered isolated Diagnostic; leave both empty for ordinary use.
+The supported cold release provisions once. Every paying service reserves
+before provider I/O; restart never creates or refills allowance. Unknown usage
+retains its reservation, and control/evidence failures never trigger provider
+retry or successful SSE completion. Image/embedding calls and restore/resume
+are refused in this mode. See [ADR 0004](docs/adr/0004-durable-diagnostic-budget.md)
+for exact limits and evidence boundaries; the feature does not authorize a paid run.
+
 `S3_ENABLED` is optional. When true, configure `S3_BUCKET` and `S3_REGION`;
 `S3_ENDPOINT` and path-style addressing support S3-compatible providers. Use
 either explicit `S3_ACCESS_KEY`/`S3_SECRET_KEY` credentials or the standard AWS
@@ -291,6 +303,15 @@ Use the narrow commands above while iterating. Before review, follow the
 affected-gate matrix in [`CONTRIBUTING.md`](./CONTRIBUTING.md#verification);
 CI remains the authoritative required gate.
 
+For complex tasks, state deliverables, evidence entrypoints, allowed actions,
+and stopping conditions at the start. For routine, well-defined changes,
+proceed directly using the relevant existing plan/review; do not add another
+formal confirmation round. Read material by relevance, retain necessary
+contract wording and real acceptance evidence, save long reports to files,
+and rerun only affected checks. Independent review and applicable blocking
+gates still apply; an unchanged check's prior result is not evidence of new
+behavior.
+
 ## GitHub Project Governance
 
 - `docs/ROADMAP.md` owns product direction, invariants, horizon ordering, and
@@ -303,9 +324,12 @@ CI remains the authoritative required gate.
 - Add active roadmap issues and their pull requests to the Project. Set
   `Horizon`, `Priority`, and `Status`; use `In Progress` only while work is
   actively owned.
-- Roadmap pull requests must link their issue with `Closes #<issue>`. `Done`
-  means the final commit is merged to `main` and required CI is green. A pushed
-  branch, open pull request, or delegated auto-merge is not done.
+- Roadmap pull requests must link their issue with `Closes #<issue>`. An issue
+  is `Done` when its own acceptance evidence is satisfied, its final commit is
+  merged to `main`, and required CI is green. A structural child can be Done
+  while its live-evidence parent remains open; a horizon still requires its
+  roadmap exit evidence. A pushed branch, open pull request, or delegated
+  auto-merge is not done.
 - Update the roadmap status only when its stated evidence or exit criteria are
   true. Record blockers on the issue instead of reporting optimistic status.
 

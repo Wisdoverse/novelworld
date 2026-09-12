@@ -723,8 +723,15 @@ The memory pyramid has four layers. Each layer has distinct characteristics:
 - Contains raw conversation turns from the current and recent sessions.
 - Persisted to PostgreSQL for durability; Redis holds only a bounded projection and has no
   time-based expiry.
-- The current runtime creates a mid-term summary every 20 committed messages. A later contract may
-  make this threshold configurable.
+- In the prospective self-mode path, each ten newly completed self turns enrolls one immutable
+  summary window containing the exact twenty role-paired messages for that interval. The window
+  records its fixed Mid result identity, source turn/message interval, reader/novel/character
+  scope, persona and progress provenance, and claim/lease fences. Historical or rollback-period
+  chat is not backfilled; character-mode turns remain unenrolled.
+- A bounded worker may recover only known-unsent windows. A dispatched failure, interruption,
+  expiry, or uncertain provider acknowledgement is terminal and never authorizes another logical
+  model call. Successful publication inserts the fixed Mid result once under the current fence;
+  stale owners cannot publish. Re-upgrade resumes only eligible known-unsent windows.
 
 #### 6.2.2 Mid-Term Layer
 
@@ -789,17 +796,30 @@ The memory pyramid has four layers. Each layer has distinct characteristics:
 
 ### 6.3 Compression Pipeline
 
-The current mid-term projection is triggered every 20 committed messages.
+The prospective mid-term projection enrolls each ten newly completed self turns as one immutable
+summary window of twenty role-paired messages. Enrollment and the fixed Mid result identity are
+recorded in the fenced chat-completion transaction; historical and rollback-period chat is not
+backfilled, and character-mode turns remain unenrolled.
+Rollback to an older Agent suspends this guarantee; see ADR 0005 for rollback, deadlines,
+transport retries, and evidence limits.
 
 Steps:
 
-1. Retrieve the twenty most recent committed `ChatMessage` records for the
-   `(character_id, user_id, novel_id)` conversation in chronological order.
-2. Send those messages to the LLM with a prompt requesting a concise summary of the key events,
-   emotional tone, and relationship developments.
-3. Store the summary as a new `mid` layer entry with bounded importance.
-4. Keep committed chat messages in PostgreSQL; the Redis projection remains bounded independently.
-5. Attempt best-effort 1536-dim long-term promotion of the new mid summary.
+1. A bounded worker claims a due window with its source turn/message interval, exact
+   `(character_id, user_id, novel_id)` scope, persona/progress provenance, and a monotonic
+   claim/lease fence. Only known-unsent work is recoverable; once dispatch is recorded, any
+   failure, interruption, expiry, or uncertain acknowledgement is terminal and cannot trigger
+   another logical model call.
+2. Revalidate the exact twenty committed role-paired `ChatMessage` sources and all scope,
+   provenance, and progress fences before provider work and before publication.
+3. Build the existing bounded summary input from that frozen source window (at most 24,000
+   Unicode characters, favoring recent messages), then send it to the LLM with a prompt requesting
+   a concise summary of the key events, emotional tone, and relationship developments.
+4. In one fenced transaction, insert the summary under its fixed Mid result identity and mark the
+   window saved. A stale owner cannot publish, and a lost acknowledgement leaves the one saved
+   result or an explicit unresolved terminal outcome.
+5. Keep committed chat messages in PostgreSQL; the Redis projection remains bounded independently.
+6. Attempt best-effort 1536-dim long-term promotion of the new mid summary.
    Separately, every committed open-world turn stores a durable projection
    status on its `world_turns` row: `pending` until a protagonist-scoped
    permanent fact is acknowledged as `saved`, or eligibility is conclusively
@@ -1188,7 +1208,14 @@ rejection of the original POST establishes that no commit occurred. When local
 storage is absent but the authoritative bounded journal contains its unique
 `pending` row, the browser MUST reconstruct the exact action, turn UUID, and
 `turn_number - 1` expected revision, lock the form, and offer same-key
-compensation. A failed
+compensation. When the journal is not yet committed, the authoritative view MAY
+return the exact `in_progress` action, turn UUID, and expected revision only if
+the revision matches the current session and the action remains semantically
+valid against its sealed entry context. The view MUST reject repeated world-
+state drift rather than mix that claim with another revision. The browser MUST
+prefer either server-owned pending form over stale browser storage, lock the
+form, and require explicit same-key confirmation; expired-lease supersession
+remains unchanged. A failed
 confirmation refresh after a successful POST remains ambiguous regardless of
 that refresh response's status. `sessionStorage` covers the interval before a
 commit becomes journal-visible; committed-pending recovery does not depend on

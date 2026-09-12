@@ -8,14 +8,19 @@ use tracing::Instrument;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use user_service::{
+    application::diagnostic_budget::DiagnosticBudgetHandler,
     application::handlers::{AuthHandler, LlmUsageHandler},
     domain::{self, entities::runtime_config::RuntimeLlmConfig, repositories::UserRepository},
     infrastructure::{
         auth::{jwt::JwtService, password::BcryptPasswordHasher},
+        diagnostic_budget::registration_from_environment,
         http::privacy::AgentPrivacyClient,
         llm::LlmClientTester,
         llm_usage::{pricing_from_config, PrometheusLlmUsageReader},
-        persistence::{pg_user_repo::PgUserRepository, PgReadinessProbe},
+        persistence::{
+            pg_diagnostic_budget::PgDiagnosticBudgetRepository, pg_user_repo::PgUserRepository,
+            PgReadinessProbe,
+        },
     },
     interface::http::{router, AppState},
 };
@@ -43,10 +48,22 @@ async fn trace_middleware(request: Request, next: Next) -> Response {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    run_body().await
+    if let Some(output) =
+        llm_client::diagnostic_capability::capability_probe(std::env::args_os().skip(1))
+    {
+        println!("{output}");
+        return Ok(());
+    }
+    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    let provision = match arguments.as_slice() {
+        [] => false,
+        [flag] if flag == "--provision-diagnostic-budget" => true,
+        _ => anyhow::bail!("diagnostic_budget_invalid"),
+    };
+    run_body(provision).await
 }
 
-async fn run_body() -> Result<()> {
+async fn run_body(provision: bool) -> Result<()> {
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(format!(
             "{},reqwest=off,tower_http=off",
@@ -61,13 +78,42 @@ async fn run_body() -> Result<()> {
         // (empty outside a request, the propagated X-Trace-Id while handling one).
 
         dotenvy::dotenv().ok();
+        let registration = registration_from_environment()?;
+        if provision && registration.is_none() {
+            anyhow::bail!("diagnostic_budget_invalid");
+        }
         let metrics = llm_client::install_metrics("user-service")?;
 
         let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-        let pool = PgPoolOptions::new()
-            .max_connections(10)
-            .connect(&database_url)
-            .await?;
+        let options = PgPoolOptions::new().max_connections(10);
+        let pool = if registration.is_some() {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                options.connect(&database_url),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("diagnostic_budget_unavailable"))?
+            .map_err(|_| anyhow::anyhow!("diagnostic_budget_unavailable"))?
+        } else {
+            options.connect(&database_url).await?
+        };
+
+        let diagnostic_budget = if let Some(registration) = registration {
+            let budget = DiagnosticBudgetHandler::new(
+                registration,
+                Arc::new(PgDiagnosticBudgetRepository::new(pool.clone())),
+            )?;
+            if provision {
+                budget.provision_once().await?;
+                println!("diagnostic_budget_provisioned");
+                return Ok(());
+            }
+            budget.verify_startup().await?;
+            llm_client::diagnostic_budget::validate_environment()?;
+            Some(Arc::new(budget))
+        } else {
+            None
+        };
 
         tracing::info!("Connected to PostgreSQL");
 
@@ -131,6 +177,7 @@ async fn run_body() -> Result<()> {
 
         let readiness = Arc::new(PgReadinessProbe::new(pool));
         let state = AppState {
+            diagnostic_budget,
             handler,
             llm_usage_handler,
             readiness,

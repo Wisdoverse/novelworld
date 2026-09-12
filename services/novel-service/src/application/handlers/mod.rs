@@ -35,6 +35,7 @@ use crate::domain::repositories::{
     SourceFileDeletionRepository, IMPORT_BUDGET_EXHAUSTED_MESSAGE,
 };
 use crate::domain::services::{
+    canon_story_context::{build_character_canon_grounding, CharacterCanonGrounding},
     canon_story_extractor, chapter_boundary_detector, game_rule_generator, node_detector,
 };
 use crate::domain::services::{
@@ -42,7 +43,7 @@ use crate::domain::services::{
         build_chunk_extraction_prompt, build_extraction_prompt, build_representative_sample,
         build_scan_plan, find_first_appearance, json_object_payload, merge_extractions,
         needs_chunk_scan, text_contains_name, validate_chunk_extraction, validate_extraction,
-        ChunkExtractionResult, ExtractionResult,
+        ChunkExtractionResult, ExtractionResult, MAX_WORLD_SUMMARY_CHARS,
     },
     novel_parser::NovelParserService,
 };
@@ -2053,10 +2054,6 @@ impl NovelCommandHandler {
             if let Some(prompt) =
                 canon_story_extractor::build_event_selection_prompt(&novel.title, &extracted)
             {
-                let candidate_count = extracted
-                    .iter()
-                    .map(|(_, extraction)| extraction.events.len())
-                    .sum();
                 let final_chunk = &extracted.last().expect("canon chunks are non-empty").0;
                 let chapter_number = final_chunk.chapter_number;
                 let chunk_index = i32::try_from(final_chunk.chunk_index)
@@ -2075,7 +2072,7 @@ impl NovelCommandHandler {
                 let mut checkpointed = false;
                 let mut selection = match checkpoint {
                     Some(raw) => {
-                        match canon_story_extractor::parse_event_selection(&raw, candidate_count) {
+                        match canon_story_extractor::parse_event_selection(&raw, &extracted) {
                             Ok(selection) => {
                                 checkpointed = true;
                                 info!(
@@ -2106,7 +2103,7 @@ impl NovelCommandHandler {
                                 &prompt,
                             )
                             .await?;
-                        match canon_story_extractor::parse_event_selection(&raw, candidate_count) {
+                        match canon_story_extractor::parse_event_selection(&raw, &extracted) {
                             Ok(parsed) => {
                                 selection = Some(parsed);
                                 break;
@@ -2559,6 +2556,8 @@ pub struct ProgressBoundCharacter {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub persona_source_chapter_high_water: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub world_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<DateTime<Utc>>,
@@ -2581,12 +2580,18 @@ impl ProgressBoundCharacter {
             avatar_url: None,
             avatar_status: None,
             persona_source_chapter_high_water: None,
+            world_summary: None,
             created_at: None,
             updated_at: None,
         }
     }
 
-    fn full(character: &Character, first_appearance_chapter: i32, total_chapters: i32) -> Self {
+    fn full(
+        character: &Character,
+        first_appearance_chapter: i32,
+        total_chapters: i32,
+        world_summary: &str,
+    ) -> Self {
         Self {
             id: character.id,
             novel_id: character.novel_id,
@@ -2602,6 +2607,7 @@ impl ProgressBoundCharacter {
             avatar_url: character.avatar_url.clone(),
             avatar_status: Some(character.avatar_status.clone()),
             persona_source_chapter_high_water: Some(total_chapters),
+            world_summary: Some(world_summary.to_owned()),
             created_at: Some(character.created_at),
             updated_at: Some(character.updated_at),
         }
@@ -2628,10 +2634,14 @@ fn progress_bound_character(
         .filter(|chapter| (1..=current_chapter).contains(chapter))?;
 
     if persona_is_complete(novel, current_chapter) {
+        let world_summary = novel.world_summary.as_deref().filter(|summary| {
+            !summary.trim().is_empty() && summary.chars().count() <= MAX_WORLD_SUMMARY_CHARS
+        })?;
         Some(ProgressBoundCharacter::full(
             character,
             first_appearance_chapter,
             novel.total_chapters,
+            world_summary,
         ))
     } else {
         canonical_name_source_proven
@@ -2747,6 +2757,7 @@ pub struct ReadingProgressHandler {
     pub novel_repo: Arc<dyn NovelRepository>,
     pub chapter_repo: Arc<dyn ChapterRepository>,
     pub character_repo: Arc<dyn CharacterRepository>,
+    pub canon_repo: Arc<dyn CanonStoryModelRepository>,
     pub progress_repo: Arc<dyn ReadingProgressRepository>,
 }
 
@@ -3021,6 +3032,90 @@ impl ReadingProgressHandler {
             .collect())
     }
 
+    pub async fn list_available_relationships(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+    ) -> std::result::Result<Vec<CharacterRelationshipRecord>, ReadingProgressError> {
+        let novel = self.owned_novel(user_id, novel_id).await?;
+        if novel.status != NovelStatus::Ready {
+            return Ok(Vec::new());
+        }
+        let validated_progress = self.progress_for_novel(user_id, &novel).await?;
+        if !persona_is_complete(&novel, validated_progress.current_chapter) {
+            return Ok(Vec::new());
+        }
+
+        let relationships = self
+            .character_repo
+            .find_relationships(novel_id)
+            .await
+            .map_err(ReadingProgressError::Internal)?;
+        // Relationship provenance is not persisted, so the whole-novel graph
+        // is authorized only at exact completion. Recheck after its final I/O.
+        let progress = self.persisted_progress_for_novel(user_id, &novel).await?;
+        if progress.current_chapter != validated_progress.current_chapter
+            || !persona_is_complete(&novel, progress.current_chapter)
+        {
+            return Err(ReadingProgressError::Internal(anyhow::anyhow!(
+                "persisted reading progress changed during relationship validation"
+            )));
+        }
+        Ok(relationships)
+    }
+
+    pub async fn get_character_canon_grounding(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        character_id: Uuid,
+        requested_checkpoint: i32,
+    ) -> std::result::Result<CharacterCanonGrounding, ReadingProgressError> {
+        let novel = self.owned_novel(user_id, novel_id).await?;
+        if novel.status != NovelStatus::Ready
+            || requested_checkpoint != novel.total_chapters
+            || novel.total_chapters < 1
+        {
+            return Err(ReadingProgressError::NotFound);
+        }
+        let initial_progress = self.progress_for_novel(user_id, &novel).await?;
+        if initial_progress.current_chapter != requested_checkpoint {
+            return Err(ReadingProgressError::NotFound);
+        }
+        let model = self
+            .canon_repo
+            .find_version(novel_id, 1)
+            .await
+            .map_err(ReadingProgressError::Internal)?
+            .ok_or(ReadingProgressError::NotFound)?;
+        let characters = self
+            .character_repo
+            .find_by_novel(novel_id)
+            .await
+            .map_err(ReadingProgressError::Internal)?;
+        let grounding = build_character_canon_grounding(
+            &model,
+            &characters,
+            character_id,
+            requested_checkpoint,
+        )
+        .map_err(|error| ReadingProgressError::Internal(error.into()))?;
+
+        let final_novel = self.owned_novel(user_id, novel_id).await?;
+        let final_progress = self
+            .persisted_progress_for_novel(user_id, &final_novel)
+            .await?;
+        if final_novel.status != NovelStatus::Ready
+            || final_novel.total_chapters != requested_checkpoint
+            || final_progress.current_chapter != requested_checkpoint
+        {
+            return Err(ReadingProgressError::Internal(anyhow::anyhow!(
+                "persisted reading boundary changed during canon grounding"
+            )));
+        }
+        Ok(grounding)
+    }
+
     pub async fn get_available_character(
         &self,
         user_id: Uuid,
@@ -3246,6 +3341,7 @@ mod reading_progress_validation_tests {
         assert_eq!(json["description"], "她在第二章继承王位。");
         assert_eq!(json["avatar_status"], "ready");
         assert_eq!(json["persona_source_chapter_high_water"], 2);
+        assert_eq!(json["world_summary"], "世界");
         assert!(json.get("system_prompt").is_none());
         assert!(json.get("created_at").is_some());
         assert!(json.get("updated_at").is_some());
@@ -3273,12 +3369,25 @@ mod reading_progress_validation_tests {
             serde_json::to_value(progress_bound_character(&character, &novel, 2, true).unwrap())
                 .unwrap();
         assert!(full.get("role").is_some());
+        assert_eq!(full["world_summary"], "世界");
 
         let rewound =
             serde_json::to_value(progress_bound_character(&character, &novel, 1, true).unwrap())
                 .unwrap();
         assert!(rewound.get("role").is_none());
         assert!(rewound.get("persona_source_chapter_high_water").is_none());
+        assert!(rewound.get("world_summary").is_none());
+    }
+
+    #[test]
+    fn full_character_rejects_invalid_world_summary() {
+        let character = persona_character();
+        let mut novel = ready_novel(character.novel_id, 2);
+
+        for summary in [None, Some(" ".into()), Some("界".repeat(2_001))] {
+            novel.world_summary = summary;
+            assert!(progress_bound_character(&character, &novel, 2, true).is_none());
+        }
     }
 
     #[test]
@@ -3315,7 +3424,11 @@ mod reading_progress_validation_tests {
 #[cfg(test)]
 mod reading_progress_handler_tests {
     use super::*;
-    use std::collections::VecDeque;
+    use crate::domain::entities::canon_story_model::{
+        CanonEndingSnapshot, CanonRelationship, CanonStoryContent, CanonStoryModel, CharacterGoal,
+        SourceCitation, SourceEvidence, CANON_STORY_SCHEMA_VERSION,
+    };
+    use std::collections::{BTreeMap, VecDeque};
 
     #[derive(Clone, Default)]
     struct CallLog(Arc<Mutex<Vec<String>>>);
@@ -3488,6 +3601,8 @@ mod reading_progress_handler_tests {
     struct TestCharacterRepository {
         novel_id: Uuid,
         characters: Vec<Character>,
+        relationships: Mutex<Vec<CharacterRelationshipRecord>>,
+        relationship_error: Mutex<bool>,
         calls: CallLog,
     }
 
@@ -3527,8 +3642,105 @@ mod reading_progress_handler_tests {
 
         async fn find_relationships(
             &self,
-            _novel_id: Uuid,
+            novel_id: Uuid,
         ) -> Result<Vec<CharacterRelationshipRecord>> {
+            self.calls.push("relationships");
+            anyhow::ensure!(
+                !*self.relationship_error.lock().unwrap(),
+                "synthetic relationship failure"
+            );
+            Ok(if novel_id == self.novel_id {
+                self.relationships.lock().unwrap().clone()
+            } else {
+                Vec::new()
+            })
+        }
+    }
+
+    struct TestCanonStoryModelRepository {
+        model: Mutex<Option<crate::domain::entities::canon_story_model::CanonStoryModel>>,
+        calls: CallLog,
+    }
+
+    #[async_trait::async_trait]
+    impl CanonStoryModelRepository for TestCanonStoryModelRepository {
+        async fn find_version(
+            &self,
+            novel_id: Uuid,
+            model_version: i32,
+        ) -> Result<Option<crate::domain::entities::canon_story_model::CanonStoryModel>> {
+            self.calls.push(format!("canon:{model_version}"));
+            Ok(self
+                .model
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|model| model.novel_id == novel_id && model.model_version == model_version)
+                .cloned())
+        }
+
+        async fn find_import_checkpoint(
+            &self,
+            _: Uuid,
+            _: i32,
+            _: &str,
+            _: i32,
+            _: i32,
+            _: &str,
+        ) -> Result<Option<String>> {
+            unreachable!("unused test repository method")
+        }
+        async fn save_import_checkpoint(
+            &self,
+            _: CanonExtractionCheckpoint<'_>,
+            _: i64,
+        ) -> Result<bool> {
+            unreachable!("unused test repository method")
+        }
+        async fn insert_import(
+            &self,
+            _: &crate::domain::entities::canon_story_model::CanonStoryModel,
+            _: i64,
+        ) -> Result<bool> {
+            unreachable!("unused test repository method")
+        }
+        async fn find_latest(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<crate::domain::entities::canon_story_model::CanonStoryModel>> {
+            unreachable!("unused test repository method")
+        }
+        async fn begin_game_rule_generation(
+            &self,
+            _: Uuid,
+            _: i32,
+        ) -> Result<BeginGameRuleGeneration> {
+            unreachable!("unused test repository method")
+        }
+        async fn renew_game_rule_generation(&self, _: Uuid, _: i32, _: i64) -> Result<bool> {
+            unreachable!("unused test repository method")
+        }
+        async fn complete_game_rule_generation(
+            &self,
+            _: &GameRuleTemplate,
+            _: i64,
+        ) -> Result<bool> {
+            unreachable!("unused test repository method")
+        }
+        async fn fail_game_rule_generation(
+            &self,
+            _: Uuid,
+            _: i32,
+            _: i64,
+            _: &str,
+        ) -> Result<bool> {
+            unreachable!("unused test repository method")
+        }
+        async fn find_game_rule_template(
+            &self,
+            _: Uuid,
+            _: i32,
+        ) -> Result<Option<GameRuleTemplate>> {
             unreachable!("unused test repository method")
         }
     }
@@ -3640,6 +3852,7 @@ mod reading_progress_handler_tests {
         CallLog,
         Arc<TestCharacterRepository>,
         Arc<TestProgressRepository>,
+        Arc<TestCanonStoryModelRepository>,
     ) {
         let calls = CallLog::default();
         let novel_repo = Arc::new(TestNovelRepository {
@@ -3657,6 +3870,8 @@ mod reading_progress_handler_tests {
         let character_repo = Arc::new(TestCharacterRepository {
             novel_id: novel.id,
             characters,
+            relationships: Mutex::new(Vec::new()),
+            relationship_error: Mutex::new(false),
             calls: calls.clone(),
         });
         let progress_repo = Arc::new(TestProgressRepository {
@@ -3669,16 +3884,22 @@ mod reading_progress_handler_tests {
             )),
             calls: calls.clone(),
         });
+        let canon_repo = Arc::new(TestCanonStoryModelRepository {
+            model: Mutex::new(None),
+            calls: calls.clone(),
+        });
         (
             ReadingProgressHandler {
                 novel_repo,
                 chapter_repo,
                 character_repo: character_repo.clone(),
+                canon_repo: canon_repo.clone(),
                 progress_repo: progress_repo.clone(),
             },
             calls,
             character_repo,
             progress_repo,
+            canon_repo,
         )
     }
 
@@ -3687,6 +3908,55 @@ mod reading_progress_handler_tests {
         novel.id = novel_id;
         novel.mark_ready(total_chapters, "世界".into(), "奇幻".into());
         novel
+    }
+
+    fn canon_model(novel_id: Uuid, character_id: Uuid, other_id: Uuid) -> CanonStoryModel {
+        let evidence = SourceEvidence {
+            provenance: vec![SourceCitation {
+                chapter_number: 2,
+                excerpt: "第二章证据".into(),
+            }],
+            confidence: 1.0,
+        };
+        CanonStoryModel {
+            id: Uuid::new_v4(),
+            novel_id,
+            model_version: 1,
+            schema_version: CANON_STORY_SCHEMA_VERSION,
+            prompt_version: "canon-extraction-v1".into(),
+            content: CanonStoryContent {
+                arcs: vec![],
+                events: vec![],
+                locations: vec![],
+                factions: vec![],
+                world_rules: vec![],
+                character_goals: vec![CharacterGoal {
+                    id: "goal".into(),
+                    character_id,
+                    description: "保护同伴".into(),
+                    evidence: evidence.clone(),
+                }],
+                relationships: vec![CanonRelationship {
+                    id: "relationship".into(),
+                    from_character_id: character_id,
+                    to_character_id: other_id,
+                    kind: "盟友".into(),
+                    description: "共同守城".into(),
+                    evidence: evidence.clone(),
+                }],
+                deaths: vec![],
+                unresolved_threads: vec![],
+                ending: CanonEndingSnapshot {
+                    summary: "故事结束".into(),
+                    character_states: BTreeMap::new(),
+                    faction_states: BTreeMap::new(),
+                    location_states: BTreeMap::new(),
+                    unresolved_thread_ids: vec![],
+                    evidence,
+                },
+            },
+            created_at: Utc::now(),
+        }
     }
 
     #[tokio::test]
@@ -3699,7 +3969,7 @@ mod reading_progress_handler_tests {
         let novel = ready_novel(novel_id, 2);
         let full_user = Uuid::new_v4();
         let partial_user = Uuid::new_v4();
-        let (handler, calls, character_repo, _) = handler(
+        let (handler, calls, character_repo, _, _) = handler(
             novel,
             &[full_user, partial_user],
             vec![character.clone(), future],
@@ -3733,6 +4003,7 @@ mod reading_progress_handler_tests {
         .unwrap();
         assert_eq!(full_json["role"], "protagonist");
         assert_eq!(full_json["persona_source_chapter_high_water"], 2);
+        assert_eq!(full_json["world_summary"], "世界");
         assert!(full_json.get("system_prompt").is_none());
 
         calls.clear();
@@ -3797,6 +4068,211 @@ mod reading_progress_handler_tests {
     }
 
     #[tokio::test]
+    async fn relationships_require_exact_full_progress_and_recheck_after_io() {
+        let novel_id = Uuid::new_v4();
+        let from = persona_character(novel_id);
+        let mut to = Character::new(novel_id, "顾远".into(), CharacterRole::Supporting);
+        to.first_appearance_chapter = Some(2);
+        let relationship = CharacterRelationshipRecord {
+            id: Uuid::new_v4(),
+            novel_id,
+            from_character_id: from.id,
+            to_character_id: to.id,
+            relationship_type: "同盟".into(),
+            description: Some("第二章才建立的关系。".into()),
+            strength: 80,
+        };
+        let full_user = Uuid::new_v4();
+        let partial_user = Uuid::new_v4();
+        let rewinding_user = Uuid::new_v4();
+        let full = progress(full_user, novel_id, 2, None);
+        let partial = progress(partial_user, novel_id, 1, None);
+        let before_rewind = progress(rewinding_user, novel_id, 2, None);
+        let after_rewind = progress(rewinding_user, novel_id, 1, None);
+        let (handler, calls, character_repo, _, _) = handler(
+            ready_novel(novel_id, 2),
+            &[full_user, partial_user, rewinding_user],
+            vec![from, to],
+            vec![
+                Chapter::new(novel_id, 1, None, "第一章。".into()),
+                Chapter::new(novel_id, 2, None, "第二章。".into()),
+            ],
+            vec![full, partial, before_rewind, after_rewind],
+        );
+        character_repo
+            .relationships
+            .lock()
+            .unwrap()
+            .push(relationship.clone());
+
+        assert!(handler
+            .list_available_relationships(partial_user, novel_id)
+            .await
+            .unwrap()
+            .is_empty());
+        calls.assert_eq(&["novel", "progress:1", "chapter:1"]);
+
+        calls.clear();
+        let full_relationships = handler
+            .list_available_relationships(full_user, novel_id)
+            .await
+            .unwrap();
+        assert_eq!(full_relationships.len(), 1);
+        assert_eq!(full_relationships[0].id, relationship.id);
+        assert_eq!(full_relationships[0].description, relationship.description);
+        calls.assert_eq(&[
+            "novel",
+            "progress:2",
+            "chapter:2",
+            "relationships",
+            "progress:2",
+        ]);
+
+        calls.clear();
+        assert!(matches!(
+            handler
+                .list_available_relationships(rewinding_user, novel_id)
+                .await,
+            Err(ReadingProgressError::Internal(_))
+        ));
+        calls.assert_eq(&[
+            "novel",
+            "progress:2",
+            "chapter:2",
+            "relationships",
+            "progress:1",
+        ]);
+
+        *character_repo.relationship_error.lock().unwrap() = true;
+        calls.clear();
+        assert!(matches!(
+            handler
+                .list_available_relationships(full_user, novel_id)
+                .await,
+            Err(ReadingProgressError::Internal(_))
+        ));
+        calls.assert_eq(&["novel", "progress:2", "chapter:2", "relationships"]);
+    }
+
+    #[tokio::test]
+    async fn canon_grounding_requires_exact_completion_and_rechecks_after_canon_io() {
+        let novel_id = Uuid::new_v4();
+        let full_user = Uuid::new_v4();
+        let partial_user = Uuid::new_v4();
+        let rewinding_user = Uuid::new_v4();
+        let character = persona_character(novel_id);
+        let mut other = Character::new(novel_id, "顾衡".into(), CharacterRole::Supporting);
+        other.first_appearance_chapter = Some(1);
+        let full = progress(full_user, novel_id, 2, None);
+        let partial = progress(partial_user, novel_id, 1, None);
+        let before_rewind = progress(rewinding_user, novel_id, 2, None);
+        let after_rewind = progress(rewinding_user, novel_id, 1, None);
+        let (handler, calls, _, _, canon_repo) = handler(
+            ready_novel(novel_id, 2),
+            &[full_user, partial_user, rewinding_user],
+            vec![character.clone(), other.clone()],
+            vec![
+                Chapter::new(novel_id, 1, None, "第一章。".into()),
+                Chapter::new(novel_id, 2, None, "第二章。".into()),
+            ],
+            vec![full, partial, before_rewind, after_rewind],
+        );
+        *canon_repo.model.lock().unwrap() = Some(canon_model(novel_id, character.id, other.id));
+
+        let grounding = handler
+            .get_character_canon_grounding(full_user, novel_id, character.id, 2)
+            .await
+            .unwrap();
+        assert_eq!(grounding.model_version, 1);
+        assert_eq!(grounding.goals[0].description, "保护同伴");
+        assert_eq!(grounding.relationships[0].other_character_name, "顾衡");
+        calls.assert_eq(&[
+            "novel",
+            "progress:2",
+            "chapter:2",
+            "canon:1",
+            "characters",
+            "novel",
+            "progress:2",
+        ]);
+
+        calls.clear();
+        assert!(matches!(
+            handler
+                .get_character_canon_grounding(partial_user, novel_id, character.id, 2)
+                .await,
+            Err(ReadingProgressError::NotFound)
+        ));
+        calls.assert_eq(&["novel", "progress:1", "chapter:1"]);
+
+        calls.clear();
+        assert!(matches!(
+            handler
+                .get_character_canon_grounding(rewinding_user, novel_id, character.id, 2)
+                .await,
+            Err(ReadingProgressError::Internal(_))
+        ));
+        calls.assert_eq(&[
+            "novel",
+            "progress:2",
+            "chapter:2",
+            "canon:1",
+            "characters",
+            "novel",
+            "progress:1",
+        ]);
+
+        calls.clear();
+        assert!(matches!(
+            handler
+                .get_character_canon_grounding(Uuid::new_v4(), novel_id, character.id, 2)
+                .await,
+            Err(ReadingProgressError::NotFound)
+        ));
+        calls.assert_eq(&["novel"]);
+
+        *canon_repo.model.lock().unwrap() = None;
+        calls.clear();
+        assert!(matches!(
+            handler
+                .get_character_canon_grounding(full_user, novel_id, character.id, 2)
+                .await,
+            Err(ReadingProgressError::NotFound)
+        ));
+        calls.assert_eq(&["novel", "progress:2", "chapter:2", "canon:1"]);
+    }
+
+    #[tokio::test]
+    async fn non_ready_novel_never_reads_or_exposes_relationships() {
+        let novel_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let mut novel = Novel::create(Uuid::new_v4(), "故事".into(), None);
+        novel.id = novel_id;
+        let (handler, calls, character_repo, _, _) =
+            handler(novel, &[user_id], Vec::new(), Vec::new(), Vec::new());
+        character_repo
+            .relationships
+            .lock()
+            .unwrap()
+            .push(CharacterRelationshipRecord {
+                id: Uuid::new_v4(),
+                novel_id,
+                from_character_id: Uuid::new_v4(),
+                to_character_id: Uuid::new_v4(),
+                relationship_type: "秘密".into(),
+                description: Some("不可见".into()),
+                strength: 100,
+            });
+
+        assert!(handler
+            .list_available_relationships(user_id, novel_id)
+            .await
+            .unwrap()
+            .is_empty());
+        calls.assert_eq(&["novel"]);
+    }
+
+    #[tokio::test]
     async fn complete_to_rewind_race_never_returns_a_full_list_or_detail() {
         let novel_id = Uuid::new_v4();
         let character = persona_character(novel_id);
@@ -3804,7 +4280,7 @@ mod reading_progress_handler_tests {
         let user_id = Uuid::new_v4();
         let full = progress(user_id, novel_id, 2, None);
         let rewound = progress(user_id, novel_id, 1, None);
-        let (handler, calls, _, progress_repo) = handler(
+        let (handler, calls, _, progress_repo, _) = handler(
             novel,
             &[user_id],
             vec![character.clone()],
@@ -3849,7 +4325,7 @@ mod reading_progress_handler_tests {
         let character = persona_character(novel_id);
         let novel = ready_novel(novel_id, 2);
         let user_id = Uuid::new_v4();
-        let (handler, calls, _, _) = handler(
+        let (handler, calls, _, _, _) = handler(
             novel,
             &[user_id],
             vec![character.clone()],

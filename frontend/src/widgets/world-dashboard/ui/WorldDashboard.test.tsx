@@ -72,6 +72,8 @@ describe('WorldDashboard', () => {
     const page = render(<WorldDashboard novelId="novel" view={view} />);
 
     expect(screen.getAllByText(/原著主线/).length).toBeGreaterThan(0);
+    expect(screen.getByText('原著抽取')).toBeTruthy();
+    expect(screen.getByText('事件由模型从原著中抽取，可能存在遗漏或误读，请结合来源章节核对。')).toBeTruthy();
     expect(screen.getByText(/来源章节 2/)).toBeTruthy();
     // The journey keeps the committed branch prefix before living-world turns
     // and distinguishes reader decisions from generated prose projections.
@@ -107,6 +109,52 @@ describe('WorldDashboard', () => {
     expect(mocks.submit.mock.calls[1][0].idempotencyKey)
       .toBe(mocks.submit.mock.calls[0][0].idempotencyKey);
     expect(mocks.submit.mock.calls[1][0].expectedTurnNumber).toBe(1);
+  });
+
+  it('discloses extraction provenance while preserving event status and source chapters', () => {
+    const withPlayerAffectedEvent = {
+      ...view,
+      session: {
+        ...view.session,
+        canonical_events: [
+          ...view.session.canonical_events,
+          { id: 'scheduled-event', sequence: 2, summary: '尚未发生的事件', character_ids: [], location_ids: ['gate'], faction_ids: [], death_character_ids: [], source_chapters: [5], status: 'scheduled' as const, reason: '尚未触发' },
+          { id: 'assisted-event', sequence: 3, summary: '玩家影响的事件', character_ids: [], location_ids: ['gate'], faction_ids: [], death_character_ids: [], source_chapters: [3, 4], status: 'assisted' as const, reason: '读者守住城门' },
+        ],
+      },
+    } satisfies OpenWorldView;
+    render(<WorldDashboard novelId="novel" view={withPlayerAffectedEvent} />);
+
+    const rows = screen.getAllByRole('listitem').map(row => row.textContent ?? '');
+    expect(rows.some(row => row.includes('围城开始') && row.includes('原著抽取') && row.includes('被延迟') && row.includes('来源章节 2') && row.includes('城门未开'))).toBe(true);
+    expect(rows.some(row => row.includes('尚未发生的事件') && row.includes('原著抽取') && row.includes('等待发生') && row.includes('来源章节 5') && row.includes('尚未触发'))).toBe(true);
+    expect(rows.some(row => row.includes('玩家影响的事件') && row.includes('原著抽取') && row.includes('玩家协助') && row.includes('来源章节 3、4') && row.includes('读者守住城门'))).toBe(true);
+    expect(screen.getByText('事件由模型从原著中抽取，可能存在遗漏或误读，请结合来源章节核对。')).toBeTruthy();
+  });
+
+  it('labels only explicit thread provenance as canon or player', () => {
+    const unmarked = {
+      ...view,
+      world_state: {
+        ...view.world_state,
+        state: {
+          ...view.world_state.state,
+          threads: {
+            canon: { status: 'open', description: '原著线', origin: 'canon' },
+            player: { status: 'open', description: '玩家线', origin: 'player' },
+            absent: { status: 'open', description: '未标记线' },
+            unexpected: { status: 'open', description: '异常线', origin: 'model' as never },
+          },
+        },
+      },
+    } satisfies OpenWorldView;
+    render(<WorldDashboard novelId="novel" view={unmarked} />);
+
+    const rows = screen.getAllByRole('listitem').map(row => row.textContent);
+    expect(rows).toContain('原著线 · 原著主线');
+    expect(rows).toContain('玩家线 · 玩家创造');
+    expect(rows).toContain('未标记线 · 来源未确认');
+    expect(rows).toContain('异常线 · 来源未确认');
   });
 
   it('unlocks the form after a terminal rejection', async () => {
@@ -283,6 +331,47 @@ describe('WorldDashboard', () => {
       await waitFor(() => expect(mocks.submit).toHaveBeenCalledOnce());
       expect(mocks.submit.mock.calls[0][0]).toEqual({
         action: pendingEntry.action,
+        idempotencyKey: turnId,
+        expectedTurnNumber: 1,
+      });
+    } finally {
+      getItem.mockRestore();
+      setItem.mockRestore();
+    }
+  });
+
+  it('recovers an active server turn after reload when session storage is unavailable', async () => {
+    const turnId = 'e3744cac-e557-4d78-9d91-9ba060e81c5f';
+    const action = { kind: 'travel' as const, target_id: 'gate', intent: '穿过旧城门' };
+    const getItem = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new Error('storage blocked');
+    });
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('storage blocked');
+    });
+    mocks.submit.mockResolvedValue({ memory_projection_status: 'saved' });
+    try {
+      render(
+        <WorldDashboard
+          novelId="novel"
+          view={{
+            ...view,
+            journal: [],
+            recoverable_turn: {
+              turn_id: turnId,
+              action,
+              expected_turn_number: 1,
+            },
+          }}
+        />,
+      );
+
+      expect(mocks.submit).not.toHaveBeenCalled();
+      expect(screen.getByRole('button', { name: '执行行动' }).hasAttribute('disabled')).toBe(true);
+      fireEvent.click(screen.getByRole('button', { name: '继续确认结果' }));
+      await waitFor(() => expect(mocks.submit).toHaveBeenCalledOnce());
+      expect(mocks.submit.mock.calls[0][0]).toEqual({
+        action,
         idempotencyKey: turnId,
         expectedTurnNumber: 1,
       });

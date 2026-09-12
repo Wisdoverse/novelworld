@@ -67,6 +67,9 @@ roadmap status only when its required evidence exists.
 | [Data retention](./DATA_RETENTION.md) | Retention, deletion, and external data boundaries | Stored data or deletion behavior changes |
 | [Account export](./ACCOUNT_EXPORT.md) | Export wire format and completeness contract | Exported fields, ordering, limits, or completion semantics change |
 | [Extraction quality](./EXTRACTION_QUALITY.md) | Supported slices and extraction thresholds | A parser slice, metric, judge rubric, or threshold changes |
+| [Extraction quality v2](./EXTRACTION_QUALITY_V2.md) | Implemented Structural oracle correction; not formally adopted for Qualification | The v2 corpus, policy identity, or separately reviewed adoption changes |
+| [Extraction quality v3](./EXTRACTION_QUALITY_V3.md) | Implemented single-source event accounting policy; not formally adopted | Judge response/accounting implementation, versioned inputs, or adoption changes |
+| [H1 measurement v4](./EXTRACTION_QUALITY_V4.md) | Gold alignment and judge-reported source support; measurement-only, not Qualification | Measurement schema, rubric, input bounds or separately reviewed adoption changes |
 | [Import budget](./IMPORT_BUDGET.md) | Provider work limits during import | Provider calls, retry behavior, or budget evidence changes |
 
 ### Reliability, security, and operations
@@ -119,3 +122,5 @@ Accepted records:
 - [ADR 0001: Source-bound shared rules and server-owned D20 resolution](./adr/0001-source-bound-advanced-game-rules.md)
 - [ADR 0002: L0-L4 minimal bootstrap and deferred runtime configuration](./adr/0002-minimal-bootstrap-and-deferred-runtime-configuration.md)
 - [ADR 0003: H4 private-preview journey qualification](./adr/0003-h4-journey-qualification.md)
+- [ADR 0004: Durable diagnostic budget authority (implementation in progress)](./adr/0004-durable-diagnostic-budget.md)
+- [ADR 0005: Durable prospective chat summary windows](./adr/0005-durable-chat-summary-windows.md)

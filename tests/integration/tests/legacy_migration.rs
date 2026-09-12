@@ -63,6 +63,12 @@ const PERSONA_PROVENANCE_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0024_persona_provenance.sql");
 const CHAT_WORLD_REVISION_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0025_chat_world_revision.sql");
+const DIAGNOSTIC_LLM_BUDGET_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0026_diagnostic_llm_budget.sql");
+const CHAT_SUMMARY_WINDOWS_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0027_chat_summary_windows.sql");
+const DEEPSEEK_V41_DIAGNOSTIC_COST_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0028_deepseek_v41_diagnostic_cost.sql");
 
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
@@ -95,7 +101,65 @@ const ALL_MIGRATIONS: &[&str] = &[
     USER_LLM_CONFIG_MIGRATION,
     PERSONA_PROVENANCE_MIGRATION,
     CHAT_WORLD_REVISION_MIGRATION,
+    DIAGNOSTIC_LLM_BUDGET_MIGRATION,
+    CHAT_SUMMARY_WINDOWS_MIGRATION,
+    DEEPSEEK_V41_DIAGNOSTIC_COST_MIGRATION,
 ];
+
+#[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
+struct DiagnosticBudgetColumn {
+    table_name: String,
+    column_name: String,
+    udt_name: String,
+    is_nullable: String,
+    column_default: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
+struct DiagnosticBudgetConstraint {
+    relation: String,
+    name: String,
+    kind: String,
+    definition: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct DiagnosticBudgetSchema {
+    columns: Vec<DiagnosticBudgetColumn>,
+    constraints: Vec<DiagnosticBudgetConstraint>,
+}
+
+async fn diagnostic_budget_schema_signature(pool: &sqlx::PgPool) -> DiagnosticBudgetSchema {
+    let columns = sqlx::query_as::<_, DiagnosticBudgetColumn>(
+        "SELECT table_name, column_name, udt_name, is_nullable, column_default \
+         FROM information_schema.columns \
+         WHERE table_schema = 'public' \
+           AND table_name IN ('diagnostic_llm_budgets', 'diagnostic_llm_attempts') \
+         ORDER BY table_name, ordinal_position",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let constraints = sqlx::query_as::<_, DiagnosticBudgetConstraint>(
+        "SELECT conrelid::pg_catalog.regclass::text AS relation, \
+                conname AS name, \
+                contype::text AS kind, \
+                pg_catalog.pg_get_constraintdef(oid, false) AS definition \
+         FROM pg_catalog.pg_constraint \
+         WHERE conrelid IN ( \
+             'public.diagnostic_llm_budgets'::pg_catalog.regclass, \
+             'public.diagnostic_llm_attempts'::pg_catalog.regclass \
+         ) \
+         ORDER BY conrelid::pg_catalog.regclass::text, conname",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    DiagnosticBudgetSchema {
+        columns,
+        constraints,
+    }
+}
 
 #[tokio::test]
 async fn current_snapshot_replays_after_shared_uploader_deletion() {
@@ -540,7 +604,39 @@ async fn fresh_schema_matches_replayable_chat_turn_contract() {
             .execute(&fresh)
             .await
             .unwrap();
+        sqlx::raw_sql(DIAGNOSTIC_LLM_BUDGET_MIGRATION)
+            .execute(&fresh)
+            .await
+            .unwrap();
+        sqlx::raw_sql(DEEPSEEK_V41_DIAGNOSTIC_COST_MIGRATION)
+            .execute(&fresh)
+            .await
+            .unwrap();
     }
+
+    let fresh_diagnostic_schema = diagnostic_budget_schema_signature(&fresh).await;
+    sqlx::query("DROP TABLE public.diagnostic_llm_attempts")
+        .execute(&fresh)
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE public.diagnostic_llm_budgets")
+        .execute(&fresh)
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        sqlx::raw_sql(DIAGNOSTIC_LLM_BUDGET_MIGRATION)
+            .execute(&fresh)
+            .await
+            .unwrap();
+        sqlx::raw_sql(DEEPSEEK_V41_DIAGNOSTIC_COST_MIGRATION)
+            .execute(&fresh)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        fresh_diagnostic_schema,
+        diagnostic_budget_schema_signature(&fresh).await
+    );
 
     let repaired_incomplete: (String, Option<String>, String, String, Option<String>) =
         sqlx::query_as(
@@ -1905,6 +2001,9 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
         "0023_user_llm_config.sql",
         "0024_persona_provenance.sql",
         "0025_chat_world_revision.sql",
+        "0026_diagnostic_llm_budget.sql",
+        "0027_chat_summary_windows.sql",
+        "0028_deepseek_v41_diagnostic_cost.sql",
     ] {
         let migration_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../infra/postgres/migrations")
@@ -2037,6 +2136,22 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
             .await
             .unwrap();
         sqlx::raw_sql(PERSONA_PROVENANCE_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
+        sqlx::raw_sql(CHAT_WORLD_REVISION_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
+        sqlx::raw_sql(DIAGNOSTIC_LLM_BUDGET_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
+        sqlx::raw_sql(CHAT_SUMMARY_WINDOWS_MIGRATION)
+            .execute(&mut *non_default_path)
+            .await
+            .unwrap();
+        sqlx::raw_sql(DEEPSEEK_V41_DIAGNOSTIC_COST_MIGRATION)
             .execute(&mut *non_default_path)
             .await
             .unwrap();
