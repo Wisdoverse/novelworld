@@ -56,7 +56,8 @@ class DockerSpyTest(unittest.TestCase):
                  "--read-only", "--cap-drop", "ALL", "--security-opt",
                  "no-new-privileges", "--entrypoint", "/app/service", image,
                  "--diagnostic-budget-contract"]
-        for argv in (probe, ["start", "--attach", name], ["rm", "--force", name],
+        for argv in (probe, probe + ["four-layer-journey-diagnostic-v2"],
+                     ["start", "--attach", name], ["rm", "--force", name],
                      ["ps", "--all", "--quiet", "--filter", "name=^/" + name + "$"]):
             execv = self.invoke(argv)
             execv.assert_called_once_with("/usr/bin/docker", ["/usr/bin/docker", *argv])

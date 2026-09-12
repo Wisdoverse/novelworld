@@ -56,7 +56,7 @@ impl DiagnosticBudgetHandler {
         dispatch: &Dispatch,
     ) -> Result<Reservation, BudgetError> {
         self.check_scope(budget_id)?;
-        dispatch.validate()?;
+        dispatch.validate(&self.registration.profile)?;
         self.repository
             .reserve(&self.registration, &dispatch.attempt)
             .await

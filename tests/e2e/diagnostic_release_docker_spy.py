@@ -65,7 +65,7 @@ def _compose_allowed(argv, project):
 
 
 def _probe_allowed(argv, project):
-    if len(argv) != 19 or argv[:4] != ["create", "--pull", "never", "--name"]:
+    if len(argv) not in (19, 20) or argv[:4] != ["create", "--pull", "never", "--name"]:
         return False
     name = argv[4]
     if not _probe_name(name, project):
@@ -75,8 +75,9 @@ def _probe_allowed(argv, project):
                 "no-new-privileges", "--entrypoint", "/app/service"]
     if argv[5:17] != expected:
         return False
-    return bool(re.fullmatch(r"[a-z0-9][a-z0-9._/:@-]*@sha256:[0-9a-f]{64}", argv[17])) \
-        and argv[18] == "--diagnostic-budget-contract"
+    return (bool(re.fullmatch(r"[a-z0-9][a-z0-9._/:@-]*@sha256:[0-9a-f]{64}", argv[17]))
+            and argv[18] == "--diagnostic-budget-contract"
+            and (len(argv) == 19 or argv[19] == "four-layer-journey-diagnostic-v2"))
 
 
 def _start_allowed(argv, project):

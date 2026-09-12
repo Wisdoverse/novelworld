@@ -262,6 +262,7 @@ class DiagnosticJourneyTest(unittest.TestCase):
         registration = self.load()
         environment = registration.environment()
         self.assertEqual(environment["LLM_DIAGNOSTIC_BUDGET_ID"], self.value["budget_id"])
+        self.assertEqual(environment["LLM_DIAGNOSTIC_PROFILE"], CONTROL.PROFILE)
         self.assertEqual(json.loads(environment["LLM_DIAGNOSTIC_BUDGET_LIMITS"]), self.value["limits"])
         modified = registration.value
         modified["limits"]["max_attempts"] = 100
@@ -556,6 +557,7 @@ class DiagnosticJourneyTest(unittest.TestCase):
         self.addCleanup(journey.runtime_temp.cleanup)
         environment = dict(line.split("=", 1) for line in (journey.runtime_root / ".env").read_text().splitlines() if line)
         self.assertEqual(environment["LLM_DIAGNOSTIC_BUDGET_ID"], self.value["budget_id"])
+        self.assertEqual(environment["LLM_DIAGNOSTIC_PROFILE"], CONTROL.PROFILE)
         self.assertEqual(json.loads(environment["LLM_DIAGNOSTIC_BUDGET_LIMITS"]), self.value["limits"])
         self.assertEqual(environment["LLM_API_KEY"], "")
         self.assertNotIn("LLM_DIAGNOSTIC_BUDGET_ID", journey.compose_env)

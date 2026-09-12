@@ -513,6 +513,7 @@ services = {}
 for service in ('user-service', 'novel-service', 'agent-service', 'narrative-service'):
     owner = service == 'user-service'
     env = {'LLM_DIAGNOSTIC_BUDGET_ID': os.environ['LLM_DIAGNOSTIC_BUDGET_ID'],
+           'LLM_DIAGNOSTIC_PROFILE': os.environ['LLM_DIAGNOSTIC_PROFILE'],
            'USER_SERVICE_URL': 'http://127.0.0.1:8001' if owner else 'http://user-service:8001',
            'INTERNAL_SERVICE_TOKEN': '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'}
     if owner: env['LLM_DIAGNOSTIC_BUDGET_LIMITS'] = os.environ['LLM_DIAGNOSTIC_BUDGET_LIMITS']

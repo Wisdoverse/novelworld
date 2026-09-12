@@ -13,7 +13,7 @@ use crate::{
         self as budget, Binding, BudgetClient, BudgetControlError, BudgetEvidenceError,
     },
     providers::openai::OpenAIProvider,
-    ChatRequest, ChatStreamEvent, EmbeddingRequest, LlmClient, LlmOperation,
+    ChatRequest, ChatStreamEvent, EmbeddingRequest, EmbeddingResponse, LlmClient, LlmOperation,
 };
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -155,9 +155,12 @@ fn json_reply(value: Value) -> Option<(u16, &'static str, Vec<u8>)> {
 
 fn control_reply(path: &str, request: &Value) -> Option<(u16, &'static str, Vec<u8>)> {
     if path.ends_with("/reserve") {
+        let embedding = request["operation"] == "embedding";
         json_reply(
             json!({"binding": request["binding"], "attempt_id": request["attempt_id"], "ordinal":1,
-            "reservation":{"attempts":1,"tokens":1048584,"cost_micro_cny":4194400}}),
+            "reservation":{"attempts":1,
+                "tokens": if embedding { 8192 } else { 1048584 },
+                "cost_micro_cny": if embedding { 8192 } else { 4194400 }}}),
         )
     } else {
         assert!(path.ends_with("/settle"));
@@ -179,6 +182,33 @@ fn client(control: &LocalHttp, provider: &LocalHttp) -> LlmClient {
     let budget =
         BudgetClient::new(Binding::new(Uuid::new_v4()), &control.origin, TOKEN.into()).unwrap();
     LlmClient::diagnostic_test_client(Arc::new(budget), provider.origin.clone())
+}
+
+fn embedding_client(control: &LocalHttp, provider: &LocalHttp) -> LlmClient {
+    let budget = BudgetClient::new(
+        Binding::new_for_profile(Uuid::new_v4(), "four-layer-journey-diagnostic-v2"),
+        &control.origin,
+        TOKEN.into(),
+    )
+    .unwrap();
+    LlmClient::diagnostic_test_client_for(
+        Arc::new(budget),
+        provider.origin.clone(),
+        "openai",
+        "https://api.openai.com",
+    )
+}
+
+fn embedding(usage: bool, dimensions: usize) -> Value {
+    json!({"model":"text-embedding-3-small", "data":[{"embedding":vec![0.25; dimensions]}],
+        "usage": if usage { json!({"prompt_tokens":7,"total_tokens":7}) } else { Value::Null }})
+}
+
+fn embedding_request() -> EmbeddingRequest {
+    EmbeddingRequest {
+        model: "openai/text-embedding-3-small".into(),
+        input: "synthetic memory".into(),
+    }
 }
 
 fn completion(content: &str, usage: bool) -> Value {
@@ -391,6 +421,122 @@ async fn denied_or_lost_reservation_never_dispatches_or_retries() {
         assert_eq!(control.count(), 2, "unpriced embedding does not reserve");
         assert_eq!(provider.count(), 0);
     }
+}
+
+#[tokio::test]
+async fn budgeted_embedding_requires_reserve_usage_and_settlement_before_return() {
+    for stage in [
+        "success",
+        "reserve",
+        "usage",
+        "model",
+        "settle",
+        "dimensions",
+    ] {
+        let control = LocalHttp::start(move |path, body| {
+            if stage == "reserve" || (stage == "settle" && path.ends_with("/settle")) {
+                None
+            } else {
+                control_reply(path, body)
+            }
+        })
+        .await;
+        let provider = LocalHttp::start(move |_, _| {
+            let mut response = embedding(
+                stage != "usage",
+                if stage == "dimensions" { 1 } else { 1536 },
+            );
+            if stage == "model" {
+                response["model"] = json!("other");
+            }
+            json_reply(response)
+        })
+        .await;
+        let result = embedding_client(&control, &provider)
+            .embed(embedding_request())
+            .await;
+        if stage == "success" {
+            assert_eq!(result.unwrap().embedding.len(), 1536);
+        } else if stage == "reserve" {
+            assert!(result.unwrap_err().is::<BudgetControlError>());
+        } else {
+            assert!(result.unwrap_err().is::<BudgetEvidenceError>());
+        }
+        assert_eq!(provider.count(), usize::from(stage != "reserve"));
+        assert_eq!(
+            control.count(),
+            if matches!(stage, "reserve" | "usage" | "model") {
+                1
+            } else {
+                2
+            }
+        );
+    }
+
+    let control = LocalHttp::start(control_reply).await;
+    let provider = LocalHttp::start(|_, _| json_reply(embedding(true, 1536))).await;
+    let mut oversized = embedding_request();
+    oversized.input = "x".repeat(8192);
+    assert!(embedding_client(&control, &provider)
+        .embed(oversized)
+        .await
+        .unwrap_err()
+        .is::<BudgetControlError>());
+    assert_eq!((control.count(), provider.count()), (0, 0));
+
+    let budget = BudgetClient::new(
+        Binding::new_for_profile(Uuid::new_v4(), "four-layer-journey-diagnostic-v2"),
+        &control.origin,
+        TOKEN.into(),
+    )
+    .unwrap();
+    assert!(budget
+        .validate_embedding_result(&EmbeddingResponse {
+            embedding: vec![f32::NAN; 1536],
+            model: "text-embedding-3-small".into(),
+            usage: None,
+        })
+        .is_err());
+}
+
+#[tokio::test]
+async fn budgeted_embedding_retries_known_http_status_with_a_new_reservation() {
+    let control = LocalHttp::start(control_reply).await;
+    let calls = Arc::new(Mutex::new(0));
+    let provider = LocalHttp::start(move |_, _| {
+        let mut calls = calls.lock().unwrap();
+        *calls += 1;
+        if *calls == 1 {
+            Some((500, "application/json", b"{}".to_vec()))
+        } else {
+            json_reply(embedding(true, 1536))
+        }
+    })
+    .await;
+    assert_eq!(
+        embedding_client(&control, &provider)
+            .embed(embedding_request())
+            .await
+            .unwrap()
+            .embedding
+            .len(),
+        1536
+    );
+    assert_eq!(provider.count(), 2);
+    assert_eq!(control.count(), 3);
+}
+
+#[tokio::test]
+async fn budgeted_embedding_ambiguous_transport_outcome_is_terminal() {
+    let control = LocalHttp::start(control_reply).await;
+    let provider = LocalHttp::start(|_, _| Some((0, "application/json", vec![]))).await;
+    assert!(embedding_client(&control, &provider)
+        .embed(embedding_request())
+        .await
+        .unwrap_err()
+        .is::<BudgetEvidenceError>());
+    assert_eq!(provider.count(), 1);
+    assert_eq!(control.count(), 1);
 }
 
 #[tokio::test]

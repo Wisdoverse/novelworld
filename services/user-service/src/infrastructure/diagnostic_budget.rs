@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 
 use chrono::{DateTime, SecondsFormat, Utc};
-pub use llm_client::diagnostic_budget::profile_sha256;
+pub use llm_client::diagnostic_budget::{profile_sha256, profile_sha256_for};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -21,12 +21,14 @@ pub fn registration_from_environment() -> Result<Option<Registration>, BudgetErr
     parse_registration(
         std::env::var_os("LLM_DIAGNOSTIC_BUDGET_ID"),
         std::env::var_os("LLM_DIAGNOSTIC_BUDGET_LIMITS"),
+        std::env::var_os("LLM_DIAGNOSTIC_PROFILE"),
     )
 }
 
 fn parse_registration(
     id: Option<OsString>,
     limits: Option<OsString>,
+    selector: Option<OsString>,
 ) -> Result<Option<Registration>, BudgetError> {
     let id = id
         .unwrap_or_default()
@@ -36,8 +38,16 @@ fn parse_registration(
         .unwrap_or_default()
         .into_string()
         .map_err(|_| BudgetError::Invalid)?;
+    let selector = selector
+        .unwrap_or_else(|| "vision-journey-diagnostic-v1".into())
+        .into_string()
+        .map_err(|_| BudgetError::Invalid)?;
     if id.is_empty() && limits.is_empty() {
-        return Ok(None);
+        return if selector == "vision-journey-diagnostic-v1" {
+            Ok(None)
+        } else {
+            Err(BudgetError::Invalid)
+        };
     }
     if id.len() != 36 || limits.is_empty() || limits.len() > 4096 {
         return Err(BudgetError::Invalid);
@@ -55,9 +65,9 @@ fn parse_registration(
     }
     let registration = Registration {
         budget_id,
-        contract: Profile::compiled().contract,
+        contract: Profile::compiled_named(&selector)?.contract,
         profile: limits.profile,
-        profile_sha256: profile_sha256(),
+        profile_sha256: profile_sha256_for(&selector),
         limits: Amount {
             attempts: limits.max_attempts,
             tokens: limits.max_tokens,
@@ -65,6 +75,9 @@ fn parse_registration(
         },
         expires_at,
     };
+    if registration.profile != selector || registration.profile_sha256.is_empty() {
+        return Err(BudgetError::Invalid);
+    }
     registration.validate()?;
     Ok(Some(registration))
 }
@@ -78,12 +91,12 @@ mod tests {
 
     #[test]
     fn diagnostic_registration_is_explicit_strict_and_compiled_profile_bound() {
-        assert_eq!(parse_registration(None, None), Ok(None));
+        assert_eq!(parse_registration(None, None, None), Ok(None));
         assert_eq!(
-            parse_registration(Some("".into()), Some("".into())),
+            parse_registration(Some("".into()), Some("".into()), None),
             Ok(None)
         );
-        let registration = parse_registration(Some(ID.into()), Some(LIMITS.into()))
+        let registration = parse_registration(Some(ID.into()), Some(LIMITS.into()), None)
             .unwrap()
             .unwrap();
         assert_eq!(registration.limits, Amount::default());
@@ -94,6 +107,10 @@ mod tests {
         assert_eq!(
             crate::domain::entities::diagnostic_budget::PROFILE_JSON,
             llm_client::diagnostic_budget::PROFILE_JSON
+        );
+        assert_eq!(
+            parse_registration(None, None, Some("four-layer-journey-diagnostic-v2".into())),
+            Err(BudgetError::Invalid)
         );
         for (id, limits) in [
             ("".to_owned(), LIMITS.to_owned()),
@@ -126,7 +143,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                parse_registration(Some(id.into()), Some(limits.into())),
+                parse_registration(Some(id.into()), Some(limits.into()), None),
                 Err(BudgetError::Invalid)
             );
         }
@@ -138,11 +155,11 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
         let invalid = OsString::from_vec(vec![0xff]);
         assert_eq!(
-            parse_registration(Some(invalid.clone()), None),
+            parse_registration(Some(invalid.clone()), None, None),
             Err(BudgetError::Invalid)
         );
         assert_eq!(
-            parse_registration(None, Some(invalid)),
+            parse_registration(None, Some(invalid), None),
             Err(BudgetError::Invalid)
         );
     }

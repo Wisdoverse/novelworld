@@ -391,7 +391,7 @@ fn embedding_honors_retry_after_and_records_exact_attempts() {
                     )
                     .unwrap();
             } else {
-                let body = r#"{"data":[{"embedding":[0.25,0.75]}],"model":"embedding-model"}"#;
+                let body = r#"{"data":[{"embedding":[0.25,0.75]}],"model":"embedding-model","usage":{"prompt_tokens":1,"total_tokens":2}}"#;
                 socket
                     .write_all(&http_response("200 OK", "application/json", body, ""))
                     .unwrap();
