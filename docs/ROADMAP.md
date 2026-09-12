@@ -624,8 +624,9 @@ Exit evidence for any slice:
 - Project status tracks execution; this document changes only when outcome
   ordering, evidence, or exit criteria change.
 - An issue is `Done` only when its own acceptance evidence is satisfied, its
-  final commit is merged, and required CI is green. A structural child can be
-  Done while its live-evidence parent remains open.
+  final commit is merged, and required CI is green. Then set its Project item
+  to `Done` and close the GitHub issue. A structural child can close while its
+  live-evidence parent remains open.
 - A horizon is complete only with its stated exit evidence on the final commit
   and applicable target environment. A merged structural PR or green synthetic
   benchmark cannot substitute for required live, upgrade or observation evidence.
