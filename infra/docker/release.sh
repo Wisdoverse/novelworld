@@ -123,6 +123,8 @@ diagnostic_enabled=false
 diagnostic_loaded=false
 diagnostic_id=
 diagnostic_limits=
+diagnostic_profile=vision-journey-diagnostic-v1
+diagnostic_profile_file=diagnostic-v1.json
 diagnostic_helper_source=
 diagnostic_profile_source=
 
@@ -150,23 +152,35 @@ load_diagnostic_mode() {
   [[ "$diagnostic_loaded" == false ]] || return 0
   diagnostic_id=$(diagnostic_value LLM_DIAGNOSTIC_BUDGET_ID)
   diagnostic_limits=$(diagnostic_value LLM_DIAGNOSTIC_BUDGET_LIMITS)
+  diagnostic_profile=$(diagnostic_value LLM_DIAGNOSTIC_PROFILE)
+  diagnostic_profile=${diagnostic_profile:-vision-journey-diagnostic-v1}
   diagnostic_loaded=true
-  [[ -n "$diagnostic_id$diagnostic_limits" ]] || return 0
+  if [[ -z "$diagnostic_id$diagnostic_limits" ]]; then
+    [[ "$diagnostic_profile" == vision-journey-diagnostic-v1 ]] \
+      || die "diagnostic profile requires a budget registration"
+    return 0
+  fi
   diagnostic_enabled=true
   [[ "$qualification_scope" == true ]] || die "diagnostic budget requires isolated qualification scope"
   # Capture exact bytes before checkout. The journey copies this same tool layout
   # outside its changing runtime checkout; no code/profile is loaded from old images.
   tool_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-  [[ -r "$tool_dir/diagnostic_budget.py" && -r "$tool_dir/../../tools/llm-budget/diagnostic-v1.json" ]] \
+  case "$diagnostic_profile" in
+    vision-journey-diagnostic-v1) diagnostic_profile_file=diagnostic-v1.json ;;
+    four-layer-journey-diagnostic-v2) diagnostic_profile_file=diagnostic-v2.json ;;
+    *) die "unsupported diagnostic profile" ;;
+  esac
+  [[ -r "$tool_dir/diagnostic_budget.py" && -r "$tool_dir/../../tools/llm-budget/$diagnostic_profile_file" ]] \
     || die "diagnostic release adapter missing"
   IFS= read -r -d '' diagnostic_helper_source < "$tool_dir/diagnostic_budget.py" || true
-  IFS= read -r -d '' diagnostic_profile_source < "$tool_dir/../../tools/llm-budget/diagnostic-v1.json" || true
+  IFS= read -r -d '' diagnostic_profile_source < "$tool_dir/../../tools/llm-budget/$diagnostic_profile_file" || true
 }
 
 diagnostic() {
   [[ "$diagnostic_enabled" == true ]] || return 0
   [[ "$1" != restore ]] || die "diagnostic budget cannot restore and resume"
   env LLM_DIAGNOSTIC_BUDGET_ID="$diagnostic_id" LLM_DIAGNOSTIC_BUDGET_LIMITS="$diagnostic_limits" \
+    LLM_DIAGNOSTIC_PROFILE="$diagnostic_profile" \
     python3 -c "$diagnostic_helper_source" "$diagnostic_profile_source" "$1" \
       "$state_dir" "$qualification_project" "${@:2}"
 }
@@ -459,6 +473,7 @@ compose() (
   if [[ "$diagnostic_enabled" == true ]]; then
     export LLM_DIAGNOSTIC_BUDGET_ID="$diagnostic_id"
     export LLM_DIAGNOSTIC_BUDGET_LIMITS="$diagnostic_limits"
+    export LLM_DIAGNOSTIC_PROFILE="$diagnostic_profile"
   fi
   if [[ "$qualification_scope" == true ]]; then
     export CONTAINER_PREFIX="$container_prefix"

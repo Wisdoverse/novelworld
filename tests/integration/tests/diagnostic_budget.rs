@@ -57,6 +57,53 @@ fn usage() -> Settlement {
     }
 }
 
+#[tokio::test]
+async fn v2_embedding_receipt_accepts_zero_output_and_settles_exact_usage() {
+    let repo = PgDiagnosticBudgetRepository::new(pool().await);
+    let profile = Profile::compiled_named("four-layer-journey-diagnostic-v2").unwrap();
+    let registration = Registration {
+        budget_id: Uuid::new_v4(),
+        contract: profile.contract.clone(),
+        profile: profile.profile.clone(),
+        profile_sha256: user_service::infrastructure::diagnostic_budget::profile_sha256_for(
+            &profile.profile,
+        ),
+        limits: profile.max_limits,
+        expires_at: chrono::DateTime::from_timestamp(
+            (Utc::now() + Duration::hours(1)).timestamp(),
+            0,
+        )
+        .unwrap(),
+    };
+    let attempt = Attempt {
+        attempt_id: Uuid::new_v4(),
+        operation: "embedding".into(),
+        output_limit: 0,
+    };
+    repo.provision(&registration).await.unwrap();
+    repo.reserve(&registration, &attempt).await.unwrap();
+    repo.settle(
+        &registration,
+        attempt.attempt_id,
+        &Settlement {
+            model: "text-embedding-3-small".into(),
+            input_tokens: 7,
+            output_tokens: 0,
+            cached_input_tokens: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        repo.read(&registration).await.unwrap().charged,
+        Amount {
+            attempts: 1,
+            tokens: 7,
+            cost_micro_cny: 7,
+        }
+    );
+}
+
 #[derive(sqlx::FromRow)]
 struct ReceiptTotals {
     count: i64,

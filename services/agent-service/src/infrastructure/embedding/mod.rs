@@ -47,7 +47,10 @@ impl EmbeddingGenerator for EmbeddingAdapter {
             model: self.model.clone(),
             input: text.to_string(),
         };
-        self.client.embed(req).await.map(|r| r.embedding)
+        self.client
+            .embed(req)
+            .await
+            .map(|response| response.embedding)
     }
 }
 

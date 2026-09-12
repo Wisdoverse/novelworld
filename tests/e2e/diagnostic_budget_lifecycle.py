@@ -547,7 +547,8 @@ class Lifecycle:
         manifest, config = {}, {"services": {}}
         for service in SERVICES:
             manifest[service.upper().replace("-", "_") + "_IMAGE"] = self.images[service]
-            environment = {"LLM_DIAGNOSTIC_BUDGET_ID": self.budget_id, "INTERNAL_SERVICE_TOKEN": TOKEN,
+            environment = {"LLM_DIAGNOSTIC_BUDGET_ID": self.budget_id,
+                           "LLM_DIAGNOSTIC_PROFILE": PROFILE, "INTERNAL_SERVICE_TOKEN": TOKEN,
                            "USER_SERVICE_URL": "http://127.0.0.1:8001" if service == "user-service" else "http://user-service:8001"}
             if service == "user-service":
                 environment["LLM_DIAGNOSTIC_BUDGET_LIMITS"] = self.environment["LLM_DIAGNOSTIC_BUDGET_LIMITS"]

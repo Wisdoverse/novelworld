@@ -40,6 +40,7 @@ BUDGET = importlib.util.module_from_spec(_budget_spec)
 _budget_spec.loader.exec_module(BUDGET)
 
 PROFILE_BYTES = (ROOT / "tools/llm-budget/diagnostic-v1.json").read_bytes()
+MEMORY_PROFILE_BYTES = (ROOT / "tools/llm-budget/diagnostic-v2.json").read_bytes()
 BUDGET_ID = "550e8400-e29b-41d4-a716-446655440000"
 TOKEN = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 REGISTERED_ENV = {
@@ -197,6 +198,13 @@ class ReleaseImageDigestTest(unittest.TestCase):
         )
         self.assertEqual(BUDGET.registration(PROFILE_BYTES, REGISTERED_ENV)["limits"],
                          json.loads(REGISTERED_ENV["LLM_DIAGNOSTIC_BUDGET_LIMITS"]))
+        memory_env = dict(REGISTERED_ENV, LLM_DIAGNOSTIC_BUDGET_LIMITS=json.dumps({
+            **json.loads(REGISTERED_ENV["LLM_DIAGNOSTIC_BUDGET_LIMITS"]),
+            "profile": "four-layer-journey-diagnostic-v2",
+        }, separators=(",", ":")))
+        memory = BUDGET.registration(MEMORY_PROFILE_BYTES, memory_env)
+        self.assertEqual(memory["binding"]["contract"], "llm-diagnostic-budget-v2")
+        self.assertEqual(memory["binding"]["profile"], "four-layer-journey-diagnostic-v2")
 
         for key, value in (
             ("LLM_DIAGNOSTIC_BUDGET_ID", BUDGET_ID.upper()),
@@ -272,6 +280,7 @@ class ReleaseImageDigestTest(unittest.TestCase):
         for service in BUDGET.SERVICES:
             environment = {
                 "LLM_DIAGNOSTIC_BUDGET_ID": BUDGET_ID,
+                "LLM_DIAGNOSTIC_PROFILE": "vision-journey-diagnostic-v1",
                 "USER_SERVICE_URL": "http://127.0.0.1:8001" if service == "user-service" else "http://user-service:8001",
                 "INTERNAL_SERVICE_TOKEN": TOKEN,
             }

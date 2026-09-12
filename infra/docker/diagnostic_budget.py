@@ -232,11 +232,13 @@ def probe(image, project, expected):
     try:
         # A killed `docker run` client can leave a late-created daemon object.
         # Confirm creation before starting; a lost create ACK is not absence.
+        profile_args = ([] if expected.get("profile") == "vision-journey-diagnostic-v1"
+                        else [expected.get("profile")])
         identifier = bounded_output([
             "docker", "create", "--pull", "never", "--name", name,
             "--network", "none", "--no-healthcheck", "--log-driver", "none",
             "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-            "--entrypoint", "/app/service", image, "--diagnostic-budget-contract",
+            "--entrypoint", "/app/service", image, "--diagnostic-budget-contract", *profile_args,
         ], 10)
         if not re.fullmatch(rb"[0-9a-f]{64}\n?", identifier):
             raise ProbeInvalid("create_ack_invalid")
@@ -330,6 +332,7 @@ def preflight(raw, manifest, registered, project):
         actual = services[service]
         environment = actual["environment"]
         require(environment.get("LLM_DIAGNOSTIC_BUDGET_ID") == registered["binding"]["budget_id"])
+        require(environment.get("LLM_DIAGNOSTIC_PROFILE") == registered["binding"]["profile"])
         owner = service == "user-service"
         require(environment.get("USER_SERVICE_URL") == ("http://127.0.0.1:8001" if owner else "http://user-service:8001"))
         if owner:

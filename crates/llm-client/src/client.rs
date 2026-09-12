@@ -52,11 +52,22 @@ impl Default for LlmClient {
 impl LlmClient {
     #[cfg(test)]
     pub(crate) fn diagnostic_test_client(budget: Arc<BudgetClient>, dispatch_base: String) -> Self {
-        let mut client = Self::new().with_openai_compatible(
+        Self::diagnostic_test_client_for(
+            budget,
+            dispatch_base,
             "deepseek",
-            "synthetic-test-key",
             "https://api.deepseek.com",
-        );
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn diagnostic_test_client_for(
+        budget: Arc<BudgetClient>,
+        dispatch_base: String,
+        provider: &str,
+        origin: &str,
+    ) -> Self {
+        let mut client = Self::new().with_openai_compatible(provider, "synthetic-test-key", origin);
         client.budget = Ok(Some(budget));
         client.admission = Arc::new(Semaphore::new(8));
         client
@@ -442,9 +453,7 @@ impl LlmClient {
     }
 
     pub async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
-        if self.budget.as_ref().map_err(|error| *error)?.is_some() {
-            return Err(BudgetControlError.into());
-        }
+        let budget = self.budget.as_ref().map_err(|error| *error)?.clone();
         let started = Instant::now();
         let (provider, api_key, provider_name, model_name) =
             self.resolve_provider(&request.model)?;
@@ -455,13 +464,44 @@ impl LlmClient {
             model: model_name,
             input: request.input,
         };
+        let wire = provider.embedding_wire_bytes(&req)?;
         let deadline = TokioInstant::now() + LLM_TOTAL_TIMEOUT;
+        let mut provider_started = false;
         match tokio::time::timeout_at(deadline, async {
             for attempt in 0..=RetryPolicy::max_retries() {
+                let grant = match &budget {
+                    Some(budget) => Some(
+                        budget
+                            .reserve_embedding(
+                                &provider_name,
+                                provider.base_url(),
+                                &req.model,
+                                &wire,
+                                deadline,
+                            )
+                            .await?,
+                    ),
+                    None => None,
+                };
                 let attempt_started = Instant::now();
-                match provider.embed(&self.http, api_key, &req).await {
+                provider_started = true;
+                match provider
+                    .embed_wire(&self.http, api_key, wire.clone(), budget.is_some())
+                    .await
+                {
                     Ok(response) => {
                         labels.attempt("success", attempt_started.elapsed().as_secs_f64());
+                        if let (Some(budget), Some(grant)) = (&budget, grant) {
+                            budget
+                                .settle(
+                                    grant,
+                                    Some(&response.model),
+                                    response.usage.as_ref(),
+                                    deadline,
+                                )
+                                .await?;
+                            budget.validate_embedding_result(&response)?;
+                        }
                         labels.finish("success", started);
                         return Ok(response);
                     }
@@ -471,6 +511,10 @@ impl LlmClient {
                         let metric_status = error_status(api_error);
                         labels.attempt(metric_status, attempt_started.elapsed().as_secs_f64());
 
+                        if budget.is_some() && api_error.is_none() {
+                            labels.finish("evidence_error", started);
+                            return Err(BudgetEvidenceError.into());
+                        }
                         if RetryPolicy::should_retry(status, attempt) {
                             labels.retry(metric_status);
                             let delay = RetryPolicy::delay(
@@ -500,7 +544,13 @@ impl LlmClient {
             Ok(result) => result,
             Err(_) => {
                 labels.finish("timeout", started);
-                Err(anyhow!("LLM request exceeded the total deadline"))
+                if budget.is_some() && provider_started {
+                    Err(BudgetEvidenceError.into())
+                } else if budget.is_some() {
+                    Err(BudgetControlError.into())
+                } else {
+                    Err(anyhow!("LLM request exceeded the total deadline"))
+                }
             }
         }
     }

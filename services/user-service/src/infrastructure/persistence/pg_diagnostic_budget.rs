@@ -103,7 +103,9 @@ fn signed(value: u64) -> Result<i64, BudgetError> {
 fn validate_registration(registration: &Registration) -> Result<(), BudgetError> {
     registration.validate()?;
     // Hashing stays in infrastructure, but every durable entrypoint enforces the compiled binding.
-    if registration.profile_sha256 != llm_client::diagnostic_budget::profile_sha256() {
+    if registration.profile_sha256
+        != llm_client::diagnostic_budget::profile_sha256_for(&registration.profile)
+    {
         return Err(BudgetError::Invalid);
     }
     Ok(())
@@ -257,7 +259,8 @@ impl DiagnosticBudgetRepository for PgDiagnosticBudgetRepository {
         attempt: &Attempt,
     ) -> Result<Reservation, BudgetError> {
         bounded(async {
-            let quote = attempt.quote()?;
+            let profile = Profile::compiled_named(&registration.profile)?;
+            let quote = attempt.quote_with_profile(&profile)?;
             let mut tx = self.transaction().await?;
             let snapshot = locked_budget(&mut tx, registration).await?;
             if sqlx::query_as::<_, AttemptRow>(
@@ -325,7 +328,7 @@ impl DiagnosticBudgetRepository for PgDiagnosticBudgetRepository {
                 }
                 return tx.commit().await.map_err(database_error);
             }
-            let profile = Profile::compiled();
+            let profile = Profile::compiled_named(&registration.profile)?;
             let output_limit =
                 u32::try_from(receipt.output_limit).map_err(|_| BudgetError::Invalid)?;
             let reserved = Amount {

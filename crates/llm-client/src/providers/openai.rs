@@ -67,6 +67,13 @@ impl OpenAIProvider {
         )?)
     }
 
+    pub(crate) fn embedding_wire_bytes(&self, request: &EmbeddingRequest) -> Result<Vec<u8>> {
+        Ok(serde_json::to_vec(&serde_json::json!({
+            "model": request.model,
+            "input": request.input,
+        }))?)
+    }
+
     pub fn new(base_url: Option<&str>) -> Self {
         Self {
             base_url: base_url.unwrap_or("https://api.openai.com").to_string(),
@@ -304,11 +311,19 @@ fn response_content(response: &OpenAIResponse) -> Result<String> {
 struct OpenAIEmbeddingResponse {
     data: Vec<OpenAIEmbeddingData>,
     model: String,
+    usage: Option<Value>,
 }
 
 #[derive(Deserialize)]
 struct OpenAIEmbeddingData {
     embedding: Vec<f32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenAIEmbeddingUsage {
+    prompt_tokens: u32,
+    total_tokens: u32,
 }
 
 pub(crate) fn parse_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>> {
@@ -542,22 +557,19 @@ impl OpenAIProvider {
         Ok(decode_stream(response.bytes_stream(), parse_stream_frame))
     }
 
-    pub(crate) async fn embed(
+    pub(crate) async fn embed_wire(
         &self,
         client: &reqwest::Client,
         api_key: &str,
-        request: &EmbeddingRequest,
+        body: Vec<u8>,
+        require_usage_evidence: bool,
     ) -> Result<EmbeddingResponse> {
-        let body = serde_json::json!({
-            "model": request.model,
-            "input": request.input,
-        });
-
         let (hk, hv) = self.auth_header(api_key);
         let response = client
             .post(self.endpoint("/v1/embeddings"))
             .header(&hk, &hv)
-            .json(&body)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
             .send()
             .await?;
 
@@ -573,9 +585,23 @@ impl OpenAIProvider {
             .map(|d| d.embedding.clone())
             .ok_or_else(|| anyhow::anyhow!("No embedding returned"))?;
 
+        let usage = if require_usage_evidence {
+            resp.usage
+                .map(|value| {
+                    let usage: OpenAIEmbeddingUsage = serde_json::from_value(value)?;
+                    if usage.prompt_tokens != usage.total_tokens {
+                        return Err(anyhow!("provider returned invalid embedding usage"));
+                    }
+                    Usage::new(usage.prompt_tokens, 0, None)
+                })
+                .transpose()?
+        } else {
+            None
+        };
         Ok(EmbeddingResponse {
             embedding,
             model: resp.model,
+            usage,
         })
     }
 }
