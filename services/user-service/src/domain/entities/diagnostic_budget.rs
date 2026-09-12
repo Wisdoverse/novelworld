@@ -7,6 +7,10 @@ pub const PROFILE_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../tools/llm-budget/diagnostic-v1.json"
 ));
+pub const MEMORY_PROFILE_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tools/llm-budget/diagnostic-v2.json"
+));
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum BudgetError {
@@ -37,11 +41,10 @@ pub struct Registration {
 
 impl Registration {
     pub fn validate(&self) -> Result<(), BudgetError> {
-        let profile = Profile::compiled();
+        let profile = Profile::compiled_named(&self.profile)?;
         if self.budget_id.get_version() != Some(Version::Random)
             || self.budget_id.get_variant() != Variant::RFC4122
             || self.contract != profile.contract
-            || self.profile != profile.profile
             || self.profile_sha256.len() != 64
             || !self
                 .profile_sha256
@@ -59,7 +62,10 @@ impl Registration {
         self.validate()?;
         let remaining = self.expires_at.signed_duration_since(database_now);
         if remaining <= chrono::Duration::zero()
-            || remaining > chrono::Duration::seconds(Profile::compiled().max_lifetime_seconds)
+            || remaining
+                > chrono::Duration::seconds(
+                    Profile::compiled_named(&self.profile)?.max_lifetime_seconds,
+                )
         {
             return Err(BudgetError::Invalid);
         }
@@ -102,27 +108,29 @@ pub struct Dispatch {
 }
 
 impl Dispatch {
-    pub fn validate(&self) -> Result<(), BudgetError> {
-        let profile = Profile::compiled();
-        if self.provider != profile.provider
-            || self.model != profile.model
-            || self.origin != profile.origin
-        {
+    pub fn validate(&self, profile_name: &str) -> Result<(), BudgetError> {
+        let profile = Profile::compiled_named(profile_name)?;
+        let (provider, model, origin) = profile.identity(&self.attempt.operation)?;
+        if self.provider != provider || self.model != model || self.origin != origin {
             return Err(BudgetError::Invalid);
         }
-        self.attempt.quote()?;
+        self.attempt.quote_with_profile(&profile)?;
         Ok(())
     }
 }
 
 impl Attempt {
     pub fn quote(&self) -> Result<Amount, BudgetError> {
+        self.quote_with_profile(&Profile::compiled())
+    }
+
+    pub fn quote_with_profile(&self, profile: &Profile) -> Result<Amount, BudgetError> {
         if self.attempt_id.get_version() != Some(Version::Random)
             || self.attempt_id.get_variant() != Variant::RFC4122
         {
             return Err(BudgetError::Invalid);
         }
-        Profile::compiled().quote(&self.operation, self.output_limit)
+        profile.quote(&self.operation, self.output_limit)
     }
 }
 
@@ -205,6 +213,20 @@ pub struct Profile {
     pub output_micro_cny: u64,
     pub max_messages: usize,
     pub max_request_bytes: usize,
+    #[serde(default)]
+    pub embedding_provider: Option<String>,
+    #[serde(default)]
+    pub embedding_model: Option<String>,
+    #[serde(default)]
+    pub embedding_origin: Option<String>,
+    #[serde(default)]
+    pub embedding_input_token_ceiling: Option<u64>,
+    #[serde(default)]
+    pub embedding_input_micro_cny: Option<u64>,
+    #[serde(default)]
+    pub embedding_max_request_bytes: Option<usize>,
+    #[serde(default)]
+    pub embedding_dimensions: Option<usize>,
     pub max_lifetime_seconds: i64,
     pub max_limits: Amount,
     pub operations: BTreeMap<String, u32>,
@@ -212,15 +234,49 @@ pub struct Profile {
 
 impl Profile {
     pub fn compiled() -> Self {
-        serde_json::from_str(PROFILE_JSON).expect("compiled diagnostic profile is valid")
+        Self::compiled_named("vision-journey-diagnostic-v1")
+            .expect("valid compiled diagnostic profile")
+    }
+
+    pub fn compiled_named(name: &str) -> Result<Self, BudgetError> {
+        let source = match name {
+            "vision-journey-diagnostic-v1" => PROFILE_JSON,
+            "four-layer-journey-diagnostic-v2" => MEMORY_PROFILE_JSON,
+            _ => return Err(BudgetError::Invalid),
+        };
+        serde_json::from_str(source).map_err(|_| BudgetError::Invalid)
+    }
+
+    fn identity(&self, operation: &str) -> Result<(&str, &str, &str), BudgetError> {
+        if operation == "embedding" {
+            Ok((
+                self.embedding_provider
+                    .as_deref()
+                    .ok_or(BudgetError::Invalid)?,
+                self.embedding_model
+                    .as_deref()
+                    .ok_or(BudgetError::Invalid)?,
+                self.embedding_origin
+                    .as_deref()
+                    .ok_or(BudgetError::Invalid)?,
+            ))
+        } else {
+            Ok((&self.provider, &self.model, &self.origin))
+        }
     }
 
     pub fn quote(&self, operation: &str, output_limit: u32) -> Result<Amount, BudgetError> {
         let ceiling = self.operations.get(operation).ok_or(BudgetError::Invalid)?;
-        if output_limit == 0 || output_limit > *ceiling {
+        if (operation == "embedding") != (output_limit == 0) || output_limit > *ceiling {
             return Err(BudgetError::Invalid);
         }
-        self.consumption(self.input_token_ceiling, u64::from(output_limit))
+        let (input_ceiling, input_price, output_price) = self.pricing(operation)?;
+        Self::consumption(
+            input_ceiling,
+            u64::from(output_limit),
+            input_price,
+            output_price,
+        )
     }
 
     pub fn usage(
@@ -230,8 +286,10 @@ impl Profile {
         usage: &Settlement,
     ) -> Result<Amount, BudgetError> {
         self.quote(operation, output_limit)?;
-        if usage.model != self.model
-            || usage.input_tokens > self.input_token_ceiling
+        let (_, model, _) = self.identity(operation)?;
+        let (input_ceiling, input_price, output_price) = self.pricing(operation)?;
+        if usage.model != model
+            || usage.input_tokens > input_ceiling
             || usage.output_tokens > u64::from(output_limit)
             || usage
                 .cached_input_tokens
@@ -239,18 +297,45 @@ impl Profile {
         {
             return Err(BudgetError::Invalid);
         }
-        self.consumption(usage.input_tokens, usage.output_tokens)
+        Self::consumption(
+            usage.input_tokens,
+            usage.output_tokens,
+            input_price,
+            output_price,
+        )
     }
 
-    fn consumption(&self, input: u64, output: u64) -> Result<Amount, BudgetError> {
+    fn pricing(&self, operation: &str) -> Result<(u64, u64, u64), BudgetError> {
+        if operation == "embedding" {
+            Ok((
+                self.embedding_input_token_ceiling
+                    .ok_or(BudgetError::Invalid)?,
+                self.embedding_input_micro_cny.ok_or(BudgetError::Invalid)?,
+                0,
+            ))
+        } else {
+            Ok((
+                self.input_token_ceiling,
+                self.input_micro_cny,
+                self.output_micro_cny,
+            ))
+        }
+    }
+
+    fn consumption(
+        input: u64,
+        output: u64,
+        input_price: u64,
+        output_price: u64,
+    ) -> Result<Amount, BudgetError> {
         Ok(Amount {
             attempts: 1,
             tokens: input.checked_add(output).ok_or(BudgetError::Invalid)?,
             cost_micro_cny: input
-                .checked_mul(self.input_micro_cny)
+                .checked_mul(input_price)
                 .and_then(|amount| {
                     output
-                        .checked_mul(self.output_micro_cny)
+                        .checked_mul(output_price)
                         .and_then(|output_cost| amount.checked_add(output_cost))
                 })
                 .ok_or(BudgetError::Invalid)?,
@@ -368,6 +453,39 @@ mod tests {
             "settlement never refunds the attempt count"
         );
         assert_eq!(charged.reserve(quote, quote), Err(BudgetError::Exhausted));
+    }
+
+    #[test]
+    fn memory_profile_prices_embedding_without_relaxing_v1() {
+        let v1 = Profile::compiled();
+        let v2 = Profile::compiled_named("four-layer-journey-diagnostic-v2").unwrap();
+        assert_eq!(v1.quote("embedding", 0), Err(BudgetError::Invalid));
+        assert_eq!(
+            v2.quote("embedding", 0),
+            Ok(Amount {
+                attempts: 1,
+                tokens: 8192,
+                cost_micro_cny: 8192,
+            })
+        );
+        assert_eq!(v2.quote("embedding", 1), Err(BudgetError::Invalid));
+        assert_eq!(
+            v2.usage(
+                "embedding",
+                0,
+                &Settlement {
+                    model: "text-embedding-3-small".into(),
+                    input_tokens: 7,
+                    output_tokens: 0,
+                    cached_input_tokens: None,
+                }
+            ),
+            Ok(Amount {
+                attempts: 1,
+                tokens: 7,
+                cost_micro_cny: 7,
+            })
+        );
     }
 
     #[test]

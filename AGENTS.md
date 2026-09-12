@@ -283,11 +283,16 @@ complete DeepSeek/OpenAI setup later in protected Settings.
 
 `LLM_DIAGNOSTIC_BUDGET_ID` / `LLM_DIAGNOSTIC_BUDGET_LIMITS` are only for an
 explicitly registered isolated Diagnostic; leave both empty for ordinary use.
+`LLM_DIAGNOSTIC_PROFILE` defaults to the closed v1 profile. The four-layer
+journey selects the compiled v2 profile and requires explicit OpenAI embedding
+endpoint, model, and credential configuration; it never falls back to the chat
+credential.
 The supported cold release provisions once. Every paying service reserves
 before provider I/O; restart never creates or refills allowance. Unknown usage
 retains its reservation, and control/evidence failures never trigger provider
-retry or successful SSE completion. Image/embedding calls and restore/resume
-are refused in this mode. See [ADR 0004](docs/adr/0004-durable-diagnostic-budget.md)
+retry or successful SSE completion. Image calls and restore/resume are refused;
+embedding remains refused by v1 and is allowed only by the exact v2 profile.
+See [ADR 0004](docs/adr/0004-durable-diagnostic-budget.md)
 for exact limits and evidence boundaries; the feature does not authorize a paid run.
 
 `S3_ENABLED` is optional. When true, configure `S3_BUCKET` and `S3_REGION`;

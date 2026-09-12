@@ -1,6 +1,7 @@
 # ADR 0004: Durable diagnostic budget authority
 
-- Status: Accepted decision; delivery evidence is tracked in issue #320
+- Status: Accepted decision; v1 delivery evidence is tracked in issue #320 and
+  the additive embedding profile in issue #376
 - Date: 2026-09-07
 - Owners: repository maintainers and affected service owners
 - Related: [issue #320](https://github.com/Wisdoverse/novelworld/issues/320),
@@ -40,7 +41,7 @@ refund or grant reuse. A lost settlement acknowledgement likewise fails closed:
 the client does not reuse the grant or assume a refund, while the authoritative
 receipt remains the source of truth for a later bounded reconciliation.
 
-The wire contract is `llm-diagnostic-budget-v1`; budgeted runtime configuration
+The original wire contract is `llm-diagnostic-budget-v1`; budgeted runtime configuration
 uses contract 3 with the exact budget ID, wire version, and compiled profile
 digest. Ordinary configuration remains contract 2 and is not budgeted. The
 fixed profile is Vision-only, DeepSeek-only, non-thinking, and uses the reviewed
@@ -54,8 +55,16 @@ Budget control uses authenticated internal HTTP under
 public gateway route and exposes no prompts, source text, credentials, provider
 response IDs, reader IDs, or novel IDs. Control calls have their own bounded
 deadline and no automatic transport retry. Image and embedding paths deny
-dispatch in this opt-in profile until separately priced; ordinary behavior is
-unchanged. A shared trusted internal boundary is required across Settings,
+dispatch in this v1 profile. The additive `llm-diagnostic-budget-v2` profile
+uses the same owner endpoints and tables and adds only the exact OpenAI
+`text-embedding-3-small` operation at `https://api.openai.com`. It reserves a
+worst-case 8,192 input tokens immediately before each embedding attempt,
+requires provider usage with zero output tokens, settles before returning a
+vector, and then requires the exact model and 1,536 finite dimensions. Its
+compiled ceiling is 1 micro-CNY per input token; registration supplies the
+actual funded limits. A lost reserve acknowledgement never dispatches, while
+an ambiguous provider result or lost settlement acknowledgement never returns
+the vector. Ordinary behavior is unchanged. A shared trusted internal boundary is required across Settings,
 sync chat, stream setup, fallback, and all four paying services.
 
 ## Alternatives considered
@@ -104,9 +113,11 @@ this ADR.
 `LLM_DIAGNOSTIC_BUDGET_ID` and owner-only `LLM_DIAGNOSTIC_BUDGET_LIMITS` are
 empty by default. The latter is strict JSON containing exactly `profile`,
 `max_attempts`, `max_tokens`, `max_cost_micro_cny`, and `expires_at`. Use canonical
-unquoted `KEY=value` environment-file entries, without shell expansion. The
-profile is `vision-journey-diagnostic-v1`; expiry is fixed UTC seconds, not a
-duration renewed on restart. Limits have no funded defaults. Individual local
+unquoted `KEY=value` environment-file entries, without shell expansion.
+`LLM_DIAGNOSTIC_PROFILE` defaults to `vision-journey-diagnostic-v1`; the
+four-layer journey selects `four-layer-journey-diagnostic-v2`. A non-default
+selector without a complete registration fails closed. Expiry is fixed UTC
+seconds, not a duration renewed on restart. Limits have no funded defaults. Individual local
 processes also require explicit `USER_SERVICE_URL` and a valid shared internal
 token; missing control URL never silently falls back to a loopback listener.
 
@@ -230,5 +241,12 @@ A second successful budget-capable source version is not
 manufactured for this first protocol delivery: actual different-version
 successful upgrade journeys remain owned by #230. Local image/test evidence
 does not replace required CI, final independent review or exact-main delivery
-evidence; #320 owns their current status. No funded Diagnostic or H1/H3/H4
+evidence; #320 owns their current status.
+
+Issue #376 adds offline tests for the v2 profile's fixed identity and price,
+reserve-before-provider order, fresh reservation on a known retry, terminal
+ambiguous transport behavior, mandatory usage and settlement, and validation
+after settlement. These tests use loopback stubs and make no provider call.
+They are foundation evidence only; the registered long-conversation upgrade
+journey remains separate evidence. No funded Diagnostic or H1/H3/H4
 qualification is authorized by this structural control.

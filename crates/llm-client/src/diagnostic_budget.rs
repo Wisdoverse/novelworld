@@ -1,4 +1,4 @@
-use crate::{ChatRequest, Usage};
+use crate::{ChatRequest, EmbeddingResponse, Usage};
 use futures::StreamExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -154,6 +154,20 @@ pub(crate) struct CompiledProfile {
     pub output_micro_cny: u64,
     pub max_messages: usize,
     pub max_request_bytes: usize,
+    #[serde(default)]
+    pub embedding_provider: Option<String>,
+    #[serde(default)]
+    pub embedding_model: Option<String>,
+    #[serde(default)]
+    pub embedding_origin: Option<String>,
+    #[serde(default)]
+    pub embedding_input_token_ceiling: Option<u64>,
+    #[serde(default)]
+    pub embedding_input_micro_cny: Option<u64>,
+    #[serde(default)]
+    pub embedding_max_request_bytes: Option<usize>,
+    #[serde(default)]
+    pub embedding_dimensions: Option<usize>,
     pub max_limits: Amount,
     pub operations: BTreeMap<String, u32>,
 }
@@ -163,6 +177,25 @@ pub(crate) fn profile() -> &'static CompiledProfile {
     PROFILE.get_or_init(|| {
         serde_json::from_str(PROFILE_JSON).expect("valid compiled diagnostic profile")
     })
+}
+
+pub(crate) fn profile_named(name: &str) -> Result<&'static CompiledProfile, BudgetControlError> {
+    static MEMORY_PROFILE: OnceLock<CompiledProfile> = OnceLock::new();
+    match name {
+        "vision-journey-diagnostic-v1" => Ok(profile()),
+        "four-layer-journey-diagnostic-v2" => Ok(MEMORY_PROFILE.get_or_init(|| {
+            serde_json::from_str(MEMORY_PROFILE_JSON).expect("valid compiled memory profile")
+        })),
+        _ => Err(BudgetControlError),
+    }
+}
+
+fn selected_profile() -> Result<&'static CompiledProfile, BudgetControlError> {
+    let name = std::env::var_os("LLM_DIAGNOSTIC_PROFILE")
+        .unwrap_or_else(|| "vision-journey-diagnostic-v1".into())
+        .into_string()
+        .map_err(|_| BudgetControlError)?;
+    profile_named(&name)
 }
 
 impl Binding {
@@ -176,21 +209,37 @@ impl Binding {
             .into_string()
             .map_err(|_| BudgetControlError)?;
         if id.is_empty() {
-            return if limits.is_empty() {
+            return if limits.is_empty()
+                && std::env::var_os("LLM_DIAGNOSTIC_PROFILE")
+                    .is_none_or(|value| value == "vision-journey-diagnostic-v1")
+            {
                 Ok(None)
             } else {
                 Err(BudgetControlError)
             };
         }
-        Ok(Some(Self::new(canonical_uuid(&id)?)))
+        Ok(Some(Self::for_profile(
+            canonical_uuid(&id)?,
+            selected_profile()?,
+        )))
     }
 
+    #[cfg(test)]
     pub(crate) fn new(budget_id: Uuid) -> Self {
+        Self::for_profile(budget_id, profile())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_profile(budget_id: Uuid, name: &str) -> Self {
+        Self::for_profile(budget_id, profile_named(name).expect("test profile exists"))
+    }
+
+    fn for_profile(budget_id: Uuid, profile: &CompiledProfile) -> Self {
         Self {
             budget_id,
-            contract: profile().contract.clone(),
-            profile: profile().profile.clone(),
-            profile_sha256: profile_sha256(),
+            contract: profile.contract.clone(),
+            profile: profile.profile.clone(),
+            profile_sha256: profile_sha256_for(&profile.profile),
         }
     }
 }
@@ -225,6 +274,7 @@ pub(crate) fn root_url(value: &str) -> Result<reqwest::Url, BudgetControlError> 
 #[derive(Clone)]
 pub(crate) struct BudgetClient {
     binding: Binding,
+    profile: &'static CompiledProfile,
     http: reqwest::Client,
     control_origin: String,
     token: String,
@@ -234,6 +284,8 @@ pub(crate) struct BudgetClient {
 pub(crate) struct Grant {
     attempt_id: Uuid,
     output_limit: u32,
+    model: String,
+    input_token_ceiling: u64,
 }
 
 impl BudgetClient {
@@ -251,13 +303,16 @@ impl BudgetClient {
         origin: &str,
         token: String,
     ) -> Result<Self, BudgetControlError> {
-        if binding != Binding::new(canonical_uuid(&binding.budget_id.to_string())?) {
+        let profile = profile_named(&binding.profile)?;
+        if binding != Binding::for_profile(canonical_uuid(&binding.budget_id.to_string())?, profile)
+        {
             return Err(BudgetControlError);
         }
         crate::validate_internal_service_token(&token).map_err(|_| BudgetControlError)?;
         let origin = root_url(origin)?;
         Ok(Self {
             binding,
+            profile,
             token,
             control_origin: origin.origin().ascii_serialization(),
             http: reqwest::Client::builder()
@@ -328,7 +383,7 @@ impl BudgetClient {
         wire: &[u8],
         deadline: Instant,
     ) -> Result<Grant, BudgetControlError> {
-        let quote = validate_dispatch(provider, origin, request, wire)?;
+        let quote = validate_dispatch_for_profile(self.profile, provider, origin, request, wire)?;
         let attempt_id = Uuid::new_v4();
         let output_limit = request
             .effective_max_output_tokens()
@@ -341,7 +396,7 @@ impl BudgetClient {
                     attempt_id,
                     provider: provider.into(),
                     model: request.model.clone(),
-                    origin: profile().origin.clone(),
+                    origin: self.profile.origin.clone(),
                     operation: request.operation.to_str().into(),
                     output_limit,
                 },
@@ -351,7 +406,7 @@ impl BudgetClient {
         if response.binding != self.binding
             || response.attempt_id != attempt_id
             || response.ordinal == 0
-            || response.ordinal > profile().max_limits.attempts
+            || response.ordinal > self.profile.max_limits.attempts
             || response.reservation != quote
         {
             return Err(BudgetControlError);
@@ -363,6 +418,92 @@ impl BudgetClient {
         Ok(Grant {
             attempt_id,
             output_limit,
+            model: self.profile.model.clone(),
+            input_token_ceiling: self.profile.input_token_ceiling,
+        })
+    }
+
+    pub(crate) async fn reserve_embedding(
+        &self,
+        provider: &str,
+        origin: &str,
+        model: &str,
+        wire: &[u8],
+        deadline: Instant,
+    ) -> Result<Grant, BudgetControlError> {
+        let expected_provider = self
+            .profile
+            .embedding_provider
+            .as_deref()
+            .ok_or(BudgetControlError)?;
+        let expected_model = self
+            .profile
+            .embedding_model
+            .as_deref()
+            .ok_or(BudgetControlError)?;
+        let expected_origin = self
+            .profile
+            .embedding_origin
+            .as_deref()
+            .ok_or(BudgetControlError)?;
+        let input_token_ceiling = self
+            .profile
+            .embedding_input_token_ceiling
+            .ok_or(BudgetControlError)?;
+        let input_micro_cny = self
+            .profile
+            .embedding_input_micro_cny
+            .ok_or(BudgetControlError)?;
+        let max_request_bytes = self
+            .profile
+            .embedding_max_request_bytes
+            .ok_or(BudgetControlError)?;
+        let origin = root_url(origin)?;
+        if provider != expected_provider
+            || model != expected_model
+            || origin.origin().ascii_serialization() != expected_origin
+            || wire.len() > max_request_bytes
+            || self.profile.operations.get("embedding") != Some(&0)
+        {
+            return Err(BudgetControlError);
+        }
+        let quote = Amount {
+            attempts: 1,
+            tokens: input_token_ceiling,
+            cost_micro_cny: input_token_ceiling
+                .checked_mul(input_micro_cny)
+                .ok_or(BudgetControlError)?,
+        };
+        let attempt_id = Uuid::new_v4();
+        let response: ReservationResponse = self
+            .post(
+                "reserve",
+                &ReserveRequest {
+                    binding: self.binding.clone(),
+                    attempt_id,
+                    provider: provider.into(),
+                    model: model.into(),
+                    origin: expected_origin.into(),
+                    operation: "embedding".into(),
+                    output_limit: 0,
+                },
+                deadline,
+            )
+            .await?;
+        if response.binding != self.binding
+            || response.attempt_id != attempt_id
+            || response.ordinal == 0
+            || response.ordinal > self.profile.max_limits.attempts
+            || response.reservation != quote
+            || Instant::now() >= deadline
+        {
+            return Err(BudgetControlError);
+        }
+        Ok(Grant {
+            attempt_id,
+            output_limit: 0,
+            model: model.into(),
+            input_token_ceiling,
         })
     }
 
@@ -374,8 +515,8 @@ impl BudgetClient {
         deadline: Instant,
     ) -> Result<(), BudgetEvidenceError> {
         let usage = usage.ok_or(BudgetEvidenceError)?;
-        if model != Some(profile().model.as_str())
-            || u64::from(usage.input_tokens) > profile().input_token_ceiling
+        if model != Some(grant.model.as_str())
+            || u64::from(usage.input_tokens) > grant.input_token_ceiling
             || usage.output_tokens > grant.output_limit
             || usage
                 .cached_input_tokens
@@ -384,7 +525,7 @@ impl BudgetClient {
             return Err(BudgetEvidenceError);
         }
         let usage = SettlementUsage {
-            model: profile().model.clone(),
+            model: grant.model,
             input_tokens: u64::from(usage.input_tokens),
             output_tokens: u64::from(usage.output_tokens),
             cached_input_tokens: usage.cached_input_tokens.map(u64::from),
@@ -406,6 +547,22 @@ impl BudgetClient {
         }
         Ok(())
     }
+
+    pub(crate) fn validate_embedding_result(
+        &self,
+        response: &EmbeddingResponse,
+    ) -> Result<(), BudgetEvidenceError> {
+        if response.embedding.len()
+            != self
+                .profile
+                .embedding_dimensions
+                .ok_or(BudgetEvidenceError)?
+            || response.embedding.iter().any(|value| !value.is_finite())
+        {
+            return Err(BudgetEvidenceError);
+        }
+        Ok(())
+    }
 }
 
 /// Bootstrap validation for the owner, whose Settings tester is constructed only after startup.
@@ -413,13 +570,23 @@ pub fn validate_environment() -> Result<(), BudgetControlError> {
     BudgetClient::from_environment().map(|_| ())
 }
 
+#[cfg(test)]
 pub(crate) fn validate_dispatch(
     provider: &str,
     origin: &str,
     request: &ChatRequest,
     wire: &[u8],
 ) -> Result<Amount, BudgetControlError> {
-    let profile = profile();
+    validate_dispatch_for_profile(profile(), provider, origin, request, wire)
+}
+
+fn validate_dispatch_for_profile(
+    profile: &CompiledProfile,
+    provider: &str,
+    origin: &str,
+    request: &ChatRequest,
+    wire: &[u8],
+) -> Result<Amount, BudgetControlError> {
     let origin = root_url(origin)?;
     let output = request
         .effective_max_output_tokens()
@@ -466,9 +633,23 @@ pub const PROFILE_JSON: &str = include_str!(concat!(
     "/../../tools/llm-budget/diagnostic-v1.json"
 ));
 
+pub const MEMORY_PROFILE_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tools/llm-budget/diagnostic-v2.json"
+));
+
 /// Hash the exact compiled profile bytes; no downloaded policy or mutable runtime pricing.
 pub fn profile_sha256() -> String {
-    Sha256::digest(PROFILE_JSON.as_bytes())
+    profile_sha256_for("vision-journey-diagnostic-v1")
+}
+
+pub fn profile_sha256_for(name: &str) -> String {
+    let bytes = match name {
+        "vision-journey-diagnostic-v1" => PROFILE_JSON.as_bytes(),
+        "four-layer-journey-diagnostic-v2" => MEMORY_PROFILE_JSON.as_bytes(),
+        _ => return String::new(),
+    };
+    Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()

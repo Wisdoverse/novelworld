@@ -120,6 +120,7 @@ services:
       USER_SERVICE_URL: http://127.0.0.1:8001
       LLM_DIAGNOSTIC_BUDGET_ID: ${LLM_DIAGNOSTIC_BUDGET_ID:-}
       LLM_DIAGNOSTIC_BUDGET_LIMITS: ${LLM_DIAGNOSTIC_BUDGET_LIMITS:-}
+      LLM_DIAGNOSTIC_PROFILE: ${LLM_DIAGNOSTIC_PROFILE:-vision-journey-diagnostic-v1}
       LLM_API_URL: ${LLM_API_URL:-https://api.openai.com}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
@@ -157,6 +158,7 @@ services:
       LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
       USER_SERVICE_URL: http://user-service:8001
       LLM_DIAGNOSTIC_BUDGET_ID: ${LLM_DIAGNOSTIC_BUDGET_ID:-}
+      LLM_DIAGNOSTIC_PROFILE: ${LLM_DIAGNOSTIC_PROFILE:-vision-journey-diagnostic-v1}
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN is required}
       AGENT_SERVICE_URL: http://agent-service:8003
       IMAGE_GEN_API_URL: ${IMAGE_GEN_API_URL:-https://api.openai.com}
@@ -200,6 +202,7 @@ services:
       LLM_MODEL: ${LLM_MODEL:-gpt-4o}
       USER_SERVICE_URL: http://user-service:8001
       LLM_DIAGNOSTIC_BUDGET_ID: ${LLM_DIAGNOSTIC_BUDGET_ID:-}
+      LLM_DIAGNOSTIC_PROFILE: ${LLM_DIAGNOSTIC_PROFILE:-vision-journey-diagnostic-v1}
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN is required}
       EMBEDDING_API_URL: ${EMBEDDING_API_URL:-}
       EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
@@ -239,6 +242,7 @@ services:
       LLM_MODEL: ${LLM_MODEL:-gpt-4o}
       USER_SERVICE_URL: http://user-service:8001
       LLM_DIAGNOSTIC_BUDGET_ID: ${LLM_DIAGNOSTIC_BUDGET_ID:-}
+      LLM_DIAGNOSTIC_PROFILE: ${LLM_DIAGNOSTIC_PROFILE:-vision-journey-diagnostic-v1}
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN is required}
       PORT: 8004
       NOVEL_SERVICE_URL: http://novel-service:8002

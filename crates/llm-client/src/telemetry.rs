@@ -267,10 +267,8 @@ impl RequestLabels {
     }
 }
 
-/// Embeddings do not yet have the token-usage semantics required by the
-/// closed `llm-observability-v1` budget contract. Keep their bounded transport
-/// telemetry in a separate namespace so release qualification cannot mistake
-/// them for a chat operation.
+/// Keep embedding transport telemetry separate from chat metrics; paid
+/// Diagnostic usage is accounted by the durable budget ledger.
 #[derive(Clone)]
 pub(crate) struct EmbeddingLabels {
     provider: String,

@@ -5795,7 +5795,10 @@ def main() -> int:
             ),
         )
         load_product_input(root / diagnostic.product_fixture(registration.value["schema"]),
-                           prospective=registration.value["schema"] == diagnostic.REGISTRATION_SCHEMA_V2)
+                           prospective=registration.value["schema"] in (
+                               diagnostic.REGISTRATION_SCHEMA_V2,
+                               diagnostic.REGISTRATION_SCHEMA_V3,
+                           ))
         diagnostic.network.preflight(registration.value.get("network_subnet"))
         if any(base[key] != candidate[key] for key in INFRASTRUCTURE_IMAGE_KEYS):
             raise QualificationFailure("release_infrastructure_changed")

@@ -155,6 +155,7 @@ class Registration:
     def environment(self) -> dict[str, str]:
         value = self.value
         return {"LLM_DIAGNOSTIC_BUDGET_ID": value["budget_id"],
+                "LLM_DIAGNOSTIC_PROFILE": self.profile["profile"],
                 "LLM_DIAGNOSTIC_BUDGET_LIMITS": canonical(value["limits"]).decode()}
 
 

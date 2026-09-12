@@ -155,12 +155,40 @@ async fn run_body() -> Result<()> {
         let narrative_readiness: Arc<dyn domain::ports::ReadinessProbe> = narrative_client;
 
         // Embedding adapter — auto-select model based on provider
-        let embed_api_key = std::env::var("EMBEDDING_API_KEY").unwrap_or_else(|_| api_key.clone());
-        let embed_api_url = std::env::var("EMBEDDING_API_URL").unwrap_or_else(|_| api_url.clone());
-        let embed_model = std::env::var("EMBEDDING_MODEL")
+        let diagnostic_profile = std::env::var("LLM_DIAGNOSTIC_PROFILE")
+            .unwrap_or_else(|_| "vision-journey-diagnostic-v1".into());
+        let memory_diagnostic = diagnostic_profile == "four-layer-journey-diagnostic-v2";
+        let embed_api_key = std::env::var("EMBEDDING_API_KEY").unwrap_or_else(|_| {
+            if memory_diagnostic {
+                String::new()
+            } else {
+                api_key.clone()
+            }
+        });
+        let embed_api_url = std::env::var("EMBEDDING_API_URL").unwrap_or_else(|_| {
+            if memory_diagnostic {
+                String::new()
+            } else {
+                api_url.clone()
+            }
+        });
+        let configured_embed_model = std::env::var("EMBEDDING_MODEL")
             .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| default_model_for_api(&embed_api_url));
+            .filter(|value| !value.trim().is_empty());
+        let embed_model = configured_embed_model.unwrap_or_else(|| {
+            if memory_diagnostic {
+                String::new()
+            } else {
+                default_model_for_api(&embed_api_url)
+            }
+        });
+        if memory_diagnostic
+            && (embed_api_key.is_empty()
+                || embed_api_url != "https://api.openai.com"
+                || embed_model != "text-embedding-3-small")
+        {
+            anyhow::bail!("four-layer Diagnostic embedding configuration mismatch");
+        }
 
         let embedding: Arc<dyn domain::ports::EmbeddingGenerator> =
             if embed_api_key.is_empty() && !embed_api_url.contains("localhost") {
@@ -169,15 +197,16 @@ async fn run_body() -> Result<()> {
                 );
                 Arc::new(NoopEmbeddingGenerator)
             } else {
+                let embed_provider = if memory_diagnostic { "openai" } else { "embed" };
                 let embed_base = Arc::new(llm_client::LlmClient::new().with_openai_compatible(
-                    "embed",
+                    embed_provider,
                     &embed_api_key,
                     &embed_api_url,
                 ));
                 tracing::info!("Embedding model: {}", embed_model);
                 Arc::new(EmbeddingAdapter::new(
                     embed_base,
-                    format!("embed/{}", embed_model),
+                    format!("{embed_provider}/{embed_model}"),
                 ))
             };
 

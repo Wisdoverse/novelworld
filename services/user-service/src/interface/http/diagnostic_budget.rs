@@ -21,7 +21,7 @@ use serde::{de::DeserializeOwned, Serialize};
 
 use crate::{
     application::diagnostic_budget::DiagnosticBudgetHandler,
-    domain::entities::diagnostic_budget::{Attempt, BudgetError, Dispatch, Profile, Settlement},
+    domain::entities::diagnostic_budget::{Attempt, BudgetError, Dispatch, Settlement},
 };
 
 #[derive(Clone)]
@@ -87,18 +87,18 @@ fn authorize(
             "diagnostic_budget_unauthorized",
         ));
     }
+    let handler = state.handler.as_ref().ok_or(BudgetError::NotFound)?;
     if request.uri().query().is_some()
         || request.headers().get_all(CONTRACT_HEADER).iter().count() != 1
         || request
             .headers()
             .get(CONTRACT_HEADER)
             .and_then(|value| value.to_str().ok())
-            != Some(Profile::compiled().contract.as_str())
+            != Some(handler.registration().contract.as_str())
     {
         return Err(BudgetError::Invalid.into());
     }
     let id = canonical_uuid(id).map_err(|_| BudgetError::Invalid)?;
-    let handler = state.handler.as_ref().ok_or(BudgetError::NotFound)?;
     if id != handler.registration().budget_id {
         return Err(BudgetError::NotFound.into());
     }
@@ -146,7 +146,7 @@ fn amount(amount: crate::domain::entities::diagnostic_budget::Amount) -> Amount 
     }
 }
 
-fn respond<T: Serialize>(result: Result<T, ControlFailure>) -> Response {
+fn respond<T: Serialize>(result: Result<T, ControlFailure>, contract: &str) -> Response {
     let result = result.and_then(|value| {
         let bytes = serde_json::to_vec(&value).map_err(|_| BudgetError::Unavailable)?;
         if bytes.len() > MAX_CONTROL_BYTES {
@@ -159,7 +159,7 @@ fn respond<T: Serialize>(result: Result<T, ControlFailure>) -> Response {
         Err(ControlFailure(status, code)) => (
             status,
             serde_json::to_vec(&serde_json::json!({
-                "contract": Profile::compiled().contract, "code": code,
+                "contract": contract, "code": code,
             }))
             .expect("constant control error serializes"),
         ),
@@ -180,6 +180,12 @@ async fn snapshot(
     Path(id): Path<String>,
     request: Request,
 ) -> Response {
+    let contract = state
+        .handler
+        .as_ref()
+        .map(|handler| handler.registration().contract.as_str())
+        .unwrap_or("llm-diagnostic-budget-v1")
+        .to_owned();
     respond(
         async {
             let handler = authorize(&state, &id, &request)?;
@@ -200,6 +206,7 @@ async fn snapshot(
             })
         }
         .await,
+        &contract,
     )
 }
 
@@ -208,6 +215,12 @@ async fn reserve(
     Path(id): Path<String>,
     request: Request,
 ) -> Response {
+    let contract = state
+        .handler
+        .as_ref()
+        .map(|handler| handler.registration().contract.as_str())
+        .unwrap_or("llm-diagnostic-budget-v1")
+        .to_owned();
     respond(
         async {
             let handler = authorize(&state, &id, &request)?;
@@ -236,6 +249,7 @@ async fn reserve(
             })
         }
         .await,
+        &contract,
     )
 }
 
@@ -244,6 +258,12 @@ async fn settle(
     Path(id): Path<String>,
     request: Request,
 ) -> Response {
+    let contract = state
+        .handler
+        .as_ref()
+        .map(|handler| handler.registration().contract.as_str())
+        .unwrap_or("llm-diagnostic-budget-v1")
+        .to_owned();
     respond(
         async {
             let handler = authorize(&state, &id, &request)?;
@@ -268,6 +288,7 @@ async fn settle(
             })
         }
         .await,
+        &contract,
     )
 }
 
@@ -276,6 +297,12 @@ async fn seal(
     Path(id): Path<String>,
     request: Request,
 ) -> Response {
+    let contract = state
+        .handler
+        .as_ref()
+        .map(|handler| handler.registration().contract.as_str())
+        .unwrap_or("llm-diagnostic-budget-v1")
+        .to_owned();
     respond(
         async {
             let handler = authorize(&state, &id, &request)?;
@@ -288,5 +315,6 @@ async fn seal(
             })
         }
         .await,
+        &contract,
     )
 }

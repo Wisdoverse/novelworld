@@ -935,7 +935,7 @@ CREATE TABLE diagnostic_llm_attempts (
     attempt_id                 UUID NOT NULL,
     ordinal                    BIGINT NOT NULL CHECK (ordinal BETWEEN 1 AND 2000),
     operation                  TEXT NOT NULL,
-    output_limit               INTEGER NOT NULL CHECK (output_limit BETWEEN 1 AND 8192),
+    output_limit               INTEGER NOT NULL CHECK (output_limit BETWEEN 0 AND 8192),
     reservation_tokens         BIGINT NOT NULL CHECK (reservation_tokens BETWEEN 1 AND 1056768),
     reservation_cost_micro_cny BIGINT NOT NULL CHECK (reservation_cost_micro_cny BETWEEN 1 AND 4292608),
     settled                    BOOLEAN NOT NULL DEFAULT FALSE,

@@ -292,6 +292,7 @@ pub struct EmbeddingRequest {
 pub struct EmbeddingResponse {
     pub embedding: Vec<f32>,
     pub model: String,
+    pub usage: Option<Usage>,
 }
 
 #[cfg(test)]
