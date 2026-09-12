@@ -1222,6 +1222,9 @@ class Journey:
     expected_model = EXPECTED_MODEL
     diagnostic_registration = None
     diagnostic_ledger = None
+    summary_base_enrolled = False
+    summary_binding = None
+    summary_claim_attempt = 0
 
     def capture_final_world_view(self, world_view: Any) -> None:
         if not self.prospective_summary:
@@ -1279,8 +1282,11 @@ class Journey:
             self.diagnostic_registration = diagnostic_registration
             self.diagnostic_ledger = diagnostic.DiagnosticLedger(diagnostic_registration)
             self.expected_model = diagnostic.MODEL
-        self.prospective_summary = (diagnostic_registration is not None and
-            diagnostic_registration.value["schema"] == diagnostic.REGISTRATION_SCHEMA_V2)
+        summary_schema = (diagnostic_registration.value["schema"]
+                          if diagnostic_registration is not None else None)
+        self.prospective_summary = summary_schema in (
+            diagnostic.REGISTRATION_SCHEMA_V2, diagnostic.REGISTRATION_SCHEMA_V3)
+        self.summary_base_enrolled = summary_schema == diagnostic.REGISTRATION_SCHEMA_V3
         self.product_input_path = self.root / (
             diagnostic.product_fixture(diagnostic_registration.value["schema"])
             if diagnostic_registration is not None else PRODUCT_INPUT)
@@ -1295,6 +1301,8 @@ class Journey:
         )
         self.summary_legacy_ids: list[str] = []
         self.summary_candidate_ids: list[str] = []
+        self.summary_binding = None
+        self.summary_claim_attempt = 0
         self.summary_saved = None
         suffix = secrets.token_hex(5)
         self.project = f"nwq-{suffix}"
@@ -1384,8 +1392,11 @@ class Journey:
             "journey": {},
         }
         if diagnostic_registration is not None:
-            self.report.update(schema_version=3, report_kind=(
-                "h4-vision-diagnostic-v2" if self.prospective_summary else "h4-vision-diagnostic-v1"))
+            self.report.update(schema_version=3, report_kind={
+                diagnostic.REGISTRATION_SCHEMA: "h4-vision-diagnostic-v1",
+                diagnostic.REGISTRATION_SCHEMA_V2: "h4-vision-diagnostic-v2",
+                diagnostic.REGISTRATION_SCHEMA_V3: "h4-vision-diagnostic-v3",
+            }[summary_schema])
             self.report["policy_identity"].update(
                 qualification=None, extraction=None,
                 journey=self.report["report_kind"],
@@ -1987,11 +1998,47 @@ class Journey:
         if observed != expected:
             raise QualificationFailure("summary_logical_dispatch_mismatch")
 
+    def require_at_most_one_summary_call(self) -> None:
+        observed = provider_started_delta(
+            self.root, b"", self.service_metrics("agent-service"), service="agent-service",
+            operation="memory_summary", expected_model=self.expected_model)
+        if observed > 1:
+            raise QualificationFailure("summary_logical_dispatch_mismatch")
+
     def validate_summary_window(self, value: dict[str, Any], user_id: str,
                                 novel_id: str, character_id: str) -> dict[str, Any] | None:
-        return diagnostic.summary_window(
+        saved = diagnostic.summary_window(
             value, self.summary_legacy_ids, self.summary_candidate_ids,
-            {"user_id": user_id, "novel_id": novel_id, "character_id": character_id})
+            {"user_id": user_id, "novel_id": novel_id, "character_id": character_id},
+            enrolled_base=self.summary_base_enrolled)
+        anchor_index = 2 if self.summary_base_enrolled else 9
+        if len(self.summary_candidate_ids) > anchor_index:
+            anchor = next(row for row in value["turns"]
+                          if row["id"] == self.summary_candidate_ids[anchor_index])
+            observed_binding = (anchor["id"], anchor["summary_memory_id"])
+            if ((self.summary_binding is not None and self.summary_binding != observed_binding)
+                    or anchor["summary_claim_attempt"] < self.summary_claim_attempt):
+                raise QualificationFailure("summary_window_fence_changed")
+            self.summary_binding = observed_binding
+            self.summary_claim_attempt = anchor["summary_claim_attempt"]
+        return saved
+
+    def require_summary_phase(self, saved: dict[str, Any] | None) -> None:
+        if not self.summary_base_enrolled or len(self.summary_candidate_ids) < 3:
+            self.require_summary_calls(0)
+        elif saved is None:
+            self.require_at_most_one_summary_call()
+        else:
+            self.require_summary_calls(1)
+
+    def validate_summary_base(self, value: dict[str, Any], user_id: str,
+                              novel_id: str, character_id: str) -> None:
+        if (value["mid"] or len(value["turns"]) != 7
+                or {row["id"] for row in value["turns"]} != set(self.summary_legacy_ids)
+                or len(value["messages"]) != 14):
+            raise QualificationFailure("summary_base_not_empty")
+        if self.summary_base_enrolled:
+            self.validate_summary_window(value, user_id, novel_id, character_id)
 
     def complete_prospective_summary(self, token: str, user_id: str,
                                      novel_id: str, character_id: str) -> None:
@@ -2001,9 +2048,10 @@ class Journey:
         for key in ("chat_turns", "chat_messages"):
             world_before.pop(key)
         for message in self.product_input["post_adoption_chats"]:
-            self.validate_summary_window(self.summary_snapshot(user_id, novel_id, character_id),
-                                         user_id, novel_id, character_id)
-            self.require_summary_calls(0)
+            saved = self.validate_summary_window(
+                self.summary_snapshot(user_id, novel_id, character_id),
+                user_id, novel_id, character_id)
+            self.require_summary_phase(saved)
             context = self.internal_character_context(user_id, novel_id, character_id)
             result = self.chat(token, novel_id, character_id, message)
             self.summary_candidate_ids.append(result["turn_id"])
@@ -2017,8 +2065,6 @@ class Journey:
             if world_after != world_before:
                 raise QualificationFailure("summary_chat_changed_world")
         deadline = time.monotonic() + 360
-        binding = None
-        attempt = 0
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -2026,12 +2072,6 @@ class Journey:
             snapshot = self.summary_snapshot(user_id, novel_id, character_id,
                                              timeout=min(5, remaining))
             saved = self.validate_summary_window(snapshot, user_id, novel_id, character_id)
-            anchor = next(row for row in snapshot["turns"] if row["id"] == self.summary_candidate_ids[9])
-            observed_binding = (anchor["id"], anchor["summary_memory_id"])
-            if ((binding is not None and binding != observed_binding)
-                    or anchor["summary_claim_attempt"] < attempt):
-                raise QualificationFailure("summary_window_fence_changed")
-            binding, attempt = observed_binding, anchor["summary_claim_attempt"]
             if saved is not None:
                 self.require_summary_calls(1)
                 self.summary_saved = saved
@@ -4049,10 +4089,7 @@ class Journey:
         if self.prospective_summary:
             self.require_summary_calls(0)
             before_summary = self.summary_snapshot(user_id, novel_id, character_id)
-            if (before_summary["mid"] or len(before_summary["turns"]) != 7
-                    or {row["id"] for row in before_summary["turns"]} != set(self.summary_legacy_ids)
-                    or len(before_summary["messages"]) != 14):
-                raise QualificationFailure("summary_base_not_empty")
+            self.validate_summary_base(before_summary, user_id, novel_id, character_id)
             self.private_report["summary_before_upgrade"] = before_summary
         self.private_report["pre_upgrade_authority_sha256"] = sha256_bytes(
             pre_upgrade_authority.encode("utf-8")
@@ -4103,7 +4140,10 @@ class Journey:
             }
             post_upgrade_authority = self.authority_snapshot(user_id, novel_id)
             if self.prospective_summary:
-                if diagnostic.upgrade_authority(post_upgrade_authority) != diagnostic.upgrade_authority(pre_upgrade_authority):
+                if ((post_upgrade_authority != pre_upgrade_authority)
+                        if self.summary_base_enrolled else
+                        (diagnostic.upgrade_authority(post_upgrade_authority)
+                         != diagnostic.upgrade_authority(pre_upgrade_authority))):
                     raise QualificationFailure("upgrade_authority_changed")
                 self.validate_summary_window(self.summary_snapshot(user_id, novel_id, character_id),
                                              user_id, novel_id, character_id)
@@ -4291,9 +4331,10 @@ class Journey:
                 chat_turns += 1
                 if self.prospective_summary:
                     self.summary_candidate_ids.append(chat_result["turn_id"])
-                    self.validate_summary_window(self.summary_snapshot(user_id, novel_id, character_id),
-                                                 user_id, novel_id, character_id)
-                    self.require_summary_calls(0)
+                    saved = self.validate_summary_window(
+                        self.summary_snapshot(user_id, novel_id, character_id),
+                        user_id, novel_id, character_id)
+                    self.require_summary_phase(saved)
                 current = self.internal_character_context(
                     user_id, novel_id, character_id
                 )

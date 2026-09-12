@@ -31,6 +31,7 @@ _network_spec.loader.exec_module(network)
 
 REGISTRATION_SCHEMA = "vision-journey-registration-v1"
 REGISTRATION_SCHEMA_V2 = "vision-journey-registration-v2"
+REGISTRATION_SCHEMA_V3 = "vision-journey-registration-v3"
 LEDGER_SCHEMA = "vision-journey-ledger-v1"
 PROFILE_PATH = Path("tools/llm-budget/diagnostic-v1.json")
 MODEL = "deepseek-flash"
@@ -158,8 +159,8 @@ class Registration:
 
 
 def product_fixture(schema: str) -> Path:
-    require(schema in (REGISTRATION_SCHEMA, REGISTRATION_SCHEMA_V2))
-    version = 2 if schema == REGISTRATION_SCHEMA_V2 else 1
+    require(schema in (REGISTRATION_SCHEMA, REGISTRATION_SCHEMA_V2, REGISTRATION_SCHEMA_V3))
+    version = 1 if schema == REGISTRATION_SCHEMA else 2
     return Path(f"tests/e2e/fixtures/h4-journey-v{version}.json")
 
 
@@ -178,11 +179,13 @@ def load_registration(
         value = strict_json(raw)
         require(isinstance(value, dict))
         expected_keys = REGISTRATION_KEYS | ({"network_subnet"}
-            if value.get("schema") == REGISTRATION_SCHEMA_V2 else set())
+            if value.get("schema") in (REGISTRATION_SCHEMA_V2, REGISTRATION_SCHEMA_V3) else set())
         require(set(value) == expected_keys)
         encoded = canonical(value)
         require(digest(encoded) == approved_sha256, "diagnostic_registration_digest_mismatch")
-        require(value["schema"] in (REGISTRATION_SCHEMA, REGISTRATION_SCHEMA_V2) and uuid4(value["budget_id"]))
+        require(value["schema"] in (
+            REGISTRATION_SCHEMA, REGISTRATION_SCHEMA_V2, REGISTRATION_SCHEMA_V3
+        ) and uuid4(value["budget_id"]))
         try:
             network.subnet(value.get("network_subnet"))
         except network.NetworkFailure as error:
@@ -255,7 +258,7 @@ def upgrade_authority(raw: str) -> bytes:
 
 
 def summary_window(value: Any, legacy_ids: list[str], candidate_ids: list[str],
-                   scope: dict[str, str]) -> dict[str, Any] | None:
+                   scope: dict[str, str], *, enrolled_base: bool = False) -> dict[str, Any] | None:
     """Validate the one fixed prospective window against the chats actually sent."""
     def check(condition: bool) -> None:
         require(condition, "summary_window_evidence_invalid")
@@ -273,11 +276,20 @@ def summary_window(value: Any, legacy_ids: list[str], candidate_ids: list[str],
     check(all(all(row.get(key) == val for key, val in scope.items()) for row in turns + messages + mid))
     check(len({row.get("id") for row in messages}) == len(messages))
     check(all(uuid4(row.get("id")) for row in messages))
-    for turn_id in legacy_ids:
+    for sequence, turn_id in enumerate(legacy_ids, 1):
         row = by_id[turn_id]
+        expected_sequence = sequence if enrolled_base else None
+        check("summary_sequence" in row
+              and ((type(row["summary_sequence"]) is int
+                    and row["summary_sequence"] == expected_sequence)
+                   if enrolled_base else row["summary_sequence"] is None))
         check(all(key in row and type(row[key]) is type(default) and row[key] == default
-                  for key, default in SUMMARY_DEFAULTS.items()))
-    for sequence, turn_id in enumerate(candidate_ids, 1):
+                  for key, default in SUMMARY_DEFAULTS.items() if key != "summary_sequence"))
+    first_candidate_sequence = 8 if enrolled_base else 1
+    anchor_index = 2 if enrolled_base else 9
+    source_ids = legacy_ids + candidate_ids[:3] if enrolled_base else candidate_ids[:10]
+    for offset, turn_id in enumerate(candidate_ids):
+        sequence = first_candidate_sequence + offset
         row = by_id[turn_id]
         check(type(row.get("summary_sequence")) is int and row["summary_sequence"] == sequence)
         if sequence != 10:
@@ -295,12 +307,12 @@ def summary_window(value: Any, legacy_ids: list[str], candidate_ids: list[str],
         check(all(message.get("chapter_context") == chapter
                   and message.get("persona_source_chapter_high_water") == persona
                   and message.get("reader_identity") == row.get("reader_identity") for message in pair))
-        if turn_id in candidate_ids[:10]:
+        if turn_id in source_ids:
             source_messages.extend(sorted(pair, key=lambda message: message["role"] != "user"))
-    if len(candidate_ids) < 10:
+    if len(candidate_ids) <= anchor_index:
         check(not mid)
         return None
-    anchor = by_id[candidate_ids[9]]
+    anchor = by_id[candidate_ids[anchor_index]]
     state, attempt = anchor.get("summary_state"), anchor.get("summary_claim_attempt")
     check(uuid4(anchor.get("summary_memory_id")) and type(attempt) is int and attempt >= 0)
     if state in ("failed", "unknown"):
@@ -331,7 +343,7 @@ def summary_window(value: Any, legacy_ids: list[str], candidate_ids: list[str],
             "memory": {key: memory[key] for key in (
                 "id", "user_id", "novel_id", "character_id", "layer", "content", "importance",
                 "chapter_number", "persona_source_chapter_high_water")},
-            "source_turn_ids": candidate_ids[:10], "source_messages": source_messages}
+            "source_turn_ids": source_ids, "source_messages": source_messages}
 
 
 def source_identities(root: Path, base_sha: str, candidate_sha: str) -> dict[str, Any]:
