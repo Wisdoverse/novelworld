@@ -326,10 +326,11 @@ behavior.
   actively owned.
 - Roadmap pull requests must link their issue with `Closes #<issue>`. An issue
   is `Done` when its own acceptance evidence is satisfied, its final commit is
-  merged to `main`, and required CI is green. A structural child can be Done
-  while its live-evidence parent remains open; a horizon still requires its
-  roadmap exit evidence. A pushed branch, open pull request, or delegated
-  auto-merge is not done.
+  merged to `main`, and required CI is green. Then set its Project item to
+  `Done` and close the GitHub issue. A structural child can close while its
+  live-evidence parent remains open; a horizon still requires its roadmap exit
+  evidence. A pushed branch, open pull request, or delegated auto-merge is not
+  done.
 - Update the roadmap status only when its stated evidence or exit criteria are
   true. Record blockers on the issue instead of reporting optimistic status.
 
