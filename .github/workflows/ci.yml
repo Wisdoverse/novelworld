@@ -199,9 +199,24 @@ jobs:
             --commit "$GITHUB_SHA" > /tmp/llm-budget-b.json
           cmp /tmp/llm-budget-a.json /tmp/llm-budget-b.json
       - name: Live qualification runner contract
+        shell: bash
         run: |
+          set -euo pipefail
+          cleanup() {
+            test_status=$?
+            if ! timeout 60 docker compose -f docker-compose.test.yml down -v; then
+              exit 1
+            fi
+            exit "$test_status"
+          }
+          trap cleanup EXIT
+          timeout 180 docker compose -f docker-compose.test.yml up -d --wait test-postgres
           python3 tests/e2e/live_deepseek_journey.py --self-test
-          python3 tests/e2e/diagnostic_journey_test.py
+          NW_H4_TEST_POSTGRES=novelworld-test-pg \
+          NW_H4_TEST_POSTGRES_DISPOSABLE=1 \
+          NW_H4_TEST_PGUSER=test \
+          NW_H4_TEST_PGDATABASE=novelworld_test \
+            python3 tests/e2e/diagnostic_journey_test.py
       - name: Horizon 5 capacity policy contract
         run: python3 tools/capacity/run.py --self-test
       - name: Test

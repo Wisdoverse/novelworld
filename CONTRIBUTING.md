@@ -215,13 +215,16 @@ boundaries, not release-built artifacts, a supported base-to-candidate release
 upgrade or live-model qualification.
 
 For Vision journey tooling changes, also run
-`python3 tests/e2e/live_deepseek_journey.py --self-test`. The separate
-`diagnostic_journey_test.py` checks single-start registration, committed source
+`python3 tests/e2e/live_deepseek_journey.py --self-test`. CI runs
+`diagnostic_journey_test.py` with the digest-pinned `test-postgres` service and
+destroys its volume afterward. The PostgreSQL selector test mutates public rows
+and therefore requires `NW_H4_TEST_POSTGRES_DISPOSABLE=1`; never point it at a
+shared database. The suite checks single-start registration, committed source
 identity, synthetic receipt reconciliation, cancellation, bounded terminal
-handling and public-report privacy without Docker or provider calls. These
-checks do not replace the mandatory real release-image cold-adoption/Settings
-and lifecycle wiring evidence tracked in #322. No protected operator key is
-needed or authorized by these offline gates.
+handling, public-report privacy, and latest-Canon player-entry selection without
+a provider call. These checks do not replace the mandatory real release-image
+cold-adoption/Settings and lifecycle wiring evidence tracked in #322. No
+protected operator key is needed or authorized by these gates.
 
 The same lifecycle fixture has a separate `--journey-images` mode for actual
 cold-adoption wiring. Its JSON map contains the four paying services plus
