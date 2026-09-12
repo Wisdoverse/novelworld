@@ -250,3 +250,12 @@ after settlement. These tests use loopback stubs and make no provider call.
 They are foundation evidence only; the registered long-conversation upgrade
 journey remains separate evidence. No funded Diagnostic or H1/H3/H4
 qualification is authorized by this structural control.
+
+Issue #378 adds a v4 registration selector to the existing single-start runner.
+It binds the same v2 budget profile to an exact base/candidate artifact pair and
+requires separate protected DeepSeek and OpenAI embedding configuration. The
+runner proves six fenced Mid/Long windows across 60 chats, release upgrade and
+Agent restart, then uses a fresh login for a trace-correlated four-layer
+selection check, export, deletion, and sealed receipt/metric reconciliation.
+This source path does not create a registration, call either provider, authorize
+spending, or turn a Diagnostic into H3/H4 qualification.

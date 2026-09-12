@@ -5,11 +5,11 @@ use uuid::Uuid;
 /// 记忆层级（借鉴 project-lunar 的 Crystal Memory 4层金字塔）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MemoryLayer {
-    /// 短期记忆：最近 N 条对话，存于 Redis，TTL=24h
+    /// 短期记忆：PostgreSQL 中最近 N 条已提交对话；Redis 仅作可选投影
     Short,
     /// 中期记忆：每 20 条对话自动摘要，存于 PostgreSQL
     Mid,
-    /// 长期记忆：关键事件向量化，pgvector 语义检索
+    /// 长期记忆：对话摘要向量化，存于 PostgreSQL 并通过 pgvector 语义检索
     Long,
     /// 永久记忆：角色关系状态、读者身份、重大选择，永不过期
     Permanent,

@@ -32,11 +32,16 @@ _network_spec.loader.exec_module(network)
 REGISTRATION_SCHEMA = "vision-journey-registration-v1"
 REGISTRATION_SCHEMA_V2 = "vision-journey-registration-v2"
 REGISTRATION_SCHEMA_V3 = "vision-journey-registration-v3"
+REGISTRATION_SCHEMA_V4 = "vision-journey-registration-v4"
 LEDGER_SCHEMA = "vision-journey-ledger-v1"
 PROFILE_PATH = Path("tools/llm-budget/diagnostic-v1.json")
+PROFILE_PATH_V2 = Path("tools/llm-budget/diagnostic-v2.json")
 MODEL = "deepseek-flash"
+MEMORY_MODEL = "deepseek-v4-flash"
 CONTRACT = "llm-diagnostic-budget-v1"
 PROFILE = "vision-journey-diagnostic-v1"
+CONTRACT_V2 = "llm-diagnostic-budget-v2"
+PROFILE_V2 = "four-layer-journey-diagnostic-v2"
 APP_KEYS = {
     "GATEWAY_IMAGE", "USER_SERVICE_IMAGE", "NOVEL_SERVICE_IMAGE",
     "AGENT_SERVICE_IMAGE", "NARRATIVE_SERVICE_IMAGE", "FRONTEND_IMAGE",
@@ -149,7 +154,7 @@ class Registration:
     @property
     def binding(self) -> dict[str, str]:
         value = self.value
-        return {"contract": CONTRACT, "profile": PROFILE,
+        return {"contract": self.profile["contract"], "profile": self.profile["profile"],
                 "profile_sha256": value["profile_sha256"], "budget_id": value["budget_id"]}
 
     def environment(self) -> dict[str, str]:
@@ -160,9 +165,16 @@ class Registration:
 
 
 def product_fixture(schema: str) -> Path:
-    require(schema in (REGISTRATION_SCHEMA, REGISTRATION_SCHEMA_V2, REGISTRATION_SCHEMA_V3))
+    require(schema in (
+        REGISTRATION_SCHEMA, REGISTRATION_SCHEMA_V2,
+        REGISTRATION_SCHEMA_V3, REGISTRATION_SCHEMA_V4,
+    ))
     version = 1 if schema == REGISTRATION_SCHEMA else 2
     return Path(f"tests/e2e/fixtures/h4-journey-v{version}.json")
+
+
+def profile_path(schema: str) -> Path:
+    return PROFILE_PATH_V2 if schema == REGISTRATION_SCHEMA_V4 else PROFILE_PATH
 
 
 def load_registration(
@@ -180,12 +192,15 @@ def load_registration(
         value = strict_json(raw)
         require(isinstance(value, dict))
         expected_keys = REGISTRATION_KEYS | ({"network_subnet"}
-            if value.get("schema") in (REGISTRATION_SCHEMA_V2, REGISTRATION_SCHEMA_V3) else set())
+            if value.get("schema") in (
+                REGISTRATION_SCHEMA_V2, REGISTRATION_SCHEMA_V3, REGISTRATION_SCHEMA_V4
+            ) else set())
         require(set(value) == expected_keys)
         encoded = canonical(value)
         require(digest(encoded) == approved_sha256, "diagnostic_registration_digest_mismatch")
         require(value["schema"] in (
-            REGISTRATION_SCHEMA, REGISTRATION_SCHEMA_V2, REGISTRATION_SCHEMA_V3
+            REGISTRATION_SCHEMA, REGISTRATION_SCHEMA_V2,
+            REGISTRATION_SCHEMA_V3, REGISTRATION_SCHEMA_V4,
         ) and uuid4(value["budget_id"]))
         try:
             network.subnet(value.get("network_subnet"))
@@ -198,13 +213,23 @@ def load_registration(
         require(value["base_manifest_sha256"] == digest(base_manifest.read_bytes())
                 and value["candidate_manifest_sha256"] == digest(candidate_manifest.read_bytes()),
                 "diagnostic_manifest_mismatch")
-        profile_raw = (root / PROFILE_PATH).read_bytes()
+        profile_raw = (root / profile_path(value["schema"])).read_bytes()
         profile = strict_json(profile_raw)
+        expected_contract = CONTRACT_V2 if value["schema"] == REGISTRATION_SCHEMA_V4 else CONTRACT
+        expected_profile = PROFILE_V2 if value["schema"] == REGISTRATION_SCHEMA_V4 else PROFILE
+        expected_model = MEMORY_MODEL if value["schema"] == REGISTRATION_SCHEMA_V4 else MODEL
         require(value["profile_sha256"] == digest(profile_raw)
-                and profile["contract"] == CONTRACT and profile["profile"] == PROFILE
-                and profile["model"] == MODEL and profile["provider"] == "deepseek"
+                and profile["contract"] == expected_contract and profile["profile"] == expected_profile
+                and profile["model"] == expected_model and profile["provider"] == "deepseek"
                 and profile["origin"] == "https://api.deepseek.com"
                 and profile["thinking_enabled"] is False, "diagnostic_profile_mismatch")
+        if value["schema"] == REGISTRATION_SCHEMA_V4:
+            require(profile.get("embedding_provider") == "openai"
+                    and profile.get("embedding_model") == "text-embedding-3-small"
+                    and profile.get("embedding_origin") == "https://api.openai.com"
+                    and profile.get("embedding_dimensions") == 1536
+                    and profile.get("operations", {}).get("embedding") == 0,
+                    "diagnostic_profile_mismatch")
         require(value["product_fixture_sha256"] == digest(
             (root / product_fixture(value["schema"])).read_bytes()),
             "diagnostic_fixture_mismatch")
@@ -218,7 +243,7 @@ def load_registration(
         limits = value["limits"]
         require(isinstance(limits, dict) and set(limits) == {
             "profile", "max_attempts", "max_tokens", "max_cost_micro_cny", "expires_at"})
-        require(limits["profile"] == PROFILE)
+        require(limits["profile"] == expected_profile)
         for name, ceiling in profile["max_limits"].items():
             require(integer(limits["max_" + name], ceiling))
         remaining = (expiry(limits["expires_at"]) - (now or datetime.now(timezone.utc))).total_seconds()
@@ -400,7 +425,7 @@ def affected_application_images(paths: list[str]) -> set[str]:
                         r"crates/[^/]+/(?:src/.*|Cargo\.toml|build\.rs)", path
                     ):
             affected.update(rust_images)
-        if path == PROFILE_PATH.as_posix():
+        if path in {PROFILE_PATH.as_posix(), PROFILE_PATH_V2.as_posix()}:
             # Compiled by llm-client and user-service; ordinary tools are not inputs.
             # Existing registration/profile and all payer capability checks still apply.
             affected.update(rust_images - {"GATEWAY_IMAGE"})
@@ -540,28 +565,33 @@ def reconcile_snapshot(registration: Registration, snapshot: Any,
         attempt = row.get("attempt_id")
         operation = row.get("operation")
         limit = row.get("output_limit")
+        embedding = operation == "embedding"
         require(row.get("budget_id") == value["budget_id"] and uuid4(attempt)
                 and attempt not in indexed and type(row.get("ordinal")) is int
                 and row["ordinal"] == ordinal and isinstance(operation, str)
                 and operation in profile["operations"]
-                and integer(limit, profile["operations"][operation], 1)
+                and integer(limit, profile["operations"][operation], 0 if embedding else 1)
                 and type(row.get("settled")) is bool, "diagnostic_receipt_invalid")
-        tokens = profile["input_token_ceiling"] + limit
-        cost = profile["input_token_ceiling"] * profile["input_micro_cny"] + limit * profile["output_micro_cny"]
+        input_ceiling = profile["embedding_input_token_ceiling"] if embedding else profile["input_token_ceiling"]
+        input_price = profile["embedding_input_micro_cny"] if embedding else profile["input_micro_cny"]
+        output_price = 0 if embedding else profile["output_micro_cny"]
+        settlement_model = profile["embedding_model"] if embedding else profile["model"]
+        tokens = input_ceiling + limit
+        cost = input_ceiling * input_price + limit * output_price
         require(type(row.get("reservation_tokens")) is int and row["reservation_tokens"] == tokens
                 and type(row.get("reservation_cost_micro_cny")) is int
                 and row["reservation_cost_micro_cny"] == cost, "diagnostic_reservation_mismatch")
         fields = ("settlement_model", "input_tokens", "output_tokens", "cached_input_tokens")
         require(all(key in row for key in fields), "diagnostic_settlement_invalid")
         if row["settled"]:
-            require(row["settlement_model"] == MODEL
-                    and integer(row["input_tokens"], profile["input_token_ceiling"])
+            require(row["settlement_model"] == settlement_model
+                    and integer(row["input_tokens"], input_ceiling)
                     and integer(row["output_tokens"], limit)
                     and (row["cached_input_tokens"] is None
                          or integer(row["cached_input_tokens"], row["input_tokens"])),
                     "diagnostic_settlement_invalid")
             tokens = row["input_tokens"] + row["output_tokens"]
-            cost = row["input_tokens"] * profile["input_micro_cny"] + row["output_tokens"] * profile["output_micro_cny"]
+            cost = row["input_tokens"] * input_price + row["output_tokens"] * output_price
             settled += 1
         else:
             require(all(row[key] is None for key in fields), "diagnostic_settlement_invalid")
@@ -621,12 +651,16 @@ def reconcile_metrics(registration: Registration, snapshot: Any, summary: Any) -
         if not counter.startswith(("attempts.", "tokens.", "billable_tokens.")):
             continue
         value = item.get("value")
-        require(item.get("provider_model") == "deepseek/" + MODEL
-                and item.get("operation") in registration.profile["operations"]
+        operation = item.get("operation")
+        provider_model = ("openai/" + registration.profile["embedding_model"]
+                          if operation == "embedding"
+                          else "deepseek/" + registration.profile["model"])
+        require(item.get("provider_model") == provider_model
+                and operation in registration.profile["operations"]
                 and type(value) in (int, float) and math.isfinite(value)
                 and value >= 0 and int(value) == value,
                 "diagnostic_metrics_invalid")
-        add(observed, item["operation"], "attempts" if counter.startswith("attempts.") else counter,
+        add(observed, operation, "attempts" if counter.startswith("attempts.") else counter,
             int(value))
     require(observed == expected, "diagnostic_metrics_receipt_mismatch")
 

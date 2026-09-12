@@ -185,22 +185,26 @@ cannot repair a failed cohort or substitute for Qualification and human review.
 The selected rapid-iteration model uses an explicit, separate path in the same
 runner. It does not change the Flash entrypoint or frozen Qualification cohort.
 Tooling work [#322](https://github.com/Wisdoverse/novelworld/issues/322) is not a
-live execution approval or evidence that H3/H4 passed. The real release-upgrade
-and pending-projection result remains [#230](https://github.com/Wisdoverse/novelworld/issues/230).
+live execution approval or evidence that H3/H4 passed. The bounded four-layer
+memory and release-upgrade result is owned by
+[#378](https://github.com/Wisdoverse/novelworld/issues/378); the broader H4
+release-upgrade and pending-projection result remains
+[#230](https://github.com/Wisdoverse/novelworld/issues/230).
 
 Before execution, independently review one private, secret-free registration
 with schema `vision-journey-registration-v1` or the separate prospective-summary
 Diagnostic schemas `vision-journey-registration-v2` and
-`vision-journey-registration-v3`. V1 has exactly these
+`vision-journey-registration-v3`, or the four-layer lifecycle schema
+`vision-journey-registration-v4`. V1 has exactly these
 fields: `schema`,
 `budget_id`, `hypothesis`, `candidate_git_sha`, `base_manifest_sha256`,
 `candidate_manifest_sha256`, `base_application_image_ids`,
 `candidate_application_image_ids`, `profile_sha256`, `product_fixture_sha256`,
 `prompt_schema_identities`, `limits`, `output_dir`, and `ledger_path`.
-V2 and V3 additionally require `network_subnet`: JSON null retains automatic Docker
-allocation; a string must be one canonical strict IPv4 RFC1918 /28. V1 rejects
-this extra field. The canonical registration hash binds this selection; it does
-not alter prompt/source identities or the fixed budget/product fixture.
+V2, V3, and V4 additionally require `network_subnet`: JSON null retains automatic
+Docker allocation; a string must be one canonical strict IPv4 RFC1918 /28. V1
+rejects this extra field. The canonical registration hash binds this selection;
+it does not alter prompt/source identities or the fixed budget/product fixture.
 
 For explicit selection, the supported qualification adapter derives
 `RELEASE_QUALIFICATION_SUBNET` only from the registration, clearing inherited
@@ -261,6 +265,27 @@ Terminal or unknown state, identity/fence drift, a second dispatch, or any other
 Mid result fails closed. This is durability and retrieval evidence; it does not
 prove semantic quality or interrupted-provider-call recovery. V3 does not
 authorize registration, spending, or use of an unapproved runtime artifact pair.
+
+V4 reuses the V2 product fixture and selects the checked-in
+`four-layer-journey-diagnostic-v2` budget profile. A separate protected OpenAI
+configuration must name the exact `https://api.openai.com` origin and
+`text-embedding-3-small` model; it is accepted only with V4 and is never copied
+into registration or public evidence. Its DeepSeek side uses the current
+`deepseek-v4-flash`; the frozen v1 profile retains its historical
+`deepseek-flash` identity. The base release completes 30 self-chat
+turns and exactly three fenced Mid summaries with matching 1,536-dimension Long
+rows. The same PostgreSQL volume and budget cross a strict-descendant release
+upgrade, then the candidate reaches 60 turns and six Mid/Long pairs. After Agent
+restart, a fresh login sends turn 61. Its trace must contain one content-free
+selection marker with positive Short, Mid, Long, and Permanent counts. Six
+windows make the Long selection independent of the latest-five direct Mid
+bucket after content de-duplication. Exact snapshots must survive upgrade and
+restart; export must contain 122 chat messages, six Mid, six Long, and the
+expected Permanent facts before scoped account deletion removes them. Sealed
+PostgreSQL receipts must reconcile with DeepSeek generation and OpenAI embedding
+metrics. V4 is a single prospectively approved Diagnostic, not provider quality,
+formal H3/H4 qualification, interrupted embedding recovery, or permission to
+spend.
 
 CI runs the real-schema regressions against its digest-pinned disposable
 `test-postgres` database. Local runs name the container with
