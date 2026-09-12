@@ -190,13 +190,14 @@ and pending-projection result remains [#230](https://github.com/Wisdoverse/novel
 
 Before execution, independently review one private, secret-free registration
 with schema `vision-journey-registration-v1` or the separate prospective-summary
-Diagnostic schema `vision-journey-registration-v2`. V1 has exactly these
+Diagnostic schemas `vision-journey-registration-v2` and
+`vision-journey-registration-v3`. V1 has exactly these
 fields: `schema`,
 `budget_id`, `hypothesis`, `candidate_git_sha`, `base_manifest_sha256`,
 `candidate_manifest_sha256`, `base_application_image_ids`,
 `candidate_application_image_ids`, `profile_sha256`, `product_fixture_sha256`,
 `prompt_schema_identities`, `limits`, `output_dir`, and `ledger_path`.
-V2 additionally requires `network_subnet`: JSON null retains automatic Docker
+V2 and V3 additionally require `network_subnet`: JSON null retains automatic Docker
 allocation; a string must be one canonical strict IPv4 RFC1918 /28. V1 rejects
 this extra field. The canonical registration hash binds this selection; it does
 not alter prompt/source identities or the fixed budget/product fixture.
@@ -246,6 +247,20 @@ summary call. V2 cannot be used for Flash, a Qualification cohort or the legacy
 character slice. Existing fixture bytes, failed ledgers and formal policies are
 unchanged; each Diagnostic still needs a new prospective approval and actual
 useful runtime artifact pair. Fixture validation precedes protected configuration.
+
+V3 reuses the exact V2 fixture and schedule for an upgrade where summary
+enrollment is already active on both releases. The seven base chats must retain
+sequences 1 through 7 across the upgrade, and candidate chats continue at 8
+through 18. Overall sequence 10, the third candidate chat, is the sole anchor;
+its source is exactly the seven base and first three candidate turns and their
+twenty messages. The runner binds the anchor and memory identity immediately,
+accepts only the existing fenced pending-to-saved states, requires exactly one
+logical summary call, and proves the same Mid result and provenance after
+restart. Full authority bytes must remain equal across this same-schema upgrade.
+Terminal or unknown state, identity/fence drift, a second dispatch, or any other
+Mid result fails closed. This is durability and retrieval evidence; it does not
+prove semantic quality or interrupted-provider-call recovery. V3 does not
+authorize registration, spending, or use of an unapproved runtime artifact pair.
 
 CI runs the real-schema regressions against its digest-pinned disposable
 `test-postgres` database. Local runs name the container with

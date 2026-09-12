@@ -1584,7 +1584,7 @@ network_guard() {
             self.assertEqual(trace.exists(), failure == "after")
             if trace.exists(): self.assertEqual(trace.read_text().splitlines(), ["mutation"])
 
-    def test_v2_fixture_selection_and_current_profile_identity(self):
+    def test_v2_v3_fixture_selection_and_current_profile_identity(self):
         self.assertEqual(CONTROL.digest((ROOT / "tests/e2e/fixtures/h4-journey-v1.json").read_bytes()),
                          "e01d35e1bdad197876aefce1ae32f43dc93be185f9987c247ef2525c8ed0f9a9")
         self.assertEqual(CONTROL.digest((ROOT / CONTROL.PROFILE_PATH).read_bytes()),
@@ -1601,7 +1601,9 @@ network_guard() {
         for key in old.keys() - {"manifest_version", "case_id"}:
             self.assertEqual(fixture[key], old[key])
         self.assertEqual(registration.binding["profile_sha256"], self.value["profile_sha256"])
-        for schema, digest in [("vision-journey-registration-v3", value["product_fixture_sha256"]),
+        v3 = {**value, "schema": CONTROL.REGISTRATION_SCHEMA_V3}
+        self.assertEqual(self.load(v3).value["schema"], CONTROL.REGISTRATION_SCHEMA_V3)
+        for schema, digest in [("vision-journey-registration-v4", value["product_fixture_sha256"]),
                                (CONTROL.REGISTRATION_SCHEMA_V2, self.value["product_fixture_sha256"])]:
             invalid = {**value, "schema": schema, "product_fixture_sha256": digest}
             with self.assertRaises(CONTROL.DiagnosticFailure):
@@ -1644,14 +1646,14 @@ network_guard() {
                                    "bash", evidence, slice_name, diagnostic_registration=registration)
                 config.assert_not_called()
 
-    def summary_fixture(self):
+    def summary_fixture(self, enrolled_base=False):
         # These are projected snapshot DTOs, not raw chat_messages table rows.
         scope = {key: str(uuid.uuid4()) for key in ("user_id", "novel_id", "character_id")}
         legacy, candidate = ([str(uuid.uuid4()) for _ in range(count)] for count in (7, 11))
         turns, messages = [], []
         memory_id = str(uuid.uuid4())
         for index, turn_id in enumerate(legacy + candidate):
-            sequence = index - 6 if index >= 7 else None
+            sequence = index + 1 if enrolled_base else (index - 6 if index >= 7 else None)
             row = {**scope, **CONTROL.SUMMARY_DEFAULTS, "id": turn_id, "status": "completed",
                    "reader_identity_type": "self", "reader_character_id": None,
                    "reader_identity": "reader", "chapter_context": 4,
@@ -1665,18 +1667,139 @@ network_guard() {
                                  "chapter_context": 4, "persona_source_chapter_high_water": 4})
         memory = {**scope, "id": memory_id, "layer": "mid", "importance": 6, "embedding": None,
                   "content": "bounded summary", "chapter_number": 4, "persona_source_chapter_high_water": 4}
-        def snapshot(count=10, state="saved"):
+        anchor_count = 3 if enrolled_base else 10
+        def snapshot(count=anchor_count, state="saved"):
             ids = set(legacy + candidate[:count])
             result = {"turns": [copy.deepcopy(row) for row in turns if row["id"] in ids],
                       "messages": [copy.deepcopy(row) for row in messages if row["turn_id"] in ids],
-                      "mid": [copy.deepcopy(memory)] if count >= 10 and state == "saved" else []}
-            if count >= 10:
-                anchor = result["turns"][16]
+                      "mid": [copy.deepcopy(memory)] if count >= anchor_count and state == "saved" else []}
+            if count >= anchor_count:
+                anchor = next(row for row in result["turns"] if row["summary_sequence"] == 10)
                 anchor["summary_state"] = state
                 if state == "pending": anchor["summary_next_attempt_at"] = "2030-01-01T00:00:00Z"
                 if state in ("failed", "unknown"): anchor["summary_failure_code"] = "dispatch_unknown"
             return result
         return scope, legacy, candidate, snapshot
+
+    def test_v3_existing_epoch_window_and_immediate_binding(self):
+        scope, legacy, candidate, snapshot = self.summary_fixture(enrolled_base=True)
+        self.assertIsNone(CONTROL.summary_window(
+            snapshot(2), legacy, candidate[:2], scope, enrolled_base=True))
+        saved = CONTROL.summary_window(
+            snapshot(3), legacy, candidate[:3], scope, enrolled_base=True)
+        self.assertEqual(saved["source_turn_ids"], legacy + candidate[:3])
+        self.assertEqual(len(saved["source_messages"]), 20)
+
+        journey = object.__new__(RUNNER.Journey)
+        journey.summary_base_enrolled = True
+        journey.summary_legacy_ids, journey.summary_candidate_ids = legacy, candidate[:3]
+        journey.summary_binding, journey.summary_claim_attempt = None, 0
+        self.assertIsNone(journey.validate_summary_window(snapshot(3, "pending"), **scope))
+        binding = journey.summary_binding
+        self.assertEqual(binding[0], candidate[2])
+        self.assertEqual(journey.validate_summary_window(snapshot(3), **scope), saved)
+        self.assertEqual(journey.summary_binding, binding)
+
+        for state in ("failed", "unknown"):
+            with self.assertRaisesRegex(CONTROL.DiagnosticFailure, "summary_window_terminal"):
+                CONTROL.summary_window(snapshot(3, state), legacy, candidate[:3], scope,
+                                       enrolled_base=True)
+        for mutation in ("base_gap", "base_bool", "base_float", "candidate_gap",
+                         "second_anchor", "binding_drift"):
+            data = snapshot(4)
+            if mutation == "base_gap": data["turns"][0]["summary_sequence"] = 2
+            elif mutation == "base_bool": data["turns"][0]["summary_sequence"] = True
+            elif mutation == "base_float": data["turns"][1]["summary_sequence"] = 2.0
+            elif mutation == "candidate_gap": data["turns"][7]["summary_sequence"] = 9
+            elif mutation == "second_anchor": data["turns"][10].update(
+                summary_state="saved", summary_memory_id=str(uuid.uuid4()), summary_claim_attempt=1)
+            else:
+                anchor = next(row for row in data["turns"] if row["summary_sequence"] == 10)
+                anchor["summary_memory_id"] = str(uuid.uuid4())
+            with self.assertRaises((CONTROL.DiagnosticFailure,
+                                    RUNNER.diagnostic.DiagnosticFailure,
+                                    RUNNER.QualificationFailure)):
+                if mutation == "binding_drift":
+                    journey.summary_candidate_ids = candidate[:4]
+                    journey.validate_summary_window(data, **scope)
+                else:
+                    CONTROL.summary_window(data, legacy, candidate[:4], scope,
+                                           enrolled_base=True)
+
+    def test_v2_pre_upgrade_accepts_absent_fields_while_v3_requires_enrollment(self):
+        scope, legacy, _, snapshot = self.summary_fixture()
+        old_base = snapshot(0)
+        for row in old_base["turns"]:
+            for key in CONTROL.SUMMARY_DEFAULTS:
+                row.pop(key)
+        journey = object.__new__(RUNNER.Journey)
+        journey.summary_legacy_ids = legacy
+        journey.summary_base_enrolled = False
+        journey.validate_summary_base(old_base, **scope)
+
+        scope, legacy, _, snapshot = self.summary_fixture(enrolled_base=True)
+        enrolled = snapshot(0)
+        journey.summary_legacy_ids = legacy
+        journey.summary_candidate_ids = []
+        journey.summary_base_enrolled = True
+        journey.summary_binding, journey.summary_claim_attempt = None, 0
+        journey.validate_summary_base(enrolled, **scope)
+        enrolled["turns"][0].pop("summary_sequence")
+        with self.assertRaises(RUNNER.diagnostic.DiagnosticFailure):
+            journey.validate_summary_base(enrolled, **scope)
+
+    def test_v3_immediate_or_delayed_save_keeps_one_window(self):
+        scope, legacy, candidate, snapshot = self.summary_fixture(enrolled_base=True)
+        for initial_state in ("saved", "pending"):
+            journey = object.__new__(RUNNER.Journey)
+            journey.root, journey.expected_model = ROOT, CONTROL.MODEL
+            journey.summary_base_enrolled = True
+            journey.summary_legacy_ids, journey.summary_candidate_ids = legacy, candidate[:5].copy()
+            journey.summary_binding, journey.summary_claim_attempt = None, 0
+            journey.summary_saved = None
+            journey.private_report, journey.report = {}, {"journey": {}}
+            journey.product_input = {"post_adoption_chats": ["fixed"] * 5}
+            observations = [initial_state]
+            def observe(*args, **kwargs):
+                state = observations.pop(0) if observations else "saved"
+                return snapshot(len(journey.summary_candidate_ids), state)
+            metrics = (f'novelworld_llm_requests_started_total{{service="agent-service",contract="llm-observability-v1",provider="deepseek",'
+                       f'model="{CONTROL.MODEL}",operation="memory_summary",mode="sync"}} 1\n').encode()
+            with self.subTest(initial_state=initial_state), \
+                    mock.patch.object(journey, "authority_snapshot", return_value=json.dumps(
+                        {"chat_turns": [], "chat_messages": [], "world_state": {"turn": 11}})), \
+                    mock.patch.object(journey, "summary_snapshot", side_effect=observe), \
+                    mock.patch.object(journey, "service_metrics", return_value=metrics), \
+                    mock.patch.object(journey, "internal_character_context", return_value={"world_revision": [0] * 32}), \
+                    mock.patch.object(journey, "assert_chat_revision"), \
+                    mock.patch.object(journey, "chat", side_effect=lambda *args: {
+                        "turn_id": candidate[len(journey.summary_candidate_ids)]}) as chat:
+                journey.complete_prospective_summary("synthetic-token", **scope)
+                self.assertEqual(chat.call_count, 5)
+                self.assertEqual(journey.summary_binding[0], candidate[2])
+                self.assertEqual(journey.summary_saved["source_turn_ids"], legacy + candidate[:3])
+
+    def test_v3_restart_rejects_fence_selection_or_second_dispatch(self):
+        scope, legacy, candidate, snapshot = self.summary_fixture(enrolled_base=True)
+        for mutation in ("fence", "selection", "extra_dispatch"):
+            journey = object.__new__(RUNNER.Journey)
+            journey.summary_base_enrolled = True
+            journey.summary_legacy_ids, journey.summary_candidate_ids = legacy, candidate[:10].copy()
+            journey.summary_binding, journey.summary_claim_attempt = None, 0
+            journey.summary_saved = CONTROL.summary_window(
+                snapshot(10), legacy, candidate[:10], scope, enrolled_base=True)
+            journey.private_report, journey.report = {}, {"journey": {}}
+            value = snapshot(11)
+            if mutation == "fence":
+                next(row for row in value["turns"] if row["summary_sequence"] == 10)[
+                    "summary_claim_attempt"] += 1
+            with mock.patch.object(journey, "summary_snapshot", return_value=value), \
+                    mock.patch.object(journey, "require_summary_calls",
+                                      side_effect=RUNNER.QualificationFailure("summary_logical_dispatch_mismatch")
+                                      if mutation == "extra_dispatch" else None):
+                with self.assertRaises(RUNNER.QualificationFailure):
+                    journey.verify_summary_restart(**scope, resumed_turn_id=candidate[10],
+                                                    selected=2 if mutation == "selection" else 1)
 
     def test_v2_cross_schema_only_normalization_and_exact_window_negatives(self):
         scope, legacy, candidate, snapshot = self.summary_fixture()
@@ -1694,6 +1817,7 @@ network_guard() {
         self.assertEqual(saved["source_turn_ids"], candidate[:10])
         self.assertEqual(len(saved["source_messages"]), 20)
         mutations = [lambda data: data["turns"][0].update(summary_sequence=1),
+                     lambda data: data["turns"][0].pop("summary_sequence"),
                      lambda data: data["turns"][0].pop("summary_state"),
                      lambda data: data["turns"][7].update(summary_sequence=2),
                      lambda data: data["turns"][7].update(reader_identity_type="character"),
