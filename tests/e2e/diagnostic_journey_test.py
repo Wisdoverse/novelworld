@@ -258,6 +258,19 @@ class DiagnosticJourneyTest(unittest.TestCase):
             prompt_schema_identities={"canon_prompt": "test-version"}, now=self.now,
         )
 
+    def v4_value(self):
+        value = copy.deepcopy(self.value)
+        value.update(
+            schema=CONTROL.REGISTRATION_SCHEMA_V4,
+            network_subnet=None,
+            profile_sha256=CONTROL.digest((ROOT / CONTROL.PROFILE_PATH_V2).read_bytes()),
+            product_fixture_sha256=CONTROL.digest(
+                (ROOT / "tests/e2e/fixtures/h4-journey-v2.json").read_bytes()
+            ),
+        )
+        value["limits"]["profile"] = CONTROL.PROFILE_V2
+        return value
+
     def test_registration_preserves_exact_environment_and_immutable_value(self):
         registration = self.load()
         environment = registration.environment()
@@ -268,6 +281,249 @@ class DiagnosticJourneyTest(unittest.TestCase):
         modified["limits"]["max_attempts"] = 100
         self.assertEqual(registration.value, self.value)
         self.assertNotIn("api_key", CONTROL.canonical(registration.value).decode())
+
+    def test_v4_binds_embedding_profile_and_reconciles_zero_output_receipt(self):
+        value = self.v4_value()
+        registration = self.load(value)
+        self.assertEqual(registration.binding, {
+            "contract": CONTROL.CONTRACT_V2,
+            "profile": CONTROL.PROFILE_V2,
+            "profile_sha256": value["profile_sha256"],
+            "budget_id": value["budget_id"],
+        })
+        self.assertEqual(registration.environment()["LLM_DIAGNOSTIC_PROFILE"], CONTROL.PROFILE_V2)
+        self.assertEqual(registration.profile["model"], CONTROL.MEMORY_MODEL)
+        attempt = str(uuid.uuid4())
+        receipt = {
+            "budget_id": value["budget_id"], "attempt_id": attempt, "ordinal": 1,
+            "operation": "embedding", "output_limit": 0,
+            "reservation_tokens": 8192, "reservation_cost_micro_cny": 8192,
+            "settled": True, "settlement_model": "text-embedding-3-small",
+            "input_tokens": 3, "output_tokens": 0, "cached_input_tokens": None,
+        }
+        budget = {
+            **registration.binding,
+            "max_attempts": 5, "max_tokens": 20000000,
+            "max_cost_micro_cny": 35000000, "expires_at": "2030-01-01T01:00:00Z",
+            "charged_attempts": 1, "charged_tokens": 3,
+            "charged_cost_micro_cny": 3, "sealed": True,
+        }
+        self.assertEqual(
+            CONTROL.reconcile_snapshot(registration, {"budget": budget, "receipts": [receipt]}),
+            {"charged": {"attempts": 1, "tokens": 3, "cost_micro_cny": 3},
+             "settled_attempts": 1, "unresolved_attempts": 0, "sealed": True},
+        )
+        metrics = self.directory / "embedding.prom"
+        labels = ('service="agent-service",provider="openai",'
+                  'model="text-embedding-3-small"')
+        metrics.write_text(
+            f'novelworld_embedding_attempts_total{{{labels},status="success"}} 1\n'
+            f'novelworld_embedding_requests_total{{{labels},status="success"}} 1\n'
+            f'novelworld_embedding_tokens_total{{{labels},type="input"}} 3\n'
+            f'novelworld_embedding_billable_tokens_total{{{labels},'
+            'class="uncached_input",usage_key="test"} 3\n'
+        )
+        summary = RUNNER.summarize_metrics(
+            ROOT, [("embedding", metrics)], include_embedding=True
+        )
+        CONTROL.reconcile_metrics(
+            registration, {"budget": budget, "receipts": [receipt]}, summary
+        )
+        started = (
+            f'novelworld_embedding_requests_started_total{{{labels}}} 2\n'
+        ).encode()
+        self.assertEqual(
+            RUNNER.provider_started_delta(
+                ROOT, b"", started, service="agent-service", operation="embedding"
+            ),
+            2,
+        )
+        self.assertEqual(
+            RUNNER.provider_started_delta(
+                ROOT, b"", started, service="agent-service", include_embedding=True
+            ),
+            2,
+        )
+        for field, replacement in (
+            ("settlement_model", CONTROL.MODEL),
+            ("output_limit", 1),
+            ("reservation_tokens", 8191),
+        ):
+            invalid = copy.deepcopy(receipt)
+            invalid[field] = replacement
+            with self.assertRaises(CONTROL.DiagnosticFailure):
+                CONTROL.reconcile_snapshot(
+                    registration, {"budget": budget, "receipts": [invalid]}
+                )
+
+        journey = object.__new__(RUNNER.Journey)
+        journey.diagnostic_registration = registration
+        journey.internal_service_token = "synthetic-internal-token"
+        journey.prefix = "nwq-abcdef1234"
+        journey.diagnostic_seal_attempted = False
+        captured = []
+
+        def owner_control(command, *, stdin, **_kwargs):
+            captured.append((command, stdin.decode()))
+            return CONTROL.canonical({"binding": registration.binding, "sealed": True})
+
+        with mock.patch.object(
+            RUNNER.diagnostic, "bounded_command", side_effect=owner_control
+        ):
+            journey.diagnostic_owner_control(seal=True)
+        self.assertIn(
+            "X-LLM-Budget-Contract: " + CONTROL.CONTRACT_V2,
+            captured[0][1],
+        )
+
+    def test_embedding_config_and_four_layer_log_marker_are_strict_and_secret_free(self):
+        path = self.directory / "embedding.json"
+        config = {
+            "provider": "openai", "api_url": "https://api.openai.com",
+            "model": "text-embedding-3-small", "api_key": "synthetic-test-key",
+        }
+        path.write_text(json.dumps(config))
+        self.assertEqual(RUNNER.load_embedding_config(path), config)
+        config["model"] = "other"
+        path.write_text(json.dumps(config))
+        with self.assertRaises(RUNNER.QualificationFailure):
+            RUNNER.load_embedding_config(path)
+
+        trace_id = str(uuid.uuid4())
+        marker = json.dumps({
+            "fields": {"message": "memory lifecycle context selected",
+                       "short": 10, "mid": 5, "long": 1, "permanent": 10},
+            "span": {"trace_id": trace_id},
+        })
+        self.assertEqual(RUNNER.selected_layers_from_logs(marker, trace_id), {
+            "short": 10, "mid": 5, "long": 1, "permanent": 10,
+        })
+        with self.assertRaises(RUNNER.QualificationFailure):
+            RUNNER.selected_layers_from_logs(marker, str(uuid.uuid4()))
+
+        embedding_marker = json.dumps({"fields": {
+            "message": "LLM response model observed", "provider": "openai",
+            "configured_model": "text-embedding-3-small",
+            "response_model": "text-embedding-3-small", "operation": "embedding",
+            "mode": "sync",
+        }})
+        observations = RUNNER.response_models_from_logs(
+            embedding_marker,
+            "agent-service",
+            expected_embedding_model="text-embedding-3-small",
+        )
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(observations[0]["response_model"], "text-embedding-3-small")
+        embedding_metrics = self.directory / "embedding-model.prom"
+        embedding_metrics.write_text(
+            'novelworld_embedding_requests_total{service="agent-service",'
+            'provider="openai",model="text-embedding-3-small",status="success"} 1\n'
+        )
+        RUNNER.verify_response_models(
+            ROOT,
+            [("embedding", embedding_metrics)],
+            observations,
+            [CONTROL.MODEL],
+            expected_embedding_model="text-embedding-3-small",
+        )
+        with self.assertRaisesRegex(
+            RUNNER.QualificationFailure, "response_model_observation_count_mismatch"
+        ):
+            RUNNER.verify_response_models(
+                ROOT,
+                [("embedding", embedding_metrics)],
+                [],
+                [CONTROL.MODEL],
+                expected_embedding_model="text-embedding-3-small",
+            )
+        with self.assertRaises(RUNNER.QualificationFailure):
+            RUNNER.response_models_from_logs(
+                embedding_marker.replace('"openai"', '"deepseek"'),
+                "agent-service",
+                expected_embedding_model="text-embedding-3-small",
+            )
+
+    def test_four_layer_snapshot_requires_exact_windows_vectors_and_sequences(self):
+        scope = [str(uuid.uuid4()) for _ in range(3)]
+        mids = [{
+            "id": str(uuid.uuid4()), "layer": "mid", "content": f"summary-{index}",
+            "importance": 6, "chapter_number": 4,
+            "persona_source_chapter_high_water": 4, "embedding_dimensions": None,
+        } for index in range(2)]
+        longs = [{
+            **memory, "id": str(uuid.uuid4()), "layer": "long", "embedding_dimensions": 1536,
+        } for memory in mids]
+        turns = [{
+            "id": str(uuid.uuid4()), "status": "completed", "summary_sequence": sequence,
+            "summary_state": "saved" if sequence % 10 == 0 else "none",
+            "summary_memory_id": mids[sequence // 10 - 1]["id"] if sequence % 10 == 0 else None,
+            "chapter_context": 4, "persona_source_chapter_high_water": 4,
+            "reader_identity": "reader", "reader_identity_type": "self",
+            "reader_character_id": None,
+        } for sequence in range(1, 21)]
+        messages = [{
+            "id": str(uuid.uuid4()), "turn_id": turn["id"], "role": role,
+            "content": f"{role}-{turn['summary_sequence']}", "reader_identity": "reader",
+            "chapter_context": 4,
+        } for turn in turns for role in ("user", "character")]
+        permanent = {
+            "id": str(uuid.uuid4()), "layer": "permanent", "content": "fact",
+            "importance": 8, "chapter_number": 4,
+            "persona_source_chapter_high_water": 4, "embedding_dimensions": None,
+        }
+        for memory in longs:
+            memory["embedding_text"] = "[" + ",".join(["0.1"] * 1536) + "]"
+        for memory in [*mids, permanent]:
+            memory["embedding_text"] = None
+        value = {
+            "turns": turns, "messages": messages,
+            "memories": [*mids, *longs, permanent],
+        }
+        journey = object.__new__(RUNNER.Journey)
+        journey.db_scalar = lambda _sql: json.dumps(value)
+        snapshot = journey.four_layer_snapshot(*scope, 20)
+        self.assertEqual(len(snapshot["mid"]), 2)
+        self.assertEqual(len(snapshot["long"]), 2)
+        self.assertEqual(snapshot["permanent_count"], 1)
+        self.assertNotIn("summary-0", json.dumps(snapshot))
+        self.assertNotIn("user-1", json.dumps(snapshot))
+        messages[0]["content"] = "changed"
+        self.assertNotEqual(journey.four_layer_snapshot(*scope, 20), snapshot)
+        messages[0]["content"] = "user-1"
+        permanent["content"] = "changed"
+        self.assertNotEqual(journey.four_layer_snapshot(*scope, 20), snapshot)
+        permanent["content"] = "fact"
+        longs[0]["embedding_text"] = "[" + ",".join(["0.2"] * 1536) + "]"
+        self.assertNotEqual(journey.four_layer_snapshot(*scope, 20), snapshot)
+        longs[0]["embedding_text"] = "[" + ",".join(["0.1"] * 1536) + "]"
+        turns[0]["persona_source_chapter_high_water"] = 3
+        self.assertNotEqual(journey.four_layer_snapshot(*scope, 20), snapshot)
+        turns[0]["persona_source_chapter_high_water"] = 4
+
+        value["memories"].remove(longs[-1])
+        self.assertIsNone(journey.four_layer_snapshot(*scope, 20))
+        value["memories"] = [*mids, *longs, permanent]
+        turns[9]["summary_state"] = "unknown"
+        with self.assertRaisesRegex(RUNNER.QualificationFailure, "four_layer_summary_terminal"):
+            journey.four_layer_snapshot(*scope, 20)
+        turns[9]["summary_state"] = "saved"
+        turns[0]["summary_sequence"] = 2
+        with self.assertRaisesRegex(RUNNER.QualificationFailure, "four_layer_sequence_invalid"):
+            journey.four_layer_snapshot(*scope, 20)
+
+    def test_four_layer_continuation_has_one_fixed_monotonic_schedule(self):
+        journey = object.__new__(RUNNER.Journey)
+        journey.four_layer = True
+        seen = []
+        journey.internal_character_context = lambda *_: {"world_revision": [0] * 32}
+        journey.chat = lambda *args: seen.append(args[-1]) or {"turn_id": str(uuid.uuid4())}
+        journey.assert_chat_revision = lambda _turn_id, revision: self.assertEqual(revision, [0] * 32)
+        self.assertEqual(journey.continue_chat_to("token", *[str(uuid.uuid4()) for _ in range(3)], 7, 10), 10)
+        self.assertEqual(len(seen), 3)
+        self.assertIn("第 8 轮", seen[0])
+        self.assertIn("第 10 轮", seen[-1])
+        with self.assertRaisesRegex(RUNNER.QualificationFailure, "four_layer_schedule_invalid"):
+            journey.continue_chat_to("token", *[str(uuid.uuid4()) for _ in range(3)], 60, 61)
 
     def test_registration_rejects_changed_reviewed_identity(self):
         approved = CONTROL.digest(CONTROL.canonical(self.value))
