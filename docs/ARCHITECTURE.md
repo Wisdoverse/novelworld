@@ -1,8 +1,10 @@
 # NovelWorld Architecture
 
-This is the current high-level boundary map. [`AGENTS.md`](../AGENTS.md) owns
-the detailed repository layout and coding rules; runtime code, migrations, and
-tests own current behavior. Product support and evidence limits are in the
+This is the current high-level boundary map. [`AGENTS.md`](../AGENTS.md) is the
+task router and hard-constraint entrypoint; this document and
+[`CONTRIBUTING.md`](../CONTRIBUTING.md) own the detailed architecture and
+engineering rules. Runtime code, migrations, and tests own current behavior.
+Product support and evidence limits are in the
 [`product contract`](./PRODUCT_CONTRACT.md).
 
 ```text
