@@ -13,7 +13,8 @@ requires a separate immutable registration and enforceable budget under
 | Policy | `extraction-quality-v4` |
 | Corpus | `h1-synthetic-v6`, `tools/h1-eval/corpus/v6.json` |
 | Rubric | `h1-extraction-v4` |
-| Judge prompt | `h1-semantic-judge-v9` |
+| Judge prompt | `h1-semantic-judge-v10` |
+| Bounded Diagnostic profile / model | `vision-diagnostic-budget-v3` / `deepseek-v4-flash` |
 | Public report / private response envelope | 4 / 2 |
 
 The new corpus copies `corpus/v1.json`, changing only policy/corpus/rubric
