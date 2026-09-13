@@ -796,9 +796,41 @@ class DiagnosticJourneyTest(unittest.TestCase):
         self.assertIn(b"REPEATABLE READ READ ONLY", sql)
         self.assertIn(b"lock_timeout = '2s'", sql)
         self.assertIn(b"statement_timeout = '5s'", sql)
+        v5_prefix = "nwq-" + "a" * 32
+        self.assertIn(
+            v5_prefix + "-postgres",
+            CONTROL.snapshot_command(v5_prefix, self.value["budget_id"])[0],
+        )
         for prefix, identifier in (("novel", self.value["budget_id"]), ("nwq-abcdef1234", "';DROP TABLE users;")):
             with self.assertRaises(CONTROL.DiagnosticFailure):
                 CONTROL.snapshot_command(prefix, identifier)
+
+    def test_v5_checkpoint_uses_registration_bound_project(self):
+        self.value = self.v5_value()
+        journey = self.journey()
+        registration = journey.diagnostic_registration
+        snapshot = {
+            "budget": {
+                **registration.binding,
+                **{key: value for key, value in self.value["limits"].items()
+                   if key != "profile"},
+                "charged_attempts": 0,
+                "charged_tokens": 0,
+                "charged_cost_micro_cny": 0,
+                "sealed": False,
+            },
+            "receipts": [],
+        }
+        calls = []
+
+        def bounded(command, **_kwargs):
+            calls.append(command)
+            return CONTROL.canonical(snapshot)
+
+        with mock.patch.object(RUNNER.diagnostic, "bounded_command", side_effect=bounded):
+            aggregate = journey.diagnostic_checkpoint("initial")
+        self.assertEqual(aggregate["charged"]["attempts"], 0)
+        self.assertIn(journey.project + "-postgres", calls[0])
 
     def journey(self):
         for path, marker in ((self.base, "b"), (self.candidate, "a")):

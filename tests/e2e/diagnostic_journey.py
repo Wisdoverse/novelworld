@@ -777,7 +777,8 @@ def bounded_command(command: list[str], *, stdin: bytes = b"", timeout: float = 
 
 
 def snapshot_command(prefix: str, budget_id: str) -> tuple[list[str], bytes]:
-    require(bool(re.fullmatch(r"nwq-[a-f0-9]{10}", prefix)) and uuid4(budget_id),
+    require(bool(re.fullmatch(r"nwq-(?:[a-f0-9]{10}|[a-f0-9]{32})", prefix))
+            and uuid4(budget_id),
             "diagnostic_snapshot_target_invalid")
     # psql quotes the UUID variable as a SQL literal; never interpolate SQL input.
     sql = b'''BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
