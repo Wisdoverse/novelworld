@@ -19,7 +19,7 @@ use agent_service::{
             parse_cache_mode, validate_redis_url, AlwaysReadyProbe, CacheMode, NoopMessageCache,
             RedisCache, RedisReadinessProbe,
         },
-        embedding::{default_model_for_api, EmbeddingAdapter, NoopEmbeddingGenerator},
+        embedding::{EmbeddingAdapter, EmbeddingConfig, NoopEmbeddingGenerator},
         http::{narrative_client::NarrativeServiceClient, novel_client::NovelServiceClient},
         llm::LlmAdapter,
         persistence::{
@@ -119,9 +119,6 @@ async fn run_body() -> Result<()> {
         };
 
         // Shared LLM client (from llm-client workspace crate)
-        let api_key = std::env::var("LLM_API_KEY").unwrap_or_default();
-        let api_url =
-            std::env::var("LLM_API_URL").unwrap_or_else(|_| "https://api.openai.com".into());
         let llm_base = Arc::new(llm_client::RuntimeLlmClient::from_env()?);
 
         // LLM adapter for chat (TextSummarizer + handler direct calls)
@@ -154,61 +151,42 @@ async fn run_body() -> Result<()> {
         let world_context: Arc<dyn domain::ports::WorldContextPort> = narrative_client.clone();
         let narrative_readiness: Arc<dyn domain::ports::ReadinessProbe> = narrative_client;
 
-        // Embedding adapter — auto-select model based on provider
+        // Embeddings use a separate provider boundary from generation.
         let diagnostic_profile = std::env::var("LLM_DIAGNOSTIC_PROFILE")
             .unwrap_or_else(|_| "vision-journey-diagnostic-v1".into());
         let memory_diagnostic = diagnostic_profile == "four-layer-journey-diagnostic-v2";
-        let embed_api_key = std::env::var("EMBEDDING_API_KEY").unwrap_or_else(|_| {
-            if memory_diagnostic {
-                String::new()
-            } else {
-                api_key.clone()
-            }
-        });
-        let embed_api_url = std::env::var("EMBEDDING_API_URL").unwrap_or_else(|_| {
-            if memory_diagnostic {
-                String::new()
-            } else {
-                api_url.clone()
-            }
-        });
-        let configured_embed_model = std::env::var("EMBEDDING_MODEL")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
-        let embed_model = configured_embed_model.unwrap_or_else(|| {
-            if memory_diagnostic {
-                String::new()
-            } else {
-                default_model_for_api(&embed_api_url)
-            }
-        });
-        if memory_diagnostic
-            && (embed_api_key.is_empty()
-                || embed_api_url != "https://api.openai.com"
-                || embed_model != "text-embedding-3-small")
-        {
-            anyhow::bail!("four-layer Diagnostic embedding configuration mismatch");
-        }
-
-        let embedding: Arc<dyn domain::ports::EmbeddingGenerator> =
-            if embed_api_key.is_empty() && !embed_api_url.contains("localhost") {
-                tracing::info!(
-                    "No embedding API key — semantic search disabled, using other memory layers"
+        let embedding_config = EmbeddingConfig::from_environment()?;
+        let embedding: Arc<dyn domain::ports::EmbeddingGenerator> = match embedding_config {
+            None => {
+                anyhow::ensure!(
+                    !memory_diagnostic,
+                    "four-layer Diagnostic embedding configuration mismatch"
                 );
+                tracing::info!("No embedding provider configured; semantic search is disabled");
                 Arc::new(NoopEmbeddingGenerator)
-            } else {
-                let embed_provider = if memory_diagnostic { "openai" } else { "embed" };
+            }
+            Some(config) => {
+                if memory_diagnostic
+                    && (config.provider != "openai"
+                        || config.api_key.is_empty()
+                        || config.api_url != "https://api.openai.com"
+                        || config.model != "text-embedding-3-small")
+                {
+                    anyhow::bail!("four-layer Diagnostic embedding configuration mismatch");
+                }
                 let embed_base = Arc::new(llm_client::LlmClient::new().with_openai_compatible(
-                    embed_provider,
-                    &embed_api_key,
-                    &embed_api_url,
+                    &config.provider,
+                    &config.api_key,
+                    &config.api_url,
                 ));
-                tracing::info!("Embedding model: {}", embed_model);
-                Arc::new(EmbeddingAdapter::new(
-                    embed_base,
-                    format!("{embed_provider}/{embed_model}"),
-                ))
-            };
+                tracing::info!(
+                    embedding_provider = %config.provider,
+                    embedding_model = %config.model,
+                    "Embedding provider configured"
+                );
+                Arc::new(EmbeddingAdapter::new(embed_base, config.qualified_model()))
+            }
+        };
 
         // Memory manager (4-layer memory pyramid)
         let memory_manager = Arc::new(MemoryManager {

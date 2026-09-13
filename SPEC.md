@@ -1552,9 +1552,10 @@ Runtime variables (some are required only when their integration is enabled):
 | `INTERNAL_SERVICE_TOKEN` | Gateway, User, Novel, Agent, Narrative | Authenticates internal runtime configuration and account-export reads |
 | `IMAGE_GEN_API_URL` | Novel | Image generation API base URL |
 | `IMAGE_GEN_API_KEY` | Novel | Image generation API key |
-| `EMBEDDING_API_URL` | Agent | Embedding API base URL |
-| `EMBEDDING_API_KEY` | Agent | Embedding API key |
-| `EMBEDDING_MODEL` | Agent | Embedding model identifier |
+| `EMBEDDING_PROVIDER` | Agent | Embedding provider identity; required with URL and model |
+| `EMBEDDING_API_URL` | Agent | OpenAI-compatible local or external embedding API base URL |
+| `EMBEDDING_API_KEY` | Agent | Optional embedding API key; omitted for isolated no-auth local endpoints |
+| `EMBEDDING_MODEL` | Agent | Embedding model identifier; responses must contain 1536 finite values |
 | `S3_ENDPOINT` | Novel | S3-compatible endpoint URL |
 | `S3_BUCKET` | Novel | Bucket name |
 | `S3_ACCESS_KEY` | Novel | Access key ID |
