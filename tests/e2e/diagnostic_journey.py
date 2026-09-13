@@ -36,6 +36,7 @@ REGISTRATION_SCHEMA_V4 = "vision-journey-registration-v4"
 REGISTRATION_SCHEMA_V5 = "vision-journey-registration-v5"
 LEDGER_SCHEMA = "vision-journey-ledger-v1"
 PRESTART_SCHEMA = "vision-journey-prestart-v1"
+PRESTART_SCHEMA_V2 = "vision-journey-prestart-v2"
 PROFILE_PATH = Path("tools/llm-budget/diagnostic-v1.json")
 PROFILE_PATH_V2 = Path("tools/llm-budget/diagnostic-v2.json")
 PROFILE_PATH_V3 = Path("tools/llm-budget/diagnostic-v3.json")
@@ -561,12 +562,26 @@ class DiagnosticLedger:
             self.close()
             raise
 
-    def freeze_prestart(self, project: str, code: str) -> None:
+    def freeze_prestart(
+        self,
+        project: str,
+        codes: list[str],
+        evidence_sha256: str | None,
+        *,
+        cleanup_proven: bool,
+    ) -> None:
         """Block reuse after an interrupted Docker mutation without claiming Started."""
         require(self.descriptor is None and not self.created,
                 "diagnostic_registration_already_started")
         require(bool(re.fullmatch(r"nwq-(?:[a-f0-9]{10}|[a-f0-9]{32})", project))
-                and bool(re.fullmatch(r"[a-z][a-z0-9_]{0,100}", code)),
+                and isinstance(codes, list) and bool(codes) and len(codes) <= 3
+                and len(codes) == len(set(codes))
+                and all(isinstance(code, str)
+                        and re.fullmatch(r"[a-z][a-z0-9_]{0,100}", code)
+                        for code in codes)
+                and (evidence_sha256 is None or bool(re.fullmatch(
+                    r"[0-9a-f]{64}", evidence_sha256)))
+                and type(cleanup_proven) is bool,
                 "diagnostic_prestart_freeze_invalid")
         path = Path(self.registration.value["ledger_path"])
         try:
@@ -577,12 +592,17 @@ class DiagnosticLedger:
             raise DiagnosticFailure("diagnostic_registration_already_started") from error
         try:
             self._write({
-                "schema": PRESTART_SCHEMA,
+                "schema": PRESTART_SCHEMA_V2,
                 "evidence_class": "Diagnostic",
                 "registration_sha256": self.registration.sha256,
                 "status": "Frozen",
                 "at": datetime.now(timezone.utc).isoformat(),
-                "failure_code": code,
+                "failure_codes": codes,
+                "prestart_evidence_file": (
+                    "prestart-failure-private.json" if evidence_sha256 else None
+                ),
+                "prestart_evidence_sha256": evidence_sha256,
+                "cleanup_proven": cleanup_proven,
                 "project": project,
             })
             sync_directory(path.parent)

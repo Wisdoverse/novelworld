@@ -971,7 +971,7 @@ class DiagnosticJourneyTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(journey, name, side_effect=function))
         return events
 
-    def test_v5_prestart_precedes_started_and_failure_uses_no_output_cleanup(self):
+    def test_v5_prestart_precedes_started_and_failure_freezes_without_provider(self):
         self.value = self.v5_value()
         journey = self.journey()
         self.assertTrue(journey.local_embedding)
@@ -1011,6 +1011,9 @@ class DiagnosticJourneyTest(unittest.TestCase):
         self.value["budget_id"] = str(uuid.uuid4())
         self.value["ledger_path"] = str(self.directory / (self.value["budget_id"] + ".jsonl"))
         journey = self.journey()
+        prestart_log = self.directory / "prestart-release-adopt.log"
+        prestart_log.write_bytes(b"provider API key: test-only\n")
+        journey.prestart_release_log = prestart_log
         cleaned = []
         with mock.patch.object(
             journey, "prestart_v5", side_effect=RUNNER.QualificationFailure("probe_failed")
@@ -1021,9 +1024,25 @@ class DiagnosticJourneyTest(unittest.TestCase):
         ) as report:
             self.assertEqual(RUNNER.run_diagnostic(journey), 1)
         self.assertEqual(cleaned, [True])
-        self.assertEqual(list(self.output.iterdir()), [])
+        evidence = (self.output / "prestart-failure-private.json").read_bytes()
+        private = json.loads(evidence)
+        self.assertEqual(private["primary_failure_code"], "probe_failed")
+        self.assertEqual(private["prestart_release_log"], {
+            "byte_count": len(prestart_log.read_bytes()),
+            "sha256": CONTROL.digest(prestart_log.read_bytes()),
+            "truncated": False,
+        })
+        self.assertNotIn("test-only", evidence.decode())
+        row = json.loads(Path(self.value["ledger_path"]).read_text())
+        self.assertEqual(row["schema"], CONTROL.PRESTART_SCHEMA_V2)
+        self.assertEqual(row["failure_codes"], ["probe_failed"])
+        self.assertEqual(row["prestart_evidence_file"], "prestart-failure-private.json")
+        self.assertEqual(row["prestart_evidence_sha256"], CONTROL.digest(evidence))
+        self.assertTrue(row["cleanup_proven"])
         execute.assert_not_called()
         report.assert_not_called()
+        with self.assertRaises(CONTROL.DiagnosticFailure):
+            self.load()
 
         for path in self.output.iterdir():
             path.unlink()
@@ -1054,10 +1073,36 @@ class DiagnosticJourneyTest(unittest.TestCase):
             self.assertEqual(RUNNER.run_diagnostic(journey), 1)
         docker.assert_not_called()
         row = json.loads(Path(self.value["ledger_path"]).read_text())
-        self.assertEqual(row["schema"], CONTROL.PRESTART_SCHEMA)
+        self.assertEqual(row["schema"], CONTROL.PRESTART_SCHEMA_V2)
         self.assertEqual(row["status"], "Frozen")
         self.assertEqual(row["project"], journey.project)
+        self.assertEqual(row["failure_codes"], [
+            "interrupted", "diagnostic_docker_outcome_unknown",
+        ])
+        self.assertFalse(row["cleanup_proven"])
+        evidence = (self.output / "prestart-failure-private.json").read_bytes()
+        self.assertEqual(row["prestart_evidence_sha256"], CONTROL.digest(evidence))
         self.assertNotIn("registration", row)
+        with self.assertRaises(CONTROL.DiagnosticFailure):
+            self.load()
+
+    def test_v5_prestart_evidence_write_failure_still_freezes(self):
+        self.value = self.v5_value()
+        journey = self.journey()
+        with mock.patch.object(
+            journey, "prestart_v5", side_effect=RUNNER.QualificationFailure("probe_failed")
+        ), mock.patch.object(
+            journey, "persist_prestart_failure", side_effect=OSError("synthetic")
+        ), mock.patch.object(journey, "prestart_cleanup_v5"):
+            self.assertEqual(RUNNER.run_diagnostic(journey), 1)
+        row = json.loads(Path(self.value["ledger_path"]).read_text())
+        self.assertEqual(row["failure_codes"], [
+            "probe_failed", "diagnostic_prestart_evidence_unproven",
+        ])
+        self.assertIsNone(row["prestart_evidence_file"])
+        self.assertIsNone(row["prestart_evidence_sha256"])
+        self.assertTrue(row["cleanup_proven"])
+        self.assertNotEqual(row["status"], "Started")
         with self.assertRaises(CONTROL.DiagnosticFailure):
             self.load()
 
