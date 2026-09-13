@@ -33,7 +33,8 @@ characters, and explore a new timeline as an original player.
 - **Keep your journey.** Committed conversations, choices, and world turns are
   stored in PostgreSQL so you can return to them.
 - **Choose your setup.** Run a private Docker server or try a portable desktop
-  build. Configure a DeepSeek/OpenAI-compatible provider when you need AI features.
+  build. Configure DeepSeek for generation and optionally use a local or external
+  OpenAI-compatible embedding endpoint for semantic memory.
 
 ## Quick Start
 
@@ -163,7 +164,7 @@ flowchart TD
 | Frontend | React, TypeScript, Tailwind CSS; Feature-Sliced Design |
 | Backend | Five Rust/Axum services; DDD layers and HTTP service boundaries |
 | State | PostgreSQL is authoritative; Redis is an optional projection |
-| Model integration | OpenAI-compatible requests, SSE chat streaming, bounded retries |
+| Model integration | DeepSeek generation, local or external OpenAI-compatible embeddings, SSE streaming, bounded retries |
 | Deployment | Docker Compose server or experimental Tauri desktop bundle |
 
 The current topology is private `single-node-v1`, with a shared database.

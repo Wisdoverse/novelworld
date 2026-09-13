@@ -191,7 +191,7 @@ def write_once(path, data):
 
 
 def state_paths(state, project, root):
-    require(re.fullmatch(r"nwq-[a-f0-9]{10}", project) is not None)
+    require(re.fullmatch(r"nwq-(?:[a-f0-9]{10}|[a-f0-9]{32})", project) is not None)
     require(state.is_absolute() and state == state.resolve() and state != root.resolve()
             and root.resolve() not in state.parents, "qualification_network_state_must_be_external")
     if state.exists():

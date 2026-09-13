@@ -7,6 +7,7 @@ use crate::domain::ports::EmbeddingGenerator;
 pub struct EmbeddingAdapter {
     client: Arc<llm_client::LlmClient>,
     model: String,
+    pad_to_dimensions: Option<(usize, usize)>,
 }
 
 pub struct NoopEmbeddingGenerator;
@@ -97,9 +98,28 @@ fn clean(value: Option<String>) -> Result<Option<String>> {
 }
 
 impl EmbeddingAdapter {
-    pub fn new(client: Arc<llm_client::LlmClient>, model: String) -> Self {
-        Self { client, model }
+    pub fn new(
+        client: Arc<llm_client::LlmClient>,
+        model: String,
+        pad_to_dimensions: Option<(usize, usize)>,
+    ) -> Self {
+        Self {
+            client,
+            model,
+            pad_to_dimensions,
+        }
     }
+}
+
+fn pad_embedding(mut embedding: Vec<f32>, dimensions: Option<(usize, usize)>) -> Result<Vec<f32>> {
+    if let Some((source, target)) = dimensions {
+        anyhow::ensure!(
+            embedding.len() == source && target >= source,
+            "embedding dimension mismatch"
+        );
+        embedding.resize(target, 0.0);
+    }
+    Ok(embedding)
 }
 
 #[async_trait]
@@ -109,10 +129,8 @@ impl EmbeddingGenerator for EmbeddingAdapter {
             model: self.model.clone(),
             input: text.to_string(),
         };
-        self.client
-            .embed(req)
-            .await
-            .map(|response| response.embedding)
+        let response = self.client.embed(req).await?;
+        pad_embedding(response.embedding, self.pad_to_dimensions)
     }
 }
 
@@ -127,7 +145,7 @@ impl EmbeddingGenerator for NoopEmbeddingGenerator {
 
 #[cfg(test)]
 mod tests {
-    use super::EmbeddingConfig;
+    use super::{pad_embedding, EmbeddingConfig};
 
     #[test]
     fn explicit_config_supports_local_and_external_endpoints() {
@@ -135,17 +153,17 @@ mod tests {
             .unwrap()
             .is_none());
         let local = EmbeddingConfig::parse(
-            Some("local-gte".into()),
+            Some("local-tei".into()),
             Some("http://embedding:80/".into()),
             None,
-            Some("Alibaba-NLP/gte-Qwen2-1.5B-instruct".into()),
+            Some("Qwen/Qwen3-Embedding-0.6B".into()),
         )
         .unwrap()
         .unwrap();
-        assert_eq!(local.provider, "local-gte");
+        assert_eq!(local.provider, "local-tei");
         assert_eq!(local.api_url, "http://embedding:80");
         assert!(local.api_key.is_empty());
-        assert_eq!(local.model, "Alibaba-NLP/gte-Qwen2-1.5B-instruct");
+        assert_eq!(local.model, "Qwen/Qwen3-Embedding-0.6B");
         let external = EmbeddingConfig::parse(
             Some("external".into()),
             Some("https://embeddings.example".into()),
@@ -176,5 +194,15 @@ mod tests {
             )
             .is_err());
         }
+    }
+
+    #[test]
+    fn local_vector_is_zero_padded_to_storage_dimensions() {
+        let embedding = pad_embedding(vec![1.0; 1024], Some((1024, 1536))).unwrap();
+        assert_eq!(embedding.len(), 1536);
+        assert!(embedding[..1024].iter().all(|value| *value == 1.0));
+        assert!(embedding[1024..].iter().all(|value| *value == 0.0));
+        assert!(pad_embedding(vec![1.0; 1536], None).is_ok());
+        assert!(pad_embedding(vec![1.0; 1023], Some((1024, 1536))).is_err());
     }
 }

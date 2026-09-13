@@ -195,13 +195,14 @@ Before execution, independently review one private, secret-free registration
 with schema `vision-journey-registration-v1` or the separate prospective-summary
 Diagnostic schemas `vision-journey-registration-v2` and
 `vision-journey-registration-v3`, or the four-layer lifecycle schema
-`vision-journey-registration-v4`. V1 has exactly these
+`vision-journey-registration-v4` or keyless local-embedding schema
+`vision-journey-registration-v5`. V1 has exactly these
 fields: `schema`,
 `budget_id`, `hypothesis`, `candidate_git_sha`, `base_manifest_sha256`,
 `candidate_manifest_sha256`, `base_application_image_ids`,
 `candidate_application_image_ids`, `profile_sha256`, `product_fixture_sha256`,
 `prompt_schema_identities`, `limits`, `output_dir`, and `ledger_path`.
-V2, V3, and V4 additionally require `network_subnet`: JSON null retains automatic
+V2, V3, V4, and V5 additionally require `network_subnet`: JSON null retains automatic
 Docker allocation; a string must be one canonical strict IPv4 RFC1918 /28. V1
 rejects this extra field. The canonical registration hash binds this selection;
 it does not alter prompt/source identities or the fixed budget/product fixture.
@@ -286,6 +287,24 @@ PostgreSQL receipts must reconcile with DeepSeek generation and OpenAI embedding
 metrics. V4 is a single prospectively approved Diagnostic, not provider quality,
 formal H3/H4 qualification, interrupted embedding recovery, or permission to
 spend.
+
+V5 preserves the V4 product schedule and four-layer assertions but selects the
+compiled `four-layer-journey-diagnostic-v3` profile. Generation is still the
+exact DeepSeek model. Embeddings use the opt-in, digest-pinned CPU TEI service,
+the immutable `Qwen/Qwen3-Embedding-0.6B` Hub revision, the internal
+`http://embedding:80` origin, no API key, and no host port. Both manifests must
+pin the same Nginx probe image. Before the exclusive Started append, the runner
+proves an empty registration-bound project, cold-adopts the base without provider settings, verifies
+the TEI container/cache ownership and command, then checks health, model identity,
+usage, and exactly 1,024 finite provider values through that Nginx container;
+Agent zero-pads this exact model's vectors to the 1,536-dimension store. Failure in
+this phase writes no report. Cleanup removes only labelled resources after the
+Docker operations have completed and three inventory reads remain stable. An
+interrupted or otherwise unknown Docker outcome preserves resources and writes a
+registration-bound `Frozen` control record without claiming `Started`;
+after Started, ordinary evidence-gated cleanup applies. A V5 registration still
+requires a reviewed strict-descendant application artifact pair and explicit
+authorization; checked-in support is not live lifecycle evidence.
 
 CI runs the real-schema regressions against its digest-pinned disposable
 `test-postgres` database. Local runs name the container with

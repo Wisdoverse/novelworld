@@ -68,7 +68,7 @@ def probe_evidence(error):
                    "cleanup_uncertain" if isinstance(error, OSError) else "unknown",
         "phase": phase if isinstance(phase, str) and phase in PROBE_PHASES else "unknown",
         "name": name if isinstance(name, str) and re.fullmatch(
-            r"nwq-[a-f0-9]{10}-budget-probe-[a-f0-9]{12}", name) else None,
+            r"nwq-(?:[a-f0-9]{10}|[a-f0-9]{32})-budget-probe-[a-f0-9]{12}", name) else None,
         "container_id": identifier if isinstance(identifier, str) and re.fullmatch(
             r"[0-9a-f]{64}", identifier) else None,
         "primary": _closed_detail(getattr(error, "primary_evidence", None)),
@@ -355,7 +355,7 @@ def preflight(raw, manifest, registered, project):
 
 def main():
     profile_bytes, action, state, project, *paths = sys.argv[1:]
-    require(re.fullmatch(r"nwq-[a-f0-9]{10}", project))
+    require(re.fullmatch(r"nwq-(?:[a-f0-9]{10}|[a-f0-9]{32})", project))
     registered = registration(profile_bytes.encode(), os.environ)
     if action == "probe":
         require(len(paths) == 1)

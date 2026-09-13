@@ -33,15 +33,19 @@ REGISTRATION_SCHEMA = "vision-journey-registration-v1"
 REGISTRATION_SCHEMA_V2 = "vision-journey-registration-v2"
 REGISTRATION_SCHEMA_V3 = "vision-journey-registration-v3"
 REGISTRATION_SCHEMA_V4 = "vision-journey-registration-v4"
+REGISTRATION_SCHEMA_V5 = "vision-journey-registration-v5"
 LEDGER_SCHEMA = "vision-journey-ledger-v1"
+PRESTART_SCHEMA = "vision-journey-prestart-v1"
 PROFILE_PATH = Path("tools/llm-budget/diagnostic-v1.json")
 PROFILE_PATH_V2 = Path("tools/llm-budget/diagnostic-v2.json")
+PROFILE_PATH_V3 = Path("tools/llm-budget/diagnostic-v3.json")
 MODEL = "deepseek-flash"
 MEMORY_MODEL = "deepseek-v4-flash"
 CONTRACT = "llm-diagnostic-budget-v1"
 PROFILE = "vision-journey-diagnostic-v1"
 CONTRACT_V2 = "llm-diagnostic-budget-v2"
 PROFILE_V2 = "four-layer-journey-diagnostic-v2"
+PROFILE_V3 = "four-layer-journey-diagnostic-v3"
 APP_KEYS = {
     "GATEWAY_IMAGE", "USER_SERVICE_IMAGE", "NOVEL_SERVICE_IMAGE",
     "AGENT_SERVICE_IMAGE", "NARRATIVE_SERVICE_IMAGE", "FRONTEND_IMAGE",
@@ -167,13 +171,15 @@ class Registration:
 def product_fixture(schema: str) -> Path:
     require(schema in (
         REGISTRATION_SCHEMA, REGISTRATION_SCHEMA_V2,
-        REGISTRATION_SCHEMA_V3, REGISTRATION_SCHEMA_V4,
+        REGISTRATION_SCHEMA_V3, REGISTRATION_SCHEMA_V4, REGISTRATION_SCHEMA_V5,
     ))
     version = 1 if schema == REGISTRATION_SCHEMA else 2
     return Path(f"tests/e2e/fixtures/h4-journey-v{version}.json")
 
 
 def profile_path(schema: str) -> Path:
+    if schema == REGISTRATION_SCHEMA_V5:
+        return PROFILE_PATH_V3
     return PROFILE_PATH_V2 if schema == REGISTRATION_SCHEMA_V4 else PROFILE_PATH
 
 
@@ -193,14 +199,15 @@ def load_registration(
         require(isinstance(value, dict))
         expected_keys = REGISTRATION_KEYS | ({"network_subnet"}
             if value.get("schema") in (
-                REGISTRATION_SCHEMA_V2, REGISTRATION_SCHEMA_V3, REGISTRATION_SCHEMA_V4
+                REGISTRATION_SCHEMA_V2, REGISTRATION_SCHEMA_V3,
+                REGISTRATION_SCHEMA_V4, REGISTRATION_SCHEMA_V5,
             ) else set())
         require(set(value) == expected_keys)
         encoded = canonical(value)
         require(digest(encoded) == approved_sha256, "diagnostic_registration_digest_mismatch")
         require(value["schema"] in (
             REGISTRATION_SCHEMA, REGISTRATION_SCHEMA_V2,
-            REGISTRATION_SCHEMA_V3, REGISTRATION_SCHEMA_V4,
+            REGISTRATION_SCHEMA_V3, REGISTRATION_SCHEMA_V4, REGISTRATION_SCHEMA_V5,
         ) and uuid4(value["budget_id"]))
         try:
             network.subnet(value.get("network_subnet"))
@@ -215,9 +222,11 @@ def load_registration(
                 "diagnostic_manifest_mismatch")
         profile_raw = (root / profile_path(value["schema"])).read_bytes()
         profile = strict_json(profile_raw)
-        expected_contract = CONTRACT_V2 if value["schema"] == REGISTRATION_SCHEMA_V4 else CONTRACT
-        expected_profile = PROFILE_V2 if value["schema"] == REGISTRATION_SCHEMA_V4 else PROFILE
-        expected_model = MEMORY_MODEL if value["schema"] == REGISTRATION_SCHEMA_V4 else MODEL
+        memory_schema = value["schema"] in (REGISTRATION_SCHEMA_V4, REGISTRATION_SCHEMA_V5)
+        expected_contract = CONTRACT_V2 if memory_schema else CONTRACT
+        expected_profile = (PROFILE_V3 if value["schema"] == REGISTRATION_SCHEMA_V5 else
+                            PROFILE_V2 if memory_schema else PROFILE)
+        expected_model = MEMORY_MODEL if memory_schema else MODEL
         require(value["profile_sha256"] == digest(profile_raw)
                 and profile["contract"] == expected_contract and profile["profile"] == expected_profile
                 and profile["model"] == expected_model and profile["provider"] == "deepseek"
@@ -228,6 +237,20 @@ def load_registration(
                     and profile.get("embedding_model") == "text-embedding-3-small"
                     and profile.get("embedding_origin") == "https://api.openai.com"
                     and profile.get("embedding_dimensions") == 1536
+                    and profile.get("operations", {}).get("embedding") == 0,
+                    "diagnostic_profile_mismatch")
+        if value["schema"] == REGISTRATION_SCHEMA_V5:
+            require(profile.get("embedding_provider") == "local-tei"
+                    and profile.get("embedding_model") == "Qwen/Qwen3-Embedding-0.6B"
+                    and profile.get("embedding_origin") == "http://embedding:80"
+                    and profile.get("embedding_dimensions") == 1024
+                    and profile.get("embedding_storage_dimensions") == 1536
+                    and profile.get("embedding_runtime_image")
+                    == "ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.3@sha256:c26a226262ad4ff3330fb30b76653c1bb65da2fcf413b92284545a010e0a8a48"
+                    and profile.get("embedding_model_revision")
+                    == "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
+                    and profile.get("embedding_probe_image")
+                    == "nginx:alpine@sha256:db35bfc6b2951e7f8a72db5db120288c127ffaeeb4a6d4b95a26fead017d5913"
                     and profile.get("operations", {}).get("embedding") == 0,
                     "diagnostic_profile_mismatch")
         require(value["product_fixture_sha256"] == digest(
@@ -425,7 +448,8 @@ def affected_application_images(paths: list[str]) -> set[str]:
                         r"crates/[^/]+/(?:src/.*|Cargo\.toml|build\.rs)", path
                     ):
             affected.update(rust_images)
-        if path in {PROFILE_PATH.as_posix(), PROFILE_PATH_V2.as_posix()}:
+        if path in {PROFILE_PATH.as_posix(), PROFILE_PATH_V2.as_posix(),
+                    PROFILE_PATH_V3.as_posix()}:
             # Compiled by llm-client and user-service; ordinary tools are not inputs.
             # Existing registration/profile and all payer capability checks still apply.
             affected.update(rust_images - {"GATEWAY_IMAGE"})
@@ -491,9 +515,25 @@ class DiagnosticLedger:
     def __init__(self, registration: Registration):
         self.registration = registration
         self.descriptor: int | None = None
+        self._created = False
+
+    @property
+    def created(self) -> bool:
+        try:
+            return self._created or os.path.lexists(self.registration.value["ledger_path"])
+        except OSError:
+            return True
+
+    def _write(self, record: dict[str, Any]) -> None:
+        require(self.descriptor is not None, "diagnostic_ledger_not_started")
+        remaining = canonical(record) + b"\n"
+        while remaining:
+            size = os.write(self.descriptor, remaining)
+            require(size > 0, "diagnostic_ledger_write_failed")
+            remaining = remaining[size:]
+        os.fsync(self.descriptor)
 
     def _append(self, status: str, codes: list[str]) -> None:
-        require(self.descriptor is not None, "diagnostic_ledger_not_started")
         require(status in ("Started", "Passed", "Failed") and all(
             isinstance(code, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,100}", code) for code in codes),
             "diagnostic_failure_code_invalid")
@@ -503,12 +543,7 @@ class DiagnosticLedger:
                   "failure_codes": codes}
         if status == "Started":
             record["registration"] = self.registration.value
-        remaining = canonical(record) + b"\n"
-        while remaining:
-            size = os.write(self.descriptor, remaining)
-            require(size > 0, "diagnostic_ledger_write_failed")
-            remaining = remaining[size:]
-        os.fsync(self.descriptor)
+        self._write(record)
 
     def start(self) -> None:
         require(self.descriptor is None, "diagnostic_registration_already_started")
@@ -516,6 +551,7 @@ class DiagnosticLedger:
         try:
             self.descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL
                                       | os.O_NOFOLLOW | os.O_APPEND, 0o600)
+            self._created = True
         except OSError as error:
             raise DiagnosticFailure("diagnostic_registration_already_started") from error
         try:
@@ -524,6 +560,34 @@ class DiagnosticLedger:
         except BaseException:
             self.close()
             raise
+
+    def freeze_prestart(self, project: str, code: str) -> None:
+        """Block reuse after an interrupted Docker mutation without claiming Started."""
+        require(self.descriptor is None and not self.created,
+                "diagnostic_registration_already_started")
+        require(bool(re.fullmatch(r"nwq-(?:[a-f0-9]{10}|[a-f0-9]{32})", project))
+                and bool(re.fullmatch(r"[a-z][a-z0-9_]{0,100}", code)),
+                "diagnostic_prestart_freeze_invalid")
+        path = Path(self.registration.value["ledger_path"])
+        try:
+            self.descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                                      | os.O_NOFOLLOW | os.O_APPEND, 0o600)
+            self._created = True
+        except OSError as error:
+            raise DiagnosticFailure("diagnostic_registration_already_started") from error
+        try:
+            self._write({
+                "schema": PRESTART_SCHEMA,
+                "evidence_class": "Diagnostic",
+                "registration_sha256": self.registration.sha256,
+                "status": "Frozen",
+                "at": datetime.now(timezone.utc).isoformat(),
+                "failure_code": code,
+                "project": project,
+            })
+            sync_directory(path.parent)
+        finally:
+            self.close()
 
     def finish(self, passed: bool, codes: list[str]) -> None:
         try:
@@ -652,7 +716,8 @@ def reconcile_metrics(registration: Registration, snapshot: Any, summary: Any) -
             continue
         value = item.get("value")
         operation = item.get("operation")
-        provider_model = ("openai/" + registration.profile["embedding_model"]
+        provider_model = (registration.profile["embedding_provider"] + "/"
+                          + registration.profile["embedding_model"]
                           if operation == "embedding"
                           else "deepseek/" + registration.profile["model"])
         require(item.get("provider_model") == provider_model
@@ -713,7 +778,8 @@ def bounded_command(command: list[str], *, stdin: bytes = b"", timeout: float = 
 
 
 def snapshot_command(prefix: str, budget_id: str) -> tuple[list[str], bytes]:
-    require(bool(re.fullmatch(r"nwq-[a-f0-9]{10}", prefix)) and uuid4(budget_id),
+    require(bool(re.fullmatch(r"nwq-(?:[a-f0-9]{10}|[a-f0-9]{32})", prefix))
+            and uuid4(budget_id),
             "diagnostic_snapshot_target_invalid")
     # psql quotes the UUID variable as a SQL literal; never interpolate SQL input.
     sql = b'''BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;

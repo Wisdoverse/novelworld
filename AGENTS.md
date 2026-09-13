@@ -18,7 +18,8 @@ agent entrypoint.
   and uuid-ossp extensions.
 - Redis is an explicit optional short-term projection for agent-service;
   PostgreSQL-backed operation is the default minimum profile.
-- LLM calls go to an OpenAI-compatible API. All calls implement retry
+- H3/H4 journey generation uses DeepSeek through the OpenAI-compatible client;
+  embeddings may use a local or external OpenAI-compatible endpoint. All calls implement retry
   (3 retries, exponential backoff 1s/2s/4s, Retry-After header support).
 - JWT authentication flows through the gateway. Downstream services receive
   `X-User-Id` and `X-User-Role` headers injected by the gateway middleware.
@@ -279,19 +280,22 @@ unconfigured non-interactive launches fail closed. Bootstrap/runtime surfaces:
 
 `LLM_API_KEY` is optional: set it for an operator-managed environment override,
 or leave it empty, create the first administrator without a provider call, and
-complete DeepSeek/OpenAI setup later in protected Settings.
+complete generation setup later in protected Settings.
+For H3/H4 journey work, configure DeepSeek generation; do not select or call
+OpenAI generation.
 
 `LLM_DIAGNOSTIC_BUDGET_ID` / `LLM_DIAGNOSTIC_BUDGET_LIMITS` are only for an
 explicitly registered isolated Diagnostic; leave both empty for ordinary use.
 `LLM_DIAGNOSTIC_PROFILE` defaults to the closed v1 profile. The four-layer
-journey selects the compiled v2 profile and requires explicit OpenAI embedding
-endpoint, model, and credential configuration; it never falls back to the chat
-credential.
+journey uses either the frozen compiled v2 external-embedding profile or the
+additive compiled v3 keyless local-embedding profile; neither falls back to the
+chat credential. Ordinary runtime embedding configuration continues to support
+both local and authenticated external OpenAI-compatible endpoints.
 The supported cold release provisions once. Every paying service reserves
 before provider I/O; restart never creates or refills allowance. Unknown usage
 retains its reservation, and control/evidence failures never trigger provider
 retry or successful SSE completion. Image calls and restore/resume are refused;
-embedding remains refused by v1 and is allowed only by the exact v2 profile.
+embedding remains refused by v1 and is allowed only by the exact v2 or v3 profile.
 See [ADR 0004](docs/adr/0004-durable-diagnostic-budget.md)
 for exact limits and evidence boundaries; the feature does not authorize a paid run.
 
