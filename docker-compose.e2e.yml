@@ -36,7 +36,9 @@ services:
     environment:
       LLM_API_URL: http://llm-stub:18080
       LLM_ALLOW_INSECURE_HTTP: "true"
+      EMBEDDING_PROVIDER: e2e
       EMBEDDING_API_URL: http://llm-stub:18080
+      EMBEDDING_MODEL: text-embedding-3-small
     depends_on:
       llm-stub:
         condition: service_healthy

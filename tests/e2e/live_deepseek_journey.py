@@ -1845,6 +1845,7 @@ class Journey:
             f"RUNTIME_CONFIG_KEY={secrets.token_hex(32)}",
             f"INTERNAL_SERVICE_TOKEN={self.internal_service_token}",
             "LLM_API_KEY=",
+            f"EMBEDDING_PROVIDER={self.embedding_config['provider'] if self.embedding_config else ''}",
             f"EMBEDDING_API_URL={self.embedding_config['api_url'] if self.embedding_config else ''}",
             f"EMBEDDING_API_KEY={self.embedding_config['api_key'] if self.embedding_config else ''}",
             f"EMBEDDING_MODEL={self.embedding_config['model'] if self.embedding_config else ''}",

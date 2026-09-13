@@ -30,7 +30,7 @@ pub struct Memory {
     /// Legacy rows are unmarked and must stay out of online prompt paths.
     #[serde(default, skip_serializing)]
     pub persona_source_chapter_high_water: Option<i32>,
-    /// 长期记忆的向量嵌入（1536维，OpenAI text-embedding-3-small）
+    /// 长期记忆的向量嵌入（固定 1536 维）
     pub embedding: Option<Vec<f32>>,
     pub created_at: DateTime<Utc>,
 }

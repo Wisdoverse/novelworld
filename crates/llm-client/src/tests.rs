@@ -424,7 +424,11 @@ fn embedding_honors_retry_after_and_records_exact_attempts() {
         metric_value(
             &rendered,
             "novelworld_embedding_attempts_total",
-            &[("status", "provider_error")],
+            &[
+                ("provider", "test"),
+                ("model", "embedding-model"),
+                ("status", "provider_error"),
+            ],
         ),
         1.0
     );
@@ -432,7 +436,11 @@ fn embedding_honors_retry_after_and_records_exact_attempts() {
         metric_value(
             &rendered,
             "novelworld_embedding_attempts_total",
-            &[("status", "success")],
+            &[
+                ("provider", "test"),
+                ("model", "embedding-model"),
+                ("status", "success"),
+            ],
         ),
         1.0
     );
@@ -455,6 +463,57 @@ fn embedding_honors_retry_after_and_records_exact_attempts() {
     assert!(!rendered
         .lines()
         .any(|line| { line.starts_with("novelworld_llm_") && line.contains("embedding") }));
+}
+
+#[test]
+fn embedding_authentication_is_optional_without_sending_an_empty_bearer() {
+    for (api_key, expected_header) in [("", None), ("secret", Some("authorization: bearer secret"))]
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut bytes = [0; 1024];
+                let read = socket.read(&mut bytes).unwrap();
+                assert!(read > 0, "request ended before complete HTTP headers");
+                request.extend_from_slice(&bytes[..read]);
+                assert!(request.len() <= 8192, "request headers exceed test bound");
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let body = r#"{"data":[{"embedding":[0.25,0.75]}],"model":"embedding-model"}"#;
+            socket
+                .write_all(&http_response("200 OK", "application/json", body, ""))
+                .unwrap();
+            String::from_utf8(request).unwrap().to_ascii_lowercase()
+        });
+
+        let response = tokio::runtime::Runtime::new().unwrap().block_on(async {
+            LlmClient::new()
+                .with_openai_compatible("embedding", api_key, format!("http://{address}"))
+                .embed(EmbeddingRequest {
+                    model: "embedding/embedding-model".into(),
+                    input: "remember this".into(),
+                })
+                .await
+                .unwrap()
+        });
+        assert_eq!(response.embedding, vec![0.25, 0.75]);
+        let request = server.join().unwrap();
+        assert_eq!(
+            request.contains("authorization:"),
+            expected_header.is_some()
+        );
+        if let Some(expected_header) = expected_header {
+            assert!(request.contains(expected_header));
+        }
+    }
 }
 
 #[test]
