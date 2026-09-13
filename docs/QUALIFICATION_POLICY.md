@@ -37,7 +37,7 @@ decision, not a change to the frozen Qualification contract below.
   causal hypothesis and independent agent plan review. Do not repeatedly
   sample an unchanged failed revision to obtain a pass or tune historical
   cohorts after seeing their results.
-- The selected iteration model is [`deepseek-flash` (DeepSeek-V4.1-Flash)](https://api-docs.deepseek.com/);
+- The selected live iteration model is [`deepseek-v4-flash`](https://api-docs.deepseek.com/);
   the
   retired Flash aliases and the unregistered Pro proposal are not selected for
   a new run. Selection is not evidence of provider acceptance or qualification
