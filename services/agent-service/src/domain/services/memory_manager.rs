@@ -13,8 +13,8 @@ const MID_TERM_TRIGGER: usize = 20;
 const SEMANTIC_SEARCH_LIMIT: usize = 5;
 const PERMANENT_CANDIDATE_LIMIT: i64 = 10;
 pub const MAX_MEMORY_BLOCK_CHARS: usize = 4_000;
-/// pgvector column width (vector(1536)); promotion tolerates any other
-/// provider dimension by skipping rather than failing the projection.
+/// pgvector column width (vector(1536)); invalid provider vectors skip the
+/// best-effort projection instead of corrupting Long memory.
 const EMBEDDING_DIMS: usize = 1536;
 const MAX_RECENT_MESSAGE_CHARS: usize = 1_000;
 const MAX_SUMMARY_INPUT_CHARS: usize = 24_000;
@@ -698,7 +698,12 @@ impl MemoryManager {
     /// Best effort only after one fenced Mid commit. A restart never repeats it.
     pub async fn promote_summary(&self, memory: &Memory) -> Result<Option<Memory>> {
         let embedding = match self.embedding.generate_embedding(&memory.content).await {
-            Ok(vector) if vector.len() == EMBEDDING_DIMS => vector,
+            Ok(vector)
+                if vector.len() == EMBEDDING_DIMS
+                    && vector.iter().all(|value| value.is_finite()) =>
+            {
+                vector
+            }
             _ => return Ok(None),
         };
         let mut promoted = memory.clone();
@@ -1063,6 +1068,15 @@ mod tests {
         fail: bool,
     }
 
+    struct FixedEmbedding(Vec<f32>);
+
+    #[async_trait::async_trait]
+    impl EmbeddingGenerator for FixedEmbedding {
+        async fn generate_embedding(&self, _text: &str) -> Result<Vec<f32>> {
+            Ok(self.0.clone())
+        }
+    }
+
     #[async_trait::async_trait]
     impl EmbeddingGenerator for FakeEmbedding {
         async fn generate_embedding(&self, _text: &str) -> Result<Vec<f32>> {
@@ -1140,7 +1154,10 @@ mod tests {
         }
     }
 
-    fn manager(repo: Arc<RecordingMemoryRepo>, embedding: Arc<FakeEmbedding>) -> MemoryManager {
+    fn manager(
+        repo: Arc<RecordingMemoryRepo>,
+        embedding: Arc<dyn EmbeddingGenerator>,
+    ) -> MemoryManager {
         MemoryManager {
             memory_repo: repo,
             chat_repo: Arc::new(CountingChatRepo { count: 0 }),
@@ -2251,7 +2268,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn summary_promotion_preserves_mid_and_requires_the_vector_dimension() {
+    async fn summary_promotion_preserves_mid_and_requires_a_finite_vector() {
         let repo = Arc::new(RecordingMemoryRepo {
             saved: Mutex::new(vec![]),
         });
@@ -2280,6 +2297,13 @@ mod tests {
                 "publication belongs to the bounded application path"
             );
             assert_eq!(mid.layer, MemoryLayer::Mid);
+        }
+        for non_finite in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let manager = manager(
+                repo.clone(),
+                Arc::new(FixedEmbedding(vec![non_finite; EMBEDDING_DIMS])),
+            );
+            assert!(manager.promote_summary(&mid).await.unwrap().is_none());
         }
     }
 

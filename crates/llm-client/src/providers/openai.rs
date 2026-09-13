@@ -564,14 +564,15 @@ impl OpenAIProvider {
         body: Vec<u8>,
         require_usage_evidence: bool,
     ) -> Result<EmbeddingResponse> {
-        let (hk, hv) = self.auth_header(api_key);
-        let response = client
+        let mut request = client
             .post(self.endpoint("/v1/embeddings"))
-            .header(&hk, &hv)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body)
-            .send()
-            .await?;
+            .body(body);
+        if !api_key.is_empty() {
+            let (hk, hv) = self.auth_header(api_key);
+            request = request.header(&hk, &hv);
+        }
+        let response = request.send().await?;
 
         if !response.status().is_success() {
             return Err(response_error(response).await);
