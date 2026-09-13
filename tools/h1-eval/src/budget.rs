@@ -3,8 +3,8 @@ use std::sync::Mutex;
 use llm_client::{MetricsHandle, Usage};
 use serde::Serialize;
 
-pub const MODEL: &str = "deepseek-flash";
-pub const PROFILE: &str = "vision-diagnostic-budget-v2";
+pub const MODEL: &str = "deepseek-v4-flash";
+pub const PROFILE: &str = "vision-diagnostic-budget-v3";
 const INPUT_CEILING: u64 = 1 << 20;
 const ATTEMPTS_PER_CALL: u64 = 5;
 const INPUT_MICRO_CNY: u64 = 4;
@@ -282,8 +282,8 @@ mod tests {
 
     #[test]
     fn reserves_before_dispatch_and_only_settles_complete_evidence() {
-        assert_eq!(MODEL, "deepseek-flash");
-        assert_eq!(PROFILE, "vision-diagnostic-budget-v2");
+        assert_eq!(MODEL, "deepseek-v4-flash");
+        assert_eq!(PROFILE, "vision-diagnostic-budget-v3");
         let mut ledger = Ledger::default();
         let ticket = ledger.reserve(8192, Counters::default()).unwrap();
         assert_eq!(ledger.charged.tokens, 5_283_840);
