@@ -338,6 +338,30 @@ behavior.
   done.
 - Update the roadmap status only when its stated evidence or exit criteria are
   true. Record blockers on the issue instead of reporting optimistic status.
+- Treat the issue body and Project fields as the current execution record. Edit
+  them in place; do not append comments for plans, ownership, implementation
+  progress, pending CI, local checks, branch/worktree state, or facts already
+  visible from linked issues, pull requests, checks, and commits.
+- Keep one current-truth section in the issue body. Replace superseded status
+  text instead of appending dated status sections; retain only the outcome,
+  scope, invariants, acceptance evidence, dependencies, and active blockers.
+- Add an issue comment only when it preserves evidence that must remain
+  immutable outside the editable body: a consumed external/provider execution
+  with its exact registration and terminal result, a stable public-safe
+  execution ID that uniquely links retained private registration, Started and
+  terminal records, or a human decision that cannot be represented by fields or
+  the issue body. Keep that comment concise and self-contained. Never split one
+  state transition across several comments.
+- Before adding an ordinary editable status comment, update the latest ordinary
+  status comment you own when it represents the same still-current state. Never
+  edit a consumed-execution or human-decision audit comment. When a comment
+  becomes obsolete, delete it only after any unique audit or no-rerun evidence
+  has been retained in the issue body or another durable record. Default to zero
+  active status comments and at most one canonical immutable comment per
+  consumed external/provider execution.
+- Before deleting a comment, search issue and pull-request bodies and comments
+  for inbound links. Retain the comment until every live reference is migrated
+  to an equivalent durable record.
 
 ## Gotchas
 
