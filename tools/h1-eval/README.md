@@ -8,7 +8,7 @@ policy files, the v1 corpus, frozen H4 cohort guard, and failed reports remain
 immutable and are not rescored or compared.
 
 Active identities: policy `extraction-quality-v4`, corpus `h1-synthetic-v6`,
-response rubric `h1-extraction-v4`, semantic judge `h1-semantic-judge-v9`,
+response rubric `h1-extraction-v4`, semantic judge `h1-semantic-judge-v10`,
 public report schema `4`, and private HTTP response envelope `2`.
 
 Public reports explicitly carry these identities and distinguish gold alignment
@@ -82,8 +82,8 @@ Live mode requires fresh private evidence outputs:
 H1_EVAL_PROVIDER=deepseek \
 LLM_API_URL=https://api.deepseek.com \
 LLM_API_KEY=... \
-LLM_MODEL=deepseek-flash \
-H1_EVAL_ALLOWED_RESPONSE_MODELS=deepseek-flash \
+LLM_MODEL=deepseek-v4-flash \
+H1_EVAL_ALLOWED_RESPONSE_MODELS=deepseek-v4-flash \
 cargo run -p h1-eval -- --live --git-sha "$(git rev-parse HEAD)" \
   --metrics-output /private/h1-metrics.prom \
   --private-responses-output /private/h1-responses.jsonl
@@ -102,14 +102,14 @@ write failure stops further provider calls and retains the unproven reservation.
 
 New paid Diagnostic work is allowed only with `--live --bounded-diagnostic`, both
 private output paths, and a separately registered immutable input/model/budget
-under the prospective fixed `vision-diagnostic-budget-v2` profile:
+under the prospective fixed `vision-diagnostic-budget-v3` profile:
 
 ```bash
 H1_EVAL_PROVIDER=deepseek \
 LLM_API_URL=https://api.deepseek.com \
 LLM_API_KEY=... \
-LLM_MODEL=deepseek-flash \
-H1_EVAL_ALLOWED_RESPONSE_MODELS=deepseek-flash \
+LLM_MODEL=deepseek-v4-flash \
+H1_EVAL_ALLOWED_RESPONSE_MODELS=deepseek-v4-flash \
 cargo run -p h1-eval -- --live --bounded-diagnostic \
   --git-sha "$(git rev-parse HEAD)" \
   --metrics-output /private/vision-diagnostic-metrics.prom \
