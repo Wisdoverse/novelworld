@@ -269,9 +269,12 @@ CPU TEI service without a host port, and uses the release's pinned Nginx curl to
 verify the exact Hub revision, served model, usage, and 1,024 finite provider
 values. Agent zero-pads this exact local model to the existing 1,536-dimension
 store; external provider behavior is unchanged. A
-settled pre-Started failure removes only resources carrying the registration-bound
-Compose project label after three stable inventory reads and writes no journey
-report. An interrupted Docker mutation preserves resources and writes a
-registration-bound `Frozen` control record without claiming `Started`. Once Started exists, the existing
+pre-Started failure writes bounded private evidence containing only its stable
+error code, stage, and optional release-log digest metadata; it never copies log
+content. The runner then removes only resources carrying the registration-bound
+Compose project label after three stable inventory reads. Every such failure
+writes a v2 registration-bound `Frozen` record with the primary and any cleanup
+error codes, cleanup verdict, and private-evidence digest, without claiming
+`Started`; the registration cannot be reused. Once Started exists, the existing
 durable terminal and evidence-gated cleanup rules apply. This implementation
 does not itself register, fund, or execute a live Diagnostic.
