@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise release record validation and SBOM identity with a fake registry.
+"""Exercise release image identity and scan controls with fake tools.
 
 This runs the real shell entrypoints, not native image builds or Trivy scans.
 The registry's mutable tag and first RepoDigests entry deliberately point at
@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/docker.yml"
 RECORD = ROOT / "infra/docker/record-application-images.sh"
 SBOM = ROOT / "infra/security/generate-sboms.sh"
+SCAN_IMAGES = ROOT / "infra/security/scan-images.sh"
 RELEASE = ROOT / "infra/docker/release.sh"
 SERVICES = ("gateway", "user-service", "novel-service", "agent-service", "narrative-service", "frontend")
 PREFIX = "ghcr.io/wisdoverse/novelworld"
@@ -572,6 +573,50 @@ class ReleaseImageDigestTest(unittest.TestCase):
         self.assertEqual(len(patterns), 1)
         self.assertEqual(re.findall(patterns[0], log.getvalue().encode()),
                          [b"probe_start", b"probe_cleanup_ps"])
+
+
+class ImageScanGateTest(unittest.TestCase):
+    def test_incomplete_scans_fail_closed_without_rejecting_ordinary_warnings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            docker = Path(directory) / "docker"
+            docker.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"$SCAN_OUTPUT\" >&2\nexit \"$SCAN_STATUS\"\n")
+            docker.chmod(0o755)
+            env = dict(os.environ, PATH=directory + os.pathsep + os.environ["PATH"])
+
+            for output, status, expected in (
+                ("scan complete", "0", 0),
+                ("WARN ordinary scanner notice", "0", 0),
+                ("WARN Unable to get vulnerability details (CVE may be rejected)", "0", 1),
+                ("scanner failed", "23", 23),
+            ):
+                with self.subTest(output=output, status=status):
+                    result = subprocess.run(
+                        ["bash", str(SCAN_IMAGES), "example/image@sha256:" + "a" * 64],
+                        env=dict(env, SCAN_OUTPUT=output, SCAN_STATUS=status),
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=10,
+                    )
+                    self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+
+            tee = Path(directory) / "tee"
+            tee.write_text("#!/usr/bin/env bash\ncat >/dev/null\nexit 9\n")
+            tee.chmod(0o755)
+            result = subprocess.run(
+                ["bash", str(SCAN_IMAGES), "example/image@sha256:" + "a" * 64],
+                env=dict(env, SCAN_OUTPUT="scan complete", SCAN_STATUS="0"),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("scan: output capture failed", result.stderr)
+
+        workflow = WORKFLOW.read_text()
+        self.assertEqual(workflow.count('infra/security/scan-images.sh "$IMAGE"'), 2)
+        self.assertNotIn("aquasec/trivy:0.74.0", workflow)
 
 
 if __name__ == "__main__":
