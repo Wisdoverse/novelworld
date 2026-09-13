@@ -459,6 +459,8 @@ mod tests {
     fn memory_profile_prices_embedding_without_relaxing_v1() {
         let v1 = Profile::compiled();
         let v2 = Profile::compiled_named("four-layer-journey-diagnostic-v2").unwrap();
+        assert_eq!(v1.model, "deepseek-flash");
+        assert_eq!(v2.model, "deepseek-v4-flash");
         assert_eq!(v1.quote("embedding", 0), Err(BudgetError::Invalid));
         assert_eq!(
             v2.quote("embedding", 0),

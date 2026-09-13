@@ -500,6 +500,47 @@ async fn budgeted_embedding_requires_reserve_usage_and_settlement_before_return(
 }
 
 #[tokio::test]
+async fn budgeted_embedding_emits_reconcilable_usage_metrics() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    let control = LocalHttp::start(control_reply).await;
+    let provider = LocalHttp::start(|_, _| json_reply(embedding(true, 1536))).await;
+
+    embedding_client(&control, &provider)
+        .embed(embedding_request())
+        .await
+        .unwrap();
+
+    let metrics = handle.render();
+    for (name, label, value) in [
+        (
+            "novelworld_embedding_attempts_total",
+            "status=\"success\"",
+            1.0,
+        ),
+        (
+            "novelworld_embedding_usage_reports_total",
+            "status=\"present\"",
+            1.0,
+        ),
+        ("novelworld_embedding_tokens_total", "type=\"input\"", 7.0),
+        (
+            "novelworld_embedding_billable_tokens_total",
+            "class=\"uncached_input\"",
+            7.0,
+        ),
+    ] {
+        let observed: f64 = metrics
+            .lines()
+            .filter(|line| line.starts_with(&format!("{name}{{")) && line.contains(label))
+            .map(|line| line.rsplit_once(' ').unwrap().1.parse::<f64>().unwrap())
+            .sum();
+        assert_eq!(observed, value);
+    }
+}
+
+#[tokio::test]
 async fn budgeted_embedding_retries_known_http_status_with_a_new_reservation() {
     let control = LocalHttp::start(control_reply).await;
     let calls = Arc::new(Mutex::new(0));

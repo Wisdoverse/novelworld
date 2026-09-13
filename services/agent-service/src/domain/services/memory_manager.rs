@@ -436,6 +436,14 @@ pub struct MemoryManager {
     pub embedding: Arc<dyn EmbeddingGenerator>,
 }
 
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct MemorySelectionCounts {
+    pub short: usize,
+    pub mid: usize,
+    pub long: usize,
+    pub permanent: usize,
+}
+
 impl MemoryManager {
     /// Build context with semantic search: embeds the user's current message,
     /// retrieves similar long-term memories, and injects them into the context.
@@ -449,8 +457,9 @@ impl MemoryManager {
         current_chapter: i32,
         system_prompt: &str,
         user_message: &str,
-    ) -> Result<(Vec<(String, String)>, usize)> {
+    ) -> Result<(Vec<(String, String)>, MemorySelectionCounts)> {
         let mut messages: Vec<(String, String)> = vec![];
+        let mut selected = MemorySelectionCounts::default();
         let allow_unscoped_memory = reader_character_id.is_none();
 
         // 1. 系统提示词（角色人格）
@@ -477,6 +486,8 @@ impl MemoryManager {
             .collect::<HashSet<_>>();
         if !permanent.is_empty() {
             let perm_context = encode_permanent_memory_data(permanent.iter(), 10, true);
+            selected.permanent = serde_json::from_str::<Vec<serde_json::Value>>(&perm_context)
+                .map_or(0, |values| values.len());
             messages.push((
                 "system".into(),
                 format!(
@@ -506,7 +517,7 @@ impl MemoryManager {
         };
         let selected_mid =
             bounded_untrusted_memory_values(mid.iter().map(|memory| memory.content.as_str()), 5);
-        let selected_mid_count = selected_mid.len();
+        selected.mid = selected_mid.len();
         if !selected_mid.is_empty() {
             let mid_context = serde_json::to_string(&selected_mid).unwrap_or_else(|_| "[]".into());
             messages.push((
@@ -548,16 +559,23 @@ impl MemoryManager {
                         })
                         .filter(|memory| !direct_permanent_ids.contains(&memory.id))
                         .filter_map(|memory| {
-                            semantic_memory_content(&memory, true).filter(|content| {
-                                !direct_memory_contents.contains(content.as_str())
-                                    && semantic_contents.insert(content.clone())
-                            })
+                            let layer = memory.layer.clone();
+                            semantic_memory_content(&memory, true)
+                                .filter(|content| {
+                                    !direct_memory_contents.contains(content.as_str())
+                                        && semantic_contents.insert(content.clone())
+                                })
+                                .map(|content| (layer, content))
                         })
                         .take(SEMANTIC_SEARCH_LIMIT)
                         .collect::<Vec<_>>();
                     if !similar.is_empty() {
+                        selected.long = similar
+                            .iter()
+                            .filter(|(layer, _)| *layer == MemoryLayer::Long)
+                            .count();
                         let semantic_context = encode_untrusted_memory_data(
-                            similar.iter().map(String::as_str),
+                            similar.iter().map(|(_, content)| content.as_str()),
                             SEMANTIC_SEARCH_LIMIT,
                         );
                         messages.push((
@@ -589,11 +607,12 @@ impl MemoryManager {
                 current_chapter,
                 SHORT_TERM_LIMIT,
             )
-            .await?;
-        for msg in recent
+            .await?
             .into_iter()
             .filter(|message| chat_has_safe_persona_provenance(message, current_chapter))
-        {
+            .collect::<Vec<_>>();
+        selected.short = recent.len();
+        for msg in recent {
             let role = if msg.role == "user" {
                 "user"
             } else {
@@ -605,7 +624,7 @@ impl MemoryManager {
             ));
         }
 
-        Ok((messages, selected_mid_count))
+        Ok((messages, selected))
     }
 
     /// Project an already committed turn into Redis and derived memories.
@@ -1616,7 +1635,7 @@ mod tests {
             }),
         };
 
-        let (context, selected_mid_count) = manager
+        let (context, selected) = manager
             .build_context_with_semantic(
                 Uuid::new_v4(),
                 Uuid::new_v4(),
@@ -1629,7 +1648,15 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(selected_mid_count, 1);
+        assert_eq!(
+            selected,
+            MemorySelectionCounts {
+                short: 0,
+                mid: 1,
+                long: 1,
+                permanent: 1,
+            }
+        );
 
         for (heading, expected) in [
             ("## 你与读者的关系和重要记忆", permanent),
@@ -1668,7 +1695,7 @@ mod tests {
             }),
         };
 
-        let (context, selected_mid_count) = manager
+        let (context, selection) = manager
             .build_context_with_semantic(
                 Uuid::new_v4(),
                 Uuid::new_v4(),
@@ -1687,8 +1714,8 @@ mod tests {
             .unwrap();
         let selected: Vec<String> = serde_json::from_str(block.lines().last().unwrap()).unwrap();
 
-        assert_eq!(selected_mid_count, selected.len());
-        assert!(selected_mid_count < 5);
+        assert_eq!(selection.mid, selected.len());
+        assert!(selection.mid < 5);
     }
 
     #[tokio::test]
@@ -1726,7 +1753,7 @@ mod tests {
             }),
         };
 
-        let (character_context, character_mid_count) = manager
+        let (character_context, character_selection) = manager
             .build_context_with_semantic(
                 Uuid::new_v4(),
                 Uuid::new_v4(),
@@ -1743,7 +1770,7 @@ mod tests {
             .map(|(_, content)| content)
             .collect::<Vec<_>>()
             .join("\n");
-        assert_eq!(character_mid_count, 0);
+        assert_eq!(character_selection.mid, 0);
         assert!(!character_prompt.contains(direct_marker));
         assert!(!character_prompt.contains(semantic_marker));
         for marker in [permanent_marker, mid_marker, long_marker] {
@@ -1753,7 +1780,7 @@ mod tests {
             character_prompt.contains(&format!("SAME-CHARACTER-CONTINUITY-{reader_character_id}"))
         );
 
-        let (self_context, self_mid_count) = manager
+        let (self_context, self_selection) = manager
             .build_context_with_semantic(
                 Uuid::new_v4(),
                 Uuid::new_v4(),
@@ -1770,7 +1797,7 @@ mod tests {
             .map(|(_, content)| content)
             .collect::<Vec<_>>()
             .join("\n");
-        assert_eq!(self_mid_count, 1);
+        assert_eq!(self_selection.mid, 1);
         for marker in [
             direct_marker,
             semantic_marker,
@@ -2095,7 +2122,7 @@ mod tests {
             }),
         };
 
-        let (prompt_context, selected_mid_count) = manager
+        let (prompt_context, selection) = manager
             .build_context_with_semantic(
                 Uuid::new_v4(),
                 Uuid::new_v4(),
@@ -2113,7 +2140,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert_eq!(selected_mid_count, 0);
+        assert_eq!(selection.mid, 0);
         assert!(!prompt.contains("UNMARKED-MID-SECRET"));
         assert!(!prompt.contains("AHEAD-LONG-SECRET"));
     }
