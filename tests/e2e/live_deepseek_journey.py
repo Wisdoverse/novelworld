@@ -4242,7 +4242,8 @@ class Journey:
                 "model_revision": profile["embedding_model_revision"],
                 "runtime_image": profile["embedding_runtime_image"],
                 "probe_image": profile["embedding_probe_image"],
-                "dimensions": len(vector),
+                "provider_dimensions": len(vector),
+                "storage_dimensions": profile["embedding_storage_dimensions"],
                 "prompt_tokens": usage["prompt_tokens"],
                 "host_ports": 0,
             }

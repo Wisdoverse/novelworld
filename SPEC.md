@@ -1555,7 +1555,7 @@ Runtime variables (some are required only when their integration is enabled):
 | `EMBEDDING_PROVIDER` | Agent | Embedding provider identity; required with URL and model |
 | `EMBEDDING_API_URL` | Agent | OpenAI-compatible local or external embedding API base URL |
 | `EMBEDDING_API_KEY` | Agent | Optional embedding API key; omitted for isolated no-auth local endpoints |
-| `EMBEDDING_MODEL` | Agent | Embedding model identifier; responses must contain 1536 finite values |
+| `EMBEDDING_MODEL` | Agent | Embedding model identifier; external responses must contain 1536 finite values; the exact local model's 1024 values are zero-padded to 1536 |
 | `S3_ENDPOINT` | Novel | S3-compatible endpoint URL |
 | `S3_BUCKET` | Novel | Bucket name |
 | `S3_ACCESS_KEY` | Novel | Access key ID |
@@ -1563,10 +1563,12 @@ Runtime variables (some are required only when their integration is enabled):
 | `SERVICE_PORT` | All | Port the service listens on |
 
 The server Compose file provides an opt-in `local-embedding` profile. It pins
-Text Embeddings Inference and `Alibaba-NLP/gte-Qwen2-1.5B-instruct` to immutable
+Text Embeddings Inference and `Qwen/Qwen3-Embedding-0.6B` to immutable
 image/model revisions, exposes no host port, and uses the same OpenAI-compatible
 Agent adapter as an external endpoint. Ordinary deployments may select either
-form; generation configuration remains separate.
+form; only this exact local provider/model pair is zero-padded from 1,024 to
+1,536 dimensions, and generation configuration remains separate. Switching
+embedding models requires re-embedding stored Long memories.
 
 ### 11.2 Tunable Parameters
 

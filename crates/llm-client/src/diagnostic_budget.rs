@@ -168,6 +168,8 @@ pub(crate) struct CompiledProfile {
     pub embedding_max_request_bytes: Option<usize>,
     #[serde(default)]
     pub embedding_dimensions: Option<usize>,
+    #[serde(default, rename = "embedding_storage_dimensions")]
+    pub _embedding_storage_dimensions: Option<usize>,
     #[serde(default, rename = "embedding_runtime_image")]
     pub _embedding_runtime_image: Option<String>,
     #[serde(default, rename = "embedding_model_revision")]

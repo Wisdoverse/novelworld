@@ -232,6 +232,8 @@ pub struct Profile {
     #[serde(default)]
     pub embedding_dimensions: Option<usize>,
     #[serde(default)]
+    pub embedding_storage_dimensions: Option<usize>,
+    #[serde(default)]
     pub embedding_runtime_image: Option<String>,
     #[serde(default)]
     pub embedding_model_revision: Option<String>,
@@ -488,7 +490,7 @@ mod tests {
             v3.quote("embedding", 0),
             Ok(Amount {
                 attempts: 1,
-                tokens: 8192,
+                tokens: 4096,
                 cost_micro_cny: 0,
             })
         );
@@ -496,7 +498,7 @@ mod tests {
             v3.identity("embedding"),
             Ok((
                 "local-tei",
-                "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+                "Qwen/Qwen3-Embedding-0.6B",
                 "http://embedding:80"
             ))
         );
@@ -504,9 +506,11 @@ mod tests {
             v3.embedding_runtime_image.as_deref(),
             Some("ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.3@sha256:c26a226262ad4ff3330fb30b76653c1bb65da2fcf413b92284545a010e0a8a48")
         );
+        assert_eq!(v3.embedding_dimensions, Some(1024));
+        assert_eq!(v3.embedding_storage_dimensions, Some(1536));
         assert_eq!(
             v3.embedding_model_revision.as_deref(),
-            Some("a9af15a6372d7d6b25e9fb07c2ccb9e1fe645644")
+            Some("97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3")
         );
         assert_eq!(
             v3.embedding_probe_image.as_deref(),

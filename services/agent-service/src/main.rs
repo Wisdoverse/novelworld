@@ -180,7 +180,7 @@ async fn run_body() -> Result<()> {
                         config.provider != "local-tei"
                             || !config.api_key.is_empty()
                             || config.api_url != "http://embedding:80"
-                            || config.model != "Alibaba-NLP/gte-Qwen2-1.5B-instruct"
+                            || config.model != "Qwen/Qwen3-Embedding-0.6B"
                     }
                     _ => false,
                 };
@@ -197,7 +197,14 @@ async fn run_body() -> Result<()> {
                     embedding_model = %config.model,
                     "Embedding provider configured"
                 );
-                Arc::new(EmbeddingAdapter::new(embed_base, config.qualified_model()))
+                let padding = (config.provider == "local-tei"
+                    && config.model == "Qwen/Qwen3-Embedding-0.6B")
+                    .then_some((1024, 1536));
+                Arc::new(EmbeddingAdapter::new(
+                    embed_base,
+                    config.qualified_model(),
+                    padding,
+                ))
             }
         };
 

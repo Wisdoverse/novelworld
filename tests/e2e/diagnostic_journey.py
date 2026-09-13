@@ -241,13 +241,14 @@ def load_registration(
                     "diagnostic_profile_mismatch")
         if value["schema"] == REGISTRATION_SCHEMA_V5:
             require(profile.get("embedding_provider") == "local-tei"
-                    and profile.get("embedding_model") == "Alibaba-NLP/gte-Qwen2-1.5B-instruct"
+                    and profile.get("embedding_model") == "Qwen/Qwen3-Embedding-0.6B"
                     and profile.get("embedding_origin") == "http://embedding:80"
-                    and profile.get("embedding_dimensions") == 1536
+                    and profile.get("embedding_dimensions") == 1024
+                    and profile.get("embedding_storage_dimensions") == 1536
                     and profile.get("embedding_runtime_image")
                     == "ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.3@sha256:c26a226262ad4ff3330fb30b76653c1bb65da2fcf413b92284545a010e0a8a48"
                     and profile.get("embedding_model_revision")
-                    == "a9af15a6372d7d6b25e9fb07c2ccb9e1fe645644"
+                    == "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
                     and profile.get("embedding_probe_image")
                     == "nginx:alpine@sha256:db35bfc6b2951e7f8a72db5db120288c127ffaeeb4a6d4b95a26fead017d5913"
                     and profile.get("operations", {}).get("embedding") == 0,

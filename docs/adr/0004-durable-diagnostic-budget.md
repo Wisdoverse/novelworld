@@ -266,7 +266,9 @@ Issue #385 adds registration v5 and the compiled v3 profile without changing
 the v2 bytes. Generation remains DeepSeek-only. Before Started, the runner cold
 adopts the registered base with no provider setting, starts the digest-pinned
 CPU TEI service without a host port, and uses the release's pinned Nginx curl to
-verify the exact Hub revision, served model, usage, and 1,536 finite values. A
+verify the exact Hub revision, served model, usage, and 1,024 finite provider
+values. Agent zero-pads this exact local model to the existing 1,536-dimension
+store; external provider behavior is unchanged. A
 settled pre-Started failure removes only resources carrying the registration-bound
 Compose project label after three stable inventory reads and writes no journey
 report. An interrupted Docker mutation preserves resources and writes a

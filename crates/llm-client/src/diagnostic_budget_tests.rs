@@ -150,17 +150,18 @@ fn local_memory_profile_is_additive_and_v2_stays_frozen() {
     assert_eq!(profile.embedding_provider.as_deref(), Some("local-tei"));
     assert_eq!(
         profile.embedding_model.as_deref(),
-        Some("Alibaba-NLP/gte-Qwen2-1.5B-instruct")
+        Some("Qwen/Qwen3-Embedding-0.6B")
     );
     assert_eq!(
         profile.embedding_origin.as_deref(),
         Some("http://embedding:80")
     );
     assert_eq!(profile.embedding_input_micro_cny, Some(0));
-    assert_eq!(profile.embedding_dimensions, Some(1536));
+    assert_eq!(profile.embedding_dimensions, Some(1024));
+    assert_eq!(profile._embedding_storage_dimensions, Some(1536));
     assert_eq!(
         profile._embedding_model_revision.as_deref(),
-        Some("a9af15a6372d7d6b25e9fb07c2ccb9e1fe645644")
+        Some("97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3")
     );
     assert_eq!(
         profile_sha256_for("four-layer-journey-diagnostic-v2"),

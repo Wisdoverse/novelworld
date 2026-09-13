@@ -108,17 +108,17 @@ services:
     restart: unless-stopped
     command:
       - --model-id
-      - Alibaba-NLP/gte-Qwen2-1.5B-instruct
+      - Qwen/Qwen3-Embedding-0.6B
       - --revision
-      - a9af15a6372d7d6b25e9fb07c2ccb9e1fe645644
+      - 97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3
       - --served-model-name
-      - Alibaba-NLP/gte-Qwen2-1.5B-instruct
+      - Qwen/Qwen3-Embedding-0.6B
       - --dtype
       - float32
       - --max-concurrent-requests
       - "4"
       - --max-batch-tokens
-      - "8192"
+      - "4096"
       - --max-client-batch-size
       - "1"
       - --payload-limit

@@ -291,12 +291,13 @@ spend.
 V5 preserves the V4 product schedule and four-layer assertions but selects the
 compiled `four-layer-journey-diagnostic-v3` profile. Generation is still the
 exact DeepSeek model. Embeddings use the opt-in, digest-pinned CPU TEI service,
-the immutable `Alibaba-NLP/gte-Qwen2-1.5B-instruct` Hub revision, the internal
+the immutable `Qwen/Qwen3-Embedding-0.6B` Hub revision, the internal
 `http://embedding:80` origin, no API key, and no host port. Both manifests must
 pin the same Nginx probe image. Before the exclusive Started append, the runner
 proves an empty registration-bound project, cold-adopts the base without provider settings, verifies
 the TEI container/cache ownership and command, then checks health, model identity,
-usage, and exactly 1,536 finite values through that Nginx container. Failure in
+usage, and exactly 1,024 finite provider values through that Nginx container;
+Agent zero-pads this exact model's vectors to the 1,536-dimension store. Failure in
 this phase writes no report. Cleanup removes only labelled resources after the
 Docker operations have completed and three inventory reads remain stable. An
 interrupted or otherwise unknown Docker outcome preserves resources and writes a

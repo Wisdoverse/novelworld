@@ -370,10 +370,11 @@ class DiagnosticJourneyTest(unittest.TestCase):
         registration = self.load(value)
         self.assertEqual(registration.binding["profile"], CONTROL.PROFILE_V3)
         self.assertEqual(registration.profile["embedding_provider"], "local-tei")
-        self.assertEqual(registration.profile["embedding_dimensions"], 1536)
+        self.assertEqual(registration.profile["embedding_dimensions"], 1024)
+        self.assertEqual(registration.profile["embedding_storage_dimensions"], 1536)
         self.assertEqual(
             registration.profile["embedding_model_revision"],
-            "a9af15a6372d7d6b25e9fb07c2ccb9e1fe645644",
+            "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
         )
         self.assertEqual(self.load(self.v4_value()).binding["profile"], CONTROL.PROFILE_V2)
 
@@ -979,20 +980,20 @@ class DiagnosticJourneyTest(unittest.TestCase):
             "provider": "local-tei",
             "api_url": "http://embedding:80",
             "api_key": "",
-            "model": "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+            "model": "Qwen/Qwen3-Embedding-0.6B",
         })
         self.assertEqual(journey.public_report()["provider"]["embedding"], {
             "name": "local-tei",
-            "configured_model": "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+            "configured_model": "Qwen/Qwen3-Embedding-0.6B",
         })
         RUNNER.assert_metric_identity(
             [("novelworld_embedding_requests_total", {
                 "service": "agent-service", "provider": "local-tei",
-                "model": "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+                "model": "Qwen/Qwen3-Embedding-0.6B",
             }, 1.0)],
             include_embedding=True,
             expected_embedding_provider="local-tei",
-            expected_embedding_model="Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+            expected_embedding_model="Qwen/Qwen3-Embedding-0.6B",
         )
         events = self.terminal_runner(journey)
 
@@ -1080,7 +1081,7 @@ class DiagnosticJourneyTest(unittest.TestCase):
             "--revision", profile["embedding_model_revision"],
             "--served-model-name", profile["embedding_model"],
             "--dtype", "float32",
-            "--max-batch-tokens", "8192",
+            "--max-batch-tokens", "4096",
             "--max-client-batch-size", "1",
             "--payload-limit", "8192",
             "--json-output",
@@ -1119,7 +1120,7 @@ class DiagnosticJourneyTest(unittest.TestCase):
                 return CONTROL.canonical({
                     "model": profile["embedding_model"],
                     "usage": {"prompt_tokens": 6, "total_tokens": 6},
-                    "data": [{"embedding": [0.0] * 1536}],
+                    "data": [{"embedding": [0.0] * 1024}],
                 })
             return b""
 
@@ -1127,7 +1128,12 @@ class DiagnosticJourneyTest(unittest.TestCase):
                 mock.patch.object(RUNNER.diagnostic, "bounded_command", side_effect=bounded):
             journey.prestart_v5()
         self.assertTrue(journey.base_prestarted)
-        self.assertEqual(journey.private_report["local_embedding_prestart"]["dimensions"], 1536)
+        self.assertEqual(
+            journey.private_report["local_embedding_prestart"]["provider_dimensions"], 1024
+        )
+        self.assertEqual(
+            journey.private_report["local_embedding_prestart"]["storage_dimensions"], 1536
+        )
         self.assertTrue(all("Authorization" not in command for command, _ in calls))
         self.assertEqual(list(self.output.iterdir()), [])
 
