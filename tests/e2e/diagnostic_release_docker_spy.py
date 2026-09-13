@@ -20,7 +20,7 @@ def _environment():
         _fail("NWQ_REAL_DOCKER must be an absolute path")
     if not trace:
         _fail("NWQ_DOCKER_TRACE is required")
-    if not re.fullmatch(r"nwq-[0-9a-f]{10}", project):
+    if not re.fullmatch(r"nwq-(?:[0-9a-f]{10}|[0-9a-f]{32})", project):
         _fail("invalid NWQ_PROJECT")
     return real, Path(trace), project
 

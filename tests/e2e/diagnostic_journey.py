@@ -35,6 +35,7 @@ REGISTRATION_SCHEMA_V3 = "vision-journey-registration-v3"
 REGISTRATION_SCHEMA_V4 = "vision-journey-registration-v4"
 REGISTRATION_SCHEMA_V5 = "vision-journey-registration-v5"
 LEDGER_SCHEMA = "vision-journey-ledger-v1"
+PRESTART_SCHEMA = "vision-journey-prestart-v1"
 PROFILE_PATH = Path("tools/llm-budget/diagnostic-v1.json")
 PROFILE_PATH_V2 = Path("tools/llm-budget/diagnostic-v2.json")
 PROFILE_PATH_V3 = Path("tools/llm-budget/diagnostic-v3.json")
@@ -513,9 +514,25 @@ class DiagnosticLedger:
     def __init__(self, registration: Registration):
         self.registration = registration
         self.descriptor: int | None = None
+        self._created = False
+
+    @property
+    def created(self) -> bool:
+        try:
+            return self._created or os.path.lexists(self.registration.value["ledger_path"])
+        except OSError:
+            return True
+
+    def _write(self, record: dict[str, Any]) -> None:
+        require(self.descriptor is not None, "diagnostic_ledger_not_started")
+        remaining = canonical(record) + b"\n"
+        while remaining:
+            size = os.write(self.descriptor, remaining)
+            require(size > 0, "diagnostic_ledger_write_failed")
+            remaining = remaining[size:]
+        os.fsync(self.descriptor)
 
     def _append(self, status: str, codes: list[str]) -> None:
-        require(self.descriptor is not None, "diagnostic_ledger_not_started")
         require(status in ("Started", "Passed", "Failed") and all(
             isinstance(code, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,100}", code) for code in codes),
             "diagnostic_failure_code_invalid")
@@ -525,12 +542,7 @@ class DiagnosticLedger:
                   "failure_codes": codes}
         if status == "Started":
             record["registration"] = self.registration.value
-        remaining = canonical(record) + b"\n"
-        while remaining:
-            size = os.write(self.descriptor, remaining)
-            require(size > 0, "diagnostic_ledger_write_failed")
-            remaining = remaining[size:]
-        os.fsync(self.descriptor)
+        self._write(record)
 
     def start(self) -> None:
         require(self.descriptor is None, "diagnostic_registration_already_started")
@@ -538,6 +550,7 @@ class DiagnosticLedger:
         try:
             self.descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL
                                       | os.O_NOFOLLOW | os.O_APPEND, 0o600)
+            self._created = True
         except OSError as error:
             raise DiagnosticFailure("diagnostic_registration_already_started") from error
         try:
@@ -546,6 +559,34 @@ class DiagnosticLedger:
         except BaseException:
             self.close()
             raise
+
+    def freeze_prestart(self, project: str, code: str) -> None:
+        """Block reuse after an interrupted Docker mutation without claiming Started."""
+        require(self.descriptor is None and not self.created,
+                "diagnostic_registration_already_started")
+        require(bool(re.fullmatch(r"nwq-(?:[a-f0-9]{10}|[a-f0-9]{32})", project))
+                and bool(re.fullmatch(r"[a-z][a-z0-9_]{0,100}", code)),
+                "diagnostic_prestart_freeze_invalid")
+        path = Path(self.registration.value["ledger_path"])
+        try:
+            self.descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                                      | os.O_NOFOLLOW | os.O_APPEND, 0o600)
+            self._created = True
+        except OSError as error:
+            raise DiagnosticFailure("diagnostic_registration_already_started") from error
+        try:
+            self._write({
+                "schema": PRESTART_SCHEMA,
+                "evidence_class": "Diagnostic",
+                "registration_sha256": self.registration.sha256,
+                "status": "Frozen",
+                "at": datetime.now(timezone.utc).isoformat(),
+                "failure_code": code,
+                "project": project,
+            })
+            sync_directory(path.parent)
+        finally:
+            self.close()
 
     def finish(self, passed: bool, codes: list[str]) -> None:
         try:

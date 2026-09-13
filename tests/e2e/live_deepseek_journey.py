@@ -41,7 +41,7 @@ EXPECTED_API_URL = "https://api.deepseek.com"
 EXPECTED_CANON_PROMPT = "canon-chunk-v10+event-grouping-v5"
 EXPECTED_BRANCH_PROMPT = "narrative-transition-v1"
 EXPECTED_WORLD_PROMPT = "world-turn-v2"
-PROJECT_PATTERN = re.compile(r"^nwq-[a-f0-9]{10}$")
+PROJECT_PATTERN = re.compile(r"^nwq-(?:[a-f0-9]{10}|[a-f0-9]{32})$")
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 IMAGE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._/:@-]*@sha256:[0-9a-f]{64}$")
 PUBLIC_MODEL_PATTERN = re.compile(r"^[A-Za-z0-9._/:-]{1,200}$")
@@ -1459,7 +1459,8 @@ class Journey:
         self.summary_binding = None
         self.summary_claim_attempt = 0
         self.summary_saved = None
-        suffix = secrets.token_hex(5)
+        suffix = (diagnostic_registration.sha256[:32]
+                  if self.local_embedding else secrets.token_hex(5))
         self.project = f"nwq-{suffix}"
         self.prefix = self.project
         self.port = reserve_port()
@@ -1485,6 +1486,7 @@ class Journey:
         self.diagnostic_evidence_durable = False
         self.diagnostic_evidence_deadline = None
         self.active_release_process = None
+        self.prestart_docker_mutation_unknown = False
         self.internal_service_token = ""
         self.user_stack_before: dict[str, Any] = {}
         self.inventory_captured = False
@@ -2638,7 +2640,7 @@ class Journey:
             self.diagnostic_failure(getattr(error, "code", "diagnostic_private_evidence_failed"))
 
     def prestart_cleanup_v5(self) -> None:
-        """Remove only this proven-empty v5 project without creating evidence files."""
+        """Remove only a settled, proven-empty v5 project."""
         try:
             if not self.inventory_captured:
                 return
@@ -2656,6 +2658,9 @@ class Journey:
                     raise QualificationFailure(
                         "diagnostic_release_stop_unproven"
                     ) from error
+                raise QualificationFailure("diagnostic_docker_outcome_unknown")
+            if getattr(self, "prestart_docker_mutation_unknown", False):
+                raise QualificationFailure("diagnostic_docker_outcome_unknown")
 
             def bounded_run(command):
                 return diagnostic.bounded_command(command).decode()
@@ -2691,19 +2696,22 @@ class Journey:
                         bounded_run(command)
                     except (QualificationFailure, diagnostic.DiagnosticFailure, OSError):
                         failures.append("diagnostic_cleanup_command_failed")
-            after = docker_inventory_snapshot(runner=bounded_run)
-            residue = attempt_resources(after, self.project, self.prefix)
-            unrelated = {
-                kind: {
-                    name: value for name, value in after[kind].items()
-                    if f"{kind}:{name}" not in residue
+            for index in range(3):
+                if index:
+                    time.sleep(1)
+                after = docker_inventory_snapshot(runner=bounded_run)
+                residue = attempt_resources(after, self.project, self.prefix)
+                unrelated = {
+                    kind: {
+                        name: value for name, value in after[kind].items()
+                        if f"{kind}:{name}" not in residue
+                    }
+                    for kind in ("containers", "volumes", "networks")
                 }
-                for kind in ("containers", "volumes", "networks")
-            }
-            if residue or failures:
-                raise QualificationFailure("diagnostic_cleanup_residue")
-            if unrelated != self.user_stack_before:
-                raise QualificationFailure("existing_user_stack_changed")
+                if residue or failures:
+                    raise QualificationFailure("diagnostic_cleanup_residue")
+                if unrelated != self.user_stack_before:
+                    raise QualificationFailure("existing_user_stack_changed")
             self.stack_started = False
         finally:
             if self.runtime_temp is not None:
@@ -4128,10 +4136,14 @@ class Journey:
             raise QualificationFailure("local_embedding_prestart_outside_v5")
         self.preflight()
         self.prepare_compose()
+        self.prestart_docker_mutation_unknown = True
         self.adopt_initial_release(prestart=True)
+        self.prestart_docker_mutation_unknown = False
         with self.stage("local_embedding_prestart"):
             self.compose("pull", "embedding", capture=False)
+            self.prestart_docker_mutation_unknown = True
             self.compose("up", "-d", "--no-deps", "embedding", capture=False)
+            self.prestart_docker_mutation_unknown = False
             profile = self.diagnostic_registration.profile
             embedding_name = f"{self.prefix}-embedding"
             nginx_name = f"{self.prefix}-nginx"
@@ -5676,8 +5688,8 @@ def run_diagnostic(journey: Journey) -> int:
         signal.signal(number, cancel)
     try:
         # Existing registrations are rejected before Journey construction. v5
-        # prepares its keyless local model before Started and removes only its
-        # newly labelled project if preparation or ledger creation fails.
+        # prepares its keyless local model before Started. Cleanup is destructive
+        # only after every Docker mutation completed and inventory stayed empty.
         try:
             if journey.local_embedding:
                 journey.prestart_v5()
@@ -5686,11 +5698,20 @@ def run_diagnostic(journey: Journey) -> int:
             journey.diagnostic_ledger.start()
         except (Exception, KeyboardInterrupt) as error:
             failure(error, "diagnostic_start_failed")
-            if journey.local_embedding:
+            if (journey.local_embedding
+                    and not journey.diagnostic_ledger.created):
                 try:
                     journey.prestart_cleanup_v5()
                 except (Exception, KeyboardInterrupt) as cleanup_error:
                     failure(cleanup_error, "diagnostic_prestart_cleanup_unproven")
+                    if not journey.diagnostic_ledger.created:
+                        try:
+                            journey.diagnostic_ledger.freeze_prestart(
+                                journey.project,
+                                "diagnostic_prestart_cleanup_unproven",
+                            )
+                        except (Exception, KeyboardInterrupt) as freeze_error:
+                            failure(freeze_error, "diagnostic_prestart_freeze_unproven")
             return 1
         try:
             journey.execute()

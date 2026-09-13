@@ -622,6 +622,7 @@ class DiagnosticJourneyTest(unittest.TestCase):
             with self.assertRaises(OSError):
                 ledger.start()
         self.assertIsNone(ledger.descriptor)
+        self.assertTrue(ledger.created)
         with self.assertRaises(CONTROL.DiagnosticFailure):
             CONTROL.DiagnosticLedger(registration).start()
         self.assertTrue(Path(self.value["ledger_path"]).exists())
@@ -941,6 +942,7 @@ class DiagnosticJourneyTest(unittest.TestCase):
         self.value = self.v5_value()
         journey = self.journey()
         self.assertTrue(journey.local_embedding)
+        self.assertEqual(journey.project, "nwq-" + journey.diagnostic_registration.sha256[:32])
         self.assertEqual(journey.embedding_config, {
             "provider": "local-tei",
             "api_url": "http://embedding:80",
@@ -989,6 +991,42 @@ class DiagnosticJourneyTest(unittest.TestCase):
         self.assertEqual(list(self.output.iterdir()), [])
         execute.assert_not_called()
         report.assert_not_called()
+
+        for path in self.output.iterdir():
+            path.unlink()
+        self.value = self.v5_value()
+        self.value["budget_id"] = str(uuid.uuid4())
+        self.value["ledger_path"] = str(self.directory / (self.value["budget_id"] + ".jsonl"))
+        journey = self.journey()
+        with mock.patch.object(journey, "prestart_v5"), mock.patch.object(
+            journey, "prestart_cleanup_v5"
+        ) as cleanup, mock.patch.object(
+            CONTROL, "sync_directory", side_effect=OSError("synthetic")
+        ):
+            self.assertEqual(RUNNER.run_diagnostic(journey), 1)
+        cleanup.assert_not_called()
+        self.assertTrue(journey.diagnostic_ledger.created)
+        self.assertTrue(Path(self.value["ledger_path"]).exists())
+
+    def test_v5_uncertain_prestart_freezes_registration_without_started(self):
+        self.value = self.v5_value()
+        journey = self.journey()
+        journey.inventory_captured = True
+        journey.prestart_docker_mutation_unknown = True
+        with mock.patch.object(
+            journey, "prestart_v5", side_effect=RUNNER.QualificationFailure("interrupted")
+        ), mock.patch.object(
+            RUNNER.diagnostic, "bounded_command"
+        ) as docker:
+            self.assertEqual(RUNNER.run_diagnostic(journey), 1)
+        docker.assert_not_called()
+        row = json.loads(Path(self.value["ledger_path"]).read_text())
+        self.assertEqual(row["schema"], CONTROL.PRESTART_SCHEMA)
+        self.assertEqual(row["status"], "Frozen")
+        self.assertEqual(row["project"], journey.project)
+        self.assertNotIn("registration", row)
+        with self.assertRaises(CONTROL.DiagnosticFailure):
+            self.load()
 
     def test_v5_prestart_proves_keyless_pinned_runtime_and_vector(self):
         profile = json.loads((ROOT / CONTROL.PROFILE_PATH_V3).read_bytes())
@@ -1091,10 +1129,14 @@ class DiagnosticJourneyTest(unittest.TestCase):
             return b""
 
         with mock.patch.object(
-            RUNNER, "docker_inventory_snapshot", side_effect=[before, unrelated]
-        ), mock.patch.object(RUNNER.diagnostic, "bounded_command", side_effect=bounded):
+            RUNNER, "docker_inventory_snapshot",
+            side_effect=[before, unrelated, unrelated, unrelated]
+        ), mock.patch.object(
+            RUNNER.diagnostic, "bounded_command", side_effect=bounded
+        ), mock.patch.object(RUNNER.time, "sleep") as sleep:
             journey.prestart_cleanup_v5()
         self.assertEqual([command[1] for command in commands], ["rm", "network", "volume"])
+        self.assertEqual(sleep.call_count, 2)
         self.assertFalse(journey.stack_started)
         self.assertEqual(list(self.output.iterdir()), [])
 

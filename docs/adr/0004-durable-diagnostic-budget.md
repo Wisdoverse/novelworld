@@ -267,7 +267,9 @@ the v2 bytes. Generation remains DeepSeek-only. Before Started, the runner cold
 adopts the registered base with no provider setting, starts the digest-pinned
 CPU TEI service without a host port, and uses the release's pinned Nginx curl to
 verify the exact Hub revision, served model, usage, and 1,536 finite values. A
-pre-Started failure removes only resources carrying the proven-empty Compose
-project label and writes no journey report. Once Started exists, the existing
+settled pre-Started failure removes only resources carrying the registration-bound
+Compose project label after three stable inventory reads and writes no journey
+report. An interrupted Docker mutation preserves resources and writes a
+registration-bound `Frozen` control record without claiming `Started`. Once Started exists, the existing
 durable terminal and evidence-gated cleanup rules apply. This implementation
 does not itself register, fund, or execute a live Diagnostic.
