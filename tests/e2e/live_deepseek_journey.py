@@ -2644,6 +2644,18 @@ class Journey:
                 return
             if not PROJECT_PATTERN.fullmatch(self.project) or self.prefix != self.project:
                 raise QualificationFailure("diagnostic_cleanup_target_invalid")
+            process = getattr(self, "active_release_process", None)
+            if process is not None:
+                try:
+                    if process.poll() is None:
+                        with contextlib.suppress(ProcessLookupError):
+                            os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=10)
+                    self.active_release_process = None
+                except (OSError, subprocess.SubprocessError) as error:
+                    raise QualificationFailure(
+                        "diagnostic_release_stop_unproven"
+                    ) from error
 
             def bounded_run(command):
                 return diagnostic.bounded_command(command).decode()
