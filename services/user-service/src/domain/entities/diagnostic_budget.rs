@@ -11,6 +11,10 @@ pub const MEMORY_PROFILE_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../tools/llm-budget/diagnostic-v2.json"
 ));
+pub const LOCAL_MEMORY_PROFILE_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tools/llm-budget/diagnostic-v3.json"
+));
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum BudgetError {
@@ -227,6 +231,12 @@ pub struct Profile {
     pub embedding_max_request_bytes: Option<usize>,
     #[serde(default)]
     pub embedding_dimensions: Option<usize>,
+    #[serde(default)]
+    pub embedding_runtime_image: Option<String>,
+    #[serde(default)]
+    pub embedding_model_revision: Option<String>,
+    #[serde(default)]
+    pub embedding_probe_image: Option<String>,
     pub max_lifetime_seconds: i64,
     pub max_limits: Amount,
     pub operations: BTreeMap<String, u32>,
@@ -242,6 +252,7 @@ impl Profile {
         let source = match name {
             "vision-journey-diagnostic-v1" => PROFILE_JSON,
             "four-layer-journey-diagnostic-v2" => MEMORY_PROFILE_JSON,
+            "four-layer-journey-diagnostic-v3" => LOCAL_MEMORY_PROFILE_JSON,
             _ => return Err(BudgetError::Invalid),
         };
         serde_json::from_str(source).map_err(|_| BudgetError::Invalid)
@@ -459,8 +470,10 @@ mod tests {
     fn memory_profile_prices_embedding_without_relaxing_v1() {
         let v1 = Profile::compiled();
         let v2 = Profile::compiled_named("four-layer-journey-diagnostic-v2").unwrap();
+        let v3 = Profile::compiled_named("four-layer-journey-diagnostic-v3").unwrap();
         assert_eq!(v1.model, "deepseek-flash");
         assert_eq!(v2.model, "deepseek-v4-flash");
+        assert_eq!(v3.model, "deepseek-v4-flash");
         assert_eq!(v1.quote("embedding", 0), Err(BudgetError::Invalid));
         assert_eq!(
             v2.quote("embedding", 0),
@@ -471,6 +484,38 @@ mod tests {
             })
         );
         assert_eq!(v2.quote("embedding", 1), Err(BudgetError::Invalid));
+        assert_eq!(
+            v3.quote("embedding", 0),
+            Ok(Amount {
+                attempts: 1,
+                tokens: 8192,
+                cost_micro_cny: 0,
+            })
+        );
+        assert_eq!(
+            v3.identity("embedding"),
+            Ok((
+                "local-tei",
+                "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+                "http://embedding:80"
+            ))
+        );
+        assert_eq!(
+            v3.embedding_runtime_image.as_deref(),
+            Some("ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.3@sha256:c26a226262ad4ff3330fb30b76653c1bb65da2fcf413b92284545a010e0a8a48")
+        );
+        assert_eq!(
+            v3.embedding_model_revision.as_deref(),
+            Some("a9af15a6372d7d6b25e9fb07c2ccb9e1fe645644")
+        );
+        assert_eq!(
+            v3.embedding_probe_image.as_deref(),
+            Some("nginx:alpine@sha256:db35bfc6b2951e7f8a72db5db120288c127ffaeeb4a6d4b95a26fead017d5913")
+        );
+        assert_eq!(
+            llm_client::diagnostic_budget::profile_sha256_for("four-layer-journey-diagnostic-v2"),
+            "6cee114e4008b250e2d00d629c938dd245027d5245437b1f2cbdeb81c4bdffbc"
+        );
         assert_eq!(
             v2.usage(
                 "embedding",

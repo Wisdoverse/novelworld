@@ -1,4 +1,7 @@
-use crate::diagnostic_budget::{canonical_uuid, Amount, Binding, ReserveRequest, SettleRequest};
+use crate::diagnostic_budget::{
+    canonical_uuid, profile_named, profile_sha256_for, Amount, Binding, ReserveRequest,
+    SettleRequest,
+};
 use uuid::Uuid;
 
 const BUDGET_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
@@ -139,4 +142,28 @@ fn required_fields_are_required_but_cached_usage_is_optional() {
         settle_json().replace(",\n                \"cached_input_tokens\":null", "");
     let parsed = serde_json::from_str::<SettleRequest>(&without_cached).unwrap();
     assert_eq!(parsed.usage.cached_input_tokens, None);
+}
+
+#[test]
+fn local_memory_profile_is_additive_and_v2_stays_frozen() {
+    let profile = profile_named("four-layer-journey-diagnostic-v3").unwrap();
+    assert_eq!(profile.embedding_provider.as_deref(), Some("local-tei"));
+    assert_eq!(
+        profile.embedding_model.as_deref(),
+        Some("Alibaba-NLP/gte-Qwen2-1.5B-instruct")
+    );
+    assert_eq!(
+        profile.embedding_origin.as_deref(),
+        Some("http://embedding:80")
+    );
+    assert_eq!(profile.embedding_input_micro_cny, Some(0));
+    assert_eq!(profile.embedding_dimensions, Some(1536));
+    assert_eq!(
+        profile._embedding_model_revision.as_deref(),
+        Some("a9af15a6372d7d6b25e9fb07c2ccb9e1fe645644")
+    );
+    assert_eq!(
+        profile_sha256_for("four-layer-journey-diagnostic-v2"),
+        "6cee114e4008b250e2d00d629c938dd245027d5245437b1f2cbdeb81c4bdffbc"
+    );
 }

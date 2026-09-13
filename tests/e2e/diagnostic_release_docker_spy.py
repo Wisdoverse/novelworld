@@ -77,7 +77,10 @@ def _probe_allowed(argv, project):
         return False
     return (bool(re.fullmatch(r"[a-z0-9][a-z0-9._/:@-]*@sha256:[0-9a-f]{64}", argv[17]))
             and argv[18] == "--diagnostic-budget-contract"
-            and (len(argv) == 19 or argv[19] == "four-layer-journey-diagnostic-v2"))
+            and (len(argv) == 19 or argv[19] in {
+                "four-layer-journey-diagnostic-v2",
+                "four-layer-journey-diagnostic-v3",
+            }))
 
 
 def _start_allowed(argv, project):

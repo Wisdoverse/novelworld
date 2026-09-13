@@ -168,6 +168,12 @@ pub(crate) struct CompiledProfile {
     pub embedding_max_request_bytes: Option<usize>,
     #[serde(default)]
     pub embedding_dimensions: Option<usize>,
+    #[serde(default, rename = "embedding_runtime_image")]
+    pub _embedding_runtime_image: Option<String>,
+    #[serde(default, rename = "embedding_model_revision")]
+    pub _embedding_model_revision: Option<String>,
+    #[serde(default, rename = "embedding_probe_image")]
+    pub _embedding_probe_image: Option<String>,
     pub max_limits: Amount,
     pub operations: BTreeMap<String, u32>,
 }
@@ -181,10 +187,15 @@ pub(crate) fn profile() -> &'static CompiledProfile {
 
 pub(crate) fn profile_named(name: &str) -> Result<&'static CompiledProfile, BudgetControlError> {
     static MEMORY_PROFILE: OnceLock<CompiledProfile> = OnceLock::new();
+    static LOCAL_MEMORY_PROFILE: OnceLock<CompiledProfile> = OnceLock::new();
     match name {
         "vision-journey-diagnostic-v1" => Ok(profile()),
         "four-layer-journey-diagnostic-v2" => Ok(MEMORY_PROFILE.get_or_init(|| {
             serde_json::from_str(MEMORY_PROFILE_JSON).expect("valid compiled memory profile")
+        })),
+        "four-layer-journey-diagnostic-v3" => Ok(LOCAL_MEMORY_PROFILE.get_or_init(|| {
+            serde_json::from_str(LOCAL_MEMORY_PROFILE_JSON)
+                .expect("valid compiled local memory profile")
         })),
         _ => Err(BudgetControlError),
     }
@@ -638,6 +649,11 @@ pub const MEMORY_PROFILE_JSON: &str = include_str!(concat!(
     "/../../tools/llm-budget/diagnostic-v2.json"
 ));
 
+pub const LOCAL_MEMORY_PROFILE_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tools/llm-budget/diagnostic-v3.json"
+));
+
 /// Hash the exact compiled profile bytes; no downloaded policy or mutable runtime pricing.
 pub fn profile_sha256() -> String {
     profile_sha256_for("vision-journey-diagnostic-v1")
@@ -647,6 +663,7 @@ pub fn profile_sha256_for(name: &str) -> String {
     let bytes = match name {
         "vision-journey-diagnostic-v1" => PROFILE_JSON.as_bytes(),
         "four-layer-journey-diagnostic-v2" => MEMORY_PROFILE_JSON.as_bytes(),
+        "four-layer-journey-diagnostic-v3" => LOCAL_MEMORY_PROFILE_JSON.as_bytes(),
         _ => return String::new(),
     };
     Sha256::digest(bytes)

@@ -1562,6 +1562,12 @@ Runtime variables (some are required only when their integration is enabled):
 | `S3_SECRET_KEY` | Novel | Secret access key |
 | `SERVICE_PORT` | All | Port the service listens on |
 
+The server Compose file provides an opt-in `local-embedding` profile. It pins
+Text Embeddings Inference and `Alibaba-NLP/gte-Qwen2-1.5B-instruct` to immutable
+image/model revisions, exposes no host port, and uses the same OpenAI-compatible
+Agent adapter as an external endpoint. Ordinary deployments may select either
+form; generation configuration remains separate.
+
 ### 11.2 Tunable Parameters
 
 The following parameters SHOULD be configurable via environment variables with the listed defaults:

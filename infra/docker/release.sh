@@ -168,6 +168,7 @@ load_diagnostic_mode() {
   case "$diagnostic_profile" in
     vision-journey-diagnostic-v1) diagnostic_profile_file=diagnostic-v1.json ;;
     four-layer-journey-diagnostic-v2) diagnostic_profile_file=diagnostic-v2.json ;;
+    four-layer-journey-diagnostic-v3) diagnostic_profile_file=diagnostic-v3.json ;;
     *) die "unsupported diagnostic profile" ;;
   esac
   [[ -r "$tool_dir/diagnostic_budget.py" && -r "$tool_dir/../../tools/llm-budget/$diagnostic_profile_file" ]] \

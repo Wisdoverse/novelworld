@@ -13,6 +13,7 @@ import contextlib
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import secrets
@@ -821,6 +822,8 @@ def summarize_metrics(
     *,
     expected_model: str = EXPECTED_MODEL,
     include_embedding: bool = False,
+    expected_embedding_provider: str = "openai",
+    expected_embedding_model: str = "text-embedding-3-small",
 ) -> dict[str, Any]:
     parser = load_metric_parser(root)
     windows = []
@@ -853,7 +856,9 @@ def summarize_metrics(
         raw = path.read_bytes()
         samples = parser.parse_metrics(raw)
         assert_metric_identity(
-            samples, expected_model=expected_model, include_embedding=include_embedding
+            samples, expected_model=expected_model, include_embedding=include_embedding,
+            expected_embedding_provider=expected_embedding_provider,
+            expected_embedding_model=expected_embedding_model,
         )
         operations: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         for metric, labels, value in samples:
@@ -924,6 +929,8 @@ def assert_metric_identity(
     operation: str | None = None,
     expected_model: str = EXPECTED_MODEL,
     include_embedding: bool = False,
+    expected_embedding_provider: str = "openai",
+    expected_embedding_model: str = "text-embedding-3-small",
 ) -> None:
     for metric, labels, _ in samples:
         embedding = metric.startswith("novelworld_embedding_")
@@ -939,7 +946,7 @@ def assert_metric_identity(
         if "provider" not in labels and "model" not in labels:
             continue
         expected = (
-            ("openai", "text-embedding-3-small")
+            (expected_embedding_provider, expected_embedding_model)
             if metric_operation == "embedding"
             else (EXPECTED_PROVIDER, expected_model)
         )
@@ -968,6 +975,8 @@ def provider_started_delta(
     operation: str | None = None,
     expected_model: str = EXPECTED_MODEL,
     include_embedding: bool = False,
+    expected_embedding_provider: str = "openai",
+    expected_embedding_model: str = "text-embedding-3-small",
 ) -> int:
     include_embedding = include_embedding or operation == "embedding"
     parser = load_metric_parser(root)
@@ -977,6 +986,8 @@ def provider_started_delta(
         operation=operation,
         expected_model=expected_model,
         include_embedding=include_embedding,
+        expected_embedding_provider=expected_embedding_provider,
+        expected_embedding_model=expected_embedding_model,
     )
     assert_metric_identity(
         parser.parse_metrics(after),
@@ -984,12 +995,15 @@ def provider_started_delta(
         operation=operation,
         expected_model=expected_model,
         include_embedding=include_embedding,
+        expected_embedding_provider=expected_embedding_provider,
+        expected_embedding_model=expected_embedding_model,
     )
     llm_labels = {"service": service, "provider": EXPECTED_PROVIDER, "model": expected_model}
     if operation not in (None, "embedding"):
         llm_labels["operation"] = operation
     embedding_labels = {
-        "service": service, "provider": "openai", "model": "text-embedding-3-small"
+        "service": service, "provider": expected_embedding_provider,
+        "model": expected_embedding_model,
     }
     start = finish = 0.0
     if operation != "embedding":
@@ -1080,6 +1094,7 @@ def response_models_from_logs(
     *,
     expected_model: str = EXPECTED_MODEL,
     expected_embedding_model: str | None = None,
+    expected_embedding_provider: str = "openai",
 ) -> list[dict[str, str]]:
     observed = []
     for line in raw.splitlines():
@@ -1102,7 +1117,7 @@ def response_models_from_logs(
             if expected_embedding_model is None:
                 continue
             if (record["provider"], record["configured_model"], record["response_model"], record["mode"]) != (
-                "openai", expected_embedding_model, expected_embedding_model, "sync"
+                expected_embedding_provider, expected_embedding_model, expected_embedding_model, "sync"
             ):
                 raise QualificationFailure("response_model_marker_invalid")
             observed.append(record)
@@ -1125,12 +1140,14 @@ def unseen_response_models(
     *,
     expected_model: str = EXPECTED_MODEL,
     expected_embedding_model: str | None = None,
+    expected_embedding_provider: str = "openai",
 ) -> tuple[list[dict[str, str]], int]:
     observed = response_models_from_logs(
         raw,
         service,
         expected_model=expected_model,
         expected_embedding_model=expected_embedding_model,
+        expected_embedding_provider=expected_embedding_provider,
     )
     if previous_count < 0 or previous_count > len(observed):
         raise QualificationFailure("response_model_log_rewound")
@@ -1145,6 +1162,7 @@ def verify_response_models(
     *,
     expected_model: str = EXPECTED_MODEL,
     expected_embedding_model: str | None = None,
+    expected_embedding_provider: str = "openai",
 ) -> dict[str, Any]:
     if not allowed or not all(valid_public_model(model) for model in allowed):
         raise QualificationFailure("response_model_allowlist_invalid")
@@ -1160,7 +1178,7 @@ def verify_response_models(
             if embedding:
                 if expected_embedding_model is None:
                     continue
-                if labels.get("provider") != "openai" \
+                if labels.get("provider") != expected_embedding_provider \
                         or labels.get("model") != expected_embedding_model:
                     raise QualificationFailure("successful_provider_identity_invalid")
                 if value < 0 or not value.is_integer():
@@ -1402,12 +1420,25 @@ class Journey:
             self.expected_model = diagnostic_registration.profile["model"]
         summary_schema = (diagnostic_registration.value["schema"]
                           if diagnostic_registration is not None else None)
-        self.four_layer = summary_schema == diagnostic.REGISTRATION_SCHEMA_V4
-        if self.four_layer != (embedding_config_path is not None):
+        self.local_embedding = summary_schema == diagnostic.REGISTRATION_SCHEMA_V5
+        self.four_layer = summary_schema in (
+            diagnostic.REGISTRATION_SCHEMA_V4, diagnostic.REGISTRATION_SCHEMA_V5)
+        if ((summary_schema == diagnostic.REGISTRATION_SCHEMA_V4)
+                != (embedding_config_path is not None)):
             raise QualificationFailure("embedding_config_v4_only")
-        self.embedding_config = (
-            load_embedding_config(embedding_config_path) if embedding_config_path is not None else None
-        )
+        if self.local_embedding:
+            profile = diagnostic_registration.profile
+            self.embedding_config = {
+                "provider": profile["embedding_provider"],
+                "api_url": profile["embedding_origin"],
+                "api_key": "",
+                "model": profile["embedding_model"],
+            }
+        else:
+            self.embedding_config = (
+                load_embedding_config(embedding_config_path)
+                if embedding_config_path is not None else None
+            )
         self.prospective_summary = summary_schema in (
             diagnostic.REGISTRATION_SCHEMA_V2, diagnostic.REGISTRATION_SCHEMA_V3)
         self.summary_base_enrolled = summary_schema == diagnostic.REGISTRATION_SCHEMA_V3
@@ -1435,6 +1466,9 @@ class Journey:
         self.api = f"http://127.0.0.1:{self.port}/api"
         self.compose_env: dict[str, str] = {}
         self.stack_started = False
+        self.base_prestarted = False
+        self.base_postgres_volume: dict[str, Any] | None = None
+        self.prestart_release_log: Path | None = None
         self.cleanup_required = False
         self.runtime_temp: tempfile.TemporaryDirectory[str] | None = None
         self.runtime_root: Path | None = None
@@ -1527,6 +1561,7 @@ class Journey:
                 diagnostic.REGISTRATION_SCHEMA_V2: "h4-vision-diagnostic-v2",
                 diagnostic.REGISTRATION_SCHEMA_V3: "h4-vision-diagnostic-v3",
                 diagnostic.REGISTRATION_SCHEMA_V4: "h3-h4-four-layer-diagnostic-v4",
+                diagnostic.REGISTRATION_SCHEMA_V5: "h3-h4-four-layer-diagnostic-v5",
             }[summary_schema])
             self.report["policy_identity"].update(
                 qualification=None, extraction=None,
@@ -1785,7 +1820,8 @@ class Journey:
             self.private_report["attempt_sequence"] = sequence
         self.cleanup_required = True
         if self.diagnostic_registration is not None:
-            if self.diagnostic_ledger.descriptor is None:
+            if (not self.local_embedding
+                    and self.diagnostic_ledger.descriptor is None):
                 raise QualificationFailure("diagnostic_ledger_not_started")
             # Reuse the supported release probe: no network, mounts, credentials
             # or provider work. Check both versions before adopting either one.
@@ -1816,7 +1852,8 @@ class Journey:
         for relative in ("infra/docker/release.sh", "infra/docker/diagnostic_budget.py",
                          "infra/docker/qualification_network.py",
                          "tools/llm-budget/diagnostic-v1.json",
-                         "tools/llm-budget/diagnostic-v2.json"):
+                         "tools/llm-budget/diagnostic-v2.json",
+                         "tools/llm-budget/diagnostic-v3.json"):
             target = tool_root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes((self.root / relative).read_bytes())
@@ -2600,6 +2637,67 @@ class Journey:
         except (QualificationFailure, diagnostic.DiagnosticFailure, OSError) as error:
             self.diagnostic_failure(getattr(error, "code", "diagnostic_private_evidence_failed"))
 
+    def prestart_cleanup_v5(self) -> None:
+        """Remove only this proven-empty v5 project without creating evidence files."""
+        try:
+            if not self.inventory_captured:
+                return
+            if not PROJECT_PATTERN.fullmatch(self.project) or self.prefix != self.project:
+                raise QualificationFailure("diagnostic_cleanup_target_invalid")
+
+            def bounded_run(command):
+                return diagnostic.bounded_command(command).decode()
+
+            before = docker_inventory_snapshot(runner=bounded_run)
+            owned = attempt_resources(before, self.project, self.prefix)
+            for resource in owned:
+                kind, name = resource.split(":", 1)
+                if (before[kind][name].get("labels") or {}).get(
+                    "com.docker.compose.project"
+                ) != self.project:
+                    raise QualificationFailure("diagnostic_cleanup_ownership_unproven")
+            failures = []
+            for expected_kind in ("containers", "networks", "volumes"):
+                for resource in owned:
+                    kind, name = resource.split(":", 1)
+                    if kind != expected_kind:
+                        continue
+                    item = before[kind][name]
+                    if kind == "containers":
+                        identifier = item.get("id")
+                        if not isinstance(identifier, str) or not re.fullmatch(
+                            r"[0-9a-f]{64}", identifier
+                        ):
+                            failures.append("diagnostic_cleanup_identity_invalid")
+                            continue
+                        command = ["docker", "rm", "--force", "--volumes", identifier]
+                    elif kind == "networks":
+                        command = ["docker", "network", "rm", item["id"]]
+                    else:
+                        command = ["docker", "volume", "rm", name]
+                    try:
+                        bounded_run(command)
+                    except (QualificationFailure, diagnostic.DiagnosticFailure, OSError):
+                        failures.append("diagnostic_cleanup_command_failed")
+            after = docker_inventory_snapshot(runner=bounded_run)
+            residue = attempt_resources(after, self.project, self.prefix)
+            unrelated = {
+                kind: {
+                    name: value for name, value in after[kind].items()
+                    if f"{kind}:{name}" not in residue
+                }
+                for kind in ("containers", "volumes", "networks")
+            }
+            if residue or failures:
+                raise QualificationFailure("diagnostic_cleanup_residue")
+            if unrelated != self.user_stack_before:
+                raise QualificationFailure("existing_user_stack_changed")
+            self.stack_started = False
+        finally:
+            if self.runtime_temp is not None:
+                self.runtime_temp.cleanup()
+                self.runtime_temp = None
+
     def diagnostic_cleanup(self) -> None:
         """Fixed owned inventory; no unconditional Compose down --volumes."""
         if not self.inventory_captured or not self.cleanup_required:
@@ -2962,7 +3060,7 @@ class Journey:
             source_counts[expected_source] += 1
         secret_values = [self.config["api_key"].encode(), token.encode(), password.encode()]
         if self.embedding_config is not None:
-            secret_values.append(self.embedding_config["api_key"].encode())
+            secret_values.extend(filter(None, [self.embedding_config["api_key"].encode()]))
         if any(secret_value in export for secret_value in secret_values):
             raise QualificationFailure("export_contains_secret")
         write_private(self.output / artifact, export)
@@ -3184,9 +3282,13 @@ class Journey:
                     previous_count,
                     expected_model=self.expected_model,
                     expected_embedding_model=(
-                        "text-embedding-3-small"
-                        if getattr(self, "four_layer", False)
+                        self.embedding_config["model"]
+                        if getattr(self, "four_layer", False) and self.embedding_config
                         else None
+                    ),
+                    expected_embedding_provider=(
+                        getattr(self, "embedding_config", None)["provider"]
+                        if getattr(self, "embedding_config", None) else "openai"
                     ),
                 )
                 self.response_model_observations.extend(new)
@@ -3234,9 +3336,12 @@ class Journey:
                     allowed,
                     expected_model=self.expected_model,
                     expected_embedding_model=(
-                        "text-embedding-3-small"
-                        if getattr(self, "four_layer", False)
+                        self.embedding_config["model"]
+                        if getattr(self, "four_layer", False) and self.embedding_config
                         else None
+                    ),
+                    expected_embedding_provider=(
+                        self.embedding_config["provider"] if self.embedding_config else "openai"
                     ),
                 )
             )
@@ -3248,6 +3353,13 @@ class Journey:
                 windows,
                 expected_model=self.expected_model,
                 include_embedding=getattr(self, "four_layer", False),
+                expected_embedding_provider=(
+                    self.embedding_config["provider"] if self.embedding_config else "openai"
+                ),
+                expected_embedding_model=(
+                    self.embedding_config["model"] if self.embedding_config
+                    else "text-embedding-3-small"
+                ),
             )
             if self.prospective_summary:
                 summary_calls = sum(row["value"] for row in self.report["llm_metrics"]["counter_totals"]
@@ -3287,10 +3399,13 @@ class Journey:
         manifest: Path,
         gate: Callable[[], None] | None = None,
         release_name: str | None = None,
+        *,
+        prestart: bool = False,
     ) -> int:
         if self.runtime_root is None or self.release_tool is None:
             raise QualificationFailure("release_environment_missing")
-        log_path = self.output / f"release-{command}.log"
+        log_path = ((self.runtime_root.parent / f"prestart-release-{command}.log")
+                    if prestart else self.output / f"release-{command}.log")
         descriptor = os.open(log_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         started = time.monotonic()
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as log:
@@ -3366,6 +3481,8 @@ class Journey:
                 for phase, value in phases.items()
             }
         )
+        if prestart:
+            self.prestart_release_log = log_path
         return duration
 
     def run_legacy_character_slice(
@@ -3957,28 +4074,19 @@ class Journey:
             prompt_identity[name] = expected
         self.report["journey"]["prompt_identity"] = prompt_identity
 
-    def execute(self) -> None:
-        self.preflight()
-        self.prepare_compose()
-        write_private(
-            self.output / "docker-inventory-before.json",
-            canonical_json(self.user_stack_before) + b"\n",
-        )
-
+    def adopt_initial_release(self, *, prestart: bool = False) -> None:
         release_label = "candidate" if self.journey_slice == "legacy-character" else "base"
         release_manifest = (
             self.candidate_manifest_path
-            if self.journey_slice == "legacy-character"
-            else self.base_manifest_path
+            if self.journey_slice == "legacy-character" else self.base_manifest_path
         )
         release_identity = (
             self.candidate_manifest
-            if self.journey_slice == "legacy-character"
-            else self.base_manifest
+            if self.journey_slice == "legacy-character" else self.base_manifest
         )
         with self.stage(f"supported_{release_label}_adoption"):
             duration = self.release(
-                "adopt", release_manifest, release_name=release_label
+                "adopt", release_manifest, release_name=release_label, prestart=prestart
             )
             self.stack_started = True
             self.wait_gateway()
@@ -3986,8 +4094,151 @@ class Journey:
             release_postgres_volume = self.postgres_volume_identity()
             self.report["journey"][f"{release_label}_adoption_duration_ms"] = duration
             if self.journey_slice == "core":
-                base_postgres_volume = release_postgres_volume
+                self.base_postgres_volume = release_postgres_volume
+            if not prestart:
+                self.diagnostic_checkpoint("initial")
+
+    def publish_prestart_release_log(self) -> None:
+        if self.prestart_release_log is None:
+            return
+        target = self.output / "release-adopt.log"
+        descriptor = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with self.prestart_release_log.open("rb") as source, os.fdopen(descriptor, "wb") as sink:
+            while chunk := source.read(65536):
+                sink.write(chunk)
+            sink.flush()
+            os.fsync(sink.fileno())
+        self.prestart_release_log.unlink()
+        self.prestart_release_log = None
+
+    def prestart_v5(self) -> None:
+        if not self.local_embedding:
+            raise QualificationFailure("local_embedding_prestart_outside_v5")
+        self.preflight()
+        self.prepare_compose()
+        self.adopt_initial_release(prestart=True)
+        with self.stage("local_embedding_prestart"):
+            self.compose("pull", "embedding", capture=False)
+            self.compose("up", "-d", "--no-deps", "embedding", capture=False)
+            profile = self.diagnostic_registration.profile
+            embedding_name = f"{self.prefix}-embedding"
+            nginx_name = f"{self.prefix}-nginx"
+            embedding = docker_inspect("container", embedding_name)
+            image = docker_inspect("image", profile["embedding_runtime_image"])
+            nginx = docker_inspect("container", nginx_name)
+            nginx_image = docker_inspect("image", profile["embedding_probe_image"])
+            config = embedding.get("Config") or {}
+            host = embedding.get("HostConfig") or {}
+            command = config.get("Cmd") or []
+            repo_digests = image.get("RepoDigests") or []
+            digest_suffix = profile["embedding_runtime_image"].split("@", 1)[1]
+            nginx_digest_suffix = profile["embedding_probe_image"].split("@", 1)[1]
+            nginx_config = nginx.get("Config") or {}
+            mounts = [mount for mount in embedding.get("Mounts") or []
+                      if mount.get("Destination") == "/data"]
+            cache = (docker_inspect("volume", mounts[0]["Name"])
+                     if len(mounts) == 1 and mounts[0].get("Type") == "volume"
+                     and isinstance(mounts[0].get("Name"), str) else {})
+            required_args = {
+                "--model-id": profile["embedding_model"],
+                "--revision": profile["embedding_model_revision"],
+                "--served-model-name": profile["embedding_model"],
+                "--dtype": "float32",
+                "--max-batch-tokens": str(profile["embedding_input_token_ceiling"]),
+                "--max-client-batch-size": "1",
+                "--payload-limit": str(profile["embedding_max_request_bytes"]),
+            }
+            if (config.get("Image") != profile["embedding_runtime_image"]
+                    or embedding.get("Image") != image.get("Id")
+                    or not any(value.endswith("@" + digest_suffix) for value in repo_digests)
+                    or (config.get("Labels") or {}).get("com.docker.compose.project") != self.project
+                    or (host.get("PortBindings") or {})
+                    or (cache.get("Labels") or {}).get("com.docker.compose.project") != self.project
+                    or nginx_config.get("Image") != profile["embedding_probe_image"]
+                    or nginx.get("Image") != nginx_image.get("Id")
+                    or not any(value.endswith("@" + nginx_digest_suffix)
+                               for value in nginx_image.get("RepoDigests") or [])
+                    or (nginx_config.get("Labels") or {}).get("com.docker.compose.project")
+                    != self.project
+                    or not isinstance(command, list)
+                    or "--json-output" not in command
+                    or any(flag not in command or command.index(flag) + 1 >= len(command)
+                           or command[command.index(flag) + 1] != value
+                           for flag, value in required_args.items())):
+                raise QualificationFailure("local_embedding_runtime_identity_invalid")
+
+            def probe(path: str, *, payload: bytes = b"") -> bytes:
+                argv = ["docker", "exec", nginx_name, "/usr/bin/curl", "--fail",
+                        "--silent", "--show-error", "--max-time", "5"]
+                if payload:
+                    argv.extend(["--header", "Content-Type: application/json",
+                                 "--data-binary", "@-"])
+                argv.append("http://embedding:80" + path)
+                return diagnostic.bounded_command(argv, stdin=payload)
+
+            diagnostic.bounded_command(
+                ["docker", "exec", nginx_name, "test", "-x", "/usr/bin/curl"]
+            )
+            deadline = time.monotonic() + 1_200
+            while True:
+                try:
+                    probe("/health")
+                    break
+                except diagnostic.DiagnosticFailure:
+                    if time.monotonic() >= deadline:
+                        raise QualificationFailure("local_embedding_health_timeout")
+                    time.sleep(1)
+            info = diagnostic.strict_json(probe("/info"))
+            if (not isinstance(info, dict)
+                    or info.get("model_id") != profile["embedding_model"]
+                    or info.get("model_sha") != profile["embedding_model_revision"]):
+                raise QualificationFailure("local_embedding_model_identity_invalid")
+            payload = diagnostic.canonical({
+                "input": "NovelWorld local embedding probe",
+                "model": profile["embedding_model"],
+            })
+            response = diagnostic.strict_json(probe("/v1/embeddings", payload=payload))
+            data = response.get("data") if isinstance(response, dict) else None
+            usage = response.get("usage") if isinstance(response, dict) else None
+            vector = data[0].get("embedding") if isinstance(data, list) and len(data) == 1 \
+                and isinstance(data[0], dict) else None
+            if (response.get("model") != profile["embedding_model"]
+                    or not isinstance(usage, dict)
+                    or type(usage.get("prompt_tokens")) is not int
+                    or usage["prompt_tokens"] <= 0
+                    or usage.get("total_tokens") != usage["prompt_tokens"]
+                    or not isinstance(vector, list)
+                    or len(vector) != profile["embedding_dimensions"]
+                    or any(type(value) not in (int, float) or not math.isfinite(value)
+                           for value in vector)):
+                raise QualificationFailure("local_embedding_probe_invalid")
+            self.private_report["local_embedding_prestart"] = {
+                "provider": profile["embedding_provider"],
+                "model": profile["embedding_model"],
+                "model_revision": profile["embedding_model_revision"],
+                "runtime_image": profile["embedding_runtime_image"],
+                "probe_image": profile["embedding_probe_image"],
+                "dimensions": len(vector),
+                "prompt_tokens": usage["prompt_tokens"],
+                "host_ports": 0,
+            }
+        self.base_prestarted = True
+
+    def execute(self) -> None:
+        if not getattr(self, "base_prestarted", False):
+            self.preflight()
+        if not getattr(self, "compose_env", None):
+            self.prepare_compose()
+        write_private(
+            self.output / "docker-inventory-before.json",
+            canonical_json(self.user_stack_before) + b"\n",
+        )
+
+        if getattr(self, "base_prestarted", False):
+            self.publish_prestart_release_log()
             self.diagnostic_checkpoint("initial")
+        else:
+            self.adopt_initial_release()
 
         admin_email = f"admin-{secrets.token_hex(8)}@qualification.invalid"
         reader_email = f"reader-{secrets.token_hex(8)}@qualification.invalid"
@@ -4458,10 +4709,10 @@ class Journey:
             self.wait_gateway()
             self.verify_release_images("candidate", self.candidate_manifest)
             candidate_postgres_volume = self.postgres_volume_identity()
-            if candidate_postgres_volume != base_postgres_volume:
+            if candidate_postgres_volume != self.base_postgres_volume:
                 raise QualificationFailure("postgres_authority_volume_changed")
             self.private_report["postgres_authority_volume"] = {
-                "base": base_postgres_volume,
+                "base": self.base_postgres_volume,
                 "candidate": candidate_postgres_volume,
             }
             post_upgrade_authority = self.authority_snapshot(user_id, novel_id)
@@ -5269,7 +5520,8 @@ class Journey:
         }
         if self.four_layer:
             provider["embedding"] = {
-                "name": "openai", "configured_model": "text-embedding-3-small"
+                "name": self.embedding_config["provider"],
+                "configured_model": self.embedding_config["model"],
             }
         successful_calls = self.report["provider"].get("successful_calls")
         if isinstance(successful_calls, int) and not isinstance(successful_calls, bool):
@@ -5411,13 +5663,22 @@ def run_diagnostic(journey: Journey) -> int:
     for number in signals:
         signal.signal(number, cancel)
     try:
-        # Refusal of an existing/partial Started never writes to its output or
-        # invokes cleanup. The ledger owns the descriptor after exclusive create.
+        # Existing registrations are rejected before Journey construction. v5
+        # prepares its keyless local model before Started and removes only its
+        # newly labelled project if preparation or ledger creation fails.
         try:
-            diagnostic.network.preflight(journey.network_subnet)
+            if journey.local_embedding:
+                journey.prestart_v5()
+            else:
+                diagnostic.network.preflight(journey.network_subnet)
             journey.diagnostic_ledger.start()
         except (Exception, KeyboardInterrupt) as error:
             failure(error, "diagnostic_start_failed")
+            if journey.local_embedding:
+                try:
+                    journey.prestart_cleanup_v5()
+                except (Exception, KeyboardInterrupt) as cleanup_error:
+                    failure(cleanup_error, "diagnostic_prestart_cleanup_unproven")
             return 1
         try:
             journey.execute()
@@ -6240,11 +6501,16 @@ def main() -> int:
                 root, base["RELEASE_GIT_SHA"], args.git_sha,
             ),
         )
+        if registration.value["schema"] == diagnostic.REGISTRATION_SCHEMA_V5:
+            probe_image = registration.profile["embedding_probe_image"]
+            if base["NGINX_IMAGE"] != probe_image or candidate["NGINX_IMAGE"] != probe_image:
+                raise QualificationFailure("embedding_probe_image_mismatch")
         load_product_input(root / diagnostic.product_fixture(registration.value["schema"]),
                            prospective=registration.value["schema"] in (
                                diagnostic.REGISTRATION_SCHEMA_V2,
                                diagnostic.REGISTRATION_SCHEMA_V3,
                                diagnostic.REGISTRATION_SCHEMA_V4,
+                               diagnostic.REGISTRATION_SCHEMA_V5,
                            ))
         diagnostic.network.preflight(registration.value.get("network_subnet"))
         if any(base[key] != candidate[key] for key in INFRASTRUCTURE_IMAGE_KEYS):
