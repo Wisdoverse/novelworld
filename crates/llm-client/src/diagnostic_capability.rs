@@ -79,7 +79,7 @@ mod tests {
         assert_eq!(value["profile"], "four-layer-journey-diagnostic-v2");
         assert_eq!(
             value["profile_sha256"],
-            "b1dfc51cbf3a845bf21ecdb5cb63f30949c6cb3c64f384faeca5be33e5dfd488"
+            "6cee114e4008b250e2d00d629c938dd245027d5245437b1f2cbdeb81c4bdffbc"
         );
         assert_eq!(capability_probe(["--unknown"]), None);
         assert_eq!(

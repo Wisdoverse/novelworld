@@ -273,13 +273,15 @@ impl RequestLabels {
 pub(crate) struct EmbeddingLabels {
     provider: String,
     model: String,
+    usage_key: String,
 }
 
 impl EmbeddingLabels {
-    pub(crate) fn new(provider: &str, model: &str) -> Self {
+    pub(crate) fn new(provider: &str, model: &str, api_key: &str) -> Self {
         Self {
             provider: bounded_label(provider),
             model: bounded_label(model),
+            usage_key: usage_key_fingerprint(api_key),
         }
     }
 
@@ -317,6 +319,53 @@ impl EmbeddingLabels {
             "reason" => reason,
         )
         .increment(1);
+    }
+
+    pub(crate) fn response_model(&self, response_model: &str) {
+        tracing::info!(
+            provider = %self.provider,
+            configured_model = %self.model,
+            response_model = %bounded_label(response_model),
+            operation = "embedding",
+            mode = "sync",
+            "LLM response model observed"
+        );
+    }
+
+    pub(crate) fn usage(&self, usage: Option<&Usage>) {
+        let status = if usage.is_some() {
+            "present"
+        } else {
+            "missing"
+        };
+        counter!(
+            "novelworld_embedding_usage_reports_total",
+            "provider" => self.provider.clone(),
+            "model" => self.model.clone(),
+            "status" => status,
+        )
+        .increment(1);
+        let Some(usage) = usage else { return };
+        for (kind, value) in [
+            ("input", usage.input_tokens),
+            ("output", usage.output_tokens),
+        ] {
+            counter!(
+                "novelworld_embedding_tokens_total",
+                "provider" => self.provider.clone(),
+                "model" => self.model.clone(),
+                "type" => kind,
+            )
+            .increment(value.into());
+        }
+        counter!(
+            "novelworld_embedding_billable_tokens_total",
+            "provider" => self.provider.clone(),
+            "model" => self.model.clone(),
+            "class" => "uncached_input",
+            "usage_key" => self.usage_key.clone(),
+        )
+        .increment(usage.input_tokens.into());
     }
 
     pub(crate) fn finish(&self, status: &'static str, started: Instant) {

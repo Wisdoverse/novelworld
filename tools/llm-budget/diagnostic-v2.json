@@ -2,7 +2,7 @@
   "contract": "llm-diagnostic-budget-v2",
   "profile": "four-layer-journey-diagnostic-v2",
   "provider": "deepseek",
-  "model": "deepseek-flash",
+  "model": "deepseek-v4-flash",
   "origin": "https://api.deepseek.com",
   "thinking_enabled": false,
   "input_token_ceiling": 1048576,

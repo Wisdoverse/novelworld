@@ -26,7 +26,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -305,6 +305,27 @@ def load_config(
         or any(ord(character) < 32 or ord(character) == 127 for character in key)
     ):
         raise QualificationFailure("provider_config_outside_slice")
+    return value
+
+
+def load_embedding_config(path: Path) -> dict[str, str]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise QualificationFailure("invalid_embedding_config") from error
+    if not isinstance(value, dict) or set(value) != {"provider", "api_url", "model", "api_key"}:
+        raise QualificationFailure("invalid_embedding_config_shape")
+    key = value.get("api_key")
+    if (
+        value.get("provider") != "openai"
+        or value.get("api_url") != "https://api.openai.com"
+        or value.get("model") != "text-embedding-3-small"
+        or not isinstance(key, str)
+        or not key
+        or len(key.encode("utf-8")) > 4096
+        or any(ord(character) < 32 or ord(character) == 127 for character in key)
+    ):
+        raise QualificationFailure("embedding_config_outside_slice")
     return value
 
 
@@ -799,6 +820,7 @@ def summarize_metrics(
     named_paths: list[tuple[str, Path]],
     *,
     expected_model: str = EXPECTED_MODEL,
+    include_embedding: bool = False,
 ) -> dict[str, Any]:
     parser = load_metric_parser(root)
     windows = []
@@ -811,6 +833,13 @@ def summarize_metrics(
         "novelworld_llm_usage_reports_total": "usage_reports",
         "novelworld_llm_tokens_total": "tokens",
         "novelworld_llm_billable_tokens_total": "billable_tokens",
+        "novelworld_embedding_requests_started_total": "requests_started",
+        "novelworld_embedding_attempts_total": "attempts",
+        "novelworld_embedding_retries_total": "retries",
+        "novelworld_embedding_requests_total": "requests",
+        "novelworld_embedding_usage_reports_total": "usage_reports",
+        "novelworld_embedding_tokens_total": "tokens",
+        "novelworld_embedding_billable_tokens_total": "billable_tokens",
     }
     histogram_names = {
         "novelworld_llm_attempt_duration_seconds": "attempt_duration_seconds",
@@ -823,10 +852,15 @@ def summarize_metrics(
     for name, path in named_paths:
         raw = path.read_bytes()
         samples = parser.parse_metrics(raw)
-        assert_metric_identity(samples, expected_model=expected_model)
+        assert_metric_identity(
+            samples, expected_model=expected_model, include_embedding=include_embedding
+        )
         operations: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         for metric, labels, value in samples:
-            operation = labels.get("operation")
+            embedding = metric.startswith("novelworld_embedding_")
+            if embedding and not include_embedding:
+                continue
+            operation = "embedding" if embedding else labels.get("operation")
             provider = labels.get("provider")
             model = labels.get("model")
             service = labels.get("service")
@@ -889,20 +923,27 @@ def assert_metric_identity(
     service: str | None = None,
     operation: str | None = None,
     expected_model: str = EXPECTED_MODEL,
+    include_embedding: bool = False,
 ) -> None:
     for metric, labels, _ in samples:
-        if not metric.startswith("novelworld_llm_"):
+        embedding = metric.startswith("novelworld_embedding_")
+        if embedding and not include_embedding:
+            continue
+        if not metric.startswith("novelworld_llm_") and not embedding:
             continue
         if service is not None and labels.get("service") != service:
             continue
-        if operation is not None and labels.get("operation") != operation:
+        metric_operation = "embedding" if embedding else labels.get("operation")
+        if operation is not None and metric_operation != operation:
             continue
         if "provider" not in labels and "model" not in labels:
             continue
-        if (
-            labels.get("provider") != EXPECTED_PROVIDER
-            or labels.get("model") != expected_model
-        ):
+        expected = (
+            ("openai", "text-embedding-3-small")
+            if metric_operation == "embedding"
+            else (EXPECTED_PROVIDER, expected_model)
+        )
+        if (labels.get("provider"), labels.get("model")) != expected:
             raise QualificationFailure("provider_identity_changed")
 
 
@@ -926,30 +967,45 @@ def provider_started_delta(
     service: str,
     operation: str | None = None,
     expected_model: str = EXPECTED_MODEL,
+    include_embedding: bool = False,
 ) -> int:
+    include_embedding = include_embedding or operation == "embedding"
     parser = load_metric_parser(root)
     assert_metric_identity(
         parser.parse_metrics(before),
         service=service,
         operation=operation,
         expected_model=expected_model,
+        include_embedding=include_embedding,
     )
     assert_metric_identity(
         parser.parse_metrics(after),
         service=service,
         operation=operation,
         expected_model=expected_model,
+        include_embedding=include_embedding,
     )
-    labels = {
-        "service": service,
-        "provider": EXPECTED_PROVIDER,
-        "model": expected_model,
+    llm_labels = {"service": service, "provider": EXPECTED_PROVIDER, "model": expected_model}
+    if operation not in (None, "embedding"):
+        llm_labels["operation"] = operation
+    embedding_labels = {
+        "service": service, "provider": "openai", "model": "text-embedding-3-small"
     }
-    if operation is not None:
-        labels["operation"] = operation
-    metric = "novelworld_llm_requests_started_total"
-    start = metric_counter_value(root, before, metric, labels)
-    finish = metric_counter_value(root, after, metric, labels)
+    start = finish = 0.0
+    if operation != "embedding":
+        start += metric_counter_value(
+            root, before, "novelworld_llm_requests_started_total", llm_labels
+        )
+        finish += metric_counter_value(
+            root, after, "novelworld_llm_requests_started_total", llm_labels
+        )
+    if include_embedding:
+        start += metric_counter_value(
+            root, before, "novelworld_embedding_requests_started_total", embedding_labels
+        )
+        finish += metric_counter_value(
+            root, after, "novelworld_embedding_requests_started_total", embedding_labels
+        )
     if start < 0 or finish < start or not start.is_integer() or not finish.is_integer():
         raise QualificationFailure("provider_counter_epoch_invalid")
     return int(finish - start)
@@ -991,11 +1047,39 @@ def selected_mid_from_logs(raw: str, trace_id: str) -> int:
     return selected[0]
 
 
+def selected_layers_from_logs(raw: str, trace_id: str) -> dict[str, int]:
+    selected = []
+    for line in raw.splitlines():
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        fields = entry.get("fields") if isinstance(entry, dict) else None
+        ancestors = entry.get("spans") if isinstance(entry, dict) else None
+        spans = [entry.get("span"), *(ancestors if isinstance(ancestors, list) else [])]
+        trace_ids = {
+            span.get("trace_id")
+            for span in spans
+            if isinstance(span, dict) and isinstance(span.get("trace_id"), str)
+            and span.get("trace_id")
+        }
+        if trace_ids == {trace_id} and isinstance(fields, dict) \
+                and fields.get("message") == "memory lifecycle context selected":
+            counts = {layer: fields.get(layer) for layer in ("short", "mid", "long", "permanent")}
+            if all(isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                   for value in counts.values()):
+                selected.append(counts)
+    if len(selected) != 1 or any(value < 1 for value in selected[0].values()):
+        raise QualificationFailure("four_layer_selection_marker_missing")
+    return selected[0]
+
+
 def response_models_from_logs(
     raw: str,
     service: str,
     *,
     expected_model: str = EXPECTED_MODEL,
+    expected_embedding_model: str | None = None,
 ) -> list[dict[str, str]]:
     observed = []
     for line in raw.splitlines():
@@ -1014,6 +1098,15 @@ def response_models_from_logs(
             "operation": fields.get("operation"),
             "mode": fields.get("mode"),
         }
+        if record["operation"] == "embedding":
+            if expected_embedding_model is None:
+                continue
+            if (record["provider"], record["configured_model"], record["response_model"], record["mode"]) != (
+                "openai", expected_embedding_model, expected_embedding_model, "sync"
+            ):
+                raise QualificationFailure("response_model_marker_invalid")
+            observed.append(record)
+            continue
         if (
             record["provider"] != EXPECTED_PROVIDER
             or record["configured_model"] != expected_model
@@ -1031,8 +1124,14 @@ def unseen_response_models(
     previous_count: int,
     *,
     expected_model: str = EXPECTED_MODEL,
+    expected_embedding_model: str | None = None,
 ) -> tuple[list[dict[str, str]], int]:
-    observed = response_models_from_logs(raw, service, expected_model=expected_model)
+    observed = response_models_from_logs(
+        raw,
+        service,
+        expected_model=expected_model,
+        expected_embedding_model=expected_embedding_model,
+    )
     if previous_count < 0 or previous_count > len(observed):
         raise QualificationFailure("response_model_log_rewound")
     return observed[previous_count:], len(observed)
@@ -1045,6 +1144,7 @@ def verify_response_models(
     allowed: list[str],
     *,
     expected_model: str = EXPECTED_MODEL,
+    expected_embedding_model: str | None = None,
 ) -> dict[str, Any]:
     if not allowed or not all(valid_public_model(model) for model in allowed):
         raise QualificationFailure("response_model_allowlist_invalid")
@@ -1052,7 +1152,20 @@ def verify_response_models(
     expected: dict[tuple[str, str, str], int] = defaultdict(int)
     for _, path in named_paths:
         for metric, labels, value in parser.parse_metrics(path.read_bytes()):
-            if metric != "novelworld_llm_requests_total" or labels.get("status") != "success":
+            embedding = metric == "novelworld_embedding_requests_total"
+            if metric != "novelworld_llm_requests_total" and not embedding:
+                continue
+            if labels.get("status") != "success":
+                continue
+            if embedding:
+                if expected_embedding_model is None:
+                    continue
+                if labels.get("provider") != "openai" \
+                        or labels.get("model") != expected_embedding_model:
+                    raise QualificationFailure("successful_provider_identity_invalid")
+                if value < 0 or not value.is_integer():
+                    raise QualificationFailure("successful_provider_count_invalid")
+                expected[(labels.get("service", ""), "embedding", "sync")] += int(value)
                 continue
             if labels.get("provider") != EXPECTED_PROVIDER or labels.get("model") != expected_model:
                 raise QualificationFailure("successful_provider_identity_invalid")
@@ -1063,7 +1176,11 @@ def verify_response_models(
     models: dict[str, int] = defaultdict(int)
     for record in observations:
         model = record["response_model"]
-        if model not in allowed:
+        embedding = record["operation"] == "embedding"
+        if embedding:
+            if model != expected_embedding_model:
+                raise QualificationFailure("response_model_not_allowed")
+        elif model not in allowed:
             raise QualificationFailure("response_model_not_allowed")
         actual[(record["service"], record["operation"], record["mode"])] += 1
         models[model] += 1
@@ -1252,6 +1369,7 @@ class Journey:
         journey_slice: str = "core",
         *,
         diagnostic_registration: diagnostic.Registration | None = None,
+        embedding_config_path: Path | None = None,
     ):
         self.root = root
         self.config_path = config_path
@@ -1281,9 +1399,15 @@ class Journey:
                 raise QualificationFailure("diagnostic_registration_outside_slice")
             self.diagnostic_registration = diagnostic_registration
             self.diagnostic_ledger = diagnostic.DiagnosticLedger(diagnostic_registration)
-            self.expected_model = diagnostic.MODEL
+            self.expected_model = diagnostic_registration.profile["model"]
         summary_schema = (diagnostic_registration.value["schema"]
                           if diagnostic_registration is not None else None)
+        self.four_layer = summary_schema == diagnostic.REGISTRATION_SCHEMA_V4
+        if self.four_layer != (embedding_config_path is not None):
+            raise QualificationFailure("embedding_config_v4_only")
+        self.embedding_config = (
+            load_embedding_config(embedding_config_path) if embedding_config_path is not None else None
+        )
         self.prospective_summary = summary_schema in (
             diagnostic.REGISTRATION_SCHEMA_V2, diagnostic.REGISTRATION_SCHEMA_V3)
         self.summary_base_enrolled = summary_schema == diagnostic.REGISTRATION_SCHEMA_V3
@@ -1291,7 +1415,7 @@ class Journey:
             diagnostic.product_fixture(diagnostic_registration.value["schema"])
             if diagnostic_registration is not None else PRODUCT_INPUT)
         self.product_input = load_product_input(
-            self.product_input_path, prospective=self.prospective_summary)
+            self.product_input_path, prospective=self.prospective_summary or self.four_layer)
         self.network_subnet = (diagnostic_registration.value.get("network_subnet")
                                if diagnostic_registration is not None else None)
         diagnostic.network.preflight(self.network_subnet)
@@ -1348,6 +1472,12 @@ class Journey:
                 "api_origin": EXPECTED_API_URL,
                 "configured_model": self.expected_model,
                 "product_thinking_enabled": self.config["thinking_enabled"],
+                "embedding_api_origin": (
+                    self.embedding_config["api_url"] if self.embedding_config else None
+                ),
+                "embedding_model": (
+                    self.embedding_config["model"] if self.embedding_config else None
+                ),
             },
         }
         self.report: dict[str, Any] = {
@@ -1396,11 +1526,12 @@ class Journey:
                 diagnostic.REGISTRATION_SCHEMA: "h4-vision-diagnostic-v1",
                 diagnostic.REGISTRATION_SCHEMA_V2: "h4-vision-diagnostic-v2",
                 diagnostic.REGISTRATION_SCHEMA_V3: "h4-vision-diagnostic-v3",
+                diagnostic.REGISTRATION_SCHEMA_V4: "h3-h4-four-layer-diagnostic-v4",
             }[summary_schema])
             self.report["policy_identity"].update(
                 qualification=None, extraction=None,
                 journey=self.report["report_kind"],
-                diagnostic_budget=diagnostic.PROFILE,
+                diagnostic_budget=diagnostic_registration.binding["profile"],
                 diagnostic_profile_sha256=diagnostic_registration.binding["profile_sha256"],
             )
             self.private_report["diagnostic_registration"] = diagnostic_registration.value
@@ -1684,7 +1815,8 @@ class Journey:
         tool_root = temporary_root / "release-tool"
         for relative in ("infra/docker/release.sh", "infra/docker/diagnostic_budget.py",
                          "infra/docker/qualification_network.py",
-                         "tools/llm-budget/diagnostic-v1.json"):
+                         "tools/llm-budget/diagnostic-v1.json",
+                         "tools/llm-budget/diagnostic-v2.json"):
             target = tool_root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes((self.root / relative).read_bytes())
@@ -1713,6 +1845,9 @@ class Journey:
             f"RUNTIME_CONFIG_KEY={secrets.token_hex(32)}",
             f"INTERNAL_SERVICE_TOKEN={self.internal_service_token}",
             "LLM_API_KEY=",
+            f"EMBEDDING_API_URL={self.embedding_config['api_url'] if self.embedding_config else ''}",
+            f"EMBEDDING_API_KEY={self.embedding_config['api_key'] if self.embedding_config else ''}",
+            f"EMBEDDING_MODEL={self.embedding_config['model'] if self.embedding_config else ''}",
             "CACHE_MODE=postgres",
             "REDIS_PASSWORD=",
             "REDIS_URL=memory://",
@@ -2094,6 +2229,169 @@ class Journey:
         self.report["journey"].update(legacy_chat_turns=7, prospective_chat_turns=11,
                                         summary_logical_calls=1)
 
+    def four_layer_snapshot(self, user_id: str, novel_id: str,
+                            character_id: str, expected_turns: int) -> dict[str, Any] | None:
+        if not all(diagnostic.uuid4(value) for value in (user_id, novel_id, character_id)):
+            raise QualificationFailure("four_layer_scope_invalid")
+        raw = self.db_scalar(
+            "SELECT jsonb_build_object("
+            "'turns', (SELECT COALESCE(jsonb_agg(jsonb_build_object("
+            "'id', id, 'status', status, 'summary_sequence', summary_sequence, "
+            "'summary_state', summary_state, 'summary_memory_id', summary_memory_id, "
+            "'chapter_context', chapter_context, "
+            "'persona_source_chapter_high_water', persona_source_chapter_high_water, "
+            "'reader_identity', reader_identity, "
+            "'reader_identity_type', reader_identity_type, "
+            "'reader_character_id', reader_character_id) "
+            "ORDER BY summary_sequence), '[]') FROM chat_turns "
+            f"WHERE user_id = '{user_id}' AND novel_id = '{novel_id}' "
+            f"AND character_id = '{character_id}'), "
+            "'messages', (SELECT COALESCE(jsonb_agg(jsonb_build_object("
+            "'id', id, 'turn_id', turn_id, 'role', role, 'content', content, "
+            "'reader_identity', reader_identity, 'chapter_context', chapter_context) "
+            "ORDER BY created_at, id), '[]') FROM chat_messages "
+            f"WHERE user_id = '{user_id}' AND novel_id = '{novel_id}' "
+            f"AND character_id = '{character_id}'), "
+            "'memories', (SELECT COALESCE(jsonb_agg(jsonb_build_object("
+            "'id', id, 'layer', layer, 'content', content, 'importance', importance, "
+            "'chapter_number', chapter_number, "
+            "'persona_source_chapter_high_water', persona_source_chapter_high_water, "
+            "'embedding_dimensions', CASE WHEN embedding IS NULL THEN NULL ELSE vector_dims(embedding) END, "
+            "'embedding_text', CASE WHEN embedding IS NULL THEN NULL ELSE embedding::text END) "
+            "ORDER BY layer, created_at, id), '[]') FROM character_memories "
+            f"WHERE user_id = '{user_id}' AND novel_id = '{novel_id}' "
+            f"AND character_id = '{character_id}'))::text"
+        )
+        value = json.loads(raw)
+        turns, messages, memories = (
+            value.get("turns"), value.get("messages"), value.get("memories")
+        )
+        if not all(isinstance(rows, list) for rows in (turns, messages, memories)) \
+                or len(turns) != expected_turns or len(messages) != expected_turns * 2:
+            raise QualificationFailure("four_layer_authority_invalid")
+        if any(turn.get("status") != "completed" for turn in turns) or [
+            turn.get("summary_sequence") for turn in turns
+        ] != list(range(1, expected_turns + 1)):
+            raise QualificationFailure("four_layer_sequence_invalid")
+        turn_ids = [turn.get("id") for turn in turns]
+        if any(not diagnostic.uuid4(turn_id) or turn.get("reader_identity_type") != "self"
+               or turn.get("reader_character_id") is not None
+               or not isinstance(turn.get("chapter_context"), int)
+               or not isinstance(turn.get("persona_source_chapter_high_water"), int)
+               or not 1 <= turn["persona_source_chapter_high_water"] <= turn["chapter_context"]
+               for turn_id, turn in zip(turn_ids, turns)):
+            raise QualificationFailure("four_layer_turn_provenance_invalid")
+        turn_by_id = {turn["id"]: turn for turn in turns}
+        message_turns = Counter(message.get("turn_id") for message in messages)
+        message_roles: dict[str, set[str]] = defaultdict(set)
+        for message in messages:
+            turn_id = message.get("turn_id")
+            role = message.get("role")
+            content = message.get("content")
+            if turn_id not in turn_ids or role not in ("user", "character") \
+                    or not isinstance(content, str) or not content \
+                    or message.get("reader_identity") != turn_by_id[turn_id]["reader_identity"] \
+                    or message.get("chapter_context") != turn_by_id[turn_id]["chapter_context"]:
+                raise QualificationFailure("four_layer_messages_invalid")
+            message_roles[turn_id].add(role)
+        if message_turns != Counter({turn_id: 2 for turn_id in turn_ids}) or any(
+            message_roles[turn_id] != {"user", "character"} for turn_id in turn_ids
+        ):
+            raise QualificationFailure("four_layer_messages_invalid")
+        anchors = [turn for turn in turns if turn["summary_sequence"] % 10 == 0]
+        if any(turn.get("summary_state") in ("failed", "unknown") for turn in anchors):
+            raise QualificationFailure("four_layer_summary_terminal")
+        if any(turn.get("summary_state") != "saved" for turn in anchors):
+            return None
+        mids = [memory for memory in memories if memory.get("layer") == "mid"]
+        longs = [memory for memory in memories if memory.get("layer") == "long"]
+        permanent = [memory for memory in memories if memory.get("layer") == "permanent"]
+        windows = expected_turns // 10
+        if len(mids) != windows or len(longs) != windows:
+            return None
+        if {memory.get("id") for memory in mids} != {
+            turn.get("summary_memory_id") for turn in anchors
+        }:
+            raise QualificationFailure("four_layer_mid_identity_invalid")
+        if any(memory.get("importance") != 6 or memory.get("embedding_dimensions") is not None
+               or not isinstance(memory.get("content"), str) or not memory["content"].strip()
+               or memory.get("chapter_number") != memory.get("persona_source_chapter_high_water")
+               for memory in mids):
+            raise QualificationFailure("four_layer_mid_invalid")
+        if any(memory.get("importance") != 6 or memory.get("embedding_dimensions") != 1536
+               or not isinstance(memory.get("embedding_text"), str)
+               or not memory["embedding_text"]
+               or not isinstance(memory.get("content"), str) or not memory["content"].strip()
+               or memory.get("chapter_number") != memory.get("persona_source_chapter_high_water")
+               for memory in longs) or Counter(memory["content"] for memory in mids) != Counter(
+                   memory["content"] for memory in longs
+               ):
+            raise QualificationFailure("four_layer_long_invalid")
+        def compact(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [{
+                "id": row["id"],
+                "content_sha256": sha256_bytes(row["content"].encode("utf-8")),
+                "chapter_number": row["chapter_number"],
+                "persona_source_chapter_high_water": row["persona_source_chapter_high_water"],
+                "embedding_dimensions": row["embedding_dimensions"],
+                "embedding_sha256": (sha256_bytes(row["embedding_text"].encode("utf-8"))
+                                     if row["embedding_text"] is not None else None),
+                "importance": row["importance"],
+            } for row in rows]
+        compact_turns = [{
+            "id": turn["id"],
+            "chapter_context": turn["chapter_context"],
+            "persona_source_chapter_high_water": turn[
+                "persona_source_chapter_high_water"
+            ],
+            "reader_identity": turn["reader_identity"],
+            "reader_identity_type": turn["reader_identity_type"],
+            "reader_character_id": turn["reader_character_id"],
+        } for turn in turns]
+        compact_messages = [{
+            "id": message["id"],
+            "turn_id": message["turn_id"],
+            "role": message["role"],
+            "content_sha256": sha256_bytes(message["content"].encode("utf-8")),
+            "reader_identity": message["reader_identity"],
+            "chapter_context": message["chapter_context"],
+        } for message in messages]
+        return {
+            "turn_ids": turn_ids,
+            "turns": compact_turns,
+            "messages": compact_messages,
+            "mid": compact(mids),
+            "long": compact(longs),
+            "permanent": compact(permanent),
+            "permanent_count": len(permanent),
+        }
+
+    def wait_four_layer_snapshot(self, user_id: str, novel_id: str,
+                                 character_id: str, expected_turns: int) -> dict[str, Any]:
+        deadline = time.monotonic() + 360
+        while time.monotonic() < deadline:
+            snapshot = self.four_layer_snapshot(
+                user_id, novel_id, character_id, expected_turns
+            )
+            if snapshot is not None:
+                return snapshot
+            time.sleep(2)
+        raise QualificationFailure("four_layer_projection_timeout")
+
+    def continue_chat_to(self, token: str, user_id: str, novel_id: str,
+                         character_id: str, current: int, target: int) -> int:
+        if not self.four_layer or not 0 <= current < target <= 60:
+            raise QualificationFailure("four_layer_schedule_invalid")
+        while current < target:
+            context = self.internal_character_context(user_id, novel_id, character_id)
+            result = self.chat(
+                token, novel_id, character_id,
+                f"长对话记忆核验第 {current + 1} 轮：请结合我们已确认的行动与关系，简短说明你现在记得什么。",
+            )
+            current += 1
+            self.assert_chat_revision(result["turn_id"], context["world_revision"])
+        return current
+
     def diagnostic_checkpoint(self, name: str, *, persist: bool = True,
                               timeout: float = 10) -> dict[str, Any] | None:
         if self.diagnostic_registration is None:
@@ -2132,7 +2430,7 @@ class Journey:
         options = [
             "silent", "fail-with-body", "max-time = 4", "max-redirs = 0", 'noproxy = "*"',
             "url = " + json.dumps(url),
-            "header = " + json.dumps("X-LLM-Budget-Contract: " + diagnostic.CONTRACT),
+            "header = " + json.dumps("X-LLM-Budget-Contract: " + binding["contract"]),
             "header = " + json.dumps("X-Internal-Service-Token: " + self.internal_service_token),
         ]
         if seal:
@@ -2661,14 +2959,10 @@ class Journey:
             if data.get("source") != expected_source:
                 raise QualificationFailure("export_source_provenance_invalid")
             source_counts[expected_source] += 1
-        if any(
-            secret_value in export
-            for secret_value in (
-                self.config["api_key"].encode(),
-                token.encode(),
-                password.encode(),
-            )
-        ):
+        secret_values = [self.config["api_key"].encode(), token.encode(), password.encode()]
+        if self.embedding_config is not None:
+            secret_values.append(self.embedding_config["api_key"].encode())
+        if any(secret_value in export for secret_value in secret_values):
             raise QualificationFailure("export_contains_secret")
         write_private(self.output / artifact, export)
         review = self.private_report.setdefault(
@@ -2884,7 +3178,15 @@ class Journey:
                 if previous_id != container_id:
                     previous_count = 0
                 new, total = unseen_response_models(
-                    raw, service, previous_count, expected_model=self.expected_model
+                    raw,
+                    service,
+                    previous_count,
+                    expected_model=self.expected_model,
+                    expected_embedding_model=(
+                        "text-embedding-3-small"
+                        if getattr(self, "four_layer", False)
+                        else None
+                    ),
                 )
                 self.response_model_observations.extend(new)
                 self.response_model_log_offsets[service] = (container_id, total)
@@ -2930,13 +3232,21 @@ class Journey:
                     self.response_model_observations,
                     allowed,
                     expected_model=self.expected_model,
+                    expected_embedding_model=(
+                        "text-embedding-3-small"
+                        if getattr(self, "four_layer", False)
+                        else None
+                    ),
                 )
             )
         except (QualificationFailure, OSError, ValueError) as error:
             errors.append(getattr(error, "code", "llm_metrics_invalid"))
         try:
             self.report["llm_metrics"] = summarize_metrics(
-                self.root, windows, expected_model=self.expected_model
+                self.root,
+                windows,
+                expected_model=self.expected_model,
+                include_embedding=getattr(self, "four_layer", False),
             )
             if self.prospective_summary:
                 summary_calls = sum(row["value"] for row in self.report["llm_metrics"]["counter_totals"]
@@ -4082,6 +4392,21 @@ class Journey:
                     chat_result["turn_id"], current["world_revision"]
                 )
 
+        if self.four_layer:
+            with self.stage("base_four_layer_windows"):
+                chat_turns = self.continue_chat_to(
+                    token, user_id, novel_id, character_id, chat_turns, 30
+                )
+                self.four_layer_base_snapshot = self.wait_four_layer_snapshot(
+                    user_id, novel_id, character_id, 30
+                )
+                if self.four_layer_base_snapshot["permanent_count"] < 6:
+                    raise QualificationFailure("four_layer_permanent_missing")
+                self.private_report["four_layer_before_upgrade"] = self.four_layer_base_snapshot
+                self.report["journey"].update(
+                    base_chat_turns=30, base_mid_windows=3, base_long_memories=3
+                )
+
         self.collect_metrics("base")
         self.collect_response_models("base")
         self.diagnostic_checkpoint("before_upgrade")
@@ -4150,6 +4475,13 @@ class Journey:
                 self.require_summary_calls(0)
             elif post_upgrade_authority != pre_upgrade_authority:
                 raise QualificationFailure("upgrade_authority_changed")
+            if self.four_layer:
+                after_upgrade = self.wait_four_layer_snapshot(
+                    user_id, novel_id, character_id, 30
+                )
+                if after_upgrade != self.four_layer_base_snapshot:
+                    raise QualificationFailure("four_layer_upgrade_changed")
+                self.private_report["four_layer_after_upgrade"] = after_upgrade
             self.private_report["post_upgrade_authority_sha256"] = sha256_bytes(
                 post_upgrade_authority.encode("utf-8")
             )
@@ -4360,6 +4692,22 @@ class Journey:
                             "mid_memory_window_not_projected"
                         )
 
+        if self.four_layer:
+            with self.stage("candidate_four_layer_windows"):
+                chat_turns = self.continue_chat_to(
+                    token, user_id, novel_id, character_id, chat_turns, 60
+                )
+                self.four_layer_candidate_snapshot = self.wait_four_layer_snapshot(
+                    user_id, novel_id, character_id, 60
+                )
+                if self.four_layer_candidate_snapshot["permanent_count"] < 11:
+                    raise QualificationFailure("four_layer_permanent_missing")
+                self.private_report["four_layer_before_restart"] = self.four_layer_candidate_snapshot
+                mid_count = 6
+                self.report["journey"].update(
+                    candidate_chat_turns=30, mid_memory_windows=6, long_memories=6
+                )
+
         if self.prospective_summary:
             with self.stage("prospective_summary_window"):
                 self.complete_prospective_summary(token, user_id, novel_id, character_id)
@@ -4521,6 +4869,27 @@ class Journey:
             )
 
         with self.stage("post_restart_mid_continuity"):
+            if self.four_layer:
+                after_restart = self.wait_four_layer_snapshot(
+                    user_id, novel_id, character_id, 60
+                )
+                for key in ("turn_ids", "turns", "messages", "mid", "long"):
+                    if after_restart[key] != self.four_layer_candidate_snapshot[key]:
+                        raise QualificationFailure("four_layer_restart_changed")
+                prior_permanent = self.four_layer_candidate_snapshot["permanent"]
+                if len(after_restart["permanent"]) != len(prior_permanent) + 1 \
+                        or after_restart["permanent"][:len(prior_permanent)] != prior_permanent:
+                    raise QualificationFailure("four_layer_restart_changed")
+                login = request_json(
+                    f"{self.api}/auth/login",
+                    method="POST",
+                    value={"email": reader_email, "password": password},
+                )
+                if login.get("user", {}).get("id") != user_id \
+                        or not isinstance(login.get("access_token"), str) \
+                        or login["access_token"] == token:
+                    raise QualificationFailure("four_layer_fresh_session_invalid")
+                token = login["access_token"]
             resumed_context = self.internal_character_context(
                 user_id, novel_id, character_id
             )
@@ -4543,9 +4912,13 @@ class Journey:
                 expected_model=self.expected_model,
             ) != 1:
                 raise QualificationFailure("post_restart_chat_provider_delta_invalid")
-            marker_count = selected_mid_from_logs(
-                run(["docker", "logs", f"{self.prefix}-agent-service"]),
-                trace_id,
+            logs = run(["docker", "logs", f"{self.prefix}-agent-service"])
+            selected_layers = (
+                selected_layers_from_logs(logs, trace_id) if self.four_layer else None
+            )
+            marker_count = (
+                selected_layers["mid"] if selected_layers is not None
+                else selected_mid_from_logs(logs, trace_id)
             )
             self.assert_chat_revision(
                 resumed_chat["turn_id"], resumed_context["world_revision"]
@@ -4557,13 +4930,34 @@ class Journey:
             if self.prospective_summary:
                 self.verify_summary_restart(user_id, novel_id, character_id,
                                             resumed_chat["turn_id"], marker_count)
-            if history.get("count") != (36 if self.prospective_summary else 26):
+            expected_messages = 122 if self.four_layer else (36 if self.prospective_summary else 26)
+            if history.get("count") != expected_messages:
                 raise QualificationFailure("restart_chat_history_incomplete")
+            if self.four_layer:
+                self.private_report["four_layer_after_restart"] = after_restart
+                following_session = self.wait_four_layer_snapshot(
+                    user_id, novel_id, character_id, 61
+                )
+                if following_session["turn_ids"][:60] != after_restart["turn_ids"] \
+                        or following_session["turns"][:60] != after_restart["turns"] \
+                        or following_session["messages"][:120] != after_restart["messages"] \
+                        or any(following_session[key] != after_restart[key]
+                               for key in ("mid", "long", "permanent")):
+                    raise QualificationFailure("four_layer_following_session_changed")
+                self.private_report["four_layer_following_session"] = following_session
+                self.report["journey"].update(
+                    short_candidates_selected=selected_layers["short"],
+                    long_candidates_selected=selected_layers["long"],
+                    permanent_candidates_selected=selected_layers["permanent"],
+                    fresh_session_login=1,
+                )
             self.report["journey"].update(
                 {
                     "pre_restart_chat_turns": chat_turns,
                     "post_restart_chat_turns": 1,
-                    "total_chat_turns": 18 if self.prospective_summary else 13,
+                    "total_chat_turns": (
+                        61 if self.four_layer else (18 if self.prospective_summary else 13)
+                    ),
                     "mid_memory_windows": mid_count,
                     "mid_candidates_selected": marker_count,
                     "mid_selection_trace_correlated": True,
@@ -4685,6 +5079,27 @@ class Journey:
                 artifact="account-export.ndjson",
                 required_kinds=required_kinds,
             )
+            if self.four_layer:
+                memory_layers = Counter(
+                    record["data"].get("layer")
+                    for record in records
+                    if record.get("type") == "record"
+                    and record.get("kind") == "character_memory"
+                    and isinstance(record.get("data"), dict)
+                )
+                short_messages = sum(
+                    record.get("type") == "record" and record.get("kind") == "chat_message"
+                    for record in records
+                )
+                if memory_layers["mid"] != 6 or memory_layers["long"] != 6 \
+                        or memory_layers["permanent"] < 12 or short_messages != 122:
+                    raise QualificationFailure("four_layer_export_incomplete")
+                self.report["journey"].update(
+                    export_short_messages=short_messages,
+                    export_mid_memories=memory_layers["mid"],
+                    export_long_memories=memory_layers["long"],
+                    export_permanent_memories=memory_layers["permanent"],
+                )
             erasure = self.delete_user(
                 token=token,
                 email=reader_email,
@@ -4780,6 +5195,19 @@ class Journey:
             "pre_restart_chat_turns",
             "post_restart_chat_turns",
             "total_chat_turns",
+            "base_chat_turns",
+            "candidate_chat_turns",
+            "base_mid_windows",
+            "base_long_memories",
+            "long_memories",
+            "short_candidates_selected",
+            "long_candidates_selected",
+            "permanent_candidates_selected",
+            "fresh_session_login",
+            "export_short_messages",
+            "export_mid_memories",
+            "export_long_memories",
+            "export_permanent_memories",
             "legacy_chat_turns",
             "prospective_chat_turns",
             "summary_logical_calls",
@@ -4838,6 +5266,10 @@ class Journey:
             "name": EXPECTED_PROVIDER,
             "configured_model": self.expected_model,
         }
+        if self.four_layer:
+            provider["embedding"] = {
+                "name": "openai", "configured_model": "text-embedding-3-small"
+            }
         successful_calls = self.report["provider"].get("successful_calls")
         if isinstance(successful_calls, int) and not isinstance(successful_calls, bool):
             provider["successful_calls"] = successful_calls
@@ -4897,7 +5329,7 @@ class Journey:
         if self.diagnostic_registration is not None:
             public.update(schema_version=3, report_kind=self.report["report_kind"])
             public.pop("attempt_id", None)
-            public["diagnostic_profile"] = diagnostic.PROFILE
+            public["diagnostic_profile"] = self.diagnostic_registration.binding["profile"]
             public["thinking_enabled"] = False
             if self.diagnostic_last_snapshot is not None:
                 reconciled = diagnostic.reconcile_snapshot(
@@ -5214,7 +5646,7 @@ def self_test(root: Path) -> None:
         )
         assert load_config(config_path)["model"] == EXPECTED_MODEL
         valid_config = config_path.read_text(encoding="utf-8")
-        vision_model = "deepseek-flash"
+        vision_model = diagnostic.MEMORY_MODEL
         config_path.write_text(
             json.dumps(
                 {
@@ -5463,11 +5895,17 @@ def self_test(root: Path) -> None:
             operation="narrative_transition",
             expected_model=vision_model,
         ) == 1
+        legacy_before = vision_before.replace(
+            vision_model.encode(), diagnostic.MODEL.encode()
+        )
+        legacy_after = vision_after.replace(
+            vision_model.encode(), diagnostic.MODEL.encode()
+        )
         try:
             provider_started_delta(
                 root,
-                vision_before,
-                vision_after,
+                legacy_before,
+                legacy_after,
                 service="narrative-service",
                 operation="narrative_transition",
             )
@@ -5497,7 +5935,11 @@ def self_test(root: Path) -> None:
             "observed_response_models": {vision_model: 1},
         }
         try:
-            response_models_from_logs(model_log, "narrative-service", expected_model=vision_model)
+            response_models_from_logs(
+                model_log.replace(EXPECTED_MODEL, diagnostic.MODEL),
+                "narrative-service",
+                expected_model=vision_model,
+            )
         except QualificationFailure as error:
             assert error.code == "response_model_marker_invalid"
         else:
@@ -5720,6 +6162,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--config", type=Path)
+    parser.add_argument("--embedding-config", type=Path)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--git-sha")
     parser.add_argument("--base-manifest", type=Path)
@@ -5771,7 +6214,7 @@ def main() -> int:
     root_resolved = root.resolve()
     if output == root_resolved or root_resolved in output.parents:
         raise QualificationFailure("output_dir_must_be_outside_checkout")
-    private_paths = [args.config, args.cohort_manifest, args.ledger]
+    private_paths = [args.config, args.embedding_config, args.cohort_manifest, args.ledger]
     if any(
         path is not None
         and (path.resolve() == root_resolved or root_resolved in path.resolve().parents)
@@ -5784,6 +6227,8 @@ def main() -> int:
         # registration. These read-only checks precede protected config loading.
         diagnostic.private_path(args.output_dir, root, directory=True)
         diagnostic.private_path(args.config, root)
+        if args.embedding_config is not None:
+            diagnostic.private_path(args.embedding_config, root)
         base = load_release_manifest(args.base_manifest)
         candidate = load_release_manifest(args.candidate_manifest)
         registration = diagnostic.load_registration(
@@ -5798,6 +6243,7 @@ def main() -> int:
                            prospective=registration.value["schema"] in (
                                diagnostic.REGISTRATION_SCHEMA_V2,
                                diagnostic.REGISTRATION_SCHEMA_V3,
+                               diagnostic.REGISTRATION_SCHEMA_V4,
                            ))
         diagnostic.network.preflight(registration.value.get("network_subnet"))
         if any(base[key] != candidate[key] for key in INFRASTRUCTURE_IMAGE_KEYS):
@@ -5823,6 +6269,7 @@ def main() -> int:
         args.evidence_class,
         args.slice,
         diagnostic_registration=registration,
+        embedding_config_path=args.embedding_config.resolve() if args.embedding_config else None,
     )
     if registration is not None:
         return run_diagnostic(journey)

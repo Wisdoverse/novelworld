@@ -458,7 +458,7 @@ impl LlmClient {
         let (provider, api_key, provider_name, model_name) =
             self.resolve_provider(&request.model)?;
         let _permit = self.admit()?;
-        let labels = EmbeddingLabels::new(&provider_name, &model_name);
+        let labels = EmbeddingLabels::new(&provider_name, &model_name, api_key);
         labels.started();
         let req = EmbeddingRequest {
             model: model_name,
@@ -491,6 +491,8 @@ impl LlmClient {
                 {
                     Ok(response) => {
                         labels.attempt("success", attempt_started.elapsed().as_secs_f64());
+                        labels.response_model(&response.model);
+                        labels.usage(response.usage.as_ref());
                         if let (Some(budget), Some(grant)) = (&budget, grant) {
                             budget
                                 .settle(

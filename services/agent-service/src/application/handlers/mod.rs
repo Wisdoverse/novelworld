@@ -916,7 +916,7 @@ impl AgentCommandHandler {
             .await?
             .ok_or_else(|| anyhow::anyhow!("Canon grounding is unavailable"))?;
         let system_prompt = Self::system_prompt(&turn.character);
-        let (mut context, selected_mid_count) = self
+        let (mut context, selected) = self
             .memory_manager
             .build_context_with_semantic(
                 turn.claim.character_id,
@@ -930,8 +930,15 @@ impl AgentCommandHandler {
             .await?;
         tracing::info!(
             memory_layer = "mid",
-            selected_count = selected_mid_count,
+            selected_count = selected.mid,
             "memory context selected"
+        );
+        tracing::info!(
+            short = selected.short,
+            mid = selected.mid,
+            long = selected.long,
+            permanent = selected.permanent,
+            "memory lifecycle context selected"
         );
         let lore_query = truncate_chars(&turn.user_message, MAX_LORE_QUERY_CHARS);
         match self
