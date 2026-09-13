@@ -2505,7 +2505,7 @@ class Journey:
                 raise QualificationFailure("diagnostic_control_snapshot_invalid")
         return response
 
-    def diagnostic_failure(self, code: str) -> None:
+    def diagnostic_failure(self, code: str) -> str:
         if not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,100}", code):
             code = "unexpected_diagnostic_failure"
         if code not in self.diagnostic_failures:
@@ -2513,6 +2513,39 @@ class Journey:
         self.report["outcome"] = "failed"
         self.report.setdefault("failure", {"stage": self.current_stage, "code": code})
         self.private_report["diagnostic_failures"] = list(self.diagnostic_failures)
+        return code
+
+    def persist_prestart_failure(self, primary_code: str) -> str:
+        """Persist bounded, allowlisted evidence before temporary cleanup."""
+        stage = (self.current_stage if isinstance(self.current_stage, str)
+                 and re.fullmatch(r"[a-z][a-z0-9_]{0,100}", self.current_stage)
+                 else "unknown")
+        release_log = None
+        path = self.prestart_release_log
+        if path is not None:
+            try:
+                descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+                with os.fdopen(descriptor, "rb") as stream:
+                    snapshot = stream.read(1_048_577)
+                truncated = len(snapshot) > 1_048_576
+                release_log = {
+                    "byte_count": min(len(snapshot), 1_048_576),
+                    "sha256": None if truncated else sha256_bytes(snapshot),
+                    "truncated": truncated,
+                }
+            except OSError:
+                release_log = {"byte_count": None, "sha256": None, "truncated": None}
+        payload = diagnostic.canonical({
+            "schema": "vision-journey-prestart-failure-v1",
+            "registration_sha256": self.diagnostic_registration.sha256,
+            "project": self.project,
+            "stage": stage,
+            "primary_failure_code": primary_code,
+            "prestart_release_log": release_log,
+        }) + b"\n"
+        write_private(self.output / "prestart-failure-private.json", payload)
+        diagnostic.sync_directory(self.output)
+        return sha256_bytes(payload)
 
     def diagnostic_terminal(self) -> None:
         """No new product request after entry; preserve PG unless evidence is durable."""
@@ -3426,6 +3459,8 @@ class Journey:
             raise QualificationFailure("release_environment_missing")
         log_path = ((self.runtime_root.parent / f"prestart-release-{command}.log")
                     if prestart else self.output / f"release-{command}.log")
+        if prestart:
+            self.prestart_release_log = log_path
         descriptor = os.open(log_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         started = time.monotonic()
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as log:
@@ -3501,8 +3536,6 @@ class Journey:
                 for phase, value in phases.items()
             }
         )
-        if prestart:
-            self.prestart_release_log = log_path
         return duration
 
     def run_legacy_character_slice(
@@ -5683,7 +5716,7 @@ def run_diagnostic(journey: Journey) -> int:
             raise QualificationFailure("diagnostic_cancelled")
 
     def failure(error, fallback):
-        journey.diagnostic_failure(getattr(error, "code", fallback))
+        return journey.diagnostic_failure(getattr(error, "code", fallback))
 
     for number in signals:
         signal.signal(number, cancel)
@@ -5698,21 +5731,36 @@ def run_diagnostic(journey: Journey) -> int:
                 diagnostic.network.preflight(journey.network_subnet)
             journey.diagnostic_ledger.start()
         except (Exception, KeyboardInterrupt) as error:
-            failure(error, "diagnostic_start_failed")
+            primary_code = failure(error, "diagnostic_start_failed")
             if (journey.local_embedding
                     and not journey.diagnostic_ledger.created):
+                frozen_codes = [primary_code]
+                evidence_sha256 = None
+                try:
+                    evidence_sha256 = journey.persist_prestart_failure(primary_code)
+                except (Exception, KeyboardInterrupt) as evidence_error:
+                    frozen_codes.append(failure(
+                        evidence_error, "diagnostic_prestart_evidence_unproven"
+                    ))
+                cleanup_proven = False
                 try:
                     journey.prestart_cleanup_v5()
                 except (Exception, KeyboardInterrupt) as cleanup_error:
-                    failure(cleanup_error, "diagnostic_prestart_cleanup_unproven")
-                    if not journey.diagnostic_ledger.created:
-                        try:
-                            journey.diagnostic_ledger.freeze_prestart(
-                                journey.project,
-                                "diagnostic_prestart_cleanup_unproven",
-                            )
-                        except (Exception, KeyboardInterrupt) as freeze_error:
-                            failure(freeze_error, "diagnostic_prestart_freeze_unproven")
+                    frozen_codes.append(failure(
+                        cleanup_error, "diagnostic_prestart_cleanup_unproven"
+                    ))
+                else:
+                    cleanup_proven = True
+                if not journey.diagnostic_ledger.created:
+                    try:
+                        journey.diagnostic_ledger.freeze_prestart(
+                            journey.project,
+                            list(dict.fromkeys(frozen_codes)),
+                            evidence_sha256,
+                            cleanup_proven=cleanup_proven,
+                        )
+                    except (Exception, KeyboardInterrupt) as freeze_error:
+                        failure(freeze_error, "diagnostic_prestart_freeze_unproven")
             return 1
         try:
             journey.execute()
