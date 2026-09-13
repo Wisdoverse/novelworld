@@ -41,6 +41,7 @@ _budget_spec.loader.exec_module(BUDGET)
 
 PROFILE_BYTES = (ROOT / "tools/llm-budget/diagnostic-v1.json").read_bytes()
 MEMORY_PROFILE_BYTES = (ROOT / "tools/llm-budget/diagnostic-v2.json").read_bytes()
+LOCAL_MEMORY_PROFILE_BYTES = (ROOT / "tools/llm-budget/diagnostic-v3.json").read_bytes()
 BUDGET_ID = "550e8400-e29b-41d4-a716-446655440000"
 TOKEN = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 REGISTERED_ENV = {
@@ -205,6 +206,13 @@ class ReleaseImageDigestTest(unittest.TestCase):
         memory = BUDGET.registration(MEMORY_PROFILE_BYTES, memory_env)
         self.assertEqual(memory["binding"]["contract"], "llm-diagnostic-budget-v2")
         self.assertEqual(memory["binding"]["profile"], "four-layer-journey-diagnostic-v2")
+        local_memory_env = dict(memory_env, LLM_DIAGNOSTIC_BUDGET_LIMITS=json.dumps({
+            **json.loads(memory_env["LLM_DIAGNOSTIC_BUDGET_LIMITS"]),
+            "profile": "four-layer-journey-diagnostic-v3",
+        }, separators=(",", ":")))
+        local_memory = BUDGET.registration(LOCAL_MEMORY_PROFILE_BYTES, local_memory_env)
+        self.assertEqual(local_memory["binding"]["contract"], "llm-diagnostic-budget-v2")
+        self.assertEqual(local_memory["binding"]["profile"], "four-layer-journey-diagnostic-v3")
 
         for key, value in (
             ("LLM_DIAGNOSTIC_BUDGET_ID", BUDGET_ID.upper()),

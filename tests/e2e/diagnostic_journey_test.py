@@ -271,6 +271,15 @@ class DiagnosticJourneyTest(unittest.TestCase):
         value["limits"]["profile"] = CONTROL.PROFILE_V2
         return value
 
+    def v5_value(self):
+        value = self.v4_value()
+        value.update(
+            schema=CONTROL.REGISTRATION_SCHEMA_V5,
+            profile_sha256=CONTROL.digest((ROOT / CONTROL.PROFILE_PATH_V3).read_bytes()),
+        )
+        value["limits"]["profile"] = CONTROL.PROFILE_V3
+        return value
+
     def test_registration_preserves_exact_environment_and_immutable_value(self):
         registration = self.load()
         environment = registration.environment()
@@ -355,6 +364,19 @@ class DiagnosticJourneyTest(unittest.TestCase):
                 CONTROL.reconcile_snapshot(
                     registration, {"budget": budget, "receipts": [invalid]}
                 )
+
+    def test_v5_binds_keyless_local_embedding_without_changing_v4(self):
+        value = self.v5_value()
+        registration = self.load(value)
+        self.assertEqual(registration.binding["profile"], CONTROL.PROFILE_V3)
+        self.assertEqual(registration.profile["embedding_provider"], "local-tei")
+        self.assertEqual(registration.profile["embedding_dimensions"], 1024)
+        self.assertEqual(registration.profile["embedding_storage_dimensions"], 1536)
+        self.assertEqual(
+            registration.profile["embedding_model_revision"],
+            "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
+        )
+        self.assertEqual(self.load(self.v4_value()).binding["profile"], CONTROL.PROFILE_V2)
 
         journey = object.__new__(RUNNER.Journey)
         journey.diagnostic_registration = registration
@@ -601,6 +623,7 @@ class DiagnosticJourneyTest(unittest.TestCase):
             with self.assertRaises(OSError):
                 ledger.start()
         self.assertIsNone(ledger.descriptor)
+        self.assertTrue(ledger.created)
         with self.assertRaises(CONTROL.DiagnosticFailure):
             CONTROL.DiagnosticLedger(registration).start()
         self.assertTrue(Path(self.value["ledger_path"]).exists())
@@ -774,9 +797,41 @@ class DiagnosticJourneyTest(unittest.TestCase):
         self.assertIn(b"REPEATABLE READ READ ONLY", sql)
         self.assertIn(b"lock_timeout = '2s'", sql)
         self.assertIn(b"statement_timeout = '5s'", sql)
+        v5_prefix = "nwq-" + "a" * 32
+        self.assertIn(
+            v5_prefix + "-postgres",
+            CONTROL.snapshot_command(v5_prefix, self.value["budget_id"])[0],
+        )
         for prefix, identifier in (("novel", self.value["budget_id"]), ("nwq-abcdef1234", "';DROP TABLE users;")):
             with self.assertRaises(CONTROL.DiagnosticFailure):
                 CONTROL.snapshot_command(prefix, identifier)
+
+    def test_v5_checkpoint_uses_registration_bound_project(self):
+        self.value = self.v5_value()
+        journey = self.journey()
+        registration = journey.diagnostic_registration
+        snapshot = {
+            "budget": {
+                **registration.binding,
+                **{key: value for key, value in self.value["limits"].items()
+                   if key != "profile"},
+                "charged_attempts": 0,
+                "charged_tokens": 0,
+                "charged_cost_micro_cny": 0,
+                "sealed": False,
+            },
+            "receipts": [],
+        }
+        calls = []
+
+        def bounded(command, **_kwargs):
+            calls.append(command)
+            return CONTROL.canonical(snapshot)
+
+        with mock.patch.object(RUNNER.diagnostic, "bounded_command", side_effect=bounded):
+            aggregate = journey.diagnostic_checkpoint("initial")
+        self.assertEqual(aggregate["charged"]["attempts"], 0)
+        self.assertIn(journey.project + "-postgres", calls[0])
 
     def journey(self):
         for path, marker in ((self.base, "b"), (self.candidate, "a")):
@@ -788,7 +843,7 @@ class DiagnosticJourneyTest(unittest.TestCase):
         self.value["candidate_manifest_sha256"] = CONTROL.digest(self.candidate.read_bytes())
         registration = self.load()
         config = self.directory / "config.json"
-        config.write_text(json.dumps({"provider": "deepseek", "model": CONTROL.MODEL,
+        config.write_text(json.dumps({"provider": "deepseek", "model": registration.profile["model"],
                                       "thinking_enabled": False, "api_key": "test-only",
                                       "api_url": "https://api.deepseek.com"}))
         config.chmod(0o600)
@@ -915,6 +970,213 @@ class DiagnosticJourneyTest(unittest.TestCase):
                                ("cleanup", cleanup or cleanup_default)):
             stack.enter_context(mock.patch.object(journey, name, side_effect=function))
         return events
+
+    def test_v5_prestart_precedes_started_and_failure_uses_no_output_cleanup(self):
+        self.value = self.v5_value()
+        journey = self.journey()
+        self.assertTrue(journey.local_embedding)
+        self.assertEqual(journey.project, "nwq-" + journey.diagnostic_registration.sha256[:32])
+        self.assertEqual(journey.embedding_config, {
+            "provider": "local-tei",
+            "api_url": "http://embedding:80",
+            "api_key": "",
+            "model": "Qwen/Qwen3-Embedding-0.6B",
+        })
+        self.assertEqual(journey.public_report()["provider"]["embedding"], {
+            "name": "local-tei",
+            "configured_model": "Qwen/Qwen3-Embedding-0.6B",
+        })
+        RUNNER.assert_metric_identity(
+            [("novelworld_embedding_requests_total", {
+                "service": "agent-service", "provider": "local-tei",
+                "model": "Qwen/Qwen3-Embedding-0.6B",
+            }, 1.0)],
+            include_embedding=True,
+            expected_embedding_provider="local-tei",
+            expected_embedding_model="Qwen/Qwen3-Embedding-0.6B",
+        )
+        events = self.terminal_runner(journey)
+
+        def prestart():
+            self.assertFalse(Path(self.value["ledger_path"]).exists())
+            events.append("prestart")
+
+        with mock.patch.object(journey, "prestart_v5", side_effect=prestart):
+            self.assertEqual(RUNNER.run_diagnostic(journey), 0)
+        self.assertEqual(events, ["prestart", "execute", "terminal", "cleanup"])
+
+        for path in self.output.iterdir():
+            path.unlink()
+        self.value = self.v5_value()
+        self.value["budget_id"] = str(uuid.uuid4())
+        self.value["ledger_path"] = str(self.directory / (self.value["budget_id"] + ".jsonl"))
+        journey = self.journey()
+        cleaned = []
+        with mock.patch.object(
+            journey, "prestart_v5", side_effect=RUNNER.QualificationFailure("probe_failed")
+        ), mock.patch.object(
+            journey, "prestart_cleanup_v5", side_effect=lambda: cleaned.append(True)
+        ), mock.patch.object(journey, "execute") as execute, mock.patch.object(
+            journey, "write_report"
+        ) as report:
+            self.assertEqual(RUNNER.run_diagnostic(journey), 1)
+        self.assertEqual(cleaned, [True])
+        self.assertEqual(list(self.output.iterdir()), [])
+        execute.assert_not_called()
+        report.assert_not_called()
+
+        for path in self.output.iterdir():
+            path.unlink()
+        self.value = self.v5_value()
+        self.value["budget_id"] = str(uuid.uuid4())
+        self.value["ledger_path"] = str(self.directory / (self.value["budget_id"] + ".jsonl"))
+        journey = self.journey()
+        with mock.patch.object(journey, "prestart_v5"), mock.patch.object(
+            journey, "prestart_cleanup_v5"
+        ) as cleanup, mock.patch.object(
+            CONTROL, "sync_directory", side_effect=OSError("synthetic")
+        ):
+            self.assertEqual(RUNNER.run_diagnostic(journey), 1)
+        cleanup.assert_not_called()
+        self.assertTrue(journey.diagnostic_ledger.created)
+        self.assertTrue(Path(self.value["ledger_path"]).exists())
+
+    def test_v5_uncertain_prestart_freezes_registration_without_started(self):
+        self.value = self.v5_value()
+        journey = self.journey()
+        journey.inventory_captured = True
+        journey.prestart_docker_mutation_unknown = True
+        with mock.patch.object(
+            journey, "prestart_v5", side_effect=RUNNER.QualificationFailure("interrupted")
+        ), mock.patch.object(
+            RUNNER.diagnostic, "bounded_command"
+        ) as docker:
+            self.assertEqual(RUNNER.run_diagnostic(journey), 1)
+        docker.assert_not_called()
+        row = json.loads(Path(self.value["ledger_path"]).read_text())
+        self.assertEqual(row["schema"], CONTROL.PRESTART_SCHEMA)
+        self.assertEqual(row["status"], "Frozen")
+        self.assertEqual(row["project"], journey.project)
+        self.assertNotIn("registration", row)
+        with self.assertRaises(CONTROL.DiagnosticFailure):
+            self.load()
+
+    def test_v5_prestart_proves_keyless_pinned_runtime_and_vector(self):
+        profile = json.loads((ROOT / CONTROL.PROFILE_PATH_V3).read_bytes())
+        journey = object.__new__(RUNNER.Journey)
+        journey.local_embedding = True
+        journey.project = journey.prefix = "nwq-abcdef1234"
+        journey.diagnostic_registration = mock.Mock(profile=profile)
+        journey.private_report = {}
+        journey.report = {"stages": []}
+        journey.current_stage = "preflight"
+        journey.base_prestarted = False
+        journey.preflight = mock.Mock()
+        journey.prepare_compose = mock.Mock()
+        journey.adopt_initial_release = mock.Mock()
+        journey.compose = mock.Mock()
+        tei_id, nginx_id = "sha256:" + "a" * 64, "sha256:" + "b" * 64
+        command = [
+            "--model-id", profile["embedding_model"],
+            "--revision", profile["embedding_model_revision"],
+            "--served-model-name", profile["embedding_model"],
+            "--dtype", "float32",
+            "--max-batch-tokens", "4096",
+            "--max-client-batch-size", "1",
+            "--payload-limit", "8192",
+            "--json-output",
+        ]
+
+        def inspect(kind, name):
+            if kind == "container" and name.endswith("-embedding"):
+                return {
+                    "Image": tei_id,
+                    "Config": {"Image": profile["embedding_runtime_image"], "Cmd": command,
+                               "Labels": {"com.docker.compose.project": journey.project}},
+                    "HostConfig": {"PortBindings": {}},
+                    "Mounts": [{"Type": "volume", "Destination": "/data", "Name": "cache"}],
+                }
+            if kind == "container":
+                return {"Image": nginx_id, "Config": {
+                    "Image": profile["embedding_probe_image"],
+                    "Labels": {"com.docker.compose.project": journey.project},
+                }}
+            if kind == "volume":
+                return {"Labels": {"com.docker.compose.project": journey.project}}
+            image_id = tei_id if name == profile["embedding_runtime_image"] else nginx_id
+            digest = name.split("@", 1)[1]
+            return {"Id": image_id, "RepoDigests": ["registry.invalid/image@" + digest]}
+
+        calls = []
+
+        def bounded(command, *, stdin=b"", **_kwargs):
+            calls.append((command, stdin))
+            if command[-1].endswith("/info"):
+                return CONTROL.canonical({
+                    "model_id": profile["embedding_model"],
+                    "model_sha": profile["embedding_model_revision"],
+                })
+            if command[-1].endswith("/v1/embeddings"):
+                return CONTROL.canonical({
+                    "model": profile["embedding_model"],
+                    "usage": {"prompt_tokens": 6, "total_tokens": 6},
+                    "data": [{"embedding": [0.0] * 1024}],
+                })
+            return b""
+
+        with mock.patch.object(RUNNER, "docker_inspect", side_effect=inspect), \
+                mock.patch.object(RUNNER.diagnostic, "bounded_command", side_effect=bounded):
+            journey.prestart_v5()
+        self.assertTrue(journey.base_prestarted)
+        self.assertEqual(
+            journey.private_report["local_embedding_prestart"]["provider_dimensions"], 1024
+        )
+        self.assertEqual(
+            journey.private_report["local_embedding_prestart"]["storage_dimensions"], 1536
+        )
+        self.assertTrue(all("Authorization" not in command for command, _ in calls))
+        self.assertEqual(list(self.output.iterdir()), [])
+
+    def test_v5_prestart_cleanup_removes_only_labelled_project_resources(self):
+        journey = object.__new__(RUNNER.Journey)
+        journey.project = journey.prefix = "nwq-abcdef1234"
+        journey.inventory_captured = True
+        journey.runtime_temp = None
+        journey.stack_started = True
+        unrelated = {
+            "containers": {"other": {"labels": {}}},
+            "volumes": {},
+            "networks": {},
+        }
+        labels = {"com.docker.compose.project": journey.project}
+        before = copy.deepcopy(unrelated)
+        before["containers"][journey.prefix + "-agent-service"] = {
+            "id": "a" * 64, "labels": labels,
+        }
+        before["networks"][journey.project + "_novel-net"] = {
+            "id": "b" * 64, "labels": labels,
+        }
+        before["volumes"][journey.project + "_embedding_model_cache"] = {
+            "labels": labels,
+        }
+        journey.user_stack_before = unrelated
+        commands = []
+
+        def bounded(command, **_kwargs):
+            commands.append(command)
+            return b""
+
+        with mock.patch.object(
+            RUNNER, "docker_inventory_snapshot",
+            side_effect=[before, unrelated, unrelated, unrelated]
+        ), mock.patch.object(
+            RUNNER.diagnostic, "bounded_command", side_effect=bounded
+        ), mock.patch.object(RUNNER.time, "sleep") as sleep:
+            journey.prestart_cleanup_v5()
+        self.assertEqual([command[1] for command in commands], ["rm", "network", "volume"])
+        self.assertEqual(sleep.call_count, 2)
+        self.assertFalse(journey.stack_started)
+        self.assertEqual(list(self.output.iterdir()), [])
 
     def test_terminal_started_precedes_execution_and_passed_follows_durable_reports(self):
         journey = self.journey()
@@ -1795,6 +2057,14 @@ class DiagnosticJourneyTest(unittest.TestCase):
         fresh.mkdir(mode=0o700)
         with mock.patch.object(network, "inventory", return_value=([item], own_routes)):
             with self.assertRaises(network.NetworkFailure): network.guard("check", selected, fresh, project, ROOT)
+
+    def test_network_guard_accepts_registration_bound_v5_project(self):
+        network = CONTROL.network
+        project = "nwq-" + "a" * 32
+        state = self.directory / "v5-network-state"
+        state.mkdir(mode=0o700)
+        path = Path(network.guard("overlay", "10.2.3.0/28", state, project, ROOT))
+        self.assertEqual(path, state / "qualification-network.yml")
 
     def test_journey_fixed_network_overlay_and_null_original_compose_argv(self):
         journey = self.journey()

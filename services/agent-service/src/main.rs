@@ -154,7 +154,10 @@ async fn run_body() -> Result<()> {
         // Embeddings use a separate provider boundary from generation.
         let diagnostic_profile = std::env::var("LLM_DIAGNOSTIC_PROFILE")
             .unwrap_or_else(|_| "vision-journey-diagnostic-v1".into());
-        let memory_diagnostic = diagnostic_profile == "four-layer-journey-diagnostic-v2";
+        let memory_diagnostic = matches!(
+            diagnostic_profile.as_str(),
+            "four-layer-journey-diagnostic-v2" | "four-layer-journey-diagnostic-v3"
+        );
         let embedding_config = EmbeddingConfig::from_environment()?;
         let embedding: Arc<dyn domain::ports::EmbeddingGenerator> = match embedding_config {
             None => {
@@ -166,12 +169,22 @@ async fn run_body() -> Result<()> {
                 Arc::new(NoopEmbeddingGenerator)
             }
             Some(config) => {
-                if memory_diagnostic
-                    && (config.provider != "openai"
-                        || config.api_key.is_empty()
-                        || config.api_url != "https://api.openai.com"
-                        || config.model != "text-embedding-3-small")
-                {
+                let diagnostic_mismatch = match diagnostic_profile.as_str() {
+                    "four-layer-journey-diagnostic-v2" => {
+                        config.provider != "openai"
+                            || config.api_key.is_empty()
+                            || config.api_url != "https://api.openai.com"
+                            || config.model != "text-embedding-3-small"
+                    }
+                    "four-layer-journey-diagnostic-v3" => {
+                        config.provider != "local-tei"
+                            || !config.api_key.is_empty()
+                            || config.api_url != "http://embedding:80"
+                            || config.model != "Qwen/Qwen3-Embedding-0.6B"
+                    }
+                    _ => false,
+                };
+                if diagnostic_mismatch {
                     anyhow::bail!("four-layer Diagnostic embedding configuration mismatch");
                 }
                 let embed_base = Arc::new(llm_client::LlmClient::new().with_openai_compatible(
@@ -184,7 +197,14 @@ async fn run_body() -> Result<()> {
                     embedding_model = %config.model,
                     "Embedding provider configured"
                 );
-                Arc::new(EmbeddingAdapter::new(embed_base, config.qualified_model()))
+                let padding = (config.provider == "local-tei"
+                    && config.model == "Qwen/Qwen3-Embedding-0.6B")
+                    .then_some((1024, 1536));
+                Arc::new(EmbeddingAdapter::new(
+                    embed_base,
+                    config.qualified_model(),
+                    padding,
+                ))
             }
         };
 

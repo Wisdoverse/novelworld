@@ -11,6 +11,7 @@ networks:
 volumes:
   postgres_data:
   redis_data:
+  embedding_model_cache:
 
 services:
 
@@ -99,6 +100,43 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  embedding:
+    profiles: ["local-embedding"]
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.3@sha256:c26a226262ad4ff3330fb30b76653c1bb65da2fcf413b92284545a010e0a8a48
+    container_name: ${CONTAINER_PREFIX:-novel}-embedding
+    restart: unless-stopped
+    command:
+      - --model-id
+      - Qwen/Qwen3-Embedding-0.6B
+      - --revision
+      - 97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3
+      - --served-model-name
+      - Qwen/Qwen3-Embedding-0.6B
+      - --dtype
+      - float32
+      - --max-concurrent-requests
+      - "4"
+      - --max-batch-tokens
+      - "4096"
+      - --max-client-batch-size
+      - "1"
+      - --payload-limit
+      - "8192"
+      - --json-output
+    volumes:
+      - embedding_model_cache:/data
+    networks:
+      - novel-net
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 12g
+    cpus: 4.0
 
   # ─── 微服务 ────────────────────────────────────────────────────────────────
 

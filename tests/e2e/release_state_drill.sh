@@ -245,11 +245,16 @@ expect_ok 'qualification scope accepts an isolated loopback project' '' env \
   RELEASE_CONTAINER_PREFIX=nwq-0123456789 \
   RELEASE_HTTP_BIND=127.0.0.1 RELEASE_HTTP_PORT=18080 \
   "$release" validate "$good"
+expect_ok 'qualification scope accepts a registration-bound v5 project' '' env \
+  RELEASE_COMPOSE_PROJECT=nwq-0123456789abcdef0123456789abcdef \
+  RELEASE_CONTAINER_PREFIX=nwq-0123456789abcdef0123456789abcdef \
+  RELEASE_HTTP_BIND=127.0.0.1 RELEASE_HTTP_PORT=18080 \
+  "$release" validate "$good"
 expect_fail 'qualification scope rejects partial configuration' \
   'qualification scope requires project, prefix, bind, and port together' env \
   RELEASE_COMPOSE_PROJECT=nwq-0123456789 "$release" validate "$good"
 expect_fail 'qualification scope rejects a production-like project' \
-  'qualification project must match nwq-<10 lowercase hex>' env \
+  'qualification project must match nwq-<10 or 32 lowercase hex>' env \
   RELEASE_COMPOSE_PROJECT=novelworld RELEASE_CONTAINER_PREFIX=novelworld \
   RELEASE_HTTP_BIND=127.0.0.1 RELEASE_HTTP_PORT=18080 \
   "$release" validate "$good"

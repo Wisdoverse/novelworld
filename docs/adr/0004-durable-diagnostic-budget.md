@@ -115,7 +115,9 @@ empty by default. The latter is strict JSON containing exactly `profile`,
 `max_attempts`, `max_tokens`, `max_cost_micro_cny`, and `expires_at`. Use canonical
 unquoted `KEY=value` environment-file entries, without shell expansion.
 `LLM_DIAGNOSTIC_PROFILE` defaults to `vision-journey-diagnostic-v1`; the
-four-layer journey selects `four-layer-journey-diagnostic-v2`. A non-default
+external-embedding four-layer journey selects `four-layer-journey-diagnostic-v2`;
+the keyless local-embedding journey selects the additive
+`four-layer-journey-diagnostic-v3`. A non-default
 selector without a complete registration fails closed. Expiry is fixed UTC
 seconds, not a duration renewed on restart. Limits have no funded defaults. Individual local
 processes also require explicit `USER_SERVICE_URL` and a valid shared internal
@@ -259,3 +261,17 @@ Agent restart, then uses a fresh login for a trace-correlated four-layer
 selection check, export, deletion, and sealed receipt/metric reconciliation.
 This source path does not create a registration, call either provider, authorize
 spending, or turn a Diagnostic into H3/H4 qualification.
+
+Issue #385 adds registration v5 and the compiled v3 profile without changing
+the v2 bytes. Generation remains DeepSeek-only. Before Started, the runner cold
+adopts the registered base with no provider setting, starts the digest-pinned
+CPU TEI service without a host port, and uses the release's pinned Nginx curl to
+verify the exact Hub revision, served model, usage, and 1,024 finite provider
+values. Agent zero-pads this exact local model to the existing 1,536-dimension
+store; external provider behavior is unchanged. A
+settled pre-Started failure removes only resources carrying the registration-bound
+Compose project label after three stable inventory reads and writes no journey
+report. An interrupted Docker mutation preserves resources and writes a
+registration-bound `Frozen` control record without claiming `Started`. Once Started exists, the existing
+durable terminal and evidence-gated cleanup rules apply. This implementation
+does not itself register, fund, or execute a live Diagnostic.

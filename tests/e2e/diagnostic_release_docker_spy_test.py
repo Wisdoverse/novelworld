@@ -48,6 +48,14 @@ class DockerSpyTest(unittest.TestCase):
             execv = self.invoke(argv)
             execv.assert_called_once_with("/usr/bin/docker", ["/usr/bin/docker", *argv])
 
+    def test_accepts_registration_bound_v5_project(self):
+        self.project = "nwq-" + "a" * 32
+        self.env["NWQ_PROJECT"] = self.project
+        argv = self.compose(["config", "--format", "json"])
+        self.invoke(argv).assert_called_once_with(
+            "/usr/bin/docker", ["/usr/bin/docker", *argv]
+        )
+
     def test_forwards_exact_capability_probe_and_cleanup(self):
         name = self.project + "-budget-probe-0123456789ab"
         image = "ghcr.io/wisdoverse/novelworld/user-service@sha256:" + "a" * 64
@@ -57,6 +65,7 @@ class DockerSpyTest(unittest.TestCase):
                  "no-new-privileges", "--entrypoint", "/app/service", image,
                  "--diagnostic-budget-contract"]
         for argv in (probe, probe + ["four-layer-journey-diagnostic-v2"],
+                     probe + ["four-layer-journey-diagnostic-v3"],
                      ["start", "--attach", name], ["rm", "--force", name],
                      ["ps", "--all", "--quiet", "--filter", "name=^/" + name + "$"]):
             execv = self.invoke(argv)

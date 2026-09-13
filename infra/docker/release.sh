@@ -46,8 +46,8 @@ configure_qualification_scope() {
   fi
   [[ -n "$project" && -n "$prefix" && -n "$bind" && -n "$port" ]] \
     || die "qualification scope requires project, prefix, bind, and port together"
-  [[ "$project" =~ ^nwq-[a-f0-9]{10}$ ]] \
-    || die "qualification project must match nwq-<10 lowercase hex>"
+  [[ "$project" =~ ^nwq-([a-f0-9]{10}|[a-f0-9]{32})$ ]] \
+    || die "qualification project must match nwq-<10 or 32 lowercase hex>"
   [[ "$prefix" == "$project" ]] \
     || die "qualification container prefix must equal its project"
   [[ "$bind" == 127.0.0.1 ]] \
@@ -168,6 +168,7 @@ load_diagnostic_mode() {
   case "$diagnostic_profile" in
     vision-journey-diagnostic-v1) diagnostic_profile_file=diagnostic-v1.json ;;
     four-layer-journey-diagnostic-v2) diagnostic_profile_file=diagnostic-v2.json ;;
+    four-layer-journey-diagnostic-v3) diagnostic_profile_file=diagnostic-v3.json ;;
     *) die "unsupported diagnostic profile" ;;
   esac
   [[ -r "$tool_dir/diagnostic_budget.py" && -r "$tool_dir/../../tools/llm-budget/$diagnostic_profile_file" ]] \
