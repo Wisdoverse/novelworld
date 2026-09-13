@@ -2020,6 +2020,14 @@ class DiagnosticJourneyTest(unittest.TestCase):
         with mock.patch.object(network, "inventory", return_value=([item], own_routes)):
             with self.assertRaises(network.NetworkFailure): network.guard("check", selected, fresh, project, ROOT)
 
+    def test_network_guard_accepts_registration_bound_v5_project(self):
+        network = CONTROL.network
+        project = "nwq-" + "a" * 32
+        state = self.directory / "v5-network-state"
+        state.mkdir(mode=0o700)
+        path = Path(network.guard("overlay", "10.2.3.0/28", state, project, ROOT))
+        self.assertEqual(path, state / "qualification-network.yml")
+
     def test_journey_fixed_network_overlay_and_null_original_compose_argv(self):
         journey = self.journey()
         journey.runtime_root = self.directory / "repo"
