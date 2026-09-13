@@ -2,8 +2,8 @@
 # Container image vulnerability scan (H2 supply-chain; see SECURITY.md
 # 'Dependency Policy'). Scans the application images with the pinned trivy
 # release for HIGH/CRITICAL vulnerabilities; any finding exits 1. The CI
-# tag pipeline (docker.yml) runs the same check automatically on every
-# pushed image, so this script is the local convenience form of the gate.
+# tag pipeline (docker.yml) runs this shared gate automatically on every
+# pushed image; operators can invoke it locally with the same behavior.
 #
 # The digest-pinned infrastructure images (postgres/redis/nginx) are NOT
 # scanned here: they have no local Dockerfile to remediate, and re-pinning
@@ -26,11 +26,23 @@ if [ "${#images[@]}" -eq 0 ]; then
   )
 fi
 
+scan_log=$(mktemp)
+trap 'rm -f "$scan_log"' EXIT
 for image in "${images[@]}"; do
   printf 'scan: %s\n' "$image"
+  : > "$scan_log"
+  set +e
   docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
     aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 image --scanners vuln \
     --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
-    --skip-version-check "$image"
+    --skip-version-check "$image" 2>&1 | tee "$scan_log"
+  statuses=("${PIPESTATUS[@]}")
+  set -e
+  [ "${statuses[1]}" -eq 0 ] || { printf 'scan: output capture failed\n' >&2; exit 1; }
+  [ "${statuses[0]}" -eq 0 ] || exit "${statuses[0]}"
+  if grep -Fq 'Unable to get vulnerability details (CVE may be rejected)' "$scan_log"; then
+    printf 'scan: incomplete vulnerability details for %s\n' "$image" >&2
+    exit 1
+  fi
 done
 printf 'scan: all images clean\n'

@@ -218,8 +218,9 @@ maintaining two ignore lists.
 
 Every pushed application image is scanned in the tag pipeline (docker.yml)
 with the pinned `aquasec/trivy:0.74.0` for HIGH/CRITICAL vulnerabilities
-(--ignore-unfixed, vuln scanner); any finding fails the release. The same
-check runs locally via `infra/security/scan-images.sh`. The four base
+(--ignore-unfixed, vuln scanner); any finding or unresolved vulnerability
+detail fails the release. The same check runs locally and in release CI via
+`infra/security/scan-images.sh`. The four base
 images in the Dockerfiles are digest-pinned. The digest-pinned
 infrastructure images are scanned when they are re-pinned through the
 separately approved infrastructure procedure; the current local scan of

@@ -62,10 +62,7 @@ jobs:
           set -euo pipefail
           [[ "$IMAGE" =~ @sha256:[0-9a-f]{64}$ ]]
           docker pull "$IMAGE"
-          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-            aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 image --scanners vuln \
-            --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
-            --skip-version-check "$IMAGE"
+          infra/security/scan-images.sh "$IMAGE"
           mkdir -p image-digests
           printf '%s\n' "$IMAGE" > "image-digests/${{ matrix.service }}.txt"
       - uses: actions/upload-artifact@v7.0.1
@@ -108,10 +105,7 @@ jobs:
           set -euo pipefail
           [[ "$IMAGE" =~ @sha256:[0-9a-f]{64}$ ]]
           docker pull "$IMAGE"
-          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-            aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 image --scanners vuln \
-            --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
-            --skip-version-check "$IMAGE"
+          infra/security/scan-images.sh "$IMAGE"
           mkdir -p image-digests
           printf '%s\n' "$IMAGE" > image-digests/frontend.txt
       - uses: actions/upload-artifact@v7.0.1
