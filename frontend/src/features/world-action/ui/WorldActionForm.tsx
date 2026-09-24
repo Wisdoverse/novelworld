@@ -1,4 +1,5 @@
-import { useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { suggestWorldAction } from '@/entities/narrative';
 import type { OpenWorldView, WorldAction, WorldActionKind } from '@/shared/types';
 
 interface WorldActionFormProps {
@@ -56,12 +57,59 @@ function targets(view: OpenWorldView, kind: WorldActionKind) {
 
 export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }: WorldActionFormProps) {
   const [kind, setKind] = useState<WorldActionKind>('travel');
-  const [targetId, setTargetId] = useState('');
+  const [targetId, setTargetId] = useState<string | null>('');
   const [intent, setIntent] = useState('');
+  const [suggesting, setSuggesting] = useState(false);
+  const [suggestion, setSuggestion] = useState<{ kind: WorldActionKind | null; view: OpenWorldView } | null>(null);
+  const suggestionRequest = useRef<AbortController | null>(null);
   const targetOptions = useMemo(() => targets(view, kind), [kind, view]);
   const targetRequired = kind !== 'pursue_goal';
   const controlsDisabled = isPending || isLocked;
-  const selectedTarget = targetOptions.some(option => option.id === targetId)
+  const latest = useRef({ view, intent, kind, controlsDisabled });
+  latest.current = { view, intent, kind, controlsDisabled };
+  useEffect(() => {
+    suggestionRequest.current?.abort();
+    suggestionRequest.current = null;
+    setSuggestion(null);
+    setSuggesting(false);
+  }, [view, controlsDisabled]);
+  useEffect(() => () => suggestionRequest.current?.abort(), []);
+
+  const clearSuggestion = () => {
+    suggestionRequest.current?.abort();
+    suggestionRequest.current = null;
+    setSuggestion(null);
+    setSuggesting(false);
+  };
+
+  const requestSuggestion = async () => {
+    if (controlsDisabled || !view.action_suggestions_available || !intent.trim()) return;
+    const controller = new AbortController();
+    const requestedIntent = intent.trim();
+    const requestedKind = kind;
+    suggestionRequest.current = controller;
+    setSuggestion(null);
+    setSuggesting(true);
+    try {
+      const result = await suggestWorldAction(view.player.novel_id, requestedIntent, controller.signal);
+      const current = latest.current;
+      if (suggestionRequest.current === controller && current.view === view
+        && current.intent.trim() === requestedIntent && current.kind === requestedKind
+        && !current.controlsDisabled) {
+        setSuggestion({ kind: result, view });
+      }
+    } catch {
+      if (suggestionRequest.current === controller && !controller.signal.aborted) {
+        setSuggestion({ kind: null, view });
+      }
+    } finally {
+      if (suggestionRequest.current === controller) {
+        suggestionRequest.current = null;
+        setSuggesting(false);
+      }
+    }
+  };
+  const selectedTarget = targetId === null ? '' : targetOptions.some(option => option.id === targetId)
     ? targetId
     : targetRequired ? targetOptions[0]?.id ?? '' : '';
   const actionRule = view.session.game_rules?.action_rules.find(rule => rule.kind === kind);
@@ -76,6 +124,7 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (controlsDisabled || (targetRequired && !selectedTarget)) return;
+    clearSuggestion();
     try {
       await onSubmit({
         kind,
@@ -100,6 +149,7 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
           disabled={controlsDisabled}
           value={kind}
           onChange={event => {
+            clearSuggestion();
             setKind(event.target.value as WorldActionKind);
             setTargetId('');
           }}
@@ -122,10 +172,14 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
           className="field-control mt-1"
           disabled={controlsDisabled}
           value={selectedTarget}
-          onChange={event => setTargetId(event.target.value)}
+          onChange={event => {
+            clearSuggestion();
+            setTargetId(event.target.value);
+          }}
           required={targetRequired}
         >
           {!targetRequired ? <option value="">自定目标</option> : null}
+          {targetRequired && targetId === null ? <option value="" disabled>请选择目标</option> : null}
           {targetOptions.map(option => (
             <option key={option.id} value={option.id}>{option.name}</option>
           ))}
@@ -142,12 +196,51 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
           className="field-control mt-1"
           disabled={controlsDisabled}
           value={intent}
-          onChange={event => setIntent(event.target.value)}
+          onChange={event => {
+            clearSuggestion();
+            setIntent(event.target.value);
+          }}
           maxLength={500}
           rows={3}
           required
         />
       </label>
+      {view.action_suggestions_available ? (
+        <div className="text-sm text-[#3c4043]">
+          <button
+            type="button"
+            className="underline disabled:opacity-50"
+            disabled={controlsDisabled || suggesting || !intent.trim()}
+            onClick={() => void requestSuggestion()}
+          >
+            {suggesting ? '正在分析行动…' : '建议行动类型'}
+          </button>
+          <p className="mt-1 text-xs text-[#5f6368]">
+            点击后会将当前意图发送至部署方配置的 Laya 服务。
+          </p>
+          {suggestion?.view === view && !controlsDisabled ? (
+            <div role="status" className="mt-1">
+              {suggestion.kind ? (
+                <>
+                  建议：
+                  <button
+                    type="button"
+                    className="underline"
+                    onClick={() => {
+                      setKind(suggestion.kind!);
+                      setTargetId(null);
+                      clearSuggestion();
+                    }}
+                  >
+                    {actionLabels[suggestion.kind]}
+                  </button>
+                  。点击可选用行动类型，再确认目标并提交。
+                </>
+              ) : '暂时没有可靠建议，请自行选择行动。'}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       <button
         type="submit"
         disabled={controlsDisabled || !intent.trim() || (targetRequired && !selectedTarget)}

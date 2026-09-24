@@ -285,6 +285,16 @@ A: 创建首位管理员后，可在受保护的设置页选择 DeepSeek 或 Ope
 可在启动前设置 `.env` 中的 `LLM_API_URL`、`LLM_API_KEY` 和 `LLM_MODEL`，
 然后重新运行启动器；环境配置优先于数据库设置并在网页中只读显示。
 
+**Q: 如何启用本机 Laya 的玩家行动建议？**
+
+A: 这是可选的分类提示，不替代 DeepSeek 故事生成。让 Laya 服务与
+`narrative-service` 处于同一条私有 Docker 网络，在 `.env` 中填写
+`LAYA_API_URL=http://<Laya容器名>:8000` 和 `LAYA_API_KEY`，然后重建并重启
+Narrative。地址必须从 Narrative 容器内可达；宿主机的
+`127.0.0.1:18881` 在容器内指向 Narrative 自己。只使用私有网络，
+不要公开 Narrative 或 Laya 端口。未同时配置 URL 和密钥时，界面不显示
+建议入口；Laya 失效时玩家仍可手动选行动。
+
 **Q: pgvector 扩展安装失败？**
 
 A: pgvector 是当前 schema 的必需扩展。不要修改 `init.sql` 绕过它；修复镜像或扩展

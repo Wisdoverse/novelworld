@@ -22,7 +22,7 @@ use crate::domain::entities::world_session::{
     CharacterContextEnvelope, CharacterContextSnapshot, CharacterWorldContext, WorldAction,
     WorldActionKind,
 };
-use crate::domain::ports::{AccountExportPort, ReadinessProbe};
+use crate::domain::ports::{AccountExportPort, ActionSuggestionPort, ReadinessProbe};
 
 const WORLD_CONTEXT_VERSION_HEADER: &str = "X-World-Context-Version";
 const WORLD_CONTEXT_VERSION_V2: &str = "2";
@@ -42,6 +42,7 @@ pub struct AppState {
     pub postgres_readiness: Arc<dyn ReadinessProbe>,
     pub novel_readiness: Arc<dyn ReadinessProbe>,
     pub account_export: Arc<dyn AccountExportPort>,
+    pub action_suggester: Option<Arc<dyn ActionSuggestionPort>>,
     pub internal_service_token: Arc<str>,
     pub metrics: llm_client::MetricsHandle,
 }
@@ -74,6 +75,10 @@ fn routes() -> Router<AppState> {
             get(get_open_world).post(start_open_world),
         )
         .route("/narrative/{novel_id}/world/turns", post(submit_world_turn))
+        .route(
+            "/narrative/{novel_id}/world/action-suggestion",
+            post(suggest_world_action),
+        )
         .route(
             "/internal/privacy/users/{user_id}/export",
             get(export_account),
@@ -563,7 +568,10 @@ async fn start_open_world(
         );
     };
     match state.handler.start_open_world(user_id, novel_id).await {
-        Ok(view) => (StatusCode::OK, Json(view)).into_response(),
+        Ok(mut view) => {
+            view.action_suggestions_available = state.action_suggester.is_some();
+            (StatusCode::OK, Json(view)).into_response()
+        }
         Err(error) => narrative_error_response(error),
     }
 }
@@ -581,7 +589,53 @@ async fn get_open_world(
         );
     };
     match state.handler.get_open_world(user_id, novel_id).await {
-        Ok(view) => (StatusCode::OK, Json(view)).into_response(),
+        Ok(mut view) => {
+            view.action_suggestions_available = state.action_suggester.is_some();
+            (StatusCode::OK, Json(view)).into_response()
+        }
+        Err(error) => narrative_error_response(error),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActionSuggestionRequest {
+    intent: String,
+}
+
+async fn suggest_world_action(
+    State(state): State<AppState>,
+    Path(novel_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(request): Json<ActionSuggestionRequest>,
+) -> Response {
+    let Some(user_id) = extract_user_id(&headers) else {
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "Missing or invalid user identity",
+        );
+    };
+    let Some(suggester) = state.action_suggester.as_deref() else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "action_suggestions_unavailable",
+            "Action suggestions are unavailable",
+        );
+    };
+    match state
+        .handler
+        .suggest_world_action(user_id, novel_id, &request.intent, suggester)
+        .await
+    {
+        Ok(kind) => {
+            let mut response =
+                (StatusCode::OK, Json(serde_json::json!({ "kind": kind }))).into_response();
+            response
+                .headers_mut()
+                .insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
+            response
+        }
         Err(error) => narrative_error_response(error),
     }
 }

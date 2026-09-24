@@ -1,3 +1,4 @@
+use crate::domain::entities::world_session::WorldActionKind;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::pin::Pin;
@@ -65,4 +66,14 @@ pub trait DiceRollerPort: Send + Sync {
         expected_turn_number: i64,
         request_fingerprint: &[u8; 32],
     ) -> u8;
+}
+
+/// Non-authoritative action hint. A model response never commits or validates a turn.
+#[async_trait]
+pub trait ActionSuggestionPort: Send + Sync {
+    async fn suggest(
+        &self,
+        intent: &str,
+        available: &[WorldActionKind],
+    ) -> Result<Option<WorldActionKind>>;
 }

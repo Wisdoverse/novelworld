@@ -7,6 +7,7 @@ import type {
   OpenWorldView,
   PlayerEntry,
   WorldAction,
+  WorldActionKind,
   WorldState,
   WorldTurnResult,
   PlayerRuleProfile,
@@ -222,6 +223,15 @@ export function useStartOpenWorld(novelId: string) {
       ]);
     },
   });
+}
+
+export async function suggestWorldAction(novelId: string, intent: string, signal: AbortSignal) {
+  const { data } = await apiClient.post<{ kind: WorldActionKind | null }>(
+    `/narrative/${novelId}/world/action-suggestion`,
+    { intent },
+    { signal, timeout: 8_000 },
+  );
+  return data.kind;
 }
 
 export function useSubmitWorldTurn(novelId: string) {

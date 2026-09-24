@@ -124,3 +124,4 @@ Accepted records:
 - [ADR 0003: H4 private-preview journey qualification](./adr/0003-h4-journey-qualification.md)
 - [ADR 0004: Durable diagnostic budget authority (implementation in progress)](./adr/0004-durable-diagnostic-budget.md)
 - [ADR 0005: Durable prospective chat summary windows](./adr/0005-durable-chat-summary-windows.md)
+- [ADR 0006: Optional local action hints](./adr/0006-optional-laya-action-hints.md)

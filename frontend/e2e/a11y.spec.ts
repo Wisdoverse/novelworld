@@ -64,10 +64,17 @@ test.describe('critical journey — full axe rule set', () => {
     await expectNoA11yViolations(page);
   });
 
-  test('reader page — open world dashboard and action form', async ({ page }) => {
-    await installStubs(page, { openWorld: true });
+  test('reader page — open world dashboard and action form', async ({ page }, testInfo) => {
+    await installStubs(page, { openWorld: true, actionSuggestions: true });
     await page.goto('/reader/novel-1/1');
     await expect(page.getByText(/的开放世界/).first()).toBeVisible();
+    await page.getByLabel('你的意图').fill('查看脚印');
+    await page.getByRole('button', { name: '建议行动类型' }).click();
+    await expect(page.getByRole('button', { name: '调查线索' })).toBeVisible();
+    await page.locator('form').screenshot({ path: testInfo.outputPath('laya-action-suggestion.png') });
+    await page.getByRole('button', { name: '调查线索' }).click();
+    await expect(page.getByLabel(/^目标/)).toHaveValue('');
+    await expect(page.getByRole('button', { name: '执行行动' })).toBeDisabled();
     await page.waitForLoadState('networkidle');
     await expectNoA11yViolations(page);
   });
