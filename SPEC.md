@@ -1800,6 +1800,15 @@ src/
 First-run setup renders `SetupPage` before authenticated application routing;
 it is a state gate rather than a public URL.
 
+The authenticated shared catalog MUST list every `ready` canonical novel,
+including novels already on the reader's shelf, and MUST exclude unfinished or
+failed imports. Catalog responses MUST NOT expose uploader identity, source
+storage locators, import diagnostics, or reader-specific progress and world
+state. The shelf UI MUST label already attached novels and prevent a
+second attachment. Repeating an attach request for the same reader and novel
+MUST leave existing reading progress and deviation mode unchanged. Another
+reader can attach that canonical novel without another import or parse.
+
 ### 13.3 Required Widgets
 
 - `ChatPanel` — Slide-in panel with SSE-streamed character conversation. MUST support opening

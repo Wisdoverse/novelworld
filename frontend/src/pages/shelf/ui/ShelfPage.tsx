@@ -152,7 +152,7 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, retrying }: {
   );
 }
 
-function SharedLibraryModal({ onClose }: { onClose: () => void }) {
+function SharedLibraryModal({ onClose, shelfNovels }: { onClose: () => void; shelfNovels?: Novel[] }) {
   const returnFocusRef = useRef<HTMLElement | null>(
     typeof document !== 'undefined' && document.activeElement instanceof HTMLElement
       ? document.activeElement
@@ -161,6 +161,7 @@ function SharedLibraryModal({ onClose }: { onClose: () => void }) {
   const { data: novels, isLoading, isError, refetch } = useNovelCatalog();
   const attachNovel = useAttachNovel();
   const [deviationMode, setDeviationMode] = useState('canon');
+  const shelfNovelIds = new Set(shelfNovels?.map(novel => novel.id));
 
   const attach = async (novelId: string) => {
     try {
@@ -222,6 +223,8 @@ function SharedLibraryModal({ onClose }: { onClose: () => void }) {
             </div>
           ) : novels?.length ? novels.map(novel => {
             const attaching = attachNovel.isPending && attachNovel.variables?.novelId === novel.id;
+            const onShelf = shelfNovelIds.has(novel.id);
+            const shelfUnavailable = !shelfNovels;
             return (
               <div key={novel.id} className="flex items-center gap-4 rounded-xl border border-[#e1e3e8] p-4">
                 <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-[#eef3ff] text-[#174ea6]"><BookOpen size={19} /></div>
@@ -231,18 +234,18 @@ function SharedLibraryModal({ onClose }: { onClose: () => void }) {
                 </div>
                 <button
                   type="button"
-                  aria-label={`将《${novel.title}》加入书架`}
-                  disabled={attachNovel.isPending}
+                  aria-label={onShelf ? `《${novel.title}》已在书架` : shelfUnavailable ? `书架暂不可用，无法加入《${novel.title}》` : `将《${novel.title}》加入书架`}
+                  disabled={onShelf || shelfUnavailable || attachNovel.isPending}
                   onClick={() => attach(novel.id)}
                   className="primary-action shrink-0 text-xs"
                 >
-                  {attaching ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
-                  加入书架
+                  {onShelf ? <CheckCircle size={13} /> : attaching ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
+                  {onShelf ? '已在书架' : shelfUnavailable ? '书架暂不可用' : '加入书架'}
                 </button>
               </div>
             );
           }) : (
-            <div className="py-12 text-center text-sm text-[#5f6368]">暂无可加入的小说，可以上传一本新小说。</div>
+            <div className="py-12 text-center text-sm text-[#5f6368]">暂无已解析完成的小说，可以上传一本新小说。</div>
           )}
         </div>
         <div className="flex justify-end border-t border-[#e8eaed] px-6 py-4 sm:px-8">
@@ -387,7 +390,7 @@ export function ShelfPage() {
 
       <AnimatePresence>
         {showImport && <NovelImportModal onClose={() => setShowImport(false)} />}
-        {showSharedLibrary && <SharedLibraryModal onClose={() => setShowSharedLibrary(false)} />}
+        {showSharedLibrary && <SharedLibraryModal onClose={() => setShowSharedLibrary(false)} shelfNovels={novels} />}
       </AnimatePresence>
     </div>
   );
