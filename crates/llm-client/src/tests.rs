@@ -83,6 +83,43 @@ fn test_should_not_retry_on_4xx() {
 }
 
 #[test]
+fn truncated_json_does_not_fallback_or_retry() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let mut request = [0; 8192];
+        assert!(socket.read(&mut request).unwrap() > 0);
+        socket
+            .write_all(&http_response(
+                "200 OK",
+                "application/json",
+                r#"{"choices":[{"message":{"content":"{\"characters\":["},"finish_reason":"length"}],"model":"test","usage":null}"#,
+                "",
+            ))
+            .unwrap();
+    });
+
+    let error = tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let client =
+            LlmClient::new().with_openai_compatible("test", "key", format!("http://{address}"));
+        client
+            .chat(
+                ChatRequest::new(crate::LlmOperation::CharacterExtraction, "test/model")
+                    .message("user", "probe")
+                    .max_tokens(4_096)
+                    .json(),
+            )
+            .await
+            .unwrap_err()
+    });
+    assert!(error
+        .downcast_ref::<openai::TruncatedCompletion>()
+        .is_some());
+    server.join().unwrap();
+}
+
+#[test]
 fn test_retry_delay() {
     let d = RetryPolicy::delay(500, 0, None);
     assert_eq!(d.as_secs(), 1);

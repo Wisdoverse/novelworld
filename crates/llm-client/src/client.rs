@@ -277,6 +277,13 @@ impl LlmClient {
                         let metric_status = error_status(api_error);
                         labels.attempt(metric_status, attempt_started.elapsed().as_secs_f64());
 
+                        if e.downcast_ref::<crate::providers::openai::TruncatedCompletion>()
+                            .is_some()
+                        {
+                            labels.finish("error", started);
+                            return Err(e);
+                        }
+
                         if RetryPolicy::should_retry(status, retry_attempt) {
                             labels.retry(metric_status);
                             let delay = RetryPolicy::delay(
