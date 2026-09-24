@@ -322,6 +322,7 @@ export interface OpenWorldView {
   session: WorldSession;
   world_state: WorldState;
   journal: WorldTurnJournalEntry[];
+  action_suggestions_available?: boolean;
   recoverable_turn?: {
     turn_id: string;
     action: WorldAction;

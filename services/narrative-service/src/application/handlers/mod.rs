@@ -22,7 +22,9 @@ use crate::domain::entities::world_session::{
     MAX_CHARACTER_CONTEXT_TEXT_CHARS, MAX_CHARACTER_RECENT_ACTIONS, MAX_CHARACTER_RECENT_EVENTS,
     MAX_RECENT_WORLD_NARRATIVE_CHARS, MAX_RECENT_WORLD_TURNS,
 };
-use crate::domain::ports::{AgentMemoryPort, DiceRollerPort, LlmPort, NarrativeLlmTask};
+use crate::domain::ports::{
+    ActionSuggestionPort, AgentMemoryPort, DiceRollerPort, LlmPort, NarrativeLlmTask,
+};
 use crate::domain::repositories::{
     BeginWorldTurn, ChapterInfo, ChapterReadRepository, CharacterBrief,
     CharacterContextSnapshotRepository, ChoiceCommit, GameRuleTemplateRequestError,
@@ -499,6 +501,70 @@ pub struct OpenWorldView {
     pub journal: Vec<WorldTurnJournalEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recoverable_turn: Option<RecoverableWorldTurn>,
+    #[serde(default)]
+    pub action_suggestions_available: bool,
+}
+
+fn available_suggestion_kinds(view: &OpenWorldView) -> Vec<WorldActionKind> {
+    let context = &view.session.entry_context;
+    let locations: Vec<String> = context
+        .locations
+        .iter()
+        .map(|item| item.id.clone())
+        .collect();
+    let characters: Vec<String> = context
+        .characters
+        .iter()
+        .filter(|item| !view.session.dead_character_ids.contains(&item.id))
+        .map(|item| item.id.to_string())
+        .collect();
+    let threads: Vec<String> = view
+        .world_state
+        .state
+        .get("threads")
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flat_map(|items| items.iter())
+        .filter(|(_, thread)| {
+            thread.get("status").and_then(serde_json::Value::as_str) == Some("open")
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    let mut investigation = locations.clone();
+    investigation.extend(threads.iter().cloned());
+    investigation.extend(
+        view.session
+            .canonical_events
+            .iter()
+            .filter(|event| event.status.is_pending())
+            .map(|event| event.event.id.clone()),
+    );
+    [
+        (WorldActionKind::Travel, locations),
+        (WorldActionKind::Investigate, investigation),
+        (WorldActionKind::Converse, characters.clone()),
+        (WorldActionKind::Ally, characters.clone()),
+        (WorldActionKind::Oppose, characters),
+        (WorldActionKind::AdvanceThread, threads),
+        (WorldActionKind::PursueGoal, vec![String::new()]),
+    ]
+    .into_iter()
+    .filter_map(|(kind, targets)| {
+        targets
+            .into_iter()
+            .any(|target| {
+                let action = WorldAction {
+                    kind,
+                    target_id: (!target.is_empty()).then_some(target),
+                    intent: "建议行动".into(),
+                };
+                view.world_state
+                    .validate_world_action(&action, context)
+                    .is_ok()
+            })
+            .then_some(kind)
+    })
+    .collect()
 }
 
 /// HTTP-facing completion view. The committed result remains the single
@@ -1211,6 +1277,34 @@ impl NarrativeCommandHandler {
         self.open_world_view(user_id, novel_id, state).await
     }
 
+    pub async fn suggest_world_action(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        intent: &str,
+        suggester: &dyn ActionSuggestionPort,
+    ) -> NarrativeResult<Option<WorldActionKind>> {
+        let view = self.get_open_world(user_id, novel_id).await?;
+        WorldAction {
+            kind: WorldActionKind::PursueGoal,
+            target_id: None,
+            intent: intent.into(),
+        }
+        .validate(&view.session.entry_context)
+        .map_err(|error| NarrativeError::Validation(error.to_string()))?;
+        let available = available_suggestion_kinds(&view);
+        if available.len() < 2 {
+            return Ok(None);
+        }
+        match suggester.suggest(intent, &available).await {
+            Ok(result) => Ok(result.filter(|kind| available.contains(kind))),
+            Err(_) => {
+                tracing::warn!("action suggestion provider unavailable");
+                Ok(None)
+            }
+        }
+    }
+
     pub async fn get_character_world_context(
         &self,
         user_id: Uuid,
@@ -1437,6 +1531,7 @@ impl NarrativeCommandHandler {
                 world_state,
                 journal,
                 recoverable_turn,
+                action_suggestions_available: false,
             });
         }
         unreachable!("open-world view retry loop always returns")

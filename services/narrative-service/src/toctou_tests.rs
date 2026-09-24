@@ -20,7 +20,9 @@ use crate::domain::entities::{
         WorldAction, WorldActionKind, WorldCharacterRef, WorldEntryContext, WorldTurnTransition,
     },
 };
-use crate::domain::ports::{AgentMemoryPort, DiceRollerPort, LlmPort, NarrativeLlmTask};
+use crate::domain::ports::{
+    ActionSuggestionPort, AgentMemoryPort, DiceRollerPort, LlmPort, NarrativeLlmTask,
+};
 use crate::domain::repositories::{
     BeginWorldTurn, ChapterInfo, ChapterReadRepository, CharacterBrief, CharacterContextReadModel,
     CharacterContextSnapshotRepository, ChoiceCommit, ChoiceCommitResult, MemoryProjectionStatus,
@@ -34,6 +36,36 @@ use crate::domain::services::narrative_transition::{
 };
 
 const ANCHOR: &str = "城门在暮色中缓缓关闭，守卫举起火把照亮石阶。";
+
+struct CountingSuggester(AtomicUsize);
+
+#[async_trait]
+impl ActionSuggestionPort for CountingSuggester {
+    async fn suggest(
+        &self,
+        _intent: &str,
+        _available: &[WorldActionKind],
+    ) -> Result<Option<WorldActionKind>> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(Some(WorldActionKind::Travel))
+    }
+}
+
+#[tokio::test]
+async fn action_suggestion_refuses_character_identity_before_model_work() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    fixture.self_identity.store(false, Ordering::SeqCst);
+    let suggester = CountingSuggester(AtomicUsize::new(0));
+
+    assert!(matches!(
+        fixture
+            .handler()
+            .suggest_world_action(fixture.user_id, fixture.novel_id, "前往城门", &suggester,)
+            .await,
+        Err(NarrativeError::Conflict(_))
+    ));
+    assert_eq!(suggester.0.load(Ordering::SeqCst), 0);
+}
 
 enum BranchReply {
     Response(String),

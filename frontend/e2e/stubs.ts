@@ -12,6 +12,8 @@ export interface StubOptions {
   setupNeeded?: boolean;
   /** Open-world view present on the reader page (WorldDashboard + WorldActionForm render). */
   openWorld?: boolean;
+  /** Optional action classification is available from Narrative. */
+  actionSuggestions?: boolean;
   /** Player-entry has no player yet (PlayerEntryForm renders). */
   entryRequired?: boolean;
   /** Progress adopts a canonical character identity (boundary mode). */
@@ -49,7 +51,9 @@ export async function installStubs(page: Page, opts: StubOptions = {}): Promise<
     : opts.openWorld
       ? OPEN_WORLD.world_state
       : WORLD_STATE;
-  let openWorld = opts.openWorld ? OPEN_WORLD : null;
+  let openWorld = opts.openWorld
+    ? { ...OPEN_WORLD, action_suggestions_available: opts.actionSuggestions ?? false }
+    : null;
 
   type ResponseSpec = ReturnType<typeof json> | ReturnType<typeof sse> | { status: number };
   const table: Array<[string, RegExp, (req: Request) => ResponseSpec]> = [
@@ -78,9 +82,10 @@ export async function installStubs(page: Page, opts: StubOptions = {}): Promise<
     ['GET', /^\/narrative\/[^/]+\/chapters\/[^/]+$/, () => json(200, effectiveChapter)],
     ['GET', /^\/narrative\/[^/]+\/world-state$/, () => json(200, worldState)],
     ['GET', /^\/narrative\/[^/]+\/world$/, () => (openWorld ? json(200, openWorld) : { status: 404 })],
+    ['POST', /^\/narrative\/[^/]+\/world\/action-suggestion$/, () => json(200, { kind: 'investigate' })],
     ['GET', /^\/narrative\/[^/]+\/[^/]+$/, () => json(200, NODE)],
     ['POST', /^\/narrative\/[^/]+\/world$/, () => {
-      openWorld = OPEN_WORLD;
+      openWorld = { ...OPEN_WORLD, action_suggestions_available: opts.actionSuggestions ?? false };
       worldState = OPEN_WORLD.world_state;
       return json(200, openWorld);
     }],
@@ -88,6 +93,7 @@ export async function installStubs(page: Page, opts: StubOptions = {}): Promise<
       worldState = WORLD_TURN_RESULT.world_state;
       openWorld = {
         ...OPEN_WORLD,
+        action_suggestions_available: opts.actionSuggestions ?? false,
         session: { ...OPEN_WORLD.session, turn_number: 2 },
         world_state: worldState,
         journal: [

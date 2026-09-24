@@ -1466,6 +1466,7 @@ routes are outside this public contract.
 | GET | `/api/narrative/:novelId/world` | Narrative | JWT | Read the current open-world session |
 | POST | `/api/narrative/:novelId/world` | Narrative | JWT | Start the open-world session |
 | POST | `/api/narrative/:novelId/world/turns` | Narrative | JWT | Commit an idempotent player action |
+| POST | `/api/narrative/:novelId/world/action-suggestion` | Narrative | JWT | Optional non-authoritative action-type hint for an owned, source-visible open world |
 
 ### 10.7 Progress Endpoints
 

@@ -12,7 +12,10 @@ use narrative_service::{
     domain,
     infrastructure::{
         dice::Sha256DiceRoller,
-        http::{agent_client::AgentServiceClient, novel_client::NovelServiceClient},
+        http::{
+            agent_client::AgentServiceClient, laya_client::LayaActionSuggester,
+            novel_client::NovelServiceClient,
+        },
         llm::LlmAdapter,
         persistence::{
             account_export::PgAccountExport,
@@ -133,11 +136,34 @@ async fn run_body() -> Result<()> {
         });
         let _memory_projection_recovery = handler.spawn_memory_projection_recovery();
 
+        let action_suggester: Option<Arc<dyn domain::ports::ActionSuggestionPort>> = match (
+            std::env::var("LAYA_API_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            std::env::var("LAYA_API_KEY")
+                .ok()
+                .filter(|value| !value.is_empty()),
+        ) {
+            (Some(url), Some(key)) => match LayaActionSuggester::new(&url, key) {
+                Ok(client) => Some(Arc::new(client)),
+                Err(_) => {
+                    tracing::warn!("Laya action suggestions disabled: invalid configuration");
+                    None
+                }
+            },
+            (None, None) => None,
+            _ => {
+                tracing::warn!("Laya action suggestions disabled: URL and key are both required");
+                None
+            }
+        };
+
         let state = AppState {
             handler,
             postgres_readiness: Arc::new(PgReadinessProbe::new(pool)),
             novel_readiness,
             account_export,
+            action_suggester,
             internal_service_token: internal_service_token.into(),
             metrics,
         };

@@ -1,10 +1,13 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { suggestWorldAction } from '@/entities/narrative';
 import type { OpenWorldView } from '@/shared/types';
 import { WorldActionForm } from './WorldActionForm';
 
+vi.mock('@/entities/narrative', () => ({ suggestWorldAction: vi.fn() }));
+
 const view = {
-  player: { name: '云舟', location_id: 'gate' },
+  player: { name: '云舟', novel_id: 'novel', location_id: 'gate' },
   session: {
     entry_context: {
       locations: [{ id: 'gate', name: '旧城门' }],
@@ -19,6 +22,70 @@ const view = {
 } as unknown as OpenWorldView;
 
 describe('WorldActionForm', () => {
+  beforeEach(() => vi.clearAllMocks());
+  it('offers a suggestion only after a click and applies it only when chosen', async () => {
+    const onSubmit = vi.fn();
+    vi.mocked(suggestWorldAction).mockResolvedValueOnce('investigate');
+    render(<WorldActionForm
+      view={{ ...view, action_suggestions_available: true }}
+      isPending={false}
+      onSubmit={onSubmit}
+    />);
+
+    fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '看看脚印' } });
+    expect(suggestWorldAction).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '建议行动类型' }));
+    await waitFor(() => expect(screen.getByRole('status').textContent).toContain('调查线索'));
+    expect(screen.getByLabelText('行动')).toHaveProperty('value', 'travel');
+    expect(onSubmit).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '调查线索' }));
+    expect(screen.getByLabelText('行动')).toHaveProperty('value', 'investigate');
+    expect(screen.getByLabelText('目标')).toHaveProperty('value', '');
+    expect(screen.queryByRole('status')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '执行行动' }));
+    expect(onSubmit).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText('目标'), { target: { value: 'gate' } });
+    fireEvent.click(screen.getByRole('button', { name: '执行行动' }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith({
+      kind: 'investigate',
+      target_id: 'gate',
+      intent: '看看脚印',
+    }));
+  });
+
+  it('discards a suggestion after the player changes the intent', async () => {
+    let resolve!: (kind: 'travel') => void;
+    vi.mocked(suggestWorldAction).mockImplementationOnce(() => new Promise(settle => {
+      resolve = settle;
+    }));
+    render(<WorldActionForm
+      view={{ ...view, action_suggestions_available: true }}
+      isPending={false}
+      onSubmit={vi.fn()}
+    />);
+
+    fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '前往北塔' } });
+    fireEvent.click(screen.getByRole('button', { name: '建议行动类型' }));
+    fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '调查脚印' } });
+    await act(async () => resolve('travel'));
+    expect(screen.queryByRole('status')).toBeNull();
+  });
+
+  it('discards an in-flight suggestion when the world view changes', async () => {
+    let resolve!: (kind: 'travel') => void;
+    vi.mocked(suggestWorldAction).mockImplementationOnce(() => new Promise(settle => {
+      resolve = settle;
+    }));
+    const firstView = { ...view, action_suggestions_available: true };
+    const { rerender } = render(<WorldActionForm view={firstView} isPending={false} onSubmit={vi.fn()} />);
+
+    fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '前往北塔' } });
+    fireEvent.click(screen.getByRole('button', { name: '建议行动类型' }));
+    rerender(<WorldActionForm view={{ ...firstView, world_state: { ...firstView.world_state } }} isPending={false} onSubmit={vi.fn()} />);
+    await act(async () => resolve('travel'));
+    expect(screen.queryByRole('status')).toBeNull();
+  });
+
   it('submits an action for the player against a server-provided target', async () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     render(<WorldActionForm view={view} isPending={false} onSubmit={onSubmit} />);
@@ -116,7 +183,7 @@ describe('WorldActionForm', () => {
   it('disables every editable control while an exact request is locked', () => {
     const onSubmit = vi.fn();
     const { container } = render(<WorldActionForm
-      view={view}
+      view={{ ...view, action_suggestions_available: true }}
       isPending={false}
       isLocked
       onSubmit={onSubmit}
@@ -126,6 +193,7 @@ describe('WorldActionForm', () => {
       expect(screen.getByLabelText(label).hasAttribute('disabled')).toBe(true);
     }
     expect(screen.getByRole('button', { name: '执行行动' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByRole('button', { name: '建议行动类型' }).hasAttribute('disabled')).toBe(true);
     fireEvent.submit(container.querySelector('form')!);
     expect(onSubmit).not.toHaveBeenCalled();
   });
