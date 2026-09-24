@@ -724,6 +724,136 @@ pub struct ImportChaptersUnusable;
 pub struct ImportSourceMissing;
 
 #[derive(Debug, thiserror::Error)]
+#[error("The retained source file cannot be parsed")]
+struct ImportSourceInvalid(#[source] anyhow::Error);
+
+#[derive(Debug, thiserror::Error)]
+enum ImportAnalysisFailed {
+    #[error("Chapter boundary analysis failed")]
+    ChapterBoundary(#[source] anyhow::Error),
+    #[error("Character analysis failed")]
+    Character(#[source] anyhow::Error),
+    #[error("Story model analysis failed")]
+    StoryModel(#[source] anyhow::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("AI request for story model analysis failed")]
+struct CanonProviderFailed(#[source] anyhow::Error);
+
+#[derive(Debug, thiserror::Error)]
+#[error("AI story model response could not be validated")]
+struct CanonValidationFailed(#[source] anyhow::Error);
+
+#[derive(Debug, thiserror::Error)]
+#[error("Story model checkpoint could not be saved")]
+struct CanonCheckpointFailed(#[source] anyhow::Error);
+
+fn import_error<T: std::error::Error + 'static>(error: &anyhow::Error) -> Option<&T> {
+    error.chain().find_map(|cause| cause.downcast_ref::<T>())
+}
+
+fn import_failure_guidance(error: &anyhow::Error) -> (&'static str, &'static str) {
+    if import_error::<ImportSourceMissing>(error).is_some() {
+        (
+            "source_missing",
+            "The retained source file is missing; re-upload the source",
+        )
+    } else if import_error::<SourceFileStorageUnavailable>(error).is_some() {
+        (
+            "source_storage_unavailable",
+            "Source storage is unavailable; retry the import",
+        )
+    } else if import_error::<ImportChaptersUnusable>(error).is_some() {
+        (
+            "source_unavailable",
+            "No parsed chapters are available; re-upload the source",
+        )
+    } else if import_error::<ImportSourceInvalid>(error).is_some() {
+        (
+            "source_invalid",
+            "The retained source file cannot be parsed; re-upload the source",
+        )
+    } else if import_error::<ImportBudgetExceeded>(error).is_some() {
+        (
+            "processing_budget_exceeded",
+            "Import exceeded the processing budget; re-upload a shorter source",
+        )
+    } else if import_error::<CanonProviderFailed>(error).is_some() {
+        (
+            "canon_provider_failed",
+            "AI request for story model analysis failed; retry the import",
+        )
+    } else if import_error::<CanonValidationFailed>(error).is_some() {
+        (
+            "canon_validation_failed",
+            "AI story model response could not be validated; retry the import",
+        )
+    } else if import_error::<CanonCheckpointFailed>(error).is_some() {
+        (
+            "canon_checkpoint_failed",
+            "Story model checkpoint could not be saved; retry the import",
+        )
+    } else if let Some(step) = import_error::<ImportAnalysisFailed>(error) {
+        match step {
+            ImportAnalysisFailed::ChapterBoundary(_) => (
+                "chapter_analysis_failed",
+                "Chapter boundary analysis did not finish; retry the import",
+            ),
+            ImportAnalysisFailed::Character(_) => (
+                "character_analysis_failed",
+                "Character analysis did not finish; retry the import",
+            ),
+            ImportAnalysisFailed::StoryModel(_) => (
+                "canon_analysis_failed",
+                "Story model analysis did not finish; retry the import",
+            ),
+        }
+    } else {
+        (
+            "processing_failed",
+            "Import processing failed; retry the import",
+        )
+    }
+}
+
+#[cfg(test)]
+mod import_failure_guidance_tests {
+    use super::*;
+
+    #[test]
+    fn reports_only_typed_failure_steps_and_never_publishes_internal_details() {
+        let unknown = anyhow::anyhow!("private provider or database detail");
+        let (code, message) = import_failure_guidance(&unknown);
+        assert_eq!(code, "processing_failed");
+        assert!(!message.contains("private"));
+
+        let source: anyhow::Error = ImportSourceInvalid(anyhow::anyhow!("private source")).into();
+        assert_eq!(import_failure_guidance(&source).0, "source_invalid");
+
+        let canon: anyhow::Error = ImportAnalysisFailed::StoryModel(
+            CanonValidationFailed(anyhow::anyhow!("private model output")).into(),
+        )
+        .into();
+        let (code, message) = import_failure_guidance(&canon);
+        assert_eq!(code, "canon_validation_failed");
+        assert_eq!(
+            crate::domain::entities::novel::public_parse_error(Some(message)),
+            Some(message)
+        );
+
+        let budget: anyhow::Error = ImportAnalysisFailed::StoryModel(
+            CanonProviderFailed(ImportBudgetExceeded.into()).into(),
+        )
+        .into();
+        assert_eq!(
+            import_failure_guidance(&budget).0,
+            "processing_budget_exceeded"
+        );
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum ShelfMutationError {
     #[error("Novel not found")]
     NotFound,
@@ -1452,7 +1582,7 @@ impl NovelCommandHandler {
                 attempt = claim.attempt,
                 "novel import stopped after losing its lease"
             ),
-            Some(Err(error)) if error.downcast_ref::<ImportLeaseLost>().is_some() => {
+            Some(Err(error)) if import_error::<ImportLeaseLost>(&error).is_some() => {
                 tracing::warn!(
                     novel_id = %claim.novel_id,
                     attempt = claim.attempt,
@@ -1467,36 +1597,7 @@ impl NovelCommandHandler {
                     attempt = claim.attempt,
                     "novel import processing failed"
                 );
-                let (code, public_error) = if error.downcast_ref::<ImportSourceMissing>().is_some()
-                {
-                    (
-                        "source_missing",
-                        "The retained source file is missing; re-upload the source",
-                    )
-                } else if error
-                    .downcast_ref::<SourceFileStorageUnavailable>()
-                    .is_some()
-                {
-                    (
-                        "source_storage_unavailable",
-                        "Source storage is unavailable; retry the import",
-                    )
-                } else if error.downcast_ref::<ImportChaptersUnusable>().is_some() {
-                    (
-                        "source_unavailable",
-                        "No parsed chapters are available; re-upload the source",
-                    )
-                } else if claim.stage == ImportStage::Source {
-                    (
-                        "source_invalid",
-                        "The retained source file cannot be parsed; re-upload the source",
-                    )
-                } else {
-                    (
-                        "processing_failed",
-                        "Import processing failed; retry the import",
-                    )
-                };
+                let (code, public_error) = import_failure_guidance(&error);
                 if let Err(failure_error) = self
                     .novel_repo
                     .fail_import(claim.novel_id, claim.attempt, code, public_error)
@@ -1540,17 +1641,18 @@ impl NovelCommandHandler {
         };
         let chapters = if matches!(claim.stage, ImportStage::Source | ImportStage::Chapters) {
             self.repair_chapter_boundaries(chapters, claim, llm_budget.clone())
-                .await?
+                .await
+                .map_err(ImportAnalysisFailed::ChapterBoundary)?
         } else {
             chapters
         };
         ensure_import_budget(&chapters)?;
 
         let characters = match claim.stage {
-            ImportStage::Chapters | ImportStage::Source => {
-                self.enrich_novel_async(&mut novel, &chapters, claim, llm_budget.clone())
-                    .await?
-            }
+            ImportStage::Chapters | ImportStage::Source => self
+                .enrich_novel_async(&mut novel, &chapters, claim, llm_budget.clone())
+                .await
+                .map_err(ImportAnalysisFailed::Character)?,
             ImportStage::Enriched => {
                 let characters = self.character_repo.find_by_novel(claim.novel_id).await?;
                 if characters.is_empty() {
@@ -1561,7 +1663,8 @@ impl NovelCommandHandler {
             ImportStage::Completed => return Err(ImportLeaseLost.into()),
         };
         self.complete_canon_async(&novel, &chapters, &characters, claim, llm_budget)
-            .await?;
+            .await
+            .map_err(ImportAnalysisFailed::StoryModel)?;
         Ok(characters)
     }
 
@@ -1597,8 +1700,11 @@ impl NovelCommandHandler {
             } else {
                 "text/plain"
             };
-            let text = extractor.extract_text(None, Some(mime), &bytes)?;
-            let chapters = NovelParserService::parse_chapters(novel_id, &text)?;
+            let text = extractor
+                .extract_text(None, Some(mime), &bytes)
+                .map_err(|error| ImportSourceInvalid(error.into()))?;
+            let chapters =
+                NovelParserService::parse_chapters(novel_id, &text).map_err(ImportSourceInvalid)?;
             ensure_import_budget(&chapters)?;
             Ok::<_, anyhow::Error>(chapters)
         })
@@ -1985,7 +2091,8 @@ impl NovelCommandHandler {
                                     NovelLlmTask::CanonExtraction,
                                     &prompt,
                                 )
-                                .await?;
+                                .await
+                                .map_err(CanonProviderFailed)?;
                             match canon_story_extractor::parse_chunk(&raw, &chunk).and_then(
                                 |mut extraction| {
                                     canon_story_extractor::canonicalize_character_references(
@@ -2012,14 +2119,15 @@ impl NovelCommandHandler {
                             }
                         }
                         let extraction = extraction.ok_or_else(|| {
-                            anyhow::anyhow!(
+                            CanonValidationFailed(anyhow::anyhow!(
                                 "canonical extraction failed validation after 3 attempts at chapter {} chunk {}: {:?}",
                                 chunk.chapter_number,
                                 chunk.chunk_index,
                                 last_error,
-                            )
+                            ))
                         })?;
-                        let extraction_json = serde_json::to_string(&extraction)?;
+                        let extraction_json = serde_json::to_string(&extraction)
+                            .map_err(|error| CanonCheckpointFailed(error.into()))?;
                         if !canon_repo
                             .save_import_checkpoint(
                                 CanonExtractionCheckpoint {
@@ -2035,7 +2143,8 @@ impl NovelCommandHandler {
                                 },
                                 import_attempt,
                             )
-                            .await?
+                            .await
+                            .map_err(CanonCheckpointFailed)?
                         {
                             return Err(ImportLeaseLost.into());
                         }
@@ -2102,7 +2211,8 @@ impl NovelCommandHandler {
                                 NovelLlmTask::CanonExtraction,
                                 &prompt,
                             )
-                            .await?;
+                            .await
+                            .map_err(CanonProviderFailed)?;
                         match canon_story_extractor::parse_event_selection(&raw, &extracted) {
                             Ok(parsed) => {
                                 selection = Some(parsed);
@@ -2115,14 +2225,15 @@ impl NovelCommandHandler {
                                     "retrying canonical event grouping after invalid schema"
                                 );
                             }
-                            Err(error) => return Err(error.into()),
+                            Err(error) => return Err(CanonValidationFailed(error.into()).into()),
                         }
                     }
                 }
                 let selection = selection
                     .ok_or_else(|| anyhow::anyhow!("canonical event selection is missing"))?;
                 if !checkpointed {
-                    let selection_json = serde_json::to_string(&selection)?;
+                    let selection_json = serde_json::to_string(&selection)
+                        .map_err(|error| CanonCheckpointFailed(error.into()))?;
                     if !self
                         .canon_repo
                         .save_import_checkpoint(
@@ -2139,7 +2250,8 @@ impl NovelCommandHandler {
                             },
                             claim.attempt,
                         )
-                        .await?
+                        .await
+                        .map_err(CanonCheckpointFailed)?
                     {
                         return Err(ImportLeaseLost.into());
                     }

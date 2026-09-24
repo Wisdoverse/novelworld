@@ -2,6 +2,7 @@ use futures::TryStreamExt;
 use sqlx::{prelude::FromRow, PgPool};
 use uuid::Uuid;
 
+use crate::domain::entities::novel::public_parse_error;
 use crate::domain::ports::{AccountExportPort, AccountExportRecord, AccountExportStream};
 
 #[derive(FromRow)]
@@ -28,7 +29,12 @@ impl AccountExportPort for PgAccountExport {
                 .bind(user_id)
                 .fetch(&pool);
             while let Some(row) = rows.try_next().await? {
-                yield AccountExportRecord { kind: row.kind, data: row.data };
+                let mut data = row.data;
+                if row.kind == "novel" {
+                    let safe_error = serde_json::to_value(public_parse_error(data["parse_error"].as_str()))?;
+                    data["parse_error"] = safe_error;
+                }
+                yield AccountExportRecord { kind: row.kind, data };
             }
         })
     }

@@ -26,6 +26,7 @@ pub struct Novel {
     pub file_key: Option<String>,
     pub total_chapters: i32,
     pub status: NovelStatus,
+    #[serde(serialize_with = "serialize_public_parse_error")]
     pub parse_error: Option<String>,
     pub deviation_mode: DeviationMode,
     pub created_at: DateTime<Utc>,
@@ -33,6 +34,35 @@ pub struct Novel {
 
     #[serde(skip)]
     pub domain_events: Vec<NovelEvent>,
+}
+
+/// Historic rows may predate static import errors. Never serialize their raw
+/// provider or internal text into an authenticated reader response.
+pub fn public_parse_error(error: Option<&str>) -> Option<&str> {
+    error.map(|error| match error {
+        "The retained source file is missing; re-upload the source"
+        | "Source storage is unavailable; retry the import"
+        | "No parsed chapters are available; re-upload the source"
+        | "The retained source file cannot be parsed; re-upload the source"
+        | "Import provider budget exhausted; re-upload the source"
+        | "Import exceeded the processing budget; re-upload a shorter source"
+        | "Chapter boundary analysis did not finish; retry the import"
+        | "Character analysis did not finish; retry the import"
+        | "Story model analysis did not finish; retry the import"
+        | "AI request for story model analysis failed; retry the import"
+        | "AI story model response could not be validated; retry the import"
+        | "Story model checkpoint could not be saved; retry the import"
+        | "Previous import failed; retry or re-upload the source"
+        | "Import processing failed; retry the import" => error,
+        _ => "Import processing failed; retry the import",
+    })
+}
+
+fn serialize_public_parse_error<S: serde::Serializer>(
+    error: &Option<String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    public_parse_error(error.as_deref()).serialize(serializer)
 }
 
 impl Novel {
@@ -128,11 +158,16 @@ mod tests {
     fn public_serialization_omits_internal_ownership_and_storage_fields() {
         let mut novel = Novel::create(Uuid::new_v4(), "Private source".into(), None);
         novel.retain_source_file("source-files/private-user/private-novel".into());
+        novel.parse_error = Some("private provider response: /internal/path".into());
 
         let value = serde_json::to_value(novel).unwrap();
 
         assert!(value.get("user_id").is_none());
         assert!(value.get("file_key").is_none());
         assert_eq!(value["title"], "Private source");
+        assert_eq!(
+            value["parse_error"],
+            "Import processing failed; retry the import"
+        );
     }
 }
