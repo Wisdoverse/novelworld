@@ -13,6 +13,17 @@ use crate::types::*;
 #[derive(Debug)]
 pub(crate) struct InvalidCompletion(String);
 
+#[derive(Debug)]
+pub(crate) struct TruncatedCompletion;
+
+impl std::fmt::Display for TruncatedCompletion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LLM response was truncated")
+    }
+}
+
+impl std::error::Error for TruncatedCompletion {}
+
 impl std::fmt::Display for InvalidCompletion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
@@ -288,7 +299,7 @@ fn response_content(response: &OpenAIResponse) -> Result<String> {
         .first()
         .ok_or_else(|| anyhow!("LLM response has no choices"))?;
     match choice.finish_reason.as_deref() {
-        Some("length") => return Err(anyhow!("LLM response was truncated")),
+        Some("length") => return Err(TruncatedCompletion.into()),
         Some("content_filter") => {
             return Err(anyhow!("LLM response was blocked by content filtering"))
         }
@@ -473,14 +484,19 @@ impl OpenAIProvider {
             .map_err(invalid_completion)?;
 
         let content = response_content(&resp);
-        let complete_empty = resp.choices.first().is_some_and(|choice| {
-            choice.finish_reason.as_deref() == Some("stop")
+        let empty_json = resp.choices.first().is_some_and(|choice| {
+            matches!(choice.finish_reason.as_deref(), Some("stop") | None)
                 && choice
                     .message
                     .content
                     .as_ref()
                     .is_none_or(|content| content.trim().is_empty())
         });
+        let complete_empty = empty_json
+            && resp
+                .choices
+                .first()
+                .is_some_and(|choice| choice.finish_reason.as_deref() == Some("stop"));
         let usage = resp
             .usage
             .map(OpenAIUsage::into_usage)
@@ -488,7 +504,7 @@ impl OpenAIProvider {
             .map_err(invalid_completion)?;
         let content = match content {
             Ok(content) => content,
-            Err(_) if request.json_mode => {
+            Err(_) if request.json_mode && empty_json => {
                 // DeepSeek documents that JSON mode can occasionally return an
                 // empty content field. The shared client owns the single
                 // response_format-free fallback so it is counted as an attempt.
@@ -633,6 +649,9 @@ mod response_tests {
             response_content(&response).unwrap_err().to_string(),
             "LLM response was truncated"
         );
+        assert!(response_content(&response)
+            .unwrap_err()
+            .is::<TruncatedCompletion>());
     }
 
     #[test]
