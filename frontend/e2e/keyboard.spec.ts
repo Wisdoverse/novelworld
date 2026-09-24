@@ -50,7 +50,7 @@ test.describe('critical journey — keyboard operability', () => {
 
     const dialog = page.getByRole('dialog', { name: '共享书库' });
     await expect(dialog).toBeVisible();
-    await expect(dialog.getByRole('button', { name: '将《星海拾遗》加入书架' })).toBeVisible();
+    await expect(dialog.getByRole('button', { name: '《星海拾遗》已在书架' })).toBeDisabled();
     await expectFocusWithin(dialog);
     for (let index = 0; index < 8; index += 1) {
       await page.keyboard.press('Tab');

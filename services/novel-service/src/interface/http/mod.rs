@@ -1177,14 +1177,13 @@ async fn list_novels(State(state): State<AppState>, headers: HeaderMap) -> impl 
 }
 
 async fn list_catalog(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    let user_id = match extract_user_id(&headers) {
-        Some(user_id) => user_id,
-        None => return StatusCode::UNAUTHORIZED.into_response(),
-    };
-    match state.novel_repo.find_available_to_user(user_id).await {
+    if extract_user_id(&headers).is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match state.novel_repo.find_catalog().await {
         Ok(novels) => (StatusCode::OK, Json(novels)).into_response(),
         Err(error) => {
-            tracing::error!(error = ?error, %user_id, "shared novel catalog lookup failed");
+            tracing::error!(error = ?error, "shared novel catalog lookup failed");
             api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Shared library lookup failed",

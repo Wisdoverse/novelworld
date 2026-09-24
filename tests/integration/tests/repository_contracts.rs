@@ -509,7 +509,9 @@ async fn shared_novel_has_private_shelves_progress_and_worlds() {
     let repo = NovelPgRepository::new(pool.clone());
     repo.create_import(&novel, &[chapter]).await.unwrap();
     sqlx::query(
-        "UPDATE novels SET status = 'ready'::novel_status, total_chapters = 1 WHERE id = $1",
+        "UPDATE novels SET status = 'ready'::novel_status, total_chapters = 1, \
+         parse_error = 'synthetic private failure detail', \
+         original_file_key = 'synthetic/private/source' WHERE id = $1",
     )
     .bind(novel.id)
     .execute(&pool)
@@ -521,25 +523,54 @@ async fn shared_novel_has_private_shelves_progress_and_worlds() {
         .await
         .unwrap()
         .is_some());
-    assert!(repo
-        .find_available_to_user(reader)
+    let catalog_novel = repo
+        .find_catalog()
         .await
         .unwrap()
-        .iter()
-        .any(|candidate| candidate.id == novel.id));
+        .into_iter()
+        .find(|candidate| candidate.id == novel.id)
+        .unwrap();
+    assert!(catalog_novel.parse_error.is_none());
+    assert!(catalog_novel.file_key.is_none());
+    assert_eq!(catalog_novel.deviation_mode, DeviationMode::Canon);
+    sqlx::query("UPDATE novels SET parse_error = NULL, original_file_key = NULL WHERE id = $1")
+        .bind(novel.id)
+        .execute(&pool)
+        .await
+        .unwrap();
     assert!(repo
         .attach_to_user(reader, novel.id, DeviationMode::Remix)
         .await
         .unwrap());
-    assert!(!repo
-        .find_available_to_user(reader)
+    assert!(repo
+        .find_catalog()
         .await
         .unwrap()
         .iter()
         .any(|candidate| candidate.id == novel.id));
+    assert!(repo
+        .attach_to_user(reader, novel.id, DeviationMode::Canon)
+        .await
+        .unwrap());
 
     let reader_novel = repo.find_for_user(reader, novel.id).await.unwrap().unwrap();
     assert_eq!(reader_novel.deviation_mode, DeviationMode::Remix);
+    sqlx::query("UPDATE novels SET status = 'error'::novel_status WHERE id = $1")
+        .bind(novel.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(!repo
+        .find_catalog()
+        .await
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate.id == novel.id));
+    sqlx::query("UPDATE novels SET status = 'ready'::novel_status WHERE id = $1")
+        .bind(novel.id)
+        .execute(&pool)
+        .await
+        .unwrap();
     let modes: Vec<(Uuid, String)> = sqlx::query_as(
         "SELECT user_id, deviation_mode::text FROM reading_progress \
          WHERE novel_id = $1 ORDER BY user_id",
@@ -550,6 +581,24 @@ async fn shared_novel_has_private_shelves_progress_and_worlds() {
     .unwrap();
     assert!(modes.contains(&(uploader, "creative".into())));
     assert!(modes.contains(&(reader, "remix".into())));
+    sqlx::query("DELETE FROM reading_progress WHERE user_id = $1 AND novel_id = $2")
+        .bind(reader)
+        .bind(novel.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(repo
+        .attach_to_user(reader, novel.id, DeviationMode::Remix)
+        .await
+        .unwrap());
+    assert_eq!(
+        repo.find_for_user(reader, novel.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .deviation_mode,
+        DeviationMode::Remix
+    );
 
     for (user_id, marker) in [(uploader, "uploader-world"), (reader, "reader-world")] {
         sqlx::query(
