@@ -2,6 +2,7 @@ export {
   isNarrativeChoiceConflict,
   isWorldTurnOutcomeUnknown,
   narrativeKeys,
+  suggestWorldAction,
   useCreatePlayerEntity,
   useEffectiveChapter,
   useGenerateGameRules,
