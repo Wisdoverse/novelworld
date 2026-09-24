@@ -14,7 +14,7 @@ use crate::types::*;
 pub(crate) struct InvalidCompletion(String);
 
 #[derive(Debug)]
-pub(crate) struct TruncatedCompletion;
+pub struct TruncatedCompletion;
 
 impl std::fmt::Display for TruncatedCompletion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

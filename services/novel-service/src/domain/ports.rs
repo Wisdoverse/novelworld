@@ -22,6 +22,10 @@ pub trait LlmPort: Send + Sync {
     async fn chat_json(&self, user_id: Uuid, task: NovelLlmTask, prompt: &str) -> Result<String>;
 }
 
+#[derive(Debug, Error)]
+#[error("Model response reached its output limit")]
+pub struct LlmOutputTruncated(#[source] pub anyhow::Error);
+
 #[async_trait]
 pub trait TextTranslator: Send + Sync {
     async fn to_simplified_chinese(&self, user_id: Uuid, source: &str) -> Result<String>;

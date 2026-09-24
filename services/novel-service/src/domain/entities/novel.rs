@@ -46,6 +46,7 @@ pub fn public_parse_error(error: Option<&str>) -> Option<&str> {
         | "The retained source file cannot be parsed; re-upload the source"
         | "Import provider budget exhausted; re-upload the source"
         | "Import exceeded the processing budget; re-upload a shorter source"
+        | "AI response reached its output limit; import a shorter source"
         | "Chapter boundary analysis did not finish; retry the import"
         | "Character analysis did not finish; retry the import"
         | "Story model analysis did not finish; retry the import"
