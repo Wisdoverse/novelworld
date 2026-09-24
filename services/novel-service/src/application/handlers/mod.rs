@@ -24,8 +24,8 @@ use crate::domain::entities::{
     novel::Novel,
 };
 use crate::domain::ports::{
-    DocumentTextExtractor, ImagePort, LlmPort, NovelLlmTask, PrivacyCleanupPort, SourceFileStorage,
-    TextTranslator,
+    DocumentTextExtractor, ImagePort, LlmOutputTruncated, LlmPort, NovelLlmTask,
+    PrivacyCleanupPort, SourceFileStorage, TextTranslator,
 };
 use crate::domain::repositories::{
     BeginChapterTranslation, BeginGameRuleGeneration, CanonExtractionCheckpoint,
@@ -779,6 +779,11 @@ fn import_failure_guidance(error: &anyhow::Error) -> (&'static str, &'static str
             "processing_budget_exceeded",
             "Import exceeded the processing budget; re-upload a shorter source",
         )
+    } else if import_error::<LlmOutputTruncated>(error).is_some() {
+        (
+            "model_output_truncated",
+            "AI response reached its output limit; import a shorter source",
+        )
     } else if import_error::<CanonProviderFailed>(error).is_some() {
         (
             "canon_provider_failed",
@@ -849,6 +854,17 @@ mod import_failure_guidance_tests {
         assert_eq!(
             import_failure_guidance(&budget).0,
             "processing_budget_exceeded"
+        );
+
+        let truncated: anyhow::Error = ImportAnalysisFailed::Character(
+            LlmOutputTruncated(anyhow::anyhow!("private model response")).into(),
+        )
+        .into();
+        let (code, message) = import_failure_guidance(&truncated);
+        assert_eq!(code, "model_output_truncated");
+        assert_eq!(
+            crate::domain::entities::novel::public_parse_error(Some(message)),
+            Some(message)
         );
     }
 }
