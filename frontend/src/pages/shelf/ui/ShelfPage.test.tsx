@@ -1,5 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { AxiosError, type AxiosResponse } from 'axios';
+import { toast } from 'sonner';
 import { ShelfPage } from './ShelfPage';
 
 const mocks = vi.hoisted(() => ({
@@ -11,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   catalogCachedOnError: false,
   refetchNovels: vi.fn(),
   refetchCatalog: vi.fn(),
+  retryNovel: vi.fn(),
   navigate: vi.fn(),
 }));
 
@@ -32,7 +35,7 @@ vi.mock('@/entities/novel', () => ({
     refetch: mocks.refetchCatalog,
   }),
   useDeleteNovel: () => ({ mutate: vi.fn() }),
-  useRetryNovel: () => ({ mutate: vi.fn(), isPending: false, variables: undefined }),
+  useRetryNovel: () => ({ mutate: mocks.retryNovel, isPending: false, variables: undefined }),
   useAttachNovel: () => ({ mutateAsync: vi.fn(), isPending: false, variables: undefined }),
 }));
 
@@ -44,10 +47,6 @@ vi.mock('@/features/auth', () => ({
 
 vi.mock('@/features/novel-import', () => ({
   NovelImportModal: () => <div role="dialog" aria-label="导入小说" />,
-}));
-
-vi.mock('@/shared/api/client', () => ({
-  getApiErrorMessage: (_error: unknown, fallback: string) => fallback,
 }));
 
 vi.mock('sonner', () => ({
@@ -64,7 +63,9 @@ describe('ShelfPage contracts', () => {
     mocks.catalogCachedOnError = false;
     mocks.refetchNovels.mockReset();
     mocks.refetchCatalog.mockReset();
+    mocks.retryNovel.mockReset();
     mocks.navigate.mockReset();
+    vi.mocked(toast.error).mockReset();
   });
 
   it('distinguishes a shelf query failure from an empty shelf and offers retry', () => {
@@ -140,5 +141,29 @@ describe('ShelfPage contracts', () => {
     const remove = screen.getByRole('button', { name: '将 故事 移出书架' });
     expect(remove.hasAttribute('disabled')).toBe(false);
     expect(remove.className).not.toContain('opacity-0');
+  });
+
+  it('uses safe guidance for known and unknown import failures and offers the matching action', () => {
+    mocks.novels = [
+      { id: 'missing', title: '文件丢失', status: 'error', parse_error: 'The retained source file is missing; re-upload the source', total_chapters: 0, updated_at: '2026-01-01T00:00:00Z' },
+      { id: 'unknown', title: '未知错误', status: 'error', parse_error: 'token=private-secret', total_chapters: 0, updated_at: '2026-01-01T00:00:00Z' },
+    ];
+    render(<ShelfPage />);
+
+    expect(screen.getByText('解析失败：原始文件已不可用，请重新导入小说。')).toBeTruthy();
+    expect(screen.getByText('解析失败：具体原因未记录，可以尝试重试解析；若重试次数已用尽，请重新导入原始文件。')).toBeTruthy();
+    expect(screen.queryByText(/private-secret/)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '重新导入文件' }));
+    expect(screen.getByRole('dialog', { name: '导入小说' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '重试解析' }));
+    expect(mocks.retryNovel).toHaveBeenCalledWith('unknown', expect.objectContaining({ onSuccess: expect.any(Function), onError: expect.any(Function) }));
+    const onError = mocks.retryNovel.mock.calls[0][1].onError as (error: AxiosError) => void;
+    const retryResponse = (message: string) => new AxiosError('Retry failed', 'ERR_BAD_RESPONSE', undefined, undefined, {
+      status: 409, data: { error: message },
+    } as AxiosResponse);
+    onError(retryResponse('Import provider budget exhausted; re-upload the source'));
+    expect(toast.error).toHaveBeenLastCalledWith('重试次数已用尽，请重新导入原始文件。');
+    onError(retryResponse('private provider response'));
+    expect(toast.error).toHaveBeenLastCalledWith('重试失败，请稍后再试。');
   });
 });

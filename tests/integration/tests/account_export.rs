@@ -61,6 +61,22 @@ async fn production_account_exports_are_complete_scoped_deterministic_and_secret
     .execute(&pool)
     .await
     .unwrap();
+    let failed_novel_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO novels (id, user_id, title, status, parse_error) \
+         VALUES ($1, $2, 'Failed import', 'error', 'private-provider-token-marker')",
+    )
+    .bind(failed_novel_id)
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO user_novels (user_id, novel_id) VALUES ($1, $2)")
+        .bind(user_id)
+        .bind(failed_novel_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("INSERT INTO user_novels (user_id, novel_id) VALUES ($1, $2), ($3, $4)")
         .bind(user_id)
         .bind(novel_id)
@@ -372,6 +388,19 @@ async fn production_account_exports_are_complete_scoped_deterministic_and_secret
         second_novel_records.push(json!({"kind": record.kind, "data": record.data}));
     }
     assert_eq!(novel_records, second_novel_records);
+    let failed_record = novel_records
+        .iter()
+        .find(|record| {
+            record["kind"] == "novel" && record["data"]["id"] == failed_novel_id.to_string()
+        })
+        .unwrap();
+    assert_eq!(
+        failed_record["data"]["parse_error"],
+        "Import processing failed; retry the import"
+    );
+    assert!(!serde_json::to_string(&novel_records)
+        .unwrap()
+        .contains("private-provider-token-marker"));
     assert_eq!(
         novel_records
             .iter()
