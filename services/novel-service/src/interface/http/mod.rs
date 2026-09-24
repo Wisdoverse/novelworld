@@ -1498,7 +1498,7 @@ async fn get_parse_status(
                 "novel_id": novel.id,
                 "status": novel.status.to_str(),
                 "total_chapters": novel.total_chapters,
-                "error": novel.parse_error,
+                "error": crate::domain::entities::novel::public_parse_error(novel.parse_error.as_deref()),
             })),
         )
             .into_response(),

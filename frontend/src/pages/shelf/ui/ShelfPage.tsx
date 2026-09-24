@@ -16,13 +16,57 @@ import type { Novel } from '@/shared/types';
 import { getApiErrorMessage } from '@/shared/api/client';
 import { toast } from 'sonner';
 
-function NovelCard({ novel, onOpen, onDelete, onRetry, retrying }: {
+const importFailureGuidance: Record<string, { message: string; action: 'retry' | 'import' }> = {
+  'The retained source file is missing; re-upload the source': { message: '原始文件已不可用，请重新导入小说。', action: 'import' },
+  'No parsed chapters are available; re-upload the source': { message: '没有可用的章节内容，请重新导入原始文件。', action: 'import' },
+  'The retained source file cannot be parsed; re-upload the source': { message: '原始文件无法解析，请检查文件后重新导入。', action: 'import' },
+  'Import provider budget exhausted; re-upload the source': { message: '重试次数已用尽，请重新导入原始文件。', action: 'import' },
+  'Import exceeded the processing budget; re-upload a shorter source': { message: '本次解析已达到处理上限，请重新导入较短的文件。', action: 'import' },
+  'Source storage is unavailable; retry the import': { message: '文件存储暂时不可用，请稍后重试解析。', action: 'retry' },
+  'Import processing failed; retry the import': { message: '具体原因未记录，可以重试解析。', action: 'retry' },
+  'Previous import failed; retry or re-upload the source': { message: '具体原因未记录，可以重试解析；若仍失败，请重新导入原始文件。', action: 'retry' },
+  'Chapter boundary analysis did not finish; retry the import': { message: '章节边界分析未完成，可以重试解析。', action: 'retry' },
+  'Character analysis did not finish; retry the import': { message: '角色分析未完成，可以重试解析。', action: 'retry' },
+  'Story model analysis did not finish; retry the import': { message: '故事模型分析未完成，可以重试解析。', action: 'retry' },
+  'AI request for story model analysis failed; retry the import': { message: '故事模型分析请求失败，可以重试解析。', action: 'retry' },
+  'AI story model response could not be validated; retry the import': { message: '故事模型分析结果无法验证，可以重试解析。', action: 'retry' },
+  'Story model checkpoint could not be saved; retry the import': { message: '故事模型分析进度未能保存，可以重试解析。', action: 'retry' },
+};
+
+function getFailureGuidance(parseError?: string) {
+  return parseError && Object.prototype.hasOwnProperty.call(importFailureGuidance, parseError)
+    ? importFailureGuidance[parseError]
+    : undefined;
+}
+
+function getRetryErrorMessage(error: unknown) {
+  const message = getApiErrorMessage(error, '');
+  const guidance = getFailureGuidance(message);
+  if (guidance) return guidance.message;
+  switch (message) {
+    case 'Novel import capacity is busy; retry the request':
+      return '解析任务繁忙，请稍后重试。';
+    case 'Novel exceeds the supported processing budget':
+      return '内容超出处理上限，请导入较短的文件。';
+    case 'Only failed imports can be retried':
+      return '这本小说当前不需要重试解析。';
+    case 'Novel cannot be retried':
+    case 'Import cannot be retried':
+      return '无法继续重试，请刷新书架；若仍失败，请重新导入原始文件。';
+    default:
+      return '重试失败，请稍后再试。';
+  }
+}
+
+function NovelCard({ novel, onOpen, onDelete, onRetry, onImport, retrying }: {
   novel: Novel;
   onOpen: () => void;
   onDelete: () => void;
   onRetry: () => void;
+  onImport: () => void;
   retrying: boolean;
 }) {
+  const failureGuidance = getFailureGuidance(novel.parse_error);
   const statusConfig = {
     pending: { icon: Loader2, color: '#5f6368', label: '等待解析', spin: true },
     parsing: { icon: Loader2, color: '#0b57d0', label: '解析中…', spin: true },
@@ -116,23 +160,22 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, retrying }: {
             {novel.genre}
           </div>
         )}
-        {novel.status === 'error' && novel.parse_error && (
+        {novel.status === 'error' && (
           <>
             <p
               className="mt-3 text-xs leading-relaxed"
               role="alert"
               style={{ color: '#b3261e' }}
             >
-              解析失败：{novel.parse_error.includes('EOF while parsing') || novel.parse_error.includes('empty response')
-                ? 'AI 服务返回了空内容，可以直接重试'
-                : novel.parse_error}
+              解析失败：{failureGuidance?.message ?? '具体原因未记录，可以尝试重试解析；若重试次数已用尽，请重新导入原始文件。'}
             </p>
             <button
               type="button"
               disabled={retrying}
               onClick={(event) => {
                 event.stopPropagation();
-                onRetry();
+                if (failureGuidance?.action === 'import') onImport();
+                else onRetry();
               }}
               className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold"
               style={{
@@ -142,8 +185,8 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, retrying }: {
                 opacity: retrying ? 0.6 : 1,
               }}
             >
-              {retrying ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />}
-              {retrying ? '正在重试...' : '重试解析'}
+              {retrying ? <Loader2 size={12} className="animate-spin" /> : failureGuidance?.action === 'import' ? <Plus size={12} /> : <RotateCcw size={12} />}
+              {retrying ? '正在重试...' : failureGuidance?.action === 'import' ? '重新导入文件' : '重试解析'}
             </button>
           </>
         )}
@@ -378,8 +421,9 @@ export function ShelfPage() {
                   })}
                   onRetry={() => retryNovel.mutate(novel.id, {
                     onSuccess: () => toast.success('已重新开始解析'),
-                    onError: (error) => toast.error(getApiErrorMessage(error, '重试失败')),
+                    onError: (error) => toast.error(getRetryErrorMessage(error)),
                   })}
+                  onImport={() => setShowImport(true)}
                   retrying={retryNovel.isPending && retryNovel.variables === novel.id}
                 />
               ))}
