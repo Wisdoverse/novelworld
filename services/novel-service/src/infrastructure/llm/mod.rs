@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::domain::ports::{LlmPort, NovelLlmTask, TextTranslator};
+use crate::domain::ports::{LlmOutputTruncated, LlmPort, NovelLlmTask, TextTranslator};
 
 pub struct LlmAdapter {
     client: Arc<llm_client::RuntimeLlmClient>,
@@ -34,6 +34,18 @@ impl LlmPort for LlmAdapter {
         self.client
             .json_chat_for_user(user_id.to_string(), operation, prompt)
             .await
+            .map_err(classify_llm_error)
+    }
+}
+
+fn classify_llm_error(error: anyhow::Error) -> anyhow::Error {
+    if error
+        .chain()
+        .any(|cause| cause.is::<llm_client::TruncatedCompletion>())
+    {
+        LlmOutputTruncated(error).into()
+    } else {
+        error
     }
 }
 
@@ -55,5 +67,22 @@ impl TextTranslator for LlmAdapter {
             )
             .await
             .map(|response| response.content)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_only_typed_truncation_to_the_domain_port() {
+        let truncated = classify_llm_error(llm_client::TruncatedCompletion.into());
+        assert!(truncated
+            .chain()
+            .any(|cause| cause.is::<LlmOutputTruncated>()));
+        let unrelated = classify_llm_error(anyhow::anyhow!("LLM response was truncated"));
+        assert!(!unrelated
+            .chain()
+            .any(|cause| cause.is::<LlmOutputTruncated>()));
     }
 }
