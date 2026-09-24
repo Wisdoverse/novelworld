@@ -3540,7 +3540,7 @@ mod reading_progress_handler_tests {
             unreachable!("unused test repository method")
         }
 
-        async fn find_available_to_user(&self, _user_id: Uuid) -> Result<Vec<Novel>> {
+        async fn find_catalog(&self) -> Result<Vec<Novel>> {
             unreachable!("unused test repository method")
         }
 

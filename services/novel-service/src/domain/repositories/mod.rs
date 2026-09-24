@@ -77,7 +77,7 @@ pub trait NovelRepository: Send + Sync {
     async fn find_by_id(&self, id: Uuid) -> Result<Option<Novel>>;
     async fn find_for_user(&self, user_id: Uuid, novel_id: Uuid) -> Result<Option<Novel>>;
     async fn find_by_user(&self, user_id: Uuid) -> Result<Vec<Novel>>;
-    async fn find_available_to_user(&self, user_id: Uuid) -> Result<Vec<Novel>>;
+    async fn find_catalog(&self) -> Result<Vec<Novel>>;
     async fn attach_to_user(
         &self,
         user_id: Uuid,

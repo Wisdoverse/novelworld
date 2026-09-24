@@ -583,17 +583,17 @@ impl NovelRepository for NovelPgRepository {
         Ok(row.map(Into::into))
     }
 
-    async fn find_available_to_user(&self, user_id: Uuid) -> Result<Vec<Novel>> {
+    async fn find_catalog(&self) -> Result<Vec<Novel>> {
+        // Novel requires these fields; the catalog must not return uploader-private values.
         let rows = sqlx::query_as::<_, NovelRow>(
             "SELECT n.id, n.user_id, n.title, n.author, n.cover_url, n.description, n.world_summary, n.genre, \
-                    n.original_file_key, n.total_chapters, n.status::text, n.parse_error, n.deviation_mode::text, \
+                    NULL::text AS original_file_key, n.total_chapters, n.status::text, \
+                    NULL::text AS parse_error, 'canon'::text AS deviation_mode, \
                     n.created_at, n.updated_at \
              FROM novels AS n \
              WHERE n.status = 'ready'::novel_status \
-               AND NOT EXISTS (SELECT 1 FROM user_novels AS shelf WHERE shelf.user_id = $1 AND shelf.novel_id = n.id) \
              ORDER BY n.updated_at DESC",
         )
-        .bind(user_id)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().map(Into::into).collect())
@@ -616,7 +616,7 @@ impl NovelRepository for NovelPgRepository {
             transaction.rollback().await?;
             return Ok(false);
         }
-        sqlx::query(
+        let inserted = sqlx::query(
             "INSERT INTO user_novels (user_id, novel_id) VALUES ($1, $2) \
              ON CONFLICT (user_id, novel_id) DO NOTHING",
         )
@@ -629,12 +629,14 @@ impl NovelRepository for NovelPgRepository {
              (id, user_id, novel_id, current_chapter, reader_identity_type, deviation_mode) \
              VALUES ($1, $2, $3, 1, 'self', $4::deviation_mode) \
              ON CONFLICT (user_id, novel_id) DO UPDATE \
-             SET deviation_mode = EXCLUDED.deviation_mode",
+             SET deviation_mode = EXCLUDED.deviation_mode \
+             WHERE $5::boolean",
         )
         .bind(Uuid::new_v4())
         .bind(user_id)
         .bind(novel_id)
         .bind(deviation_mode.to_str())
+        .bind(inserted.rows_affected() == 1)
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;

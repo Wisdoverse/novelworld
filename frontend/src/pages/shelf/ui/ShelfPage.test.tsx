@@ -111,6 +111,22 @@ describe('ShelfPage contracts', () => {
     await waitFor(() => expect(document.activeElement).toBe(opener));
   });
 
+  it('shows ready books already on the shelf without allowing a second attachment', () => {
+    mocks.novels = [{
+      id: 'mine', title: '已加入', status: 'ready', total_chapters: 2,
+      updated_at: '2026-01-01T00:00:00Z',
+    }];
+    mocks.catalog = [
+      mocks.novels[0],
+      { id: 'other', title: '新书', status: 'ready', total_chapters: 3 },
+    ];
+    render(<ShelfPage />);
+    fireEvent.click(screen.getByRole('button', { name: '打开共享书库' }));
+
+    expect(screen.getByRole('button', { name: '《已加入》已在书架' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByRole('button', { name: '将《新书》加入书架' }).hasAttribute('disabled')).toBe(false);
+  });
+
   it('keeps the remove action visible and keyboard reachable on a ready novel', () => {
     mocks.novels = [{
       id: 'novel',
