@@ -9,8 +9,8 @@ const SCAN_CHUNK_BYTES: usize = 24_000;
 const SCAN_OVERLAP_BYTES: usize = 256;
 pub const CHARACTER_EXTRACTION_PROMPT_VERSION: &str = "character-extraction-v8";
 const CHARACTER_DESCRIPTION_RULE: &str = "所有角色描述字段及关系描述只能包含给定文本明确支持的信息；保留人物、行为主体、所有者及关系归属，不得把他人的经历或物品移到该角色名下。对话、传闻、猜测和承诺须保留原有说话者、归属、条件与不确定性；除非文本另有明确证实，不得改写为已发生或无条件成立的事实。保留原文支持的具体细节；未说明的外貌、性格、背景或说话风格用空字符串，不为满足字数、细节数量或画像需要补造。";
-// ponytail: compact output can still overflow on dense chapters; split scan chunks if live evidence shows repeated truncation.
 const CHARACTER_OUTPUT_RULE: &str = "完整 JSON 控制在 3000 token 内；不得为控制篇幅省略符合条件的角色或明确关系。保留原文支持的具体事实，删去重复措辞；每个角色描述字段及关系描述最多 30 字，world_summary 最多 600 字，绝不输出截断的 JSON。";
+const MIN_SCAN_SPLIT_BYTES: usize = 1_500;
 
 /// SPEC 5.4: the extractor returns at most 50 characters per novel to bound
 /// provider cost.
@@ -96,6 +96,10 @@ pub fn json_object_payload(response: &str) -> &str {
 }
 
 pub fn build_representative_sample(chapters: &[Chapter]) -> String {
+    build_representative_sample_with_limit(chapters, SUMMARY_SAMPLE_BYTES)
+}
+
+pub fn build_representative_sample_with_limit(chapters: &[Chapter], max_bytes: usize) -> String {
     if chapters.is_empty() {
         return String::new();
     }
@@ -105,7 +109,7 @@ pub fn build_representative_sample(chapters: &[Chapter]) -> String {
     } else {
         vec![0, chapters.len() / 2, chapters.len() - 1]
     };
-    let per_chapter = SUMMARY_SAMPLE_BYTES / indexes.len();
+    let per_chapter = max_bytes / indexes.len();
 
     indexes
         .into_iter()
@@ -130,28 +134,79 @@ pub fn needs_chunk_scan(chapters: &[Chapter]) -> bool {
         > SUMMARY_SAMPLE_BYTES
 }
 
-pub fn build_scan_plan(chapters: &[Chapter]) -> Vec<String> {
+#[derive(Debug)]
+pub struct ScanChunk {
+    parts: Vec<ScanPart>,
+}
+
+#[derive(Debug)]
+struct ScanPart {
+    chapter_number: i32,
+    content: String,
+}
+
+impl ScanChunk {
+    pub fn render(&self) -> String {
+        self.parts
+            .iter()
+            .map(|part| format!("Chapter {}:\n{}", part.chapter_number, part.content))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    pub fn split(self) -> Option<(Self, Self)> {
+        if self.parts.len() > 1 {
+            let middle = self.parts.len() / 2;
+            let mut parts = self.parts;
+            let right = parts.split_off(middle);
+            return Some((Self { parts }, Self { parts: right }));
+        }
+        let part = self.parts.into_iter().next()?;
+        if part.content.len() <= MIN_SCAN_SPLIT_BYTES {
+            return None;
+        }
+        let middle = part.content.floor_char_boundary(part.content.len() / 2);
+        let mut right_start = middle.saturating_sub(SCAN_OVERLAP_BYTES);
+        while !part.content.is_char_boundary(right_start) {
+            right_start += 1;
+        }
+        let left = ScanPart {
+            chapter_number: part.chapter_number,
+            content: part.content[..middle].to_owned(),
+        };
+        let right = ScanPart {
+            chapter_number: part.chapter_number,
+            content: part.content[right_start..].to_owned(),
+        };
+        Some((Self { parts: vec![left] }, Self { parts: vec![right] }))
+    }
+}
+
+pub fn build_scan_plan(chapters: &[Chapter]) -> Vec<ScanChunk> {
     let mut chunks = Vec::new();
-    let mut current = String::new();
+    let mut current = Vec::new();
+    let mut current_len = 0;
 
     for chapter in chapters {
         let header = format!("Chapter {}:\n", chapter.chapter_number);
         let part_bytes = SCAN_CHUNK_BYTES.saturating_sub(header.len());
         for part in split_at_utf8_boundaries(&chapter.content, part_bytes) {
-            if !current.is_empty()
-                && current.len() + header.len() + part.len() + 2 > SCAN_CHUNK_BYTES
-            {
-                chunks.push(std::mem::take(&mut current));
+            let part_len = header.len() + part.len();
+            if !current.is_empty() && current_len + part_len + 2 > SCAN_CHUNK_BYTES {
+                chunks.push(ScanChunk {
+                    parts: std::mem::take(&mut current),
+                });
+                current_len = 0;
             }
-            if !current.is_empty() {
-                current.push_str("\n\n");
-            }
-            current.push_str(&header);
-            current.push_str(part);
+            current_len += part_len + if current.is_empty() { 0 } else { 2 };
+            current.push(ScanPart {
+                chapter_number: chapter.chapter_number,
+                content: part.to_owned(),
+            });
         }
     }
     if !current.is_empty() {
-        chunks.push(current);
+        chunks.push(ScanChunk { parts: current });
     }
 
     chunks
@@ -724,9 +779,56 @@ mod tests {
         let plan = build_scan_plan(&chapters);
 
         assert!(plan.len() > 24);
-        assert!(plan.first().unwrap().contains("Chapter 1:"));
-        assert!(plan.last().unwrap().contains("Chapter 30:"));
-        assert!(plan.iter().all(|chunk| chunk.len() <= SCAN_CHUNK_BYTES));
+        assert!(plan.first().unwrap().render().contains("Chapter 1:"));
+        assert!(plan.last().unwrap().render().contains("Chapter 30:"));
+        assert!(plan
+            .iter()
+            .all(|chunk| chunk.render().len() <= SCAN_CHUNK_BYTES));
+    }
+
+    #[test]
+    fn split_scan_preserves_chapter_labels_and_utf8_source() {
+        assert_eq!(
+            build_scan_plan(&[chapter(1, "甲"), chapter(2, "乙")])[0].render(),
+            "Chapter 1:\n甲\n\nChapter 2:\n乙"
+        );
+        let source = "甲乙丙丁".repeat(1_000);
+        let chapters = vec![chapter(7, &source), chapter(8, "第八章内容")];
+        let plan = build_scan_plan(&chapters);
+        let (left, right) = plan.into_iter().next().unwrap().split().unwrap();
+        assert_eq!(left.parts[0].chapter_number, 7);
+        assert_eq!(left.parts[0].content, source);
+        assert_eq!(right.parts[0].chapter_number, 8);
+        assert_eq!(right.parts[0].content, "第八章内容");
+        let rendered = format!("{}\n{}", left.render(), right.render());
+        assert!(rendered.contains("Chapter 7:\n"));
+        assert!(rendered.contains("Chapter 8:\n"));
+        assert!(rendered.contains("第八章内容"));
+        for marker in ["甲乙丙丁甲", "乙丙丁甲乙", "丙丁甲乙丙", "丁甲乙丙丁"] {
+            assert!(rendered.contains(marker));
+        }
+        assert!(left.render().len() < SCAN_CHUNK_BYTES);
+        assert!(right.render().len() < SCAN_CHUNK_BYTES);
+        let (first, second) = build_scan_plan(&[chapter(9, &source)])
+            .pop()
+            .unwrap()
+            .split()
+            .unwrap();
+        let first_content = &first.parts[0].content;
+        let second_content = &second.parts[0].content;
+        let duplicate = first_content.len() + second_content.len() - source.len();
+        assert_eq!(
+            format!("{first_content}{}", &second_content[duplicate..]),
+            source
+        );
+        let first = first.render();
+        let second = second.render();
+        assert!(first.starts_with("Chapter 9:\n"));
+        assert!(second.starts_with("Chapter 9:\n"));
+        let overlap = first.rsplit_once('\n').unwrap().1.len()
+            + second.rsplit_once('\n').unwrap().1.len()
+            - source.len();
+        assert!((SCAN_OVERLAP_BYTES - 3..=SCAN_OVERLAP_BYTES).contains(&overlap));
     }
 
     #[test]
