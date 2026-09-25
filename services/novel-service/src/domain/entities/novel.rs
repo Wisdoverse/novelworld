@@ -52,6 +52,7 @@ pub fn public_parse_error(error: Option<&str>) -> Option<&str> {
         | "Story model analysis did not finish; retry the import"
         | "AI request for story model analysis failed; retry the import"
         | "AI story model response could not be validated; retry the import"
+        | "AI story model response could not be validated; re-upload the source"
         | "Story model checkpoint could not be saved; retry the import"
         | "Previous import failed; retry or re-upload the source"
         | "Import processing failed; retry the import" => error,

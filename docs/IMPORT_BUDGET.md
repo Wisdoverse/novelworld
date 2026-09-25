@@ -39,7 +39,9 @@ separately below.
    `budget_exhausted`, set the Novel to `error` with the actionable public
    message "Import provider budget exhausted; re-upload the source", and the
    job MUST never be reclaimed by the recovery scan or resumed by the retry
-   endpoint. Re-uploading creates a new import with a fresh budget.
+   endpoint. A failure on the third claim keeps its actual failure code and
+   shows re-upload guidance immediately, rather than offering an unusable
+   retry. Re-uploading creates a new import with a fresh budget.
 5. **Metering and retry proof boundary.** The enforcement evidence is the
    per-claim atomic 610-token LLM-dispatch budget plus the reserved 30 image
    slots. Cross-attempt evidence is the persisted `job.attempt`; structured
