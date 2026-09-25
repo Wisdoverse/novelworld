@@ -2325,10 +2325,11 @@ impl NovelCommandHandler {
                                     );
                                     return Ok::<_, anyhow::Error>((position, chunk, extraction));
                                 }
-                                Err(_error) => tracing::warn!(
+                                Err(error) => tracing::warn!(
                                     novel_id = %novel_id,
                                     chapter = chunk.chapter_number,
                                     chunk = chunk.chunk_index,
+                                    reason_code = error.reason_code(),
                                     "discarding invalid canonical extraction checkpoint"
                                 ),
                             }
@@ -2369,24 +2370,28 @@ impl NovelCommandHandler {
                                     break;
                                 }
                                 Err(error) => {
+                                    tracing::warn!(
+                                        novel_id = %novel_id,
+                                        chapter = chunk.chapter_number,
+                                        chunk = chunk.chunk_index,
+                                        attempt = attempt + 1,
+                                        reason_code = error.reason_code(),
+                                        "canonical extraction response failed validation"
+                                    );
                                     if attempt < 2 {
-                                        tracing::debug!(
-                                            attempt,
-                                            "canonical extraction failed the verbatim gate; retrying"
-                                        );
-                                        prompt = canon_retry_prompt(&base_prompt, &error.to_string());
+                                        prompt =
+                                            canon_retry_prompt(&base_prompt, &error.to_string());
                                     }
                                     last_error = Some(error);
                                 }
                             }
                         }
                         let extraction = extraction.ok_or_else(|| {
-                            CanonValidationFailed(anyhow::anyhow!(
-                                "canonical extraction failed validation after 3 attempts at chapter {} chunk {}: {:?}",
-                                chunk.chapter_number,
-                                chunk.chunk_index,
-                                last_error,
-                            ))
+                            CanonValidationFailed(
+                                last_error
+                                    .expect("a failed extraction has a validation error")
+                                    .into(),
+                            )
                         })?;
                         let extraction_json = serde_json::to_string(&extraction)
                             .map_err(|error| CanonCheckpointFailed(error.into()))?;
@@ -2452,9 +2457,10 @@ impl NovelCommandHandler {
                                 );
                                 Some(selection)
                             }
-                            Err(_error) => {
+                            Err(error) => {
                                 tracing::warn!(
                                     novel_id = %novel.id,
+                                    reason_code = error.reason_code(),
                                     "discarding invalid canonical event selection checkpoint"
                                 );
                                 None
@@ -2479,13 +2485,23 @@ impl NovelCommandHandler {
                                 selection = Some(parsed);
                                 break;
                             }
-                            Err(_error) if schema_attempt == 1 => {
+                            Err(error) if schema_attempt == 1 => {
                                 tracing::warn!(
                                     novel_id = %novel.id,
-                                    "retrying canonical event grouping after invalid schema"
+                                    attempt = schema_attempt,
+                                    reason_code = error.reason_code(),
+                                    "canonical event grouping response failed validation; retrying"
                                 );
                             }
-                            Err(error) => return Err(CanonValidationFailed(error.into()).into()),
+                            Err(error) => {
+                                tracing::warn!(
+                                    novel_id = %novel.id,
+                                    attempt = schema_attempt,
+                                    reason_code = error.reason_code(),
+                                    "canonical event grouping response failed validation"
+                                );
+                                return Err(CanonValidationFailed(error.into()).into());
+                            }
                         }
                     }
                 }
@@ -2516,9 +2532,23 @@ impl NovelCommandHandler {
                         return Err(ImportLeaseLost.into());
                     }
                 }
-                canon_story_extractor::apply_event_selection(&mut extracted, &selection)?;
+                canon_story_extractor::apply_event_selection(&mut extracted, &selection)
+                    .inspect_err(|error| {
+                        tracing::warn!(
+                            novel_id = %novel.id,
+                            reason_code = error.reason_code(),
+                            "canonical event grouping could not be applied"
+                        );
+                    })?;
             }
-            let model = canon_story_extractor::assemble_model(novel.id, 1, &extracted, characters)?;
+            let model = canon_story_extractor::assemble_model(novel.id, 1, &extracted, characters)
+                .inspect_err(|error| {
+                    tracing::warn!(
+                        novel_id = %novel.id,
+                        reason_code = error.reason_code(),
+                        "canonical story model could not be assembled"
+                    );
+                })?;
             if !self.canon_repo.insert_import(&model, claim.attempt).await? {
                 return Err(ImportLeaseLost.into());
             }
