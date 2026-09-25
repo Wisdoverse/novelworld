@@ -5,7 +5,10 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::domain::ports::{LlmOutputTruncated, LlmPort, NovelLlmTask, TextTranslator};
+use crate::domain::ports::{
+    LlmOutputTruncated, LlmPort, LlmProviderFailure, LlmProviderFailureKind, NovelLlmTask,
+    TextTranslator,
+};
 
 pub struct LlmAdapter {
     client: Arc<llm_client::RuntimeLlmClient>,
@@ -44,6 +47,26 @@ fn classify_llm_error(error: anyhow::Error) -> anyhow::Error {
         .any(|cause| cause.is::<llm_client::TruncatedCompletion>())
     {
         LlmOutputTruncated(error).into()
+    } else if let Some((status, kind)) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<llm_client::LlmApiError>())
+        .and_then(|cause| match cause.status {
+            402 => Some((cause.status, LlmProviderFailureKind::BalanceUnavailable)),
+            400 | 401 | 403 | 404 | 422 => {
+                Some((cause.status, LlmProviderFailureKind::RequestRejected))
+            }
+            _ => None,
+        })
+    {
+        tracing::warn!(
+            provider_http_status = status,
+            "LLM provider rejected request"
+        );
+        LlmProviderFailure {
+            kind,
+            source: error,
+        }
+        .into()
     } else {
         error
     }
@@ -75,7 +98,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn maps_only_typed_truncation_to_the_domain_port() {
+    fn classifies_typed_model_failures_without_claiming_local_413_is_upstream() {
         let truncated = classify_llm_error(llm_client::TruncatedCompletion.into());
         assert!(truncated
             .chain()
@@ -84,5 +107,40 @@ mod tests {
         assert!(!unrelated
             .chain()
             .any(|cause| cause.is::<LlmOutputTruncated>()));
+
+        for (status, kind) in [
+            (400, LlmProviderFailureKind::RequestRejected),
+            (401, LlmProviderFailureKind::RequestRejected),
+            (402, LlmProviderFailureKind::BalanceUnavailable),
+            (422, LlmProviderFailureKind::RequestRejected),
+        ] {
+            let provider = classify_llm_error(
+                llm_client::LlmApiError {
+                    status,
+                    message: "provider request failed".into(),
+                    retry_after: None,
+                }
+                .into(),
+            );
+            assert_eq!(
+                provider
+                    .chain()
+                    .find_map(|cause| cause.downcast_ref::<LlmProviderFailure>())
+                    .map(|cause| cause.kind),
+                Some(kind)
+            );
+        }
+
+        let oversized = classify_llm_error(
+            llm_client::LlmApiError {
+                status: 413,
+                message: "provider response exceeds local size limit".into(),
+                retry_after: None,
+            }
+            .into(),
+        );
+        assert!(!oversized
+            .chain()
+            .any(|cause| cause.is::<LlmProviderFailure>()));
     }
 }

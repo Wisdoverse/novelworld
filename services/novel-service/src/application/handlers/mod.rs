@@ -24,8 +24,8 @@ use crate::domain::entities::{
     novel::Novel,
 };
 use crate::domain::ports::{
-    DocumentTextExtractor, ImagePort, LlmOutputTruncated, LlmPort, NovelLlmTask,
-    PrivacyCleanupPort, SourceFileStorage, TextTranslator,
+    DocumentTextExtractor, ImagePort, LlmOutputTruncated, LlmPort, LlmProviderFailure,
+    LlmProviderFailureKind, NovelLlmTask, PrivacyCleanupPort, SourceFileStorage, TextTranslator,
 };
 use crate::domain::repositories::{
     BeginChapterTranslation, BeginGameRuleGeneration, CanonExtractionCheckpoint,
@@ -982,6 +982,20 @@ fn import_failure_guidance(error: &anyhow::Error) -> (&'static str, &'static str
             "model_output_truncated",
             "AI response reached its output limit; import a shorter source",
         )
+    } else if import_error::<LlmProviderFailure>(error)
+        .is_some_and(|e| e.kind == LlmProviderFailureKind::BalanceUnavailable)
+    {
+        (
+            "provider_balance_unavailable",
+            "AI provider balance is unavailable; contact the site administrator before retrying",
+        )
+    } else if import_error::<LlmProviderFailure>(error)
+        .is_some_and(|e| e.kind == LlmProviderFailureKind::RequestRejected)
+    {
+        (
+            "provider_request_rejected",
+            "AI provider rejected the request; contact the site administrator before retrying",
+        )
     } else if import_error::<CanonProviderFailed>(error).is_some() {
         (
             "canon_provider_failed",
@@ -1036,6 +1050,12 @@ fn import_failure_guidance_for_attempt(
         | "model_output_truncated" => message,
         "canon_validation_failed" => {
             "AI story model response could not be validated; re-upload the source"
+        }
+        "provider_balance_unavailable" => {
+            "AI provider balance is unavailable; contact the site administrator, then re-upload the source"
+        }
+        "provider_request_rejected" => {
+            "AI provider rejected the request; contact the site administrator, then re-upload the source"
         }
         _ => IMPORT_BUDGET_EXHAUSTED_MESSAGE,
     };
@@ -1112,6 +1132,44 @@ mod import_failure_guidance_tests {
             import_failure_guidance_for_attempt(&unknown, MAX_IMPORT_ATTEMPTS).1,
             IMPORT_BUDGET_EXHAUSTED_MESSAGE
         );
+    }
+
+    #[test]
+    fn provider_rejection_keeps_safe_status_guidance_through_import_error_chain() {
+        for (kind, expected_code) in [
+            (
+                LlmProviderFailureKind::RequestRejected,
+                "provider_request_rejected",
+            ),
+            (
+                LlmProviderFailureKind::BalanceUnavailable,
+                "provider_balance_unavailable",
+            ),
+        ] {
+            let error: anyhow::Error = ImportAnalysisFailed::Character(
+                LlmProviderFailure {
+                    kind,
+                    source: anyhow::anyhow!("private provider response and credential"),
+                }
+                .into(),
+            )
+            .into();
+            let (code, message) = import_failure_guidance(&error);
+            assert_eq!(code, expected_code);
+            assert_eq!(
+                crate::domain::entities::novel::public_parse_error(Some(message)),
+                Some(message)
+            );
+            assert!(!message.contains("private"));
+            let (terminal_code, terminal_message) =
+                import_failure_guidance_for_attempt(&error, MAX_IMPORT_ATTEMPTS);
+            assert_eq!(terminal_code, expected_code);
+            assert!(terminal_message.contains("re-upload the source"));
+            assert_eq!(
+                crate::domain::entities::novel::public_parse_error(Some(terminal_message)),
+                Some(terminal_message)
+            );
+        }
     }
 }
 

@@ -82,6 +82,13 @@ sensitive. Use the edge status and upstream timing for routine failures.
 - `INFO`: lifecycle and normal request completion. `DEBUG`: bounded internal
   decisions needed for a focused investigation.
 
+For a failed novel import, `error_code` is the public-safe category. The
+associated provider-rejection `WARN` records `provider_http_status` for common
+upstream 4xx responses. HTTP `402` indicates an account-balance problem;
+verify the provider account before asking the reader to re-import. A locally
+rejected oversized response does not claim an upstream HTTP status. Never log
+the provider response body or credentials.
+
 Completion `elapsed_ms` ends when response headers are produced; it excludes
 the rest of a streaming response. `route` is an Axum template or `unmatched`,
 never the raw path. Caller trace IDs are bounded and sanitized at every HTTP
