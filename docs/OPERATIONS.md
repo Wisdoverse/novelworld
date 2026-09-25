@@ -46,9 +46,42 @@ dedup, or paging exists yet.
   plus gateway `RATE_LIMIT_RPS` ([`SECURITY.md`](../SECURITY.md)); capacity contract and
   503 assertions in [`SLOS.md`](./SLOS.md).
 - **Log contract** — [`log_contract.py`](../tests/e2e/log_contract.py) checks the §14.1 shape and
-  trace propagation.
+  trace propagation and request outcome fields.
 - **Capacity profile** — [`SLOS.md`](./SLOS.md) Run locally section; the recorded CI run is
   the qualification gate.
+
+## Log levels and incident lookup
+
+All five Rust processes emit JSON to stdout. Set `RUST_LOG` in `.env` to tune
+verbosity at the next service recreation; Compose defaults to `info`. For a
+focused investigation, use `RUST_LOG=info,novel_service=debug` (replace the
+module target for another service). `reqwest` and `tower_http` remain disabled
+because their default traces can contain full URLs. Restore `info` after the
+investigation. `debug` can be high volume and is not a privacy exception.
+
+- `ERROR`: a failed operation or HTTP 5xx; investigate using `trace_id`,
+  `route`, `status`, and nearby fixed error codes.
+- `WARN`: degraded or retried work, including HTTP 429. Normal client 4xx
+  remains `INFO` and is searchable by numeric `status`.
+- `INFO`: lifecycle and normal request completion. `DEBUG`: bounded internal
+  decisions needed for a focused investigation.
+
+Completion `elapsed_ms` ends when response headers are produced; it excludes
+the rest of a streaming response. `route` is an Axum template or `unmatched`,
+never the raw path. Caller trace IDs are bounded and sanitized at every HTTP
+ingress. Keep credentials, email, names, novel content, prompt/response bodies,
+raw URLs, query strings, and arbitrary headers out of logs at every level.
+
+For a recent error on the local host, inspect the service's structured output:
+
+```bash
+docker logs novel-novel-service --since 30m 2>&1 \
+  | jq -c 'select(.level == "ERROR") | (.spans // [] | map(select(has("service"))) | .[-1] // {}) as $ctx | {timestamp,service: $ctx.service,trace_id: $ctx.trace_id,fields}'
+```
+
+Use the same `trace_id` with `docker logs` for the Gateway and the downstream
+service. This is local log inspection; a collector, retention policy, and
+paging integration are not yet qualified for the supported profile.
 
 ## Ownership and escalation
 

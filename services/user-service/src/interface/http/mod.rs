@@ -366,8 +366,8 @@ fn llm_usage_error_response(error: LlmUsageError) -> axum::response::Response {
             "LLM usage statistics are temporarily unavailable",
         ),
         LlmUsageError::NotFound => (StatusCode::NOT_FOUND, "not_found", "User not found"),
-        LlmUsageError::Internal(error) => {
-            tracing::error!(error = ?error, "LLM usage operation failed");
+        LlmUsageError::Internal(_error) => {
+            tracing::error!(error_code = "internal_error", "LLM usage operation failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",

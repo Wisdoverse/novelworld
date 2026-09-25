@@ -700,6 +700,10 @@ fn coded_api_error(status: StatusCode, code: &'static str, message: impl Into<St
 
 fn import_error_response(error: anyhow::Error) -> Response {
     if error.downcast_ref::<ImportCapacityUnavailable>().is_some() {
+        tracing::warn!(
+            error_code = "import_capacity_busy",
+            "novel import admission rejected"
+        );
         let mut response = coded_api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "import_capacity_busy",
@@ -720,6 +724,10 @@ fn import_error_response(error: anyhow::Error) -> Response {
         .downcast_ref::<SourceFileStorageUnavailable>()
         .is_some()
     {
+        tracing::error!(
+            error_code = "source_storage_unavailable",
+            "novel source storage unavailable"
+        );
         let mut response = coded_api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "source_storage_unavailable",
@@ -730,7 +738,7 @@ fn import_error_response(error: anyhow::Error) -> Response {
             .insert("Retry-After", HeaderValue::from_static("5"));
         return response;
     }
-    tracing::error!(%error, "novel import request failed");
+    tracing::error!(error_code = "internal_error", "novel import request failed");
     api_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
 }
 
@@ -743,7 +751,7 @@ fn retry_error_response(error: anyhow::Error, novel_id: Uuid) -> Response {
     if let Some(conflict) = error.downcast_ref::<ImportRetryConflict>() {
         return api_error(StatusCode::CONFLICT, conflict.0);
     }
-    tracing::error!(%error, %novel_id, "novel import retry failed");
+    tracing::error!(error_code = "internal_error", %novel_id, "novel import retry failed");
     api_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
 }
 
@@ -1407,8 +1415,8 @@ async fn translate_chapter_text(
         Err(TranslationError::Timeout) => {
             api_error(StatusCode::GATEWAY_TIMEOUT, "Translation timed out")
         }
-        Err(TranslationError::Provider(error)) => {
-            tracing::warn!(error = ?error, %novel_id, "chapter translation failed");
+        Err(TranslationError::Provider(_error)) => {
+            tracing::warn!(error_code = "translation_provider_unavailable", %novel_id, "chapter translation failed");
             api_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Translation is temporarily unavailable",

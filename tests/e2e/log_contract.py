@@ -75,6 +75,7 @@ def main():
             problems.append(f"{service}: no log lines")
             continue
         non_empty_trace_ids = 0
+        completions = 0
         for line in lines:
             try:
                 entry = json.loads(line)
@@ -103,11 +104,32 @@ def main():
                     continue
                 if any(value for value in trace_ids):
                     non_empty_trace_ids += 1
+                fields = entry.get("fields", {})
+                if isinstance(fields, dict) and fields.get("message") == "request completed":
+                    completions += 1
+                    method = fields.get("method")
+                    route = fields.get("route")
+                    status = fields.get("status")
+                    elapsed_ms = fields.get("elapsed_ms")
+                    if not isinstance(method, str) or not method:
+                        problems.append(f"{service}: completion missing method")
+                    if not isinstance(route, str) or not route or "?" in route:
+                        problems.append(f"{service}: completion has unsafe route")
+                    if type(status) is not int or not 100 <= status <= 599:
+                        problems.append(f"{service}: completion missing numeric status")
+                    else:
+                        expected = "ERROR" if status >= 500 else "WARN" if status == 429 else "INFO"
+                        if entry.get("level") != expected:
+                            problems.append(f"{service}: completion level disagrees with status")
+                    if type(elapsed_ms) is not int or elapsed_ms < 0:
+                        problems.append(f"{service}: completion missing elapsed_ms")
         else:
             if non_empty_trace_ids == 0:
                 problems.append(
                     f"{service}: no request-scoped line with a propagated trace id"
                 )
+            if completions == 0:
+                problems.append(f"{service}: no request completion log")
     if problems:
         print("log contract failed:\n  " + "\n  ".join(problems))
         sys.exit(1)

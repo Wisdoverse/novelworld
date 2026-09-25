@@ -137,7 +137,7 @@ where
         match result {
             Ok(value) => return Ok(value),
             Err(error) => {
-                tracing::warn!(attempt, %error, "LLM JSON output failed validation");
+                tracing::warn!(attempt, task = ?task, "LLM JSON output failed validation");
                 current_prompt = format!(
                     "{prompt}\n\nCORRECTION REQUIRED: the previous response failed validation: {error}. Return a new JSON object that fixes this error. Do not repeat the rejected value."
                 );
@@ -1318,13 +1318,13 @@ impl NovelCommandHandler {
                     "game rule template generation completed"
                 );
             }
-            Err(error) => {
+            Err(_error) => {
                 tracing::error!(
                     %novel_id,
                     canon_model_version = model.model_version,
                     attempt,
                     elapsed_ms = generation_started.elapsed().as_millis(),
-                    error = ?error,
+                    error_code = "game_rule_generation_failed",
                     "game rule generation failed"
                 );
                 if let Err(failure_error) = self
@@ -1439,7 +1439,7 @@ impl NovelCommandHandler {
     /// have committed atomically. Provider enrichment remains asynchronous.
     #[tracing::instrument(
         skip(self, cmd),
-        fields(user_id = %cmd.user_id, title = %cmd.title)
+        fields(user_id = %cmd.user_id)
     )]
     pub async fn handle_import(self: &Arc<Self>, cmd: ImportNovelCommand) -> Result<Uuid> {
         let mut ids = self.handle_import_batch(vec![cmd]).await?;
@@ -1607,13 +1607,13 @@ impl NovelCommandHandler {
             }
             Some(Err(error)) => {
                 lease.stop();
+                let (code, public_error) = import_failure_guidance(&error);
                 error!(
-                    error = ?error,
+                    error_code = code,
                     novel_id = %claim.novel_id,
                     attempt = claim.attempt,
                     "novel import processing failed"
                 );
-                let (code, public_error) = import_failure_guidance(&error);
                 if let Err(failure_error) = self
                     .novel_repo
                     .fail_import(claim.novel_id, claim.attempt, code, public_error)
@@ -1911,16 +1911,18 @@ impl NovelCommandHandler {
             .characters
             .iter()
             .filter_map(|ec| {
-                let first_appearance =
-                    find_first_appearance(ec, &extraction.characters, chapters);
+                let first_appearance = find_first_appearance(ec, &extraction.characters, chapters);
                 let Some(first_appearance) = first_appearance else {
-                    tracing::warn!(character = %ec.name, "omitting character without a source-proven first appearance");
+                    tracing::warn!(
+                        reason = "missing_source_first_appearance",
+                        "omitting character"
+                    );
                     return None;
                 };
                 let Some(mut character) =
                     Character::from_extraction(novel_id, ec, &extraction.world_summary, &title)
                 else {
-                    tracing::warn!(character = %ec.name, "omitting character with invalid name");
+                    tracing::warn!(reason = "invalid_name", "omitting character");
                     return None;
                 };
                 character.first_appearance_chapter = Some(first_appearance);
@@ -2078,11 +2080,10 @@ impl NovelCommandHandler {
                                     );
                                     return Ok::<_, anyhow::Error>((position, chunk, extraction));
                                 }
-                                Err(error) => tracing::warn!(
+                                Err(_error) => tracing::warn!(
                                     novel_id = %novel_id,
                                     chapter = chunk.chapter_number,
                                     chunk = chunk.chunk_index,
-                                    %error,
                                     "discarding invalid canonical extraction checkpoint"
                                 ),
                             }
@@ -2125,7 +2126,7 @@ impl NovelCommandHandler {
                                 Err(error) => {
                                     if attempt < 2 {
                                         tracing::debug!(
-                                            %error, attempt,
+                                            attempt,
                                             "canonical extraction failed the verbatim gate; retrying"
                                         );
                                         prompt = canon_retry_prompt(&base_prompt, &error.to_string());
@@ -2206,10 +2207,9 @@ impl NovelCommandHandler {
                                 );
                                 Some(selection)
                             }
-                            Err(error) => {
+                            Err(_error) => {
                                 tracing::warn!(
                                     novel_id = %novel.id,
-                                    %error,
                                     "discarding invalid canonical event selection checkpoint"
                                 );
                                 None
@@ -2234,10 +2234,9 @@ impl NovelCommandHandler {
                                 selection = Some(parsed);
                                 break;
                             }
-                            Err(error) if schema_attempt == 1 => {
+                            Err(_error) if schema_attempt == 1 => {
                                 tracing::warn!(
                                     novel_id = %novel.id,
-                                    %error,
                                     "retrying canonical event grouping after invalid schema"
                                 );
                             }
@@ -2320,7 +2319,7 @@ impl NovelCommandHandler {
                 let image_client = self.image_client.clone();
                 let avatar_admission = avatar_admission.clone();
                 async move {
-                    if let Err(error) = Self::generate_avatar(
+                    if let Err(_error) = Self::generate_avatar(
                         character_id,
                         &appearance,
                         character_repo,
@@ -2329,7 +2328,7 @@ impl NovelCommandHandler {
                     )
                     .await
                     {
-                        error!(%error, %character_id, "avatar generation failed");
+                        error!(error_code = "avatar_generation_failed", %character_id, "avatar generation failed");
                     }
                 }
             })

@@ -2135,7 +2135,7 @@ impl NarrativeCommandHandler {
                 }
                 Err(error) => {
                     if attempt < 2 {
-                        tracing::debug!(%error, attempt, "branch generation failed validation; retrying");
+                        tracing::debug!(attempt, "branch generation failed validation; retrying");
                     }
                     last_error = Some(error);
                 }
@@ -2495,7 +2495,10 @@ impl NarrativeCommandHandler {
                 }
                 Err(error) => {
                     if attempt < 2 {
-                        tracing::debug!(%error, attempt, "narrative transition failed validation; retrying");
+                        tracing::debug!(
+                            attempt,
+                            "narrative transition failed validation; retrying"
+                        );
                     }
                     last_error = Some(error);
                 }

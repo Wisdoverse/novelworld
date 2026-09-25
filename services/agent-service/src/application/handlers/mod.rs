@@ -1089,8 +1089,8 @@ impl AgentCommandHandler {
                                 let _ = sender.send(Ok(AgentStreamEvent::Delta(text)));
                             }
                             Some(Ok(ChatCompletionEvent::Finished)) => break,
-                            Some(Err(error)) => {
-                                tracing::error!(turn_id = %turn.claim.id, attempt = turn.attempt, error = ?error, "LLM stream failed");
+                            Some(Err(_error)) => {
+                                tracing::error!(turn_id = %turn.claim.id, attempt = turn.attempt, error_code = "llm_stream_error", "LLM stream failed");
                                 if let Err(fail_error) = memory_manager.chat_repo.fail_turn(turn.claim.id, turn.attempt, "llm_stream_error").await {
                                     tracing::error!(turn_id = %turn.claim.id, attempt = turn.attempt, error = ?fail_error, "failed to record chat turn failure");
                                 }

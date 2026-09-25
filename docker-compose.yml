@@ -168,7 +168,7 @@ services:
       AUTH_ACCESS_TOKEN_EXPIRY: ${AUTH_ACCESS_TOKEN_EXPIRY:-3600}
       AUTH_REFRESH_TOKEN_EXPIRY: ${AUTH_REFRESH_TOKEN_EXPIRY:-604800}
       PORT: 8001
-      RUST_LOG: info
+      RUST_LOG: ${RUST_LOG:-info}
     depends_on:
       postgres-migrate:
         condition: service_completed_successfully
@@ -210,7 +210,7 @@ services:
       S3_SECRET_KEY: ${S3_SECRET_KEY:-}
       S3_SESSION_TOKEN: ${S3_SESSION_TOKEN:-}
       PORT: 8002
-      RUST_LOG: info
+      RUST_LOG: ${RUST_LOG:-info}
     depends_on:
       postgres-migrate:
         condition: service_completed_successfully
@@ -249,7 +249,7 @@ services:
       PORT: 8003
       NOVEL_SERVICE_URL: http://novel-service:8002
       NARRATIVE_SERVICE_URL: http://narrative-service:8004
-      RUST_LOG: info
+      RUST_LOG: ${RUST_LOG:-info}
     depends_on:
       postgres-migrate:
         condition: service_completed_successfully
@@ -288,7 +288,7 @@ services:
       PORT: 8004
       NOVEL_SERVICE_URL: http://novel-service:8002
       AGENT_SERVICE_URL: http://agent-service:8003
-      RUST_LOG: info
+      RUST_LOG: ${RUST_LOG:-info}
     depends_on:
       postgres-migrate:
         condition: service_completed_successfully
@@ -323,7 +323,7 @@ services:
       PORT: 8080
       RATE_LIMIT_RPS: ${RATE_LIMIT_RPS:-500}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost,http://127.0.0.1}
-      RUST_LOG: info
+      RUST_LOG: ${RUST_LOG:-info}
     # ports:
     #   - "8080:8080"  # uncomment for local dev
     depends_on:
