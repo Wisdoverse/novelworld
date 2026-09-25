@@ -32,7 +32,7 @@ use crate::domain::repositories::{
     CanonStoryModelRepository, ChapterRepository, ChapterTranslationKey,
     ChapterTranslationRepository, CharacterRelationshipRecord, CharacterRepository, ImportClaim,
     LoreExcerpt, NovelRepository, ReadingProgressRecord, ReadingProgressRepository,
-    SourceFileDeletionRepository, IMPORT_BUDGET_EXHAUSTED_MESSAGE,
+    SourceFileDeletionRepository, IMPORT_BUDGET_EXHAUSTED_MESSAGE, MAX_IMPORT_ATTEMPTS,
 };
 use crate::domain::services::{
     canon_story_context::{build_character_canon_grounding, CharacterCanonGrounding},
@@ -1020,6 +1020,28 @@ fn import_failure_guidance(error: &anyhow::Error) -> (&'static str, &'static str
     }
 }
 
+fn import_failure_guidance_for_attempt(
+    error: &anyhow::Error,
+    attempt: i64,
+) -> (&'static str, &'static str) {
+    let (code, message) = import_failure_guidance(error);
+    if attempt < MAX_IMPORT_ATTEMPTS {
+        return (code, message);
+    }
+    let message = match code {
+        "source_missing"
+        | "source_unavailable"
+        | "source_invalid"
+        | "processing_budget_exceeded"
+        | "model_output_truncated" => message,
+        "canon_validation_failed" => {
+            "AI story model response could not be validated; re-upload the source"
+        }
+        _ => IMPORT_BUDGET_EXHAUSTED_MESSAGE,
+    };
+    (code, message)
+}
+
 #[cfg(test)]
 mod import_failure_guidance_tests {
     use super::*;
@@ -1063,6 +1085,32 @@ mod import_failure_guidance_tests {
         assert_eq!(
             crate::domain::entities::novel::public_parse_error(Some(message)),
             Some(message)
+        );
+    }
+
+    #[test]
+    fn exhausted_claim_keeps_canon_cause_and_gives_a_possible_action() {
+        let canon: anyhow::Error =
+            CanonValidationFailed(anyhow::anyhow!("private model output")).into();
+        let (code, message) = import_failure_guidance_for_attempt(&canon, MAX_IMPORT_ATTEMPTS);
+        assert_eq!(code, "canon_validation_failed");
+        assert_eq!(
+            message,
+            "AI story model response could not be validated; re-upload the source"
+        );
+        assert_eq!(
+            crate::domain::entities::novel::public_parse_error(Some(message)),
+            Some(message)
+        );
+        assert_eq!(
+            import_failure_guidance_for_attempt(&canon, MAX_IMPORT_ATTEMPTS - 1).1,
+            "AI story model response could not be validated; retry the import"
+        );
+
+        let unknown = anyhow::anyhow!("private provider response");
+        assert_eq!(
+            import_failure_guidance_for_attempt(&unknown, MAX_IMPORT_ATTEMPTS).1,
+            IMPORT_BUDGET_EXHAUSTED_MESSAGE
         );
     }
 }
@@ -1807,7 +1855,8 @@ impl NovelCommandHandler {
             }
             Some(Err(error)) => {
                 lease.stop();
-                let (code, public_error) = import_failure_guidance(&error);
+                let (code, public_error) =
+                    import_failure_guidance_for_attempt(&error, claim.attempt);
                 error!(
                     error_code = code,
                     novel_id = %claim.novel_id,

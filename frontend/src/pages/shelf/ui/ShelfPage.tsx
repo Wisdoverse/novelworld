@@ -31,6 +31,7 @@ const importFailureGuidance: Record<string, { message: string; action: 'retry' |
   'Story model analysis did not finish; retry the import': { message: '故事模型分析未完成，可以重试解析。', action: 'retry' },
   'AI request for story model analysis failed; retry the import': { message: '故事模型分析请求失败，可以重试解析。', action: 'retry' },
   'AI story model response could not be validated; retry the import': { message: '故事模型分析结果无法验证，可以重试解析。', action: 'retry' },
+  'AI story model response could not be validated; re-upload the source': { message: '故事模型分析结果无法验证，重试次数已用尽，请重新导入原始文件。', action: 'import' },
   'Story model checkpoint could not be saved; retry the import': { message: '故事模型分析进度未能保存，可以重试解析。', action: 'retry' },
 };
 
