@@ -59,6 +59,13 @@ module target for another service). `reqwest` and `tower_http` remain disabled
 because their default traces can contain full URLs. Restore `info` after the
 investigation. `debug` can be high volume and is not a privacy exception.
 
+The base and optional monitoring Compose services use Docker's `local` logging
+driver, including Redis and local embedding profiles. Its default rotation
+retains up to five 20 MB files per
+container (with compression); older logs are discarded. `docker logs` and
+`docker compose logs` remain available. Existing containers pick up this
+setting when recreated. See [Docker's local driver reference](https://docs.docker.com/engine/logging/drivers/local/).
+
 - `ERROR`: a failed operation or HTTP 5xx; investigate using `trace_id`,
   `route`, `status`, and nearby fixed error codes.
 - `WARN`: degraded or retried work, including HTTP 429. Normal client 4xx
@@ -80,8 +87,8 @@ docker logs novel-novel-service --since 30m 2>&1 \
 ```
 
 Use the same `trace_id` with `docker logs` for the Gateway and the downstream
-service. This is local log inspection; a collector, retention policy, and
-paging integration are not yet qualified for the supported profile.
+service. This is local, rotating log inspection; a central collector, archive
+retention, and paging integration are not yet qualified for the supported profile.
 
 ## Ownership and escalation
 
