@@ -174,9 +174,66 @@ pub struct ExtractedState {
     pub evidence: ExtractedEvidence,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CanonExtractionErrorKind {
+    JsonSyntax,
+    JsonEof,
+    JsonSchema,
+    EvidenceMismatch,
+    LimitExceeded,
+    ShapeInvalid,
+}
+
+impl CanonExtractionErrorKind {
+    fn code(self) -> &'static str {
+        match self {
+            Self::JsonSyntax => "json_syntax",
+            Self::JsonEof => "json_eof",
+            Self::JsonSchema => "json_schema",
+            Self::EvidenceMismatch => "evidence_mismatch",
+            Self::LimitExceeded => "limit_exceeded",
+            Self::ShapeInvalid => "shape_invalid",
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
-#[error("invalid canonical extraction: {0}")]
-pub struct CanonExtractionError(String);
+#[error("invalid canonical extraction: {message}")]
+pub struct CanonExtractionError {
+    kind: CanonExtractionErrorKind,
+    message: String,
+}
+
+impl CanonExtractionError {
+    pub fn reason_code(&self) -> &'static str {
+        self.kind.code()
+    }
+
+    fn json(message: String, error: &serde_json::Error) -> Self {
+        let kind = match error.classify() {
+            serde_json::error::Category::Data => CanonExtractionErrorKind::JsonSchema,
+            serde_json::error::Category::Eof => CanonExtractionErrorKind::JsonEof,
+            serde_json::error::Category::Io | serde_json::error::Category::Syntax => {
+                CanonExtractionErrorKind::JsonSyntax
+            }
+        };
+        Self { kind, message }
+    }
+
+    fn shape(message: impl Into<String>) -> Self {
+        Self {
+            kind: CanonExtractionErrorKind::ShapeInvalid,
+            message: message.into(),
+        }
+    }
+
+    fn limit(message: impl Into<String>) -> Self {
+        Self {
+            kind: CanonExtractionErrorKind::LimitExceeded,
+            message: message.into(),
+        }
+    }
+}
 
 pub fn build_scan_plan(
     chapters: &[Chapter],
@@ -357,7 +414,7 @@ pub fn parse_event_selection(
     chunks: &[(CanonSourceChunk, ChunkExtraction)],
 ) -> Result<EventSelection, CanonExtractionError> {
     let selection = serde_json::from_str::<EventSelection>(raw.trim()).map_err(|error| {
-        CanonExtractionError(format!("event selection JSON is invalid: {error}"))
+        CanonExtractionError::json(format!("event selection JSON is invalid: {error}"), &error)
     })?;
     validate_event_selection(&selection, chunks)?;
     Ok(selection)
@@ -499,7 +556,7 @@ pub fn apply_event_selection(
                 .get(death.event_index)
                 .and_then(|index| *index)
                 .ok_or_else(|| {
-                    CanonExtractionError("death-linked event was not retained".into())
+                    CanonExtractionError::shape("death-linked event was not retained")
                 })?;
         }
         extraction.events = selected_events;
@@ -638,8 +695,9 @@ pub fn parse_chunk(
     raw: &str,
     chunk: &CanonSourceChunk,
 ) -> Result<ChunkExtraction, CanonExtractionError> {
-    let mut extraction = serde_json::from_str::<ChunkExtraction>(raw.trim())
-        .map_err(|error| CanonExtractionError(format!("chunk JSON is invalid: {error}")))?;
+    let mut extraction = serde_json::from_str::<ChunkExtraction>(raw.trim()).map_err(|error| {
+        CanonExtractionError::json(format!("chunk JSON is invalid: {error}"), &error)
+    })?;
     repair_chunk_evidence(&mut extraction, &chunk.content);
     validate_chunk(&extraction, chunk)?;
     Ok(extraction)
@@ -879,7 +937,7 @@ fn validate_chunk(
         ("threads", extraction.threads.len()),
     ] {
         if count > MAX_ITEMS_PER_KIND {
-            return invalid(format!("{kind} exceeds {MAX_ITEMS_PER_KIND} items"));
+            return limit(format!("{kind} exceeds {MAX_ITEMS_PER_KIND} items"));
         }
     }
     for (index, event) in extraction.events.iter().enumerate() {
@@ -951,7 +1009,7 @@ fn validate_ending(ending: &ExtractedEnding, source: &str) -> Result<(), CanonEx
     evidence(&ending.evidence, source)?;
     for states in [&ending.faction_states, &ending.location_states] {
         if states.len() > MAX_ITEMS_PER_KIND {
-            return invalid("ending state list is too large");
+            return limit("ending state list is too large");
         }
         let mut names = HashSet::new();
         for state in states.iter() {
@@ -972,7 +1030,7 @@ fn validate_states(
     source: &str,
 ) -> Result<(), CanonExtractionError> {
     if states.len() > MAX_ITEMS_PER_KIND {
-        return invalid(format!("{name} exceeds {MAX_ITEMS_PER_KIND} items"));
+        return limit(format!("{name} exceeds {MAX_ITEMS_PER_KIND} items"));
     }
     let mut names = HashSet::new();
     for state in states {
@@ -1287,7 +1345,7 @@ fn build_ending(
     let ending = final_extraction
         .ending
         .as_ref()
-        .ok_or_else(|| CanonExtractionError("final chunk has no ending".into()))?;
+        .ok_or_else(|| CanonExtractionError::shape("final chunk has no ending"))?;
     let mut character_states = BTreeMap::new();
     let mut ending_evidence = source_evidence(final_chunk.chapter_number, &ending.evidence);
     for (chunk, extraction) in chunks {
@@ -1399,7 +1457,7 @@ fn resolve_character(
     known
         .get(&normalize(name))
         .copied()
-        .ok_or_else(|| CanonExtractionError(format!("unknown canonical character {name}")))
+        .ok_or_else(|| CanonExtractionError::shape(format!("unknown canonical character {name}")))
 }
 
 fn resolve_names(names: &[String], known: &HashMap<String, String>) -> Vec<String> {
@@ -1437,14 +1495,17 @@ fn evidence(value: &ExtractedEvidence, source: &str) -> Result<(), CanonExtracti
         return invalid("evidence confidence must be between 0 and 1");
     }
     if !source.contains(&value.excerpt) {
-        return invalid("evidence excerpt must be a source-verbatim substring");
+        return Err(CanonExtractionError {
+            kind: CanonExtractionErrorKind::EvidenceMismatch,
+            message: "evidence excerpt must be a source-verbatim substring".into(),
+        });
     }
     Ok(())
 }
 
 fn unique_tokens(name: &str, values: &[String]) -> Result<(), CanonExtractionError> {
     if values.len() > MAX_REFERENCES_PER_FACT {
-        return invalid(format!(
+        return limit(format!(
             "{name} exceeds {MAX_REFERENCES_PER_FACT} references"
         ));
     }
@@ -1467,8 +1528,10 @@ fn token(name: &str, value: &str) -> Result<(), CanonExtractionError> {
 }
 
 fn text(name: &str, value: &str) -> Result<(), CanonExtractionError> {
+    if value.chars().count() > MAX_TEXT_CHARS {
+        return limit(format!("{name} exceeds {MAX_TEXT_CHARS} characters"));
+    }
     if value.trim().is_empty()
-        || value.chars().count() > MAX_TEXT_CHARS
         || value
             .chars()
             .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
@@ -1487,7 +1550,11 @@ fn normalize(value: &str) -> String {
 }
 
 fn invalid<T>(message: impl Into<String>) -> Result<T, CanonExtractionError> {
-    Err(CanonExtractionError(message.into()))
+    Err(CanonExtractionError::shape(message))
+}
+
+fn limit<T>(message: impl Into<String>) -> Result<T, CanonExtractionError> {
+    Err(CanonExtractionError::limit(message))
 }
 
 #[cfg(test)]
@@ -1567,6 +1634,56 @@ mod tests {
                 evidence: extracted_evidence(excerpt),
             }),
         }
+    }
+
+    #[test]
+    fn failed_responses_expose_only_fixed_diagnostic_categories() {
+        let chunk = CanonSourceChunk {
+            chapter_number: 1,
+            chunk_index: 0,
+            is_final: false,
+            content: "The hero enters the tower.".into(),
+        };
+        assert_eq!(
+            parse_chunk("private prose", &chunk)
+                .unwrap_err()
+                .reason_code(),
+            "json_syntax"
+        );
+        assert_eq!(
+            parse_chunk("{", &chunk).unwrap_err().reason_code(),
+            "json_eof"
+        );
+        assert_eq!(
+            parse_chunk("{}", &chunk).unwrap_err().reason_code(),
+            "json_schema"
+        );
+
+        let invented = base_extraction("invented", false);
+        assert_eq!(
+            parse_chunk(&serde_json::to_string(&invented).unwrap(), &chunk)
+                .unwrap_err()
+                .reason_code(),
+            "evidence_mismatch"
+        );
+
+        let mut oversized = base_extraction("The hero enters the tower.", false);
+        oversized.events = vec![oversized.events[0].clone(); MAX_ITEMS_PER_KIND + 1];
+        assert_eq!(
+            parse_chunk(&serde_json::to_string(&oversized).unwrap(), &chunk)
+                .unwrap_err()
+                .reason_code(),
+            "limit_exceeded"
+        );
+
+        let mut invalid = base_extraction("The hero enters the tower.", false);
+        invalid.events[0].caused_by.push(0);
+        assert_eq!(
+            parse_chunk(&serde_json::to_string(&invalid).unwrap(), &chunk)
+                .unwrap_err()
+                .reason_code(),
+            "shape_invalid"
+        );
     }
 
     #[test]
