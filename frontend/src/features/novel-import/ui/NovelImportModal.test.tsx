@@ -2,8 +2,12 @@ import { useState } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { AxiosError, type AxiosResponse } from 'axios';
+import { toast } from 'sonner';
 import { apiClient } from '@/shared/api/client';
 import { NovelImportModal } from './NovelImportModal';
+
+vi.mock('sonner', () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
 
 function TestHost() {
   const [open, setOpen] = useState(false);
@@ -16,7 +20,10 @@ function TestHost() {
 }
 
 describe('NovelImportModal', () => {
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
+  });
 
   it('submits multiple selected files through the batch contract', async () => {
     const request = vi.spyOn(apiClient, 'post').mockResolvedValue({
@@ -51,6 +58,33 @@ describe('NovelImportModal', () => {
     expect(form.getAll('file')).toEqual(files);
     expect(form.get('deviation_mode')).toBe('canon');
     expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['import_capacity_busy', '解析任务繁忙，请稍后再导入。'],
+    ['source_storage_unavailable', '文件存储暂时不可用，请稍后重试。'],
+    ['service_unavailable', '导入服务暂时不可用，请稍后重试。'],
+  ])('explains batch upload error %s', async (code, message) => {
+    vi.spyOn(apiClient, 'post').mockRejectedValue(new AxiosError('Upload failed', 'ERR_BAD_RESPONSE', undefined, undefined, {
+      status: 503,
+      data: { error: { code, message: 'Service is temporarily unavailable' } },
+    } as AxiosResponse));
+    const queryClient = new QueryClient({
+      defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <NovelImportModal onClose={vi.fn()} />
+      </QueryClientProvider>,
+    );
+    fireEvent.change(document.querySelector<HTMLInputElement>('input[type="file"]')!, {
+      target: { files: [
+        new File(['first'], 'first.txt', { type: 'text/plain' }),
+        new File(['second'], 'second.txt', { type: 'text/plain' }),
+      ] },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '导入 2 本' }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(message));
   });
 
   it('traps focus, closes with Escape, and restores focus to the opener', async () => {
