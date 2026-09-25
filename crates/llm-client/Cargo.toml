@@ -22,3 +22,4 @@ uuid.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros"] }
+tracing-subscriber.workspace = true

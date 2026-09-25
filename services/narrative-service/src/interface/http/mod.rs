@@ -320,8 +320,11 @@ fn narrative_error_response(error: NarrativeError) -> axum::response::Response {
                 "Read through the world context source chapter before resuming this timeline",
             )
         }
-        NarrativeError::Unavailable(error) => {
-            tracing::warn!(error = ?error, "novel dependency unavailable");
+        NarrativeError::Unavailable(_error) => {
+            tracing::warn!(
+                error_code = "dependency_unavailable",
+                "novel dependency unavailable"
+            );
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "service_unavailable",
@@ -340,16 +343,16 @@ fn narrative_error_response(error: NarrativeError) -> axum::response::Response {
                 "Configure the language model before retrying the request",
             )
         }
-        NarrativeError::Llm(error) => {
-            tracing::error!(error = ?error, "narrative LLM operation failed");
+        NarrativeError::Llm(_error) => {
+            tracing::error!(error_code = "llm_error", "narrative LLM operation failed");
             (
                 StatusCode::BAD_GATEWAY,
                 "llm_error",
                 "Consequence generation failed",
             )
         }
-        NarrativeError::Internal(error) => {
-            tracing::error!(error = ?error, "narrative operation failed");
+        NarrativeError::Internal(_error) => {
+            tracing::error!(error_code = "internal_error", "narrative operation failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",

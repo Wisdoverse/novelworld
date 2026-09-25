@@ -340,7 +340,7 @@ fn application_error_response(
         ),
     };
     if status.is_server_error() {
-        tracing::error!(error = ?error, "agent request failed");
+        tracing::error!(error_code = code, "agent request failed");
     }
     let mut response = (
         status,

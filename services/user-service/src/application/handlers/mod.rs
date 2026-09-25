@@ -146,8 +146,11 @@ impl LlmUsageHandler {
                 LlmSettingsScope::User,
             )
         };
-        let snapshot = self.usage_reader.read(&config).await.map_err(|error| {
-            tracing::warn!(error = ?error, "LLM usage metrics query failed");
+        let snapshot = self.usage_reader.read(&config).await.map_err(|_error| {
+            tracing::warn!(
+                error_code = "llm_usage_query_failed",
+                "LLM usage metrics query failed"
+            );
             LlmUsageError::Unavailable
         })?;
         Ok((self.pricing.summarize(snapshot), scope))
@@ -155,7 +158,7 @@ impl LlmUsageHandler {
 }
 
 impl AuthHandler {
-    #[tracing::instrument(skip(self, password))]
+    #[tracing::instrument(skip_all)]
     pub async fn register(
         &self,
         email: &str,
@@ -202,7 +205,7 @@ impl AuthHandler {
         Ok((user, access_token, refresh_token.token))
     }
 
-    #[tracing::instrument(skip(self, password))]
+    #[tracing::instrument(skip_all)]
     pub async fn setup(
         &self,
         email: &str,
@@ -350,8 +353,8 @@ impl AuthHandler {
         self.llm_tester
             .test(&config)
             .await
-            .map_err(|error| {
-                tracing::warn!(error = ?error, provider = %config.provider, model = %config.model, "settings LLM connection test failed");
+            .map_err(|_error| {
+                tracing::warn!(error_code = "llm_connection_failed", provider = %config.provider, "settings LLM connection test failed");
                 AuthError::LlmUnavailable
             })?;
         if is_admin {
@@ -384,7 +387,7 @@ impl AuthHandler {
             .ok_or(AuthError::NotFound)
     }
 
-    #[tracing::instrument(skip(self, password))]
+    #[tracing::instrument(skip_all)]
     pub async fn login(&self, email: &str, password: &str) -> AuthResult<(User, String, String)> {
         let user = self
             .user_repo

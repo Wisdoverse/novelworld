@@ -89,13 +89,13 @@ async fn main() -> anyhow::Result<()> {
 async fn run_body() -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(format!(
-            "{},reqwest=off,tower_http=off",
+            "{},reqwest=off,tower_http=off,novelworld_context=info",
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into())
         )))
         .with(tracing_subscriber::fmt::layer().json())
         .init();
 
-    let service_span = tracing::info_span!("service", service = "gateway", trace_id = "");
+    let service_span = tracing::info_span!(target: "novelworld_context", "service", service = "gateway", trace_id = "");
     async move {
         dotenvy::dotenv().ok();
 
@@ -131,7 +131,7 @@ async fn run_body() -> anyhow::Result<()> {
             Ok(v) => match v.parse() {
                 Ok(n) => n,
                 Err(_) => {
-                    tracing::warn!("Invalid RATE_LIMIT_RPS value '{}', defaulting to 500", v);
+                    tracing::warn!("Invalid RATE_LIMIT_RPS; defaulting to 500");
                     500
                 }
             },
@@ -221,10 +221,14 @@ async fn readiness_check(State(state): State<AppState>) -> impl IntoResponse {
         .get_or_refresh(|| async {
             let client = &state.proxy.client;
             let (user, novel, agent, narrative) = tokio::join!(
-                check_service(client, &state.proxy.user_service_url),
-                check_service(client, &state.proxy.novel_service_url),
-                check_service(client, &state.proxy.agent_service_url),
-                check_service(client, &state.proxy.narrative_service_url),
+                check_service(client, "user-service", &state.proxy.user_service_url),
+                check_service(client, "novel-service", &state.proxy.novel_service_url),
+                check_service(client, "agent-service", &state.proxy.agent_service_url),
+                check_service(
+                    client,
+                    "narrative-service",
+                    &state.proxy.narrative_service_url
+                ),
             );
             ReadinessSnapshot {
                 checked_at: Instant::now(),
@@ -257,7 +261,7 @@ async fn readiness_check(State(state): State<AppState>) -> impl IntoResponse {
     )
 }
 
-async fn check_service(client: &reqwest::Client, base_url: &str) -> bool {
+async fn check_service(client: &reqwest::Client, service: &'static str, base_url: &str) -> bool {
     match client
         .get(format!("{}/ready", base_url))
         .timeout(Duration::from_secs(3))
@@ -266,11 +270,16 @@ async fn check_service(client: &reqwest::Client, base_url: &str) -> bool {
     {
         Ok(r) if r.status().is_success() => true,
         Ok(r) => {
-            tracing::warn!("Health check {} returned {}", base_url, r.status());
+            tracing::warn!(service, status = %r.status(), "service readiness check failed");
             false
         }
         Err(e) => {
-            tracing::warn!("Health check {} failed: {}", base_url, e);
+            tracing::warn!(
+                service,
+                timeout = e.is_timeout(),
+                connect = e.is_connect(),
+                "service readiness check failed"
+            );
             false
         }
     }
@@ -289,6 +298,13 @@ async fn request_id_middleware(mut req: Request, next: Next) -> Response {
         .headers()
         .get("x-trace-id")
         .and_then(|v| v.to_str().ok())
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
         .map(String::from)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
@@ -301,7 +317,16 @@ async fn request_id_middleware(mut req: Request, next: Next) -> Response {
     };
 
     req.headers_mut().insert("x-trace-id", hv.clone());
+    let method = req.method().clone();
+    let route = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(axum::extract::MatchedPath::as_str)
+        .unwrap_or("unmatched")
+        .to_owned();
+    let start = Instant::now();
     let span = tracing::info_span!(
+        target: "novelworld_context",
         "service",
         service = "gateway",
         trace_id = %hv.to_str().unwrap_or_default()
@@ -309,9 +334,16 @@ async fn request_id_middleware(mut req: Request, next: Next) -> Response {
 
     let mut response = async {
         let response = next.run(req).await;
-        // SPEC 14.1: one request-scoped entry per request, so the log contract
-        // holds even when no other gateway event fires while handling it.
-        tracing::info!("request completed");
+        let status = response.status().as_u16();
+        // This measures time to response headers; streaming bodies may continue.
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        if status >= 500 {
+            tracing::error!(%method, %route, status, elapsed_ms, "request completed");
+        } else if status == 429 {
+            tracing::warn!(%method, %route, status, elapsed_ms, "request completed");
+        } else {
+            tracing::info!(%method, %route, status, elapsed_ms, "request completed");
+        }
         response
     }
     .instrument(span)
@@ -399,9 +431,9 @@ fn build_router(state: AppState) -> AnyResult<Router> {
             state.clone(),
             auth_middleware,
         ))
-        .layer(middleware::from_fn(request_id_middleware))
         .layer(middleware::from_fn(metrics::metrics_middleware))
         .layer(cors_layer(cors_origins()?))
+        .layer(middleware::from_fn(request_id_middleware))
         .layer(TraceLayer::new_for_http())
         .with_state(state))
 }
@@ -580,6 +612,7 @@ fn cors_layer(origins: Vec<HeaderValue>) -> CorsLayer {
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
             HeaderName::from_static("idempotency-key"),
+            HeaderName::from_static("x-trace-id"),
         ])
 }
 
@@ -776,6 +809,33 @@ mod authz_matrix_tests {
             "a valid token must pass authentication"
         );
     }
+
+    #[tokio::test]
+    async fn preflight_gets_a_trace_id_and_unsafe_ids_are_replaced() {
+        let router = build_router(test_state()).unwrap();
+        let preflight = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/api/auth/login")
+            .header("Origin", "http://localhost:5173")
+            .header("Access-Control-Request-Method", "POST")
+            .header("x-trace-id", "diagnostic-123")
+            .body(Body::empty())
+            .unwrap();
+        let response = router.clone().oneshot(preflight).await.unwrap();
+        assert!(response.status().is_success());
+        assert_eq!(response.headers()["x-trace-id"], "diagnostic-123");
+
+        for unsafe_id in ["query?secret".to_owned(), "x".repeat(129)] {
+            let request = Request::builder()
+                .uri("/live")
+                .header("x-trace-id", unsafe_id)
+                .body(Body::empty())
+                .unwrap();
+            let response = router.clone().oneshot(request).await.unwrap();
+            let generated = response.headers()["x-trace-id"].to_str().unwrap();
+            assert!(uuid::Uuid::parse_str(generated).is_ok());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -859,11 +919,31 @@ mod cors_tests {
 #[cfg(test)]
 mod observability_tests {
     use super::{is_observability_path, ReadinessCache, ReadinessSnapshot};
+    use axum::{body::Body, http::Request, middleware, routing::get, Router};
+    use std::io::Write;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     };
     use std::time::Instant;
+    use tokio::sync::Mutex as AsyncMutex;
+    use tower::ServiceExt;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    static LOG_TEST_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());
+
+    struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn probes_and_metrics_do_not_spend_rate_limit_capacity() {
@@ -903,6 +983,87 @@ mod observability_tests {
             assert!(task.await.unwrap().user);
         }
         assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn completion_levels_keep_context_and_omit_raw_uri() {
+        let _logging_guard = LOG_TEST_LOCK.lock().await;
+        for (filter, status, level) in [
+            ("info", 401, "INFO"),
+            ("warn", 429, "WARN"),
+            ("error", 503, "ERROR"),
+        ] {
+            let output = Arc::new(Mutex::new(Vec::new()));
+            let writer = output.clone();
+            let subscriber = tracing_subscriber::registry()
+                .with(tracing_subscriber::EnvFilter::new(format!(
+                    "{filter},reqwest=off,tower_http=off,novelworld_context=info"
+                )))
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .json()
+                        .with_writer(move || LogWriter(writer.clone())),
+                );
+            let _guard = tracing::subscriber::set_default(subscriber);
+            let response_status = axum::http::StatusCode::from_u16(status).unwrap();
+            let app = Router::new()
+                .route("/fail/{id}", get(move || async move { response_status }))
+                .layer(middleware::from_fn(super::request_id_middleware));
+            let request = || {
+                Request::builder()
+                    .uri("/fail/private-id?token=private-query")
+                    .header("x-trace-id", "diagnostic-123")
+                    .body(Body::empty())
+                    .unwrap()
+            };
+            // Other parallel tests can register these callsites while no
+            // subscriber is active on their thread. Rebuild after a warmup.
+            app.clone().oneshot(request()).await.unwrap();
+            tracing::callsite::rebuild_interest_cache();
+            output.lock().unwrap().clear();
+            let response = app.oneshot(request()).await.unwrap();
+            assert_eq!(response.status(), response_status);
+
+            let logged = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+            assert!(!logged.contains("private-id"));
+            assert!(!logged.contains("private-query"));
+            assert!(!logged.is_empty(), "missing log for {filter} / {status}");
+            let entry: serde_json::Value = serde_json::from_str(logged.trim()).unwrap();
+            assert_eq!(entry["level"], level);
+            assert_eq!(entry["fields"]["method"], "GET");
+            assert_eq!(entry["fields"]["route"], "/fail/{id}");
+            assert_eq!(entry["fields"]["status"], status);
+            assert!(entry["fields"]["elapsed_ms"].as_u64().is_some());
+            assert_eq!(entry["spans"][0]["service"], "gateway");
+            assert_eq!(entry["spans"][0]["trace_id"], "diagnostic-123");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn readiness_warning_omits_dependency_url() {
+        let _logging_guard = LOG_TEST_LOCK.lock().await;
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = output.clone();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::EnvFilter::new(
+                "warn,reqwest=off,tower_http=off",
+            ))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_writer(move || LogWriter(writer.clone())),
+            );
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let url = "http://127.0.0.1:0/private?token=sentinel-private-query";
+        super::check_service(&client, "novel-service", url).await;
+        tracing::callsite::rebuild_interest_cache();
+        output.lock().unwrap().clear();
+        assert!(!super::check_service(&client, "novel-service", url).await);
+        let logged = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(logged.contains("novel-service"));
+        assert!(!logged.contains("sentinel-private-query"));
+        assert!(!logged.contains("/private"));
     }
 }
 

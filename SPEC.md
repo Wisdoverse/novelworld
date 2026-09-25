@@ -1885,6 +1885,15 @@ All services MUST emit structured JSON logs to stdout. Each log entry MUST inclu
 - `message` (string)
 - `trace_id` (string or null) — propagated from the `X-Trace-Id` request header.
 
+The Gateway and downstream services MUST replace a missing or unsafe trace ID
+with a generated UUID. Accepted IDs are 1–128 ASCII letters, digits, hyphens,
+underscores, or periods. Each emitted HTTP completion log MUST include method,
+matched route template (or `unmatched`), numeric status, and `elapsed_ms`
+(time until response headers; streaming bodies can continue afterward).
+HTTP 5xx completions use `error`, 429 uses `warn`, and other completions use
+`info` when the configured filter allows that level. Completion logs MUST NOT
+include raw paths, query strings, headers, request bodies, or user content.
+
 ### 14.2 Health Endpoints
 
 Each downstream service MUST expose `GET /health` as a process-liveness probe

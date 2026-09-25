@@ -292,13 +292,7 @@ impl LlmClient {
                                 api_error.and_then(|error| error.retry_after.as_deref()),
                             );
                             retry_attempt += 1;
-                            tracing::warn!(
-                                "LLM error ({}), retry {}/{}: {}",
-                                status,
-                                retry_attempt,
-                                RetryPolicy::max_retries(),
-                                e
-                            );
+                            log_retry("chat", status, retry_attempt, &e);
                             tokio::time::sleep(delay).await;
                             continue;
                         }
@@ -412,13 +406,7 @@ impl LlmClient {
                                 attempt,
                                 api_error.and_then(|error| error.retry_after.as_deref()),
                             );
-                            tracing::warn!(
-                                "LLM stream setup error ({}), retry {}/{}: {}",
-                                status,
-                                attempt + 1,
-                                RetryPolicy::max_retries(),
-                                error
-                            );
+                            log_retry("stream_setup", status, attempt + 1, &error);
                             tokio::time::sleep(delay).await;
                             continue;
                         }
@@ -531,13 +519,7 @@ impl LlmClient {
                                 attempt,
                                 api_error.and_then(|error| error.retry_after.as_deref()),
                             );
-                            tracing::warn!(
-                                "LLM embedding error ({}), retry {}/{}: {}",
-                                status,
-                                attempt + 1,
-                                RetryPolicy::max_retries(),
-                                error
-                            );
+                            log_retry("embedding", status, attempt + 1, &error);
                             tokio::time::sleep(delay).await;
                             continue;
                         }
@@ -605,6 +587,83 @@ fn error_status(error: Option<&LlmApiError>) -> &'static str {
         Some(500..) => "provider_error",
         Some(_) => "rejected",
         None => "client_or_transport_error",
+    }
+}
+
+fn log_retry(
+    operation: &'static str,
+    retry_status: u16,
+    retry_attempt: u32,
+    error: &anyhow::Error,
+) {
+    let error_kind = if let Some(api_error) = error.downcast_ref::<LlmApiError>() {
+        error_status(Some(api_error))
+    } else if let Some(transport) = error.downcast_ref::<reqwest::Error>() {
+        if transport.is_timeout() {
+            "transport_timeout"
+        } else if transport.is_connect() {
+            "transport_connect"
+        } else {
+            "transport_error"
+        }
+    } else if error.downcast_ref::<serde_json::Error>().is_some() {
+        "invalid_response_json"
+    } else {
+        "client_error"
+    };
+    tracing::warn!(
+        operation,
+        retry_status,
+        retry_attempt,
+        max_retries = RetryPolicy::max_retries(),
+        error_kind,
+        "LLM request retrying"
+    );
+}
+
+#[cfg(test)]
+mod retry_log_tests {
+    use super::log_retry;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::prelude::*;
+
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn retry_log_omits_query_bearing_provider_url() {
+        let url = "http://127.0.0.1:0/private?token=sentinel-private-query";
+        let error = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { reqwest::Client::new().get(url).send().await.unwrap_err() });
+        assert!(error.to_string().contains("sentinel-private-query"));
+
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = output.clone();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_writer(move || Capture(writer.clone())),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            log_retry("chat", 500, 1, &error.into());
+        });
+        let logged = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(logged.contains("transport_connect"));
+        assert!(logged.contains("retry_status"));
+        assert!(!logged.contains("sentinel-private-query"));
+        assert!(!logged.contains("/private"));
     }
 }
 

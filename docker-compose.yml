@@ -4,6 +4,9 @@
 #                                       narrative-service, user-service]
 #   基础配置使用 postgres18；Redis 投影是显式 redis profile
 
+x-logging: &bounded-logs
+  driver: local
+
 networks:
   novel-net:
     driver: bridge
@@ -21,6 +24,7 @@ services:
     image: ${POSTGRES_IMAGE:-pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a}
     container_name: ${CONTAINER_PREFIX:-novel}-postgres
     restart: unless-stopped
+    logging: *bounded-logs
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-novel}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
@@ -45,6 +49,7 @@ services:
   postgres-migrate:
     image: ${POSTGRES_IMAGE:-pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a}
     restart: "no"
+    logging: *bounded-logs
     environment:
       PGHOST: postgres
       PGUSER: ${POSTGRES_USER:-novel}
@@ -71,6 +76,7 @@ services:
     image: ${REDIS_IMAGE:-redis:8.10.1-alpine@sha256:becdda6c7f4b3fb42e42fd7f120bbf5c54c4caaaf16f26da24e4563d2c1f0576}
     container_name: ${CONTAINER_PREFIX:-novel}-redis
     restart: unless-stopped
+    logging: *bounded-logs
     environment:
       CACHE_MODE: ${CACHE_MODE:-postgres}
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
@@ -106,6 +112,7 @@ services:
     image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.3@sha256:c26a226262ad4ff3330fb30b76653c1bb65da2fcf413b92284545a010e0a8a48
     container_name: ${CONTAINER_PREFIX:-novel}-embedding
     restart: unless-stopped
+    logging: *bounded-logs
     command:
       - --model-id
       - Qwen/Qwen3-Embedding-0.6B
@@ -149,6 +156,7 @@ services:
         SERVICE: user-service
     container_name: ${CONTAINER_PREFIX:-novel}-user-service
     restart: unless-stopped
+    logging: *bounded-logs
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-novel}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-novel_world}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
@@ -168,7 +176,7 @@ services:
       AUTH_ACCESS_TOKEN_EXPIRY: ${AUTH_ACCESS_TOKEN_EXPIRY:-3600}
       AUTH_REFRESH_TOKEN_EXPIRY: ${AUTH_REFRESH_TOKEN_EXPIRY:-604800}
       PORT: 8001
-      RUST_LOG: info
+      RUST_LOG: ${RUST_LOG:-info}
     depends_on:
       postgres-migrate:
         condition: service_completed_successfully
@@ -189,6 +197,7 @@ services:
         SERVICE: novel-service
     container_name: ${CONTAINER_PREFIX:-novel}-novel-service
     restart: unless-stopped
+    logging: *bounded-logs
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-novel}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-novel_world}
       LLM_API_URL: ${LLM_API_URL:-https://api.openai.com}
@@ -210,7 +219,7 @@ services:
       S3_SECRET_KEY: ${S3_SECRET_KEY:-}
       S3_SESSION_TOKEN: ${S3_SESSION_TOKEN:-}
       PORT: 8002
-      RUST_LOG: info
+      RUST_LOG: ${RUST_LOG:-info}
     depends_on:
       postgres-migrate:
         condition: service_completed_successfully
@@ -231,6 +240,7 @@ services:
         SERVICE: agent-service
     container_name: ${CONTAINER_PREFIX:-novel}-agent-service
     restart: unless-stopped
+    logging: *bounded-logs
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-novel}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-novel_world}
       CACHE_MODE: ${CACHE_MODE:-postgres}
@@ -249,7 +259,7 @@ services:
       PORT: 8003
       NOVEL_SERVICE_URL: http://novel-service:8002
       NARRATIVE_SERVICE_URL: http://narrative-service:8004
-      RUST_LOG: info
+      RUST_LOG: ${RUST_LOG:-info}
     depends_on:
       postgres-migrate:
         condition: service_completed_successfully
@@ -274,6 +284,7 @@ services:
         SERVICE: narrative-service
     container_name: ${CONTAINER_PREFIX:-novel}-narrative-service
     restart: unless-stopped
+    logging: *bounded-logs
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-novel}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-novel_world}
       LLM_API_URL: ${LLM_API_URL:-https://api.openai.com}
@@ -288,7 +299,7 @@ services:
       PORT: 8004
       NOVEL_SERVICE_URL: http://novel-service:8002
       AGENT_SERVICE_URL: http://agent-service:8003
-      RUST_LOG: info
+      RUST_LOG: ${RUST_LOG:-info}
     depends_on:
       postgres-migrate:
         condition: service_completed_successfully
@@ -313,6 +324,7 @@ services:
         SERVICE: gateway
     container_name: ${CONTAINER_PREFIX:-novel}-gateway
     restart: unless-stopped
+    logging: *bounded-logs
     environment:
       USER_SERVICE_URL: http://user-service:8001
       NOVEL_SERVICE_URL: http://novel-service:8002
@@ -323,7 +335,7 @@ services:
       PORT: 8080
       RATE_LIMIT_RPS: ${RATE_LIMIT_RPS:-500}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost,http://127.0.0.1}
-      RUST_LOG: info
+      RUST_LOG: ${RUST_LOG:-info}
     # ports:
     #   - "8080:8080"  # uncomment for local dev
     depends_on:
@@ -354,6 +366,7 @@ services:
         VITE_API_URL: ${VITE_API_URL:-/api}
     container_name: ${CONTAINER_PREFIX:-novel}-frontend
     restart: unless-stopped
+    logging: *bounded-logs
     networks:
       - novel-net
 
@@ -363,6 +376,7 @@ services:
     image: ${NGINX_IMAGE:-nginx:alpine@sha256:db35bfc6b2951e7f8a72db5db120288c127ffaeeb4a6d4b95a26fead017d5913}
     container_name: ${CONTAINER_PREFIX:-novel}-nginx
     restart: unless-stopped
+    logging: *bounded-logs
     ports:
       - "${NGINX_HTTP_BIND:-0.0.0.0}:${NGINX_HTTP_PORT:-80}:80"
     volumes:
