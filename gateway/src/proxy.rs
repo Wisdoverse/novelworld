@@ -1107,6 +1107,15 @@ mod tests {
 
         let mut headers = HeaderMap::new();
         headers.insert(RETRY_AFTER, HeaderValue::from_static("1"));
+        let body = br#"{"error":{"code":"import_capacity_busy","message":"Novel import capacity is busy; retry the request"}}"#;
+        let response = normalized_error_response(StatusCode::SERVICE_UNAVAILABLE, &headers, body);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "1");
+        let out_body = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert_eq!(out_body.as_ref(), body);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("1"));
         let response = normalized_error_response(StatusCode::TOO_MANY_REQUESTS, &headers, b"boom");
         assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "1");
     }

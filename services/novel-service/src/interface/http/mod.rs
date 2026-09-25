@@ -700,8 +700,9 @@ fn coded_api_error(status: StatusCode, code: &'static str, message: impl Into<St
 
 fn import_error_response(error: anyhow::Error) -> Response {
     if error.downcast_ref::<ImportCapacityUnavailable>().is_some() {
-        let mut response = api_error(
+        let mut response = coded_api_error(
             StatusCode::SERVICE_UNAVAILABLE,
+            "import_capacity_busy",
             "Novel import capacity is busy; retry the request",
         );
         response
@@ -719,8 +720,9 @@ fn import_error_response(error: anyhow::Error) -> Response {
         .downcast_ref::<SourceFileStorageUnavailable>()
         .is_some()
     {
-        let mut response = api_error(
+        let mut response = coded_api_error(
             StatusCode::SERVICE_UNAVAILABLE,
+            "source_storage_unavailable",
             "Source file storage is unavailable; retry the upload",
         );
         response
@@ -2008,6 +2010,35 @@ mod ownership_tests {
             serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
             serde_json::json!({"error": "Import cannot be retried"})
         );
+    }
+
+    #[tokio::test]
+    async fn import_unavailable_errors_keep_safe_codes_and_retry_headers() {
+        for (error, code, message, retry_after) in [
+            (
+                ImportCapacityUnavailable.into(),
+                "import_capacity_busy",
+                "Novel import capacity is busy; retry the request",
+                "1",
+            ),
+            (
+                SourceFileStorageUnavailable(anyhow::anyhow!("private storage detail")).into(),
+                "source_storage_unavailable",
+                "Source file storage is unavailable; retry the upload",
+                "5",
+            ),
+        ] {
+            let response = import_error_response(error);
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.headers()["Retry-After"], retry_after);
+            let body = axum::body::to_bytes(response.into_body(), 1_024)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                serde_json::json!({"error": {"code": code, "message": message}})
+            );
+        }
     }
 
     #[tokio::test]
