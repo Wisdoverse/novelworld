@@ -37,9 +37,10 @@ def find_entries(obj, key):
 
 
 def logs_of(service):
-    return subprocess.run(
+    result = subprocess.run(
         ["docker", "logs", f"novel-{service}"], capture_output=True, text=True
-    ).stdout
+    )
+    return result.stdout + result.stderr if service == "nginx" else result.stdout
 
 
 def main():
