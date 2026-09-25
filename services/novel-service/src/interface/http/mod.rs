@@ -880,7 +880,7 @@ async fn upload_novel(
     let mut multipart = match multipart {
         Ok(multipart) => multipart,
         Err(error) => {
-            tracing::warn!(error = ?error, "multipart upload rejected");
+            tracing::warn!(status = %error.status(), "multipart upload rejected");
             return api_error(StatusCode::BAD_REQUEST, "Invalid multipart upload");
         }
     };
@@ -897,7 +897,7 @@ async fn upload_novel(
             Ok(Some(field)) => field,
             Ok(None) => break,
             Err(error) => {
-                tracing::warn!(error = ?error, "invalid multipart upload");
+                tracing::warn!(status = %error.status(), "invalid multipart upload");
                 return api_error(StatusCode::BAD_REQUEST, "Invalid multipart upload");
             }
         };
@@ -1030,7 +1030,7 @@ async fn upload_novel_batch(
     let mut multipart = match multipart {
         Ok(multipart) => multipart,
         Err(error) => {
-            tracing::warn!(error = ?error, "batch multipart upload rejected");
+            tracing::warn!(status = %error.status(), "batch multipart upload rejected");
             return api_error(StatusCode::BAD_REQUEST, "Invalid multipart upload");
         }
     };
@@ -1044,7 +1044,7 @@ async fn upload_novel_batch(
             Ok(Some(field)) => field,
             Ok(None) => break,
             Err(error) => {
-                tracing::warn!(error = ?error, "invalid batch multipart upload");
+                tracing::warn!(status = %error.status(), "invalid batch multipart upload");
                 return api_error(StatusCode::BAD_REQUEST, "Invalid multipart upload");
             }
         };
