@@ -2260,7 +2260,7 @@ async fn run_live(
         {
             let prompt = character_extractor::build_chunk_extraction_prompt(
                 &case.novel_title,
-                &chunk,
+                &chunk.render(),
                 index,
             );
             let response = config

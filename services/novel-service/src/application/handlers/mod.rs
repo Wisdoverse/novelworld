@@ -4,7 +4,7 @@ use futures::{stream, StreamExt};
 use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     future::Future,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -40,10 +40,11 @@ use crate::domain::services::{
 };
 use crate::domain::services::{
     character_extractor::{
-        build_chunk_extraction_prompt, build_extraction_prompt, build_representative_sample,
-        build_scan_plan, find_first_appearance, json_object_payload, merge_extractions,
-        needs_chunk_scan, text_contains_name, validate_chunk_extraction, validate_extraction,
-        ChunkExtractionResult, ExtractionResult, MAX_WORLD_SUMMARY_CHARS,
+        build_chunk_extraction_prompt, build_extraction_prompt,
+        build_representative_sample_with_limit, build_scan_plan, find_first_appearance,
+        json_object_payload, merge_extractions, needs_chunk_scan, text_contains_name,
+        validate_chunk_extraction, validate_extraction, ChunkExtractionResult, ExtractionResult,
+        ScanChunk, MAX_WORLD_SUMMARY_CHARS,
     },
     novel_parser::NovelParserService,
 };
@@ -148,6 +149,87 @@ where
     Err(last_error.expect("three validation attempts produce an error"))
 }
 
+async fn extract_character_summary(
+    llm: &dyn LlmPort,
+    budget: &ImportLlmDispatchBudget,
+    user_id: Uuid,
+    title: &str,
+    chapters: &[Chapter],
+) -> Result<ExtractionResult> {
+    for sample_limit in [8_000, 4_000, 2_000] {
+        let sample_text = build_representative_sample_with_limit(chapters, sample_limit);
+        let prompt = build_extraction_prompt(title, &sample_text);
+        match validated_json(
+            llm,
+            budget,
+            user_id,
+            NovelLlmTask::CharacterExtraction,
+            &prompt,
+            |result: &ExtractionResult| validate_extraction(result).map_err(Into::into),
+        )
+        .await
+        {
+            Ok(result) => return Ok(result),
+            Err(error)
+                if import_error::<LlmOutputTruncated>(&error).is_some() && sample_limit > 2_000 =>
+            {
+                warn!(
+                    sample_limit,
+                    reason = "character_summary_truncated",
+                    "retrying smaller character summary sample"
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("bounded summary fallback returns or succeeds")
+}
+
+async fn extract_character_scan_chunk(
+    llm: &dyn LlmPort,
+    budget: &ImportLlmDispatchBudget,
+    user_id: Uuid,
+    title: &str,
+    index: usize,
+    chunk: ScanChunk,
+) -> Result<Vec<ChunkExtractionResult>> {
+    let mut pending = VecDeque::from([(chunk, 0)]);
+    let mut extracted = Vec::new();
+    while let Some((chunk, depth)) = pending.pop_front() {
+        let prompt = build_chunk_extraction_prompt(title, &chunk.render(), index);
+        match validated_json(
+            llm,
+            budget,
+            user_id,
+            NovelLlmTask::CharacterExtraction,
+            &prompt,
+            |result: &ChunkExtractionResult| validate_chunk_extraction(result).map_err(Into::into),
+        )
+        .await
+        {
+            Ok(result) => extracted.push(result),
+            Err(error)
+                if import_error::<LlmOutputTruncated>(&error).is_some()
+                    && depth < MAX_CHARACTER_SCAN_SPLIT_DEPTH =>
+            {
+                let Some((left, right)) = chunk.split() else {
+                    return Err(error);
+                };
+                warn!(
+                    chunk_index = index,
+                    split_depth = depth + 1,
+                    reason = "character_scan_truncated",
+                    "splitting character scan chunk"
+                );
+                pending.push_front((right, depth + 1));
+                pending.push_front((left, depth + 1));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(extracted)
+}
+
 fn canon_retry_prompt(base_prompt: &str, validation_error: &str) -> String {
     format!(
         "{base_prompt}\n\nCORRECTION REQUIRED: the previous response was rejected because {validation_error}. Return a completely new JSON object. Fix that validation error; copy every evidence excerpt directly from SOURCE."
@@ -162,6 +244,122 @@ mod validated_json_tests {
     struct InvalidThenValid {
         calls: AtomicUsize,
         saw_correction: AtomicBool,
+    }
+
+    struct TruncateLarge {
+        calls: AtomicUsize,
+        max_source_chars: usize,
+        other_error: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmPort for TruncateLarge {
+        async fn chat_json(
+            &self,
+            _user_id: Uuid,
+            _task: NovelLlmTask,
+            prompt: &str,
+        ) -> Result<String> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if self.other_error {
+                anyhow::bail!("synthetic transport failure");
+            }
+            if prompt.matches('Ω').count() > self.max_source_chars {
+                return Err(LlmOutputTruncated(anyhow::anyhow!("synthetic output limit")).into());
+            }
+            if prompt.contains("扫描段落：") {
+                Ok(r#"{"characters":[],"relationships":[]}"#.into())
+            } else {
+                Ok(r#"{"characters":[],"relationships":[],"world_summary":"world","genre":"fantasy"}"#.into())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn character_truncation_recovers_only_by_shrinking_source_within_budget() {
+        let chapters = vec![Chapter::new(Uuid::nil(), 7, None, "Ω".repeat(6_000))];
+        let llm = TruncateLarge {
+            calls: AtomicUsize::new(0),
+            max_source_chars: 3_500,
+            other_error: false,
+        };
+        let budget = ImportLlmDispatchBudget::new(5);
+        let summary = extract_character_summary(&llm, &budget, Uuid::nil(), "test", &chapters)
+            .await
+            .unwrap();
+        assert_eq!(summary.world_summary, "world");
+        let scans = build_scan_plan(&chapters);
+        let scan = extract_character_scan_chunk(
+            &llm,
+            &budget,
+            Uuid::nil(),
+            "test",
+            0,
+            scans.into_iter().next().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(scan.len(), 2);
+        assert_eq!(llm.calls.load(Ordering::Relaxed), 5);
+        assert_eq!(budget.remaining.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn character_scan_does_not_split_other_errors_or_exceed_dispatch_budget() {
+        let chapters = vec![Chapter::new(Uuid::nil(), 7, None, "Ω".repeat(6_000))];
+        let llm = TruncateLarge {
+            calls: AtomicUsize::new(0),
+            max_source_chars: 0,
+            other_error: true,
+        };
+        let error = extract_character_scan_chunk(
+            &llm,
+            &ImportLlmDispatchBudget::new(5),
+            Uuid::nil(),
+            "test",
+            0,
+            build_scan_plan(&chapters).pop().unwrap(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("synthetic transport failure"));
+        assert_eq!(llm.calls.load(Ordering::Relaxed), 1);
+
+        let llm = TruncateLarge {
+            calls: AtomicUsize::new(0),
+            max_source_chars: 0,
+            other_error: false,
+        };
+        let error = extract_character_scan_chunk(
+            &llm,
+            &ImportLlmDispatchBudget::new(1),
+            Uuid::nil(),
+            "test",
+            0,
+            build_scan_plan(&chapters).pop().unwrap(),
+        )
+        .await
+        .unwrap_err();
+        assert!(import_error::<ImportBudgetExceeded>(&error).is_some());
+        assert_eq!(llm.calls.load(Ordering::Relaxed), 1);
+
+        let llm = TruncateLarge {
+            calls: AtomicUsize::new(0),
+            max_source_chars: 0,
+            other_error: false,
+        };
+        let error = extract_character_scan_chunk(
+            &llm,
+            &ImportLlmDispatchBudget::new(20),
+            Uuid::nil(),
+            "test",
+            0,
+            build_scan_plan(&chapters).pop().unwrap(),
+        )
+        .await
+        .unwrap_err();
+        assert!(import_error::<LlmOutputTruncated>(&error).is_some());
+        assert_eq!(llm.calls.load(Ordering::Relaxed), 4);
     }
 
     #[async_trait::async_trait]
@@ -909,6 +1107,8 @@ const MAX_IMPORT_APPLICATION_DISPATCHES: usize = 640;
 // complete projection allowance so fresh LLM responses, including every
 // schema/evidence retry and boundary repair, cannot consume those slots.
 const MAX_IMPORT_LLM_DISPATCHES: usize = MAX_IMPORT_APPLICATION_DISPATCHES - MAX_AVATARS_PER_NOVEL;
+// A dense 24 KiB scan can shrink below 2 KiB before a typed failure.
+const MAX_CHARACTER_SCAN_SPLIT_DEPTH: usize = 4;
 const IMPORT_LEASE_HEARTBEAT: Duration = Duration::from_secs(30);
 const IMPORT_RECOVERY_INTERVAL: Duration = Duration::from_secs(30);
 const GAME_RULE_LEASE_HEARTBEAT: Duration = Duration::from_secs(30);
@@ -1854,15 +2054,12 @@ impl NovelCommandHandler {
 
         // 提取角色和世界观（代表性样本 + 分块全文扫描）
         info!("Extracting characters for novel {}", novel_id);
-        let sample_text = build_representative_sample(chapters);
-        let prompt = build_extraction_prompt(&title, &sample_text);
-        let mut base_extraction: ExtractionResult = validated_json(
+        let mut base_extraction = extract_character_summary(
             self.llm.as_ref(),
             llm_budget.as_ref(),
             claim.user_id,
-            NovelLlmTask::CharacterExtraction,
-            &prompt,
-            |result| validate_extraction(result).map_err(Into::into),
+            &title,
+            chapters,
         )
         .await?;
 
@@ -1876,17 +2073,16 @@ impl NovelCommandHandler {
                     let llm_budget = llm_budget.clone();
                     let title = title.clone();
                     async move {
-                        let prompt = build_chunk_extraction_prompt(&title, &chunk, index);
-                        let result: ChunkExtractionResult = validated_json(
+                        let extracted = extract_character_scan_chunk(
                             llm.as_ref(),
                             llm_budget.as_ref(),
                             user_id,
-                            NovelLlmTask::CharacterExtraction,
-                            &prompt,
-                            |result| validate_chunk_extraction(result).map_err(Into::into),
+                            &title,
+                            index,
+                            chunk,
                         )
                         .await?;
-                        Ok::<_, anyhow::Error>((index, result))
+                        Ok::<_, anyhow::Error>((index, extracted))
                     }
                 })
                 .buffer_unordered(3)
@@ -1896,7 +2092,7 @@ impl NovelCommandHandler {
             results.sort_by_key(|(index, _)| *index);
             chunk_extractions = results
                 .into_iter()
-                .map(|(_, extraction)| extraction)
+                .flat_map(|(_, extractions)| extractions)
                 .collect();
             // The representative sample spans unrelated chapters. Use it for
             // global metadata only; source-ordered chunks own character facts.
