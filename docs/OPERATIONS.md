@@ -61,10 +61,19 @@ investigation. `debug` can be high volume and is not a privacy exception.
 
 The base and optional monitoring Compose services use Docker's `local` logging
 driver, including Redis and local embedding profiles. Its default rotation
-retains up to five 20 MB files per
-container (with compression); older logs are discarded. `docker logs` and
+retains up to five 20 MB files per container (with compression); older logs
+are discarded. `docker logs` and
 `docker compose logs` remain available. Existing containers pick up this
 setting when recreated. See [Docker's local driver reference](https://docs.docker.com/engine/logging/drivers/local/).
+
+The public Nginx edge emits JSON request outcomes with status and upstream
+timing, but no raw URI, client IP, Referer, or User-Agent. Its `trace_id`
+comes from the Gateway response and can be empty for requests stopped at the
+edge. The frontend Nginx does not duplicate access logs. Both Nginx error logs
+use `crit`: lower-severity upstream errors automatically include the original
+request line and client address. Critical errors can still carry request
+context, so restrict Docker log access and treat the retained logs as
+sensitive. Use the edge status and upstream timing for routine failures.
 
 - `ERROR`: a failed operation or HTTP 5xx; investigate using `trace_id`,
   `route`, `status`, and nearby fixed error codes.
@@ -77,7 +86,8 @@ Completion `elapsed_ms` ends when response headers are produced; it excludes
 the rest of a streaming response. `route` is an Axum template or `unmatched`,
 never the raw path. Caller trace IDs are bounded and sanitized at every HTTP
 ingress. Keep credentials, email, names, novel content, prompt/response bodies,
-raw URLs, query strings, and arbitrary headers out of logs at every level.
+raw URLs, query strings, and arbitrary headers out of application logs at every
+level. The Nginx critical-error limitation is described above.
 
 For a recent error on the local host, inspect the service's structured output:
 

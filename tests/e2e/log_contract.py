@@ -8,7 +8,8 @@ structured JSON carrying timestamp, level, message, and the service span fields
 must also have logged at least one request-scoped line with a propagated
 non-empty trace id, and the checker itself proves propagation end to end: it
 sends a request stamped with a known X-Trace-Id and asserts the downstream
-service logs that exact id.
+service logs that exact id. It also checks the edge access outcome and rejects
+raw request metadata in Nginx logs.
 """
 import json
 import subprocess
@@ -49,12 +50,15 @@ def main():
     # known X-Trace-Id must surface in the user-service setup log with that
     # exact id (the public path needs no credentials).
     probe_id = f"log-contract-{uuid.uuid4()}"
+    private_marker = f"edge-private-{uuid.uuid4()}"
     for attempt in range(5):
         subprocess.run(
             [
                 "curl", "--silent", "--show-error", "--output", "/dev/null",
                 "-H", f"X-Trace-Id: {probe_id}",
-                f"{api}/setup/status",
+                "-H", f"Referer: https://example.invalid/?probe={private_marker}",
+                "-H", f"User-Agent: {private_marker}",
+                f"{api}/setup/status?probe={private_marker}",
             ],
             check=False,
         )
@@ -68,6 +72,30 @@ def main():
         time.sleep(1.2)  # rate limiter spacing
     if not propagated:
         problems.append("propagation: the stamped X-Trace-Id never reached user-service logs")
+
+    edge_logs = logs_of("nginx")
+    if private_marker in edge_logs:
+        problems.append("nginx: private request metadata leaked into logs")
+    edge_entries = []
+    for line in edge_logs.splitlines():
+        try:
+            edge_entries.append(json.loads(line))
+        except ValueError:
+            continue  # Nginx startup lines are not access events.
+    edge_entry = next((
+        entry for entry in edge_entries
+        if isinstance(entry, dict)
+        and entry.get("trace_id") == probe_id
+        and entry.get("method") == "GET"
+        and type(entry.get("status")) is int
+    ), None)
+    if edge_entry is None:
+        problems.append("nginx: no structured edge outcome linked to the request")
+    else:
+        status = edge_entry["status"]
+        expected = "ERROR" if status >= 500 else "WARN" if status == 429 else "INFO"
+        if edge_entry.get("level") != expected:
+            problems.append("nginx: edge severity disagrees with status")
 
     for service in SERVICES:
         lines = [line for line in logs_of(service).splitlines() if line.strip()]
