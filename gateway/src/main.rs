@@ -221,10 +221,14 @@ async fn readiness_check(State(state): State<AppState>) -> impl IntoResponse {
         .get_or_refresh(|| async {
             let client = &state.proxy.client;
             let (user, novel, agent, narrative) = tokio::join!(
-                check_service(client, &state.proxy.user_service_url),
-                check_service(client, &state.proxy.novel_service_url),
-                check_service(client, &state.proxy.agent_service_url),
-                check_service(client, &state.proxy.narrative_service_url),
+                check_service(client, "user-service", &state.proxy.user_service_url),
+                check_service(client, "novel-service", &state.proxy.novel_service_url),
+                check_service(client, "agent-service", &state.proxy.agent_service_url),
+                check_service(
+                    client,
+                    "narrative-service",
+                    &state.proxy.narrative_service_url
+                ),
             );
             ReadinessSnapshot {
                 checked_at: Instant::now(),
@@ -257,7 +261,7 @@ async fn readiness_check(State(state): State<AppState>) -> impl IntoResponse {
     )
 }
 
-async fn check_service(client: &reqwest::Client, base_url: &str) -> bool {
+async fn check_service(client: &reqwest::Client, service: &'static str, base_url: &str) -> bool {
     match client
         .get(format!("{}/ready", base_url))
         .timeout(Duration::from_secs(3))
@@ -266,11 +270,16 @@ async fn check_service(client: &reqwest::Client, base_url: &str) -> bool {
     {
         Ok(r) if r.status().is_success() => true,
         Ok(r) => {
-            tracing::warn!("Health check {} returned {}", base_url, r.status());
+            tracing::warn!(service, status = %r.status(), "service readiness check failed");
             false
         }
         Err(e) => {
-            tracing::warn!("Health check {} failed: {}", base_url, e);
+            tracing::warn!(
+                service,
+                timeout = e.is_timeout(),
+                connect = e.is_connect(),
+                "service readiness check failed"
+            );
             false
         }
     }
@@ -917,8 +926,11 @@ mod observability_tests {
         Arc, Mutex,
     };
     use std::time::Instant;
+    use tokio::sync::Mutex as AsyncMutex;
     use tower::ServiceExt;
     use tracing_subscriber::layer::SubscriberExt;
+
+    static LOG_TEST_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());
 
     struct LogWriter(Arc<Mutex<Vec<u8>>>);
 
@@ -975,6 +987,7 @@ mod observability_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn completion_levels_keep_context_and_omit_raw_uri() {
+        let _logging_guard = LOG_TEST_LOCK.lock().await;
         for (filter, status, level) in [
             ("info", 401, "INFO"),
             ("warn", 429, "WARN"),
@@ -996,17 +1009,25 @@ mod observability_tests {
             let app = Router::new()
                 .route("/fail/{id}", get(move || async move { response_status }))
                 .layer(middleware::from_fn(super::request_id_middleware));
-            let request = Request::builder()
-                .uri("/fail/private-id?token=private-query")
-                .header("x-trace-id", "diagnostic-123")
-                .body(Body::empty())
-                .unwrap();
-            let response = app.oneshot(request).await.unwrap();
+            let request = || {
+                Request::builder()
+                    .uri("/fail/private-id?token=private-query")
+                    .header("x-trace-id", "diagnostic-123")
+                    .body(Body::empty())
+                    .unwrap()
+            };
+            // Other parallel tests can register these callsites while no
+            // subscriber is active on their thread. Rebuild after a warmup.
+            app.clone().oneshot(request()).await.unwrap();
+            tracing::callsite::rebuild_interest_cache();
+            output.lock().unwrap().clear();
+            let response = app.oneshot(request()).await.unwrap();
             assert_eq!(response.status(), response_status);
 
             let logged = String::from_utf8(output.lock().unwrap().clone()).unwrap();
             assert!(!logged.contains("private-id"));
             assert!(!logged.contains("private-query"));
+            assert!(!logged.is_empty(), "missing log for {filter} / {status}");
             let entry: serde_json::Value = serde_json::from_str(logged.trim()).unwrap();
             assert_eq!(entry["level"], level);
             assert_eq!(entry["fields"]["method"], "GET");
@@ -1016,6 +1037,33 @@ mod observability_tests {
             assert_eq!(entry["spans"][0]["service"], "gateway");
             assert_eq!(entry["spans"][0]["trace_id"], "diagnostic-123");
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn readiness_warning_omits_dependency_url() {
+        let _logging_guard = LOG_TEST_LOCK.lock().await;
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = output.clone();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::EnvFilter::new(
+                "warn,reqwest=off,tower_http=off",
+            ))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_writer(move || LogWriter(writer.clone())),
+            );
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let url = "http://127.0.0.1:0/private?token=sentinel-private-query";
+        super::check_service(&client, "novel-service", url).await;
+        tracing::callsite::rebuild_interest_cache();
+        output.lock().unwrap().clear();
+        assert!(!super::check_service(&client, "novel-service", url).await);
+        let logged = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(logged.contains("novel-service"));
+        assert!(!logged.contains("sentinel-private-query"));
+        assert!(!logged.contains("/private"));
     }
 }
 
