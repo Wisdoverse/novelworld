@@ -9,7 +9,7 @@ import {
   useUploadNovelsBatch,
   validateNovelBatchFiles,
 } from '@/entities/novel';
-import { getApiErrorMessage } from '@/shared/api/client';
+import { getApiErrorCode, getApiErrorMessage } from '@/shared/api/client';
 
 export function NovelImportModal({ onClose }: { onClose: () => void }) {
   const returnFocusRef = useRef<HTMLElement | null>(
@@ -75,7 +75,15 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
       toast.success(isBatch ? `已开始导入 ${files.length} 本小说` : '小说导入已开始');
       onClose();
     } catch (error) {
-      toast.error(getApiErrorMessage(error, isBatch ? '批量导入失败' : '小说导入失败'));
+      const code = getApiErrorCode(error);
+      const message = code === 'import_capacity_busy'
+        ? '解析任务繁忙，请稍后再导入。'
+        : code === 'source_storage_unavailable'
+          ? '文件存储暂时不可用，请稍后重试。'
+          : code === 'service_unavailable' || code === 'bad_gateway'
+            ? '导入服务暂时不可用，请稍后重试。'
+            : getApiErrorMessage(error, isBatch ? '批量导入失败' : '小说导入失败');
+      toast.error(message);
     }
   };
 
