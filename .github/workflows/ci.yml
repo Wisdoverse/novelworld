@@ -387,6 +387,8 @@ jobs:
           docker compose -f docker-compose.yml up -d --build --wait --wait-timeout 180
           test -z "$(docker ps -a --filter name=^/novel-redis$ --format '{{.Names}}')"
           test "$(docker exec novel-agent-service printenv CACHE_MODE)" = postgres
+      - name: Verify the structured log contract
+        run: python3 tests/e2e/log_contract.py
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Verify release-built diagnostic lifecycle and release refusal
@@ -614,9 +616,6 @@ jobs:
       - name: Verify the S3 source-boundary kill/restart drill
         if: env.RUN_EXTENDED_DRILLS == 'true'
         run: tests/e2e/source_recovery_drill.sh
-      - name: Verify the structured log contract
-        if: env.RUN_EXTENDED_DRILLS == 'true'
-        run: python3 tests/e2e/log_contract.py
       - name: Verify the secret rotation drill
         if: env.RUN_EXTENDED_DRILLS == 'true'
         env:

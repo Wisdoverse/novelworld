@@ -8,7 +8,8 @@ structured JSON carrying timestamp, level, message, and the service span fields
 must also have logged at least one request-scoped line with a propagated
 non-empty trace id, and the checker itself proves propagation end to end: it
 sends a request stamped with a known X-Trace-Id and asserts the downstream
-service logs that exact id.
+service logs that exact id. It also checks the edge access outcome and rejects
+raw request metadata in Nginx logs.
 """
 import json
 import subprocess
@@ -36,9 +37,10 @@ def find_entries(obj, key):
 
 
 def logs_of(service):
-    return subprocess.run(
+    result = subprocess.run(
         ["docker", "logs", f"novel-{service}"], capture_output=True, text=True
-    ).stdout
+    )
+    return result.stdout + result.stderr if service == "nginx" else result.stdout
 
 
 def main():
@@ -49,12 +51,15 @@ def main():
     # known X-Trace-Id must surface in the user-service setup log with that
     # exact id (the public path needs no credentials).
     probe_id = f"log-contract-{uuid.uuid4()}"
+    private_marker = f"edge-private-{uuid.uuid4()}"
     for attempt in range(5):
         subprocess.run(
             [
                 "curl", "--silent", "--show-error", "--output", "/dev/null",
                 "-H", f"X-Trace-Id: {probe_id}",
-                f"{api}/setup/status",
+                "-H", f"Referer: https://example.invalid/?probe={private_marker}",
+                "-H", f"User-Agent: {private_marker}",
+                f"{api}/setup/status?probe={private_marker}",
             ],
             check=False,
         )
@@ -69,17 +74,42 @@ def main():
     if not propagated:
         problems.append("propagation: the stamped X-Trace-Id never reached user-service logs")
 
+    edge_logs = logs_of("nginx")
+    if private_marker in edge_logs:
+        problems.append("nginx: private request metadata leaked into logs")
+    edge_entries = []
+    for line in edge_logs.splitlines():
+        try:
+            edge_entries.append(json.loads(line))
+        except ValueError:
+            continue  # Nginx startup lines are not access events.
+    edge_entry = next((
+        entry for entry in edge_entries
+        if isinstance(entry, dict)
+        and entry.get("trace_id") == probe_id
+        and entry.get("method") == "GET"
+        and type(entry.get("status")) is int
+    ), None)
+    if edge_entry is None:
+        problems.append("nginx: no structured edge outcome linked to the request")
+    else:
+        status = edge_entry["status"]
+        expected = "ERROR" if status >= 500 else "WARN" if status == 429 else "INFO"
+        if edge_entry.get("level") != expected:
+            problems.append("nginx: edge severity disagrees with status")
+
     for service in SERVICES:
         lines = [line for line in logs_of(service).splitlines() if line.strip()]
         if not lines:
             problems.append(f"{service}: no log lines")
             continue
         non_empty_trace_ids = 0
+        completions = 0
         for line in lines:
             try:
                 entry = json.loads(line)
             except ValueError:
-                problems.append(f"{service}: non-JSON log line: {line[:80]}")
+                problems.append(f"{service}: non-JSON log line")
                 continue
             target = entry.get("target", "")
             if not any(target == prefix or target.startswith(prefix + "::") for prefix in SERVICE_TARGETS):
@@ -103,11 +133,32 @@ def main():
                     continue
                 if any(value for value in trace_ids):
                     non_empty_trace_ids += 1
+                fields = entry.get("fields", {})
+                if isinstance(fields, dict) and fields.get("message") == "request completed":
+                    completions += 1
+                    method = fields.get("method")
+                    route = fields.get("route")
+                    status = fields.get("status")
+                    elapsed_ms = fields.get("elapsed_ms")
+                    if not isinstance(method, str) or not method:
+                        problems.append(f"{service}: completion missing method")
+                    if not isinstance(route, str) or not route or "?" in route:
+                        problems.append(f"{service}: completion has unsafe route")
+                    if type(status) is not int or not 100 <= status <= 599:
+                        problems.append(f"{service}: completion missing numeric status")
+                    else:
+                        expected = "ERROR" if status >= 500 else "WARN" if status == 429 else "INFO"
+                        if entry.get("level") != expected:
+                            problems.append(f"{service}: completion level disagrees with status")
+                    if type(elapsed_ms) is not int or elapsed_ms < 0:
+                        problems.append(f"{service}: completion missing elapsed_ms")
         else:
             if non_empty_trace_ids == 0:
                 problems.append(
                     f"{service}: no request-scoped line with a propagated trace id"
                 )
+            if completions == 0:
+                problems.append(f"{service}: no request completion log")
     if problems:
         print("log contract failed:\n  " + "\n  ".join(problems))
         sys.exit(1)

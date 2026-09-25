@@ -46,9 +46,59 @@ dedup, or paging exists yet.
   plus gateway `RATE_LIMIT_RPS` ([`SECURITY.md`](../SECURITY.md)); capacity contract and
   503 assertions in [`SLOS.md`](./SLOS.md).
 - **Log contract** — [`log_contract.py`](../tests/e2e/log_contract.py) checks the §14.1 shape and
-  trace propagation.
+  trace propagation and request outcome fields.
 - **Capacity profile** — [`SLOS.md`](./SLOS.md) Run locally section; the recorded CI run is
   the qualification gate.
+
+## Log levels and incident lookup
+
+All five Rust processes emit JSON to stdout. Set `RUST_LOG` in `.env` to tune
+verbosity at the next service recreation; Compose defaults to `info`. For a
+focused investigation, use `RUST_LOG=info,novel_service=debug` (replace the
+module target for another service). `reqwest` and `tower_http` remain disabled
+because their default traces can contain full URLs. Restore `info` after the
+investigation. `debug` can be high volume and is not a privacy exception.
+
+The base and optional monitoring Compose services use Docker's `local` logging
+driver, including Redis and local embedding profiles. Its default rotation
+retains up to five 20 MB files per container (with compression); older logs
+are discarded. `docker logs` and
+`docker compose logs` remain available. Existing containers pick up this
+setting when recreated. See [Docker's local driver reference](https://docs.docker.com/engine/logging/drivers/local/).
+
+The public Nginx edge emits JSON request outcomes with status and upstream
+timing, but no raw URI, client IP, Referer, or User-Agent. Its `trace_id`
+comes from the Gateway response and can be empty for requests stopped at the
+edge. The frontend Nginx does not duplicate access logs. Both Nginx error logs
+use `crit`: lower-severity upstream errors automatically include the original
+request line and client address. Critical errors can still carry request
+context, so restrict Docker log access and treat the retained logs as
+sensitive. Use the edge status and upstream timing for routine failures.
+
+- `ERROR`: a failed operation or HTTP 5xx; investigate using `trace_id`,
+  `route`, `status`, and nearby fixed error codes.
+- `WARN`: degraded or retried work, including HTTP 429. Normal client 4xx
+  remains `INFO` and is searchable by numeric `status`.
+- `INFO`: lifecycle and normal request completion. `DEBUG`: bounded internal
+  decisions needed for a focused investigation.
+
+Completion `elapsed_ms` ends when response headers are produced; it excludes
+the rest of a streaming response. `route` is an Axum template or `unmatched`,
+never the raw path. Caller trace IDs are bounded and sanitized at every HTTP
+ingress. Keep credentials, email, names, novel content, prompt/response bodies,
+raw URLs, query strings, and arbitrary headers out of application logs at every
+level. The Nginx critical-error limitation is described above.
+
+For a recent error on the local host, inspect the service's structured output:
+
+```bash
+docker logs novel-novel-service --since 30m 2>&1 \
+  | jq -c 'select(.level == "ERROR") | (.spans // [] | map(select(has("service"))) | .[-1] // {}) as $ctx | {timestamp,service: $ctx.service,trace_id: $ctx.trace_id,fields}'
+```
+
+Use the same `trace_id` with `docker logs` for the Gateway and the downstream
+service. This is local, rotating log inspection; a central collector, archive
+retention, and paging integration are not yet qualified for the supported profile.
 
 ## Ownership and escalation
 

@@ -37,14 +37,35 @@ async fn trace_middleware(request: Request, next: Next) -> Response {
         .headers()
         .get("x-trace-id")
         .and_then(|value| value.to_str().ok())
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
         .map(str::to_owned)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let span = tracing::info_span!("service", service = "narrative-service", trace_id = %trace_id);
+    let method = request.method().clone();
+    let route = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(axum::extract::MatchedPath::as_str)
+        .unwrap_or("unmatched")
+        .to_owned();
+    let start = std::time::Instant::now();
+    let span = tracing::info_span!(target: "novelworld_context", "service", service = "narrative-service", trace_id = %trace_id);
     async {
         let response = next.run(request).await;
-        // SPEC 14.1: one request-scoped entry per request, so the log contract
-        // holds even when no other service event fires while handling it.
-        tracing::info!("request completed");
+        let status = response.status().as_u16();
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        if status >= 500 {
+            tracing::error!(%method, %route, status, elapsed_ms, "request completed");
+        } else if status == 429 {
+            tracing::warn!(%method, %route, status, elapsed_ms, "request completed");
+        } else {
+            tracing::info!(%method, %route, status, elapsed_ms, "request completed");
+        }
         response
     }
     .instrument(span)
@@ -66,13 +87,13 @@ async fn run_body() -> Result<()> {
     // Initialize tracing
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(format!(
-            "{},reqwest=off,tower_http=off",
+            "{},reqwest=off,tower_http=off,novelworld_context=info",
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into())
         )))
         .with(tracing_subscriber::fmt::layer().json())
         .init();
 
-    let service_span = tracing::info_span!("service", service = "narrative-service", trace_id = "");
+    let service_span = tracing::info_span!(target: "novelworld_context", "service", service = "narrative-service", trace_id = "");
     async move {
         // SPEC 14.1: every log entry carries the service name and a trace id
         // (empty outside a request, the propagated X-Trace-Id while handling one).

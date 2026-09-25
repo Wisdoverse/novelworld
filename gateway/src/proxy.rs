@@ -261,7 +261,12 @@ impl ServiceProxy {
                 );
             }
             Ok(Err(error)) => {
-                tracing::error!(?error, "user export preflight failed");
+                tracing::error!(
+                    error_code = "user_export_preflight_failed",
+                    timeout = error.is_timeout(),
+                    connect = error.is_connect(),
+                    "user export preflight failed"
+                );
                 return api_error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "service_unavailable",
@@ -460,7 +465,7 @@ impl ServiceProxy {
             Ok(resp) => {
                 let status = resp.status();
                 if status.is_server_error() {
-                    tracing::warn!(status = %status, upstream = target_base, "upstream returned a server error");
+                    tracing::warn!(status = %status, upstream_host = target_url.host_str().unwrap_or("unknown"), "upstream returned a server error");
                 }
                 let resp_headers = resp.headers().clone();
 
@@ -494,7 +499,11 @@ impl ServiceProxy {
                     let resp_body = match resp.bytes().await {
                         Ok(b) => b,
                         Err(e) => {
-                            tracing::error!("Failed to read response from {}: {}", target_url, e);
+                            tracing::error!(
+                                upstream_host = target_url.host_str().unwrap_or("unknown"),
+                                timeout = e.is_timeout(),
+                                "failed to read upstream response"
+                            );
                             return api_error_response(
                                 StatusCode::BAD_GATEWAY,
                                 "bad_gateway",
@@ -519,7 +528,12 @@ impl ServiceProxy {
                 }
             }
             Err(e) => {
-                tracing::error!("Proxy error to {}: {}", target_url, e);
+                tracing::error!(
+                    upstream_host = target_url.host_str().unwrap_or("unknown"),
+                    timeout = e.is_timeout(),
+                    connect = e.is_connect(),
+                    "proxy request failed"
+                );
                 api_error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "service_unavailable",
