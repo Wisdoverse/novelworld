@@ -46,7 +46,7 @@ pause() { sleep 1.1; }
 
 check() {
   if [ "$2" != "$3" ]; then
-    printf 'drill: FAIL %s: expected [%s], got [%s]\n' "$1" "$2" "$3" >&2
+    printf 'drill: FAIL %s: expected [%s], got [%s]\n' "$1" "$3" "$2" >&2
     exit 1
   fi
   printf 'drill: ok   %s = %s\n' "$1" "$3"
@@ -168,8 +168,10 @@ novel_b=$(upload_novel 'outage-under-provider-failure' "$source_b")
 wait_status "$novel_b" error 80 || exit 1
 pause
 check 'outage import reached the terminal error state' "$(novel_status "$novel_b")" error
+# This fixture has valid chapter boundaries, so character enrichment is the
+# first provider-dependent step after the source/chapter checkpoints.
 check 'outage import failed with the bounded code' \
-  "$(db "SELECT failure_code FROM novel_import_jobs WHERE novel_id = '$novel_b'")" processing_failed
+  "$(db "SELECT failure_code FROM novel_import_jobs WHERE novel_id = '$novel_b'")" character_analysis_failed
 check 'the import service stays healthy during the outage' \
   "$(docker inspect --format '{{.State.Health.Status}}' novel-novel-service)" healthy
 pause
