@@ -147,16 +147,18 @@ describe('ShelfPage contracts', () => {
     mocks.novels = [
       { id: 'missing', title: '文件丢失', status: 'error', parse_error: 'The retained source file is missing; re-upload the source', total_chapters: 0, updated_at: '2026-01-01T00:00:00Z' },
       { id: 'truncated', title: '回复过长', status: 'error', parse_error: 'AI response reached its output limit; import a shorter source', total_chapters: 0, updated_at: '2026-01-01T00:00:00Z' },
+      { id: 'canon-exhausted', title: '模型校验失败', status: 'error', parse_error: 'AI story model response could not be validated; re-upload the source', total_chapters: 0, updated_at: '2026-01-01T00:00:00Z' },
       { id: 'unknown', title: '未知错误', status: 'error', parse_error: 'token=private-secret', total_chapters: 0, updated_at: '2026-01-01T00:00:00Z' },
     ];
     render(<ShelfPage />);
 
     expect(screen.getByText('解析失败：原始文件已不可用，请重新导入小说。')).toBeTruthy();
     expect(screen.getByText('解析失败：模型回复达到长度上限，请缩短或拆分原文后重新导入。')).toBeTruthy();
+    expect(screen.getByText('解析失败：故事模型分析结果无法验证，重试次数已用尽，请重新导入原始文件。')).toBeTruthy();
     expect(screen.getByText('解析失败：具体原因未记录，可以尝试重试解析；若重试次数已用尽，请重新导入原始文件。')).toBeTruthy();
     expect(screen.queryByText(/private-secret/)).toBeNull();
     const reimports = screen.getAllByRole('button', { name: '重新导入文件' });
-    expect(reimports).toHaveLength(2);
+    expect(reimports).toHaveLength(3);
     fireEvent.click(reimports[0]);
     expect(screen.getByRole('dialog', { name: '导入小说' })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '重试解析' }));
