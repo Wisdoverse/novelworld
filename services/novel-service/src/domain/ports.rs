@@ -26,6 +26,20 @@ pub trait LlmPort: Send + Sync {
 #[error("Model response reached its output limit")]
 pub struct LlmOutputTruncated(#[source] pub anyhow::Error);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmProviderFailureKind {
+    BalanceUnavailable,
+    RequestRejected,
+}
+
+#[derive(Debug, Error)]
+#[error("Model provider request failed")]
+pub struct LlmProviderFailure {
+    pub kind: LlmProviderFailureKind,
+    #[source]
+    pub source: anyhow::Error,
+}
+
 #[async_trait]
 pub trait TextTranslator: Send + Sync {
     async fn to_simplified_chinese(&self, user_id: Uuid, source: &str) -> Result<String>;
