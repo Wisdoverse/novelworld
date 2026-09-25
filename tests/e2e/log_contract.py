@@ -109,7 +109,7 @@ def main():
             try:
                 entry = json.loads(line)
             except ValueError:
-                problems.append(f"{service}: non-JSON log line: {line[:80]}")
+                problems.append(f"{service}: non-JSON log line")
                 continue
             target = entry.get("target", "")
             if not any(target == prefix or target.startswith(prefix + "::") for prefix in SERVICE_TARGETS):
