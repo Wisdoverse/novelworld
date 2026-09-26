@@ -66,6 +66,7 @@ class DockerSpyTest(unittest.TestCase):
                  "--diagnostic-budget-contract"]
         for argv in (probe, probe + ["four-layer-journey-diagnostic-v2"],
                      probe + ["four-layer-journey-diagnostic-v3"],
+                     probe + ["four-layer-journey-diagnostic-v4"],
                      ["start", "--attach", name], ["rm", "--force", name],
                      ["ps", "--all", "--quiet", "--filter", "name=^/" + name + "$"]):
             execv = self.invoke(argv)

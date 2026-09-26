@@ -80,6 +80,7 @@ def _probe_allowed(argv, project):
             and (len(argv) == 19 or argv[19] in {
                 "four-layer-journey-diagnostic-v2",
                 "four-layer-journey-diagnostic-v3",
+                "four-layer-journey-diagnostic-v4",
             }))
 
 

@@ -16,6 +16,11 @@ pub const LOCAL_MEMORY_PROFILE_JSON: &str = include_str!(concat!(
     "/../../tools/llm-budget/diagnostic-v3.json"
 ));
 
+pub const CURRENT_LOCAL_MEMORY_PROFILE_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tools/llm-budget/diagnostic-v4.json"
+));
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum BudgetError {
     #[error("diagnostic_budget_invalid")]
@@ -255,6 +260,7 @@ impl Profile {
             "vision-journey-diagnostic-v1" => PROFILE_JSON,
             "four-layer-journey-diagnostic-v2" => MEMORY_PROFILE_JSON,
             "four-layer-journey-diagnostic-v3" => LOCAL_MEMORY_PROFILE_JSON,
+            "four-layer-journey-diagnostic-v4" => CURRENT_LOCAL_MEMORY_PROFILE_JSON,
             _ => return Err(BudgetError::Invalid),
         };
         serde_json::from_str(source).map_err(|_| BudgetError::Invalid)
@@ -466,6 +472,63 @@ mod tests {
             "settlement never refunds the attempt count"
         );
         assert_eq!(charged.reserve(quote, quote), Err(BudgetError::Exhausted));
+    }
+
+    #[test]
+    fn current_flash_profile_keeps_local_embedding_and_rejects_retired_model_dispatch() {
+        let name = "four-layer-journey-diagnostic-v4";
+        let profile = Profile::compiled_named(name).unwrap();
+        assert_eq!(profile.model, "deepseek-flash");
+        assert_eq!(profile.contract, "llm-diagnostic-budget-v2");
+        assert!(!profile.thinking_enabled);
+        let mut old: serde_json::Value = serde_json::from_str(LOCAL_MEMORY_PROFILE_JSON).unwrap();
+        let new: serde_json::Value =
+            serde_json::from_str(CURRENT_LOCAL_MEMORY_PROFILE_JSON).unwrap();
+        old["profile"] = new["profile"].clone();
+        old["model"] = new["model"].clone();
+        assert_eq!(old, new);
+
+        let mut dispatch = Dispatch {
+            attempt: Attempt {
+                attempt_id: Uuid::new_v4(),
+                operation: "setup_connection".into(),
+                output_limit: 8,
+            },
+            provider: "deepseek".into(),
+            model: "deepseek-flash".into(),
+            origin: "https://api.deepseek.com".into(),
+        };
+        dispatch.validate(name).unwrap();
+        dispatch.model = "deepseek-v4-flash".into();
+        assert_eq!(dispatch.validate(name), Err(BudgetError::Invalid));
+        let mut usage = Settlement {
+            model: "deepseek-flash".into(),
+            input_tokens: 10,
+            output_tokens: 2,
+            cached_input_tokens: Some(3),
+        };
+        assert_eq!(
+            profile
+                .usage("setup_connection", 8, &usage)
+                .unwrap()
+                .cost_micro_cny,
+            64
+        );
+        usage.model = "deepseek-v4-flash".into();
+        assert_eq!(
+            profile.usage("setup_connection", 8, &usage),
+            Err(BudgetError::Invalid)
+        );
+        assert_eq!(
+            profile.identity("embedding").unwrap(),
+            (
+                "local-tei",
+                "Qwen/Qwen3-Embedding-0.6B",
+                "http://embedding:80"
+            )
+        );
+        assert_eq!(profile.quote("embedding", 0).unwrap().cost_micro_cny, 0);
+        assert!(Profile::compiled_named("four-layer-journey-diagnostic-v5").is_err());
     }
 
     #[test]

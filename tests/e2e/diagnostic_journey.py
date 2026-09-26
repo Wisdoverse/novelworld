@@ -34,19 +34,23 @@ REGISTRATION_SCHEMA_V2 = "vision-journey-registration-v2"
 REGISTRATION_SCHEMA_V3 = "vision-journey-registration-v3"
 REGISTRATION_SCHEMA_V4 = "vision-journey-registration-v4"
 REGISTRATION_SCHEMA_V5 = "vision-journey-registration-v5"
+REGISTRATION_SCHEMA_V6 = "vision-journey-registration-v6"
 LEDGER_SCHEMA = "vision-journey-ledger-v1"
 PRESTART_SCHEMA = "vision-journey-prestart-v1"
 PRESTART_SCHEMA_V2 = "vision-journey-prestart-v2"
 PROFILE_PATH = Path("tools/llm-budget/diagnostic-v1.json")
 PROFILE_PATH_V2 = Path("tools/llm-budget/diagnostic-v2.json")
 PROFILE_PATH_V3 = Path("tools/llm-budget/diagnostic-v3.json")
+PROFILE_PATH_V4 = Path("tools/llm-budget/diagnostic-v4.json")
 MODEL = "deepseek-flash"
 MEMORY_MODEL = "deepseek-v4-flash"
+CURRENT_MEMORY_MODEL = "deepseek-flash"
 CONTRACT = "llm-diagnostic-budget-v1"
 PROFILE = "vision-journey-diagnostic-v1"
 CONTRACT_V2 = "llm-diagnostic-budget-v2"
 PROFILE_V2 = "four-layer-journey-diagnostic-v2"
 PROFILE_V3 = "four-layer-journey-diagnostic-v3"
+PROFILE_V4 = "four-layer-journey-diagnostic-v4"
 APP_KEYS = {
     "GATEWAY_IMAGE", "USER_SERVICE_IMAGE", "NOVEL_SERVICE_IMAGE",
     "AGENT_SERVICE_IMAGE", "NARRATIVE_SERVICE_IMAGE", "FRONTEND_IMAGE",
@@ -173,12 +177,15 @@ def product_fixture(schema: str) -> Path:
     require(schema in (
         REGISTRATION_SCHEMA, REGISTRATION_SCHEMA_V2,
         REGISTRATION_SCHEMA_V3, REGISTRATION_SCHEMA_V4, REGISTRATION_SCHEMA_V5,
+        REGISTRATION_SCHEMA_V6,
     ))
     version = 1 if schema == REGISTRATION_SCHEMA else 2
     return Path(f"tests/e2e/fixtures/h4-journey-v{version}.json")
 
 
 def profile_path(schema: str) -> Path:
+    if schema == REGISTRATION_SCHEMA_V6:
+        return PROFILE_PATH_V4
     if schema == REGISTRATION_SCHEMA_V5:
         return PROFILE_PATH_V3
     return PROFILE_PATH_V2 if schema == REGISTRATION_SCHEMA_V4 else PROFILE_PATH
@@ -201,7 +208,7 @@ def load_registration(
         expected_keys = REGISTRATION_KEYS | ({"network_subnet"}
             if value.get("schema") in (
                 REGISTRATION_SCHEMA_V2, REGISTRATION_SCHEMA_V3,
-                REGISTRATION_SCHEMA_V4, REGISTRATION_SCHEMA_V5,
+                REGISTRATION_SCHEMA_V4, REGISTRATION_SCHEMA_V5, REGISTRATION_SCHEMA_V6,
             ) else set())
         require(set(value) == expected_keys)
         encoded = canonical(value)
@@ -209,6 +216,7 @@ def load_registration(
         require(value["schema"] in (
             REGISTRATION_SCHEMA, REGISTRATION_SCHEMA_V2,
             REGISTRATION_SCHEMA_V3, REGISTRATION_SCHEMA_V4, REGISTRATION_SCHEMA_V5,
+            REGISTRATION_SCHEMA_V6,
         ) and uuid4(value["budget_id"]))
         try:
             network.subnet(value.get("network_subnet"))
@@ -223,11 +231,14 @@ def load_registration(
                 "diagnostic_manifest_mismatch")
         profile_raw = (root / profile_path(value["schema"])).read_bytes()
         profile = strict_json(profile_raw)
-        memory_schema = value["schema"] in (REGISTRATION_SCHEMA_V4, REGISTRATION_SCHEMA_V5)
+        memory_schema = value["schema"] in (
+            REGISTRATION_SCHEMA_V4, REGISTRATION_SCHEMA_V5, REGISTRATION_SCHEMA_V6)
         expected_contract = CONTRACT_V2 if memory_schema else CONTRACT
-        expected_profile = (PROFILE_V3 if value["schema"] == REGISTRATION_SCHEMA_V5 else
+        expected_profile = (PROFILE_V4 if value["schema"] == REGISTRATION_SCHEMA_V6 else
+                            PROFILE_V3 if value["schema"] == REGISTRATION_SCHEMA_V5 else
                             PROFILE_V2 if memory_schema else PROFILE)
-        expected_model = MEMORY_MODEL if memory_schema else MODEL
+        expected_model = (CURRENT_MEMORY_MODEL if value["schema"] == REGISTRATION_SCHEMA_V6 else
+                          MEMORY_MODEL if memory_schema else MODEL)
         require(value["profile_sha256"] == digest(profile_raw)
                 and profile["contract"] == expected_contract and profile["profile"] == expected_profile
                 and profile["model"] == expected_model and profile["provider"] == "deepseek"
@@ -240,7 +251,7 @@ def load_registration(
                     and profile.get("embedding_dimensions") == 1536
                     and profile.get("operations", {}).get("embedding") == 0,
                     "diagnostic_profile_mismatch")
-        if value["schema"] == REGISTRATION_SCHEMA_V5:
+        if value["schema"] in (REGISTRATION_SCHEMA_V5, REGISTRATION_SCHEMA_V6):
             require(profile.get("embedding_provider") == "local-tei"
                     and profile.get("embedding_model") == "Qwen/Qwen3-Embedding-0.6B"
                     and profile.get("embedding_origin") == "http://embedding:80"
@@ -450,7 +461,7 @@ def affected_application_images(paths: list[str]) -> set[str]:
                     ):
             affected.update(rust_images)
         if path in {PROFILE_PATH.as_posix(), PROFILE_PATH_V2.as_posix(),
-                    PROFILE_PATH_V3.as_posix()}:
+                    PROFILE_PATH_V3.as_posix(), PROFILE_PATH_V4.as_posix()}:
             # Compiled by llm-client and user-service; ordinary tools are not inputs.
             # Existing registration/profile and all payer capability checks still apply.
             affected.update(rust_images - {"GATEWAY_IMAGE"})

@@ -37,11 +37,17 @@ decision, not a change to the frozen Qualification contract below.
   causal hypothesis and independent agent plan review. Do not repeatedly
   sample an unchanged failed revision to obtain a pass or tune historical
   cohorts after seeing their results.
-- The selected live iteration model is [`deepseek-v4-flash`](https://api-docs.deepseek.com/);
-  the
-  retired Flash aliases and the unregistered Pro proposal are not selected for
-  a new run. Selection is not evidence of provider acceptance or qualification
-  and does not change past model identities.
+- The existing default Qualification/H1 registration keeps its historical
+  `deepseek-v4-flash` identity, profile, fixtures, and evidence; it is frozen
+  and is never automatically migrated. A new current-Flash four-layer
+  Diagnostic uses `deepseek-flash` only through prospective registration v6
+  tracked by [#428](https://github.com/Wisdoverse/novelworld/issues/428). As
+  checked on 2026-09-26, DeepSeek's [Models & Pricing
+  documentation](https://api-docs.deepseek.com/quick_start/pricing/) identifies
+  that API alias as V4.1-Flash and says the retired alias is routed there; this
+  is not an immutable backend-weight attestation.
+- The prospective Diagnostic is a separate structural path: it does not
+  revise H1 or turn a Diagnostic into quality evidence.
 - Before any paid Diagnostic, register the hypothesis, immutable commit,
   corpus/policy/prompt identities, configured and allowed response models,
   and enforceable request/token/spend ceilings. Reserve a conservative
@@ -196,13 +202,14 @@ with schema `vision-journey-registration-v1` or the separate prospective-summary
 Diagnostic schemas `vision-journey-registration-v2` and
 `vision-journey-registration-v3`, or the four-layer lifecycle schema
 `vision-journey-registration-v4` or keyless local-embedding schema
-`vision-journey-registration-v5`. V1 has exactly these
+`vision-journey-registration-v5`, or the prospective current-Flash four-layer
+schema `vision-journey-registration-v6`. V1 has exactly these
 fields: `schema`,
 `budget_id`, `hypothesis`, `candidate_git_sha`, `base_manifest_sha256`,
 `candidate_manifest_sha256`, `base_application_image_ids`,
 `candidate_application_image_ids`, `profile_sha256`, `product_fixture_sha256`,
 `prompt_schema_identities`, `limits`, `output_dir`, and `ledger_path`.
-V2, V3, V4, and V5 additionally require `network_subnet`: JSON null retains automatic
+V2 through V6 additionally require `network_subnet`: JSON null retains automatic
 Docker allocation; a string must be one canonical strict IPv4 RFC1918 /28. V1
 rejects this extra field. The canonical registration hash binds this selection;
 it does not alter prompt/source identities or the fixed budget/product fixture.
@@ -305,6 +312,31 @@ registration-bound `Frozen` control record without claiming `Started`;
 after Started, ordinary evidence-gated cleanup applies. A V5 registration still
 requires a reviewed strict-descendant application artifact pair and explicit
 authorization; checked-in support is not live lifecycle evidence.
+
+V6 uses `vision-journey-registration-v6`, report kind
+`h3-h4-four-layer-diagnostic-v6`, and only the compiled
+`four-layer-journey-diagnostic-v4` profile in
+`tools/llm-budget/diagnostic-v4.json`. It selects `deepseek-flash`; V1–V5 keep
+their existing identities and cannot select this profile. V6 reuses V5's
+four-layer schedule, V2 product fixture, local TEI model/revision and probe,
+`llm-diagnostic-budget-v2` wire contract, and existing limits (2,000 attempts,
+20 million tokens, 35 CNY, and at most 14,400 seconds). The new profile changes
+only the profile name and model from the V3 local-embedding profile; prior
+profile and fixture bytes remain unchanged.
+
+As checked on 2026-09-26, DeepSeek's [Models & Pricing
+documentation](https://api-docs.deepseek.com/quick_start/pricing/) lists
+`deepseek-flash` as DeepSeek-V4.1-Flash and says the retired
+`deepseek-v4-flash` name is routed to that model. This dated API description is
+not an immutable backend-weight attestation. Structural support in #428 is not
+paid-run authorization or live evidence. A new paid attempt requires
+[#428](https://github.com/Wisdoverse/novelworld/issues/428) to merge first,
+followed by the mandatory remote-profile validation fix
+[#429](https://github.com/Wisdoverse/novelworld/issues/429), plus a fresh
+exact registration and artifact pair independently reviewed, and explicit
+authorization for that registration. Frozen or consumed registrations remain
+terminal and cannot be renewed or rerun. Issue bodies and Project 4 own current
+execution and live-evidence status.
 
 CI runs the real-schema regressions against its digest-pinned disposable
 `test-postgres` database. Local runs name the container with

@@ -93,6 +93,19 @@ mod tests {
             value["profile_sha256"],
             crate::diagnostic_budget::profile_sha256_for("four-layer-journey-diagnostic-v3")
         );
+        let output = capability_probe([
+            "--diagnostic-budget-contract",
+            "four-layer-journey-diagnostic-v4",
+        ])
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["contract"], "llm-diagnostic-budget-v2");
+        assert_eq!(value["profile"], "four-layer-journey-diagnostic-v4");
+        assert_eq!(
+            value["profile_sha256"],
+            "7ba857fd01e4c6333d9b9bf90211ed40633b18cdfbef7c48cc3c9c046baf1ebe"
+        );
+        assert_eq!(value.as_object().unwrap().len(), 3);
         assert_eq!(capability_probe(["--unknown"]), None);
         assert_eq!(
             capability_probe(["--diagnostic-budget-contract", "extra"]),

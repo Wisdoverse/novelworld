@@ -168,3 +168,26 @@ fn local_memory_profile_is_additive_and_v2_stays_frozen() {
         "6cee114e4008b250e2d00d629c938dd245027d5245437b1f2cbdeb81c4bdffbc"
     );
 }
+
+#[test]
+fn current_flash_profile_changes_only_prospective_identity() {
+    use crate::diagnostic_budget::{CURRENT_LOCAL_MEMORY_PROFILE_JSON, LOCAL_MEMORY_PROFILE_JSON};
+
+    let mut old: serde_json::Value = serde_json::from_str(LOCAL_MEMORY_PROFILE_JSON).unwrap();
+    let new: serde_json::Value = serde_json::from_str(CURRENT_LOCAL_MEMORY_PROFILE_JSON).unwrap();
+    old["profile"] = new["profile"].clone();
+    old["model"] = new["model"].clone();
+    assert_eq!(
+        old, new,
+        "limits, operations, and local TEI identity stay exact"
+    );
+    let profile = profile_named("four-layer-journey-diagnostic-v4").unwrap();
+    assert_eq!(profile.contract, "llm-diagnostic-budget-v2");
+    assert_eq!(profile.model, "deepseek-flash");
+    assert_eq!(profile.origin, "https://api.deepseek.com");
+    assert_eq!(
+        profile_sha256_for("four-layer-journey-diagnostic-v3"),
+        "1ff657e8dbe753cd7b7202400fe71ee0d4be13eaeac526d4733a74647cecb4db"
+    );
+    assert!(profile_named("four-layer-journey-diagnostic-v5").is_err());
+}

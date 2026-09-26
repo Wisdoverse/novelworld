@@ -117,7 +117,12 @@ unquoted `KEY=value` environment-file entries, without shell expansion.
 `LLM_DIAGNOSTIC_PROFILE` defaults to `vision-journey-diagnostic-v1`; the
 external-embedding four-layer journey selects `four-layer-journey-diagnostic-v2`;
 the keyless local-embedding journey selects the additive
-`four-layer-journey-diagnostic-v3`. A non-default
+`four-layer-journey-diagnostic-v3`; prospective current-Flash four-layer
+registration v6 selects `four-layer-journey-diagnostic-v4`. Only that exact
+registration schema selects the new profile; v1–v5 retain their existing
+profile and model identities. The new profile keeps the
+`llm-diagnostic-budget-v2` wire contract, fixture, limits, and local TEI
+model/revision/probe. A non-default
 selector without a complete registration fails closed. Expiry is fixed UTC
 seconds, not a duration renewed on restart. Limits have no funded defaults. Individual local
 processes also require explicit `USER_SERVICE_URL` and a valid shared internal
@@ -278,3 +283,19 @@ error codes, cleanup verdict, and private-evidence digest, without claiming
 `Started`; the registration cannot be reused. Once Started exists, the existing
 durable terminal and evidence-gated cleanup rules apply. This implementation
 does not itself register, fund, or execute a live Diagnostic.
+
+Issue [#428](https://github.com/Wisdoverse/novelworld/issues/428) adds the
+prospective registration-v6/report-v6 selector and compiled local-embedding
+profile v4 for `deepseek-flash`. It preserves the V5 schedule, fixture, limits,
+TEI and wire budget contract; V1–V3 profile and fixture bytes are unchanged.
+As checked on 2026-09-26, DeepSeek's [Models & Pricing
+documentation](https://api-docs.deepseek.com/quick_start/pricing/) identifies
+that API alias as DeepSeek-V4.1-Flash and describes the retired V4 Flash alias
+as routed to it; this is not a pin to immutable backend weights. This structural
+extension is not paid-run authorization, live evidence or H1/H3/H4 qualification.
+Frozen registrations remain terminal. Before any paid attempt,
+[#428](https://github.com/Wisdoverse/novelworld/issues/428) must merge first,
+followed by the mandatory remote-profile validation fix
+[#429](https://github.com/Wisdoverse/novelworld/issues/429). Independent review
+of the exact new registration and artifact pair and explicit authorization
+for that registration are also required.

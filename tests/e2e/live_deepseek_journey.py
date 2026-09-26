@@ -1420,9 +1420,11 @@ class Journey:
             self.expected_model = diagnostic_registration.profile["model"]
         summary_schema = (diagnostic_registration.value["schema"]
                           if diagnostic_registration is not None else None)
-        self.local_embedding = summary_schema == diagnostic.REGISTRATION_SCHEMA_V5
+        self.local_embedding = summary_schema in (
+            diagnostic.REGISTRATION_SCHEMA_V5, diagnostic.REGISTRATION_SCHEMA_V6)
         self.four_layer = summary_schema in (
-            diagnostic.REGISTRATION_SCHEMA_V4, diagnostic.REGISTRATION_SCHEMA_V5)
+            diagnostic.REGISTRATION_SCHEMA_V4, diagnostic.REGISTRATION_SCHEMA_V5,
+            diagnostic.REGISTRATION_SCHEMA_V6)
         if ((summary_schema == diagnostic.REGISTRATION_SCHEMA_V4)
                 != (embedding_config_path is not None)):
             raise QualificationFailure("embedding_config_v4_only")
@@ -1564,6 +1566,7 @@ class Journey:
                 diagnostic.REGISTRATION_SCHEMA_V3: "h4-vision-diagnostic-v3",
                 diagnostic.REGISTRATION_SCHEMA_V4: "h3-h4-four-layer-diagnostic-v4",
                 diagnostic.REGISTRATION_SCHEMA_V5: "h3-h4-four-layer-diagnostic-v5",
+                diagnostic.REGISTRATION_SCHEMA_V6: "h3-h4-four-layer-diagnostic-v6",
             }[summary_schema])
             self.report["policy_identity"].update(
                 qualification=None, extraction=None,
@@ -1856,7 +1859,8 @@ class Journey:
                          "infra/docker/qualification_network.py",
                          "tools/llm-budget/diagnostic-v1.json",
                          "tools/llm-budget/diagnostic-v2.json",
-                         "tools/llm-budget/diagnostic-v3.json"):
+                         "tools/llm-budget/diagnostic-v3.json",
+                         "tools/llm-budget/diagnostic-v4.json"):
             target = tool_root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes((self.root / relative).read_bytes())
@@ -6614,7 +6618,8 @@ def main() -> int:
                 root, base["RELEASE_GIT_SHA"], args.git_sha,
             ),
         )
-        if registration.value["schema"] == diagnostic.REGISTRATION_SCHEMA_V5:
+        if registration.value["schema"] in (
+                diagnostic.REGISTRATION_SCHEMA_V5, diagnostic.REGISTRATION_SCHEMA_V6):
             probe_image = registration.profile["embedding_probe_image"]
             if base["NGINX_IMAGE"] != probe_image or candidate["NGINX_IMAGE"] != probe_image:
                 raise QualificationFailure("embedding_probe_image_mismatch")
@@ -6624,6 +6629,7 @@ def main() -> int:
                                diagnostic.REGISTRATION_SCHEMA_V3,
                                diagnostic.REGISTRATION_SCHEMA_V4,
                                diagnostic.REGISTRATION_SCHEMA_V5,
+                               diagnostic.REGISTRATION_SCHEMA_V6,
                            ))
         diagnostic.network.preflight(registration.value.get("network_subnet"))
         if any(base[key] != candidate[key] for key in INFRASTRUCTURE_IMAGE_KEYS):
