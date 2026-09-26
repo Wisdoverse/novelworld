@@ -177,7 +177,9 @@ async fn run_body() -> Result<()> {
             .unwrap_or_else(|_| "vision-journey-diagnostic-v1".into());
         let memory_diagnostic = matches!(
             diagnostic_profile.as_str(),
-            "four-layer-journey-diagnostic-v2" | "four-layer-journey-diagnostic-v3"
+            "four-layer-journey-diagnostic-v2"
+                | "four-layer-journey-diagnostic-v3"
+                | "four-layer-journey-diagnostic-v4"
         );
         let embedding_config = EmbeddingConfig::from_environment()?;
         let embedding: Arc<dyn domain::ports::EmbeddingGenerator> = match embedding_config {
@@ -197,7 +199,7 @@ async fn run_body() -> Result<()> {
                             || config.api_url != "https://api.openai.com"
                             || config.model != "text-embedding-3-small"
                     }
-                    "four-layer-journey-diagnostic-v3" => {
+                    "four-layer-journey-diagnostic-v3" | "four-layer-journey-diagnostic-v4" => {
                         config.provider != "local-tei"
                             || !config.api_key.is_empty()
                             || config.api_url != "http://embedding:80"

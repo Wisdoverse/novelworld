@@ -13,6 +13,18 @@ active, user-scoped provider configuration from user-service using
 discovered from a registry of environment variables. `static_config` exists for
 explicit static and test configurations.
 
+The isolated Diagnostic budget path uses separately compiled, versioned
+profiles and an owner-validated registration; it does not alter normal provider
+settings or prices. The prospective four-layer current-Flash profile is
+`four-layer-journey-diagnostic-v4`, bound only by
+`vision-journey-registration-v6`, and uses the API model ID `deepseek-flash`.
+Older registrations and profiles retain their original model and digest
+identities. The profile keeps budget wire contract v2 and the existing local
+embedding path. This structural support does not authorize a provider call or
+claim quality; current implementation and live-evidence status are tracked in
+[#428](https://github.com/Wisdoverse/novelworld/issues/428) and
+[#429](https://github.com/Wisdoverse/novelworld/issues/429).
+
 Agent-service configures its embedding transport directly:
 
 ```rust

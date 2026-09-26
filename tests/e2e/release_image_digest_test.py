@@ -43,6 +43,7 @@ _budget_spec.loader.exec_module(BUDGET)
 PROFILE_BYTES = (ROOT / "tools/llm-budget/diagnostic-v1.json").read_bytes()
 MEMORY_PROFILE_BYTES = (ROOT / "tools/llm-budget/diagnostic-v2.json").read_bytes()
 LOCAL_MEMORY_PROFILE_BYTES = (ROOT / "tools/llm-budget/diagnostic-v3.json").read_bytes()
+CURRENT_LOCAL_MEMORY_PROFILE_BYTES = (ROOT / "tools/llm-budget/diagnostic-v4.json").read_bytes()
 BUDGET_ID = "550e8400-e29b-41d4-a716-446655440000"
 TOKEN = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 REGISTERED_ENV = {
@@ -214,6 +215,21 @@ class ReleaseImageDigestTest(unittest.TestCase):
         local_memory = BUDGET.registration(LOCAL_MEMORY_PROFILE_BYTES, local_memory_env)
         self.assertEqual(local_memory["binding"]["contract"], "llm-diagnostic-budget-v2")
         self.assertEqual(local_memory["binding"]["profile"], "four-layer-journey-diagnostic-v3")
+
+        current_memory_env = dict(local_memory_env, LLM_DIAGNOSTIC_BUDGET_LIMITS=json.dumps({
+            **json.loads(local_memory_env["LLM_DIAGNOSTIC_BUDGET_LIMITS"]),
+            "profile": "four-layer-journey-diagnostic-v4",
+        }, separators=(",", ":")))
+        current_memory = BUDGET.registration(CURRENT_LOCAL_MEMORY_PROFILE_BYTES, current_memory_env)
+        self.assertEqual(current_memory["binding"], {
+            **local_memory["binding"],
+            "profile": "four-layer-journey-diagnostic-v4",
+            "profile_sha256": hashlib.sha256(CURRENT_LOCAL_MEMORY_PROFILE_BYTES).hexdigest(),
+        })
+        with self.assertRaises(BUDGET.Invalid):
+            BUDGET.registration(CURRENT_LOCAL_MEMORY_PROFILE_BYTES, local_memory_env)
+        with self.assertRaises(BUDGET.Invalid):
+            BUDGET.registration(LOCAL_MEMORY_PROFILE_BYTES, current_memory_env)
 
         for key, value in (
             ("LLM_DIAGNOSTIC_BUDGET_ID", BUDGET_ID.upper()),

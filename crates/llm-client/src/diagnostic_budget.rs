@@ -190,6 +190,7 @@ pub(crate) fn profile() -> &'static CompiledProfile {
 pub(crate) fn profile_named(name: &str) -> Result<&'static CompiledProfile, BudgetControlError> {
     static MEMORY_PROFILE: OnceLock<CompiledProfile> = OnceLock::new();
     static LOCAL_MEMORY_PROFILE: OnceLock<CompiledProfile> = OnceLock::new();
+    static CURRENT_LOCAL_MEMORY_PROFILE: OnceLock<CompiledProfile> = OnceLock::new();
     match name {
         "vision-journey-diagnostic-v1" => Ok(profile()),
         "four-layer-journey-diagnostic-v2" => Ok(MEMORY_PROFILE.get_or_init(|| {
@@ -198,6 +199,10 @@ pub(crate) fn profile_named(name: &str) -> Result<&'static CompiledProfile, Budg
         "four-layer-journey-diagnostic-v3" => Ok(LOCAL_MEMORY_PROFILE.get_or_init(|| {
             serde_json::from_str(LOCAL_MEMORY_PROFILE_JSON)
                 .expect("valid compiled local memory profile")
+        })),
+        "four-layer-journey-diagnostic-v4" => Ok(CURRENT_LOCAL_MEMORY_PROFILE.get_or_init(|| {
+            serde_json::from_str(CURRENT_LOCAL_MEMORY_PROFILE_JSON)
+                .expect("valid compiled current local memory profile")
         })),
         _ => Err(BudgetControlError),
     }
@@ -656,6 +661,11 @@ pub const LOCAL_MEMORY_PROFILE_JSON: &str = include_str!(concat!(
     "/../../tools/llm-budget/diagnostic-v3.json"
 ));
 
+pub const CURRENT_LOCAL_MEMORY_PROFILE_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tools/llm-budget/diagnostic-v4.json"
+));
+
 /// Hash the exact compiled profile bytes; no downloaded policy or mutable runtime pricing.
 pub fn profile_sha256() -> String {
     profile_sha256_for("vision-journey-diagnostic-v1")
@@ -666,6 +676,7 @@ pub fn profile_sha256_for(name: &str) -> String {
         "vision-journey-diagnostic-v1" => PROFILE_JSON.as_bytes(),
         "four-layer-journey-diagnostic-v2" => MEMORY_PROFILE_JSON.as_bytes(),
         "four-layer-journey-diagnostic-v3" => LOCAL_MEMORY_PROFILE_JSON.as_bytes(),
+        "four-layer-journey-diagnostic-v4" => CURRENT_LOCAL_MEMORY_PROFILE_JSON.as_bytes(),
         _ => return String::new(),
     };
     Sha256::digest(bytes)
