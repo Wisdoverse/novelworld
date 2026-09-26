@@ -331,8 +331,8 @@ fn validate_remote_config(
             config.contract == 3 && config.diagnostic_budget.as_ref() == Some(expected)
         }
     };
-    if binding.is_some() {
-        let profile = crate::diagnostic_budget::profile();
+    if let Some(expected) = binding {
+        let profile = crate::diagnostic_budget::profile_named(&expected.profile)?;
         let origin = crate::diagnostic_budget::root_url(&config.api_url)?;
         if !contract_valid
             || origin.origin().ascii_serialization() != profile.origin
@@ -410,7 +410,14 @@ mod tests {
     use super::*;
 
     fn diagnostic_binding() -> Binding {
-        Binding::new(uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap())
+        diagnostic_binding_for("vision-journey-diagnostic-v1")
+    }
+
+    fn diagnostic_binding_for(profile: &str) -> Binding {
+        Binding::new_for_profile(
+            uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            profile,
+        )
     }
 
     fn ordinary_config(api_url: &str) -> RemoteConfig {
@@ -426,7 +433,7 @@ mod tests {
     }
 
     fn budget_config(binding: &Binding) -> RemoteConfig {
-        let profile = crate::diagnostic_budget::profile();
+        let profile = crate::diagnostic_budget::profile_named(&binding.profile).unwrap();
         RemoteConfig {
             contract: 3,
             provider: None,
@@ -496,6 +503,22 @@ mod tests {
     }
 
     #[test]
+    fn budget_remote_configuration_accepts_each_compiled_profile() {
+        for name in [
+            "vision-journey-diagnostic-v1",
+            "four-layer-journey-diagnostic-v2",
+            "four-layer-journey-diagnostic-v3",
+            "four-layer-journey-diagnostic-v4",
+        ] {
+            let binding = diagnostic_binding_for(name);
+            assert!(
+                validate_remote_config(budget_config(&binding), false, Some(&binding)).is_ok(),
+                "profile {name}"
+            );
+        }
+    }
+
+    #[test]
     fn budget_remote_configuration_rejects_binding_and_profile_mismatches() {
         let binding = diagnostic_binding();
         let other_binding =
@@ -520,6 +543,17 @@ mod tests {
             .profile_sha256 =
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into();
         assert!(validate_remote_config(wrong_digest, false, Some(&binding)).is_err());
+
+        let unknown_binding = Binding {
+            profile: "unknown-profile".into(),
+            ..binding.clone()
+        };
+        let mut unknown_profile = budget_config(&binding);
+        unknown_profile.diagnostic_budget = Some(unknown_binding.clone());
+        let error = validate_remote_config(unknown_profile, false, Some(&unknown_binding))
+            .err()
+            .expect("unknown profile rejected");
+        assert!(error.downcast_ref::<BudgetControlError>().is_some());
     }
 
     #[test]

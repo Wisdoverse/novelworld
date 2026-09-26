@@ -24,6 +24,9 @@ embedding path. This structural support does not authorize a provider call or
 claim quality; current implementation and live-evidence status are tracked in
 [#428](https://github.com/Wisdoverse/novelworld/issues/428) and
 [#429](https://github.com/Wisdoverse/novelworld/issues/429).
+Remote contract-3 configuration is checked against the exact owner binding and
+the compiled profile named by that binding; unknown profiles or mismatches fail
+closed.
 
 Agent-service configures its embedding transport directly:
 
