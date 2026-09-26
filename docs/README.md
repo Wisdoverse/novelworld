@@ -55,7 +55,7 @@ roadmap status only when its required evidence exists.
 | Document | Purpose | Update when |
 |---|---|---|
 | [Product contract](./PRODUCT_CONTRACT.md) | Supported envelope, claims, and responsibility boundaries | A user-visible claim, supported input, or deployment boundary changes |
-| [Advanced novel rules](./ADVANCED_RULES_PLAN.md) | Current D20 preview, model/dice responsibilities, and proposed Jev evaluation | Template/check behavior, hint authority, or the reviewed semantic-judgment proposal changes |
+| [Advanced novel rules](./ADVANCED_RULES_PLAN.md) | D20 preview, bounded Laya (Jev) adjudication, model/dice responsibilities, and qualification limits | Template/check behavior, adjudication context or authority, fallback, or qualification evidence changes |
 | [Specification](../SPEC.md) | Candidate normative behavior | The intended cross-component contract changes |
 | [SPEC conformance ledger](./SPEC_CONFORMANCE.md) | Evidence and disposition for every normative clause | Implementation evidence or a clause disposition changes |
 | [Qualification policy](./QUALIFICATION_POLICY.md) | Release evidence classes and thresholds | A qualification slice, guardrail, or approval rule changes |
@@ -129,3 +129,7 @@ Accepted records:
 - [ADR 0006: Optional local action hints](./adr/0006-optional-laya-action-hints.md)
 - [ADR 0007: Regional LLM presets](./adr/0007-regional-llm-presets.md)
 - [ADR 0008: Upload acceptance independent of parsing](./adr/0008-queued-upload-acceptance.md)
+
+Accepted structural preview:
+
+- [ADR 0009: Bounded Laya (Jev) D20 adjudication](./adr/0009-bounded-laya-d20-adjudication.md)

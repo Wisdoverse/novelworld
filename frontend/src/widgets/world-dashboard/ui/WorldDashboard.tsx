@@ -7,7 +7,7 @@ import {
   removeWorldTurnPendingRequest,
   worldTurnPendingStorageKey,
 } from '@/shared/lib/worldTurnStorage';
-import type { OpenWorldView, WorldAction } from '@/shared/types';
+import type { ActionCheck, OpenWorldView, WorldAction } from '@/shared/types';
 
 interface WorldDashboardProps {
   novelId: string;
@@ -92,6 +92,20 @@ function storePendingRequest(userId: string, novelId: string, request: PendingRe
   } catch {
     // The in-memory lock still protects the current mount when storage is unavailable.
   }
+}
+
+function actionCheckSummary(check: ActionCheck) {
+  const decision = check.adjudication?.decision;
+  if (decision === 'impossible') return '行动不可行 · 未进行骰子检定';
+  if (decision === 'automatic_success') return '无需检定 · 行动成功';
+  if (decision === 'pending') return '判断未完成';
+
+  const formula = `${check.attribute_label}检定：D20 ${check.roll} ${check.modifier >= 0 ? '+' : '−'} ${Math.abs(check.modifier)} = ${check.total} / 难度 ${check.difficulty_class}`;
+  if (decision === 'easy_check' || decision === 'standard_check' || decision === 'hard_check') {
+    const difficulty = decision === 'easy_check' ? '低' : decision === 'hard_check' ? '高' : '标准';
+    return `${formula} · ${check.succeeded ? '成功' : '失败'} · 语义难度：${difficulty}`;
+  }
+  return `${formula} · ${check.succeeded ? '成功' : '失败'}${decision === 'template_fallback' ? ' · 沿用模板检定' : ''}`;
 }
 
 function pendingRequestFromView(view: OpenWorldView): PendingRequest | null {
@@ -343,8 +357,14 @@ export function WorldDashboard({
                   {actionLabels[entry.action.kind]}：{entry.action.intent}
                 </span>
                 {entry.resolution ? (
-                  <div className={`mt-2 text-xs font-semibold ${entry.resolution.succeeded ? 'text-[#0d652d]' : 'text-[#b3261e]'}`}>
-                    {entry.resolution.attribute_label}检定：D20 {entry.resolution.roll} {entry.resolution.modifier >= 0 ? '+' : '−'} {Math.abs(entry.resolution.modifier)} = {entry.resolution.total} / 难度 {entry.resolution.difficulty_class} · {entry.resolution.succeeded ? '成功' : '失败'}
+                  <div className={`mt-2 text-xs font-semibold ${entry.resolution.adjudication?.decision === 'impossible'
+                    ? 'text-[#b3261e]'
+                    : entry.resolution.adjudication?.decision === 'pending'
+                      ? 'text-[#8a4b08]'
+                      : entry.resolution.adjudication?.decision === 'automatic_success' || entry.resolution.succeeded
+                        ? 'text-[#0d652d]'
+                        : 'text-[#b3261e]'}`}>
+                    {actionCheckSummary(entry.resolution)}
                   </div>
                 ) : null}
                 <div className="mt-1 text-xs text-[#5f6368]">

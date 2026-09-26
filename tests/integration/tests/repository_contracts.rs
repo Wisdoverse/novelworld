@@ -23,7 +23,7 @@ use agent_service::{
 };
 use narrative_service::domain::{
     entities::{
-        game_rules::ActionCheck,
+        game_rules::{ActionCheck, AdjudicationDecision},
         narrative_node::{NarrativeChoice, NarrativeNode, WorldState, WorldStateError},
         player_entity::PlayerEntity,
         world_session::{
@@ -6764,6 +6764,7 @@ async fn world_turn_persists_and_exactly_replays_the_server_action_check() {
         difficulty_class: 13,
         total: 15,
         succeeded: true,
+        adjudication: None,
     };
     let claim = WorldTurnClaim {
         resolution: Some(resolution.clone()),
@@ -6798,6 +6799,192 @@ async fn world_turn_persists_and_exactly_replays_the_server_action_check() {
         serde_json::to_value(resolution).unwrap(),
     );
 
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+fn pending_world_turn_check() -> ActionCheck {
+    ActionCheck {
+        schema_version: 1,
+        canon_model_version: 1,
+        template_prompt_version: "novel-game-rules-v1".into(),
+        attribute_key: "vigor".into(),
+        attribute_label: "身法".into(),
+        score: 12,
+        modifier: 1,
+        roll: 14,
+        difficulty_class: 13,
+        total: 15,
+        succeeded: true,
+        adjudication: None,
+    }
+    .with_pending_adjudication()
+}
+
+#[tokio::test]
+async fn world_turn_adjudication_cas_freezes_exact_resolution_before_commit_and_replay() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (user_id, novel_id, context) = seed_world_turn(&pool).await;
+    let repo = PgWorldTurnRepository::new(pool.clone());
+    let pending = pending_world_turn_check();
+    let claim = WorldTurnClaim {
+        resolution: Some(pending.clone()),
+        ..world_turn_claim(user_id, novel_id)
+    };
+    let attempt = world_turn_acquire(&repo, &claim).await;
+    assert!(repo
+        .complete_turn(&claim, attempt, &world_turn_transition(), &context)
+        .await
+        .is_err());
+    for invalid in [
+        WorldTurnClaim {
+            user_id: Uuid::new_v4(),
+            ..claim.clone()
+        },
+        WorldTurnClaim {
+            expected_turn_number: 1,
+            ..claim.clone()
+        },
+        WorldTurnClaim {
+            request_fingerprint: vec![8; 32],
+            ..claim.clone()
+        },
+    ] {
+        assert!(repo
+            .settle_adjudication(&invalid, attempt, AdjudicationDecision::EasyCheck)
+            .await
+            .unwrap()
+            .is_none());
+    }
+    assert!(repo
+        .settle_adjudication(&claim, attempt + 1, AdjudicationDecision::EasyCheck)
+        .await
+        .unwrap()
+        .is_none());
+    let (easy, hard) = tokio::join!(
+        repo.settle_adjudication(&claim, attempt, AdjudicationDecision::EasyCheck),
+        repo.settle_adjudication(&claim, attempt, AdjudicationDecision::HardCheck),
+    );
+    let easy = easy.unwrap();
+    let hard = hard.unwrap();
+    assert_ne!(
+        easy.is_some(),
+        hard.is_some(),
+        "only one settlement may win"
+    );
+    let frozen = easy.or(hard).unwrap();
+    let different =
+        if frozen.adjudication.as_ref().unwrap().decision == AdjudicationDecision::EasyCheck {
+            AdjudicationDecision::HardCheck
+        } else {
+            AdjudicationDecision::EasyCheck
+        };
+    let forged = WorldTurnClaim {
+        resolution: Some(pending.settle_adjudication(different).unwrap()),
+        ..claim.clone()
+    };
+    assert!(repo
+        .complete_turn(&forged, attempt, &world_turn_transition(), &context)
+        .await
+        .is_err());
+    let settled = WorldTurnClaim {
+        resolution: Some(frozen.clone()),
+        ..claim.clone()
+    };
+    let completed = repo
+        .complete_turn(&settled, attempt, &world_turn_transition(), &context)
+        .await
+        .unwrap();
+    assert_eq!(completed.resolution, Some(frozen.clone()));
+    match repo.begin_turn(&claim).await.unwrap() {
+        BeginWorldTurn::Completed { result, .. } => assert_eq!(*result, completed),
+        other => panic!("unexpected replay: {other:?}"),
+    }
+    assert!(repo
+        .settle_adjudication(&claim, attempt, AdjudicationDecision::TemplateFallback)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        repo.journal(user_id, novel_id, 10).await.unwrap()[0].resolution,
+        Some(frozen)
+    );
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn world_turn_adjudication_reclaim_fences_old_attempt_and_preserves_frozen_fallback() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (user_id, novel_id, _) = seed_world_turn(&pool).await;
+    let repo = PgWorldTurnRepository::new(pool.clone());
+    let pending = pending_world_turn_check();
+    let claim = WorldTurnClaim {
+        resolution: Some(pending.clone()),
+        ..world_turn_claim(user_id, novel_id)
+    };
+    let attempt = world_turn_acquire(&repo, &claim).await;
+    sqlx::query(
+        "UPDATE world_turns SET lease_expires_at = NOW() - INTERVAL '1 minute' WHERE id = $1",
+    )
+    .bind(claim.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(repo
+        .settle_adjudication(&claim, attempt, AdjudicationDecision::AutomaticSuccess)
+        .await
+        .unwrap()
+        .is_none());
+    let (reclaimed, next_attempt) = match repo.begin_turn(&claim).await.unwrap() {
+        BeginWorldTurn::Acquired { claim, attempt } => (*claim, attempt),
+        other => panic!("unexpected reclaim: {other:?}"),
+    };
+    assert_eq!(next_attempt, attempt + 1);
+    assert_eq!(reclaimed.resolution, Some(pending.clone()));
+    assert!(repo
+        .settle_adjudication(&claim, attempt, AdjudicationDecision::Impossible)
+        .await
+        .unwrap()
+        .is_none());
+    let fallback = repo
+        .settle_adjudication(
+            &reclaimed,
+            next_attempt,
+            AdjudicationDecision::TemplateFallback,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (fallback.roll, fallback.total, fallback.difficulty_class),
+        (pending.roll, pending.total, pending.difficulty_class)
+    );
+    assert!(repo
+        .fail_turn(claim.id, next_attempt, "llm_error")
+        .await
+        .unwrap());
+    match repo.begin_turn(&claim).await.unwrap() {
+        BeginWorldTurn::Acquired { claim, attempt } => {
+            assert_eq!(attempt, next_attempt + 1);
+            assert_eq!(claim.resolution, Some(fallback));
+        }
+        other => panic!("unexpected frozen reclaim: {other:?}"),
+    }
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
         .execute(&pool)

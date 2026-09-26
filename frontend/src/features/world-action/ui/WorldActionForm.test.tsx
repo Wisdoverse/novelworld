@@ -176,8 +176,9 @@ describe('WorldActionForm', () => {
     render(<WorldActionForm view={advancedView} isPending={false} onSubmit={vi.fn()} />);
 
     expect(screen.getByText('检定预览')).toBeTruthy();
-    expect(screen.getByText(/D20 \+ 轻功 \+1，难度 13/)).toBeTruthy();
-    expect(screen.getByText(/骰点由服务器在提交时生成/)).toBeTruthy();
+    expect(screen.getByText(/D20 \+ 轻功 \+1，模板基础难度 13/)).toBeTruthy();
+    expect(screen.getByText(/提交后服务端会进行语义判断，可能无需检定或调整难度/)).toBeTruthy();
+    expect(screen.getByText(/配置缺失时沿用模板检定。实际结果由服务端保存并可回放/)).toBeTruthy();
   });
 
   it('disables every editable control while an exact request is locked', () => {
