@@ -313,6 +313,13 @@ fn narrative_error_response(error: NarrativeError) -> axum::response::Response {
                 "Game rule template generation budget is exhausted",
             )
         }
+        NarrativeError::GameRulesUnavailableAtProgress => {
+            return error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "game_rules_unavailable_at_progress",
+                "Game rules are not yet available at current reading progress",
+            )
+        }
         NarrativeError::ReadingProgressBehindWorld => {
             return error_response(
                 StatusCode::CONFLICT,
@@ -1055,6 +1062,23 @@ mod principal_contract_tests {
                     "message": "Game rule template generation budget is exhausted"
                 }
             }),
+        );
+    }
+
+    #[tokio::test]
+    async fn game_rules_hidden_by_progress_return_a_content_free_422() {
+        let response = narrative_error_response(NarrativeError::GameRulesUnavailableAtProgress);
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(!response.headers().contains_key(RETRY_AFTER));
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({"error": {
+                "code": "game_rules_unavailable_at_progress",
+                "message": "Game rules are not yet available at current reading progress"
+            }}),
         );
     }
 

@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { AxiosError } from 'axios';
 import type { GameRuleTemplate } from '@/shared/types';
 import { PlayerEntryForm } from './PlayerEntryForm';
 
@@ -18,21 +19,49 @@ const template: GameRuleTemplate = {
   action_rules: [],
 };
 
-const mocks = vi.hoisted(() => ({ mutate: vi.fn() }));
+const mocks = vi.hoisted(() => ({ mutate: vi.fn(), error: null as unknown }));
 
 vi.mock('@/entities/narrative', () => ({
   useGenerateGameRules: () => ({
     mutate: mocks.mutate,
     isPending: false,
-    isError: false,
-    error: null,
+    isError: mocks.error !== null,
+    error: mocks.error,
   }),
 }));
 
 describe('PlayerEntryForm advanced rules', () => {
   beforeEach(() => {
+    mocks.error = null;
     mocks.mutate.mockReset();
     mocks.mutate.mockImplementation((_input, options) => options.onSuccess(template));
+  });
+
+  it('explains locked rules and lets the reader return to narrative mode', () => {
+    mocks.error = new AxiosError('Request failed', undefined, undefined, undefined, {
+      status: 422,
+      data: { error: { code: 'game_rules_unavailable_at_progress', message: 'upstream message' } },
+    } as never);
+    render(
+      <PlayerEntryForm
+        novelId="novel"
+        checkpointChapter={1}
+        unlockedThroughChapter={1}
+        locations={[{ id: 'temple', name: '破庙' }]}
+        isPending={false}
+        isTimelineLocked={false}
+        onCheckpointChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+    const advanced = screen.getByRole('checkbox', { name: /启用小说专属 D20/ });
+    fireEvent.click(advanced);
+    expect(screen.getByRole('alert').textContent).toContain('尚未解锁的章节');
+    expect(screen.queryByText('upstream message')).toBeNull();
+    fireEvent.click(advanced);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByRole('button', { name: '进入故事' }).hasAttribute('disabled')).toBe(false);
+    expect(mocks.mutate).not.toHaveBeenCalled();
   });
 
   it('allocates a shared template and submits only valid custom integer scores', async () => {

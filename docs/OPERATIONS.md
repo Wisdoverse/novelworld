@@ -112,6 +112,21 @@ Use the same `trace_id` with `docker logs` for the Gateway and the downstream
 service. This is local, rotating log inspection; a central collector, archive
 retention, and paging integration are not yet qualified for the supported profile.
 
+## D20 rules blocked by reading progress
+
+`422 game_rules_unavailable_at_progress` means the shared immutable rules
+template cites chapters beyond the reader's current progress. Novel Service
+and Narrative Service preserve this content-free rejection; it is not a
+dependency outage. Continue reading before requesting the rules again, or
+disable the advanced option to enter in narrative mode. Do not change reading
+progress administratively or regenerate a ready template to bypass visibility.
+
+The frontend displays this condition in Chinese and does not automatically
+retry it. A genuine transport failure still returns `503 service_unavailable`.
+The deterministic browser reproduction is
+`pnpm exec playwright test e2e/advanced-rules.spec.ts` from `frontend` after a
+frontend build; it uses fixtures and makes no provider calls.
+
 ## Ownership and escalation
 
 The private self-hosted profile has a single operator (the deployment
