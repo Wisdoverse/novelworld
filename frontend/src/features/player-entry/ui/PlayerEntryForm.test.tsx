@@ -190,7 +190,7 @@ describe('PlayerEntryForm advanced rules', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: /启用小说专属 D20/ }));
     fireEvent.click(screen.getByRole('button', { name: '生成小说专属规则' }));
     expect(screen.getByText('系列共享基础规则：山海系列')).toBeTruthy();
-    expect(screen.getByText(/来源书章节出处属于系列规则来源/)).toBeTruthy();
+    expect(screen.getByText(/规则出处来自系列来源书。角色属性点、装备和阅读进度仍各自独立。/)).toBeTruthy();
     fireEvent.change(screen.getByLabelText('名字'), { target: { value: '燕七' } });
     fireEvent.change(screen.getByLabelText('背景'), { target: { value: '角色自己的经历' } });
     fireEvent.change(screen.getByLabelText('能力（用逗号分隔）'), { target: { value: '听风' } });

@@ -485,10 +485,7 @@ mod tests {
     #[test]
     fn embedded_migrations_are_complete_and_ordered() {
         assert_eq!(MIGRATIONS.first().unwrap().0, "0001_runtime_contract.sql");
-        assert_eq!(
-            MIGRATIONS.last().unwrap().0,
-            "0031_user_world_series.sql"
-        );
+        assert_eq!(MIGRATIONS.last().unwrap().0, "0031_user_world_series.sql");
         assert!(MIGRATIONS.windows(2).all(|pair| pair[0].0 < pair[1].0));
     }
 
