@@ -113,6 +113,65 @@ const ALL_MIGRATIONS: &[&str] = &[
     VERSIONED_GAME_RULE_TEMPLATES_MIGRATION,
 ];
 
+async fn assert_progress_migration_fails_and_rolls_back(pool: &sqlx::PgPool, expected_error: &str) {
+    let mut connection = pool.acquire().await.unwrap();
+    let error = sqlx::raw_sql(PROGRESS_MIGRATION)
+        .execute(&mut *connection)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains(expected_error), "{error}");
+    // The migration owns an explicit transaction. Keep the same pooled session
+    // and clear its aborted transaction before checking for partial writes.
+    sqlx::query("ROLLBACK")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+}
+
+async fn reading_progress_json_hash(pool: &sqlx::PgPool) -> String {
+    sqlx::query_scalar(
+        "SELECT md5(COALESCE(jsonb_agg(to_jsonb(progress) ORDER BY progress.id), '[]'::jsonb)::text) \
+         FROM public.reading_progress AS progress",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn character_json_hash(pool: &sqlx::PgPool) -> String {
+    sqlx::query_scalar(
+        "SELECT md5(COALESCE(jsonb_agg(to_jsonb(c) ORDER BY c.id), '[]'::jsonb)::text) \
+         FROM public.characters AS c",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn import_marker_json_hash(pool: &sqlx::PgPool) -> String {
+    sqlx::query_scalar(
+        "SELECT md5(COALESCE( \
+             jsonb_agg(jsonb_build_object('novel', to_jsonb(novel), 'job', to_jsonb(job)) \
+                       ORDER BY novel.id), \
+             '[]'::jsonb)::text) \
+         FROM public.novels AS novel \
+         JOIN public.novel_import_jobs AS job ON job.novel_id = novel.id",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn user_novels_json_hash(pool: &sqlx::PgPool) -> String {
+    sqlx::query_scalar(
+        "SELECT md5(COALESCE(jsonb_agg(to_jsonb(shelf) ORDER BY shelf.user_id, shelf.novel_id), '[]'::jsonb)::text) \
+         FROM public.user_novels AS shelf",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
 #[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
 struct DiagnosticBudgetColumn {
     table_name: String,
@@ -166,6 +225,348 @@ async fn diagnostic_budget_schema_signature(pool: &sqlx::PgPool) -> DiagnosticBu
         columns,
         constraints,
     }
+}
+
+#[tokio::test]
+async fn full_migration_replay_preserves_incomplete_progress_and_terminal_imports() {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    sqlx::query("DROP DATABASE IF EXISTS novelworld_progress_replay WITH (FORCE)")
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("CREATE DATABASE novelworld_progress_replay")
+        .execute(&admin)
+        .await
+        .unwrap();
+
+    let options = PgConnectOptions::from_str(&db_url())
+        .unwrap()
+        .database("novelworld_progress_replay");
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::raw_sql(FRESH_SCHEMA).execute(&pool).await.unwrap();
+    for migration in ALL_MIGRATIONS {
+        sqlx::raw_sql(*migration).execute(&pool).await.unwrap();
+    }
+
+    let user_id = uuid::Uuid::from_u128(0x000000000000000000000000000000a1);
+    let novel_ids = [
+        uuid::Uuid::from_u128(0x000000000000000000000000000000a2),
+        uuid::Uuid::from_u128(0x000000000000000000000000000000a3),
+        uuid::Uuid::from_u128(0x000000000000000000000000000000a4),
+        uuid::Uuid::from_u128(0x000000000000000000000000000000a5),
+    ];
+    sqlx::query("INSERT INTO public.users (id, email, password_hash) VALUES ($1, 'progress-replay@test.invalid', 'test-hash')")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let novel_rows = [
+        ("pending source", "pending", "creative", None),
+        ("parsing source", "parsing", "remix", None),
+        (
+            "terminal failed source",
+            "error",
+            "creative",
+            Some("Import provider budget exhausted; re-upload the source"),
+        ),
+        (
+            "legacy chapters with zero total",
+            "error",
+            "remix",
+            Some("Import provider budget exhausted; re-upload the source"),
+        ),
+    ];
+    for (novel_id, (title, status, deviation_mode, parse_error)) in novel_ids.iter().zip(novel_rows)
+    {
+        sqlx::query(
+            "INSERT INTO public.novels \
+             (id, user_id, title, total_chapters, status, parse_error, deviation_mode, original_file_key) \
+             VALUES ($1, $2, $3, 0, $4::public.novel_status, $5, $6::public.deviation_mode, $7)",
+        )
+        .bind(novel_id)
+        .bind(user_id)
+        .bind(title)
+        .bind(status)
+        .bind(parse_error)
+        .bind(deviation_mode)
+        .bind(format!("source-files/progress-replay/{novel_id}.txt"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO public.user_novels (user_id, novel_id) VALUES ($1, $2)")
+            .bind(user_id)
+            .bind(novel_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO public.characters (id, novel_id, name) \
+             VALUES (uuid_generate_v4(), $1, $2)",
+        )
+        .bind(novel_id)
+        .bind(format!("\tLegacy reader {title}\t"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO public.reading_progress \
+             (id, user_id, novel_id, current_chapter, reader_identity, reader_identity_type, \
+              reader_character_id, deviation_mode, last_read_at, created_at) \
+             VALUES (uuid_generate_v4(), $1, $2, 1, $3, 'self', NULL, $4::public.deviation_mode, \
+                     '2025-01-02 03:04:05+00', '2024-01-02 03:04:05+00')",
+        )
+        .bind(user_id)
+        .bind(novel_id)
+        .bind(format!("\tReader for {title}\t"))
+        .bind(deviation_mode)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    sqlx::query(
+        "INSERT INTO public.novel_import_jobs \
+         (novel_id, stage, status, attempt, lease_expires_at, failure_code) VALUES \
+         ($1, 'source', 'pending', 0, NULL, NULL), \
+         ($2, 'source', 'in_progress', 1, '2035-01-01 00:00:00+00', NULL), \
+         ($3, 'source', 'failed', 3, NULL, 'budget_exhausted'), \
+         ($4, 'source', 'failed', 3, NULL, 'budget_exhausted')",
+    )
+    .bind(novel_ids[0])
+    .bind(novel_ids[1])
+    .bind(novel_ids[2])
+    .bind(novel_ids[3])
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // A restored legacy record can have 120 actual chapters while its advertised
+    // total remains zero. It is not safe to infer or rewrite that user's progress.
+    sqlx::query(
+        "INSERT INTO public.chapters (novel_id, chapter_number, title, content) \
+         SELECT $1, series.number, format('Legacy chapter %s', series.number), \
+                format('Chapter body %s', series.number) \
+         FROM generate_series(1, 120) AS series(number)",
+    )
+    .bind(novel_ids[3])
+    .execute(&pool)
+    .await
+    .unwrap();
+    let anomalous_source: (i32, i64, String, i64, Option<String>) = sqlx::query_as(
+        "SELECT novel.total_chapters, COUNT(chapter.id), novel.status::text, job.attempt, job.failure_code \
+         FROM public.novels AS novel \
+         JOIN public.novel_import_jobs AS job ON job.novel_id = novel.id \
+         LEFT JOIN public.chapters AS chapter ON chapter.novel_id = novel.id \
+         WHERE novel.id = $1 \
+         GROUP BY novel.total_chapters, novel.status, job.attempt, job.failure_code",
+    )
+    .bind(novel_ids[3])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        anomalous_source,
+        (0, 120, "error".into(), 3, Some("budget_exhausted".into()))
+    );
+
+    // Keep the uploader alive while detaching one novel from their shelf. A
+    // later replay must not mistake an intentionally absent relation for a
+    // first-time adoption and recreate it.
+    sqlx::query("DELETE FROM public.user_novels WHERE user_id = $1 AND novel_id = $2")
+        .bind(user_id)
+        .bind(novel_ids[3])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let uploader_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM public.users WHERE id = $1)")
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(uploader_exists);
+    let detached_shelf_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM public.user_novels WHERE user_id = $1 AND novel_id = $2",
+    )
+    .bind(user_id)
+    .bind(novel_ids[3])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(detached_shelf_count, 0);
+
+    let progress_before = reading_progress_json_hash(&pool).await;
+    let characters_before = character_json_hash(&pool).await;
+    let import_markers_before = import_marker_json_hash(&pool).await;
+    let shelves_before = user_novels_json_hash(&pool).await;
+    for _ in 0..2 {
+        for migration in ALL_MIGRATIONS {
+            sqlx::raw_sql(*migration).execute(&pool).await.unwrap();
+        }
+    }
+    assert_eq!(reading_progress_json_hash(&pool).await, progress_before);
+    assert_eq!(character_json_hash(&pool).await, characters_before);
+    assert_eq!(import_marker_json_hash(&pool).await, import_markers_before);
+    assert_eq!(user_novels_json_hash(&pool).await, shelves_before);
+    let detached_shelf_count_after: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM public.user_novels WHERE user_id = $1 AND novel_id = $2",
+    )
+    .bind(user_id)
+    .bind(novel_ids[3])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(detached_shelf_count_after, 0);
+    let terminal_attempts: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM public.novel_import_jobs \
+         WHERE novel_id IN ($1, $2) AND status = 'failed' AND attempt = 3 \
+           AND failure_code = 'budget_exhausted'",
+    )
+    .bind(novel_ids[2])
+    .bind(novel_ids[3])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(terminal_attempts, 2);
+
+    // An existing but intentionally empty shelf is still an established
+    // state; replay must not infer that it needs first-adoption backfill.
+    sqlx::query("DELETE FROM public.user_novels")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let empty_shelves_before = user_novels_json_hash(&pool).await;
+    let shelf_count_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM public.user_novels")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(shelf_count_before, 0);
+    for _ in 0..2 {
+        for migration in ALL_MIGRATIONS {
+            sqlx::raw_sql(*migration).execute(&pool).await.unwrap();
+        }
+    }
+    assert_eq!(user_novels_json_hash(&pool).await, empty_shelves_before);
+    let shelf_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM public.user_novels")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(shelf_count, 0);
+
+    pool.close().await;
+    sqlx::query("DROP DATABASE novelworld_progress_replay WITH (FORCE)")
+        .execute(&admin)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn progress_migration_fails_closed_for_legacy_novels_without_status() {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    sqlx::query("DROP DATABASE IF EXISTS novelworld_legacy_progress_missing_status WITH (FORCE)")
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("CREATE DATABASE novelworld_legacy_progress_missing_status")
+        .execute(&admin)
+        .await
+        .unwrap();
+
+    let options = PgConnectOptions::from_str(&db_url())
+        .unwrap()
+        .database("novelworld_legacy_progress_missing_status");
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::raw_sql(LEGACY_SCHEMA).execute(&pool).await.unwrap();
+    sqlx::raw_sql(RUNTIME_MIGRATION)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "INSERT INTO public.users (id, email, password_hash) VALUES \
+             ('00000000-0000-0000-0000-0000000000b1', 'legacy-progress@test.invalid', 'test-hash'); \
+         INSERT INTO public.novels (id, user_id, title, total_chapters) VALUES \
+             ('00000000-0000-0000-0000-0000000000b2', \
+              '00000000-0000-0000-0000-0000000000b1', 'Legacy no-status novel', 0); \
+         INSERT INTO public.characters (id, novel_id, name) VALUES \
+             ('00000000-0000-0000-0000-0000000000b3', \
+              '00000000-0000-0000-0000-0000000000b2', E'\\tLegacy character\\t'); \
+         INSERT INTO public.reading_progress \
+             (id, user_id, novel_id, current_chapter, reader_identity, reader_identity_type) VALUES \
+             ('00000000-0000-0000-0000-0000000000b4', \
+              '00000000-0000-0000-0000-0000000000b1', \
+              '00000000-0000-0000-0000-0000000000b2', 1, E'\\tLegacy reader\\t', 'self')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let progress_before = reading_progress_json_hash(&pool).await;
+    let characters_before = character_json_hash(&pool).await;
+    assert_progress_migration_fails_and_rolls_back(&pool, "novel has no readable chapter").await;
+    assert_eq!(reading_progress_json_hash(&pool).await, progress_before);
+    assert_eq!(character_json_hash(&pool).await, characters_before);
+
+    // Historical schemas may expose status as text rather than the current
+    // enum. Unknown and NULL values must remain conservative, just like a
+    // missing status column.
+    sqlx::query("ALTER TABLE public.novels ADD COLUMN status TEXT")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE public.novels SET status = 'unknown'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let progress_before_unknown_status = reading_progress_json_hash(&pool).await;
+    let characters_before_unknown_status = character_json_hash(&pool).await;
+    assert_progress_migration_fails_and_rolls_back(&pool, "novel has no readable chapter").await;
+    assert_eq!(
+        reading_progress_json_hash(&pool).await,
+        progress_before_unknown_status
+    );
+    assert_eq!(
+        character_json_hash(&pool).await,
+        characters_before_unknown_status
+    );
+
+    sqlx::query("UPDATE public.novels SET status = NULL")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let progress_before_null_status = reading_progress_json_hash(&pool).await;
+    let characters_before_null_status = character_json_hash(&pool).await;
+    assert_progress_migration_fails_and_rolls_back(&pool, "novel has no readable chapter").await;
+    assert_eq!(
+        reading_progress_json_hash(&pool).await,
+        progress_before_null_status
+    );
+    assert_eq!(
+        character_json_hash(&pool).await,
+        characters_before_null_status
+    );
+
+    pool.close().await;
+    sqlx::query("DROP DATABASE novelworld_legacy_progress_missing_status WITH (FORCE)")
+        .execute(&admin)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -2040,6 +2441,29 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
             "psql migration {migration} failed: {}",
             String::from_utf8_lossy(&psql.stderr)
         );
+        if migration == "0019_share_novels_across_user_shelves.sql" {
+            let shelves_match_first_adoption: bool = sqlx::query_scalar(
+                "SELECT NOT EXISTS ( \
+                     (SELECT novel.user_id, novel.id, novel.created_at \
+                      FROM public.novels AS novel \
+                      JOIN public.users AS uploader ON uploader.id = novel.user_id \
+                      EXCEPT \
+                      SELECT shelf.user_id, shelf.novel_id, shelf.added_at \
+                      FROM public.user_novels AS shelf) \
+                     UNION ALL \
+                     (SELECT shelf.user_id, shelf.novel_id, shelf.added_at \
+                      FROM public.user_novels AS shelf \
+                      EXCEPT \
+                      SELECT novel.user_id, novel.id, novel.created_at \
+                      FROM public.novels AS novel \
+                      JOIN public.users AS uploader ON uploader.id = novel.user_id) \
+                 )",
+            )
+            .fetch_one(&legacy)
+            .await
+            .unwrap();
+            assert!(shelves_match_first_adoption);
+        }
         if migration == "0003_chat_turn_contract.sql" {
             sqlx::query(
                 "INSERT INTO public.chat_turns (\
@@ -2752,13 +3176,74 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
     .execute(&legacy)
     .await
     .unwrap();
-    let chapter_constraint_error = sqlx::raw_sql(PROGRESS_MIGRATION)
+    let progress_before_bad_constraint = reading_progress_json_hash(&legacy).await;
+    let characters_before_bad_constraint = character_json_hash(&legacy).await;
+    assert_progress_migration_fails_and_rolls_back(
+        &legacy,
+        "chapter constraint has an unexpected definition",
+    )
+    .await;
+    assert_eq!(
+        reading_progress_json_hash(&legacy).await,
+        progress_before_bad_constraint
+    );
+    assert_eq!(
+        character_json_hash(&legacy).await,
+        characters_before_bad_constraint
+    );
+    sqlx::query(
+        "ALTER TABLE public.reading_progress \
+         DROP CONSTRAINT reading_progress_current_chapter_check",
+    )
+    .execute(&legacy)
+    .await
+    .unwrap();
+    sqlx::raw_sql(PROGRESS_MIGRATION)
         .execute(&legacy)
         .await
-        .unwrap_err();
-    assert!(chapter_constraint_error
-        .to_string()
-        .contains("chapter constraint has an unexpected definition"));
+        .unwrap();
+
+    sqlx::query(
+        "ALTER TABLE public.reading_progress \
+         DROP CONSTRAINT reading_progress_current_chapter_check, \
+         ADD CONSTRAINT reading_progress_current_chapter_check \
+             CHECK (current_chapter >= 1) NOT VALID",
+    )
+    .execute(&legacy)
+    .await
+    .unwrap();
+    sqlx::raw_sql(
+        "INSERT INTO public.characters (id, novel_id, name, first_appearance_chapter) VALUES \
+         ('00000000-0000-0000-0000-000000000022', \
+          '00000000-0000-0000-0000-000000000002', E'\\tRollback marker\\t', 1); \
+         UPDATE public.reading_progress \
+         SET reader_identity = E'\\tProgress marker\\t', \
+             reader_identity_type = 'self', reader_character_id = NULL \
+         WHERE novel_id = '00000000-0000-0000-0000-000000000002'",
+    )
+    .execute(&legacy)
+    .await
+    .unwrap();
+    let progress_before_not_valid = reading_progress_json_hash(&legacy).await;
+    let characters_before_not_valid = character_json_hash(&legacy).await;
+    assert_progress_migration_fails_and_rolls_back(&legacy, "chapter constraint").await;
+    assert_eq!(
+        reading_progress_json_hash(&legacy).await,
+        progress_before_not_valid
+    );
+    assert_eq!(
+        character_json_hash(&legacy).await,
+        characters_before_not_valid
+    );
+    let constraint_validated: bool = sqlx::query_scalar(
+        "SELECT convalidated FROM pg_catalog.pg_constraint \
+         WHERE conname = 'reading_progress_current_chapter_check' \
+           AND conrelid = 'public.reading_progress'::pg_catalog.regclass",
+    )
+    .fetch_one(&legacy)
+    .await
+    .unwrap();
+    assert!(!constraint_validated);
     sqlx::query(
         "ALTER TABLE public.reading_progress \
          DROP CONSTRAINT reading_progress_current_chapter_check",
@@ -2775,12 +3260,12 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
         "INSERT INTO public.users (id, email, password_hash) VALUES \
              ('00000000-0000-0000-0000-000000000016', \
               'legacy-repair@test.invalid', 'legacy-test-hash'); \
-         INSERT INTO public.novels (id, user_id, title, total_chapters) VALUES \
+         INSERT INTO public.novels (id, user_id, title, total_chapters, status) VALUES \
              ('00000000-0000-0000-0000-000000000017', \
-              '00000000-0000-0000-0000-000000000016', 'Pending repair', 3); \
+              '00000000-0000-0000-0000-000000000016', 'Ready repair', 3, 'ready'); \
          INSERT INTO public.characters (id, novel_id, name, first_appearance_chapter) VALUES \
              ('00000000-0000-0000-0000-000000000018', \
-              '00000000-0000-0000-0000-000000000017', E'\\tPending repair\\t', 1); \
+              '00000000-0000-0000-0000-000000000017', E'\\tReady repair\\t', 1); \
          INSERT INTO public.reading_progress \
              (id, user_id, novel_id, current_chapter, reader_identity_type) VALUES \
              ('00000000-0000-0000-0000-000000000019', \
@@ -2790,13 +3275,17 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
     .execute(&legacy)
     .await
     .unwrap();
-    let no_chapter_error = sqlx::raw_sql(PROGRESS_MIGRATION)
-        .execute(&legacy)
-        .await
-        .unwrap_err();
-    assert!(no_chapter_error
-        .to_string()
-        .contains("novel has no readable chapter"));
+    let progress_before_no_chapters = reading_progress_json_hash(&legacy).await;
+    let characters_before_no_chapters = character_json_hash(&legacy).await;
+    assert_progress_migration_fails_and_rolls_back(&legacy, "novel has no readable chapter").await;
+    assert_eq!(
+        reading_progress_json_hash(&legacy).await,
+        progress_before_no_chapters
+    );
+    assert_eq!(
+        character_json_hash(&legacy).await,
+        characters_before_no_chapters
+    );
     let unchanged_name: String = sqlx::query_scalar(
         "SELECT name FROM public.characters \
          WHERE id = '00000000-0000-0000-0000-000000000018'",
@@ -2804,12 +3293,12 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
     .fetch_one(&legacy)
     .await
     .unwrap();
-    assert_eq!(unchanged_name, "\tPending repair\t");
+    assert_eq!(unchanged_name, "\tReady repair\t");
 
     sqlx::query(
         "INSERT INTO public.chapters (id, novel_id, chapter_number, content) VALUES \
          ('00000000-0000-0000-0000-000000000020', \
-          '00000000-0000-0000-0000-000000000017', 1, '')",
+          '00000000-0000-0000-0000-000000000017', 1, 'Readable chapter')",
     )
     .execute(&legacy)
     .await
@@ -2827,7 +3316,7 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
     .fetch_one(&legacy)
     .await
     .unwrap();
-    assert_eq!(repaired_name, "Pending repair");
+    assert_eq!(repaired_name, "Ready repair");
 
     sqlx::query(
         "ALTER TABLE public.reading_progress \
@@ -2837,13 +3326,21 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
     .execute(&legacy)
     .await
     .unwrap();
-    let identity_constraint_error = sqlx::raw_sql(PROGRESS_MIGRATION)
-        .execute(&legacy)
-        .await
-        .unwrap_err();
-    assert!(identity_constraint_error
-        .to_string()
-        .contains("identity constraint has an unexpected definition"));
+    let progress_before_identity_constraint = reading_progress_json_hash(&legacy).await;
+    let characters_before_identity_constraint = character_json_hash(&legacy).await;
+    assert_progress_migration_fails_and_rolls_back(
+        &legacy,
+        "identity constraint has an unexpected definition",
+    )
+    .await;
+    assert_eq!(
+        reading_progress_json_hash(&legacy).await,
+        progress_before_identity_constraint
+    );
+    assert_eq!(
+        character_json_hash(&legacy).await,
+        characters_before_identity_constraint
+    );
     sqlx::query(
         "ALTER TABLE public.reading_progress \
          DROP CONSTRAINT reading_progress_identity_fields_check",
