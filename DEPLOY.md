@@ -178,6 +178,18 @@ test -n "$nginx_id" && test "$(printf '%s\n' "$nginx_id" | wc -l)" -eq 1 && dock
 
 ## 生产升级与回滚
 
+Rust 原生镜像的源码新鲜度属于构建阶段契约，不是部署脚本可补救的事项。
+构建必须在现有锁定的 BuildKit Cargo target cache 内只清理 workspace release
+产物（`cargo clean --locked --release --workspace`），保留第三方已编译依赖及
+registry/layer cache，不清理宿主机共享 Cargo target。历史 git archive 的源码
+mtime 可能让 Cargo 复用其他 revision 编译的 workspace 二进制；Docker `RUN`
+成功本身不能证明二进制对应当前源码。发布证据必须证明 Cargo 实际编译了变更源码。
+对注册候选 release pair，B 的真实 runtime 变更至少须使一个受影响应用镜像的
+image ID 和至少一个 filesystem layer 均与基线不同；仅文档/缓存变化或未改变的
+runtime 输入不要求每个镜像或二进制都变化。当前 #432 与 #429 的交付顺序是 A→C→B；
+只有实际合并的 C 基线和其严格后继 B 候选、且两端都含该保护，才可参与
+后续 artifact pair 资格验证。旧 A 基线和失败预览产物须保留为失败证据，且不合格。
+
 `v*` Tag workflow 会先运行完整 CI，只发布以 Git SHA 标记的应用镜像。
 全部镜像和 Windows/Linux/macOS 客户端构建成功后，同一 GitHub Release
 会附加 `release.env`、SBOM、客户端压缩包、`desktop-SHA256SUMS` 和
