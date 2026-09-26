@@ -126,3 +126,5 @@ Accepted records:
 - [ADR 0004: Durable diagnostic budget authority (implementation in progress)](./adr/0004-durable-diagnostic-budget.md)
 - [ADR 0005: Durable prospective chat summary windows](./adr/0005-durable-chat-summary-windows.md)
 - [ADR 0006: Optional local action hints](./adr/0006-optional-laya-action-hints.md)
+- [ADR 0007: Regional LLM presets](./adr/0007-regional-llm-presets.md)
+- [ADR 0008: Upload acceptance independent of parsing](./adr/0008-queued-upload-acceptance.md)

@@ -126,7 +126,7 @@ and require Internet access and a key.
 | Pasted text | 5 MiB |
 | TXT | 10 MiB; UTF-8, BOM-marked UTF-16, or GBK |
 | EPUB or text-extractable PDF | 20 MiB per file; extracted text up to 20 MiB |
-| Batch upload | Up to 5 files, 40 MiB combined; per-file limits still apply |
+| Batch upload | Select up to 50 files; sequential requests of at most 5 files / 40 MiB each; per-file limits still apply |
 
 Simplified Chinese and English have deterministic structural coverage. Generated
 narrative transitions currently require Chinese text. Scanned/image-only PDFs
