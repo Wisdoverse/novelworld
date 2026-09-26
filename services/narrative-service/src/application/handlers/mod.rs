@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::domain::entities::game_rules::{
     build_action_adjudication_context, resolve_action_check, AdjudicationDecision,
-    GameRuleTemplate, PlayerRuleProfile, ResolutionMode,
+    GameRuleTemplate, PlayerRuleProfile, ResolutionMode, BASIC_GAME_RULE_PROMPT_VERSION,
 };
 use crate::domain::entities::narrative_node::{
     fit_character_world_context, NarrativeChoice, NarrativeNode, WorldState, WorldStateError,
@@ -410,6 +410,10 @@ pub enum NarrativeError {
     GameRulesExhausted,
     #[error("Game rules are not yet available at current reading progress")]
     GameRulesUnavailableAtProgress,
+    #[error("Canonical sources cannot support game rules")]
+    GameRuleSourcesUnavailable,
+    #[error("Novel analysis is not ready")]
+    GameRuleCanonUnavailable,
     #[error("Reading progress is behind the committed world context")]
     ReadingProgressBehindWorld,
     #[error("Novel service is unavailable")]
@@ -942,6 +946,15 @@ impl NarrativeCommandHandler {
             let game_rules = match player.rules.mode {
                 ResolutionMode::Narrative => None,
                 ResolutionMode::Advanced => {
+                    let prompt_version = player
+                        .rules
+                        .template_prompt_version
+                        .as_deref()
+                        .ok_or_else(|| {
+                            NarrativeError::Internal(anyhow::anyhow!(
+                                "advanced player template prompt version is missing"
+                            ))
+                        })?;
                     let template = self
                         .chapter_repo
                         .get_game_rule_template(
@@ -952,6 +965,7 @@ impl NarrativeCommandHandler {
                                 ))
                             })?,
                             user_id,
+                            prompt_version,
                         )
                         .await
                         .map_err(NarrativeError::Unavailable)?
@@ -1004,7 +1018,7 @@ impl NarrativeCommandHandler {
     ) -> NarrativeResult<GameRuleTemplate> {
         self.owned_novel(novel_id, user_id).await?;
         self.chapter_repo
-            .request_game_rule_template(novel_id, user_id)
+            .request_game_rule_template(novel_id, user_id, BASIC_GAME_RULE_PROMPT_VERSION)
             .await
             .map_err(|error| match error {
                 GameRuleTemplateRequestError::InProgress {
@@ -1015,6 +1029,12 @@ impl NarrativeCommandHandler {
                 GameRuleTemplateRequestError::Exhausted => NarrativeError::GameRulesExhausted,
                 GameRuleTemplateRequestError::UnavailableAtProgress => {
                     NarrativeError::GameRulesUnavailableAtProgress
+                }
+                GameRuleTemplateRequestError::SourcesUnavailable => {
+                    NarrativeError::GameRuleSourcesUnavailable
+                }
+                GameRuleTemplateRequestError::CanonUnavailable => {
+                    NarrativeError::GameRuleCanonUnavailable
                 }
                 GameRuleTemplateRequestError::Unavailable(error) => {
                     NarrativeError::Unavailable(error)
@@ -1057,9 +1077,18 @@ impl NarrativeCommandHandler {
                 let version = command.rules.canon_model_version.ok_or_else(|| {
                     NarrativeError::Validation("Advanced template version is required".into())
                 })?;
+                let prompt_version = command
+                    .rules
+                    .template_prompt_version
+                    .as_deref()
+                    .ok_or_else(|| {
+                        NarrativeError::Validation(
+                            "Advanced template prompt version is required".into(),
+                        )
+                    })?;
                 let template = self
                     .chapter_repo
-                    .get_game_rule_template(novel_id, version, user_id)
+                    .get_game_rule_template(novel_id, version, user_id, prompt_version)
                     .await
                     .map_err(NarrativeError::Unavailable)?
                     .ok_or_else(|| {
@@ -1225,6 +1254,16 @@ impl NarrativeCommandHandler {
         let game_rules = match player.rules.mode {
             ResolutionMode::Narrative => None,
             ResolutionMode::Advanced => {
+                let prompt_version =
+                    player
+                        .rules
+                        .template_prompt_version
+                        .as_deref()
+                        .ok_or_else(|| {
+                            NarrativeError::Internal(anyhow::anyhow!(
+                                "advanced player template prompt version is missing"
+                            ))
+                        })?;
                 let version = player.rules.canon_model_version.ok_or_else(|| {
                     NarrativeError::Internal(anyhow::anyhow!(
                         "advanced player template version is missing"
@@ -1232,7 +1271,7 @@ impl NarrativeCommandHandler {
                 })?;
                 let template = self
                     .chapter_repo
-                    .get_game_rule_template(novel_id, version, user_id)
+                    .get_game_rule_template(novel_id, version, user_id, prompt_version)
                     .await
                     .map_err(NarrativeError::Unavailable)?
                     .ok_or_else(|| {

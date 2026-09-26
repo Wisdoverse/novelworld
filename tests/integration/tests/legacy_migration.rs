@@ -72,6 +72,9 @@ const DEEPSEEK_V41_DIAGNOSTIC_COST_MIGRATION: &str =
 const BUDGETED_EMBEDDING_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0029_budgeted_embedding.sql");
 
+const VERSIONED_GAME_RULE_TEMPLATES_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0030_versioned_game_rule_templates.sql");
+
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
         .unwrap_or_else(|_| "postgres://test:test@localhost:25432/novelworld_test".into())
@@ -107,6 +110,7 @@ const ALL_MIGRATIONS: &[&str] = &[
     CHAT_SUMMARY_WINDOWS_MIGRATION,
     DEEPSEEK_V41_DIAGNOSTIC_COST_MIGRATION,
     BUDGETED_EMBEDDING_MIGRATION,
+    VERSIONED_GAME_RULE_TEMPLATES_MIGRATION,
 ];
 
 #[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
@@ -2016,6 +2020,7 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
         "0027_chat_summary_windows.sql",
         "0028_deepseek_v41_diagnostic_cost.sql",
         "0029_budgeted_embedding.sql",
+        "0030_versioned_game_rule_templates.sql",
     ] {
         let migration_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../infra/postgres/migrations")

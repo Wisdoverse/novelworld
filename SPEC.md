@@ -1257,6 +1257,39 @@ records belonging to another principal or novel.
 
 ---
 
+### 7.7 Prompt-versioned basic game rules
+
+Narrative play MUST remain the default. Advanced D20 rules MUST be immutable
+and identified by the canonical-model version and exact prompt version. A
+newly created advanced profile MUST bind the selected template identity; every
+existing profile or session MUST continue to resolve its exact previously bound
+template identity and MUST NOT be silently upgraded to a newer prompt. Existing
+v1 bindings remain on v1; a profile explicitly bound to a later prompt version
+remains on that exact version. A missing bound template
+is an explicit unavailable result, never permission to select the latest one.
+
+For v2, Novel Service MUST derive only basic mechanics from the bounded,
+stably ordered `CanonStoryModel.world_rules` set (at most 64 source rules).
+The provider MAY select only from the server-owned twelve-key ability
+vocabulary and the eight supported action kinds, plus bounded numeric values
+and source chapter references. The server MUST provide all labels and
+descriptions from fixed dictionaries and MUST reject provider-authored free
+text, unknown keys, duplicate mappings, invalid numbers, or missing actions.
+Generated rules MUST NOT contain plot summaries, future events, character
+goals, unresolved threads, ending details, or other narrative reveals. Source
+chapter references are provenance only for v2; they MUST NOT gate template
+availability. A ready novel with positive reading progress MAY request v2
+rules. This does not relax any existing progress, ownership, target, canon,
+spoiler, or hard-rule check on world actions or narrative context.
+
+The v1 template and its existing chapter-unlock behavior MUST remain available
+to profiles and sessions already bound to v1. The total generation-claim budget
+is three per novel and canonical-model version across all prompt versions; a
+new prompt version MUST NOT refill that budget. Schema evolution MUST preserve
+ready templates and existing reader bindings. The v2 source must not be treated
+as evidence that canonical extraction captures every world rule or that
+generated mappings are semantically correct.
+
 ## 8. Player Identity System
 
 ### 8.1 Identity Types

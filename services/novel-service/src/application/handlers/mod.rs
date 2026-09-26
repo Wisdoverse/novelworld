@@ -20,7 +20,9 @@ use crate::application::commands::ImportNovelCommand;
 use crate::domain::entities::{
     chapter::{chapters_are_importable, Chapter},
     character::Character,
-    game_rule_template::GameRuleTemplate,
+    game_rule_template::{
+        supported_prompt_version, GameRuleTemplate, BASIC_GAME_RULE_PROMPT_VERSION,
+    },
     novel::Novel,
 };
 use crate::domain::ports::{
@@ -1200,6 +1202,8 @@ pub enum GameRuleTemplateRequestError {
     NovelNotFound,
     #[error("Canonical story model is unavailable")]
     CanonUnavailable,
+    #[error("Canonical sources cannot support game rules")]
+    SourcesUnavailable,
     #[error("Game rule generation budget is exhausted")]
     BudgetExhausted,
     #[error("Game rule repository failed")]
@@ -1352,6 +1356,7 @@ impl GameRuleLease {
         repo: Arc<dyn CanonStoryModelRepository>,
         novel_id: Uuid,
         canon_model_version: i32,
+        prompt_version: String,
         attempt: i64,
     ) -> Self {
         let (stop, mut stopped) = oneshot::channel();
@@ -1370,6 +1375,7 @@ impl GameRuleLease {
                                 .renew_game_rule_generation(
                                     novel_id,
                                     canon_model_version,
+                                    &prompt_version,
                                     attempt,
                                 )
                                 .await
@@ -1547,22 +1553,44 @@ impl NovelCommandHandler {
         self: &Arc<Self>,
         user_id: Uuid,
         novel_id: Uuid,
+        prompt_version: &str,
     ) -> std::result::Result<GameRuleTemplateRequest, GameRuleTemplateRequestError> {
+        if !supported_prompt_version(prompt_version) {
+            return Err(GameRuleTemplateRequestError::SourcesUnavailable);
+        }
         let novel = self
             .novel_repo
             .find_by_id(novel_id)
             .await
             .map_err(GameRuleTemplateRequestError::Repository)?
             .ok_or(GameRuleTemplateRequestError::NovelNotFound)?;
+        if prompt_version == BASIC_GAME_RULE_PROMPT_VERSION && novel.status != NovelStatus::Ready {
+            return Err(GameRuleTemplateRequestError::CanonUnavailable);
+        }
         let model = self
             .canon_repo
             .find_latest(novel_id)
             .await
             .map_err(GameRuleTemplateRequestError::Repository)?
             .ok_or(GameRuleTemplateRequestError::CanonUnavailable)?;
+        if let Some(template) = self
+            .canon_repo
+            .find_game_rule_template(novel_id, model.model_version, prompt_version)
+            .await
+            .map_err(GameRuleTemplateRequestError::Repository)?
+        {
+            return Ok(GameRuleTemplateRequest::Ready(template));
+        }
+        // Reject missing/oversized input before taking any paid-work claim.
+        let prompt = if prompt_version == BASIC_GAME_RULE_PROMPT_VERSION {
+            game_rule_generator::build_basic_prompt(&novel.title, &model)
+        } else {
+            game_rule_generator::build_prompt(&novel.title, &model)
+        }
+        .map_err(|_| GameRuleTemplateRequestError::SourcesUnavailable)?;
         let attempt = match self
             .canon_repo
-            .begin_game_rule_generation(novel_id, model.model_version)
+            .begin_game_rule_generation(novel_id, model.model_version, prompt_version)
             .await
             .map_err(GameRuleTemplateRequestError::Repository)?
         {
@@ -1582,7 +1610,14 @@ impl NovelCommandHandler {
             BeginGameRuleGeneration::Acquired { attempt } => attempt,
         };
 
-        self.spawn_game_rule_generation(user_id, novel, model, attempt);
+        self.spawn_game_rule_generation(
+            user_id,
+            novel,
+            model,
+            prompt_version.into(),
+            prompt,
+            attempt,
+        );
         Ok(GameRuleTemplateRequest::InProgress {
             retry_after_seconds: 2,
         })
@@ -1593,6 +1628,8 @@ impl NovelCommandHandler {
         user_id: Uuid,
         novel: Novel,
         model: crate::domain::entities::canon_story_model::CanonStoryModel,
+        prompt_version: String,
+        prompt: String,
         attempt: i64,
     ) {
         let handler = Arc::clone(self);
@@ -1600,7 +1637,14 @@ impl NovelCommandHandler {
         tokio::spawn(
             async move {
                 handler
-                    .finish_claimed_game_rule_generation(user_id, novel, model, attempt)
+                    .finish_claimed_game_rule_generation(
+                        user_id,
+                        novel,
+                        model,
+                        prompt_version,
+                        prompt,
+                        attempt,
+                    )
                     .await;
             }
             .instrument(current_span),
@@ -1612,12 +1656,21 @@ impl NovelCommandHandler {
         user_id: Uuid,
         novel: Novel,
         model: crate::domain::entities::canon_story_model::CanonStoryModel,
+        prompt_version: String,
+        prompt: String,
         attempt: i64,
     ) {
         let novel_id = novel.id;
         let generation_started = Instant::now();
         match self
-            .generate_claimed_game_rule_template(user_id, &novel, &model, attempt)
+            .generate_claimed_game_rule_template(
+                user_id,
+                &novel,
+                &model,
+                &prompt_version,
+                &prompt,
+                attempt,
+            )
             .await
         {
             Ok(_) => {
@@ -1643,6 +1696,7 @@ impl NovelCommandHandler {
                     .fail_game_rule_generation(
                         novel_id,
                         model.model_version,
+                        &prompt_version,
                         attempt,
                         "generation_failed",
                     )
@@ -1665,14 +1719,21 @@ impl NovelCommandHandler {
         user_id: Uuid,
         novel: &Novel,
         model: &crate::domain::entities::canon_story_model::CanonStoryModel,
+        prompt_version: &str,
+        prompt: &str,
         attempt: i64,
     ) -> Result<GameRuleTemplate> {
-        let prompt = game_rule_generator::build_prompt(&novel.title, model)?;
-        let allowed_source_chapters = game_rule_generator::source_chapters(model);
+        let basic = prompt_version == BASIC_GAME_RULE_PROMPT_VERSION;
+        let allowed_source_chapters = if basic {
+            game_rule_generator::basic_source_chapters(model)
+        } else {
+            game_rule_generator::source_chapters(model)
+        };
         let mut lease = GameRuleLease::start(
             self.canon_repo.clone(),
             novel.id,
             model.model_version,
+            prompt_version.into(),
             attempt,
         );
         anyhow::ensure!(
@@ -1682,11 +1743,16 @@ impl NovelCommandHandler {
         let raw = lease
             .run(
                 self.llm
-                    .chat_json(user_id, NovelLlmTask::GameRuleGeneration, &prompt),
+                    .chat_json(user_id, NovelLlmTask::GameRuleGeneration, prompt),
             )
             .await
             .ok_or_else(|| anyhow::anyhow!("game rule generation lease was lost"))??;
-        let template = game_rule_generator::parse_template(
+        let parse = if basic {
+            game_rule_generator::parse_basic_template
+        } else {
+            game_rule_generator::parse_template
+        };
+        let template = parse(
             &raw,
             novel.id,
             model.model_version,
@@ -4186,10 +4252,17 @@ mod reading_progress_handler_tests {
             &self,
             _: Uuid,
             _: i32,
+            _: &str,
         ) -> Result<BeginGameRuleGeneration> {
             unreachable!("unused test repository method")
         }
-        async fn renew_game_rule_generation(&self, _: Uuid, _: i32, _: i64) -> Result<bool> {
+        async fn renew_game_rule_generation(
+            &self,
+            _: Uuid,
+            _: i32,
+            _: &str,
+            _: i64,
+        ) -> Result<bool> {
             unreachable!("unused test repository method")
         }
         async fn complete_game_rule_generation(
@@ -4203,6 +4276,7 @@ mod reading_progress_handler_tests {
             &self,
             _: Uuid,
             _: i32,
+            _: &str,
             _: i64,
             _: &str,
         ) -> Result<bool> {
@@ -4212,6 +4286,7 @@ mod reading_progress_handler_tests {
             &self,
             _: Uuid,
             _: i32,
+            _: &str,
         ) -> Result<Option<GameRuleTemplate>> {
             unreachable!("unused test repository method")
         }

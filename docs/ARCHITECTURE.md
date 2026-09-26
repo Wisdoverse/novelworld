@@ -79,7 +79,13 @@ remain a separate user-confirmed type suggestion. Neither use replaces server
 validation or dice authority. The bounded adjudication exception is accepted in
 [ADR 0009](./adr/0009-bounded-laya-d20-adjudication.md) as a structural private
 preview; live semantic quality is
-unqualified, and the rest of [ADR 0001](./adr/0001-source-bound-advanced-game-rules.md)
+unqualified. ADR 0010 adds immutable v2 basic templates selected from bounded,
+stably ordered whole-book world-rule metadata. It keeps fixed server-owned
+labels/descriptions and keys, preserves v1 readers, and shares the three-claim
+budget across prompt versions under a canon lock. Chapter references are
+provenance only; narrative data and existing progress/hard-rule guards remain
+protected. Migration 0030 requires coordinated Novel and Narrative writer
+shutdown. The rest of [ADR 0001](./adr/0001-source-bound-advanced-game-rules.md)
 remains in force.
 
 User Service validates fixed provider/region/plan endpoints and owns encrypted

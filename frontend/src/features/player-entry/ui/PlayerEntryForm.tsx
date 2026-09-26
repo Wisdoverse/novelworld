@@ -176,9 +176,13 @@ export function PlayerEntryForm({
               )}
               {generateRules.isError ? (
                 <p role="alert" className="text-sm text-[#b3261e]">
-                  {getApiErrorCode(generateRules.error) === 'game_rules_unavailable_at_progress'
-                    ? '小说专属规则引用了尚未解锁的章节。请继续阅读后重试，也可关闭高级项，以纯叙事模式进入故事。'
-                    : getApiErrorMessage(generateRules.error, '小说规则生成失败，请稍后重试')}
+                  {getApiErrorCode(generateRules.error) === 'game_rule_sources_unavailable'
+                    ? '当前小说的世界规则不足以生成基础检定。可关闭高级项，以纯叙事模式进入故事。'
+                    : getApiErrorCode(generateRules.error) === 'canon_unavailable'
+                      ? '小说解析尚未完成，请等待解析成功后生成规则。'
+                      : getApiErrorCode(generateRules.error) === 'game_rules_unavailable_at_progress'
+                        ? '小说专属规则引用了尚未解锁的章节。请继续阅读后重试，也可关闭高级项，以纯叙事模式进入故事。'
+                        : getApiErrorMessage(generateRules.error, '小说规则生成失败，请稍后重试')}
                 </p>
               ) : null}
               {gameRules && !advancedReady ? (

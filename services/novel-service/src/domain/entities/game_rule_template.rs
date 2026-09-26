@@ -5,6 +5,35 @@ use uuid::Uuid;
 
 pub const GAME_RULE_SCHEMA_VERSION: i32 = 1;
 pub const GAME_RULE_PROMPT_VERSION: &str = "novel-game-rules-v1";
+pub const BASIC_GAME_RULE_PROMPT_VERSION: &str = "novel-game-rules-v2";
+pub const BASIC_ACTION_DESCRIPTION: &str = "在世界规则内处理该类行动的不确定结果";
+
+pub fn supported_prompt_version(version: &str) -> bool {
+    matches!(
+        version,
+        GAME_RULE_PROMPT_VERSION | BASIC_GAME_RULE_PROMPT_VERSION
+    )
+}
+
+// Only these server-owned words may appear in a basic template. The model
+// chooses a novel-specific subset and numbers, never public story text.
+pub fn basic_attribute(key: &str) -> Option<(&'static str, &'static str)> {
+    Some(match key {
+        "root" => ("根骨", "身体资质与基础耐受"),
+        "agility" => ("身法", "移动、闪避与身体协调"),
+        "vigor" => ("力道", "用力、冲撞与持续体能"),
+        "insight" => ("悟性", "理解、推理与学习"),
+        "fortune" => ("福缘", "处理偶然机会与环境机遇"),
+        "strategy" => ("谋略", "分析局势与制定计划"),
+        "command" => ("统御", "组织协作与协调行动"),
+        "loyalty" => ("义理", "理解承诺、信任与互助"),
+        "resolve" => ("心志", "承受压力并保持行动意志"),
+        "influence" => ("交涉", "沟通、说服与协商"),
+        "knowledge" => ("学识", "运用已掌握知识"),
+        "craft" => ("技艺", "运用工具和实践技能"),
+        _ => return None,
+    })
+}
 pub const MIN_ATTRIBUTE_SCORE: i32 = 8;
 pub const MAX_ATTRIBUTE_SCORE: i32 = 15;
 const MIN_ATTRIBUTES: usize = 3;
@@ -75,6 +104,18 @@ pub struct GameRuleTemplate {
 pub struct GameRuleTemplateError(String);
 
 impl GameRuleTemplate {
+    pub fn new_basic(
+        novel_id: Uuid,
+        canon_model_version: i32,
+        attributes: Vec<GameAttribute>,
+        action_rules: Vec<GameActionRule>,
+    ) -> Result<Self, GameRuleTemplateError> {
+        let mut template = Self::new(novel_id, canon_model_version, attributes, action_rules)?;
+        template.prompt_version = BASIC_GAME_RULE_PROMPT_VERSION.into();
+        template.validate(i32::MAX)?;
+        Ok(template)
+    }
+
     pub fn new(
         novel_id: Uuid,
         canon_model_version: i32,
@@ -83,8 +124,10 @@ impl GameRuleTemplate {
     ) -> Result<Self, GameRuleTemplateError> {
         let point_budget = attributes
             .iter()
-            .map(|attribute| attribute.default_score)
-            .sum();
+            .try_fold(0_i32, |total, attribute| {
+                total.checked_add(attribute.default_score)
+            })
+            .ok_or_else(|| GameRuleTemplateError("attribute point budget overflows".into()))?;
         let template = Self {
             novel_id,
             canon_model_version,
@@ -106,7 +149,7 @@ impl GameRuleTemplate {
         }
         if self.canon_model_version < 1
             || self.schema_version != GAME_RULE_SCHEMA_VERSION
-            || self.prompt_version != GAME_RULE_PROMPT_VERSION
+            || !supported_prompt_version(&self.prompt_version)
         {
             return invalid("template version metadata is invalid");
         }
@@ -124,6 +167,12 @@ impl GameRuleTemplate {
             key("attribute key", &attribute.key)?;
             text("attribute label", &attribute.label, 40)?;
             text("attribute description", &attribute.description, 300)?;
+            if self.prompt_version == BASIC_GAME_RULE_PROMPT_VERSION
+                && basic_attribute(&attribute.key)
+                    != Some((attribute.label.as_str(), attribute.description.as_str()))
+            {
+                return invalid("basic attribute text must match the server vocabulary");
+            }
             if !attribute_keys.insert(attribute.key.as_str()) {
                 return invalid("attribute keys must be unique");
             }
@@ -156,6 +205,11 @@ impl GameRuleTemplate {
                 return invalid("action difficulty class must be between 5 and 30");
             }
             text("action rule description", &rule.description, 300)?;
+            if self.prompt_version == BASIC_GAME_RULE_PROMPT_VERSION
+                && rule.description != BASIC_ACTION_DESCRIPTION
+            {
+                return invalid("basic action text must match the server vocabulary");
+            }
             source_chapters(&rule.source_chapters, maximum_source_chapter)?;
         }
         if GameActionKind::ALL
@@ -168,6 +222,12 @@ impl GameRuleTemplate {
     }
 
     pub fn visible_at(&self, unlocked_chapter: i32) -> Option<Self> {
+        if self.prompt_version == BASIC_GAME_RULE_PROMPT_VERSION {
+            // Basic rules expose only trusted vocabulary and bounded numbers.
+            // Real citations are provenance, not story-unlock prerequisites.
+            return (unlocked_chapter >= 1 && self.validate(i32::MAX).is_ok())
+                .then(|| self.clone());
+        }
         // A template version is immutable. Returning a progress-filtered shape
         // under the same version would make an existing player sheet invalid
         // as soon as another attribute became visible. Expose the exact shared

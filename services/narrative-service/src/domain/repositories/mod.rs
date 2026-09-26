@@ -19,6 +19,10 @@ pub enum GameRuleTemplateRequestError {
     Exhausted,
     #[error("Game rules are not yet available at current reading progress")]
     UnavailableAtProgress,
+    #[error("Canonical sources cannot support game rules")]
+    SourcesUnavailable,
+    #[error("Canonical novel analysis is not ready")]
+    CanonUnavailable,
     #[error("Novel service is unavailable")]
     Unavailable(#[source] anyhow::Error),
 }
@@ -267,12 +271,14 @@ pub trait ChapterReadRepository: Send + Sync {
         &self,
         novel_id: Uuid,
         user_id: Uuid,
+        prompt_version: &str,
     ) -> std::result::Result<GameRuleTemplate, GameRuleTemplateRequestError>;
     async fn get_game_rule_template(
         &self,
         novel_id: Uuid,
         canon_model_version: i32,
         user_id: Uuid,
+        prompt_version: &str,
     ) -> Result<Option<GameRuleTemplate>>;
 }
 
