@@ -153,7 +153,11 @@ impl LlmUsageHandler {
             );
             LlmUsageError::Unavailable
         })?;
-        Ok((self.pricing.summarize(snapshot), scope))
+        Ok((
+            self.pricing
+                .summarize_for(snapshot, &config.provider, &config.model),
+            scope,
+        ))
     }
 }
 

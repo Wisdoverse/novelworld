@@ -14,6 +14,14 @@ Key against [LLM provider configuration](./LLM_PROVIDERS.md). Settings switches
 require a freshly entered Key. A successful bounded probe proves connectivity,
 not live model quality or remaining subscription quota.
 
+For missing cost estimates, check the exact metric provider/model against the
+[official pricing snapshot and overrides](./LLM_PRICING.md), then Prometheus
+availability/retention. Native currencies need no exchange rate. Unknown prices
+and missing usage are distinct from zero cost; a subscription quote is not an
+account bill. Invalid price configuration fails User Service startup; remove
+the conflicting override and recheck `/ready` rather than changing Diagnostic
+budgets or frozen evidence.
+
 | Surface | Probe |
 |---|---|
 | Gateway | `/live`, `/ready`, `/health` on the gateway port; `/metrics` (Prometheus text, internal only) |
