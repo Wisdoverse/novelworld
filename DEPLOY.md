@@ -154,6 +154,28 @@ schema barriers；应用完整候选 release 后再启动兼容版本，避免�
 不要重写为 v2。数据库只前向迁移，旧版 rollback 不受支持，故障恢复使用兼容
 release 前向修复。此要求是 rollout 契约，不代表该迁移已在生产执行。
 
+每次受管部署都会重放标准迁移目录。导入可在章节可用前原子创建默认
+`reading_progress`；`current_chapter = 1` 只是元数据，不证明该章节存在。
+迁移 0002 对 `pending`、`parsing`、`error` 且在公布章节数内没有有效章节的小说
+保留进度及其偏好；`ready` 或状态缺失/未知而没有有效章节时必须失败关闭，且只可
+按现有有效章节规范化。升级前先完成并验证 PostgreSQL 备份，不要手动删除或改写
+进度记录来绕过迁移错误。当前一键 `start.sh` 会先 `docker compose down`，再启动完整
+栈并重放迁移；它不是只重开入口的命令。
+
+迁移 0019 只在首次引入 `user_novels` 关系时回填上传者书架：它在创建关系之前记录该表
+是否已存在，并在事务内锁定 `novels`。若表原已存在（即使为空），重放保留现有书架，
+不会把已移出的书重新挂回上传者。此检查用于区分首次采用与重放，不会自动修复任意
+历史部分迁移。`tests/integration/tests/legacy_migration.rs` 中的全迁移重放回归覆盖显式移除
+后的保留行为；Issue #424 记录最终 CI 与 live 部署证据。
+
+若受管停机后只需重开已经存在的 Nginx 容器，本机 Compose `start --help` 不提供
+`--no-deps`；确认只返回一个 Nginx 容器 ID 后再使用：
+
+```bash
+nginx_id=$(docker compose ps --all -q nginx)
+test -n "$nginx_id" && test "$(printf '%s\n' "$nginx_id" | wc -l)" -eq 1 && docker start "$nginx_id"
+```
+
 ## 生产升级与回滚
 
 `v*` Tag workflow 会先运行完整 CI，只发布以 Git SHA 标记的应用镜像。

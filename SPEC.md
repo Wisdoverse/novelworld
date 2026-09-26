@@ -457,6 +457,9 @@ Fields:
 - `novel_id` (UUID, foreign key → Novel)
 - `current_chapter` (integer)
   - Default: 1.
+  - This is initial progress metadata, not proof that chapter 1 exists or is
+    readable. Import acceptance may create the default row before chapters are
+    available; consumers MUST validate chapter availability independently.
 - `reader_identity` (string or null)
   - The name the reader uses when entering the world.
 - `reader_identity_type` (enum: `self` | `character`)
@@ -511,6 +514,8 @@ An accepted import MUST be recoverable after process death from its committed `s
 `chapters`, or `enriched` stage. A job committed at `source` MUST replay the retained object to
 rebuild chapters; a missing or unreadable retained object fails the job with actionable re-upload
 guidance and never advances the stage.
+A default progress row may be committed before chapters exist; its initial chapter coordinate does
+not establish chapter availability or novel readiness.
 
 ### 5.2 Parsing Pipeline
 
@@ -1667,6 +1672,20 @@ Implementations MUST create the following indexes:
 
 Implementations MUST apply schema changes through versioned migration files. Migrations MUST be
 idempotent where possible. The initial migration MUST be applied before the first service start.
+Migration 0002 MUST tolerate bootstrap progress rows that predate effective chapters: when a
+novel is `pending`, `parsing`, or `error` and has no effective chapter within its advertised count,
+the migration MUST preserve the progress row and its preferences without normalization. A
+`ready` novel, or a novel whose status is missing or unrecognized, with no effective chapter MUST
+fail the migration closed. Normalization MUST use an existing effective chapter and MUST NOT
+rewrite progress from a chapter coordinate alone. Replaying migration 0002 MUST preserve rows
+already in a valid post-contract state and MUST NOT delete progress data.
+Migration 0019 MUST capture whether `public.user_novels` exists before creating
+it, while holding the `novels` lock inside its transaction. The first-adoption
+decision MUST be transaction-local. Only when the relation was absent may the
+migration backfill uploader shelves from existing novels and users. An existing
+relation, including an empty shelf, MUST be treated as an adopted shelf state;
+replay MUST preserve intentional detachments and MUST NOT repopulate them. This
+is not an automatic repair for arbitrary historical partial migrations.
 Migration 0021 MUST be one explicit transaction. Its first-adoption backfill
 MUST terminally skip pre-contract completed turns before replacing the old
 in-progress-only uniqueness rule with a single unresolved-turn authority rule;
@@ -1707,7 +1726,7 @@ have not yet been applied; then use that script to deploy the next barrier and
 matching services. A post-0024 installation adopting 0025 therefore MUST retain
 0021 and 0024 in the control-only target and omit only 0025. Initial adoption
 through the new script MUST select a release that
-already contains all three migrations.
+already contains all four required migrations (0021, 0024, 0025, and 0030).
 Adoption, upgrade, restore, and rollback tooling MUST fail closed rather than
 activate a writer or reader whose manifest lacks any required semantic barrier
 after that contract is present. Crossing any barrier requires a separately
