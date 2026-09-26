@@ -145,6 +145,15 @@ RustFS 数据卷，管理员须单独安排对象存储备份与恢复，见
 
 ---
 
+## D20 基础规则迁移 0030
+
+0030 改变 Novel Service 的模板写入契约，旧 Novel writer 与新 schema 不兼容。
+升级时先关闭入口写入并停止、排空 Novel 和 Narrative 两个服务；不能只停
+Narrative。候选 release 必须包含完整的 0021、0024、0025、0030 四个 required
+schema barriers；应用完整候选 release 后再启动兼容版本，避免旧 writer 在迁移后写入。现有 v1 profiles 和 sessions 保留原绑定，继续按 v1 读取；
+不要重写为 v2。数据库只前向迁移，旧版 rollback 不受支持，故障恢复使用兼容
+release 前向修复。此要求是 rollout 契约，不代表该迁移已在生产执行。
+
 ## 生产升级与回滚
 
 `v*` Tag workflow 会先运行完整 CI，只发布以 Git SHA 标记的应用镜像。

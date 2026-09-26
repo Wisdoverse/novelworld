@@ -14,8 +14,9 @@ use crate::application::handlers::{
     journey_memory_id, CreatePlayerEntityCommand, NarrativeCommandHandler, NarrativeError,
 };
 use crate::domain::entities::game_rules::{
-    ActionAdjudicationContext, AdjudicationDecision, GameActionRule, GameAttribute,
-    GameRuleTemplate, PlayerRuleProfile, ResolutionMode,
+    basic_attribute, ActionAdjudicationContext, AdjudicationDecision, GameActionRule,
+    GameAttribute, GameRuleTemplate, PlayerRuleProfile, ResolutionMode, BASIC_ACTION_DESCRIPTION,
+    BASIC_GAME_RULE_PROMPT_VERSION, GAME_RULE_PROMPT_VERSION,
 };
 use crate::domain::entities::{
     narrative_node::{NarrativeChoice, NarrativeNode, WorldState},
@@ -81,46 +82,12 @@ impl ActionAdjudicationPort for TestAdjudicator {
 }
 
 fn advanced_adjudication_fixture() -> Arc<ToctouFixture> {
+    advanced_adjudication_fixture_with_prompt_version(BASIC_GAME_RULE_PROMPT_VERSION)
+}
+
+fn advanced_adjudication_fixture_with_prompt_version(prompt_version: &str) -> Arc<ToctouFixture> {
     let fixture = Arc::new(ToctouFixture::new(false));
-    let attributes = ["vigor", "insight", "influence"]
-        .into_iter()
-        .map(|key| GameAttribute {
-            key: key.into(),
-            label: key.into(),
-            description: "来自小说的能力".into(),
-            default_score: 10,
-            source_chapters: vec![fixture.source_chapter],
-        })
-        .collect();
-    let template = GameRuleTemplate {
-        novel_id: fixture.novel_id,
-        canon_model_version: 1,
-        schema_version: 1,
-        prompt_version: "novel-game-rules-v1".into(),
-        minimum_score: 8,
-        maximum_score: 15,
-        point_budget: 30,
-        attributes,
-        action_rules: [
-            WorldActionKind::Travel,
-            WorldActionKind::Investigate,
-            WorldActionKind::Converse,
-            WorldActionKind::Ally,
-            WorldActionKind::Oppose,
-            WorldActionKind::AdvanceThread,
-            WorldActionKind::ResolveThread,
-            WorldActionKind::PursueGoal,
-        ]
-        .into_iter()
-        .map(|kind| GameActionRule {
-            kind,
-            attribute_key: "vigor".into(),
-            difficulty_class: 13,
-            description: "行动需要符合已知世界规则".into(),
-            source_chapters: vec![fixture.source_chapter],
-        })
-        .collect(),
-    };
+    let template = game_rule_template(fixture.novel_id, 1, prompt_version, fixture.source_chapter);
     let mut state = fixture.world_state.lock().unwrap();
     let mut player = state.player_entity().unwrap().unwrap();
     player.rules = PlayerRuleProfile {
@@ -152,11 +119,128 @@ fn advanced_adjudication_fixture() -> Arc<ToctouFixture> {
     fixture
 }
 
+fn game_rule_template(
+    novel_id: Uuid,
+    canon_model_version: i32,
+    prompt_version: &str,
+    source_chapter: i32,
+) -> GameRuleTemplate {
+    let is_basic = prompt_version == BASIC_GAME_RULE_PROMPT_VERSION;
+    let attributes = ["vigor", "insight", "influence"]
+        .into_iter()
+        .map(|key| GameAttribute {
+            key: key.into(),
+            label: if is_basic {
+                basic_attribute(key).unwrap().0.into()
+            } else {
+                key.into()
+            },
+            description: if is_basic {
+                basic_attribute(key).unwrap().1.into()
+            } else {
+                "来自小说的能力".into()
+            },
+            default_score: 10,
+            source_chapters: vec![source_chapter],
+        })
+        .collect();
+    GameRuleTemplate {
+        novel_id,
+        canon_model_version,
+        schema_version: 1,
+        prompt_version: prompt_version.into(),
+        minimum_score: 8,
+        maximum_score: 15,
+        point_budget: 30,
+        attributes,
+        action_rules: [
+            WorldActionKind::Travel,
+            WorldActionKind::Investigate,
+            WorldActionKind::Converse,
+            WorldActionKind::Ally,
+            WorldActionKind::Oppose,
+            WorldActionKind::AdvanceThread,
+            WorldActionKind::ResolveThread,
+            WorldActionKind::PursueGoal,
+        ]
+        .into_iter()
+        .map(|kind| GameActionRule {
+            kind,
+            attribute_key: "vigor".into(),
+            difficulty_class: 13,
+            description: if is_basic {
+                BASIC_ACTION_DESCRIPTION.into()
+            } else {
+                "行动需要符合已知世界规则".into()
+            },
+            source_chapters: vec![source_chapter],
+        })
+        .collect(),
+    }
+}
+
 fn adjudication_action() -> WorldAction {
     WorldAction {
         kind: WorldActionKind::PursueGoal,
         target_id: None,
         intent: "在城门旁观察脚印".into(),
+    }
+}
+
+#[tokio::test]
+async fn player_profiles_create_and_reload_with_their_exact_pinned_prompt_version() {
+    for prompt_version in [GAME_RULE_PROMPT_VERSION, BASIC_GAME_RULE_PROMPT_VERSION] {
+        let fixture = Arc::new(ToctouFixture::new(false));
+        fixture.clear_world_state();
+        *fixture.player_entry_context.lock().unwrap() = Some(PlayerEntryContext {
+            checkpoint_chapter: 2,
+            name_available: true,
+            locations: vec![CanonEntityRef {
+                id: "city-gate".into(),
+                name: "城门".into(),
+            }],
+        });
+        let template = game_rule_template(fixture.novel_id, 1, prompt_version, 2);
+        let profile = PlayerRuleProfile {
+            mode: ResolutionMode::Advanced,
+            canon_model_version: Some(1),
+            template_schema_version: Some(1),
+            template_prompt_version: Some(prompt_version.into()),
+            attributes: template
+                .attributes
+                .iter()
+                .map(|attribute| (attribute.key.clone(), attribute.default_score))
+                .collect(),
+        };
+
+        let player = fixture
+            .handler()
+            .create_player_entity(
+                fixture.user_id,
+                fixture.novel_id,
+                CreatePlayerEntityCommand {
+                    checkpoint_chapter: Some(2),
+                    name: "云舟".into(),
+                    background: "远行者".into(),
+                    capabilities: vec!["观察".into()],
+                    location_id: "city-gate".into(),
+                    inventory: vec![],
+                    rules: profile,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            player.rules.template_prompt_version.as_deref(),
+            Some(prompt_version)
+        );
+
+        let entry = fixture
+            .handler()
+            .get_player_entry(fixture.user_id, fixture.novel_id, None)
+            .await
+            .unwrap();
+        assert_eq!(entry.game_rules.unwrap().prompt_version, prompt_version);
     }
 }
 
@@ -417,68 +501,70 @@ async fn legacy_claims_are_not_reclassified_and_pending_cannot_enter_prompt_or_t
 
 #[tokio::test]
 async fn semantic_judgment_is_frozen_before_prose_and_exact_replay_never_reclassifies() {
-    for decision in [
-        Some(AdjudicationDecision::Impossible),
-        Some(AdjudicationDecision::AutomaticSuccess),
-        Some(AdjudicationDecision::EasyCheck),
-        Some(AdjudicationDecision::HardCheck),
-        None,
-    ] {
-        let fixture = advanced_adjudication_fixture();
-        let judge = Arc::new(TestAdjudicator::new(decision));
-        let handler = NarrativeCommandHandler {
-            action_adjudicator: Some(judge.clone()),
-            ..fixture.handler()
-        };
-        fixture.provider_release.notify_one();
-        let id = Uuid::new_v4();
-        let response = handler
-            .submit_world_turn(
-                id,
-                fixture.user_id,
-                fixture.novel_id,
-                0,
-                adjudication_action(),
-            )
-            .await
-            .unwrap();
-        let check = response.result.resolution.as_ref().unwrap();
-        assert_eq!(
-            check.adjudication.as_ref().unwrap().decision,
-            decision.unwrap_or(AdjudicationDecision::TemplateFallback)
-        );
-        assert_eq!(
-            fixture
-                .acquired_world_turn
-                .lock()
-                .unwrap()
-                .as_ref()
-                .unwrap()
-                .0
-                .resolution,
-            response.result.resolution
-        );
-        assert!(fixture.provider_prompts.lock().unwrap()[0].contains("adjudication"));
-        if decision == Some(AdjudicationDecision::Impossible) {
+    for prompt_version in [GAME_RULE_PROMPT_VERSION, BASIC_GAME_RULE_PROMPT_VERSION] {
+        for decision in [
+            Some(AdjudicationDecision::Impossible),
+            Some(AdjudicationDecision::AutomaticSuccess),
+            Some(AdjudicationDecision::EasyCheck),
+            Some(AdjudicationDecision::HardCheck),
+            None,
+        ] {
+            let fixture = advanced_adjudication_fixture_with_prompt_version(prompt_version);
+            let judge = Arc::new(TestAdjudicator::new(decision));
+            let handler = NarrativeCommandHandler {
+                action_adjudicator: Some(judge.clone()),
+                ..fixture.handler()
+            };
+            fixture.provider_release.notify_one();
+            let id = Uuid::new_v4();
+            let response = handler
+                .submit_world_turn(
+                    id,
+                    fixture.user_id,
+                    fixture.novel_id,
+                    0,
+                    adjudication_action(),
+                )
+                .await
+                .unwrap();
+            let check = response.result.resolution.as_ref().unwrap();
             assert_eq!(
-                response.result.transition.events[0].summary,
-                "玩家行动不可行，主要意图未实现"
+                check.adjudication.as_ref().unwrap().decision,
+                decision.unwrap_or(AdjudicationDecision::TemplateFallback)
             );
-            assert!(!check.succeeded);
+            assert_eq!(
+                fixture
+                    .acquired_world_turn
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .0
+                    .resolution,
+                response.result.resolution
+            );
+            assert!(fixture.provider_prompts.lock().unwrap()[0].contains("adjudication"));
+            if decision == Some(AdjudicationDecision::Impossible) {
+                assert_eq!(
+                    response.result.transition.events[0].summary,
+                    "玩家行动不可行，主要意图未实现"
+                );
+                assert!(!check.succeeded);
+            }
+            let replay = handler
+                .submit_world_turn(
+                    id,
+                    fixture.user_id,
+                    fixture.novel_id,
+                    0,
+                    adjudication_action(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(replay.result, response.result);
+            assert_eq!(judge.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 1);
         }
-        let replay = handler
-            .submit_world_turn(
-                id,
-                fixture.user_id,
-                fixture.novel_id,
-                0,
-                adjudication_action(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(replay.result, response.result);
-        assert_eq!(judge.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 1);
     }
 }
 
@@ -1283,8 +1369,10 @@ impl WorldStateRepository for ToctouFixture {
         }
     }
 
-    async fn create_player_entity(&self, _player: &PlayerEntity) -> Result<PlayerEntity> {
-        bail!("unused")
+    async fn create_player_entity(&self, player: &PlayerEntity) -> Result<PlayerEntity> {
+        ensure!(player.user_id == self.user_id && player.novel_id == self.novel_id);
+        self.world_state.lock().unwrap().state["player_entity"] = serde_json::to_value(player)?;
+        Ok(player.clone())
     }
 
     async fn start_open_world(
@@ -1518,6 +1606,7 @@ impl ChapterReadRepository for ToctouFixture {
         &self,
         _novel_id: Uuid,
         _user_id: Uuid,
+        _prompt_version: &str,
     ) -> std::result::Result<
         crate::domain::entities::game_rules::GameRuleTemplate,
         crate::domain::repositories::GameRuleTemplateRequestError,
@@ -1531,11 +1620,22 @@ impl ChapterReadRepository for ToctouFixture {
 
     async fn get_game_rule_template(
         &self,
-        _novel_id: Uuid,
-        _canon_model_version: i32,
+        novel_id: Uuid,
+        canon_model_version: i32,
         _user_id: Uuid,
+        prompt_version: &str,
     ) -> Result<Option<crate::domain::entities::game_rules::GameRuleTemplate>> {
-        Ok(None)
+        if prompt_version != GAME_RULE_PROMPT_VERSION
+            && prompt_version != BASIC_GAME_RULE_PROMPT_VERSION
+        {
+            return Ok(None);
+        }
+        Ok(Some(game_rule_template(
+            novel_id,
+            canon_model_version,
+            prompt_version,
+            2,
+        )))
     }
 }
 

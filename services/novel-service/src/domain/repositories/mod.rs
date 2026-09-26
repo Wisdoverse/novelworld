@@ -162,11 +162,13 @@ pub trait CanonStoryModelRepository: Send + Sync {
         &self,
         novel_id: Uuid,
         canon_model_version: i32,
+        prompt_version: &str,
     ) -> Result<BeginGameRuleGeneration>;
     async fn renew_game_rule_generation(
         &self,
         novel_id: Uuid,
         canon_model_version: i32,
+        prompt_version: &str,
         attempt: i64,
     ) -> Result<bool>;
     async fn complete_game_rule_generation(
@@ -178,6 +180,7 @@ pub trait CanonStoryModelRepository: Send + Sync {
         &self,
         novel_id: Uuid,
         canon_model_version: i32,
+        prompt_version: &str,
         attempt: i64,
         failure_code: &str,
     ) -> Result<bool>;
@@ -185,6 +188,7 @@ pub trait CanonStoryModelRepository: Send + Sync {
         &self,
         novel_id: Uuid,
         canon_model_version: i32,
+        prompt_version: &str,
     ) -> Result<Option<GameRuleTemplate>>;
 }
 

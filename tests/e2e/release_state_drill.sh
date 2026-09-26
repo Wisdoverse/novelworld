@@ -351,6 +351,11 @@ remote_control=$(git -C "$fetch_seed" rev-parse HEAD)
 printf '%s\n' '-- remote-only chat-world revision contract' \
   >"$fetch_seed/infra/postgres/migrations/0025_chat_world_revision.sql"
 git -C "$fetch_seed" add infra/postgres/migrations/0025_chat_world_revision.sql
+git -C "$fetch_seed" commit -m pre-versioned-game-rules >/dev/null
+remote_pre_game_rules=$(git -C "$fetch_seed" rev-parse HEAD)
+printf '%s\n' '-- remote-only versioned basic game-rule contract' \
+  >"$fetch_seed/infra/postgres/migrations/0030_versioned_game_rule_templates.sql"
+git -C "$fetch_seed" add infra/postgres/migrations/0030_versioned_game_rule_templates.sql
 git -C "$fetch_seed" commit -m candidate >/dev/null
 remote_candidate=$(git -C "$fetch_seed" rev-parse HEAD)
 git -C "$fetch_seed" push origin main >/dev/null
@@ -380,10 +385,18 @@ expect_fail 'post-0024 control-only target retains existing barriers and omits 0
 
 migration_state=$(new_state)
 cp "$control_manifest" "$migration_state/current.env"
-expect_fail 'control-only target can advance to the matching 0025 release' \
+expect_fail 'control-only target can advance to the matching 0030 release' \
   'production secrets file not found' bash -c \
   'cd "$1"; RELEASE_STATE_DIR="$2" "$3" upgrade "$4"' \
   _ "$fetch_client" "$migration_state" "$release" "$remote_manifest"
+
+pre_game_rules_manifest=$(mktemp "$work/pre-game-rules.XXXXXX")
+write_manifest "$pre_game_rules_manifest" "$remote_pre_game_rules"
+pre_game_rules_state=$(new_state)
+expect_fail 'adopt requires migration 0030 after existing barriers' \
+  'adopt target predates the versioned basic game-rule contract' \
+  bash -c 'cd "$1"; RELEASE_STATE_DIR="$2" "$3" adopt "$4"' \
+  _ "$fetch_client" "$pre_game_rules_state" "$release" "$pre_game_rules_manifest"
 
 pre_chat_world_manifest=$(mktemp "$work/pre-chat-world.XXXXXX")
 write_manifest "$pre_chat_world_manifest" "$remote_pre_chat_world"
@@ -478,10 +491,13 @@ printf '%s\n' '-- initial persona provenance contract' \
   >"$roll_repo/infra/postgres/migrations/0024_persona_provenance.sql"
 printf '%s\n' '-- initial chat-world revision contract' \
   >"$roll_repo/infra/postgres/migrations/0025_chat_world_revision.sql"
+printf '%s\n' '-- initial versioned basic game-rule contract' \
+  >"$roll_repo/infra/postgres/migrations/0030_versioned_game_rule_templates.sql"
 git -C "$roll_repo" add \
   infra/postgres/migrations/0021_world_turn_memory_projection.sql \
   infra/postgres/migrations/0024_persona_provenance.sql \
-  infra/postgres/migrations/0025_chat_world_revision.sql
+  infra/postgres/migrations/0025_chat_world_revision.sql \
+  infra/postgres/migrations/0030_versioned_game_rule_templates.sql
 git -C "$roll_repo" commit -m 'initial roll-forward fixture' >/dev/null
 roll_sha=$(git -C "$roll_repo" rev-parse HEAD)
 printf '%s\n' 'post-0020 release fixture' >"$roll_repo/release-fixture.txt"
@@ -1043,6 +1059,7 @@ done <<'EOF'
 infra/postgres/migrations/0021_world_turn_memory_projection.sql|0021|world-memory projection
 infra/postgres/migrations/0024_persona_provenance.sql|0024|persona-provenance
 infra/postgres/migrations/0025_chat_world_revision.sql|0025|chat-world revision
+infra/postgres/migrations/0030_versioned_game_rule_templates.sql|0030|versioned basic game-rule
 EOF
 
 if git cat-file -e "HEAD:infra/postgres/migrations/0021_world_turn_memory_projection.sql" 2>/dev/null; then

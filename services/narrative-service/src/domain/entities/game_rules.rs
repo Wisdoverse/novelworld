@@ -10,7 +10,27 @@ use crate::domain::entities::{
 
 pub const GAME_RULE_SCHEMA_VERSION: i32 = 1;
 pub const GAME_RULE_PROMPT_VERSION: &str = "novel-game-rules-v1";
+pub const BASIC_GAME_RULE_PROMPT_VERSION: &str = "novel-game-rules-v2";
+pub const BASIC_ACTION_DESCRIPTION: &str = "在世界规则内处理该类行动的不确定结果";
 pub const ACTION_ADJUDICATION_CONTEXT_LIMIT: usize = 8 * 1024;
+
+pub fn basic_attribute(key: &str) -> Option<(&'static str, &'static str)> {
+    Some(match key {
+        "root" => ("根骨", "身体资质与基础耐受"),
+        "agility" => ("身法", "移动、闪避与身体协调"),
+        "vigor" => ("力道", "用力、冲撞与持续体能"),
+        "insight" => ("悟性", "理解、推理与学习"),
+        "fortune" => ("福缘", "处理偶然机会与环境机遇"),
+        "strategy" => ("谋略", "分析局势与制定计划"),
+        "command" => ("统御", "组织协作与协调行动"),
+        "loyalty" => ("义理", "理解承诺、信任与互助"),
+        "resolve" => ("心志", "承受压力并保持行动意志"),
+        "influence" => ("交涉", "沟通、说服与协商"),
+        "knowledge" => ("学识", "运用已掌握知识"),
+        "craft" => ("技艺", "运用工具和实践技能"),
+        _ => return None,
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -51,7 +71,7 @@ impl GameRuleTemplate {
         if self.novel_id.is_nil()
             || self.canon_model_version < 1
             || self.schema_version != GAME_RULE_SCHEMA_VERSION
-            || self.prompt_version != GAME_RULE_PROMPT_VERSION
+            || !supported_prompt_version(&self.prompt_version)
             || self.minimum_score != 8
             || self.maximum_score != 15
             || !(3..=6).contains(&self.attributes.len())
@@ -64,6 +84,12 @@ impl GameRuleTemplate {
             text(&attribute.label, 40)?;
             text(&attribute.description, 300)?;
             source_chapters(&attribute.source_chapters)?;
+            if self.prompt_version == BASIC_GAME_RULE_PROMPT_VERSION
+                && basic_attribute(&attribute.key)
+                    != Some((attribute.label.as_str(), attribute.description.as_str()))
+            {
+                return invalid("basic template attribute is not in the trusted vocabulary");
+            }
             if !keys.insert(attribute.key.as_str())
                 || !(self.minimum_score..=self.maximum_score).contains(&attribute.default_score)
             {
@@ -96,6 +122,11 @@ impl GameRuleTemplate {
         for rule in &self.action_rules {
             text(&rule.description, 300)?;
             source_chapters(&rule.source_chapters)?;
+            if self.prompt_version == BASIC_GAME_RULE_PROMPT_VERSION
+                && rule.description != BASIC_ACTION_DESCRIPTION
+            {
+                return invalid("basic template action description is invalid");
+            }
             if !kinds.insert(rule.kind)
                 || !keys.contains(rule.attribute_key.as_str())
                 || !(5..=30).contains(&rule.difficulty_class)
@@ -157,12 +188,18 @@ impl PlayerRuleProfile {
             ResolutionMode::Advanced => {
                 if self.canon_model_version.is_none_or(|version| version < 1)
                     || self.template_schema_version != Some(GAME_RULE_SCHEMA_VERSION)
-                    || self.template_prompt_version.as_deref() != Some(GAME_RULE_PROMPT_VERSION)
+                    || !self
+                        .template_prompt_version
+                        .as_deref()
+                        .is_some_and(supported_prompt_version)
                     || !(3..=6).contains(&self.attributes.len())
-                    || self
-                        .attributes
-                        .iter()
-                        .any(|(name, score)| key(name).is_err() || !(8..=15).contains(score))
+                    || self.attributes.iter().any(|(name, score)| {
+                        key(name).is_err()
+                            || !(8..=15).contains(score)
+                            || (self.template_prompt_version.as_deref()
+                                == Some(BASIC_GAME_RULE_PROMPT_VERSION)
+                                && basic_attribute(name).is_none())
+                    })
                 {
                     return invalid("advanced mode template binding or attributes are invalid");
                 }
@@ -260,7 +297,7 @@ impl ActionCheck {
     pub fn validate(&self) -> Result<(), GameRulesError> {
         if self.schema_version != GAME_RULE_SCHEMA_VERSION
             || self.canon_model_version < 1
-            || self.template_prompt_version != GAME_RULE_PROMPT_VERSION
+            || !supported_prompt_version(&self.template_prompt_version)
             || !(8..=15).contains(&self.score)
             || self.modifier != (self.score - 10).div_euclid(2)
             || !(1..=20).contains(&self.roll)
@@ -297,7 +334,14 @@ impl ActionCheck {
             return invalid("action check result conflicts with its decision");
         }
         key(&self.attribute_key)?;
-        text(&self.attribute_label, 40)
+        text(&self.attribute_label, 40)?;
+        if self.template_prompt_version == BASIC_GAME_RULE_PROMPT_VERSION
+            && basic_attribute(&self.attribute_key).map(|(label, _)| label)
+                != Some(self.attribute_label.as_str())
+        {
+            return invalid("basic action check attribute is invalid");
+        }
+        Ok(())
     }
 
     pub fn validate_resolved(&self) -> Result<(), GameRulesError> {
@@ -523,6 +567,10 @@ fn invalid<T>(message: impl Into<String>) -> Result<T, GameRulesError> {
     Err(GameRulesError(message.into()))
 }
 
+fn supported_prompt_version(version: &str) -> bool {
+    version == GAME_RULE_PROMPT_VERSION || version == BASIC_GAME_RULE_PROMPT_VERSION
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,6 +631,71 @@ mod tests {
                 ("influence".into(), 8),
             ]),
         }
+    }
+
+    fn basic_template() -> GameRuleTemplate {
+        let mut template = template();
+        template.prompt_version = BASIC_GAME_RULE_PROMPT_VERSION.into();
+        for attribute in &mut template.attributes {
+            let (label, description) = basic_attribute(&attribute.key).unwrap();
+            attribute.label = label.into();
+            attribute.description = description.into();
+            attribute.source_chapters = vec![2];
+        }
+        for rule in &mut template.action_rules {
+            rule.description = BASIC_ACTION_DESCRIPTION.into();
+            rule.source_chapters = vec![2];
+        }
+        template
+    }
+
+    #[test]
+    fn basic_templates_allow_full_world_rule_provenance_but_only_trusted_text() {
+        let template = basic_template();
+        assert!(template.validate().is_ok());
+
+        let mut forged = template.clone();
+        forged.attributes[0].description = "自由生成的能力说明".into();
+        assert!(forged.validate().is_err());
+
+        let mut forged = template.clone();
+        forged.action_rules[0].description = "自由生成的动作说明".into();
+        assert!(forged.validate().is_err());
+
+        let mut unsupported = template;
+        unsupported.prompt_version = "novel-game-rules-v3".into();
+        assert!(unsupported.validate().is_err());
+    }
+
+    #[test]
+    fn basic_profile_and_checks_validate_exact_vocabulary_while_v1_remains_valid() {
+        let template = basic_template();
+        let profile = PlayerRuleProfile {
+            mode: ResolutionMode::Advanced,
+            canon_model_version: Some(template.canon_model_version),
+            template_schema_version: Some(template.schema_version),
+            template_prompt_version: Some(BASIC_GAME_RULE_PROMPT_VERSION.into()),
+            attributes: BTreeMap::from([
+                ("vigor".into(), 12),
+                ("insight".into(), 10),
+                ("influence".into(), 8),
+            ]),
+        };
+        assert!(profile.validate_against(&template).is_ok());
+        let mut forged_profile = profile.clone();
+        forged_profile.attributes.insert("untrusted".into(), 8);
+        forged_profile.attributes.remove("vigor");
+        assert!(forged_profile.validate().is_err());
+        let check = resolve_action_check(&template, &profile, WorldActionKind::Travel, 10).unwrap();
+        assert!(check.validate_resolved().is_ok());
+        let replayed =
+            serde_json::from_value::<ActionCheck>(serde_json::to_value(&check).unwrap()).unwrap();
+        assert_eq!(replayed, check);
+        assert!(replayed.validate_resolved().is_ok());
+
+        let mut forged = check;
+        forged.attribute_label = "伪造标签".into();
+        assert!(forged.validate().is_err());
     }
 
     #[test]

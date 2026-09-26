@@ -57,7 +57,8 @@ use novel_service::domain::{
     entities::chapter::Chapter,
     entities::character::Character,
     entities::game_rule_template::{
-        GameActionKind, GameActionRule, GameAttribute, GameRuleTemplate,
+        basic_attribute, GameActionKind, GameActionRule, GameAttribute, GameRuleTemplate,
+        BASIC_ACTION_DESCRIPTION, BASIC_GAME_RULE_PROMPT_VERSION, GAME_RULE_PROMPT_VERSION,
     },
     entities::novel::Novel,
     ports::{ImagePort, LlmPort, NovelLlmTask, PrivacyCleanupPort, SourceFileStorage},
@@ -2821,13 +2822,336 @@ async fn seed_game_rule_model(pool: &PgPool, label: &str) -> (Uuid, Uuid) {
     sqlx::query(
         "INSERT INTO canon_story_models \
          (novel_id, model_version, schema_version, prompt_version, content) \
-         VALUES ($1, 1, 1, 'game-rule-contract-v1', '{}'::jsonb)",
+         VALUES ($1, 1, 1, 'game-rule-contract-v1', $2)",
     )
     .bind(novel_id)
+    .bind(serde_json::json!({
+        "arcs":[],"events":[],"locations":[],"factions":[],"world_rules":[],
+        "character_goals":[],"relationships":[],"deaths":[],"unresolved_threads":[],
+        "ending":{"summary":"Test ending","character_states":{},"faction_states":{},
+            "location_states":{},"unresolved_thread_ids":[],
+            "evidence":{"provenance":[],"confidence":1.0}}
+    }))
     .execute(pool)
     .await
     .unwrap();
     (user_id, novel_id)
+}
+
+fn test_basic_game_rule_template(novel_id: Uuid) -> GameRuleTemplate {
+    let legacy = test_game_rule_template(novel_id);
+    let attributes = legacy
+        .attributes
+        .into_iter()
+        .map(|mut attribute| {
+            let (label, description) = basic_attribute(&attribute.key).unwrap();
+            attribute.label = label.into();
+            attribute.description = description.into();
+            attribute
+        })
+        .collect();
+    let action_rules = legacy
+        .action_rules
+        .into_iter()
+        .map(|mut rule| {
+            rule.description = BASIC_ACTION_DESCRIPTION.into();
+            rule
+        })
+        .collect();
+    GameRuleTemplate::new_basic(novel_id, 1, attributes, action_rules).unwrap()
+}
+
+#[tokio::test]
+async fn game_rule_versions_preserve_ready_rows_and_share_consumed_budget() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (user, novel) = seed_game_rule_model(&pool, "game-rule-versions").await;
+    let repo = PgCanonStoryModelRepository::new(pool.clone());
+    let v1 = test_game_rule_template(novel);
+    let v2 = test_basic_game_rule_template(novel);
+    for key in [
+        "root",
+        "agility",
+        "vigor",
+        "insight",
+        "fortune",
+        "strategy",
+        "command",
+        "loyalty",
+        "resolve",
+        "influence",
+        "knowledge",
+        "craft",
+    ] {
+        assert_eq!(
+            basic_attribute(key),
+            narrative_service::domain::entities::game_rules::basic_attribute(key)
+        );
+    }
+    // Both independently owned runtime contracts accept the same safe wire text.
+    let narrative: narrative_service::domain::entities::game_rules::GameRuleTemplate =
+        serde_json::from_value(serde_json::to_value(&v2).unwrap()).unwrap();
+    narrative.validate().unwrap();
+    assert!(matches!(
+        repo.begin_game_rule_generation(novel, 1, GAME_RULE_PROMPT_VERSION)
+            .await
+            .unwrap(),
+        BeginGameRuleGeneration::Acquired { attempt: 1 }
+    ));
+    assert!(repo.complete_game_rule_generation(&v1, 1).await.unwrap());
+    // Replaying the new migration preserves existing immutable ready content.
+    sqlx::raw_sql(include_str!(
+        "../../../infra/postgres/migrations/0030_versioned_game_rule_templates.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(matches!(
+        repo.begin_game_rule_generation(novel, 1, BASIC_GAME_RULE_PROMPT_VERSION)
+            .await
+            .unwrap(),
+        BeginGameRuleGeneration::Acquired { attempt: 1 }
+    ));
+    assert!(!repo
+        .renew_game_rule_generation(novel, 1, GAME_RULE_PROMPT_VERSION, 1)
+        .await
+        .unwrap());
+    assert!(!repo
+        .fail_game_rule_generation(novel, 1, GAME_RULE_PROMPT_VERSION, 1, "wrong_prompt")
+        .await
+        .unwrap());
+    assert!(!repo.complete_game_rule_generation(&v1, 1).await.unwrap());
+    assert!(repo
+        .fail_game_rule_generation(
+            novel,
+            1,
+            BASIC_GAME_RULE_PROMPT_VERSION,
+            1,
+            "invalid_output"
+        )
+        .await
+        .unwrap());
+    assert!(matches!(
+        repo.begin_game_rule_generation(novel, 1, BASIC_GAME_RULE_PROMPT_VERSION)
+            .await
+            .unwrap(),
+        BeginGameRuleGeneration::Acquired { attempt: 2 }
+    ));
+    assert!(!repo.complete_game_rule_generation(&v2, 1).await.unwrap());
+    assert!(!repo
+        .renew_game_rule_generation(novel, 1, BASIC_GAME_RULE_PROMPT_VERSION, 1)
+        .await
+        .unwrap());
+    assert!(repo.complete_game_rule_generation(&v2, 2).await.unwrap());
+    for (prompt, expected) in [
+        (GAME_RULE_PROMPT_VERSION, v1),
+        (BASIC_GAME_RULE_PROMPT_VERSION, v2),
+    ] {
+        assert_eq!(
+            repo.find_game_rule_template(novel, 1, prompt)
+                .await
+                .unwrap(),
+            Some(expected.clone())
+        );
+        assert!(
+            matches!(repo.begin_game_rule_generation(novel, 1, prompt).await.unwrap(),
+            BeginGameRuleGeneration::Ready(found) if found == expected)
+        );
+    }
+    assert!(repo
+        .begin_game_rule_generation(novel, 1, "unknown-version")
+        .await
+        .is_err());
+    let consumed: i64 = sqlx::query_scalar(
+        "SELECT SUM(attempt)::BIGINT FROM novel_game_rule_templates WHERE novel_id = $1",
+    )
+    .bind(novel)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(consumed, 3);
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_game_rule_versions_have_one_owner_and_never_refill_budget() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (user, novel) = seed_game_rule_model(&pool, "game-rule-cross-prompt").await;
+    let repo = PgCanonStoryModelRepository::new(pool.clone());
+    let (a, b) = tokio::join!(
+        repo.begin_game_rule_generation(novel, 1, GAME_RULE_PROMPT_VERSION),
+        repo.begin_game_rule_generation(novel, 1, BASIC_GAME_RULE_PROMPT_VERSION)
+    );
+    let (owner, next) = match (a.unwrap(), b.unwrap()) {
+        (
+            BeginGameRuleGeneration::Acquired { attempt: 1 },
+            BeginGameRuleGeneration::InProgress { .. },
+        ) => (GAME_RULE_PROMPT_VERSION, BASIC_GAME_RULE_PROMPT_VERSION),
+        (
+            BeginGameRuleGeneration::InProgress { .. },
+            BeginGameRuleGeneration::Acquired { attempt: 1 },
+        ) => (BASIC_GAME_RULE_PROMPT_VERSION, GAME_RULE_PROMPT_VERSION),
+        other => panic!("cross-prompt ownership was not serialized: {other:?}"),
+    };
+    sqlx::query("UPDATE novel_game_rule_templates SET lease_expires_at = NOW() - INTERVAL '1 second' WHERE novel_id = $1 AND prompt_version = $2")
+        .bind(novel).bind(owner).execute(&pool).await.unwrap();
+    assert!(!repo
+        .renew_game_rule_generation(novel, 1, owner, 1)
+        .await
+        .unwrap());
+    assert!(matches!(
+        repo.begin_game_rule_generation(novel, 1, next)
+            .await
+            .unwrap(),
+        BeginGameRuleGeneration::Acquired { attempt: 1 }
+    ));
+    let old_template = if owner == GAME_RULE_PROMPT_VERSION {
+        test_game_rule_template(novel)
+    } else {
+        test_basic_game_rule_template(novel)
+    };
+    assert!(!repo
+        .complete_game_rule_generation(&old_template, 1)
+        .await
+        .unwrap());
+    assert!(!repo
+        .fail_game_rule_generation(novel, 1, owner, 1, "stale")
+        .await
+        .unwrap());
+    assert!(repo
+        .fail_game_rule_generation(novel, 1, next, 1, "provider_failed")
+        .await
+        .unwrap());
+    let (a, b) = tokio::join!(
+        repo.begin_game_rule_generation(novel, 1, GAME_RULE_PROMPT_VERSION),
+        repo.begin_game_rule_generation(novel, 1, BASIC_GAME_RULE_PROMPT_VERSION)
+    );
+    let outcomes = [
+        (GAME_RULE_PROMPT_VERSION, a.unwrap()),
+        (BASIC_GAME_RULE_PROMPT_VERSION, b.unwrap()),
+    ];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|(_, o)| matches!(o, BeginGameRuleGeneration::InProgress { .. }))
+            .count(),
+        1
+    );
+    for (prompt, outcome) in outcomes {
+        if let BeginGameRuleGeneration::Acquired { attempt } = outcome {
+            assert_eq!(attempt, 2);
+            assert!(repo
+                .fail_game_rule_generation(novel, 1, prompt, attempt, "invalid_output")
+                .await
+                .unwrap());
+        }
+    }
+    for prompt in [GAME_RULE_PROMPT_VERSION, BASIC_GAME_RULE_PROMPT_VERSION] {
+        assert!(matches!(
+            repo.begin_game_rule_generation(novel, 1, prompt)
+                .await
+                .unwrap(),
+            BeginGameRuleGeneration::Exhausted
+        ));
+    }
+    let consumed: i64 = sqlx::query_scalar(
+        "SELECT SUM(attempt)::BIGINT FROM novel_game_rule_templates WHERE novel_id = $1",
+    )
+    .bind(novel)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(consumed, 3);
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+struct ForbiddenGameRuleLlm(std::sync::atomic::AtomicUsize);
+
+#[async_trait::async_trait]
+impl LlmPort for ForbiddenGameRuleLlm {
+    async fn chat_json(&self, _: Uuid, _: NovelLlmTask, _: &str) -> anyhow::Result<String> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        anyhow::bail!("preflight must stop before provider I/O")
+    }
+}
+
+#[tokio::test]
+async fn missing_basic_mechanics_preflight_consumes_no_claim_or_provider_call() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (user, novel) = seed_game_rule_model(&pool, "game-rule-no-mechanics").await;
+    let llm = Arc::new(ForbiddenGameRuleLlm(std::sync::atomic::AtomicUsize::new(0)));
+    let mut handler = blocking_import_handler(&pool, None);
+    Arc::get_mut(&mut handler).unwrap().llm = llm.clone();
+    assert!(matches!(
+        handler
+            .request_game_rule_template(user, novel, BASIC_GAME_RULE_PROMPT_VERSION)
+            .await,
+        Err(novel_service::application::handlers::GameRuleTemplateRequestError::SourcesUnavailable)
+    ));
+    assert_eq!(llm.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let claims: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM novel_game_rule_templates WHERE novel_id = $1")
+            .bind(novel)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(claims, 0);
+    let repository = PgCanonStoryModelRepository::new(pool.clone());
+    for has_ready_cache in [false, true] {
+        if has_ready_cache {
+            repository
+                .begin_game_rule_generation(novel, 1, BASIC_GAME_RULE_PROMPT_VERSION)
+                .await
+                .unwrap();
+            assert!(repository
+                .complete_game_rule_generation(&test_basic_game_rule_template(novel), 1)
+                .await
+                .unwrap());
+        }
+        for status in ["parsing", "error"] {
+            sqlx::query("UPDATE novels SET status = $2::novel_status WHERE id = $1")
+                .bind(novel)
+                .bind(status)
+                .execute(&pool)
+                .await
+                .unwrap();
+            assert!(matches!(handler.request_game_rule_template(user, novel, BASIC_GAME_RULE_PROMPT_VERSION).await,
+                Err(novel_service::application::handlers::GameRuleTemplateRequestError::CanonUnavailable)));
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM novel_game_rule_templates WHERE novel_id = $1",
+            )
+            .bind(novel)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(count, i64::from(has_ready_cache));
+            assert_eq!(llm.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
+    }
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -2841,8 +3165,8 @@ async fn game_rule_generation_is_single_owner_fenced_bounded_and_immutable() {
     let repository = PgCanonStoryModelRepository::new(pool.clone());
 
     let (first, second) = tokio::join!(
-        repository.begin_game_rule_generation(novel_id, 1),
-        repository.begin_game_rule_generation(novel_id, 1),
+        repository.begin_game_rule_generation(novel_id, 1, GAME_RULE_PROMPT_VERSION),
+        repository.begin_game_rule_generation(novel_id, 1, GAME_RULE_PROMPT_VERSION),
     );
     let outcomes = [first.unwrap(), second.unwrap()];
     let attempt = outcomes
@@ -2861,7 +3185,7 @@ async fn game_rule_generation_is_single_owner_fenced_bounded_and_immutable() {
         1,
     );
     assert!(repository
-        .renew_game_rule_generation(novel_id, 1, attempt)
+        .renew_game_rule_generation(novel_id, 1, GAME_RULE_PROMPT_VERSION, attempt)
         .await
         .unwrap());
 
@@ -2875,7 +3199,7 @@ async fn game_rule_generation_is_single_owner_fenced_bounded_and_immutable() {
     .await
     .unwrap();
     let reclaimed = match repository
-        .begin_game_rule_generation(novel_id, 1)
+        .begin_game_rule_generation(novel_id, 1, GAME_RULE_PROMPT_VERSION)
         .await
         .unwrap()
     {
@@ -2888,11 +3212,17 @@ async fn game_rule_generation_is_single_owner_fenced_bounded_and_immutable() {
         .await
         .unwrap());
     assert!(repository
-        .fail_game_rule_generation(novel_id, 1, reclaimed, "provider_failed")
+        .fail_game_rule_generation(
+            novel_id,
+            1,
+            GAME_RULE_PROMPT_VERSION,
+            reclaimed,
+            "provider_failed"
+        )
         .await
         .unwrap());
     let final_attempt = match repository
-        .begin_game_rule_generation(novel_id, 1)
+        .begin_game_rule_generation(novel_id, 1, GAME_RULE_PROMPT_VERSION)
         .await
         .unwrap()
     {
@@ -2907,17 +3237,25 @@ async fn game_rule_generation_is_single_owner_fenced_bounded_and_immutable() {
         .unwrap());
     assert_eq!(
         repository
-            .find_game_rule_template(novel_id, 1)
+            .find_game_rule_template(novel_id, 1, GAME_RULE_PROMPT_VERSION)
             .await
             .unwrap(),
         Some(template.clone()),
     );
     assert!(matches!(
         repository
-            .begin_game_rule_generation(novel_id, 1)
+            .begin_game_rule_generation(novel_id, 1, GAME_RULE_PROMPT_VERSION)
             .await
             .unwrap(),
         BeginGameRuleGeneration::Ready(found) if found == template
+    ));
+    // A completed v1 at the cap remains readable but cannot fund a new prompt.
+    assert!(matches!(
+        repository
+            .begin_game_rule_generation(novel_id, 1, BASIC_GAME_RULE_PROMPT_VERSION)
+            .await
+            .unwrap(),
+        BeginGameRuleGeneration::Exhausted
     ));
     let immutable_error = sqlx::query(
         "UPDATE novel_game_rule_templates SET prompt_version = 'changed' \
@@ -2938,7 +3276,7 @@ async fn game_rule_generation_is_single_owner_fenced_bounded_and_immutable() {
         seed_game_rule_model(&pool, "game-rule-exhaustion").await;
     for expected_attempt in 1..=2 {
         let claimed = repository
-            .begin_game_rule_generation(exhausted_novel, 1)
+            .begin_game_rule_generation(exhausted_novel, 1, GAME_RULE_PROMPT_VERSION)
             .await
             .unwrap();
         let attempt = match claimed {
@@ -2947,12 +3285,18 @@ async fn game_rule_generation_is_single_owner_fenced_bounded_and_immutable() {
         };
         assert_eq!(attempt, expected_attempt);
         assert!(repository
-            .fail_game_rule_generation(exhausted_novel, 1, attempt, "invalid_output")
+            .fail_game_rule_generation(
+                exhausted_novel,
+                1,
+                GAME_RULE_PROMPT_VERSION,
+                attempt,
+                "invalid_output"
+            )
             .await
             .unwrap());
     }
     let final_claim = repository
-        .begin_game_rule_generation(exhausted_novel, 1)
+        .begin_game_rule_generation(exhausted_novel, 1, GAME_RULE_PROMPT_VERSION)
         .await
         .unwrap();
     assert!(matches!(
@@ -2970,14 +3314,14 @@ async fn game_rule_generation_is_single_owner_fenced_bounded_and_immutable() {
     .unwrap();
     assert!(matches!(
         repository
-            .begin_game_rule_generation(exhausted_novel, 1)
+            .begin_game_rule_generation(exhausted_novel, 1, GAME_RULE_PROMPT_VERSION)
             .await
             .unwrap(),
         BeginGameRuleGeneration::Exhausted
     ));
     assert!(matches!(
         repository
-            .begin_game_rule_generation(exhausted_novel, 1)
+            .begin_game_rule_generation(exhausted_novel, 1, GAME_RULE_PROMPT_VERSION)
             .await
             .unwrap(),
         BeginGameRuleGeneration::Exhausted

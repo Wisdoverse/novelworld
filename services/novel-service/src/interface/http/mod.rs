@@ -1,6 +1,8 @@
 use axum::{
     body::Body,
-    extract::{multipart::MultipartRejection, DefaultBodyLimit, Json, Multipart, Path, State},
+    extract::{
+        multipart::MultipartRejection, DefaultBodyLimit, Json, Multipart, Path, Query, State,
+    },
     http::{header::CACHE_CONTROL, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -19,6 +21,9 @@ use crate::application::handlers::{
     ReadingProgressError, ReadingProgressHandler, ShelfMutationError, SourceFileStorageUnavailable,
     TranslateChapterHandler, TranslationError, MAX_BATCH_IMPORTS,
 };
+use crate::domain::entities::game_rule_template::{
+    supported_prompt_version, BASIC_GAME_RULE_PROMPT_VERSION, GAME_RULE_PROMPT_VERSION,
+};
 use crate::domain::entities::novel::Novel;
 use crate::domain::ports::{
     AccountExportPort, DocumentExtractionError, DocumentTextExtractor, ReadinessProbe,
@@ -29,7 +34,7 @@ use crate::domain::repositories::{
 use crate::domain::services::canon_story_context::{
     build_canon_context, build_world_entry_context, original_player_name_available,
 };
-use crate::domain::value_objects::DeviationMode;
+use crate::domain::value_objects::{DeviationMode, NovelStatus};
 use axum::routing::put;
 
 #[derive(Clone)]
@@ -116,10 +121,25 @@ fn routes() -> Router<AppState> {
         .layer(DefaultBodyLimit::max(MAX_REQUEST_SIZE))
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GameRuleVersionQuery {
+    prompt_version: Option<String>,
+}
+
+impl GameRuleVersionQuery {
+    fn version(&self) -> &str {
+        self.prompt_version
+            .as_deref()
+            .unwrap_or(GAME_RULE_PROMPT_VERSION)
+    }
+}
+
 async fn request_game_rule_template(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(novel_id): Path<Uuid>,
+    Query(query): Query<GameRuleVersionQuery>,
 ) -> Response {
     if !internal_request_authorized(&state, &headers) {
         return api_error(
@@ -131,16 +151,27 @@ async fn request_game_rule_template(
         Some(id) => id,
         None => return api_error(StatusCode::UNAUTHORIZED, "Missing user ID"),
     };
-    let progress = match state.progress_handler.get(user_id, novel_id).await {
-        Ok(progress) => progress,
+    if !supported_prompt_version(query.version()) {
+        return coded_api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unsupported_game_rule_version",
+            "Unsupported game rule prompt version",
+        );
+    }
+    match state.progress_handler.get(user_id, novel_id).await {
+        Ok(_) => {}
         Err(error) => return progress_error_response(error),
-    };
+    }
     match state
         .handler
-        .request_game_rule_template(user_id, novel_id)
+        .request_game_rule_template(user_id, novel_id, query.version())
         .await
     {
         Ok(GameRuleTemplateRequest::Ready(template)) => {
+            let progress = match state.progress_handler.get(user_id, novel_id).await {
+                Ok(progress) => progress,
+                Err(error) => return progress_error_response(error),
+            };
             match template.visible_at(progress.current_chapter) {
                 Some(visible) => (StatusCode::OK, Json(visible)).into_response(),
                 None => coded_api_error(
@@ -171,6 +202,11 @@ async fn request_game_rule_template(
             "canon_unavailable",
             "Canonical story model is not ready",
         ),
+        Err(GameRuleTemplateRequestError::SourcesUnavailable) => coded_api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "game_rule_sources_unavailable",
+            "Canonical sources cannot support game rules",
+        ),
         Err(GameRuleTemplateRequestError::BudgetExhausted) => coded_api_error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "game_rule_generation_exhausted",
@@ -191,6 +227,7 @@ async fn get_game_rule_template(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((novel_id, model_version)): Path<(Uuid, i32)>,
+    Query(query): Query<GameRuleVersionQuery>,
 ) -> Response {
     if !internal_request_authorized(&state, &headers) {
         return api_error(
@@ -208,22 +245,48 @@ async fn get_game_rule_template(
             "Canonical model version must be at least 1",
         );
     }
-    let progress = match state.progress_handler.get(user_id, novel_id).await {
-        Ok(progress) => progress,
+    if !supported_prompt_version(query.version()) {
+        return coded_api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unsupported_game_rule_version",
+            "Unsupported game rule prompt version",
+        );
+    }
+    match state.progress_handler.get(user_id, novel_id).await {
+        Ok(_) => {}
         Err(error) => return progress_error_response(error),
-    };
+    }
+    if query.version() == BASIC_GAME_RULE_PROMPT_VERSION {
+        match state.novel_repo.find_by_id(novel_id).await {
+            Ok(Some(novel)) if novel.status == NovelStatus::Ready => {}
+            Ok(_) => {
+                return coded_api_error(
+                    StatusCode::CONFLICT,
+                    "canon_unavailable",
+                    "Canonical story model is not ready",
+                )
+            }
+            Err(_) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"),
+        }
+    }
     match state
         .canon_repo
-        .find_game_rule_template(novel_id, model_version)
+        .find_game_rule_template(novel_id, model_version, query.version())
         .await
     {
-        Ok(Some(template)) => match template.visible_at(progress.current_chapter) {
-            Some(visible) => (StatusCode::OK, Json(visible)).into_response(),
-            None => api_error(
-                StatusCode::NOT_FOUND,
-                "Game rule template is unavailable at current reading progress",
-            ),
-        },
+        Ok(Some(template)) => {
+            let progress = match state.progress_handler.get(user_id, novel_id).await {
+                Ok(progress) => progress,
+                Err(error) => return progress_error_response(error),
+            };
+            match template.visible_at(progress.current_chapter) {
+                Some(visible) => (StatusCode::OK, Json(visible)).into_response(),
+                None => api_error(
+                    StatusCode::NOT_FOUND,
+                    "Game rule template is unavailable at current reading progress",
+                ),
+            }
+        }
         Ok(None) => api_error(StatusCode::NOT_FOUND, "Game rule template not found"),
         Err(error) => {
             tracing::error!(%error, %novel_id, model_version, "failed to load game rules");
@@ -1808,6 +1871,23 @@ async fn readiness_status(
 mod ownership_tests {
     use super::*;
     use async_trait::async_trait;
+
+    #[test]
+    fn game_rule_query_defaults_to_legacy_and_accepts_only_exact_versions() {
+        let legacy: GameRuleVersionQuery = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.version(), GAME_RULE_PROMPT_VERSION);
+        for (version, supported) in [
+            ("novel-game-rules-v1", true),
+            ("novel-game-rules-v2", true),
+            ("novel-game-rules-v3", false),
+            ("", false),
+        ] {
+            let query: GameRuleVersionQuery =
+                serde_json::from_value(serde_json::json!({"prompt_version":version})).unwrap();
+            assert_eq!(supported_prompt_version(query.version()), supported);
+        }
+        assert!(serde_json::from_str::<GameRuleVersionQuery>(r#"{"schema_version":2}"#).is_err());
+    }
 
     struct FixedProbe(bool);
 
