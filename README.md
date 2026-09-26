@@ -111,6 +111,7 @@ and require Internet access and a key.
 | Character conversations | Open a streaming conversation and resume committed chat history. Available lore and memory are bounded by server-owned reading progress. |
 | Branching stories | Choose a continuation at a branch point and see its committed consequences. |
 | Open-world play | Create an original player at an unlocked checkpoint, then travel, investigate, converse, ally, or oppose. The timeline distinguishes your decisions from generated prose. |
+| Novel-specific D20 preview | Opt into source-backed attributes and server-resolved checks. [Rules and limitations](./docs/ADVANCED_RULES_PLAN.md) distinguish current dice/template behavior, optional Laya hints, and a proposed Jev evaluation; full D&D gameplay and a semantic referee are not implemented. |
 | Model settings | Configure the platform provider after setup; signed-in readers may optionally use their own encrypted provider key. |
 
 <p align="center">
