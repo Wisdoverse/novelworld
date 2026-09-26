@@ -406,6 +406,8 @@ pub enum NarrativeError {
     GameRulesInProgress { retry_after_seconds: u64 },
     #[error("Game rule template generation budget is exhausted")]
     GameRulesExhausted,
+    #[error("Game rules are not yet available at current reading progress")]
+    GameRulesUnavailableAtProgress,
     #[error("Reading progress is behind the committed world context")]
     ReadingProgressBehindWorld,
     #[error("Novel service is unavailable")]
@@ -1008,6 +1010,9 @@ impl NarrativeCommandHandler {
                     retry_after_seconds,
                 },
                 GameRuleTemplateRequestError::Exhausted => NarrativeError::GameRulesExhausted,
+                GameRuleTemplateRequestError::UnavailableAtProgress => {
+                    NarrativeError::GameRulesUnavailableAtProgress
+                }
                 GameRuleTemplateRequestError::Unavailable(error) => {
                     NarrativeError::Unavailable(error)
                 }

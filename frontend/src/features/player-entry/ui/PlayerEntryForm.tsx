@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { useGenerateGameRules, type CreatePlayerEntityInput } from '@/entities/narrative';
-import { getApiErrorMessage } from '@/shared/api/client';
+import { getApiErrorCode, getApiErrorMessage } from '@/shared/api/client';
 import type { GameRuleTemplate, ResolutionMode } from '@/shared/types';
 
 interface PlayerEntryFormProps {
@@ -176,7 +176,9 @@ export function PlayerEntryForm({
               )}
               {generateRules.isError ? (
                 <p role="alert" className="text-sm text-[#b3261e]">
-                  {getApiErrorMessage(generateRules.error, '小说规则生成失败，请稍后重试')}
+                  {getApiErrorCode(generateRules.error) === 'game_rules_unavailable_at_progress'
+                    ? '小说专属规则引用了尚未解锁的章节。请继续阅读后重试，也可关闭高级项，以纯叙事模式进入故事。'
+                    : getApiErrorMessage(generateRules.error, '小说规则生成失败，请稍后重试')}
                 </p>
               ) : null}
               {gameRules && !advancedReady ? (

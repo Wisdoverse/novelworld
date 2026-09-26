@@ -17,6 +17,8 @@ pub enum GameRuleTemplateRequestError {
     InProgress { retry_after_seconds: u64 },
     #[error("Game rule template generation budget is exhausted")]
     Exhausted,
+    #[error("Game rules are not yet available at current reading progress")]
+    UnavailableAtProgress,
     #[error("Novel service is unavailable")]
     Unavailable(#[source] anyhow::Error),
 }

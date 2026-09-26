@@ -388,6 +388,11 @@ impl ChapterReadRepository for NovelServiceClient {
             {
                 return Err(GameRuleTemplateRequestError::Exhausted);
             }
+            if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
+                && code == Some("game_rules_unavailable_at_progress")
+            {
+                return Err(GameRuleTemplateRequestError::UnavailableAtProgress);
+            }
             return Err(GameRuleTemplateRequestError::Unavailable(anyhow!(
                 "Novel service returned {status} for game rules"
             )));
@@ -453,6 +458,51 @@ mod tests {
 
     const USER_ID: Uuid = Uuid::from_u128(1);
     const NOVEL_ID: Uuid = Uuid::from_u128(2);
+
+    #[tokio::test]
+    async fn game_rules_progress_rejection_is_distinct_from_service_failure() {
+        use axum::{http::StatusCode, routing::post, Json, Router};
+
+        for (status, code, hidden) in [
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "game_rules_unavailable_at_progress",
+                true,
+            ),
+            (
+                StatusCode::BAD_GATEWAY,
+                "game_rules_unavailable_at_progress",
+                false,
+            ),
+            (StatusCode::UNPROCESSABLE_ENTITY, "unknown_error", false),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let app = Router::new().route(
+                "/internal/novels/{id}/game-rules",
+                post(move || async move {
+                    (
+                        status,
+                        Json(serde_json::json!({"error": {
+                            "code": code, "message": "private upstream detail"
+                        }})),
+                    )
+                }),
+            );
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let client = NovelServiceClient::new(format!("http://{address}"), "test-token".into());
+            let error = client
+                .request_game_rule_template(NOVEL_ID, USER_ID)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                matches!(error, GameRuleTemplateRequestError::UnavailableAtProgress),
+                hidden
+            );
+            assert!(!error.to_string().contains("private upstream detail"));
+            server.abort();
+        }
+    }
 
     fn progress() -> ReadingProgressResponse {
         ReadingProgressResponse {
