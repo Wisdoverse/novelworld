@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -1486,6 +1487,95 @@ class DiagnosticJourneyTest(unittest.TestCase):
             "world": RUNNER.EXPECTED_WORLD_PROMPT,
         })
         self.assertIn("infra/postgres", identities["base"]["source_trees"])
+
+    def prompt_identity_journey(self, versions, *, registered):
+        # Disposable offline SQL stub executes the same aggregate query;
+        # FILTER and JSON ->> syntax also work in SQLite, without a provider.
+        database = sqlite3.connect(":memory:")
+        self.addCleanup(database.close)
+        database.executescript("""
+            CREATE TABLE canon_story_models (novel_id TEXT, prompt_version TEXT);
+            CREATE TABLE user_choices (novel_id TEXT, transition TEXT);
+            CREATE TABLE world_turns (
+                novel_id TEXT, status TEXT, expected_turn_number INTEGER, transition TEXT
+            );
+        """)
+        database.execute("INSERT INTO canon_story_models VALUES (?, ?)",
+                         ("novel", RUNNER.EXPECTED_CANON_PROMPT))
+        database.execute("INSERT INTO user_choices VALUES (?, ?)",
+                         ("novel", json.dumps({"prompt_version": RUNNER.EXPECTED_BRANCH_PROMPT})))
+        database.executemany("INSERT INTO world_turns VALUES (?, ?, ?, ?)", [
+            ("novel", "completed", number, json.dumps({"prompt_version": version}))
+            for number, version in versions
+        ])
+        journey = object.__new__(RUNNER.Journey)
+        journey.report = {"journey": {}}
+        registration_value = {
+            "prompt_schema_identities": {
+                "base": {"prompt_versions": {"world": "world-turn-v2"}},
+                "candidate": {"prompt_versions": {"world": "world-turn-v3"}},
+            },
+        }
+        journey.diagnostic_registration = (
+            mock.Mock(value=registration_value) if registered else None)
+        journey.db_scalar = lambda query: database.execute(query).fetchone()[0]
+        return journey, registration_value
+
+    def test_registered_world_prompts_follow_bound_base_and_candidate_stages(self):
+        rows = [(number, "world-turn-v2" if number < 6 else "world-turn-v3")
+                for number in range(12)]
+        journey, registration = self.prompt_identity_journey(rows, registered=True)
+        frozen = CONTROL.canonical(registration)
+        with mock.patch.object(RUNNER.diagnostic, "source_identities") as identities:
+            journey.verify_prompt_identity("novel", include_world=True)
+        identities.assert_not_called()
+        self.assertEqual(CONTROL.canonical(registration), frozen)
+        self.assertEqual(journey.report["journey"]["prompt_identity"]["world"],
+                         {"base": "world-turn-v2", "candidate": "world-turn-v3"})
+
+    def test_registered_world_prompts_reject_swapped_unknown_and_wrong_stage_rows(self):
+        valid = [(number, "world-turn-v2" if number < 6 else "world-turn-v3")
+                 for number in range(12)]
+        cases = {
+            "swapped": [(number, "world-turn-v3" if number < 6 else "world-turn-v2")
+                        for number in range(12)],
+            "base_wrong": [(0, "world-turn-v3"), *valid[1:]],
+            "candidate_wrong": [*valid[:6], (6, "world-turn-v2"), *valid[7:]],
+            "unknown": [*valid[:11], (11, "world-turn-v99")],
+            "missing": valid[:-1],
+            "duplicate": [*valid[:11], valid[10]],
+            "outside_stage": [*valid[:11], (12, "world-turn-v3")],
+        }
+        for label, rows in cases.items():
+            with self.subTest(label=label):
+                journey, _ = self.prompt_identity_journey(rows, registered=True)
+                with self.assertRaises(RUNNER.QualificationFailure) as rejected:
+                    journey.verify_prompt_identity("novel", include_world=True)
+                self.assertEqual(rejected.exception.code, "prompt_identity_mismatch")
+
+    def test_registered_world_prompts_require_valid_registration_metadata(self):
+        rows = [(number, "world-turn-v3") for number in range(12)]
+        for malformed in [{}, {"base": None}, {
+            "base": {"prompt_versions": {"world": "world-turn-v2"}},
+            "candidate": {"prompt_versions": {"world": "world-turn-v3' OR '1'='1"}},
+        }]:
+            with self.subTest(metadata=malformed):
+                journey, registration = self.prompt_identity_journey(rows, registered=True)
+                registration["prompt_schema_identities"] = malformed
+                with self.assertRaises(RUNNER.QualificationFailure) as rejected:
+                    journey.verify_prompt_identity("novel", include_world=True)
+                self.assertEqual(rejected.exception.code, "prompt_identity_mismatch")
+
+    def test_unregistered_world_prompts_still_require_current_version_for_every_row(self):
+        current = [(number, "world-turn-v3") for number in range(12)]
+        journey, _ = self.prompt_identity_journey(current, registered=False)
+        journey.verify_prompt_identity("novel", include_world=True)
+        self.assertEqual(journey.report["journey"]["prompt_identity"]["world"], "world-turn-v3")
+        mixed = [(0, "world-turn-v2"), *current[1:]]
+        journey, _ = self.prompt_identity_journey(mixed, registered=False)
+        with self.assertRaises(RUNNER.QualificationFailure) as rejected:
+            journey.verify_prompt_identity("novel", include_world=True)
+        self.assertEqual(rejected.exception.code, "prompt_identity_mismatch")
 
     def test_artifact_preflight_rejects_metadata_only_changes_and_wrong_identity(self):
         journey = self.journey()
