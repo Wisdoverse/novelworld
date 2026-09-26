@@ -193,7 +193,7 @@ pub struct ServiceProxy {
     pub user_service_url: String,
     pub client: Client,
     pub internal_service_token: Arc<str>,
-    pub batch_upload_permits: Semaphore,
+    pub upload_permits: Semaphore,
 }
 
 fn json_line(value: serde_json::Value) -> io::Result<Bytes> {
@@ -422,14 +422,18 @@ impl ServiceProxy {
         } else {
             MAX_PROXY_BODY_BYTES
         };
-        let _batch_upload_permit = if batch_upload {
-            match self.batch_upload_permits.try_acquire() {
+        let _upload_permit = if method == Method::POST
+            && matches!(
+                target_url.path(),
+                "/novels" | "/novels/upload" | "/novels/upload/batch"
+            ) {
+            match self.upload_permits.try_acquire() {
                 Ok(permit) => Some(permit),
                 Err(_) => {
                     let mut response = api_error_response(
                         StatusCode::TOO_MANY_REQUESTS,
-                        "rate_limited",
-                        "Too many batch uploads are running",
+                        "upload_capacity_busy",
+                        "Too many uploads are running",
                     );
                     response
                         .headers_mut()
@@ -792,7 +796,7 @@ mod tests {
             narrative_service_url: format!("{base_url}/narrative"),
             client: reqwest::Client::new(),
             internal_service_token: Arc::from(TEST_INTERNAL_TOKEN),
-            batch_upload_permits: Semaphore::new(2),
+            upload_permits: Semaphore::new(2),
         }
     }
 
@@ -800,7 +804,7 @@ mod tests {
     async fn batch_body_boundary_does_not_expand_other_proxy_routes() {
         let target = body_server().await;
         let mut proxy = export_proxy(&target);
-        proxy.batch_upload_permits = Semaphore::new(1);
+        proxy.upload_permits = Semaphore::new(1);
 
         let response = proxy
             .forward(
@@ -843,35 +847,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn batch_admission_rejects_before_buffering_when_capacity_is_full() {
+    async fn upload_admission_rejects_before_buffering_when_capacity_is_full() {
         let target = body_server().await;
         let mut proxy = export_proxy(&target);
-        proxy.batch_upload_permits = Semaphore::new(1);
-        let _held = proxy.batch_upload_permits.try_acquire().unwrap();
-        let body_polls = Arc::new(AtomicUsize::new(0));
-        let observed_polls = body_polls.clone();
-        let body = Body::from_stream(futures::stream::once(async move {
-            observed_polls.fetch_add(1, Ordering::Relaxed);
-            Ok::<_, io::Error>(Bytes::from_static(b"x"))
-        }));
-        let request = Request::builder()
-            .method(Method::POST)
-            .uri("/")
-            .body(body)
-            .unwrap();
+        proxy.upload_permits = Semaphore::new(1);
+        let _held = proxy.upload_permits.try_acquire().unwrap();
+        for path in ["/novels", "/novels/upload", "/novels/upload/batch"] {
+            let body_polls = Arc::new(AtomicUsize::new(0));
+            let observed_polls = body_polls.clone();
+            let body = Body::from_stream(futures::stream::once(async move {
+                observed_polls.fetch_add(1, Ordering::Relaxed);
+                Ok::<_, io::Error>(Bytes::from_static(b"x"))
+            }));
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri("/")
+                .body(body)
+                .unwrap();
 
-        let response = proxy
-            .forward(&target, "/novels/upload/batch", request)
-            .await;
+            let response = proxy.forward(&target, path, request).await;
 
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "1");
-        assert_eq!(body_polls.load(Ordering::Relaxed), 0);
-
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "1");
+            assert_eq!(body_polls.load(Ordering::Relaxed), 0);
+        }
         let ordinary = proxy
             .forward(&target, "/novels/upload", body_request(Method::POST, 1))
             .await;
-        assert_eq!(ordinary.status(), StatusCode::OK);
+        assert_eq!(ordinary.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]
@@ -882,7 +885,7 @@ mod tests {
         };
         let target = held_body_server(state.clone()).await;
         let mut proxy = export_proxy(&target);
-        proxy.batch_upload_permits = Semaphore::new(1);
+        proxy.upload_permits = Semaphore::new(1);
         let proxy = Arc::new(proxy);
 
         let first_proxy = proxy.clone();

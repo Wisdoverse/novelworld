@@ -1,3 +1,4 @@
+import { isAxiosError } from 'axios';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from '@/shared/api/client';
 import { removeWorldTurnPendingRequest } from '@/shared/lib/worldTurnStorage';
@@ -158,6 +159,7 @@ export interface NovelImportAccepted {
 }
 
 export const MAX_NOVEL_BATCH_FILES = 5;
+export const MAX_NOVEL_UPLOAD_FILES = 50;
 export const MAX_NOVEL_BATCH_BYTES = 40 * 1024 * 1024;
 
 export function buildNovelUploadFormData(input: NovelUploadInput) {
@@ -195,17 +197,44 @@ export function validateNovelFile(file: File): string | null {
 
 export function validateNovelBatchFiles(files: File[]): string | null {
   if (!files.length) return '请至少选择一本小说';
-  if (files.length > MAX_NOVEL_BATCH_FILES) {
-    return `每次最多导入 ${MAX_NOVEL_BATCH_FILES} 本小说`;
+  if (files.length > MAX_NOVEL_UPLOAD_FILES) {
+    return `每次最多导入 ${MAX_NOVEL_UPLOAD_FILES} 本小说`;
   }
   for (const file of files) {
     const error = validateNovelFile(file);
     if (error) return `${file.name}：${error}`;
   }
-  if (files.reduce((total, file) => total + file.size, 0) > MAX_NOVEL_BATCH_BYTES) {
-    return '所选文件合计不能超过 40 MiB';
-  }
   return null;
+}
+
+export function splitNovelUploadBatches(files: File[]): File[][] {
+  const validation = validateNovelBatchFiles(files);
+  if (validation) throw new Error(validation);
+  const batches: File[][] = [];
+  let bytes = 0;
+  for (const file of files) {
+    let batch = batches[batches.length - 1];
+    if (!batch || batch.length === MAX_NOVEL_BATCH_FILES || bytes + file.size > MAX_NOVEL_BATCH_BYTES) {
+      batch = [];
+      batches.push(batch);
+      bytes = 0;
+    }
+    batch.push(file);
+    bytes += file.size;
+  }
+  return batches;
+}
+
+export class NovelBatchUploadError extends Error {
+  constructor(
+    readonly accepted: NovelImportAccepted[],
+    readonly unknownFiles: File[],
+    readonly remainingFiles: File[],
+    readonly cause: unknown,
+    readonly reason: 'request_failed' | 'session_changed' = 'request_failed',
+  ) {
+    super('Novel upload stopped before all files were confirmed');
+  }
 }
 
 export function useUploadNovel() {
@@ -224,13 +253,41 @@ export function useUploadNovel() {
 export function useUploadNovelsBatch() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (input: NovelBatchUploadInput) => apiClient.post<{
-      novels: NovelImportAccepted[];
-      message: string;
-    }>('/novels/upload/batch', buildNovelBatchUploadFormData(input), {
-      timeout: 120_000,
-    }).then(r => r.data),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: novelKeys.list() }),
+    retry: false,
+    mutationFn: async (input: NovelBatchUploadInput) => {
+      const batches = splitNovelUploadBatches(input.files);
+      const accepted: NovelImportAccepted[] = [];
+      const accessToken = localStorage.getItem('auth_token');
+      const headers = { Authorization: accessToken ? `Bearer ${accessToken}` : '' };
+      for (let index = 0; index < batches.length; index++) {
+        const files = batches[index];
+        if (localStorage.getItem('auth_token') !== accessToken) {
+          throw new NovelBatchUploadError(accepted, [], batches.slice(index).flat(),
+            new Error('Upload session changed'), 'session_changed');
+        }
+        try {
+          const response = await apiClient.post<{ novels: NovelImportAccepted[] }>(
+            '/novels/upload/batch', buildNovelBatchUploadFormData({ ...input, files }),
+            { timeout: 120_000, headers },
+          );
+          if (!Array.isArray(response.data.novels) || response.data.novels.length !== files.length
+            || response.data.novels.some(novel => !novel.novel_id)) {
+            throw new Error('Invalid import acceptance response');
+          }
+          accepted.push(...response.data.novels);
+          void queryClient.invalidateQueries({ queryKey: novelKeys.list() });
+        } catch (cause) {
+          const status = isAxiosError(cause) ? cause.response?.status : undefined;
+          const unknown = status === undefined || status >= 500;
+          throw new NovelBatchUploadError(
+            accepted, unknown ? files : [],
+            [...(unknown ? [] : files), ...batches.slice(index + 1).flat()], cause,
+          );
+        }
+      }
+      return { novels: accepted };
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: novelKeys.list() }),
   });
 }
 

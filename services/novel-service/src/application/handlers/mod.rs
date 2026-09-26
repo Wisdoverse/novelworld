@@ -63,6 +63,7 @@ pub struct NovelCommandHandler {
     pub source_storage: Option<Arc<dyn SourceFileStorage>>,
     pub source_deletions: Arc<dyn SourceFileDeletionRepository>,
     pub document_extractor: Arc<dyn DocumentTextExtractor>,
+    pub acceptance_permits: Arc<Semaphore>,
     pub import_permits: Arc<Semaphore>,
     pub active_import_users: Arc<Mutex<HashSet<Uuid>>>,
 }
@@ -438,6 +439,10 @@ mod validated_json_tests {
 #[derive(Debug, thiserror::Error)]
 #[error("Novel import capacity is busy")]
 pub struct ImportCapacityUnavailable;
+
+#[derive(Debug, thiserror::Error)]
+#[error("Novel upload acceptance is busy")]
+pub struct ImportAcceptanceUnavailable;
 
 #[derive(Debug, thiserror::Error)]
 #[error("Novel import exceeds the processing budget")]
@@ -1753,7 +1758,7 @@ impl NovelCommandHandler {
     }
 
     /// Atomically accept a bounded set of independent Novel aggregates while
-    /// consuming one admission slot. Only the first durable job is claimed
+    /// using a short-lived acceptance slot. Only the first durable job is claimed
     /// here; the existing recovery loop claims the remaining pending jobs.
     pub async fn handle_import_batch(
         self: &Arc<Self>,
@@ -1769,13 +1774,18 @@ impl NovelCommandHandler {
             "import batch must belong to one user"
         );
         info!(batch_size = commands.len(), %user_id, "accepting novel import batch");
-        let admission = self.try_admit_import(user_id)?;
+        let acceptance = self
+            .acceptance_permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ImportAcceptanceUnavailable)?;
         let source_retention_enabled = self.source_storage.is_some();
-        let mut prepared = tokio::task::spawn_blocking(move || {
-            commands
+        let (mut prepared, _acceptance) = tokio::task::spawn_blocking(move || {
+            let prepared = commands
                 .into_iter()
                 .map(|command| prepare_import_command(command, source_retention_enabled))
-                .collect::<Result<Vec<_>>>()
+                .collect::<Result<Vec<_>>>()?;
+            Ok::<_, anyhow::Error>((prepared, acceptance))
         })
         .await
         .map_err(|error| anyhow::anyhow!("chapter parser task failed: {error}"))??;
@@ -1826,13 +1836,15 @@ impl NovelCommandHandler {
         }
 
         let first_novel_id = novel_ids[0];
-        match self.novel_repo.claim_import(first_novel_id, user_id).await {
-            Ok(Some(claim)) => self.spawn_claimed_import(claim, admission),
-            Ok(None) => {
-                info!(novel_id = %first_novel_id, "durable novel import was claimed by another worker");
-            }
-            Err(error) => {
-                error!(error = ?error, novel_id = %first_novel_id, "durable novel import awaits recovery");
+        if let Ok(admission) = self.try_admit_import(user_id) {
+            match self.novel_repo.claim_import(first_novel_id, user_id).await {
+                Ok(Some(claim)) => self.spawn_claimed_import(claim, admission),
+                Ok(None) => {
+                    info!(novel_id = %first_novel_id, "durable novel import was claimed by another worker");
+                }
+                Err(error) => {
+                    error!(error = ?error, novel_id = %first_novel_id, "durable novel import awaits recovery");
+                }
             }
         }
         Ok(novel_ids)
