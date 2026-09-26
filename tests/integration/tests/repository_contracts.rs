@@ -412,6 +412,7 @@ fn blocking_import_handler(
         source_storage,
         source_deletions: Arc::new(PgSourceFileDeletionRepository::new(pool.clone())),
         document_extractor: Arc::new(EbookTextExtractor),
+        acceptance_permits: Arc::new(Semaphore::new(2)),
         import_permits: Arc::new(Semaphore::new(1)),
         active_import_users: Arc::new(Mutex::new(HashSet::new())),
     })
@@ -743,6 +744,62 @@ async fn startup_recovery_claims_a_pending_import() {
     .expect("startup recovery must claim the oldest pending import");
     recovery.abort();
     assert_eq!(state, ("in_progress".into(), 1, true));
+}
+
+#[tokio::test]
+async fn import_acceptance_queues_while_parser_is_busy_without_consuming_a_claim() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let user_id = insert_test_user(&pool, "queued-upload").await;
+    let handler = blocking_import_handler(&pool, None);
+    let parse_slot = handler
+        .import_permits
+        .clone()
+        .acquire_owned()
+        .await
+        .unwrap();
+    handler.active_import_users.lock().unwrap().insert(user_id);
+    let ids = handler
+        .handle_import_batch(
+            (0..2)
+                .map(|index| ImportNovelCommand {
+                    user_id,
+                    title: format!("Queued {index}"),
+                    author: None,
+                    raw_content: Some("A durable source paragraph. ".repeat(20)),
+                    source_bytes: None,
+                    deviation_mode: None,
+                })
+                .collect(),
+        )
+        .await
+        .unwrap();
+    let jobs: Vec<(String, i64, bool)> = sqlx::query_as(
+        "SELECT status, attempt, lease_expires_at IS NOT NULL FROM novel_import_jobs WHERE novel_id = ANY($1)"
+    ).bind(&ids).fetch_all(&pool).await.unwrap();
+    assert_eq!(jobs, vec![("pending".into(), 0, false); 2]);
+    assert_eq!(handler.acceptance_permits.available_permits(), 2);
+    handler.active_import_users.lock().unwrap().remove(&user_id);
+    drop(parse_slot);
+    // The separate startup recovery contract exercises the global scanner.
+    // Claim only this fixture's row so other tests' pending jobs stay untouched.
+    let claim = NovelPgRepository::new(pool.clone())
+        .claim_import(ids[0], user_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.attempt, 1);
+    let job: (String, i64, bool) = sqlx::query_as("SELECT status, attempt, lease_expires_at IS NOT NULL FROM novel_import_jobs WHERE novel_id = $1")
+        .bind(ids[0]).fetch_one(&pool).await.unwrap();
+    assert_eq!(job, ("in_progress".into(), 1, true));
+    sqlx::query("DELETE FROM novels WHERE id = ANY($1)")
+        .bind(&ids)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

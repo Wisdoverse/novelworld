@@ -123,7 +123,7 @@ async fn run_body() -> anyhow::Result<()> {
             internal_service_token: internal_service_token.into(),
             // ponytail: The supported topology has one Gateway process. Add
             // distributed admission only when Gateway replicas actually exist.
-            batch_upload_permits: Semaphore::new(2),
+            upload_permits: Semaphore::new(2),
         });
 
         // --- Global rate limiter: configurable via env, default 500 req/s ---
@@ -645,7 +645,7 @@ mod authz_matrix_tests {
                 user_service_url: "http://127.0.0.1:1".into(),
                 client: reqwest::Client::new(),
                 internal_service_token: "x".repeat(32).into(),
-                batch_upload_permits: Semaphore::new(2),
+                upload_permits: Semaphore::new(2),
             }),
             metrics_handle,
             rate_limiter: Arc::new(RateLimiter::direct(Quota::per_second(
