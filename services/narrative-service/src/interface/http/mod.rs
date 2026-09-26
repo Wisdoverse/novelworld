@@ -320,6 +320,20 @@ fn narrative_error_response(error: NarrativeError) -> axum::response::Response {
                 "Game rules are not yet available at current reading progress",
             )
         }
+        NarrativeError::GameRuleSourcesUnavailable => {
+            return error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "game_rule_sources_unavailable",
+                "Canonical sources cannot support game rules",
+            )
+        }
+        NarrativeError::GameRuleCanonUnavailable => {
+            return error_response(
+                StatusCode::CONFLICT,
+                "canon_unavailable",
+                "Canonical novel analysis is not ready",
+            );
+        }
         NarrativeError::ReadingProgressBehindWorld => {
             return error_response(
                 StatusCode::CONFLICT,
@@ -1078,6 +1092,38 @@ mod principal_contract_tests {
             serde_json::json!({"error": {
                 "code": "game_rules_unavailable_at_progress",
                 "message": "Game rules are not yet available at current reading progress"
+            }}),
+        );
+    }
+
+    #[tokio::test]
+    async fn insufficient_canonical_sources_return_a_content_free_422() {
+        let response = narrative_error_response(NarrativeError::GameRuleSourcesUnavailable);
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({"error": {
+                "code": "game_rule_sources_unavailable",
+                "message": "Canonical sources cannot support game rules"
+            }}),
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_canon_returns_a_stable_content_free_conflict() {
+        let response = narrative_error_response(NarrativeError::GameRuleCanonUnavailable);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({"error": {
+                "code": "canon_unavailable",
+                "message": "Canonical novel analysis is not ready"
             }}),
         );
     }

@@ -195,6 +195,7 @@ impl ChapterReadRepository for FixedChapterRepo {
         &self,
         _novel_id: Uuid,
         _user_id: Uuid,
+        _prompt_version: &str,
     ) -> std::result::Result<
         GameRuleTemplate,
         crate::domain::repositories::GameRuleTemplateRequestError,
@@ -211,6 +212,7 @@ impl ChapterReadRepository for FixedChapterRepo {
         _novel_id: Uuid,
         _canon_model_version: i32,
         _user_id: Uuid,
+        _prompt_version: &str,
     ) -> Result<Option<GameRuleTemplate>> {
         Ok(None)
     }

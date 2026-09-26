@@ -1677,6 +1677,7 @@ class Journey:
                 self.root / "infra/postgres/migrations/0021_world_turn_memory_projection.sql",
                 self.root / "infra/postgres/migrations/0024_persona_provenance.sql",
                 self.root / "infra/postgres/migrations/0025_chat_world_revision.sql",
+                self.root / "infra/postgres/migrations/0030_versioned_game_rule_templates.sql",
             )
         }
         non_secret_config = {

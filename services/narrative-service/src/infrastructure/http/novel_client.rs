@@ -1,4 +1,7 @@
-use crate::domain::entities::{game_rules::GameRuleTemplate, world_session::WorldEntryContext};
+use crate::domain::entities::{
+    game_rules::{GameRuleTemplate, BASIC_GAME_RULE_PROMPT_VERSION, GAME_RULE_PROMPT_VERSION},
+    world_session::WorldEntryContext,
+};
 use crate::domain::repositories::{
     ChapterInfo, ChapterReadRepository, CharacterBrief, GameRuleTemplateRequestError, NovelInfo,
     PlayerEntryContext, ReadingProgressSnapshot,
@@ -20,6 +23,10 @@ pub struct NovelServiceClient {
 
 const NOVEL_SERVICE_TIMEOUT: Duration = Duration::from_secs(2);
 const GAME_RULE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn supported_game_rule_prompt_version(version: &str) -> bool {
+    version == GAME_RULE_PROMPT_VERSION || version == BASIC_GAME_RULE_PROMPT_VERSION
+}
 
 impl NovelServiceClient {
     pub fn new(base_url: String, internal_service_token: String) -> Self {
@@ -349,12 +356,18 @@ impl ChapterReadRepository for NovelServiceClient {
         &self,
         novel_id: Uuid,
         user_id: Uuid,
+        prompt_version: &str,
     ) -> std::result::Result<GameRuleTemplate, GameRuleTemplateRequestError> {
+        if !supported_game_rule_prompt_version(prompt_version) {
+            return Err(GameRuleTemplateRequestError::Unavailable(anyhow!(
+                "Unsupported game rule prompt version"
+            )));
+        }
         let response = self
             .client
             .post(format!(
-                "{}/internal/novels/{}/game-rules",
-                self.base_url, novel_id
+                "{}/internal/novels/{}/game-rules?prompt_version={}",
+                self.base_url, novel_id, prompt_version
             ))
             .timeout(GAME_RULE_REQUEST_TIMEOUT)
             .header("X-User-Id", user_id.to_string())
@@ -393,6 +406,14 @@ impl ChapterReadRepository for NovelServiceClient {
             {
                 return Err(GameRuleTemplateRequestError::UnavailableAtProgress);
             }
+            if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
+                && code == Some("game_rule_sources_unavailable")
+            {
+                return Err(GameRuleTemplateRequestError::SourcesUnavailable);
+            }
+            if status == reqwest::StatusCode::CONFLICT && code == Some("canon_unavailable") {
+                return Err(GameRuleTemplateRequestError::CanonUnavailable);
+            }
             return Err(GameRuleTemplateRequestError::Unavailable(anyhow!(
                 "Novel service returned {status} for game rules"
             )));
@@ -406,9 +427,9 @@ impl ChapterReadRepository for NovelServiceClient {
                 "Novel service returned invalid game rules: {error}"
             ))
         })?;
-        if template.novel_id != novel_id {
+        if template.novel_id != novel_id || template.prompt_version != prompt_version {
             return Err(GameRuleTemplateRequestError::Unavailable(anyhow!(
-                "Novel service returned game rules for another novel"
+                "Novel service returned the wrong game rule template"
             )));
         }
         Ok(template)
@@ -419,12 +440,16 @@ impl ChapterReadRepository for NovelServiceClient {
         novel_id: Uuid,
         canon_model_version: i32,
         user_id: Uuid,
+        prompt_version: &str,
     ) -> Result<Option<GameRuleTemplate>> {
+        if !supported_game_rule_prompt_version(prompt_version) {
+            return Err(anyhow!("Unsupported game rule prompt version"));
+        }
         let response = self
             .client
             .get(format!(
-                "{}/internal/novels/{}/game-rules/{}",
-                self.base_url, novel_id, canon_model_version
+                "{}/internal/novels/{}/game-rules/{}?prompt_version={}",
+                self.base_url, novel_id, canon_model_version, prompt_version
             ))
             .header("X-User-Id", user_id.to_string())
             .header("X-Internal-Service-Token", &self.internal_service_token)
@@ -443,7 +468,10 @@ impl ChapterReadRepository for NovelServiceClient {
         template
             .validate()
             .map_err(|error| anyhow!("Novel service returned invalid game rules: {error}"))?;
-        if template.novel_id != novel_id || template.canon_model_version != canon_model_version {
+        if template.novel_id != novel_id
+            || template.canon_model_version != canon_model_version
+            || template.prompt_version != prompt_version
+        {
             return Err(anyhow!(
                 "Novel service returned the wrong game rule template"
             ));
@@ -455,26 +483,210 @@ impl ChapterReadRepository for NovelServiceClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::entities::{
+        game_rules::{GameActionRule, GameAttribute, BASIC_ACTION_DESCRIPTION},
+        world_session::WorldActionKind,
+    };
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+    };
 
     const USER_ID: Uuid = Uuid::from_u128(1);
     const NOVEL_ID: Uuid = Uuid::from_u128(2);
+
+    fn game_rule_template(prompt_version: &str) -> GameRuleTemplate {
+        let attributes = ["vigor", "insight", "influence"]
+            .into_iter()
+            .map(|key| {
+                let (label, description) = if prompt_version == BASIC_GAME_RULE_PROMPT_VERSION {
+                    crate::domain::entities::game_rules::basic_attribute(key).unwrap()
+                } else {
+                    (key, "v1 narrative attribute")
+                };
+                GameAttribute {
+                    key: key.into(),
+                    label: label.into(),
+                    description: description.into(),
+                    default_score: 10,
+                    source_chapters: vec![2],
+                }
+            })
+            .collect::<Vec<_>>();
+        let actions = [
+            WorldActionKind::Travel,
+            WorldActionKind::Investigate,
+            WorldActionKind::Converse,
+            WorldActionKind::Ally,
+            WorldActionKind::Oppose,
+            WorldActionKind::AdvanceThread,
+            WorldActionKind::ResolveThread,
+            WorldActionKind::PursueGoal,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, kind)| GameActionRule {
+            kind,
+            attribute_key: attributes[index % attributes.len()].key.clone(),
+            difficulty_class: 13,
+            description: if prompt_version == BASIC_GAME_RULE_PROMPT_VERSION {
+                BASIC_ACTION_DESCRIPTION.into()
+            } else {
+                "v1 narrative action".into()
+            },
+            source_chapters: vec![2],
+        })
+        .collect();
+        GameRuleTemplate {
+            novel_id: NOVEL_ID,
+            canon_model_version: 1,
+            schema_version: 1,
+            prompt_version: prompt_version.into(),
+            minimum_score: 8,
+            maximum_score: 15,
+            point_budget: 30,
+            attributes,
+            action_rules: actions,
+        }
+    }
+
+    #[tokio::test]
+    async fn game_rule_http_calls_pin_requested_prompt_version_in_query() {
+        use axum::{
+            extract::Query,
+            routing::{get, post},
+            Json, Router,
+        };
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let post_seen = seen.clone();
+        let get_seen = seen.clone();
+        let template = game_rule_template(BASIC_GAME_RULE_PROMPT_VERSION);
+        let app = Router::new()
+            .route(
+                "/internal/novels/{id}/game-rules",
+                post(move |Query(query): Query<HashMap<String, String>>| {
+                    let seen = post_seen.clone();
+                    let template = template.clone();
+                    async move {
+                        seen.lock()
+                            .unwrap()
+                            .push(query.get("prompt_version").cloned());
+                        Json(template)
+                    }
+                }),
+            )
+            .route(
+                "/internal/novels/{id}/game-rules/{version}",
+                get(move |Query(query): Query<HashMap<String, String>>| {
+                    let seen = get_seen.clone();
+                    let template = game_rule_template(BASIC_GAME_RULE_PROMPT_VERSION);
+                    async move {
+                        seen.lock()
+                            .unwrap()
+                            .push(query.get("prompt_version").cloned());
+                        Json(template)
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = NovelServiceClient::new(format!("http://{address}"), "test-token".into());
+
+        client
+            .request_game_rule_template(NOVEL_ID, USER_ID, BASIC_GAME_RULE_PROMPT_VERSION)
+            .await
+            .unwrap();
+        client
+            .get_game_rule_template(NOVEL_ID, 1, USER_ID, BASIC_GAME_RULE_PROMPT_VERSION)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                Some(BASIC_GAME_RULE_PROMPT_VERSION.into()),
+                Some(BASIC_GAME_RULE_PROMPT_VERSION.into()),
+            ]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn game_rule_http_calls_reject_a_different_returned_prompt_version() {
+        use axum::{
+            routing::{get, post},
+            Json, Router,
+        };
+
+        let template = game_rule_template(GAME_RULE_PROMPT_VERSION);
+        let app = Router::new()
+            .route(
+                "/internal/novels/{id}/game-rules",
+                post(move || async move { Json(template.clone()) }),
+            )
+            .route(
+                "/internal/novels/{id}/game-rules/{version}",
+                get(move || async move { Json(game_rule_template(GAME_RULE_PROMPT_VERSION)) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = NovelServiceClient::new(format!("http://{address}"), "test-token".into());
+
+        assert!(client
+            .request_game_rule_template(NOVEL_ID, USER_ID, BASIC_GAME_RULE_PROMPT_VERSION)
+            .await
+            .is_err());
+        assert!(client
+            .get_game_rule_template(NOVEL_ID, 1, USER_ID, BASIC_GAME_RULE_PROMPT_VERSION,)
+            .await
+            .is_err());
+        server.abort();
+    }
 
     #[tokio::test]
     async fn game_rules_progress_rejection_is_distinct_from_service_failure() {
         use axum::{http::StatusCode, routing::post, Json, Router};
 
-        for (status, code, hidden) in [
+        for (status, code, hidden, sources_unavailable, canon_unavailable) in [
             (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "game_rules_unavailable_at_progress",
                 true,
+                false,
+                false,
             ),
             (
                 StatusCode::BAD_GATEWAY,
                 "game_rules_unavailable_at_progress",
                 false,
+                false,
+                false,
             ),
-            (StatusCode::UNPROCESSABLE_ENTITY, "unknown_error", false),
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "game_rule_sources_unavailable",
+                false,
+                true,
+                false,
+            ),
+            (
+                StatusCode::CONFLICT,
+                "canon_unavailable",
+                false,
+                false,
+                true,
+            ),
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unknown_error",
+                false,
+                false,
+                false,
+            ),
         ] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
@@ -492,12 +704,24 @@ mod tests {
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
             let client = NovelServiceClient::new(format!("http://{address}"), "test-token".into());
             let error = client
-                .request_game_rule_template(NOVEL_ID, USER_ID)
+                .request_game_rule_template(
+                    NOVEL_ID,
+                    USER_ID,
+                    crate::domain::entities::game_rules::BASIC_GAME_RULE_PROMPT_VERSION,
+                )
                 .await
                 .unwrap_err();
             assert_eq!(
                 matches!(error, GameRuleTemplateRequestError::UnavailableAtProgress),
                 hidden
+            );
+            assert_eq!(
+                matches!(error, GameRuleTemplateRequestError::SourcesUnavailable),
+                sources_unavailable
+            );
+            assert_eq!(
+                matches!(error, GameRuleTemplateRequestError::CanonUnavailable),
+                canon_unavailable
             );
             assert!(!error.to_string().contains("private upstream detail"));
             server.abort();

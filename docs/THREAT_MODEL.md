@@ -13,6 +13,18 @@ The current supported profile is the private self-hosted preview defined in the
 [`product contract`](./PRODUCT_CONTRACT.md). Modeling an Internet attacker or a
 public edge is defensive analysis, not approval for public hosting.
 
+## Versioned game-rule boundary
+
+V2 template generation receives bounded whole-book `world_rules` and can
+return only fixed vocabulary keys, bounded numeric values, and chapter
+references. Server-owned dictionaries supply labels and descriptions; free-form
+provider prose is rejected. Chapter citations are provenance, not visibility
+authorization. Actual narrative context remains progress-guarded, and hard
+validation remains server-owned. A compromised or malformed provider may still
+select an incorrect allowed basic capability; extraction completeness and
+semantic quality are not established by this contract.
+
+
 The primary runtime is:
 
 ```text

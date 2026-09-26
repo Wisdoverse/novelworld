@@ -122,10 +122,12 @@ retention, and paging integration are not yet qualified for the supported profil
 
 ## D20 rules blocked by reading progress
 
-`422 game_rules_unavailable_at_progress` means the shared immutable rules
-template cites chapters beyond the reader's current progress. Novel Service
-and Narrative Service preserve this content-free rejection; it is not a
-dependency outage. Continue reading before requesting the rules again, or
+`422 game_rules_unavailable_at_progress` means a v1 template cites chapters
+beyond the reader's current progress. Novel Service and Narrative Service
+preserve this content-free rejection; it is not a dependency outage. V2 chapter
+references are provenance only, not an unlock gate; v2 still requires a ready
+novel and positive progress, and all narrative context and hard-rule guards
+remain enforced. Continue reading before requesting v1 rules again, or
 disable the advanced option to enter in narrative mode. Do not change reading
 progress administratively or regenerate a ready template to bypass visibility.
 
@@ -209,10 +211,21 @@ import/attachment followed by supported shelf removal.
 ### Advanced D20 entry reports unavailable
 
 Inspect the typed response before treating this as a service outage.
-`422 game_rules_unavailable_at_progress` means the immutable template references
-chapters the reader has not unlocked. Continue reading or choose narrative mode;
-do not regenerate the template, advance stored progress, or retry provider work
-to bypass that boundary. Template generation failure and dependency failures are
+`422 game_rules_unavailable_at_progress` for v1 means the immutable template
+references chapters the reader has not unlocked. V2 citations are provenance,
+not an unlock decision. Continue reading or choose narrative mode for the v1
+progress response; do not regenerate the template, advance stored progress, or
+retry provider work to bypass that boundary. `422 game_rule_sources_unavailable`
+means no usable source-backed mechanic was found or bounded input exceeded
+32 KiB. That preflight failure takes no generation claim and dispatches no
+provider request; more reading does not automatically fix missing mechanics or
+the input bound. Choose narrative mode or wait for corrected canonical source.
+For v2, claim admission uses one five-second PostgreSQL transaction attempt;
+never retry an uncertain commit or dispatch provider work after unknown outcome.
+An ambiguous durable claim may remain and is not budget-refilled. Before applying
+0030, the release target must contain all four required barriers (0021/0024/0025/0030);
+old Novel and Narrative writers must both be stopped and drained, then restarted
+as compatible versions. Template generation failure and dependency failures are
 separate cases. The [D20 responsibility and evaluation plan](./ADVANCED_RULES_PLAN.md)
 explains the optional Laya (Jev) classification preview and its fallback. A
 missing or failing classifier is not this 422 and falls back to the template

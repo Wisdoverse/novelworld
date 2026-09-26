@@ -9,7 +9,7 @@ use crate::domain::{
     entities::{
         canon_story_model::{CanonStoryContent, CanonStoryModel},
         game_rule_template::{
-            GameRuleTemplate, GAME_RULE_PROMPT_VERSION, GAME_RULE_SCHEMA_VERSION,
+            supported_prompt_version, GameRuleTemplate, GAME_RULE_SCHEMA_VERSION,
         },
     },
     repositories::{
@@ -230,125 +230,138 @@ impl CanonStoryModelRepository for PgCanonStoryModelRepository {
         &self,
         novel_id: Uuid,
         canon_model_version: i32,
+        prompt_version: &str,
     ) -> Result<BeginGameRuleGeneration> {
-        let inserted = sqlx::query(
-            r#"INSERT INTO novel_game_rule_templates (
+        // Admission has a fixed deadline and no retry. An unknown commit
+        // outcome stops before provider dispatch; a durable claim may remain.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            anyhow::ensure!(
+                supported_prompt_version(prompt_version),
+                "unsupported game-rule prompt"
+            );
+            let mut transaction = self.pool.begin().await?;
+            // All prompt variants compete for one existing canon owner's lock.
+            // No provider I/O occurs while this short transaction holds the lock.
+            sqlx::query_scalar::<_, i32>(
+                "SELECT model_version FROM canon_story_models \
+             WHERE novel_id = $1 AND model_version = $2 FOR UPDATE",
+            )
+            .bind(novel_id)
+            .bind(canon_model_version)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .context("game-rule canonical model does not exist")?;
+
+            let ready = sqlx::query_scalar::<_, serde_json::Value>(
+                "SELECT content FROM novel_game_rule_templates \
+             WHERE novel_id = $1 AND canon_model_version = $2 \
+             AND prompt_version = $3 AND status = 'ready'",
+            )
+            .bind(novel_id)
+            .bind(canon_model_version)
+            .bind(prompt_version)
+            .fetch_optional(&mut *transaction)
+            .await?;
+            if let Some(content) = ready {
+                let template = decode_game_rule_template(
+                    content,
+                    novel_id,
+                    canon_model_version,
+                    prompt_version,
+                )?;
+                transaction.commit().await?;
+                return Ok(BeginGameRuleGeneration::Ready(template));
+            }
+            let active = sqlx::query_scalar::<_, i64>(
+                r#"SELECT GREATEST(1, CEIL(EXTRACT(EPOCH FROM lease_expires_at - NOW()))::BIGINT)
+               FROM novel_game_rule_templates
+               WHERE novel_id = $1 AND canon_model_version = $2
+                 AND status = 'generating' AND lease_expires_at > NOW()
+               ORDER BY lease_expires_at DESC LIMIT 1"#,
+            )
+            .bind(novel_id)
+            .bind(canon_model_version)
+            .fetch_optional(&mut *transaction)
+            .await?;
+            if let Some(seconds) = active {
+                transaction.commit().await?;
+                return Ok(BeginGameRuleGeneration::InProgress {
+                    retry_after_seconds: seconds.clamp(1, 5) as u64,
+                });
+            }
+            let consumed = sqlx::query_scalar::<_, i64>(
+                "SELECT COALESCE(SUM(attempt), 0)::BIGINT FROM novel_game_rule_templates \
+             WHERE novel_id = $1 AND canon_model_version = $2",
+            )
+            .bind(novel_id)
+            .bind(canon_model_version)
+            .fetch_one(&mut *transaction)
+            .await?;
+            let exhausted = consumed >= MAX_GAME_RULE_GENERATION_ATTEMPTS;
+            // Expired variants cannot renew or finish after a different variant
+            // acquires ownership. Their consumed claims remain in the global sum.
+            sqlx::query(
+                r#"UPDATE novel_game_rule_templates
+               SET status = 'failed', lease_expires_at = NULL,
+                   failure_code = $3, updated_at = NOW()
+               WHERE novel_id = $1 AND canon_model_version = $2
+                 AND status = 'generating' AND lease_expires_at <= NOW()"#,
+            )
+            .bind(novel_id)
+            .bind(canon_model_version)
+            .bind(if exhausted {
+                "budget_exhausted"
+            } else {
+                "lease_expired"
+            })
+            .execute(&mut *transaction)
+            .await?;
+            if exhausted {
+                transaction.commit().await?;
+                return Ok(BeginGameRuleGeneration::Exhausted);
+            }
+            let attempt = sqlx::query_scalar::<_, i64>(
+                r#"INSERT INTO novel_game_rule_templates (
                    novel_id, canon_model_version, schema_version, prompt_version,
                    status, attempt, lease_expires_at
                ) VALUES ($1, $2, $3, $4, 'generating', 1, NOW() + INTERVAL '2 minutes')
-               ON CONFLICT (novel_id, canon_model_version) DO NOTHING"#,
-        )
-        .bind(novel_id)
-        .bind(canon_model_version)
-        .bind(GAME_RULE_SCHEMA_VERSION)
-        .bind(GAME_RULE_PROMPT_VERSION)
-        .execute(&self.pool)
-        .await?;
-        if inserted.rows_affected() == 1 {
-            return Ok(BeginGameRuleGeneration::Acquired { attempt: 1 });
-        }
-
-        if let Some(template) = self
-            .find_game_rule_template(novel_id, canon_model_version)
-            .await?
-        {
-            return Ok(BeginGameRuleGeneration::Ready(template));
-        }
-
-        let reclaimed = sqlx::query_scalar::<_, i64>(
-            r#"UPDATE novel_game_rule_templates
-               SET status = 'generating', attempt = attempt + 1,
+               ON CONFLICT (novel_id, canon_model_version, prompt_version) DO UPDATE
+               SET status = 'generating', attempt = novel_game_rule_templates.attempt + 1,
                    lease_expires_at = NOW() + INTERVAL '2 minutes',
                    failure_code = NULL, updated_at = NOW()
-               WHERE novel_id = $1 AND canon_model_version = $2
-                 AND attempt < $3
-                 AND (status = 'failed'
-                      OR (status = 'generating' AND lease_expires_at <= NOW()))
+               WHERE novel_game_rule_templates.status = 'failed'
                RETURNING attempt"#,
-        )
-        .bind(novel_id)
-        .bind(canon_model_version)
-        .bind(MAX_GAME_RULE_GENERATION_ATTEMPTS)
-        .fetch_optional(&self.pool)
-        .await?;
-        if let Some(attempt) = reclaimed {
-            return Ok(BeginGameRuleGeneration::Acquired { attempt });
-        }
-
-        if let Some(template) = self
-            .find_game_rule_template(novel_id, canon_model_version)
-            .await?
-        {
-            return Ok(BeginGameRuleGeneration::Ready(template));
-        }
-        let terminalized = sqlx::query(
-            r#"UPDATE novel_game_rule_templates
-               SET status = 'failed', lease_expires_at = NULL,
-                   failure_code = 'budget_exhausted', updated_at = NOW()
-               WHERE novel_id = $1 AND canon_model_version = $2
-                 AND status = 'generating' AND attempt >= $3
-                 AND lease_expires_at <= NOW()"#,
-        )
-        .bind(novel_id)
-        .bind(canon_model_version)
-        .bind(MAX_GAME_RULE_GENERATION_ATTEMPTS)
-        .execute(&self.pool)
-        .await?
-        .rows_affected()
-            == 1;
-        if terminalized {
-            return Ok(BeginGameRuleGeneration::Exhausted);
-        }
-        let exhausted = sqlx::query_scalar::<_, bool>(
-            r#"SELECT TRUE
-               FROM novel_game_rule_templates
-               WHERE novel_id = $1 AND canon_model_version = $2
-                 AND status = 'failed' AND attempt >= $3"#,
-        )
-        .bind(novel_id)
-        .bind(canon_model_version)
-        .bind(MAX_GAME_RULE_GENERATION_ATTEMPTS)
-        .fetch_optional(&self.pool)
-        .await?
-        .unwrap_or(false);
-        if exhausted {
-            return Ok(BeginGameRuleGeneration::Exhausted);
-        }
-
-        let retry_after_seconds = sqlx::query_scalar::<_, i64>(
-            r#"SELECT GREATEST(
-                       1,
-                       CEIL(EXTRACT(EPOCH FROM lease_expires_at - NOW()))::BIGINT
-                   )
-               FROM novel_game_rule_templates
-               WHERE novel_id = $1 AND canon_model_version = $2
-                 AND status = 'generating'"#,
-        )
-        .bind(novel_id)
-        .bind(canon_model_version)
-        .fetch_optional(&self.pool)
-        .await?
-        .unwrap_or(1)
-        .max(1) as u64;
-        Ok(BeginGameRuleGeneration::InProgress {
-            retry_after_seconds: retry_after_seconds.min(5),
+            )
+            .bind(novel_id)
+            .bind(canon_model_version)
+            .bind(GAME_RULE_SCHEMA_VERSION)
+            .bind(prompt_version)
+            .fetch_one(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
+            Ok(BeginGameRuleGeneration::Acquired { attempt })
         })
+        .await
+        .context("game-rule admission deadline exceeded")?
     }
 
     async fn renew_game_rule_generation(
         &self,
         novel_id: Uuid,
         canon_model_version: i32,
+        prompt_version: &str,
         attempt: i64,
     ) -> Result<bool> {
         let result = sqlx::query(
             r#"UPDATE novel_game_rule_templates
                SET lease_expires_at = NOW() + INTERVAL '2 minutes', updated_at = NOW()
                WHERE novel_id = $1 AND canon_model_version = $2
-                 AND attempt = $3 AND status = 'generating'"#,
+                 AND prompt_version = $3 AND attempt = $4 AND status = 'generating'
+                 AND lease_expires_at > NOW()"#,
         )
         .bind(novel_id)
         .bind(canon_model_version)
+        .bind(prompt_version)
         .bind(attempt)
         .execute(&self.pool)
         .await?;
@@ -366,13 +379,14 @@ impl CanonStoryModelRepository for PgCanonStoryModelRepository {
                SET status = 'ready', lease_expires_at = NULL, content = $4,
                    failure_code = NULL, completed_at = NOW(), updated_at = NOW()
                WHERE novel_id = $1 AND canon_model_version = $2
-                 AND attempt = $3 AND status = 'generating'
+                 AND attempt = $3 AND prompt_version = $5 AND status = 'generating'
                  AND lease_expires_at > NOW()"#,
         )
         .bind(template.novel_id)
         .bind(template.canon_model_version)
         .bind(attempt)
         .bind(serde_json::to_value(template)?)
+        .bind(&template.prompt_version)
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() == 1)
@@ -382,6 +396,7 @@ impl CanonStoryModelRepository for PgCanonStoryModelRepository {
         &self,
         novel_id: Uuid,
         canon_model_version: i32,
+        prompt_version: &str,
         attempt: i64,
         failure_code: &str,
     ) -> Result<bool> {
@@ -396,12 +411,14 @@ impl CanonStoryModelRepository for PgCanonStoryModelRepository {
         let result = sqlx::query(
             r#"UPDATE novel_game_rule_templates
                SET status = 'failed', lease_expires_at = NULL,
-                   failure_code = $4, updated_at = NOW()
+                   failure_code = $5, updated_at = NOW()
                WHERE novel_id = $1 AND canon_model_version = $2
-                 AND attempt = $3 AND status = 'generating'"#,
+                 AND prompt_version = $3 AND attempt = $4 AND status = 'generating'
+                 AND lease_expires_at > NOW()"#,
         )
         .bind(novel_id)
         .bind(canon_model_version)
+        .bind(prompt_version)
         .bind(attempt)
         .bind(failure_code)
         .execute(&self.pool)
@@ -413,30 +430,42 @@ impl CanonStoryModelRepository for PgCanonStoryModelRepository {
         &self,
         novel_id: Uuid,
         canon_model_version: i32,
+        prompt_version: &str,
     ) -> Result<Option<GameRuleTemplate>> {
         let content = sqlx::query_scalar::<_, serde_json::Value>(
             r#"SELECT content
                FROM novel_game_rule_templates
-               WHERE novel_id = $1 AND canon_model_version = $2 AND status = 'ready'"#,
+               WHERE novel_id = $1 AND canon_model_version = $2 AND prompt_version = $3 AND status = 'ready'"#,
         )
         .bind(novel_id)
         .bind(canon_model_version)
+        .bind(prompt_version)
         .fetch_optional(&self.pool)
         .await?;
         content
             .map(|content| {
-                let template = serde_json::from_value::<GameRuleTemplate>(content)
-                    .context("persisted game rule template is invalid")?;
-                anyhow::ensure!(
-                    template.novel_id == novel_id
-                        && template.canon_model_version == canon_model_version,
-                    "persisted game rule template identity is invalid"
-                );
-                template.validate(i32::MAX)?;
-                Ok(template)
+                decode_game_rule_template(content, novel_id, canon_model_version, prompt_version)
             })
             .transpose()
     }
+}
+
+fn decode_game_rule_template(
+    content: serde_json::Value,
+    novel_id: Uuid,
+    canon_model_version: i32,
+    prompt_version: &str,
+) -> Result<GameRuleTemplate> {
+    let template = serde_json::from_value::<GameRuleTemplate>(content)
+        .context("persisted game rule template is invalid")?;
+    anyhow::ensure!(
+        template.novel_id == novel_id
+            && template.canon_model_version == canon_model_version
+            && template.prompt_version == prompt_version,
+        "persisted game rule template identity is invalid"
+    );
+    template.validate(i32::MAX)?;
+    Ok(template)
 }
 
 #[derive(sqlx::FromRow)]
