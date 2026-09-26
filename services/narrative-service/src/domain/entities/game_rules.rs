@@ -3,10 +3,14 @@ use std::collections::{BTreeMap, HashSet};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domain::entities::world_session::WorldActionKind;
+use crate::domain::entities::{
+    player_entity::PlayerEntity,
+    world_session::{WorldAction, WorldActionKind, WorldSession},
+};
 
 pub const GAME_RULE_SCHEMA_VERSION: i32 = 1;
 pub const GAME_RULE_PROMPT_VERSION: &str = "novel-game-rules-v1";
+pub const ACTION_ADJUDICATION_CONTEXT_LIMIT: usize = 8 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -196,6 +200,44 @@ impl PlayerRuleProfile {
     }
 }
 
+/// A bounded model classification, never executable rules or a supplied roll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdjudicationDecision {
+    Pending,
+    TemplateFallback,
+    Impossible,
+    AutomaticSuccess,
+    EasyCheck,
+    StandardCheck,
+    HardCheck,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionAdjudication {
+    pub schema_version: i32,
+    pub template_difficulty_class: i32,
+    pub decision: AdjudicationDecision,
+}
+
+/// Authorized display facts only; no routing IDs, history, raw novel or dice.
+#[derive(Debug, Clone, Serialize)]
+pub struct ActionAdjudicationContext {
+    pub kind: WorldActionKind,
+    pub intent: String,
+    pub target: Option<String>,
+    pub location: String,
+    pub background: String,
+    pub capabilities: Vec<String>,
+    pub inventory: Vec<String>,
+    pub hard_rules: Vec<String>,
+    pub attribute_label: String,
+    pub attribute_description: String,
+    pub attribute_score: i32,
+    pub template_difficulty_class: i32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActionCheck {
@@ -210,6 +252,8 @@ pub struct ActionCheck {
     pub difficulty_class: i32,
     pub total: i32,
     pub succeeded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adjudication: Option<ActionAdjudication>,
 }
 
 impl ActionCheck {
@@ -222,12 +266,89 @@ impl ActionCheck {
             || !(1..=20).contains(&self.roll)
             || !(5..=30).contains(&self.difficulty_class)
             || self.total != self.roll + self.modifier
-            || self.succeeded != (self.total >= self.difficulty_class)
         {
             return invalid("action check arithmetic or versions are invalid");
         }
+        let expected_success = match &self.adjudication {
+            Some(adjudication) => {
+                if adjudication.schema_version != 1
+                    || !(5..=30).contains(&adjudication.template_difficulty_class)
+                {
+                    return invalid("action adjudication version or base DC is invalid");
+                }
+                let base = adjudication.template_difficulty_class;
+                let expected_dc = match adjudication.decision {
+                    AdjudicationDecision::EasyCheck => (base - 5).max(5),
+                    AdjudicationDecision::HardCheck => (base + 5).min(30),
+                    _ => base,
+                };
+                if self.difficulty_class != expected_dc {
+                    return invalid("action adjudication DC mapping is invalid");
+                }
+                match adjudication.decision {
+                    AdjudicationDecision::Impossible => false,
+                    AdjudicationDecision::AutomaticSuccess => true,
+                    _ => self.total >= self.difficulty_class,
+                }
+            }
+            None => self.total >= self.difficulty_class,
+        };
+        if self.succeeded != expected_success {
+            return invalid("action check result conflicts with its decision");
+        }
         key(&self.attribute_key)?;
         text(&self.attribute_label, 40)
+    }
+
+    pub fn validate_resolved(&self) -> Result<(), GameRulesError> {
+        self.validate()?;
+        if self.adjudication_pending() {
+            return invalid("action adjudication has not been frozen");
+        }
+        Ok(())
+    }
+
+    pub fn adjudication_pending(&self) -> bool {
+        self.adjudication
+            .as_ref()
+            .is_some_and(|value| value.decision == AdjudicationDecision::Pending)
+    }
+
+    pub fn with_pending_adjudication(mut self) -> Self {
+        self.adjudication = Some(ActionAdjudication {
+            schema_version: 1,
+            template_difficulty_class: self.difficulty_class,
+            decision: AdjudicationDecision::Pending,
+        });
+        self
+    }
+
+    pub fn settle_adjudication(
+        &self,
+        decision: AdjudicationDecision,
+    ) -> Result<Self, GameRulesError> {
+        self.validate()?;
+        if !self.adjudication_pending() || decision == AdjudicationDecision::Pending {
+            return invalid("only a pending adjudication may be settled");
+        }
+        let mut check = self.clone();
+        let adjudication = check
+            .adjudication
+            .as_mut()
+            .expect("pending metadata exists");
+        adjudication.decision = decision;
+        check.difficulty_class = match decision {
+            AdjudicationDecision::EasyCheck => (adjudication.template_difficulty_class - 5).max(5),
+            AdjudicationDecision::HardCheck => (adjudication.template_difficulty_class + 5).min(30),
+            _ => adjudication.template_difficulty_class,
+        };
+        check.succeeded = match decision {
+            AdjudicationDecision::Impossible => false,
+            AdjudicationDecision::AutomaticSuccess => true,
+            _ => check.total >= check.difficulty_class,
+        };
+        check.validate_resolved()?;
+        Ok(check)
     }
 }
 
@@ -267,9 +388,95 @@ pub fn resolve_action_check(
         difficulty_class: rule.difficulty_class,
         total,
         succeeded: total >= rule.difficulty_class,
+        adjudication: None,
     };
     check.validate()?;
     Ok(check)
+}
+
+pub fn build_action_adjudication_context(
+    player: &PlayerEntity,
+    session: &WorldSession,
+    action: &WorldAction,
+    check: &ActionCheck,
+) -> Option<ActionAdjudicationContext> {
+    let context = &session.entry_context;
+    let target = match action.target_id.as_deref() {
+        None if action.kind == WorldActionKind::PursueGoal => None,
+        Some(target) => Some(match action.kind {
+            WorldActionKind::Converse | WorldActionKind::Ally | WorldActionKind::Oppose => {
+                let id = Uuid::parse_str(target).ok()?;
+                context
+                    .characters
+                    .iter()
+                    .find(|item| item.id == id)?
+                    .name
+                    .clone()
+            }
+            WorldActionKind::PursueGoal => context
+                .character_goals
+                .iter()
+                .find(|item| item.id == target)?
+                .description
+                .clone(),
+            WorldActionKind::Travel => context
+                .locations
+                .iter()
+                .find(|item| item.id == target)?
+                .name
+                .clone(),
+            WorldActionKind::AdvanceThread | WorldActionKind::ResolveThread => context
+                .threads
+                .iter()
+                .find(|item| item.id == target)?
+                .name
+                .clone(),
+            WorldActionKind::Investigate => {
+                let mut matches = context
+                    .locations
+                    .iter()
+                    .chain(&context.threads)
+                    .filter(|item| item.id == target);
+                let item = matches.next()?;
+                if matches.next().is_some() {
+                    return None;
+                }
+                item.name.clone()
+            }
+        }),
+        None => return None,
+    };
+    let attribute = session
+        .game_rules
+        .as_ref()?
+        .attributes
+        .iter()
+        .find(|attribute| attribute.key == check.attribute_key)?;
+    let context = ActionAdjudicationContext {
+        kind: action.kind,
+        intent: action.intent.clone(),
+        target,
+        location: context
+            .locations
+            .iter()
+            .find(|item| item.id == player.location_id)?
+            .name
+            .clone(),
+        background: player.background.clone(),
+        capabilities: player.capabilities.clone(),
+        inventory: player.inventory.clone(),
+        hard_rules: context
+            .hard_rules
+            .iter()
+            .map(|item| item.description.clone())
+            .collect(),
+        attribute_label: check.attribute_label.clone(),
+        attribute_description: attribute.description.clone(),
+        attribute_score: check.score,
+        template_difficulty_class: check.adjudication.as_ref()?.template_difficulty_class,
+    };
+    (serde_json::to_vec(&context).ok()?.len() <= ACTION_ADJUDICATION_CONTEXT_LIMIT)
+        .then_some(context)
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -386,6 +593,84 @@ mod tests {
         assert_eq!(check.modifier, 1);
         assert_eq!(check.total, 11);
         assert!(check.succeeded);
+    }
+
+    #[test]
+    fn adjudication_maps_only_bounded_code_owned_results_without_rerolling() {
+        let pending = resolve_action_check(&template(), &profile(), WorldActionKind::Travel, 10)
+            .unwrap()
+            .with_pending_adjudication();
+        assert!(pending.validate().is_ok());
+        assert!(pending.validate_resolved().is_err());
+        for (decision, dc, success) in [
+            (AdjudicationDecision::TemplateFallback, 11, true),
+            (AdjudicationDecision::Impossible, 11, false),
+            (AdjudicationDecision::AutomaticSuccess, 11, true),
+            (AdjudicationDecision::EasyCheck, 6, true),
+            (AdjudicationDecision::StandardCheck, 11, true),
+            (AdjudicationDecision::HardCheck, 16, false),
+        ] {
+            let settled = pending.settle_adjudication(decision).unwrap();
+            assert_eq!((settled.difficulty_class, settled.succeeded), (dc, success));
+            assert_eq!(
+                (settled.roll, settled.score, settled.modifier, settled.total),
+                (pending.roll, pending.score, pending.modifier, pending.total)
+            );
+            assert!(settled.validate_resolved().is_ok());
+            assert!(settled
+                .settle_adjudication(AdjudicationDecision::Impossible)
+                .is_err());
+        }
+        let failing = resolve_action_check(&template(), &profile(), WorldActionKind::Travel, 1)
+            .unwrap()
+            .with_pending_adjudication();
+        assert!(
+            failing
+                .settle_adjudication(AdjudicationDecision::AutomaticSuccess)
+                .unwrap()
+                .succeeded
+        );
+        assert!(pending
+            .settle_adjudication(AdjudicationDecision::Pending)
+            .is_err());
+        for (base, decision, dc) in [
+            (5, AdjudicationDecision::EasyCheck, 5),
+            (30, AdjudicationDecision::HardCheck, 30),
+        ] {
+            let mut template = template();
+            template.action_rules[0].difficulty_class = base;
+            let settled = resolve_action_check(&template, &profile(), WorldActionKind::Travel, 20)
+                .unwrap()
+                .with_pending_adjudication()
+                .settle_adjudication(decision)
+                .unwrap();
+            assert_eq!(settled.difficulty_class, dc);
+        }
+    }
+
+    #[test]
+    fn legacy_checks_keep_their_wire_shape_and_forged_semantic_results_fail() {
+        let legacy =
+            resolve_action_check(&template(), &profile(), WorldActionKind::Travel, 10).unwrap();
+        let wire = serde_json::to_value(&legacy).unwrap();
+        assert!(wire.get("adjudication").is_none());
+        assert_eq!(serde_json::from_value::<ActionCheck>(wire).unwrap(), legacy);
+        let settled = legacy
+            .with_pending_adjudication()
+            .settle_adjudication(AdjudicationDecision::HardCheck)
+            .unwrap();
+        let mut forged = settled.clone();
+        forged.succeeded = true;
+        assert!(forged.validate_resolved().is_err());
+        forged = settled.clone();
+        forged.difficulty_class = 5;
+        assert!(forged.validate_resolved().is_err());
+        forged = settled.clone();
+        forged.adjudication.as_mut().unwrap().schema_version = 2;
+        assert!(forged.validate_resolved().is_err());
+        forged = settled;
+        forged.roll = 0;
+        assert!(forged.validate_resolved().is_err());
     }
 
     #[test]

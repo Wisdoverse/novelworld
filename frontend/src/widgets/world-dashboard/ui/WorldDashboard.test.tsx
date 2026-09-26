@@ -628,7 +628,7 @@ describe('WorldDashboard', () => {
     ]);
   });
 
-  it('renders advanced attributes and the persisted server dice result', () => {
+  it('renders advanced attributes and a persisted legacy server dice result', () => {
     const advancedView = {
       ...view,
       player: {
@@ -655,5 +655,55 @@ describe('WorldDashboard', () => {
 
     expect(screen.getByText('小说属性')).toBeTruthy();
     expect(screen.getByText('轻功检定：D20 14 + 1 = 15 / 难度 13 · 成功')).toBeTruthy();
+  });
+
+  it('renders adjudicated no-check, semantic-check, fallback, and pending journal outcomes', () => {
+    const cases = [
+      { intent: '不可行行动', decision: 'impossible', succeeded: true },
+      { intent: '自动成功行动', decision: 'automatic_success', succeeded: false },
+      { intent: '低难度行动', decision: 'easy_check', succeeded: true },
+      { intent: '模板回退行动', decision: 'template_fallback', succeeded: false },
+      { intent: '未完成行动', decision: 'pending', succeeded: true },
+    ] as const;
+    const adjudicatedView = {
+      ...view,
+      journal: cases.map(({ intent, decision, succeeded }, index) => ({
+        ...view.journal[0],
+        turn_id: `turn-${index}`,
+        turn_number: index + 1,
+        action: { ...view.journal[0].action, intent },
+        resolution: {
+          attribute_key: 'qinggong', attribute_label: '轻功', score: 12,
+          modifier: 1, roll: 14, total: 15, difficulty_class: 13, succeeded,
+          adjudication: {
+            schema_version: 1,
+            template_difficulty_class: 13,
+            decision,
+          },
+        },
+      })),
+    } as unknown as OpenWorldView;
+
+    render(<WorldDashboard novelId="novel" view={adjudicatedView} />);
+
+    const rowFor = (intent: string) => screen.getByText(new RegExp(intent)).closest('li')!;
+    const impossible = rowFor('不可行行动');
+    expect(impossible.textContent).toContain('行动不可行 · 未进行骰子检定');
+    expect(impossible.textContent).not.toContain('D20');
+    const automatic = rowFor('自动成功行动');
+    expect(automatic.textContent).toContain('无需检定 · 行动成功');
+    expect(automatic.textContent).not.toContain('D20');
+    expect(rowFor('低难度行动').textContent).toContain(
+      '轻功检定：D20 14 + 1 = 15 / 难度 13 · 成功 · 语义难度：低',
+    );
+    expect(rowFor('模板回退行动').textContent).toContain(
+      '轻功检定：D20 14 + 1 = 15 / 难度 13 · 失败 · 沿用模板检定',
+    );
+    const pending = rowFor('未完成行动');
+    expect(pending.textContent).toContain('判断未完成');
+    expect(pending.textContent).not.toContain('行动成功');
+    const pendingSummary = Array.from(pending.querySelectorAll('div'))
+      .find(element => element.textContent === '判断未完成');
+    expect(pendingSummary?.classList.contains('text-[#0d652d]')).toBe(false);
   });
 });

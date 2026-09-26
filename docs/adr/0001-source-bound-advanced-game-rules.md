@@ -4,6 +4,7 @@
 - Date: 2026-08-23
 - Owners: novel-service, narrative-service, and frontend owners
 - Related: [`../ADVANCED_RULES_PLAN.md`](../ADVANCED_RULES_PLAN.md); [roadmap issue #202](https://github.com/Wisdoverse/novelworld/issues/202)
+- Supersession: The accepted [ADR 0009](./0009-bounded-laya-d20-adjudication.md) creates a narrow exception to the per-action adjudication exclusion below; all other decisions here remain in force.
 
 ## Context
 
@@ -16,7 +17,9 @@ spoiler, idempotency, and service-ownership boundaries.
 This decision covers shared rule generation, player allocation, action checks,
 and committed world-turn effects. Tactical combat, a general rule DSL,
 per-action model adjudication, and live semantic-quality claims are out of
-scope.
+scope under this decision except for the bounded adjudication preview accepted
+by [ADR 0009](./0009-bounded-laya-d20-adjudication.md). That exception does not
+change the server ownership or validation rules below.
 
 ## Decision
 
@@ -52,8 +55,10 @@ optional fields and keeps narrative requests valid.
 
 - A new rules microservice was rejected because the existing novel and
   narrative ownership boundaries already cover generation and resolution.
-- Per-action LLM adjudication was rejected because it increases latency, cost,
-  nondeterminism, and prompt-injection exposure.
+- Unbounded per-action LLM adjudication was rejected because it increases
+  latency, cost, nondeterminism, and prompt-injection exposure. The limited
+  bounded exception accepted in [ADR 0009](./0009-bounded-laya-d20-adjudication.md)
+  keeps the existing server authority and failure boundaries.
 - A general formula/DSL engine was rejected because eight existing action kinds
   need only a bounded attribute and DC mapping.
 - Client-generated randomness was rejected because it permits rerolls and
@@ -81,16 +86,17 @@ normalized transition for audit and replay.
 
 Ship the mode behind an opt-in frontend control. Keep narrative mode as the
 default and monitor generation failures, validation failures, elapsed time, and
-world-turn commit errors. There is no runtime kill switch in this slice; abort
-requires deploying code that hides the advanced control and rejects the template
-request route.
+world-turn commit errors. Unsetting either Laya setting disables new
+adjudication calls and leaves template-DC fallback available; disabling the D20
+mode still requires deploying code that hides its control and rejects template
+requests.
 
 The migration is additive and has no down migration. Narrative profiles omit
 new player/session fields, retaining the previous binary's exact JSON shape.
-Advanced profiles deliberately fail closed on a previous binary because its
-strict deserializer does not know the rule fields. Forward-deploy this version
-again to recover those readers; immutable templates and persisted rolls remain
-available.
+Advanced profiles and resolutions with new adjudication metadata deliberately
+fail closed on a previous binary because its strict deserializer does not know
+those fields. Forward-deploy a compatible version again to recover those
+readers; immutable templates and persisted rolls remain available.
 
 ## Evidence
 

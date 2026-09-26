@@ -13,6 +13,10 @@ use uuid::Uuid;
 use crate::application::handlers::{
     journey_memory_id, CreatePlayerEntityCommand, NarrativeCommandHandler, NarrativeError,
 };
+use crate::domain::entities::game_rules::{
+    ActionAdjudicationContext, AdjudicationDecision, GameActionRule, GameAttribute,
+    GameRuleTemplate, PlayerRuleProfile, ResolutionMode,
+};
 use crate::domain::entities::{
     narrative_node::{NarrativeChoice, NarrativeNode, WorldState},
     player_entity::PlayerEntity,
@@ -21,7 +25,8 @@ use crate::domain::entities::{
     },
 };
 use crate::domain::ports::{
-    ActionSuggestionPort, AgentMemoryPort, DiceRollerPort, LlmPort, NarrativeLlmTask,
+    ActionAdjudicationPort, ActionSuggestionPort, AgentMemoryPort, DiceRollerPort, LlmPort,
+    NarrativeLlmTask,
 };
 use crate::domain::repositories::{
     BeginWorldTurn, ChapterInfo, ChapterReadRepository, CharacterBrief, CharacterContextReadModel,
@@ -38,6 +43,640 @@ use crate::domain::services::narrative_transition::{
 const ANCHOR: &str = "城门在暮色中缓缓关闭，守卫举起火把照亮石阶。";
 
 struct CountingSuggester(AtomicUsize);
+
+struct TestAdjudicator {
+    calls: AtomicUsize,
+    decision: Option<AdjudicationDecision>,
+    block: AtomicBool,
+    entered: Notify,
+    release: Notify,
+}
+
+impl TestAdjudicator {
+    fn new(decision: Option<AdjudicationDecision>) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            decision,
+            block: AtomicBool::new(false),
+            entered: Notify::new(),
+            release: Notify::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl ActionAdjudicationPort for TestAdjudicator {
+    async fn adjudicate(
+        &self,
+        context: &ActionAdjudicationContext,
+    ) -> Result<Option<AdjudicationDecision>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(context.location, "城门");
+        if self.block.load(Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        Ok(self.decision)
+    }
+}
+
+fn advanced_adjudication_fixture() -> Arc<ToctouFixture> {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    let attributes = ["vigor", "insight", "influence"]
+        .into_iter()
+        .map(|key| GameAttribute {
+            key: key.into(),
+            label: key.into(),
+            description: "来自小说的能力".into(),
+            default_score: 10,
+            source_chapters: vec![fixture.source_chapter],
+        })
+        .collect();
+    let template = GameRuleTemplate {
+        novel_id: fixture.novel_id,
+        canon_model_version: 1,
+        schema_version: 1,
+        prompt_version: "novel-game-rules-v1".into(),
+        minimum_score: 8,
+        maximum_score: 15,
+        point_budget: 30,
+        attributes,
+        action_rules: [
+            WorldActionKind::Travel,
+            WorldActionKind::Investigate,
+            WorldActionKind::Converse,
+            WorldActionKind::Ally,
+            WorldActionKind::Oppose,
+            WorldActionKind::AdvanceThread,
+            WorldActionKind::ResolveThread,
+            WorldActionKind::PursueGoal,
+        ]
+        .into_iter()
+        .map(|kind| GameActionRule {
+            kind,
+            attribute_key: "vigor".into(),
+            difficulty_class: 13,
+            description: "行动需要符合已知世界规则".into(),
+            source_chapters: vec![fixture.source_chapter],
+        })
+        .collect(),
+    };
+    let mut state = fixture.world_state.lock().unwrap();
+    let mut player = state.player_entity().unwrap().unwrap();
+    player.rules = PlayerRuleProfile {
+        mode: ResolutionMode::Advanced,
+        canon_model_version: Some(1),
+        template_schema_version: Some(1),
+        template_prompt_version: Some(template.prompt_version.clone()),
+        attributes: template
+            .attributes
+            .iter()
+            .map(|item| (item.key.clone(), item.default_score))
+            .collect(),
+    };
+    state.state["player_entity"] = serde_json::to_value(player).unwrap();
+    let mut context = fixture.entry_context(fixture.source_chapter, None);
+    context
+        .locations
+        .push(crate::domain::entities::world_session::WorldEntityRef {
+            id: "city-gate".into(),
+            name: "城门".into(),
+        });
+    state
+        .start_open_world_with_rules(&context, Some(&template))
+        .unwrap();
+    drop(state);
+    fixture
+        .acquire_next_world_turn
+        .store(true, Ordering::SeqCst);
+    fixture
+}
+
+fn adjudication_action() -> WorldAction {
+    WorldAction {
+        kind: WorldActionKind::PursueGoal,
+        target_id: None,
+        intent: "在城门旁观察脚印".into(),
+    }
+}
+
+#[tokio::test]
+async fn narrative_invalid_progress_and_oversized_context_make_zero_semantic_calls() {
+    for case in [
+        "narrative",
+        "invalid",
+        "progress",
+        "oversized",
+        "ambiguous",
+        "unconfigured",
+    ] {
+        let fixture = if case == "narrative" {
+            let fixture = Arc::new(ToctouFixture::new(false));
+            fixture
+                .world_state
+                .lock()
+                .unwrap()
+                .start_open_world(&fixture.entry_context(fixture.source_chapter, None))
+                .unwrap();
+            fixture
+                .acquire_next_world_turn
+                .store(true, Ordering::SeqCst);
+            fixture
+        } else {
+            advanced_adjudication_fixture()
+        };
+        if case == "progress" {
+            fixture.current_chapter.store(1, Ordering::SeqCst);
+        }
+        if case == "oversized" {
+            let rules = (0..4)
+                .map(
+                    |index| crate::domain::entities::world_session::WorldRuleRef {
+                        id: format!("rule-{index}"),
+                        description: "遵".repeat(800),
+                    },
+                )
+                .collect::<Vec<_>>();
+            fixture.world_state.lock().unwrap().state["open_world"]["entry_context"]
+                ["hard_rules"] = serde_json::to_value(rules).unwrap();
+        }
+        if case == "ambiguous" {
+            fixture.world_state.lock().unwrap().state["open_world"]["entry_context"]["threads"] =
+                serde_json::json!([{ "id": "city-gate", "name": "城门线索" }]);
+        }
+        let judge = Arc::new(TestAdjudicator::new(Some(
+            AdjudicationDecision::AutomaticSuccess,
+        )));
+        let handler = NarrativeCommandHandler {
+            action_adjudicator: (case != "unconfigured")
+                .then(|| judge.clone() as Arc<dyn ActionAdjudicationPort>),
+            ..fixture.handler()
+        };
+        let action = if case == "invalid" {
+            WorldAction {
+                kind: WorldActionKind::Converse,
+                target_id: Some(Uuid::new_v4().to_string()),
+                intent: "与未知角色交谈".into(),
+            }
+        } else if case == "ambiguous" {
+            WorldAction {
+                kind: WorldActionKind::Investigate,
+                target_id: Some("city-gate".into()),
+                intent: "调查城门线索".into(),
+            }
+        } else {
+            adjudication_action()
+        };
+        fixture.provider_release.notify_one();
+        let result = handler
+            .submit_world_turn(Uuid::new_v4(), fixture.user_id, fixture.novel_id, 0, action)
+            .await;
+        assert_eq!(judge.calls.load(Ordering::SeqCst), 0, "{case}");
+        if matches!(case, "invalid" | "progress") {
+            assert!(result.is_err(), "{case}");
+            assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+        } else {
+            let result = result.unwrap();
+            if matches!(case, "oversized" | "ambiguous") {
+                assert_eq!(
+                    result
+                        .result
+                        .resolution
+                        .unwrap()
+                        .adjudication
+                        .unwrap()
+                        .decision,
+                    AdjudicationDecision::TemplateFallback
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn semantic_target_respects_action_kind_with_cross_collection_ids() {
+    let fixture = advanced_adjudication_fixture();
+    let mut state = fixture.world_state.lock().unwrap();
+    state.state["open_world"]["entry_context"]["threads"] =
+        serde_json::json!([{ "id": "city-gate", "name": "城门线索" }]);
+    let session = state.open_world().unwrap().unwrap();
+    let player = state.player_entity().unwrap().unwrap();
+    for (kind, expected) in [
+        (WorldActionKind::Travel, Some("城门")),
+        (WorldActionKind::AdvanceThread, Some("城门线索")),
+        (WorldActionKind::ResolveThread, Some("城门线索")),
+        (WorldActionKind::Investigate, None),
+    ] {
+        let action = WorldAction {
+            kind,
+            target_id: Some("city-gate".into()),
+            intent: "行动".into(),
+        };
+        let check = crate::domain::entities::game_rules::resolve_action_check(
+            session.game_rules.as_ref().unwrap(),
+            &player.rules,
+            kind,
+            14,
+        )
+        .unwrap()
+        .with_pending_adjudication();
+        let context = crate::domain::entities::game_rules::build_action_adjudication_context(
+            &player, &session, &action, &check,
+        );
+        assert_eq!(
+            context.and_then(|context| context.target).as_deref(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn concurrent_same_key_does_not_repeat_an_inflight_semantic_call() {
+    let fixture = advanced_adjudication_fixture();
+    let judge = Arc::new(TestAdjudicator::new(Some(AdjudicationDecision::EasyCheck)));
+    judge.block.store(true, Ordering::SeqCst);
+    let handler = Arc::new(NarrativeCommandHandler {
+        action_adjudicator: Some(judge.clone()),
+        ..fixture.handler()
+    });
+    let id = Uuid::new_v4();
+    let first_handler = handler.clone();
+    let first_fixture = fixture.clone();
+    fixture.provider_release.notify_one();
+    let first = tokio::spawn(async move {
+        first_handler
+            .submit_world_turn(
+                id,
+                first_fixture.user_id,
+                first_fixture.novel_id,
+                0,
+                adjudication_action(),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), judge.entered.notified())
+        .await
+        .unwrap();
+    assert!(matches!(
+        handler
+            .submit_world_turn(
+                id,
+                fixture.user_id,
+                fixture.novel_id,
+                0,
+                adjudication_action()
+            )
+            .await,
+        Err(NarrativeError::TurnInProgress { .. })
+    ));
+    judge.release.notify_one();
+    first.await.unwrap().unwrap();
+    assert_eq!(judge.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn legacy_claims_are_not_reclassified_and_pending_cannot_enter_prompt_or_transition() {
+    let fixture = advanced_adjudication_fixture();
+    let state = fixture.world_state.lock().unwrap().clone();
+    let session = state.open_world().unwrap().unwrap();
+    let player = state.player_entity().unwrap().unwrap();
+    let check = crate::domain::entities::game_rules::resolve_action_check(
+        session.game_rules.as_ref().unwrap(),
+        &player.rules,
+        WorldActionKind::PursueGoal,
+        10,
+    )
+    .unwrap();
+    let pending = check.clone().with_pending_adjudication();
+    assert!(
+        crate::domain::entities::world_session::build_world_turn_prompt_with_check(
+            "小说",
+            &player,
+            &adjudication_action(),
+            &session,
+            &state.state,
+            &[],
+            Some(&pending),
+        )
+        .is_err()
+    );
+    let raw = serde_json::json!({"schema_version":1,"rendered_narrative":"玩家静静观察城门。",
+        "events":[],"relationship_changes":[],"location_changes":[],"thread_changes":[]})
+    .to_string();
+    assert!(
+        crate::domain::entities::world_session::parse_world_turn_transition_with_check(
+            &raw,
+            &adjudication_action(),
+            &session.entry_context,
+            &session,
+            Some(&pending),
+        )
+        .is_err()
+    );
+    let id = Uuid::new_v4();
+    fixture
+        .acquire_next_world_turn
+        .store(false, Ordering::SeqCst);
+    *fixture.acquired_world_turn.lock().unwrap() = Some((
+        WorldTurnClaim {
+            id,
+            user_id: fixture.user_id,
+            novel_id: fixture.novel_id,
+            request_fingerprint: vec![0; 32],
+            expected_turn_number: 0,
+            action: adjudication_action(),
+            resolution: Some(check.clone()),
+        },
+        1,
+    ));
+    fixture
+        .reclaim_acquired_world_turn
+        .store(true, Ordering::SeqCst);
+    let judge = Arc::new(TestAdjudicator::new(Some(
+        AdjudicationDecision::AutomaticSuccess,
+    )));
+    let handler = NarrativeCommandHandler {
+        action_adjudicator: Some(judge.clone()),
+        ..fixture.handler()
+    };
+    fixture.provider_release.notify_one();
+    let result = handler
+        .submit_world_turn(
+            id,
+            fixture.user_id,
+            fixture.novel_id,
+            0,
+            adjudication_action(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.result.resolution, Some(check));
+    assert_eq!(judge.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn semantic_judgment_is_frozen_before_prose_and_exact_replay_never_reclassifies() {
+    for decision in [
+        Some(AdjudicationDecision::Impossible),
+        Some(AdjudicationDecision::AutomaticSuccess),
+        Some(AdjudicationDecision::EasyCheck),
+        Some(AdjudicationDecision::HardCheck),
+        None,
+    ] {
+        let fixture = advanced_adjudication_fixture();
+        let judge = Arc::new(TestAdjudicator::new(decision));
+        let handler = NarrativeCommandHandler {
+            action_adjudicator: Some(judge.clone()),
+            ..fixture.handler()
+        };
+        fixture.provider_release.notify_one();
+        let id = Uuid::new_v4();
+        let response = handler
+            .submit_world_turn(
+                id,
+                fixture.user_id,
+                fixture.novel_id,
+                0,
+                adjudication_action(),
+            )
+            .await
+            .unwrap();
+        let check = response.result.resolution.as_ref().unwrap();
+        assert_eq!(
+            check.adjudication.as_ref().unwrap().decision,
+            decision.unwrap_or(AdjudicationDecision::TemplateFallback)
+        );
+        assert_eq!(
+            fixture
+                .acquired_world_turn
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .0
+                .resolution,
+            response.result.resolution
+        );
+        assert!(fixture.provider_prompts.lock().unwrap()[0].contains("adjudication"));
+        if decision == Some(AdjudicationDecision::Impossible) {
+            assert_eq!(
+                response.result.transition.events[0].summary,
+                "玩家行动不可行，主要意图未实现"
+            );
+            assert!(!check.succeeded);
+        }
+        let replay = handler
+            .submit_world_turn(
+                id,
+                fixture.user_id,
+                fixture.novel_id,
+                0,
+                adjudication_action(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay.result, response.result);
+        assert_eq!(judge.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn prose_failure_replays_frozen_judgment_and_crashed_pending_falls_back_without_reclassification(
+) {
+    for frozen in [true, false] {
+        let fixture = advanced_adjudication_fixture();
+        let judge = Arc::new(TestAdjudicator::new(Some(AdjudicationDecision::EasyCheck)));
+        let handler = NarrativeCommandHandler {
+            action_adjudicator: Some(judge.clone()),
+            ..fixture.handler()
+        };
+        let id = Uuid::new_v4();
+        if frozen {
+            fixture
+                .invalid_world_transition
+                .store(true, Ordering::SeqCst);
+            fixture.provider_release.notify_one();
+            assert!(handler
+                .submit_world_turn(
+                    id,
+                    fixture.user_id,
+                    fixture.novel_id,
+                    0,
+                    adjudication_action()
+                )
+                .await
+                .is_err());
+            fixture
+                .invalid_world_transition
+                .store(false, Ordering::SeqCst);
+        } else {
+            fixture
+                .acquire_next_world_turn
+                .store(false, Ordering::SeqCst);
+            let session = fixture
+                .world_state
+                .lock()
+                .unwrap()
+                .open_world()
+                .unwrap()
+                .unwrap();
+            let player = fixture
+                .world_state
+                .lock()
+                .unwrap()
+                .player_entity()
+                .unwrap()
+                .unwrap();
+            let pending = crate::domain::entities::game_rules::resolve_action_check(
+                session.game_rules.as_ref().unwrap(),
+                &player.rules,
+                WorldActionKind::PursueGoal,
+                10,
+            )
+            .unwrap()
+            .with_pending_adjudication();
+            *fixture.acquired_world_turn.lock().unwrap() = Some((
+                WorldTurnClaim {
+                    id,
+                    user_id: fixture.user_id,
+                    novel_id: fixture.novel_id,
+                    request_fingerprint: vec![0; 32],
+                    expected_turn_number: 0,
+                    action: adjudication_action(),
+                    resolution: Some(pending),
+                },
+                1,
+            ));
+        }
+        fixture
+            .reclaim_acquired_world_turn
+            .store(true, Ordering::SeqCst);
+        fixture.provider_release.notify_one();
+        let result = handler
+            .submit_world_turn(
+                id,
+                fixture.user_id,
+                fixture.novel_id,
+                0,
+                adjudication_action(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result
+                .result
+                .resolution
+                .unwrap()
+                .adjudication
+                .unwrap()
+                .decision,
+            if frozen {
+                AdjudicationDecision::EasyCheck
+            } else {
+                AdjudicationDecision::TemplateFallback
+            }
+        );
+        assert_eq!(judge.calls.load(Ordering::SeqCst), usize::from(frozen));
+    }
+}
+
+#[tokio::test]
+async fn unfrozen_database_outcome_stops_before_prose_and_reclaim_does_not_repeat_the_judge() {
+    let fixture = advanced_adjudication_fixture();
+    let judge = Arc::new(TestAdjudicator::new(Some(
+        AdjudicationDecision::AutomaticSuccess,
+    )));
+    let handler = NarrativeCommandHandler {
+        action_adjudicator: Some(judge.clone()),
+        ..fixture.handler()
+    };
+    fixture
+        .adjudication_cas_available
+        .store(false, Ordering::SeqCst);
+    let id = Uuid::new_v4();
+    assert!(matches!(
+        handler
+            .submit_world_turn(
+                id,
+                fixture.user_id,
+                fixture.novel_id,
+                0,
+                adjudication_action()
+            )
+            .await,
+        Err(NarrativeError::TurnOutcomeUnknown)
+    ));
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+    fixture
+        .adjudication_cas_available
+        .store(true, Ordering::SeqCst);
+    fixture
+        .reclaim_acquired_world_turn
+        .store(true, Ordering::SeqCst);
+    fixture.provider_release.notify_one();
+    let result = handler
+        .submit_world_turn(
+            id,
+            fixture.user_id,
+            fixture.novel_id,
+            0,
+            adjudication_action(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result
+            .result
+            .resolution
+            .unwrap()
+            .adjudication
+            .unwrap()
+            .decision,
+        AdjudicationDecision::TemplateFallback
+    );
+    assert_eq!(judge.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn judgment_cannot_cross_identity_or_progress_changes_before_prose_or_commit() {
+    for identity_change in [false, true] {
+        let fixture = advanced_adjudication_fixture();
+        let judge = Arc::new(TestAdjudicator::new(Some(
+            AdjudicationDecision::AutomaticSuccess,
+        )));
+        judge.block.store(true, Ordering::SeqCst);
+        let handler = NarrativeCommandHandler {
+            action_adjudicator: Some(judge.clone()),
+            ..fixture.handler()
+        };
+        let worker_fixture = fixture.clone();
+        let request = tokio::spawn(async move {
+            handler
+                .submit_world_turn(
+                    Uuid::new_v4(),
+                    worker_fixture.user_id,
+                    worker_fixture.novel_id,
+                    0,
+                    adjudication_action(),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), judge.entered.notified())
+            .await
+            .unwrap();
+        if identity_change {
+            fixture.self_identity.store(false, Ordering::SeqCst);
+        } else {
+            fixture.current_chapter.store(1, Ordering::SeqCst);
+        }
+        judge.release.notify_one();
+        assert!(request.await.unwrap().is_err());
+        assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.complete_turn_calls.load(Ordering::SeqCst), 0);
+    }
+}
 
 #[async_trait]
 impl ActionSuggestionPort for CountingSuggester {
@@ -119,6 +758,9 @@ struct ToctouFixture {
     completed_world_turn: Mutex<Option<WorldTurnResult>>,
     memory_projection_status: Mutex<MemoryProjectionStatus>,
     acquire_next_world_turn: AtomicBool,
+    acquired_world_turn: Mutex<Option<(WorldTurnClaim, i64)>>,
+    reclaim_acquired_world_turn: AtomicBool,
+    adjudication_cas_available: AtomicBool,
     world_turn_in_progress: AtomicBool,
     world_turn_stale: AtomicBool,
     begin_turn_timeline_conflict: AtomicBool,
@@ -244,6 +886,9 @@ impl ToctouFixture {
             completed_world_turn: Mutex::new(None),
             memory_projection_status: Mutex::new(MemoryProjectionStatus::Pending),
             acquire_next_world_turn: AtomicBool::new(false),
+            acquired_world_turn: Mutex::new(None),
+            reclaim_acquired_world_turn: AtomicBool::new(false),
+            adjudication_cas_available: AtomicBool::new(true),
             world_turn_in_progress: AtomicBool::new(false),
             world_turn_stale: AtomicBool::new(false),
             begin_turn_timeline_conflict: AtomicBool::new(false),
@@ -277,6 +922,7 @@ impl ToctouFixture {
             llm: self.clone(),
             agent_memory: self.clone(),
             dice_roller: self.clone(),
+            action_adjudicator: None,
         }
     }
 
@@ -1042,9 +1688,32 @@ impl WorldTurnRepository for ToctouFixture {
             });
         }
         if self.acquire_next_world_turn.swap(false, Ordering::SeqCst) {
+            *self.acquired_world_turn.lock().unwrap() = Some((claim.clone(), 1));
             return Ok(BeginWorldTurn::Acquired {
                 claim: Box::new(claim.clone()),
                 attempt: 1,
+            });
+        }
+        if self
+            .reclaim_acquired_world_turn
+            .swap(false, Ordering::SeqCst)
+        {
+            let mut stored = self.acquired_world_turn.lock().unwrap();
+            let (persisted, attempt) = stored
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("missing claim"))?;
+            ensure!(persisted.id == claim.id && persisted.action == claim.action);
+            *attempt += 1;
+            return Ok(BeginWorldTurn::Acquired {
+                claim: Box::new(persisted.clone()),
+                attempt: *attempt,
+            });
+        }
+        if self.acquired_world_turn.lock().unwrap().is_some()
+            && self.completed_world_turn.lock().unwrap().is_none()
+        {
+            return Ok(BeginWorldTurn::InProgress {
+                retry_after_seconds: 1,
             });
         }
         let result = self
@@ -1058,6 +1727,31 @@ impl WorldTurnRepository for ToctouFixture {
             result: Box::new(result),
             memory_projection: *self.memory_projection_status.lock().unwrap(),
         })
+    }
+
+    async fn settle_adjudication(
+        &self,
+        claim: &WorldTurnClaim,
+        attempt: i64,
+        decision: crate::domain::entities::game_rules::AdjudicationDecision,
+    ) -> Result<Option<crate::domain::entities::game_rules::ActionCheck>> {
+        if !self.adjudication_cas_available.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        let mut stored = self.acquired_world_turn.lock().unwrap();
+        let (persisted, persisted_attempt) = stored
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("missing claim"))?;
+        if persisted != claim || *persisted_attempt != attempt {
+            return Ok(None);
+        }
+        let check = claim
+            .resolution
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing check"))?
+            .settle_adjudication(decision)?;
+        persisted.resolution = Some(check.clone());
+        Ok(Some(check))
     }
 
     async fn recoverable_turn(
@@ -1093,8 +1787,8 @@ impl WorldTurnRepository for ToctouFixture {
         &self,
         claim: &WorldTurnClaim,
         _attempt: i64,
-        _transition: &WorldTurnTransition,
-        _context: &WorldEntryContext,
+        transition: &WorldTurnTransition,
+        context: &WorldEntryContext,
     ) -> Result<WorldTurnResult> {
         self.complete_turn_calls.fetch_add(1, Ordering::SeqCst);
         if self.complete_turn_timeline_conflict.load(Ordering::SeqCst) {
@@ -1105,12 +1799,38 @@ impl WorldTurnRepository for ToctouFixture {
                 .into(),
             );
         }
-        let result = self
-            .completed_world_turn
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("unused"))?;
+        let existing = self.completed_world_turn.lock().unwrap().clone();
+        let result = match existing {
+            Some(result) => result,
+            None => {
+                let persisted = self
+                    .acquired_world_turn
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("missing claim"))?
+                    .0;
+                ensure!(persisted.resolution == claim.resolution);
+                let mut state = self.world_state.lock().unwrap().clone();
+                state.apply_world_turn_with_check(
+                    claim.id,
+                    &claim.action,
+                    transition,
+                    context,
+                    claim.resolution.as_ref(),
+                )?;
+                *self.world_state.lock().unwrap() = state.clone();
+                let result = WorldTurnResult {
+                    turn_id: claim.id,
+                    action: claim.action.clone(),
+                    resolution: claim.resolution.clone(),
+                    transition: transition.clone(),
+                    world_state: state,
+                };
+                *self.completed_world_turn.lock().unwrap() = Some(result.clone());
+                result
+            }
+        };
         ensure!(claim.id == result.turn_id);
         if self.block_next_complete_turn.swap(false, Ordering::SeqCst) {
             self.complete_turn_entered.notify_one();

@@ -1,10 +1,16 @@
-# Advanced novel rules: current behavior and evaluation plan
+# Advanced novel rules: D20 adjudication boundaries
 
-This document owns the D20 preview's responsibilities and the proposed semantic
-judgment evaluation. The implementation below is structurally verified; live
-template/narrative quality and arbitrary free-text judgment remain unqualified.
-[ADR 0001](./adr/0001-source-bound-advanced-game-rules.md) owns the accepted
-runtime boundary. The evaluation proposal below does not change that decision.
+This document owns the D20 preview's responsibilities, the bounded Laya (Jev)
+adjudication contract, and its qualification limits. [ADR 0001](./adr/0001-source-bound-advanced-game-rules.md)
+continues to own template, server validation, and dice authority;
+[ADR 0009](./adr/0009-bounded-laya-d20-adjudication.md) records the accepted
+bounded structural semantic-adjudication exception. Live adjudication quality
+remains unqualified.
+
+Naming: Laya and Jev refer to the same decision capability in NovelWorld. This
+document uses **Laya (Jev)**; existing `LAYA_API_URL` / `LAYA_API_KEY` configuration
+and implementation identifiers retain the Laya name. The current action hint
+and semantic adjudication are different uses of that same capability.
 
 ## Outcome
 
@@ -20,12 +26,14 @@ This is a novel-specific, D20-inspired preview, not a complete D&D rules engine.
 
 | Responsibility | Current owner and behavior |
 |---|---|
-| Attributes and check difficulty | Novel Service owns one immutable, source-backed template per canon model version. Each supported action type maps to a template attribute and DC; the runtime does not ask a model to assign a new DC for each free-text intent. |
+| Attributes and check difficulty | Novel Service owns one immutable, source-backed template per canon model version. Each supported action type maps to a template attribute and base DC. For a configured adjudication, Laya (Jev) can select only a difficulty band; code maps easy/standard/hard to base DC −5/base DC/base DC +5, clamped to 5–30. The model cannot assign an arbitrary DC. |
 | Eligibility and hard constraints | Narrative Service enforces identity, ownership, reading progress, supported targets, world state, and turn ordering. A successful roll never bypasses these checks. |
-| Die and result | Narrative's secret-derived die is bound to user, novel, turn number, and request fingerprint. The domain computes `modifier = floor((score - 10) / 2)` and success as `d20 + modifier >= DC`. The claimed result is persisted before prose and replayed for the same key. |
+| Die and result | For a check, Narrative's secret-derived die is bound to user, novel, turn number, and request fingerprint. The domain computes `modifier = floor((score - 10) / 2)` and success as `d20 + modifier >= DC`. For `impossible` or `automatic_success`, there is no check result and no die is shown as evidence; the frozen category and server code determine the failed or automatic-success result. The resolution is persisted before prose and replayed for the same key. |
 | Narration | H3/H4 journey generation uses DeepSeek under the repository's provider policy. It receives the resolved check and proposes prose/transitions; server validation remains the commit authority. Failed checks discard action-granted mutations, while world time and scheduled mainline events may still advance. |
-| Optional action suggestion | Laya receives bounded intent and candidate action-type descriptions only. The reader must choose/confirm the type and target and submit manually. A hint cannot authorize an action, set its DC, roll the die, or determine success. |
-| Semantic referee | No Jev/Laya per-action semantic judge is connected. Free-text feasibility, context-sensitive difficulty, tactical combat, and full D&D rules are not delivered by this preview. |
+| Optional action suggestion | Laya (Jev) receives bounded intent and candidate action-type descriptions only. The reader chooses/confirms the type and target and submits manually. A hint cannot authorize an action, set its DC, roll the die, or determine success. |
+| Optional semantic adjudication | In advanced mode only, paired `LAYA_API_URL` and `LAYA_API_KEY` enable one bounded classification for a new turn. It may select impossible, automatic success, or a difficulty band; uncertainty and all unavailable/error paths fall back to the existing template check. Its confidence is not calibrated. It cannot bypass hard validation, choose an arbitrary DC, or choose a check's die/result. |
+| Persistence and replay | The adjudication and resulting resolution are fenced with the existing world-turn claim. A frozen result is reused on replay; a reclaimed pending classification is not called again and falls back. Unknown database outcome or lost fencing stops before prose. |
+| Semantic and game limits | This preview does not implement tactical combat, classes, spells, multiplayer fairness, arbitrary free-text semantic guarantees, or a full D&D rules engine. |
 
 Implementation entrypoints:
 [template validation/progress](../services/novel-service/src/domain/entities/game_rule_template.rs),
@@ -34,7 +42,9 @@ Implementation entrypoints:
 [world-turn orchestration](../services/narrative-service/src/application/handlers/mod.rs),
 [turn persistence](../services/narrative-service/src/infrastructure/persistence/pg_world_turn_repo.rs),
 [transition validation](../services/narrative-service/src/domain/entities/world_session.rs),
-and [Laya hints](./adr/0006-optional-laya-action-hints.md).
+and [Laya (Jev) action hints](./adr/0006-optional-laya-action-hints.md). The
+bounded turn-classification contract is in
+[ADR 0009](./adr/0009-bounded-laya-d20-adjudication.md).
 
 If a cited template chapter is still locked, both services preserve the
 content-free `422 game_rules_unavailable_at_progress`. The Chinese entry form
@@ -43,35 +53,74 @@ generic Novel Service outage. Template generation failure remains a separate
 failure case. Reader profiles and journeys stay private even when readers reuse
 the same canonical novel and ready template.
 
-## Proposed Jev evaluation — not an integration commitment
+## Bounded Laya (Jev) turn adjudication
 
-Jev's [official description](https://typesafe.ai/) presents bounded typed
-decisions with probabilities/confidence. This makes it a candidate for a narrow
-classification experiment; that suitability is an inference, not evidence that
-it judges Chinese D20 play better than DeepSeek. Laya's current compatible hint
-API also does not establish equivalent semantic judgment quality.
+This is an optional, unqualified preview, not an authority transfer. It runs
+only for a new advanced-mode turn with both existing Laya settings configured;
+ordinary narrative turns never call it. The existing action-type hint remains a
+separate user-triggered suggestion. Both use the same Laya (Jev) decision
+capability and bounded HTTP client.
 
-Start with the simplest direct DeepSeek structured-judgment baseline. Before any
-paid execution, review the exact registration and obtain authorization for its
-provider/model, corpus, budget, and stopping conditions. Freeze human-labeled
-Chinese action examples from authorized novels, including impossible actions,
-ambiguous intent, ordinary actions, hostile instructions, and locked-chapter
-traps. Give each candidate identical bounded, progress-authorized context and
-compare blinded judgments for action type, feasibility, and whether a check is
-needed. Any difficulty band is an offline candidate, not a runtime DC change.
+The classifier receives only a JSON-quoted, untrusted allowlist: player intent,
+action kind, selected target display name, current location, player background,
+abilities and inventory, the current action attribute label/description/score,
+the template base DC, and hard-rule descriptions. Names are resolved from the
+authorized entry context according to action kind. If an `investigate` target
+could refer to both a location and a thread with the same identifier, or exists
+only as a scheduled event, target resolution is ambiguous/unavailable: do not
+call the classifier and use the template fallback. No scope UUID, full
+novel text, history, future-event list, die, or check result is sent. The
+serialized context is capped at 8 KiB; an oversized context makes zero
+classifier calls and uses the template fallback. The classifier call has a 300
+ms connect timeout, 2 s total timeout, 16 KiB response cap, and no HTTP retries.
+Identity and reading progress are rechecked immediately before and after the
+classification call; existing ownership, turn, target, and hard validation
+remain in force.
 
-Measure incorrect approvals, useful abstention, canon/spoiler/agency violations,
-latency, cost, and context disclosure. Register the rubric and meaningful
-improvement threshold before execution; do not invent a passing threshold after
-seeing results. An uncertain decision must abstain to manual confirmation or a
-predefined baseline, never grant new authority. Confidence describes a model's
-judgment, not a character's probability of passing a D20 check.
+The response is one bounded category: `impossible`, `automatic_success`, `easy`,
+`standard`, or `hard`. Persisted metadata uses the exact decision tags
+`impossible`, `automatic_success`, `easy_check`, `standard_check`, and
+`hard_check`. Only a valid choice with probability at least 0.8 is
+accepted; probability is an uncalibrated abstention heuristic. Missing
+configuration, errors, malformed/oversized responses, uncertainty, or
+probability below 0.8 use the template DC. `easy`, `standard`, and `hard` select
+base DC minus 5, base DC, or base DC plus 5, clamped to 5–30. Automatic success
+and impossible are no-check outcomes: the UI does not show a die as evidence
+for either result. Impossible follows the existing failed-action normalization, clearing
+action-granted mutations while world time and scheduled canon events may still
+advance. Automatic success still passes every structural, target, ownership,
+progress, and hard-rule check.
 
-Only measured benefit can justify a runtime proposal. Such a proposal needs an
-ADR replacing the per-action-adjudication exclusion, a reviewed data boundary,
-deadlines and retry/idempotency rules, and persisted/replayed decisions before
-any narration. Hard validation and dice arithmetic remain server-owned. No
-provider benchmark or qualification result is claimed by this documentation.
+The world-turn row is first claimed with adjudication `pending`. One logical key
+gets at most one classification attempt. A final decision, resolved DC, and
+check result are frozen by fenced compare-and-set before DeepSeek prose starts.
+A reclaimed pending row uses the template fallback without another Laya call;
+legacy rows remain on the existing behavior and already-final rows are never
+reclassified. An unknown database result or lost lease stops processing. If
+prose fails after the decision is frozen, same-key replay reuses it. Disabling
+Laya configuration stops new calls and selects template fallback; it does not
+rewrite frozen results. World-turn prompts advance to version 3 while retaining
+version 1 and 2 replay compatibility. The novel game-rule template remains
+`novel-game-rules-v1`; adjudication metadata has schema version 1. An older
+binary may not understand this advanced metadata, so rollback of those
+journeys is fail-closed and recovery requires a forward deploy.
+
+## Qualification remains separate
+
+Structural implementation does not qualify semantic quality. No paid model
+comparison or human semantic-quality approval is claimed. Any such evaluation
+requires separate authorization for the exact registration, provider/model,
+corpus, budget, and stopping conditions. Compare Laya (Jev) with direct DeepSeek
+structured judgment on a frozen human-labeled corpus of authorized novel
+actions, including impossible, ambiguous, ordinary, hostile, and
+locked-chapter cases. Measure incorrect approvals, useful abstention,
+canon/spoiler/agency violations, latency, cost, and context disclosure; register
+the rubric and improvement threshold before running. Confidence remains
+uncalibrated and never stands for a character's D20 success chance.
+
+No new service, dependency, or database migration is introduced; decision
+category and base DC use the existing world-turn resolution record. Provider
+probability and raw request/response bodies are not persisted.
 
 ## Product contract
 
@@ -85,8 +134,8 @@ provider benchmark or qualification result is claimed by this documentation.
   The die never makes an invalid target, dead character, future entity, stale turn, or
   unavailable thread valid. A successful check means the best feasible outcome
   within the supplied hard rules; it never authorizes the literal wording of an
-  impossible free-text intent. Full semantic adjudication of arbitrary prose is
-  not claimed by this slice.
+  impossible free-text intent. The bounded adjudicator may classify the supplied
+  context, but arbitrary free-text correctness is not guaranteed.
 - Advanced world actions use `d20 + attribute modifier` against the template DC.
   The authoritative roll and modifier breakdown are persisted before the LLM
   result is accepted and are replayed exactly for the same idempotency key.
@@ -185,19 +234,22 @@ provider benchmark or qualification result is claimed by this documentation.
 
 ## Rollback
 
-Disable advanced-mode template requests before rollback. Narrative profiles omit
+Unset either Laya setting to stop new adjudicator calls; new advanced turns then
+use the template fallback, and already-frozen results remain unchanged. Before
+rolling back the implementation, disable advanced-mode template requests.
+Narrative profiles omit
 the new optional player/session fields when serialized, so state written by this
 version retains the previous binary's exact JSON shape. Ready templates and the
 nullable world-turn resolution column are additive and can be ignored. Existing
-advanced profiles intentionally retain their rule fields: the previous binary
-rejects them rather than silently executing them as narrative turns. Restore
-those readers by forward-deploying this version again; no down migration or data
-rewrite is required.
+advanced profiles and resolutions with adjudication metadata intentionally fail
+closed on a previous binary rather than silently becoming narrative turns.
+Restore those readers by forward-deploying this version again; no down migration
+or data rewrite is required. The game-rule template format is unchanged.
 
 ## Review record
 
 Pre-implementation review removed a separate rules microservice, executable
-formula DSL, per-action adjudication call, and per-reader templates. It also
+formula DSL, unbounded per-action adjudication, and per-reader templates. It also
 made progress safety, exact version binding, leases, provider budgets, and the
 meaning of a successful check explicit before code was written.
 
@@ -208,3 +260,9 @@ failed template generation has a three-claim logical-generation ceiling (one
 logical provider call per claim; bounded transport retries may replay that same
 request). The default narrative path performs no template generation or dice
 work.
+
+ADR 0009 accepts only the bounded adjudication exception to ADR 0001 as a
+structural private preview. Local checks and independent code review passed;
+workspace-wide Clippy and browser checks also passed. CI, merge and
+deployment status remain tracked separately in
+[#418](https://github.com/Wisdoverse/novelworld/issues/418).

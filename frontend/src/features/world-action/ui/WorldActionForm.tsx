@@ -162,8 +162,10 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
       {actionRule && actionAttribute && actionScore !== undefined && actionModifier !== undefined ? (
         <div className="rounded-lg border border-[#d2e3fc] bg-[#f8faff] p-3 text-sm text-[#3c4043]">
           <span className="font-semibold text-[#0b57d0]">检定预览</span>
-          <span className="ml-2">D20 + {actionAttribute.label} {actionModifier >= 0 ? `+${actionModifier}` : actionModifier}，难度 {actionRule.difficulty_class}</span>
-          <p className="mt-1 text-xs text-[#5f6368]">{actionRule.description}；骰点由服务器在提交时生成。</p>
+          <span className="ml-2">D20 + {actionAttribute.label} {actionModifier >= 0 ? `+${actionModifier}` : actionModifier}，模板基础难度 {actionRule.difficulty_class}</span>
+          <p className="mt-1 text-xs text-[#5f6368]">
+            {actionRule.description}；提交后服务端会进行语义判断，可能无需检定或调整难度；配置缺失时沿用模板检定。实际结果由服务端保存并可回放。
+          </p>
         </div>
       ) : null}
       <label className="block text-sm font-medium text-[#3c4043]">

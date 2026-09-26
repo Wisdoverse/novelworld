@@ -70,12 +70,17 @@ and HTTP services are reached through domain ports and infrastructure adapters.
 
 For the opt-in [D20 preview](./ADVANCED_RULES_PLAN.md), Novel Service owns shared,
 immutable source-bound attribute/DC templates. Narrative Service owns private
-player allocations, hard validation, dice resolution, and durable check replay;
-DeepSeek renders H3/H4 journey prose behind that validation. Optional Laya hints
-suggest an action type from bounded intent/candidates and do not judge feasibility
-or success. No Jev semantic referee is connected. The proposed evaluation is
-offline work; adding per-action adjudication would require a new reviewed ADR
-superseding that exclusion in [ADR 0001](./adr/0001-source-bound-advanced-game-rules.md).
+player allocations, hard validation, dice resolution, and durable check replay.
+When configured, Laya (Jev) may classify a new advanced action from a size-limited
+allowlist; the fenced world-turn record freezes that decision before DeepSeek
+prose. Missing/uncertain/error paths use the template check, and a lost lease or
+unknown database outcome stops before prose. Existing Laya (Jev) action hints
+remain a separate user-confirmed type suggestion. Neither use replaces server
+validation or dice authority. The bounded adjudication exception is accepted in
+[ADR 0009](./adr/0009-bounded-laya-d20-adjudication.md) as a structural private
+preview; live semantic quality is
+unqualified, and the rest of [ADR 0001](./adr/0001-source-bound-advanced-game-rules.md)
+remains in force.
 
 User Service validates fixed provider/region/plan endpoints and owns encrypted
 Keys; only an unchanged preset and endpoint may reuse a stored Key. Its internal

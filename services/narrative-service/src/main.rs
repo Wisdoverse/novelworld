@@ -142,6 +142,32 @@ async fn run_body() -> Result<()> {
             internal_service_token.as_bytes().to_vec(),
         )?);
 
+        let laya_client: Option<Arc<LayaActionSuggester>> = match (
+            std::env::var("LAYA_API_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            std::env::var("LAYA_API_KEY")
+                .ok()
+                .filter(|value| !value.is_empty()),
+        ) {
+            (Some(url), Some(key)) => match LayaActionSuggester::new(&url, key) {
+                Ok(client) => Some(Arc::new(client)),
+                Err(_) => {
+                    tracing::warn!(
+                        "Laya hints and D20 adjudication disabled: invalid configuration"
+                    );
+                    None
+                }
+            },
+            (None, None) => None,
+            _ => {
+                tracing::warn!(
+                    "Laya hints and D20 adjudication disabled: URL and key are both required"
+                );
+                None
+            }
+        };
+
         // Application handler
         let handler = Arc::new(NarrativeCommandHandler {
             node_repo,
@@ -154,30 +180,14 @@ async fn run_body() -> Result<()> {
             llm,
             agent_memory,
             dice_roller,
+            action_adjudicator: laya_client
+                .clone()
+                .map(|client| client as Arc<dyn domain::ports::ActionAdjudicationPort>),
         });
         let _memory_projection_recovery = handler.spawn_memory_projection_recovery();
 
-        let action_suggester: Option<Arc<dyn domain::ports::ActionSuggestionPort>> = match (
-            std::env::var("LAYA_API_URL")
-                .ok()
-                .filter(|value| !value.trim().is_empty()),
-            std::env::var("LAYA_API_KEY")
-                .ok()
-                .filter(|value| !value.is_empty()),
-        ) {
-            (Some(url), Some(key)) => match LayaActionSuggester::new(&url, key) {
-                Ok(client) => Some(Arc::new(client)),
-                Err(_) => {
-                    tracing::warn!("Laya action suggestions disabled: invalid configuration");
-                    None
-                }
-            },
-            (None, None) => None,
-            _ => {
-                tracing::warn!("Laya action suggestions disabled: URL and key are both required");
-                None
-            }
-        };
+        let action_suggester =
+            laya_client.map(|client| client as Arc<dyn domain::ports::ActionSuggestionPort>);
 
         let state = AppState {
             handler,
