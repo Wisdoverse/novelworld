@@ -517,9 +517,7 @@ impl WorldState {
         let mut session = self.open_world()?.ok_or_else(|| {
             WorldStateError::InvalidWorldSession("world session has not started".into())
         })?;
-        if transition.prompt_version
-            == crate::domain::entities::world_session::WORLD_TURN_PROMPT_VERSION
-        {
+        if transition.prompt_version != "world-turn-v1" {
             self.validate_world_action(action, context)?;
         }
         transition
@@ -1060,7 +1058,7 @@ fn object_section<'a>(
 mod causality_tests {
     use super::*;
     use crate::domain::entities::player_entity::PlayerEntity;
-    use crate::domain::entities::world_session::WorldEntityRef;
+    use crate::domain::entities::world_session::{WorldEntityRef, WorldTurnTransition};
     use crate::domain::services::narrative_transition::{
         NarrativeTransition, ThreadChange, ThreadStatus, TransitionEvent,
     };
@@ -1192,5 +1190,63 @@ mod causality_tests {
         state.start_open_world(&context).unwrap();
         assert_eq!(state.state["threads"]["branch"]["origin"], "player");
         assert_eq!(state.state["threads"]["canon"]["origin"], "canon");
+    }
+
+    #[test]
+    fn legacy_d20_turn_rejects_advancing_a_closed_current_thread() {
+        let user_id = Uuid::new_v4();
+        let novel_id = Uuid::new_v4();
+        let mut state = state_with_player(user_id, novel_id);
+        state.state["threads"]["siege"] =
+            serde_json::json!({"status": "resolved", "description": "围城", "origin": "canon"});
+        let context = WorldEntryContext {
+            model_version: 1,
+            checkpoint_chapter: 1,
+            unlocked_through_chapter: 1,
+            characters: vec![],
+            locations: vec![WorldEntityRef {
+                id: "gate".into(),
+                name: "城门".into(),
+            }],
+            factions: vec![],
+            hard_rules: vec![],
+            dead_character_ids: vec![],
+            threads: vec![WorldEntityRef {
+                id: "siege".into(),
+                name: "围城".into(),
+            }],
+            scheduled_events: vec![],
+            character_goals: vec![],
+        };
+        state.start_open_world(&context).unwrap();
+        let action = WorldAction {
+            kind: WorldActionKind::AdvanceThread,
+            target_id: Some("siege".into()),
+            intent: "继续推进围城事件线".into(),
+        };
+        let narrative = transition("siege");
+        let world_transition = WorldTurnTransition {
+            schema_version: narrative.schema_version,
+            prompt_version: "world-turn-v2".into(),
+            canon_model_version: narrative.canon_model_version,
+            canonical_checkpoint_chapter: narrative.canonical_checkpoint_chapter,
+            rendered_narrative: narrative.rendered_narrative,
+            events: narrative.events,
+            relationship_changes: narrative.relationship_changes,
+            location_changes: narrative.location_changes,
+            thread_changes: narrative.thread_changes,
+            player_location_id: None,
+            inventory_additions: vec![],
+            inventory_removals: vec![],
+            knowledge_discoveries: vec![],
+            faction_changes: vec![],
+            canonical_event_change: None,
+        };
+
+        let error = state
+            .apply_world_turn_with_check(Uuid::new_v4(), &action, &world_transition, &context, None)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("thread target is not open"));
     }
 }

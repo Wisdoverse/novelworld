@@ -16,7 +16,7 @@ exists, then the owning delete workflow removes it.
 | Character memories | PostgreSQL, scoped by account and novel. | Account or canonical-novel deletion. Shelf removal retains durable history; the per-character short-memory action clears only the Redis projection. |
 | Short-memory projection | Redis lists, at most 50 messages per character/user pair. There is no time-based TTL; PostgreSQL remains the source of truth. | Internal cleanup establishes a tombstone before authoritative deletion, then removes matching keys. Account cleanup removes every matching user key; novel cleanup preserves other novels and users. |
 | Deletion tombstones | Redis keys containing only a user UUID or user/novel UUID pair, retained for one hour. They contain no source text, message, profile, or model data. | Expire automatically. They prevent an already-committed asynchronous projection from recreating deleted cache data. |
-| Choices, world state, narrative nodes, reading progress, player timelines, and world-turn audit/replay records | PostgreSQL. Canonical narrative nodes follow the shared novel; user-scoped rows follow the account. Failed world turns retain their action and status but not a model transition/result. | Account deletion removes user-scoped rows; canonical-novel deletion removes both scopes. Shelf removal retains durable private state for explicit re-attachment. `world_turns` cascade through their owning world state. |
+| Choices, world state, narrative nodes, reading progress, player timelines, and world-turn audit/replay records | PostgreSQL. Canonical narrative nodes follow the shared novel; user-scoped rows follow the account. A world-turn resolution may include the bounded Laya (Jev) decision and resolved check metadata; completed results and the existing account export include the resolution. Failed turns may retain their action and frozen resolution, but not a model transition/result. No raw classifier request or response body is stored. | Account deletion removes user-scoped rows; canonical-novel deletion removes both scopes. Shelf removal retains durable private state for explicit re-attachment. `world_turns` cascade through their owning world state. |
 | Generated chapter prose | PostgreSQL `player_chapters`, scoped by account and novel. | Account or canonical-novel deletion. Shelf removal retains it for explicit re-attachment. |
 | User profile and refresh tokens | PostgreSQL, for the account lifetime. A refresh token is atomically replaced after successful refresh and removed by logout or when expired. | Account deletion. The approved [`BACKUP_RESTORE.md`](./BACKUP_RESTORE.md) procedure additionally deletes every refresh token during a restore, so sessions never survive one. |
 | Web-managed LLM API keys | The platform key is encrypted in the singleton PostgreSQL runtime configuration. A reader's optional personal key is encrypted in a user-owned row whose authenticated-encryption context is bound to that user's UUID. Keys remain until replaced or their owner is deleted. | A personal row cascades with its account. The platform row is removed when the final account is deleted. Environment-managed keys remain under operator control outside NovelWorld. |
@@ -71,10 +71,13 @@ on that bucket for readiness and `s3:PutObject`/`s3:DeleteObject` only on the
 ## Data outside NovelWorld
 
 Configured model and image providers may receive source excerpts, prompts,
-messages, and image-generation descriptions. NovelWorld cannot delete provider
-logs or provider-hosted image bytes unless that provider offers and the operator
-configures a separate deletion contract. Their retention is governed by the
-operator's provider agreement.
+messages, and image-generation descriptions. When enabled, Laya (Jev) may also
+receive the bounded player/world adjudication context described in
+[`THREAT_MODEL.md`](./THREAT_MODEL.md); no provider request body is retained in
+NovelWorld, but the provider may retain it under its own policy. NovelWorld
+cannot delete provider logs or provider-hosted image bytes unless that provider
+offers and the operator configures a separate deletion contract. Their
+retention is governed by the operator's provider agreement.
 
 Container logs, database snapshots, volume copies, and external backups are also
 operator-owned. NovelWorld does not schedule, upload, or prune backups, so

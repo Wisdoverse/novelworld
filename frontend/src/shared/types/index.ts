@@ -234,6 +234,18 @@ export interface ActionCheck {
   difficulty_class: number;
   total: number;
   succeeded: boolean;
+  adjudication?: {
+    schema_version: number;
+    template_difficulty_class: number;
+    decision:
+      | 'pending'
+      | 'template_fallback'
+      | 'impossible'
+      | 'automatic_success'
+      | 'easy_check'
+      | 'standard_check'
+      | 'hard_check';
+  } | null;
 }
 
 export interface WorldTurnTransition {

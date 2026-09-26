@@ -8,7 +8,8 @@ use tracing::{info, warn, Instrument};
 use uuid::Uuid;
 
 use crate::domain::entities::game_rules::{
-    resolve_action_check, GameRuleTemplate, PlayerRuleProfile, ResolutionMode,
+    build_action_adjudication_context, resolve_action_check, AdjudicationDecision,
+    GameRuleTemplate, PlayerRuleProfile, ResolutionMode,
 };
 use crate::domain::entities::narrative_node::{
     fit_character_world_context, NarrativeChoice, NarrativeNode, WorldState, WorldStateError,
@@ -23,7 +24,8 @@ use crate::domain::entities::world_session::{
     MAX_RECENT_WORLD_NARRATIVE_CHARS, MAX_RECENT_WORLD_TURNS,
 };
 use crate::domain::ports::{
-    ActionSuggestionPort, AgentMemoryPort, DiceRollerPort, LlmPort, NarrativeLlmTask,
+    ActionAdjudicationPort, ActionSuggestionPort, AgentMemoryPort, DiceRollerPort, LlmPort,
+    NarrativeLlmTask,
 };
 use crate::domain::repositories::{
     BeginWorldTurn, ChapterInfo, ChapterReadRepository, CharacterBrief,
@@ -597,6 +599,7 @@ pub struct NarrativeCommandHandler {
     pub llm: Arc<dyn LlmPort>,
     pub agent_memory: Arc<dyn AgentMemoryPort>,
     pub dice_roller: Arc<dyn DiceRollerPort>,
+    pub action_adjudicator: Option<Arc<dyn ActionAdjudicationPort>>,
 }
 
 struct WorldTurnLease {
@@ -1725,10 +1728,13 @@ impl NarrativeCommandHandler {
                     expected_turn_number,
                     &request_fingerprint,
                 );
-                Some(
-                    resolve_action_check(template, &player.rules, action.kind, roll)
-                        .map_err(|error| NarrativeError::Validation(error.to_string()))?,
-                )
+                let check = resolve_action_check(template, &player.rules, action.kind, roll)
+                    .map_err(|error| NarrativeError::Validation(error.to_string()))?;
+                Some(if self.action_adjudicator.is_some() {
+                    check.with_pending_adjudication()
+                } else {
+                    check
+                })
             }
         };
         let claim = WorldTurnClaim {
@@ -1740,7 +1746,7 @@ impl NarrativeCommandHandler {
             resolution,
             expected_turn_number,
         };
-        let (claim, attempt) = match self
+        let (mut claim, attempt) = match self
             .world_turn_repo
             .begin_turn(&claim)
             .await
@@ -1830,6 +1836,90 @@ impl NarrativeCommandHandler {
         };
 
         let mut lease = WorldTurnLease::start(self.world_turn_repo.clone(), claim.id, attempt);
+        if claim
+            .resolution
+            .as_ref()
+            .is_some_and(|check| check.adjudication_pending())
+        {
+            if let Err(error) = self.require_self_reader_identity(user_id, novel_id).await {
+                self.fail_world_turn(&claim, attempt, "identity_changed")
+                    .await;
+                return Err(error);
+            }
+            if let Err(error) = self
+                .require_world_source_visible(user_id, novel_id, &world_state)
+                .await
+            {
+                self.fail_world_turn(&claim, attempt, "progress_rewind")
+                    .await;
+                return Err(error);
+            }
+            // A reclaimed pending claim may have already dispatched a request.
+            // Conservatively settle the template rather than classify again.
+            let started = std::time::Instant::now();
+            let mut decision = AdjudicationDecision::TemplateFallback;
+            if attempt == 1 {
+                if let (Some(adjudicator), Some(context)) = (
+                    self.action_adjudicator.as_deref(),
+                    build_action_adjudication_context(
+                        &player,
+                        &session,
+                        &claim.action,
+                        claim.resolution.as_ref().expect("pending check exists"),
+                    ),
+                ) {
+                    decision = match lease.run(adjudicator.adjudicate(&context)).await {
+                        Some(Ok(Some(decision)))
+                            if !matches!(
+                                decision,
+                                AdjudicationDecision::Pending
+                                    | AdjudicationDecision::TemplateFallback
+                            ) =>
+                        {
+                            decision
+                        }
+                        Some(_) => AdjudicationDecision::TemplateFallback,
+                        None => {
+                            self.fail_world_turn(&claim, attempt, "lease_lost").await;
+                            return Err(NarrativeError::TurnOutcomeUnknown);
+                        }
+                    };
+                }
+            }
+            if let Err(error) = self
+                .require_world_source_visible(user_id, novel_id, &world_state)
+                .await
+            {
+                self.fail_world_turn(&claim, attempt, "progress_rewind")
+                    .await;
+                return Err(error);
+            }
+            if let Err(error) = self.require_self_reader_identity(user_id, novel_id).await {
+                self.fail_world_turn(&claim, attempt, "identity_changed")
+                    .await;
+                return Err(error);
+            }
+            let resolved = match lease
+                .run(
+                    self.world_turn_repo
+                        .settle_adjudication(&claim, attempt, decision),
+                )
+                .await
+            {
+                Some(Ok(Some(check))) => check,
+                _ => {
+                    self.fail_world_turn(&claim, attempt, "adjudication_outcome_unknown")
+                        .await;
+                    return Err(NarrativeError::TurnOutcomeUnknown);
+                }
+            };
+            claim.resolution = Some(resolved);
+            info!(
+                ?decision,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "world action adjudication frozen"
+            );
+        }
         let prompt = match build_world_turn_prompt_with_check(
             &novel.title,
             &player,

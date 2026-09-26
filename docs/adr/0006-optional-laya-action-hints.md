@@ -6,6 +6,12 @@
 
 ## Context
 
+Naming clarification: Laya and Jev refer to the same decision capability in
+NovelWorld. The implementation and configuration retain the Laya name; this
+decision covers its user-confirmed action-hint use. The separately bounded
+advanced-turn adjudication use is described by [ADR 0009](./0009-bounded-laya-d20-adjudication.md)
+and does not change this hint contract.
+
 The open-world form already asks the reader to choose an action type and target.
 Laya can classify a short Chinese intent, but its base checkpoint is not
 qualified for NovelWorld and can make confident mistakes. Action hints may
