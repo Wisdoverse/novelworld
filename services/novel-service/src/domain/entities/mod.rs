@@ -3,3 +3,4 @@ pub mod chapter;
 pub mod character;
 pub mod game_rule_template;
 pub mod novel;
+pub mod world_series;

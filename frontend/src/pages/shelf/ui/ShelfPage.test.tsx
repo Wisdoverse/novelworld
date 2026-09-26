@@ -49,6 +49,12 @@ vi.mock('@/features/novel-import', () => ({
   NovelImportModal: () => <div role="dialog" aria-label="导入小说" />,
 }));
 
+vi.mock('@/features/novel-world-series', () => ({
+  WorldSeriesDialog: ({ novel }: { novel: { title: string } }) => (
+    <div role="dialog" aria-label={`系列设置：${novel.title}`} />
+  ),
+}));
+
 vi.mock('sonner', () => ({
   toast: { success: vi.fn(), error: vi.fn() },
 }));
@@ -141,6 +147,18 @@ describe('ShelfPage contracts', () => {
     const remove = screen.getByRole('button', { name: '将 故事 移出书架' });
     expect(remove.hasAttribute('disabled')).toBe(false);
     expect(remove.className).not.toContain('opacity-0');
+  });
+
+  it('opens shared-series management from a ready book card', () => {
+    mocks.novels = [{
+      id: 'novel', title: '故事', status: 'ready', total_chapters: 2,
+      updated_at: '2026-01-01T00:00:00Z',
+    }];
+    render(<ShelfPage />);
+
+    fireEvent.click(screen.getByRole('button', { name: '识别同系列 / 共享世界背景' }));
+    expect(screen.getByRole('dialog', { name: '系列设置：故事' })).toBeTruthy();
+    expect(mocks.navigate).not.toHaveBeenCalled();
   });
 
   it('uses safe guidance for known and unknown import failures and offers the matching action', () => {

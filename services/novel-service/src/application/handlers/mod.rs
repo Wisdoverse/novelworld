@@ -21,7 +21,7 @@ use crate::domain::entities::{
     chapter::{chapters_are_importable, Chapter},
     character::Character,
     game_rule_template::{
-        supported_prompt_version, GameRuleTemplate, BASIC_GAME_RULE_PROMPT_VERSION,
+        supported_novel_prompt_version, GameRuleTemplate, BASIC_GAME_RULE_PROMPT_VERSION,
     },
     novel::Novel,
 };
@@ -1555,7 +1555,7 @@ impl NovelCommandHandler {
         novel_id: Uuid,
         prompt_version: &str,
     ) -> std::result::Result<GameRuleTemplateRequest, GameRuleTemplateRequestError> {
-        if !supported_prompt_version(prompt_version) {
+        if !supported_novel_prompt_version(prompt_version) {
             return Err(GameRuleTemplateRequestError::SourcesUnavailable);
         }
         let novel = self

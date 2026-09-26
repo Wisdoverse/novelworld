@@ -33,6 +33,8 @@ vi.mock('@/entities/narrative', () => ({
 describe('PlayerEntryForm advanced rules', () => {
   beforeEach(() => {
     mocks.error = null;
+    template.novel_id = 'novel';
+    template.series = undefined;
     mocks.mutate.mockReset();
     mocks.mutate.mockImplementation((_input, options) => options.onSuccess(template));
   });
@@ -161,5 +163,46 @@ describe('PlayerEntryForm advanced rules', () => {
         attributes: { qinggong: 12, jianghu: 8 },
       },
     }));
+  });
+
+  it('submits the exact series binding while keeping the template source novel', async () => {
+    template.novel_id = 'source-novel';
+    template.series = {
+      binding: { series_id: 'series-1', revision: 1 },
+      target_novel_id: 'novel',
+      name: '山海系列',
+      background: '共享的基础世界背景',
+    };
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(
+      <PlayerEntryForm
+        novelId="novel"
+        checkpointChapter={1}
+        unlockedThroughChapter={1}
+        locations={[{ id: 'temple', name: '破庙' }]}
+        isPending={false}
+        isTimelineLocked={false}
+        onCheckpointChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('checkbox', { name: /启用小说专属 D20/ }));
+    fireEvent.click(screen.getByRole('button', { name: '生成小说专属规则' }));
+    expect(screen.getByText('系列共享基础规则：山海系列')).toBeTruthy();
+    expect(screen.getByText(/来源书章节出处属于系列规则来源/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('名字'), { target: { value: '燕七' } });
+    fireEvent.change(screen.getByLabelText('背景'), { target: { value: '角色自己的经历' } });
+    fireEvent.change(screen.getByLabelText('能力（用逗号分隔）'), { target: { value: '听风' } });
+    fireEvent.click(screen.getByRole('button', { name: '进入故事' }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      rules: expect.objectContaining({
+        mode: 'advanced',
+        canon_model_version: 3,
+        series_binding: { series_id: 'series-1', revision: 1 },
+      }),
+    })));
+    expect(template.novel_id).toBe('source-novel');
   });
 });

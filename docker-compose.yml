@@ -204,6 +204,8 @@ services:
       LLM_API_URL: ${LLM_API_URL:-https://api.openai.com}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      LAYA_API_URL: ${LAYA_API_URL:-}
+      LAYA_API_KEY: ${LAYA_API_KEY:-}
       USER_SERVICE_URL: http://user-service:8001
       LLM_DIAGNOSTIC_BUDGET_ID: ${LLM_DIAGNOSTIC_BUDGET_ID:-}
       LLM_DIAGNOSTIC_PROFILE: ${LLM_DIAGNOSTIC_PROFILE:-vision-journey-diagnostic-v1}

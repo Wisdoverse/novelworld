@@ -58,6 +58,7 @@ roadmap status only when its required evidence exists.
 | [Product contract](./PRODUCT_CONTRACT.md) | Supported envelope, claims, and responsibility boundaries | A user-visible claim, supported input, or deployment boundary changes |
 | [Advanced novel rules](./ADVANCED_RULES_PLAN.md) | D20 preview, bounded Laya (Jev) adjudication, model/dice responsibilities, and qualification limits | Template/check behavior, adjudication context or authority, fallback, or qualification evidence changes |
 | [Specification](../SPEC.md) | Candidate normative behavior | The intended cross-component contract changes |
+| [ADR 0011: Confirmed series worlds](./adr/0011-confirmed-series-worlds.md) | Reader-confirmed private series, immutable source snapshots, and rollout boundaries | Series ownership, binding, or lifecycle decisions change |
 | [SPEC conformance ledger](./SPEC_CONFORMANCE.md) | Evidence and disposition for every normative clause | Implementation evidence or a clause disposition changes |
 | [Qualification policy](./QUALIFICATION_POLICY.md) | Release evidence classes and thresholds | A qualification slice, guardrail, or approval rule changes |
 | [Roadmap](./ROADMAP.md) | Ordered outcomes, invariants, and exit criteria | Product direction or evidence-gated sequencing changes |

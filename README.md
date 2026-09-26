@@ -112,6 +112,7 @@ and require Internet access and a key.
 | Branching stories | Choose a continuation at a branch point and see its committed consequences. |
 | Open-world play | Create an original player at an unlocked checkpoint, then travel, investigate, converse, ally, or oppose. The timeline distinguishes your decisions from generated prose. |
 | Novel-specific D20 preview | Opt into source-backed attributes, server-resolved checks, and optional bounded Laya (Jev) semantic adjudication when configured. [Rules and limitations](./docs/ADVANCED_RULES_PLAN.md) describe the fallback and authority boundaries; adjudication quality is unqualified, and full D&D gameplay is not implemented. |
+| Reader-confirmed series worlds | Group your shelf books around a shared setting and immutable source-book basic rules. Laya may suggest a match, but association requires your confirmation; manual selection remains available. This structural preview does not share player state or qualify matching quality. |
 | Model settings | Configure the platform provider after setup; signed-in readers may optionally use their own encrypted provider key. Key usage shows [current-price token estimates](./docs/LLM_PRICING.md) in the quoted currency and separate subscription quotes; these are not account bills. |
 
 <p align="center">

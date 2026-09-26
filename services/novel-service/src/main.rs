@@ -15,6 +15,7 @@ use novel_service::{
     application::{
         handlers::{NovelCommandHandler, ReadingProgressHandler, TranslateChapterHandler},
         source_file_cleanup::SourceFileCleanupWorker,
+        world_series::WorldSeriesHandler,
     },
     domain::ports::{
         AccountExportPort, DocumentTextExtractor, ImagePort, LlmPort, PrivacyCleanupPort,
@@ -22,7 +23,7 @@ use novel_service::{
     },
     infrastructure::{
         document::EbookTextExtractor,
-        http::privacy::AgentPrivacyClient,
+        http::{laya_series_client::LayaSeriesClient, privacy::AgentPrivacyClient},
         llm::{image::ImageClient, LlmAdapter},
         object_storage::{S3SourceFileStorage, S3StorageConfig},
         persistence::{
@@ -32,7 +33,8 @@ use novel_service::{
             chapter_translation_pg_repo::PgChapterTranslationRepository,
             character_pg_repo::CharacterPgRepository, novel_pg_repo::NovelPgRepository,
             pg_progress_repo::PgReadingProgressRepository,
-            source_file_deletion_pg_repo::PgSourceFileDeletionRepository, PgReadinessProbe,
+            source_file_deletion_pg_repo::PgSourceFileDeletionRepository,
+            world_series_pg_repo::PgWorldSeriesRepository, PgReadinessProbe,
         },
     },
     interface::http::{router, AppState},
@@ -135,6 +137,35 @@ async fn run_body() -> Result<()> {
         let character_repo = Arc::new(CharacterPgRepository::new(pool.clone()));
         let canon_repo = Arc::new(PgCanonStoryModelRepository::new(pool.clone()));
         let progress_repo = Arc::new(PgReadingProgressRepository::new(pool.clone()));
+        let matcher: Option<
+            Arc<dyn novel_service::domain::ports::series_matcher::SeriesMatcherPort>,
+        > = match (
+            std::env::var("LAYA_API_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            std::env::var("LAYA_API_KEY")
+                .ok()
+                .filter(|value| !value.is_empty()),
+        ) {
+            (Some(url), Some(key)) => match LayaSeriesClient::new(&url, key) {
+                Ok(client) => Some(Arc::new(client)),
+                Err(_) => {
+                    tracing::warn!("Laya series suggestions disabled: invalid configuration");
+                    None
+                }
+            },
+            (None, None) => None,
+            _ => {
+                tracing::warn!("Laya series suggestions disabled: URL and key are both required");
+                None
+            }
+        };
+        let series_handler = Arc::new(WorldSeriesHandler {
+            series_repo: Arc::new(PgWorldSeriesRepository::new(pool.clone())),
+            novel_repo: novel_repo.clone(),
+            canon_repo: canon_repo.clone(),
+            matcher,
+        });
         let account_export: Arc<dyn AccountExportPort> =
             Arc::new(PgAccountExport::new(pool.clone()));
         let source_deletions_impl = Arc::new(PgSourceFileDeletionRepository::new(pool.clone()));
@@ -204,6 +235,7 @@ async fn run_body() -> Result<()> {
 
         let state = AppState {
             handler,
+            series_handler,
             novel_repo,
             chapter_repo,
             character_repo,

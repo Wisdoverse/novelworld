@@ -34,7 +34,7 @@ never create additional records.
 | Service | Kinds |
 |---|---|
 | user | `profile` |
-| novel | `novel`, `chapter`, `character`, `character_relationship`, `canon_story_model`, `reading_progress` |
+| novel | `novel`, `chapter`, `character`, `character_relationship`, `canon_story_model`, `reading_progress`, `world_series`, `novel_world_series` |
 | agent | `chat_message`, `character_memory` |
 | narrative | `narrative_node`, `user_choice`, `world_state`, `player_chapter`, `world_turn` |
 
@@ -43,6 +43,11 @@ verification state, and account timestamps. Novel and character records retain
 provider-returned asset URLs, not provider-hosted bytes. Narrative nodes include
 the user's own nodes and shared/canonical nodes referenced by that user's
 choices.
+
+`world_series` exports the reader-owned confirmed definition and safe immutable
+source-template snapshot; `novel_world_series` exports that reader's shelf
+associations. Source provenance remains the original novel/version/chapter
+identity. Export does not turn those records into shared player state.
 
 Every narrative record's data carries a uniform source label so clients can
 programmatically separate canonical history, reader-created history, and

@@ -75,6 +75,7 @@ export function PlayerEntryForm({
           template_schema_version: gameRules.schema_version,
           template_prompt_version: gameRules.prompt_version,
           attributes: scores,
+          ...(gameRules.series?.binding ? { series_binding: gameRules.series.binding } : {}),
         } : {
           mode: 'narrative',
           canon_model_version: null,
@@ -149,6 +150,15 @@ export function PlayerEntryForm({
                 </button>
               ) : (
                 <>
+                  {gameRules.series ? (
+                    <div className="rounded-lg bg-[#f8fafd] p-3 text-xs leading-5 text-[#5f6368]">
+                      <p className="font-medium text-[#3c4043]">系列共享基础规则：{gameRules.series.name}</p>
+                      <p className="mt-1">{gameRules.series.background}</p>
+                      <p className="mt-1">
+                        规则出处来自系列来源书。角色属性点、装备和阅读进度仍各自独立。
+                      </p>
+                    </div>
+                  ) : null}
                   <div className="flex items-center justify-between text-xs text-[#5f6368]">
                     <span>属性点 {assignedPoints} / {gameRules.point_budget}</span>
                     <span>D20 · 服务器判定</span>

@@ -469,6 +469,13 @@ Primary SPEC focus: §4.1.4–§4.1.7 and §6.
 
 ## H4 — Causal, accessible world journey
 
+ADR 0011 reader-confirmed series worlds are a structural preview within H4,
+not evidence that the horizon is complete. Novel stores immutable safe snapshots
+and private associations; Narrative keeps source and target canon separate and
+freezes setting/rule bindings. Laya is optional metadata guidance with manual
+confirmation and fallback. CI, merge, deployment, and representative match-quality
+evidence remain pending.
+
 **Outcome:** the reader can complete the north-star journey through an
 accessible interface while canon, character agency, memory, choices, and the
 open world remain one coherent causal system.
