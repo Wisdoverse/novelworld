@@ -4,7 +4,7 @@
 - Date: 2026-08-23
 - Owners: novel-service, narrative-service, and frontend owners
 - Related: [`../ADVANCED_RULES_PLAN.md`](../ADVANCED_RULES_PLAN.md); [roadmap issue #202](https://github.com/Wisdoverse/novelworld/issues/202)
-- Supersession: The accepted [ADR 0009](./0009-bounded-laya-d20-adjudication.md) creates a narrow exception to the per-action adjudication exclusion below; all other decisions here remain in force.
+- Supersession: [ADR 0010](./0010-versioned-basic-game-rules.md) changes only template identity, prompt-version selection, v2 source-gating, and cross-version generation-budget rules for newly bound v2 profiles. Existing v1 profiles and sessions stay bound to v1. The accepted [ADR 0009](./0009-bounded-laya-d20-adjudication.md) creates a narrow exception to the per-action adjudication exclusion below; all other decisions here remain in force.
 
 ## Context
 

@@ -64,6 +64,54 @@ describe('PlayerEntryForm advanced rules', () => {
     expect(mocks.mutate).not.toHaveBeenCalled();
   });
 
+  it('explains when canonical sources cannot support advanced rules', () => {
+    mocks.error = new AxiosError('Request failed', undefined, undefined, undefined, {
+      status: 422,
+      data: { error: { code: 'game_rule_sources_unavailable', message: 'upstream message' } },
+    } as never);
+    render(
+      <PlayerEntryForm
+        novelId="novel"
+        checkpointChapter={1}
+        unlockedThroughChapter={1}
+        locations={[{ id: 'temple', name: '破庙' }]}
+        isPending={false}
+        isTimelineLocked={false}
+        onCheckpointChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole('checkbox', { name: /启用小说专属 D20/ }));
+    expect(screen.getByRole('alert').textContent).toBe(
+      '当前小说的世界规则不足以生成基础检定。可关闭高级项，以纯叙事模式进入故事。',
+    );
+    expect(screen.queryByText('upstream message')).toBeNull();
+  });
+
+  it('asks the reader to wait while the novel canon is still being analyzed', () => {
+    mocks.error = new AxiosError('Request failed', undefined, undefined, undefined, {
+      status: 409,
+      data: { error: { code: 'canon_unavailable', message: 'upstream message' } },
+    } as never);
+    render(
+      <PlayerEntryForm
+        novelId="novel"
+        checkpointChapter={1}
+        unlockedThroughChapter={1}
+        locations={[{ id: 'temple', name: '破庙' }]}
+        isPending={false}
+        isTimelineLocked={false}
+        onCheckpointChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole('checkbox', { name: /启用小说专属 D20/ }));
+    expect(screen.getByRole('alert').textContent).toBe(
+      '小说解析尚未完成，请等待解析成功后生成规则。',
+    );
+    expect(screen.queryByText('upstream message')).toBeNull();
+  });
+
   it('allocates a shared template and submits only valid custom integer scores', async () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     render(

@@ -474,9 +474,12 @@ accessible interface while canon, character agency, memory, choices, and the
 open world remain one coherent causal system.
 
 The [D20 preview and evaluation plan](./ADVANCED_RULES_PLAN.md) separates the
-implemented template/DC, server dice, and replay path from optional Laya (Jev)
-type hints and bounded advanced-turn adjudication. Implementation verification
-and semantic quality are separate evidence; no paid comparison or human
+implemented v1/v2 template, server dice, and replay path from optional Laya (Jev)
+type hints and bounded advanced-turn adjudication. V2 uses fixed basic
+capabilities selected from bounded whole-book rule metadata; chapter citations
+remain provenance and existing progress guards remain. Migration 0030 requires
+coordinated Novel/Narrative writer shutdown. Implementation verification and
+semantic quality are separate evidence; no paid comparison or human
 semantic-quality approval is claimed. It does not qualify H4 or replace
 direct DeepSeek journey prose. Any provider comparison requires separate exact-run
 authorization and registered thresholds. Neither model confidence nor a dice

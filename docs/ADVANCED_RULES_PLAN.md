@@ -15,10 +15,12 @@ and semantic adjudication are different uses of that same capability.
 ## Outcome
 
 Provide an optional rules-forward open-world mode without changing the default
-narrative experience. A novel-specific rule template is generated once, owned
-by novel-service, and reused by every authorized reader. Advanced player turns
-are resolved by a server-owned D20 check before the existing narrative model
-renders the outcome.
+narrative experience. Novel Service owns immutable game-rule templates bound to
+the exact canonical-model version, schema version 1, and prompt version. Readers
+reuse only the exact bound template. Existing v1 bindings retain their chapter
+unlock behavior; newly created v2 bindings use the bounded basic vocabulary and
+source-selection behavior below. Advanced player turns are resolved by a
+server-owned D20 check before the existing narrative model renders the outcome.
 
 ## Current D20 responsibilities
 
@@ -26,7 +28,7 @@ This is a novel-specific, D20-inspired preview, not a complete D&D rules engine.
 
 | Responsibility | Current owner and behavior |
 |---|---|
-| Attributes and check difficulty | Novel Service owns one immutable, source-backed template per canon model version. Each supported action type maps to a template attribute and base DC. For a configured adjudication, Laya (Jev) can select only a difficulty band; code maps easy/standard/hard to base DC −5/base DC/base DC +5, clamped to 5–30. The model cannot assign an arbitrary DC. |
+| Attributes and check difficulty | Novel Service owns immutable templates identified by canon-model version, schema version 1, and exact prompt version (`novel-game-rules-v1` or `novel-game-rules-v2`). V1 keeps model-authored labels and its cited-chapter unlock behavior. V2 selects 3–6 capabilities from the fixed vocabulary below using bounded, stably ordered whole-book `world_rules`; server dictionaries supply labels/descriptions, and its citations are provenance only. Each supported action maps to an attribute and base DC. For configured adjudication, Laya (Jev) can select only a difficulty band; code maps easy/standard/hard to base DC −5/base DC/base DC +5, clamped to 5–30. |
 | Eligibility and hard constraints | Narrative Service enforces identity, ownership, reading progress, supported targets, world state, and turn ordering. A successful roll never bypasses these checks. |
 | Die and result | For a check, Narrative's secret-derived die is bound to user, novel, turn number, and request fingerprint. The domain computes `modifier = floor((score - 10) / 2)` and success as `d20 + modifier >= DC`. For `impossible` or `automatic_success`, there is no check result and no die is shown as evidence; the frozen category and server code determine the failed or automatic-success result. The resolution is persisted before prose and replayed for the same key. |
 | Narration | H3/H4 journey generation uses DeepSeek under the repository's provider policy. It receives the resolved check and proposes prose/transitions; server validation remains the commit authority. Failed checks discard action-granted mutations, while world time and scheduled mainline events may still advance. |
@@ -46,12 +48,17 @@ and [Laya (Jev) action hints](./adr/0006-optional-laya-action-hints.md). The
 bounded turn-classification contract is in
 [ADR 0009](./adr/0009-bounded-laya-d20-adjudication.md).
 
-If a cited template chapter is still locked, both services preserve the
-content-free `422 game_rules_unavailable_at_progress`. The Chinese entry form
-guides the reader to continue reading or use narrative mode; this is not a
-generic Novel Service outage. Template generation failure remains a separate
-failure case. Reader profiles and journeys stay private even when readers reuse
-the same canonical novel and ready template.
+For exact prompt version `novel-game-rules-v1`, a cited template chapter still
+locked produces content-free `422 game_rules_unavailable_at_progress`; reading
+further can make that bound v1 template visible. Version `novel-game-rules-v2`
+uses chapter citations as provenance only, but requires a ready novel and
+positive reading progress. If no source-backed world-rule mechanic can support
+a template, or the bounded prompt would exceed 32 KiB, Novel Service returns
+`422 game_rule_sources_unavailable` before taking a generation claim or calling
+a provider. Continuing to read does not automatically repair missing mechanics
+or the size bound; use narrative mode or wait for an independently corrected
+canonical source. This is not a generic service outage. Reader profiles and
+journeys stay private across exact template versions.
 
 ## Bounded Laya (Jev) turn adjudication
 
@@ -100,10 +107,57 @@ reclassified. An unknown database result or lost lease stops processing. If
 prose fails after the decision is frozen, same-key replay reuses it. Disabling
 Laya configuration stops new calls and selects template fallback; it does not
 rewrite frozen results. World-turn prompts advance to version 3 while retaining
-version 1 and 2 replay compatibility. The novel game-rule template remains
-`novel-game-rules-v1`; adjudication metadata has schema version 1. An older
-binary may not understand this advanced metadata, so rollback of those
-journeys is fail-closed and recovery requires a forward deploy.
+version 1 and 2 replay compatibility. Game-rule schema version is 1 for both
+supported prompt versions, `novel-game-rules-v1` and `novel-game-rules-v2`;
+profiles and sessions resolve their exact bound prompt version. Adjudication
+metadata also has schema version 1. An older binary may not understand this
+advanced metadata, so rollback of those journeys is fail-closed and recovery
+requires a forward deploy.
+
+## Versioned basic rules from whole-book world rules
+
+Template v1 remains immutable for profiles and sessions bound to it. New basic
+rules use schema version 1 with exact prompt version `novel-game-rules-v2`; the
+source-bound template prompt remains `novel-game-rules-v1`. V2 receives at most
+64 deterministically ordered canon `world_rules` and selects 3–6 source-backed
+capabilities from the twelve-key vocabulary below, plus bounded numeric values
+and source chapter references. This is a novel-specific subset, not a fixed set
+of six attributes. The server supplies every label and description from its
+fixed dictionary; provider-authored labels, descriptions, or plot prose are
+rejected. This is a compact basic capability set, not a full rules engine or a
+claim that extraction found every rule.
+
+The complete available vocabulary is fixed; each generated template uses only
+the source-supported subset:
+
+| Key | Server label | Basic capability |
+|---|---|---|
+| `root` | 根骨 | Body aptitude and basic resilience |
+| `agility` | 身法 | Movement, evasion, and coordination |
+| `vigor` | 力道 | Force, impact, and sustained stamina |
+| `insight` | 悟性 | Understanding, reasoning, and learning |
+| `fortune` | 福缘 | Chance and environmental opportunities |
+| `strategy` | 谋略 | Situational analysis and planning |
+| `command` | 统御 | Organizing and coordinating action |
+| `loyalty` | 义理 | Commitments, trust, and mutual aid |
+| `resolve` | 心志 | Enduring pressure and maintaining intent |
+| `influence` | 交涉 | Communication, persuasion, and negotiation |
+| `knowledge` | 学识 | Applying acquired knowledge |
+| `craft` | 技艺 | Practical and tool-based skills |
+
+These keys describe capabilities only. They do not reveal hidden plot facts:
+chapter references record provenance and do not unlock narrative content. Existing progress guards on real narrative context, targets, events,
+and hard constraints remain in force; v2 templates require a ready novel and
+positive reading progress. Every existing profile/session continues using its
+exact bound prompt version; existing v1 bindings remain on v1. The canonical
+novel's three-claim generation ceiling is shared across prompt versions and
+serialized by its parent-canon lock; changing prompt versions does not replenish
+attempts.
+
+Migration 0030 is incompatible with the old Novel Service writer. Deployment
+must stop and drain both Novel and Narrative writers before applying it, then
+start compatible versions together. This rollout plumbing and offline checks do
+not establish merge, deployment, paid-provider, or semantic-quality evidence.
 
 ## Qualification remains separate
 
@@ -118,9 +172,11 @@ canon/spoiler/agency violations, latency, cost, and context disclosure; register
 the rubric and improvement threshold before running. Confidence remains
 uncalibrated and never stands for a character's D20 success chance.
 
-No new service, dependency, or database migration is introduced; decision
-category and base DC use the existing world-turn resolution record. Provider
-probability and raw request/response bodies are not persisted.
+The Laya adjudication slice introduces no new service or dependency; its
+category and base DC use the existing world-turn resolution record. It adds no
+database migration of its own. The separate v2 basic-template change does add
+migration 0030. Provider probability and raw request/response bodies are not
+persisted.
 
 ## Product contract
 
@@ -142,9 +198,11 @@ probability and raw request/response bodies are not persisted.
 - The LLM receives the authoritative check outcome and may render prose and
   propose already-validated state transitions; it cannot choose or change the
   roll, DC, attribute, or success result.
-- Every attribute and action rule carries source chapters. Template facts are
-  filtered by the reader's server-owned progress. Advanced mode is unavailable
-  when filtering would leave an incomplete action mapping.
+- Every attribute and action rule carries source chapters. For v1, template
+  facts are filtered by the reader's server-owned progress; v1 advanced mode is
+  unavailable when filtering would leave an incomplete action mapping. V2
+  citations establish provenance only and do not gate the fixed basic template;
+  its actual narrative context and action eligibility remain progress-guarded.
 - Player profiles and world sessions bind an exact `canon_model_version` and
   template schema/prompt version. A newer canon model never silently changes an
   existing journey's rules.
@@ -158,7 +216,9 @@ probability and raw request/response bodies are not persisted.
    complete action-to-attribute/DC mapping.
 2. Add a novel-service-owned `novel_game_rule_templates` table. Rows use a
    generating/ready/failed state, attempt fencing, and an expiring lease so only
-   one replica performs provider work for a novel/model version.
+   one replica performs provider work for an exact novel/model/prompt-version
+   identity. V2 claim accounting is additionally serialized across prompt
+   variants by canonical novel and model version.
 3. Add repository ports for claim, renew/complete/fail, and ready reads. PostgreSQL
    remains an adapter; application handlers depend only on the repository trait.
 4. Generate the template on first explicit advanced-mode request from the
@@ -166,11 +226,15 @@ probability and raw request/response bodies are not persisted.
    Validate model output before publishing the immutable ready template.
 5. Expose authenticated internal endpoints to request/read the progress-filtered
    template. Do not permit narrative-service to read novel-service tables.
-6. Bound prompt and response sizes, allow at most one logical generation call
-   per leased claim and three persisted claims per template, renew the lease
-   while the provider call is in flight, and emit generation latency/outcome
-   logs and existing LLM-operation metrics. Shared transport retries remain the
-   retry policy for that one logical call and do not create another generation.
+6. Bound prompt and response sizes. The current writer permits at most three persisted claims per canonical novel
+   and canon-model version across both prompt versions, including consumed v1
+   claims, serialized under the parent-canon lock. Claim admission has a fixed five-second database-transaction deadline,
+   no retry, and must not dispatch provider work after an unknown commit outcome;
+   an ambiguous outcome may leave a durable generating claim and does not refill
+   the budget. Renew the generation lease while provider work is in flight. The
+   existing LLM adapter, provider-call deadlines, response limits, and retry
+   policy remain unchanged; admission timeout does not authorize dispatch.
+   Shared transport retries remain within one logical claim.
 7. A failed or unavailable template affects only the explicit advanced request.
    It never changes novel readiness and never blocks narrative-mode entry.
 
@@ -256,13 +320,15 @@ meaning of a successful check explicit before code was written.
 Post-implementation review fixed three correctness edges: progress now exposes
 an exact immutable template or none (never a changing shape under one version),
 technical provider failures cannot be used to reroll the same action/state, and
-failed template generation has a three-claim logical-generation ceiling (one
+failed v1 template generation has a three-claim logical-generation ceiling (one
 logical provider call per claim; bounded transport retries may replay that same
-request). The default narrative path performs no template generation or dice
-work.
+request). V2 uses the shared cross-prompt canonical budget described above. The
+default narrative path performs no template generation or dice work.
 
 ADR 0009 accepts only the bounded adjudication exception to ADR 0001 as a
-structural private preview. Local checks and independent code review passed;
-workspace-wide Clippy and browser checks also passed. CI, merge and
-deployment status remain tracked separately in
+structural private preview. The recorded local checks and independent code
+review apply to that v1/Laya implementation, not to v2 templates or migration
+0030. V2 still requires its own runtime and required-CI evidence; no live-provider
+or deployment result is asserted here. CI, merge, and deployment status for ADR
+0009 remain tracked separately in
 [#418](https://github.com/Wisdoverse/novelworld/issues/418).

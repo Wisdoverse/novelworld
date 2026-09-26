@@ -14,6 +14,7 @@ Use this file as a map. Do not load the full documentation set for every task.
 | When changing | Read |
 |---|---|
 | Supported behavior, claims, or evidence | [`docs/PRODUCT_CONTRACT.md`](docs/PRODUCT_CONTRACT.md), [`SPEC.md`](SPEC.md), and [`docs/SPEC_CONFORMANCE.md`](docs/SPEC_CONFORMANCE.md) |
+| Advanced rules, prompt versions, or D20 migration | [`docs/ADVANCED_RULES_PLAN.md`](docs/ADVANCED_RULES_PLAN.md), [`docs/adr/0010-versioned-basic-game-rules.md`](docs/adr/0010-versioned-basic-game-rules.md), and [`DEPLOY.md`](DEPLOY.md) |
 | Service, data, or dependency boundaries | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | Tests, CI, review, or contribution workflow | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | Deployment, configuration, upgrade, or rollback | [`DEPLOY.md`](DEPLOY.md), [`.env.example`](.env.example), and [`docs/OPERATIONS.md`](docs/OPERATIONS.md) |
