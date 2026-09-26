@@ -294,11 +294,17 @@ UUID v4 `Idempotency-Key` 后，输入脚本
 指标按受控的 `service/provider/model/operation/mode/status` 标签记录逻辑
 请求、实际 provider 尝试、重试、延迟、首 token、usage 缺失、输入/输出/
 缓存命中 token，以及 cached-input/uncached-input/output 计费 token。指标不
-包含 prompt、URL、错误正文、用户或小说标识。成本在查询时用
-`LLM_PRICING_USD_PER_MILLION` 中当前 provider/model 价格乘计费 token；
-代码不内置会过期的价格表。设置页的管理员统计卡从 Prometheus 查询近 30 天
-增量：页面语言以 `zh` 开头时使用配置的 `USD_CNY_RATE` 显示人民币，其他
-语言显示美元。未配置价格或汇率时仍显示 token，并明确标出未定价部分。
+包含 prompt、URL、错误正文、用户或小说标识。设置页按当前 Key 从 Prometheus
+查询近 30 天增量，以随构建发布、带官网来源和核验日期的价格快照重估已报告
+计费类别。中国区人民币、国际区美元分别计算，无需汇率；峰谷/上下文/思考
+档位缺少逐次信息时显示区间。未知单价不视为免费；Coding/Token Plan 单列
+套餐月费报价，不由累计 token 推算实付费用或剩余额度。
+
+`LLM_PRICING_USD_PER_MILLION` 和 `LLM_PRICING_CNY_PER_MILLION` 可显式覆盖
+普通 API 的精确 provider/model 单价，同键冲突或套餐 token 单价使启动失败。
+`USD_CNY_RATE` 仅用于旧版点估算字段的可选换算。报价核验、更新流程、未统计
+费用和回滚边界见 [LLM 计费估算](./docs/LLM_PRICING.md)。这些设置不改变冻结
+Diagnostic 的价格、预算或证据。
 
 H3 发布样本使用版本化策略校验：
 

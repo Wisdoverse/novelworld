@@ -1,0 +1,638 @@
+{
+  "verified_on": "2026-09-26",
+  "models": {
+    "deepseek/deepseek-flash": {
+      "currency": "USD",
+      "cached_input": [
+        "0.003",
+        "0.006"
+      ],
+      "uncached_input": [
+        "0.15",
+        "0.30"
+      ],
+      "output": [
+        "0.60",
+        "1.20"
+      ],
+      "source_url": "https://api-docs.deepseek.com/quick_start/pricing/",
+      "note": "V4.1-Flash 官网峰谷价区间。现有汇总未保留每次调用时间，按当前价格重估已报告计费类别，不代表历史账单上下界。"
+    },
+    "deepseek/deepseek-v4-flash": {
+      "currency": "USD",
+      "cached_input": [
+        "0.003",
+        "0.006"
+      ],
+      "uncached_input": [
+        "0.15",
+        "0.30"
+      ],
+      "output": [
+        "0.60",
+        "1.20"
+      ],
+      "source_url": "https://api-docs.deepseek.com/quick_start/pricing/",
+      "note": "官网确认旧名称当前由 V4.1-Flash 服务并按 Flash 计费。峰谷价区间；不能还原旧模型或历史价格下的账单。"
+    },
+    "deepseek/deepseek-v4-flash-vision-exp": {
+      "currency": "USD",
+      "cached_input": [
+        "0.003",
+        "0.006"
+      ],
+      "uncached_input": [
+        "0.15",
+        "0.30"
+      ],
+      "output": [
+        "0.60",
+        "1.20"
+      ],
+      "source_url": "https://api-docs.deepseek.com/quick_start/pricing/",
+      "note": "官网确认旧名称当前由 V4.1-Flash 服务并按 Flash 计费。峰谷价区间；不能还原旧模型或历史价格下的账单。"
+    },
+    "deepseek/deepseek-v4-pro": {
+      "currency": "USD",
+      "cached_input": [
+        "0.022",
+        "0.044"
+      ],
+      "uncached_input": [
+        "0.66",
+        "1.32"
+      ],
+      "output": [
+        "1.98",
+        "3.96"
+      ],
+      "source_url": "https://api-docs.deepseek.com/quick_start/pricing/",
+      "note": "V4-Pro-0813 官网峰谷价区间。调用时间未逐次记录；仅当前价格重估，不改变已冻结 Diagnostic 的注册价格或预算。"
+    },
+    "openai/gpt-4o-mini": {
+      "currency": "USD",
+      "cached_input": [
+        "0.075",
+        "0.075"
+      ],
+      "uncached_input": [
+        "0.15",
+        "0.15"
+      ],
+      "output": [
+        "0.60",
+        "0.60"
+      ],
+      "source_url": "https://developers.openai.com/api/docs/models/gpt-4o-mini",
+      "note": "标准实时 Chat Completions token 标价；不含 Batch、Fast、工具费用或账户优惠。"
+    },
+    "zhipu/glm-5.3": {
+      "currency": "CNY",
+      "cached_input": [
+        "2",
+        "2"
+      ],
+      "uncached_input": [
+        "8",
+        "8"
+      ],
+      "output": [
+        "28",
+        "28"
+      ],
+      "source_url": "https://docs.bigmodel.cn/cn/guide/start/pricing",
+      "note": "智谱中国 API 人民币标价。缓存存储费官网限时免费，后续存储费用未纳入 token 估算；Coding Plan 另行报价。"
+    },
+    "zhipu/glm-5.3-flash": {
+      "currency": "CNY",
+      "cached_input": [
+        "0.23",
+        "0.23"
+      ],
+      "uncached_input": [
+        "0.8",
+        "0.8"
+      ],
+      "output": [
+        "2.8",
+        "2.8"
+      ],
+      "source_url": "https://docs.bigmodel.cn/cn/guide/start/pricing",
+      "note": "智谱中国 API 人民币标价。缓存存储费官网限时免费，后续存储费用未纳入 token 估算。"
+    },
+    "zai/glm-5.3": {
+      "currency": "USD",
+      "cached_input": [
+        "0.26",
+        "0.26"
+      ],
+      "uncached_input": [
+        "1.4",
+        "1.4"
+      ],
+      "output": [
+        "4.4",
+        "4.4"
+      ],
+      "source_url": "https://docs.z.ai/guides/overview/pricing",
+      "note": "Z.ai 国际 API 美元标价。缓存存储限时免费；工具费用未纳入 token 估算；Coding Plan 另行报价。"
+    },
+    "zai/glm-5.3-flash": {
+      "currency": "USD",
+      "cached_input": [
+        "0.03",
+        "0.03"
+      ],
+      "uncached_input": [
+        "0.15",
+        "0.15"
+      ],
+      "output": [
+        "0.50",
+        "0.50"
+      ],
+      "source_url": "https://docs.z.ai/guides/overview/pricing",
+      "note": "Z.ai 国际 API 美元标价；不含缓存存储、工具费用或账户优惠。"
+    },
+    "minimax_cn/MiniMax-M3": {
+      "currency": "CNY",
+      "cached_input": [
+        "0.42",
+        "0.84"
+      ],
+      "uncached_input": [
+        "2.1",
+        "4.2"
+      ],
+      "output": [
+        "8.4",
+        "16.8"
+      ],
+      "source_url": "https://platform.minimax.cn/docs/guides/pricing-paygo",
+      "note": "中国 Standard 服务有效标价，按单次输入 ≤512K / >512K 分档。汇总未保留请求长度，显示区间；不含 Priority 服务或单独的缓存写入费用。"
+    },
+    "minimax_cn/MiniMax-M2.7": {
+      "currency": "CNY",
+      "cached_input": [
+        "0.42",
+        "0.42"
+      ],
+      "uncached_input": [
+        "2.1",
+        "2.1"
+      ],
+      "output": [
+        "8.4",
+        "8.4"
+      ],
+      "source_url": "https://platform.minimax.cn/docs/guides/pricing-paygo",
+      "note": "中国 API 输入、缓存读取、输出标价。缓存写入另有单价且未单独统计，本估算不代表完整账单。"
+    },
+    "minimax_cn/MiniMax-M2.7-highspeed": {
+      "currency": "CNY",
+      "cached_input": [
+        "0.42",
+        "0.42"
+      ],
+      "uncached_input": [
+        "4.2",
+        "4.2"
+      ],
+      "output": [
+        "16.8",
+        "16.8"
+      ],
+      "source_url": "https://platform.minimax.cn/docs/guides/pricing-paygo",
+      "note": "中国 highspeed API 标价。缓存写入未单独统计；不套用普通 M2.7 或国际版价格。"
+    },
+    "minimax_global/MiniMax-M3": {
+      "currency": "USD",
+      "cached_input": [
+        "0.06",
+        "0.12"
+      ],
+      "uncached_input": [
+        "0.30",
+        "0.60"
+      ],
+      "output": [
+        "1.20",
+        "2.40"
+      ],
+      "source_url": "https://platform.minimax.io/docs/guides/pricing-paygo",
+      "note": "国际 Standard 服务有效标价，按单次输入 ≤512K / >512K 分档。汇总未保留请求长度，显示区间；不含 Priority 服务或单独的缓存写入费用。"
+    },
+    "minimax_global/MiniMax-M2.7": {
+      "currency": "USD",
+      "cached_input": [
+        "0.06",
+        "0.06"
+      ],
+      "uncached_input": [
+        "0.30",
+        "0.30"
+      ],
+      "output": [
+        "1.20",
+        "1.20"
+      ],
+      "source_url": "https://platform.minimax.io/docs/guides/pricing-paygo",
+      "note": "国际 API 输入、缓存读取、输出标价。缓存写入另有单价且未单独统计，本估算不代表完整账单。"
+    },
+    "minimax_global/MiniMax-M2.7-highspeed": {
+      "currency": "USD",
+      "cached_input": [
+        "0.06",
+        "0.06"
+      ],
+      "uncached_input": [
+        "0.60",
+        "0.60"
+      ],
+      "output": [
+        "2.40",
+        "2.40"
+      ],
+      "source_url": "https://platform.minimax.io/docs/guides/pricing-paygo",
+      "note": "国际 highspeed API 标价。缓存写入未单独统计；不套用普通 M2.7 或中国版价格。"
+    },
+    "qwen_cn/qwen-plus": {
+      "currency": "CNY",
+      "cached_input": [
+        "0.16",
+        "0.96"
+      ],
+      "uncached_input": [
+        "0.8",
+        "4.8"
+      ],
+      "output": [
+        "2",
+        "64"
+      ],
+      "source_url": "https://help.aliyun.com/zh/model-studio/model-pricing",
+      "note": "北京中国 API 标价，合并请求长度和思考模式档位；隐式缓存按对应输入价 20% 计算（官网 Context Cache 规则）。不含显式缓存创建、保留费或 Batch 优惠。"
+    },
+    "qwen_cn/qwen-flash": {
+      "currency": "CNY",
+      "cached_input": [
+        "0.03",
+        "0.24"
+      ],
+      "uncached_input": [
+        "0.15",
+        "1.2"
+      ],
+      "output": [
+        "1.5",
+        "12"
+      ],
+      "source_url": "https://help.aliyun.com/zh/model-studio/model-pricing",
+      "note": "北京中国 API 标价，按单次输入长度分档；隐式缓存输入价为对应普通输入价的 20%。不含显式缓存创建、保留费或 Batch 优惠。"
+    },
+    "qwen_cn/qwen3-coder-plus": {
+      "currency": "CNY",
+      "cached_input": [
+        "0.8",
+        "4"
+      ],
+      "uncached_input": [
+        "4",
+        "20"
+      ],
+      "output": [
+        "16",
+        "200"
+      ],
+      "source_url": "https://help.aliyun.com/zh/model-studio/model-pricing",
+      "note": "北京中国 API 标价，≤32K 至 >256K 输入分档；隐式缓存输入价为对应普通输入价的 20%。不含显式缓存创建、保留费或 Batch 优惠。"
+    },
+    "qwen_global/qwen-plus": {
+      "currency": "USD",
+      "cached_input": [
+        "0.08",
+        "0.24"
+      ],
+      "uncached_input": [
+        "0.4",
+        "1.2"
+      ],
+      "output": [
+        "1.2",
+        "12"
+      ],
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/model-pricing",
+      "note": "新加坡 International 部署美元标价，合并请求长度和思考模式档位；隐式缓存输入价为对应普通输入价的 20%。不覆盖其他 Global/EU/US 地域、显式缓存创建或账户优惠。"
+    },
+    "qwen_global/qwen-flash": {
+      "currency": "USD",
+      "cached_input": [
+        "0.01",
+        "0.05"
+      ],
+      "uncached_input": [
+        "0.05",
+        "0.25"
+      ],
+      "output": [
+        "0.4",
+        "2"
+      ],
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/model-pricing",
+      "note": "新加坡 International 部署美元标价，按请求长度分档；隐式缓存输入价为对应普通输入价的 20%。不覆盖其他地域、显式缓存创建或账户优惠。"
+    },
+    "qwen_global/qwen3-coder-plus": {
+      "currency": "USD",
+      "cached_input": [
+        "0.2",
+        "1.2"
+      ],
+      "uncached_input": [
+        "1",
+        "6"
+      ],
+      "output": [
+        "5",
+        "60"
+      ],
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/model-pricing",
+      "note": "新加坡 International 部署美元标价，按请求长度分档；隐式缓存输入价为对应普通输入价的 20%。不覆盖其他地域、显式缓存创建或账户优惠。"
+    },
+    "kimi_cn/kimi-k2.6": {
+      "currency": "CNY",
+      "cached_input": [
+        "1.1",
+        "1.1"
+      ],
+      "uncached_input": [
+        "6.5",
+        "6.5"
+      ],
+      "output": [
+        "27",
+        "27"
+      ],
+      "source_url": "https://platform.kimi.com/docs/pricing/chat",
+      "note": "Kimi 中国 API 标价，缓存命中与普通输入分别计价；不套用 Coding Plan 或 K3 缓存规则。"
+    },
+    "kimi_global/kimi-k2.6": {
+      "currency": "USD",
+      "cached_input": [
+        "0.16",
+        "0.16"
+      ],
+      "uncached_input": [
+        "0.95",
+        "0.95"
+      ],
+      "output": [
+        "4",
+        "4"
+      ],
+      "source_url": "https://platform.kimi.ai/",
+      "note": "Kimi 国际 API 官网模型页标价；不套用中国 API 或 Coding Plan 费用。"
+    },
+    "stepfun_global/step-3.5-flash": {
+      "currency": "USD",
+      "cached_input": [
+        "0.02",
+        "0.02"
+      ],
+      "uncached_input": [
+        "0.10",
+        "0.10"
+      ],
+      "output": [
+        "0.30",
+        "0.30"
+      ],
+      "source_url": "https://platform.stepfun.ai/docs/en/guides/pricing/details",
+      "note": "阶跃国际 API 美元标价；Step Plan 固定月费另行报价，未上报缓存类别的调用不能还原缓存优惠。"
+    },
+    "qianfan/ernie-4.5-turbo-128k": {
+      "currency": "CNY",
+      "cached_input": null,
+      "uncached_input": [
+        "0.8",
+        "0.8"
+      ],
+      "output": [
+        "3.2",
+        "3.2"
+      ],
+      "source_url": "https://cloud.baidu.com/product-s/qianfan_home",
+      "note": "千帆官网产品页 ERNIE 4.5 Turbo 128K 输入/输出标价。未核实此精确模型的缓存价，缓存用量留作未定价，不混用 Preview 模型报价。"
+    },
+    "stepfun/step-3.5-flash": {
+      "currency": "CNY",
+      "cached_input": [
+        "0.14",
+        "0.14"
+      ],
+      "uncached_input": [
+        "0.70",
+        "0.70"
+      ],
+      "output": [
+        "2.10",
+        "2.10"
+      ],
+      "source_url": "https://platform.stepfun.com/docs/zh/guides/pricing/details",
+      "note": "阶跃中国 API 人民币输入、缓存命中、输出标价；Step Plan 月费另行报价，不能用 token 反推订阅账单。"
+    }
+  },
+  "subscriptions": {
+    "zhipu_coding": {
+      "source_url": "https://zcode.z.ai/en/docs/configuration",
+      "note": "当前中国版月付标价；旧 V2 的 49/149/469 元不作为新用户报价。GLM Coding Plan 限指定编码工具，NovelWorld 后端用途未获条款许可；报价不授予用途授权。点数、周期、活动价和 Extra Usage 以账户为准。",
+      "plans": [
+        {
+          "name": "Lite",
+          "currency": "CNY",
+          "monthly": "118"
+        },
+        {
+          "name": "Pro",
+          "currency": "CNY",
+          "monthly": "538"
+        },
+        {
+          "name": "Max",
+          "currency": "CNY",
+          "monthly": "1078"
+        }
+      ]
+    },
+    "zai_coding": {
+      "source_url": "https://zcode.z.ai/en",
+      "note": "国际版官网月付标价，临时折扣另计。GLM Coding Plan 限指定编码工具，NovelWorld 后端用途未获条款许可；报价不授予用途授权。实际购入层级、点数与 Extra Usage 未记录，不能由 token 反推账单或剩余额度。",
+      "plans": [
+        {
+          "name": "Lite 标价",
+          "currency": "USD",
+          "monthly": "18"
+        },
+        {
+          "name": "Pro 标价",
+          "currency": "USD",
+          "monthly": "80"
+        },
+        {
+          "name": "Max 标价",
+          "currency": "USD",
+          "monthly": "168"
+        }
+      ]
+    },
+    "minimax_coding_cn": {
+      "source_url": "https://platform.minimax.cn/docs/guides/pricing-token-plan",
+      "note": "中国 Token Plan 官方文档月付标价；下单页或活动报价可能不同，以账户为准。文本、图像、语音共享额度；订阅层级、5小时/周配额窗口和 Extra Usage 未记录，不能由 token 反推实际费用或剩余额度。",
+      "plans": [
+        {
+          "name": "Plus 标价",
+          "currency": "CNY",
+          "monthly": "49"
+        },
+        {
+          "name": "Max 标价",
+          "currency": "CNY",
+          "monthly": "119"
+        },
+        {
+          "name": "Ultra 标价",
+          "currency": "CNY",
+          "monthly": "469"
+        }
+      ]
+    },
+    "minimax_coding_global": {
+      "source_url": "https://platform.minimax.io/docs/guides/pricing-token-plan",
+      "note": "国际 Token Plan 官方文档月付标价；下单页或活动报价可能不同，以账户为准。文本、图像、语音共享额度；订阅层级、5小时/周配额窗口和 Extra Usage 未记录，不能由 token 反推实际费用或剩余额度。",
+      "plans": [
+        {
+          "name": "Plus 标价",
+          "currency": "USD",
+          "monthly": "22"
+        },
+        {
+          "name": "Max 标价",
+          "currency": "USD",
+          "monthly": "55"
+        },
+        {
+          "name": "Ultra 标价",
+          "currency": "USD",
+          "monthly": "132"
+        }
+      ]
+    },
+    "aliyun_coding_cn": {
+      "source_url": "https://help.aliyun.com/zh/model-studio/coding-plan",
+      "note": "当前 Pro 正常月付标价 200 元；首购/续费优惠以实际下单页为准。Lite 已停新购及续费。仅限指定编码工具，条款禁止自定义应用后端/API 自动调用及多人共享，不能用于 NovelWorld 后端。累计 token 不能推算配额或实际账单。",
+      "plans": [
+        {
+          "name": "Pro 月付标价",
+          "currency": "CNY",
+          "monthly": "200"
+        }
+      ]
+    },
+    "aliyun_coding_global": {
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/coding-plan",
+      "note": "国际 Pro 月付标价 50 美元，以实际下单页为准。限交互式编码工具，禁止自动化脚本、应用后端、非交互式调用及账号共享，不能用于 NovelWorld 后端。累计 token 不能推算分时/周/月请求配额或实际账单。",
+      "plans": [
+        {
+          "name": "Pro 月付标价",
+          "currency": "USD",
+          "monthly": "50"
+        }
+      ]
+    },
+    "volcengine_coding": {
+      "source_url": "https://docs.volcengine.com/docs/ark/coding-plan-personal-get-started",
+      "note": "方舟个人 Coding Plan 的 Lite/Pro 月费尚未核实。点数、请求次数和周期并非普通 token 单价；具体允许用途、账号层级和额外费用以官方条款及账单为准。",
+      "plans": []
+    },
+    "qianfan_coding": {
+      "source_url": "https://cloud.baidu.com/news/notice_e839687d-1cf7-4a5b-afbd-ea2f7bcd325d",
+      "note": "官网公告：2026-06-25 起不可续订，已有套餐可使用至有效期结束；未核实历史购入月费，不能由 token 计算订阅账单。",
+      "plans": []
+    },
+    "kimi_coding_cn": {
+      "source_url": "https://www.kimi.com/code/docs/kimi-code/membership.html",
+      "note": "Kimi Code 中国会员套餐月费未核实，限指定编码客户端。账户等级、共享额度、点数及 Extra Usage 未记录，不可由 token 反推账单；不映射普通 Kimi API 单价。",
+      "plans": []
+    },
+    "kimi_coding_global": {
+      "source_url": "https://www.kimi.com/code/docs/kimi-code/membership.html",
+      "note": "Kimi Code 国际会员套餐月费未核实，限指定编码客户端。账户等级、共享额度、点数及 Extra Usage 未记录，不可由 token 反推账单；不映射普通 Kimi API 单价。",
+      "plans": []
+    },
+    "stepfun_coding": {
+      "source_url": "https://platform.stepfun.com/docs/zh/step-plan/overview",
+      "note": "中国 Flash 计划月付报价。月度点数会清零；购入层级、加量包及额度周期未知，不能从 token 推算实付月费或剩余点数。",
+      "plans": [
+        {
+          "name": "Flash Mini",
+          "currency": "CNY",
+          "monthly": "49"
+        },
+        {
+          "name": "Flash Plus",
+          "currency": "CNY",
+          "monthly": "99"
+        },
+        {
+          "name": "Flash Pro",
+          "currency": "CNY",
+          "monthly": "199"
+        },
+        {
+          "name": "Flash Max",
+          "currency": "CNY",
+          "monthly": "699"
+        }
+      ]
+    },
+    "stepfun_coding_global": {
+      "source_url": "https://platform.stepfun.ai/docs/en/step-plan/overview",
+      "note": "国际 Flash 计划月付报价。月度点数会清零；购入层级、加量包及额度周期未知，不能从 token 推算实付月费或剩余点数；不以推测汇率换算中国区价格。",
+      "plans": [
+        {
+          "name": "Flash Mini",
+          "currency": "USD",
+          "monthly": "6.99"
+        },
+        {
+          "name": "Flash Plus",
+          "currency": "USD",
+          "monthly": "9.99"
+        },
+        {
+          "name": "Flash Pro",
+          "currency": "USD",
+          "monthly": "29"
+        },
+        {
+          "name": "Flash Max",
+          "currency": "USD",
+          "monthly": "99"
+        }
+      ]
+    }
+  },
+  "unavailable": {
+    "hunyuan/hunyuan-turbos-latest": {
+      "source_url": "https://cloud.tencent.com/document/product/1729/131925",
+      "note": "此旧模型已于 2026-06-22 下线，旧平台将于 2026-09-30 停服；历史标价不能作为当前可调用价格。请核对官方迁移安排及精确模型。"
+    },
+    "doubao/doubao-seed-2-1-pro-260628": {
+      "source_url": "https://docs.volcengine.com/docs/ark/model-list",
+      "note": "官方确认模型存在，本次未核实此精确版本的价格正文；不套用 Seed 2.0 或其他平台报价。可通过运维显式配置单价。"
+    },
+    "siliconflow/Qwen/Qwen3-235B-A22B-Instruct-2507": {
+      "source_url": "https://api-docs.siliconflow.cn/docs/release-notes/overview",
+      "note": "官方发布记录显示此模型已于 2026-05-15 下线；不以其他模型、其他平台或历史报价代替当前价格。"
+    }
+  }
+}

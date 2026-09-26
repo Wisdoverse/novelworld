@@ -68,6 +68,38 @@ See [MiniMax CN](https://platform.minimaxi.com/subscribe/token-plan),
 [Ark setup](https://docs.volcengine.com/docs/ark/coding-plan-personal-get-started?lang=zh)
 and [Qianfan setup](https://cloud.baidu.com/doc/qianfan/s/ymmyn5kc2).
 
+## Cost estimates and price snapshot
+
+The administrator usage view estimates token costs from a bundled, offline
+snapshot of official public prices. API prices are per million billable tokens;
+estimates use the exact provider/model metric labels and show USD and CNY totals
+separately. They apply the snapshot's current prices to the reported usage window,
+not the prices or account terms that applied when each request ran. If a provider
+price varies by request time, context length or another tier that usage metrics do
+not retain, the view shows the corresponding range; it cannot reconstruct an
+invoice. Missing cache-class usage, cache writes/storage, tools, taxes, discounts,
+subscription quota, overage and other provider charges may also make the estimate
+incomplete. Unknown or retired model prices remain unpriced, never zero.
+
+Subscription rows are official monthly price references only. They do not infer
+which plan was purchased, remaining quota or eligible use, and are never mapped to
+ordinary API token prices. Plan restrictions above still apply.
+
+Operators may set `LLM_PRICING_USD_PER_MILLION` or
+`LLM_PRICING_CNY_PER_MILLION` to replace the snapshot price for an exact
+`provider/model` key. An override takes precedence over the snapshot for that key;
+configuring the same key in both currencies is rejected. An override is an
+operator estimate, not an official account bill. `USD_CNY_RATE` is optional and
+only enables conversion of fixed-price totals; without it, native USD and CNY
+estimates remain separate. Price refreshes and overrides affect this usage view
+only and never change a registered or Frozen Diagnostic's prices, budget or
+evidence.
+
+The [pricing guide](./LLM_PRICING.md) and
+[official snapshot](../services/user-service/src/infrastructure/llm-prices.json)
+own the verification date, source links, model prices, subscription quotes and
+unavailable-price entries.
+
 ## Transport and evidence
 
 The existing shared OpenAI-compatible adapter handles synchronous and streaming

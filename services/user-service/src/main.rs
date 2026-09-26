@@ -16,7 +16,7 @@ use user_service::{
         diagnostic_budget::registration_from_environment,
         http::privacy::AgentPrivacyClient,
         llm::LlmClientTester,
-        llm_usage::{pricing_from_config, PrometheusLlmUsageReader},
+        llm_usage::{pricing_from_environment, PrometheusLlmUsageReader},
         persistence::{
             pg_diagnostic_budget::PgDiagnosticBudgetRepository, pg_user_repo::PgUserRepository,
             PgReadinessProbe,
@@ -189,8 +189,9 @@ async fn run_body(provision: bool) -> Result<()> {
                     .unwrap_or_else(|_| "http://prometheus:9090".into()),
                 30,
             )?),
-            pricing: pricing_from_config(
+            pricing: pricing_from_environment(
                 &std::env::var("LLM_PRICING_USD_PER_MILLION").unwrap_or_else(|_| "{}".into()),
+                &std::env::var("LLM_PRICING_CNY_PER_MILLION").unwrap_or_else(|_| "{}".into()),
                 std::env::var("USD_CNY_RATE").ok().as_deref(),
             )?,
             environment_llm_config,

@@ -561,6 +561,11 @@ Scope:
 - Measure successful-journey and return-to-world cohorts, quality guardrails,
   unit cost, quota fairness, and support burden. Stop expanding scope when it
   does not improve the pre-registered outcome.
+- Keep [official provider quotes](./LLM_PRICING.md) region-, model-, currency-,
+  and date-specific. Current-token estimates and subscription price references
+  do not establish actual paid spend, remaining quotas, or historical bills;
+  request-level billing reconciliation and cost-spike decisions require their
+  own evidence before they can meet this horizon's exit criteria.
 - Measure the H0 clean-checkout verification path's CI duration and flake rate
   before optimizing developer workflow.
 
