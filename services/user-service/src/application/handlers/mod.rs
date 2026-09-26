@@ -346,7 +346,11 @@ impl AuthHandler {
         let key = api_key
             .map(str::trim)
             .filter(|key| !key.is_empty())
-            .or_else(|| current.as_ref().map(|config| config.api_key.as_str()))
+            .or_else(|| {
+                current
+                    .as_ref()
+                    .and_then(|config| config.reusable_key_for(provider))
+            })
             .unwrap_or_default();
         let config = RuntimeLlmConfig::for_settings(provider, model, key, thinking_enabled)
             .map_err(AuthError::Validation)?;

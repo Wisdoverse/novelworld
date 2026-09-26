@@ -13,6 +13,7 @@ reader does not have to reconcile several partially overlapping documents.
 | Current clause-by-clause implementation evidence | [SPEC conformance ledger](./SPEC_CONFORMANCE.md) |
 | System boundaries and ownership | [Architecture](./ARCHITECTURE.md) |
 | Local or private-preview deployment | [Deployment guide](../DEPLOY.md) |
+| LLM APIs, regions, Coding/Token Plans and credential switching | [LLM provider configuration](./LLM_PROVIDERS.md) |
 | Health, monitoring, and recovery entry points | [Operations runbook](./OPERATIONS.md) |
 | Security reporting and controls | [Security policy](../SECURITY.md) and [threat model](./THREAT_MODEL.md) |
 | Planned work and exit evidence | [Roadmap](./ROADMAP.md) |

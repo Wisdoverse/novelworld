@@ -62,6 +62,13 @@ operations.
 
 ## Responsibility boundary
 
+Protected Settings includes domestic model APIs and distinct CN/international
+Coding/Token Plan presets where official endpoints exist. Model suggestions are
+editable account IDs, and switching provider, region or plan requires a newly
+entered Key. This is configuration/transport compatibility, not live-model
+qualification or permission to use a coding subscription in an application backend;
+see [provider configuration and limits](./LLM_PROVIDERS.md).
+
 The operator must:
 
 - admit only trusted users, keep the service off the public Internet, and add

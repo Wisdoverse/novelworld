@@ -581,6 +581,7 @@ gain and cost, and include migration, compatibility, rollback, and post-change
 evidence.
 
 - **Future mainstream-LLM direction:** expand across vendors incrementally
+  beyond the [current regional API/Coding Plan configuration presets](./LLM_PROVIDERS.md),
   through a versioned provider/model/capability matrix, covering
   OpenAI-compatible and, where needed, native APIs. Reuse the domain ports and
   qualify streaming, structured output, retry, deadlines, budgets, secrets,

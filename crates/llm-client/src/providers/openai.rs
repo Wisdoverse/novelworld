@@ -60,15 +60,42 @@ impl OpenAIProvider {
         OpenAIRequest {
             model: request.model.clone(),
             messages: request.messages.clone(),
-            temperature: request.temperature,
+            temperature: if self.host_is(&[
+                "api.moonshot.cn",
+                "api.moonshot.ai",
+                "api.kimi.com",
+                "api.kimi.ai",
+            ]) {
+                None
+            } else {
+                request.temperature
+            },
             max_tokens: request.max_tokens,
             stream,
             stream_options: stream.then_some(StreamOptions {
                 include_usage: true,
             }),
-            response_format: (!stream && request.json_mode)
+            response_format: (!stream && request.json_mode && !self.is_minimax())
                 .then(|| serde_json::json!({"type": "json_object"})),
-            thinking: self.thinking_control(request.thinking),
+            thinking: if self.is_glm_53(&request.model) {
+                Some(serde_json::json!({"type": "enabled"}))
+            } else if self.is_minimax() && request.model == "MiniMax-M3" {
+                Some(
+                    serde_json::json!({"type": if request.thinking.unwrap_or(false) { "adaptive" } else { "disabled" }}),
+                )
+            } else if self.host_is(&["api.moonshot.cn", "api.moonshot.ai"])
+                && request.model != "kimi-k2.6"
+            {
+                None
+            } else {
+                self.thinking_control(request.thinking)
+            },
+            enable_thinking: (self.is_qwen()
+                && !request.model.contains("coder")
+                && request.model.starts_with("qwen"))
+            .then_some(request.thinking.unwrap_or(false)),
+            reasoning_split: self.is_minimax().then_some(true),
+            reasoning_effort: self.is_glm_53(&request.model).then_some("low"),
         }
     }
 
@@ -100,7 +127,40 @@ impl OpenAIProvider {
         if let Some(base) = &self.test_dispatch_base {
             return format!("{base}{path}");
         }
-        format!("{}{path}", self.base_url)
+        let base = self.base_url.trim_end_matches('/');
+        let explicit_base = reqwest::Url::parse(base)
+            .ok()
+            .is_some_and(|url| !matches!(url.path(), "" | "/"));
+        let path = if explicit_base {
+            path.strip_prefix("/v1").unwrap_or(path)
+        } else {
+            path
+        };
+        format!("{base}{path}")
+    }
+
+    fn host_is(&self, hosts: &[&str]) -> bool {
+        reqwest::Url::parse(&self.base_url)
+            .ok()
+            .is_some_and(|url| url.host_str().is_some_and(|host| hosts.contains(&host)))
+    }
+
+    fn is_minimax(&self) -> bool {
+        self.host_is(&["api.minimax.cn", "api.minimax.io", "api.minimaxi.com"])
+    }
+
+    fn is_qwen(&self) -> bool {
+        self.host_is(&[
+            "dashscope.aliyuncs.com",
+            "dashscope-intl.aliyuncs.com",
+            "coding.dashscope.aliyuncs.com",
+            "coding-intl.dashscope.aliyuncs.com",
+        ])
+    }
+
+    fn is_glm_53(&self, model: &str) -> bool {
+        self.host_is(&["open.bigmodel.cn", "api.z.ai"])
+            && model.to_ascii_lowercase().starts_with("glm-5.3")
     }
 
     fn is_deepseek(&self) -> bool {
@@ -112,7 +172,15 @@ impl OpenAIProvider {
     }
 
     fn thinking_control(&self, requested: Option<bool>) -> Option<serde_json::Value> {
-        self.is_deepseek().then(|| {
+        (self.is_deepseek()
+            || self.host_is(&[
+                "open.bigmodel.cn",
+                "api.z.ai",
+                "api.moonshot.cn",
+                "api.moonshot.ai",
+                "ark.cn-beijing.volces.com",
+            ]))
+        .then(|| {
             serde_json::json!({
                 "type": if requested.unwrap_or(false) { "enabled" } else { "disabled" }
             })
@@ -136,6 +204,12 @@ struct OpenAIRequest {
     response_format: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enable_thinking: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_split: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -338,6 +412,17 @@ struct OpenAIEmbeddingUsage {
 }
 
 pub(crate) fn parse_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>> {
+    parse_chat_stream_frame(frame, false)
+}
+
+pub(crate) fn parse_stepfun_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>> {
+    parse_chat_stream_frame(frame, true)
+}
+
+fn parse_chat_stream_frame(
+    frame: SseFrame,
+    cumulative_usage: bool,
+) -> Result<Vec<ChatStreamEvent>> {
     if frame.event == "error" {
         return Err(anyhow!("OpenAI stream failed"));
     }
@@ -354,20 +439,30 @@ pub(crate) fn parse_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>
         return Err(anyhow!("OpenAI stream failed"));
     }
 
+    let choices = payload
+        .get("choices")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("OpenAI stream payload is missing choices"))?;
+    let final_usage = !cumulative_usage
+        || choices.is_empty()
+        || choices.iter().any(|choice| {
+            choice
+                .get("finish_reason")
+                .and_then(Value::as_str)
+                .is_some_and(|reason| !reason.is_empty())
+        });
     let mut events = Vec::new();
     if let Some(model) = payload.get("model").and_then(Value::as_str) {
         events.push(ChatStreamEvent::ResponseModel(model.to_owned()));
     }
     if let Some(usage) = payload.get("usage").filter(|usage| !usage.is_null()) {
-        events.push(ChatStreamEvent::Usage(
-            serde_json::from_value::<OpenAIUsage>(usage.clone())?.into_usage()?,
-        ));
+        let usage = serde_json::from_value::<OpenAIUsage>(usage.clone())?.into_usage()?;
+        // StepFun repeats cumulative snapshots; only the terminal snapshot is a report.
+        if final_usage {
+            events.push(ChatStreamEvent::Usage(usage));
+        }
     }
 
-    let choices = payload
-        .get("choices")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("OpenAI stream payload is missing choices"))?;
     for choice in choices {
         let choice = choice
             .as_object()
@@ -379,7 +474,15 @@ pub(crate) fn parse_stream_frame(frame: SseFrame) -> Result<Vec<ChatStreamEvent>
                 Value::String(reason) if reason == "content_filter" => {
                     return Err(anyhow!("OpenAI stream was blocked by content filtering"));
                 }
-                Value::String(_) => {}
+                Value::String(reason) if reason == "length" => {
+                    return Err(TruncatedCompletion.into())
+                }
+                Value::String(reason) if reason == "stop" || reason.is_empty() => {}
+                Value::String(_) => {
+                    return Err(anyhow!(
+                        "LLM stream ended with an unsupported finish reason"
+                    ))
+                }
                 _ => return Err(anyhow!("OpenAI finish_reason is not a string or null")),
             }
         }
@@ -570,7 +673,12 @@ impl OpenAIProvider {
             return Err(response_error(response).await);
         }
 
-        Ok(decode_stream(response.bytes_stream(), parse_stream_frame))
+        let parser = if self.host_is(&["api.stepfun.com", "api.stepfun.ai"]) {
+            parse_stepfun_stream_frame
+        } else {
+            parse_stream_frame
+        };
+        Ok(decode_stream(response.bytes_stream(), parser))
     }
 
     pub(crate) async fn embed_wire(
@@ -671,6 +779,91 @@ mod response_tests {
                 .unwrap(),
             serde_json::json!({"type": "enabled"})
         );
+    }
+
+    #[test]
+    fn explicit_api_bases_preserve_their_version_and_path() {
+        for (base, expected) in [
+            (
+                "https://api.openai.com/",
+                "https://api.openai.com/v1/chat/completions",
+            ),
+            (
+                "https://api.deepseek.com/v1/",
+                "https://api.deepseek.com/v1/chat/completions",
+            ),
+            (
+                "https://open.bigmodel.cn/api/coding/paas/v4",
+                "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
+            ),
+            (
+                "https://api.minimax.cn/v1",
+                "https://api.minimax.cn/v1/chat/completions",
+            ),
+            (
+                "https://coding-intl.dashscope.aliyuncs.com/v1",
+                "https://coding-intl.dashscope.aliyuncs.com/v1/chat/completions",
+            ),
+            (
+                "https://ark.cn-beijing.volces.com/api/coding/v3",
+                "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
+            ),
+            (
+                "https://qianfan.baidubce.com/v2/coding",
+                "https://qianfan.baidubce.com/v2/coding/chat/completions",
+            ),
+        ] {
+            let provider = OpenAIProvider::new(Some(base));
+            assert_eq!(provider.endpoint("/v1/chat/completions"), expected);
+            for leaf in ["embeddings", "responses"] {
+                assert_eq!(
+                    provider.endpoint(&format!("/v1/{leaf}")),
+                    expected.replace("chat/completions", leaf)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn domestic_model_requests_keep_reasoning_out_of_answer_content() {
+        let request = ChatRequest::new(LlmOperation::CharacterChat, "MiniMax-M3")
+            .max_tokens(512)
+            .temperature(0.7)
+            .thinking(false)
+            .json();
+        let body = |base: &str, request: &ChatRequest| {
+            serde_json::to_value(OpenAIProvider::new(Some(base)).chat_body(request, false)).unwrap()
+        };
+        let mini = body("https://api.minimax.cn/v1", &request);
+        assert_eq!(mini["reasoning_split"], true);
+        assert_eq!(mini["thinking"]["type"], "disabled");
+        assert!(mini.get("response_format").is_none());
+        let kimi = body(
+            "https://api.moonshot.ai/v1",
+            &ChatRequest {
+                model: "kimi-k2.6".into(),
+                ..request.clone()
+            },
+        );
+        assert!(kimi.get("temperature").is_none());
+        assert_eq!(kimi["thinking"]["type"], "disabled");
+        let glm = body(
+            "https://open.bigmodel.cn/api/coding/paas/v4",
+            &ChatRequest {
+                model: "glm-5.3".into(),
+                ..request.clone()
+            },
+        );
+        assert_eq!(glm["thinking"]["type"], "enabled");
+        assert_eq!(glm["reasoning_effort"], "low");
+        let qwen = body(
+            "https://coding.dashscope.aliyuncs.com/v1",
+            &ChatRequest {
+                model: "qwen3.6-plus".into(),
+                ..request
+            },
+        );
+        assert_eq!(qwen["enable_thinking"], false);
     }
 
     #[test]

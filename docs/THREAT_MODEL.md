@@ -74,6 +74,12 @@ Attacker-controlled input includes:
   secret, not content, and must never be returned, logged, exported, or placed
   directly in a metric label.
 
+Provider/region/plan switches require a newly supplied Key. The server reuses a
+stored Key only when the canonical preset ID and fixed endpoint match; the
+browser clears unsaved Key input on a switch. Settings accepts model IDs, never
+arbitrary provider URLs. Subscription compatibility does not authorize sharing
+or application use; see [LLM providers](./LLM_PROVIDERS.md).
+
 Operator-controlled input includes environment variables, Compose overrides,
 TLS and reverse-proxy configuration, database/Redis access, provider selection,
 platform model settings, provider base URLs supplied through privileged
