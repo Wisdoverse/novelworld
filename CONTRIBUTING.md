@@ -215,6 +215,23 @@ This proves release/capability refusal, dispatch/accounting and owner recreation
 boundaries, not release-built artifacts, a supported base-to-candidate release
 upgrade or live-model qualification.
 
+Native Rust release images require source-to-binary freshness inside the
+existing locked BuildKit cache. Before release compilation, clean only workspace
+release artifacts with `cargo clean --locked --release --workspace`; retain
+third-party compiled dependencies and registry/layer caches, and never prune a
+shared host Cargo target. Historical git-archive source mtimes can otherwise
+make Cargo reuse workspace binaries from another source revision, so a completed
+Docker `RUN` is not proof that changed source was compiled. Require build evidence
+that Cargo compiled the changed source. For a registered release pair, a genuine
+B runtime change must yield at least one affected application image with both a
+different image ID and at least one different filesystem layer. Docs/cache-only
+changes and unchanged runtime inputs need not change every image or binary. For
+the current Diagnostic path, the order is merged A (#428), cache-freshness C
+(#432), then remote-profile B (#429); only an actual merged C baseline and
+strict-descendant B candidate with the guard on both sides can be considered.
+Preserve the old A baseline and failed preview pair as failed evidence; both are
+ineligible.
+
 For Vision journey tooling changes, also run
 `python3 tests/e2e/live_deepseek_journey.py --self-test`. CI runs
 `diagnostic_journey_test.py` with the digest-pinned `test-postgres` service and

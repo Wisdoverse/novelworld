@@ -14,7 +14,8 @@ COPY tools ./tools
 
 RUN --mount=type=cache,id=novel-world-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=novel-world-cargo-target,target=/app/target,sharing=locked \
-    cargo build --locked --release \
+    cargo clean --locked --release --workspace \
+    && cargo build --locked --release \
         --package gateway \
         --package user-service \
         --package novel-service \

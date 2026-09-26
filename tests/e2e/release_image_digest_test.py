@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Exercise release image identity and scan controls with fake tools.
 
-This runs the real shell entrypoints, not native image builds or Trivy scans.
+This runs the real shell entrypoints and a miniature native Cargo cache regression,
+not native image builds or Trivy scans.
 The registry's mutable tag and first RepoDigests entry deliberately point at
 a different image from the build records.
 """
@@ -10,6 +11,7 @@ import ast
 import contextlib
 import io
 import re
+import shlex
 from types import SimpleNamespace
 import copy
 import hashlib
@@ -111,6 +113,79 @@ class ReleaseImageDigestTest(unittest.TestCase):
     def sboms(self, output, images):
         return subprocess.run(["bash", str(SBOM), str(output), *images], env=self.env,
                               capture_output=True, text=True, check=False, timeout=20)
+
+    def test_native_workspace_build_refreshes_old_mtime_sources_and_preserves_dependencies(self):
+        dockerfile = (ROOT / "infra/docker/Dockerfile.rust-service").read_text().replace("\\\n", " ")
+        build_run = re.search(r"(?m)^RUN --mount=.*? (cargo [^\n]+)", dockerfile)
+        self.assertIsNotNone(build_run, "native Cargo RUN instruction missing")
+        commands = [shlex.split(part.strip()) for part in build_run.group(1).split("&&")
+                    if part.strip().startswith("cargo ")]
+        self.assertTrue(commands)
+        workspace = self.root / "native-workspace"
+        target = self.root / "native-target"
+        workspace.mkdir()
+        members = [*SERVICES[:-1], "shared"]
+        (workspace / "Cargo.toml").write_text(
+            '[workspace]\nresolver = "2"\nmembers = ' + json.dumps(members) + '\n')
+        leaf = self.root / "cached-leaf"
+        leaf.mkdir()
+        (leaf / "src").mkdir()
+        (leaf / "Cargo.toml").write_text(
+            '[package]\nname = "cached-leaf"\nversion = "0.0.0"\nedition = "2024"\n')
+        (leaf / "src/lib.rs").write_text('pub fn label() -> &\'static str { "leaf" }\n')
+        for member in members:
+            directory = workspace / member
+            (directory / "src").mkdir(parents=True)
+            (directory / "Cargo.toml").write_text(
+                f'[package]\nname = "{member}"\nversion = "0.0.0"\nedition = "2024"\n'
+                + ('[dependencies]\ncached-leaf = { path = "../../cached-leaf" }\n'
+                   if member == "shared" else '[dependencies]\nshared = { path = "../shared" }\n'))
+            if member != "shared":
+                (directory / "src/main.rs").write_text('fn main() { println!("{}", shared::value()); }\n')
+        (workspace / "shared/src/lib.rs").write_text(
+            'mod value; pub fn value() -> String { format!("{}:{}:{}", '
+            'value::label(), include_str!("../policy.txt"), cached_leaf::label()) }\n')
+        module = workspace / "shared/src/value.rs"
+        policy = workspace / "shared/policy.txt"
+        module.write_text('pub fn label() -> &\'static str { "source-A" }\n')
+        policy.write_text("policy-A")
+        for path in (module, policy):
+            os.utime(path, (1000000000, 1000000000))
+        environment = {key: value for key, value in os.environ.items()
+                       if key in {"PATH", "HOME", "RUSTUP_HOME", "CARGO_HOME", "TMPDIR", "SYSTEMROOT"}}
+        environment.update(CARGO_TARGET_DIR=str(target), CARGO_NET_OFFLINE="true")
+
+        def cargo(command):
+            result = subprocess.run(command, cwd=workspace, env=environment, capture_output=True,
+                                    text=True, check=False, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        cargo(["cargo", "generate-lockfile", "--offline"])
+        for command in commands:
+            cargo(command)
+        for name in SERVICES[:-1]:
+            output = subprocess.run([str(target / "release" / name)], capture_output=True,
+                                    text=True, check=True, timeout=10).stdout.strip()
+            self.assertEqual(output, "source-A:policy-A:leaf")
+        leaf_artifacts = list((target / "release/deps").glob("libcached_leaf-*.rlib"))
+        self.assertTrue(leaf_artifacts)
+        retained = {path.name: (path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).digest())
+                    for path in leaf_artifacts}
+        for path, value in ((module, 'pub fn label() -> &\'static str { "source-B" }\n'),
+                            (policy, "policy-B")):
+            old_mtime = path.stat().st_mtime_ns
+            path.write_text(value)
+            os.utime(path, ns=(old_mtime, old_mtime))
+        for command in commands:
+            cargo(command)
+        for name in SERVICES[:-1]:
+            output = subprocess.run([str(target / "release" / name)], capture_output=True,
+                                    text=True, check=True, timeout=10).stdout.strip()
+            self.assertEqual(output, "source-B:policy-B:leaf", "stale native artifact: " + name)
+        self.assertEqual(retained, {
+            path.name: (path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).digest())
+            for path in (target / "release/deps").glob("libcached_leaf-*.rlib")
+        }, "non-workspace dependency artifacts must stay cached")
 
     def test_publication_is_new_tag_push_only(self):
         workflow = WORKFLOW.read_text()

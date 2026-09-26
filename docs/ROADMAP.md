@@ -140,7 +140,7 @@ list:
 | `SPEC.md` storage, avatar, and node algorithms describe runtime | Original-file persistence is opt-in S3-compatible storage; when enabled, a durable `source`-stage job replays retained bytes before provider work, while the no-retention profile splits chapters during acceptance. Provider image URLs are stored directly, avatar generation is capped, and nodes are sampled then generated lazily | H0 decides outcomes rather than blindly implementing algorithms |
 | Production data can be recovered | The approved `backup-restore-v2` policy is implemented: encrypted integrity-checked artifacts, erasure-record replay, lineage-token continuation, and backup → erase → restore, deletion-resurrection, and disaster-gate drills pass in CI ([#118](https://github.com/schorsch888/novelworld/issues/118)); the recorded ≥5 GB RTO scale rehearsal and H5 restore game days remain open | H1 and H5 |
 | Quality and scale were completed | The historical DeepSeek live product/H1/H3 baseline passed the product journey and H3 calibration but failed H1. A later selected-model Diagnostic completed measurement-only with three retained alignment failures and independent semantic attribution/mapping concerns. No H1/H4 provider qualification or human approval exists, and capacity evidence remains a test-only single-node profile | H3–H6 |
-| Diagnostic model identity can advance without rewriting frozen evidence | Normal settings and prices already use `deepseek-flash`; the prospective four-layer Diagnostic path adds a separate v6 registration and compiled profile v4 while preserving prior profile/fixture bytes and the fixed budget contract. The remote runtime profile lookup defect is mandatory follow-up #429, which must merge after #428 and before any paid attempt. Issues [#428](https://github.com/Wisdoverse/novelworld/issues/428) and [#429](https://github.com/Wisdoverse/novelworld/issues/429) define the structural work and its order; Project 4 and issue bodies own execution state. This is not provider, H1, H3, or H4 live evidence | H3/H4 |
+| Diagnostic model identity can advance without rewriting frozen evidence | Normal settings and prices already use `deepseek-flash`; the prospective four-layer Diagnostic path adds a separate v6 registration and compiled profile v4 while preserving prior profile/fixture bytes and the fixed budget contract. The required order is structural A #428, native source-to-binary cache freshness C #432, then remote runtime profile lookup B #429. C is independently mergeable from B but blocks B’s final rebase, review, CI, and merge; the eventual artifact pair must be actual merged C as baseline and actual merged B as strict descendant, with the cache guard committed on both sides. The old A baseline and failed 12-image preview are ineligible. Issues [#428](https://github.com/Wisdoverse/novelworld/issues/428), [#432](https://github.com/Wisdoverse/novelworld/issues/432), and [#429](https://github.com/Wisdoverse/novelworld/issues/429) and Project 4 own execution state. This is not provider, H1, H3, or H4 live evidence | H3/H4 |
 | Internet-hosted operation is ready | Threat modeling is strong, but deployment mode, rights/content policy, provider disclosure, TLS/session/CORS posture, abuse economics, and release provenance still need explicit gates | H2 |
 
 ## Review protocol
@@ -391,6 +391,20 @@ Scope:
   provenance/attestation, signatures, and immutable image digests. A private
   source-build profile still needs reproducible input identity and vulnerability
   policy, but need not build unused distribution infrastructure.
+- For native Rust images, prove that each binary was compiled from its exact
+  source revision even with a warm BuildKit cache. Clean only workspace release
+  artifacts inside the locked BuildKit target cache; retain third-party compiled
+  dependencies and registry/layer caches, and never prune a shared host target.
+  A successful Docker build is not sufficient: source-changing controls must
+  show Cargo recompilation. For a registered release pair, a genuine affected
+  application runtime change must yield at least one affected application image
+  whose image ID and at least one filesystem layer differ from the baseline;
+  docs/cache-only changes and unchanged runtime inputs need not change every
+  image or binary. For the current
+  Diagnostic chain, the required order is A (#428) → cache-freshness C (#432) →
+  remote-profile B (#429); only the actual merged C baseline and strict-descendant
+  B candidate, both with the guard, can form an eligible artifact pair. The old
+  A baseline and failed preview are preserved as failed evidence and are ineligible.
 - Exercise credential rotation, compromised dependency/artifact, provider
   exfiltration, and incident-response scenarios.
 - Before any public traffic, operate the minimum production-readiness subset:
