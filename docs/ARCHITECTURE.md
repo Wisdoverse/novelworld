@@ -88,6 +88,13 @@ HTTP config supplies provider identity for metrics, including plans sharing a UR
 The shared adapter preserves explicit API bases and handles documented reasoning
 controls; see [LLM providers](./LLM_PROVIDERS.md).
 
+User Service reads key-filtered billable-token aggregates through its existing
+Prometheus port. Infrastructure loads the versioned offline official quote
+snapshot and operator overrides; pure domain code estimates native-currency
+amounts or ranges. Subscription quotes stay separate from API token rates.
+No price-site HTTP dependency, account billing authority, or Diagnostic ledger
+ownership is added; see [pricing boundaries](./LLM_PRICING.md).
+
 The shared schema still contains 20 cross-owner `ON DELETE CASCADE` foreign
 keys. The user and novel deletion triggers also make two exact writes into the
 platform-owned erasure journal; five cross-owner trigger/routine bindings cover
