@@ -53,6 +53,8 @@ struct ResolvedClient {
 #[derive(Deserialize)]
 struct RemoteConfig {
     contract: u8,
+    #[serde(default)]
+    provider: Option<String>,
     diagnostic_budget: Option<Binding>,
     api_url: String,
     model: String,
@@ -354,7 +356,22 @@ fn validate_remote_config(
     {
         return Err(anyhow!("invalid runtime LLM configuration"));
     }
-    let provider = provider_for_url(&config.api_url).into();
+    let provider = if binding.is_some() {
+        provider_for_url(&config.api_url).to_owned()
+    } else {
+        config
+            .provider
+            .filter(|provider| provider != "environment")
+            .unwrap_or_else(|| provider_for_url(&config.api_url).to_owned())
+    };
+    if provider.is_empty()
+        || provider.len() > 32
+        || !provider
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return Err(anyhow!("invalid runtime LLM provider"));
+    }
     Ok(RuntimeConfig {
         provider,
         api_url: config.api_url,
@@ -399,6 +416,7 @@ mod tests {
     fn ordinary_config(api_url: &str) -> RemoteConfig {
         RemoteConfig {
             contract: 2,
+            provider: None,
             diagnostic_budget: None,
             api_url: api_url.into(),
             model: "ordinary-model".into(),
@@ -411,6 +429,7 @@ mod tests {
         let profile = crate::diagnostic_budget::profile();
         RemoteConfig {
             contract: 3,
+            provider: None,
             diagnostic_budget: Some(binding.clone()),
             api_url: profile.origin.clone(),
             model: profile.model.clone(),
@@ -420,9 +439,33 @@ mod tests {
     }
 
     #[test]
+    fn owner_provider_identity_preserves_region_and_plan_labels() {
+        let mut config = ordinary_config("https://api.minimax.io/v1");
+        config.provider = Some("minimax_coding_global".into());
+        assert_eq!(
+            validate_remote_config(config, false, None)
+                .unwrap()
+                .provider,
+            "minimax_coding_global"
+        );
+        let mut config = ordinary_config("https://api.deepseek.com");
+        config.provider = Some("environment".into());
+        assert_eq!(
+            validate_remote_config(config, false, None)
+                .unwrap()
+                .provider,
+            "deepseek"
+        );
+        let mut config = ordinary_config("https://api.minimax.io/v1");
+        config.provider = Some("bad/provider".into());
+        assert!(validate_remote_config(config, false, None).is_err());
+    }
+
+    #[test]
     fn remote_configuration_transport_is_fail_closed_by_default() {
         let config = |api_url: &str| RemoteConfig {
             contract: 2,
+            provider: None,
             diagnostic_budget: None,
             api_url: api_url.into(),
             model: "model".into(),

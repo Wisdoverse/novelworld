@@ -68,6 +68,12 @@ PostgreSQL instance is a deployment choice, not shared business ownership.
 External databases, Redis, object storage, model providers, password hashing,
 and HTTP services are reached through domain ports and infrastructure adapters.
 
+User Service validates fixed provider/region/plan endpoints and owns encrypted
+Keys; only an unchanged preset and endpoint may reuse a stored Key. Its internal
+HTTP config supplies provider identity for metrics, including plans sharing a URL.
+The shared adapter preserves explicit API bases and handles documented reasoning
+controls; see [LLM providers](./LLM_PROVIDERS.md).
+
 The shared schema still contains 20 cross-owner `ON DELETE CASCADE` foreign
 keys. The user and novel deletion triggers also make two exact writes into the
 platform-owned erasure journal; five cross-owner trigger/routine bindings cover

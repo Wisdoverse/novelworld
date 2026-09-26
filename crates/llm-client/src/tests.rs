@@ -987,7 +987,93 @@ fn sse_decoder_fails_closed_on_invalid_utf8_oversize_and_missing_terminal() {
 }
 
 #[test]
+fn provider_failed_stream_never_finishes_after_partial_text() {
+    futures::executor::block_on(async {
+        for reason in [
+            "sensitive",
+            "network_error",
+            "model_context_window_exceeded",
+            "length",
+            "tool_calls",
+            "unknown",
+        ] {
+            let transcript = format!(
+                "data: {{\"choices\":[{{\"delta\":{{\"content\":\"partial\"}},\"finish_reason\":null}}]}}\n\ndata: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"{reason}\"}}]}}\n\ndata: [DONE]\n\n"
+            );
+            let events = decode(vec![transcript.into_bytes()], openai::parse_stream_frame).await;
+            assert!(events.iter().any(Result::is_err), "{reason}");
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, Ok(ChatStreamEvent::Finished))),
+                "{reason}"
+            );
+        }
+    });
+}
+
+#[test]
+fn stepfun_stream_reports_only_terminal_cumulative_usage() {
+    futures::executor::block_on(async {
+        let mut transcript = String::new();
+        for (completion_tokens, reason, content) in [
+            (1, "", "你好"),
+            (2, "", "，"),
+            (3, "", "世界"),
+            (150, "stop", ""),
+        ] {
+            let payload = serde_json::json!({
+                "model": "step-3.5-flash",
+                "choices": [{"delta": {"content": content}, "finish_reason": reason}],
+                "usage": {"prompt_tokens": 83, "completion_tokens": completion_tokens, "total_tokens": 83 + completion_tokens}
+            });
+            transcript.push_str(&format!("data: {payload}\n\n"));
+        }
+        transcript.push_str("data: [DONE]\n\n");
+        let events: Result<Vec<_>> = decode(
+            vec![transcript.as_bytes().to_vec()],
+            openai::parse_stepfun_stream_frame,
+        )
+        .await
+        .into_iter()
+        .collect();
+        let events = events.unwrap();
+        let usage: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                ChatStreamEvent::Usage(usage) => Some(usage.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(usage, vec![crate::Usage::new(83, 150, None).unwrap()]);
+        assert_eq!(events.last(), Some(&ChatStreamEvent::Finished));
+
+        // Other providers still expose duplicate reports to the client's strict guard.
+        let ordinary = decode(vec![transcript.into_bytes()], openai::parse_stream_frame).await;
+        assert_eq!(
+            ordinary
+                .iter()
+                .filter(|event| matches!(event, Ok(ChatStreamEvent::Usage(_))))
+                .count(),
+            4
+        );
+    });
+}
+
+#[test]
 fn openai_requires_done_and_rejects_content_filter_or_error() {
+    futures::executor::block_on(async {
+        let transcript = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":\"\"}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        let events = decode(
+            vec![transcript.as_bytes().to_vec()],
+            openai::parse_stream_frame,
+        )
+        .await;
+        assert!(events.iter().all(Result::is_ok));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, Ok(ChatStreamEvent::Finished))));
+    });
     futures::executor::block_on(async {
         let valid = concat!(
             "data: {\"choices\":[{\"delta\":{\"content\":\"\u{4f60}\u{597d}\"},\"finish_reason\":null}]}\n\n",

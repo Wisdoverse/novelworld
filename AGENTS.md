@@ -20,6 +20,7 @@ Use this file as a map. Do not load the full documentation set for every task.
 | Security, privacy, or trust boundaries | [`SECURITY.md`](SECURITY.md), [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md), and the relevant lifecycle contract |
 | Product direction or roadmap status | [`docs/ROADMAP.md`](docs/ROADMAP.md) and the GitHub Project |
 | Provider qualification or a paid Diagnostic | [`docs/QUALIFICATION_POLICY.md`](docs/QUALIFICATION_POLICY.md) and [`docs/adr/0004-durable-diagnostic-budget.md`](docs/adr/0004-durable-diagnostic-budget.md) |
+| LLM provider, region, Coding/Token Plan, or credential switching | [`docs/LLM_PROVIDERS.md`](docs/LLM_PROVIDERS.md) |
 
 [`docs/README.md`](docs/README.md) is the complete documentation index. Runtime
 code, migrations, and tests own current behavior; prose describes contracts and

@@ -122,6 +122,46 @@ describe('SettingsPage', () => {
   });
 
   it.each([
+    ['zhipu_coding', 'https://open.bigmodel.cn/api/coding/paas/v4', 'glm-5.3'],
+    ['zai_coding', 'https://api.z.ai/api/coding/paas/v4', 'glm-5.3'],
+    ['minimax_coding_cn', 'https://api.minimax.cn/v1', 'MiniMax-M3'],
+    ['minimax_coding_global', 'https://api.minimax.io/v1', 'MiniMax-M3'],
+    ['aliyun_coding_cn', 'https://coding.dashscope.aliyuncs.com/v1', 'qwen3.6-plus'],
+    ['aliyun_coding_global', 'https://coding-intl.dashscope.aliyuncs.com/v1', 'qwen3.6-plus'],
+    ['kimi_coding_cn', 'https://api.kimi.com/coding/v1', 'k3'],
+    ['kimi_coding_global', 'https://api.kimi.ai/coding/v1', 'k3'],
+    ['stepfun_coding', 'https://api.stepfun.com/step_plan/v1', 'step-3.5-flash'],
+    ['stepfun_coding_global', 'https://api.stepfun.ai/step_plan/v1', 'step-3.5-flash'],
+  ])('saves %s with its own regional key and model', async (provider, endpoint, model) => {
+    mocks.put.mockResolvedValue({ data: { ...settingsForCurrentUser(), provider, model: 'account-model' } });
+    render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+    await screen.findByRole('heading', { name: '平台模型设置' });
+    fireEvent.change(screen.getByLabelText('平台 API Key（留空则保持现有 Key）'), { target: { value: 'old-unsaved-key' } });
+    fireEvent.change(screen.getByLabelText('服务商 / 地区 / 套餐'), { target: { value: provider } });
+    const key = screen.getByLabelText('平台 API Key') as HTMLInputElement;
+    expect(key.value).toBe('');
+    expect(key.required).toBe(true);
+    expect(screen.getByText(`端点：${endpoint}`)).toBeTruthy();
+    expect((screen.getByLabelText('模型') as HTMLInputElement).value).toBe(model);
+    fireEvent.change(screen.getByLabelText('模型'), { target: { value: 'account-model' } });
+    fireEvent.change(key, { target: { value: 'regional-key' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存平台设置' }));
+    await waitFor(() => expect(mocks.put).toHaveBeenCalledWith('/settings/llm', {
+      provider, model: 'account-model', thinking_enabled: false, api_key: 'regional-key',
+    }));
+  });
+
+  it('requires a fresh key when changing the region of a configured plan', async () => {
+    mocks.get.mockResolvedValue({ data: { ...settingsForCurrentUser(), provider: 'minimax_coding_cn', model: 'MiniMax-M3' } });
+    render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+    await screen.findByRole('heading', { name: '平台模型设置' });
+    fireEvent.change(screen.getByLabelText('服务商 / 地区 / 套餐'), { target: { value: 'minimax_coding_global' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存平台设置' }));
+    expect(mocks.put).not.toHaveBeenCalled();
+    expect((screen.getByLabelText('平台 API Key') as HTMLInputElement).required).toBe(true);
+  });
+
+  it.each([
     'deepseek-v4-flash',
     'deepseek-v4-flash-vision-exp',
     'deepseek-v4-pro',
