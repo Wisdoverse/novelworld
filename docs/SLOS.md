@@ -23,7 +23,7 @@ key, database password, or Redis password.
 
 | Surface | Versioned workload | Objective |
 |---|---|---|
-| Import | Three distinct users release >=16 KiB TXT uploads together | Exactly two receive 202 within 1 s; one receives 503 within 1 s, owns no persisted novel, and causes no provider work; accepted novels become ready within 120 s. |
+| Import | Three distinct users release >=16 KiB TXT uploads together | Each receives either 202 within 1 s or typed `429 upload_capacity_busy` within 1 s. At least one is accepted; every accepted novel becomes ready within 120 s. Any observed 429 owns no persisted novel and adds no provider work. Fixture retries use a bounded local one-second backoff; upload 429 does not require the parser-overload 503 header. The runner records whether overload was observed and does not infer parser concurrency from completed upload responses. |
 | Agent stream | Nine distinct users release one SSE chat turn together; the provider holds stream setup for 1 s | Eight commit; p95 first event <=2.5 s; one receives retryable 503 within 1 s; provider stream peak is eight. |
 | World turn | Eight independent first turns release together; the provider holds generation for 1 s | All eight commit exactly once; p95 completion <=3 s; every timeline advances 0 -> 1; provider world-turn peak is eight. |
 | Failure/replay | The provider returns one invalid world transition | No state advances; retrying the same UUIDv4 idempotency key commits once; a completed replay is byte-identical and adds no provider call. |

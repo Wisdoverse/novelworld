@@ -2,7 +2,8 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # Manual dispatch checks do not satisfy rulesets; validate the rewrite before replacing main.
+    branches: [main, privacy/main-email-redaction]
   pull_request:
     branches: [main]
   workflow_dispatch:

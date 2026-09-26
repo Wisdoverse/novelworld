@@ -212,6 +212,39 @@ def expect(result, status, label):
     return result
 
 
+def import_upload_is_retryable_busy(result):
+    if result.status == 202:
+        return False
+    if result.status != 429:
+        raise ProfileError(
+            f"import upload: expected HTTP 202 or typed HTTP 429, got {result.status}"
+        )
+    try:
+        code = result.json()["error"]["code"]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ProfileError("import upload 429 lacks the typed error envelope") from error
+    if code != "upload_capacity_busy":
+        raise ProfileError(f"import upload 429 has unexpected error code: {code}")
+    return True
+
+
+def partition_import_admissions(results):
+    accepted, rejected = [], []
+    for entry in results:
+        (rejected if import_upload_is_retryable_busy(entry[2]) else accepted).append(
+            entry
+        )
+    return accepted, rejected
+
+
+def import_admission_shape_is_valid(accepted, rejected, total):
+    return bool(accepted) and len(accepted) + len(rejected) == total
+
+
+def rejected_upload_has_no_side_effects(owned_novels, provider_calls, expected_calls):
+    return all(not novels for novels in owned_novels) and provider_calls == expected_calls
+
+
 def barrier_batch(items, callback):
     items = list(items)
     release = {}
@@ -530,14 +563,12 @@ class CapacityProfile:
         deadline = time.monotonic() + 10
         while True:
             result = self.upload(fixture, source)
-            if result.status == 202:
+            if not import_upload_is_retryable_busy(result):
                 return result
-            if (
-                result.status != 503
-                or result.headers.get("retry-after") != "1"
-                or time.monotonic() >= deadline
-            ):
-                expect(result, 202, f"import fixture {fixture['index']}")
+            if time.monotonic() >= deadline:
+                raise ProfileError(
+                    f"import fixture {fixture['index']} stayed upload-capacity busy"
+                )
             time.sleep(1)
 
     def wait_novel_ready(self, fixture, released_at=None):
@@ -580,12 +611,13 @@ class CapacityProfile:
                 self.upload(fixture, source, released_at),
             ),
         )
-        accepted = [entry for entry in results if entry[2].status == 202]
-        rejected = [entry for entry in results if entry[2].status == 503]
+        accepted, rejected = partition_import_admissions(results)
         self.check(
             "import_admission_shape",
-            len(accepted) == workload["import_concurrency"] and len(rejected) == 1,
+            import_admission_shape_is_valid(accepted, rejected, len(results)),
             statuses=[entry[2].status for entry in results],
+            accepted=len(accepted),
+            retryable_rejections=len(rejected),
         )
         self.check(
             "import_admission_latency",
@@ -596,31 +628,39 @@ class CapacityProfile:
             samples_seconds=[entry[2].elapsed for entry in accepted],
             maximum_seconds=objectives["import_admission_seconds_max"],
         )
-        self.check(
-            "import_overload_rejection",
-            rejected[0][2].elapsed <= objectives["overload_rejection_seconds_max"]
-            and rejected[0][2].headers.get("retry-after") == "1",
-            sample_seconds=rejected[0][2].elapsed,
-            maximum_seconds=objectives["overload_rejection_seconds_max"],
-        )
+        if rejected:
+            self.check(
+                "import_overload_rejection",
+                all(
+                    entry[2].elapsed <= objectives["overload_rejection_seconds_max"]
+                    for entry in rejected
+                ),
+                sample_seconds=[entry[2].elapsed for entry in rejected],
+                maximum_seconds=objectives["overload_rejection_seconds_max"],
+            )
 
         for fixture, _, result in accepted:
             fixture["novel_id"] = result.json()["novel_id"]
-        rejected_fixture = rejected[0][0]
-        owned = expect(
-            http_request(
-                self.api_url,
-                "GET",
-                "/novels",
-                token=rejected_fixture["token"],
-                timeout=5,
-            ),
-            200,
-            "rejected import ownership check",
-        ).json()
-        self.check(
-            "rejected_import_not_persisted", owned == [], owned_novels=len(owned)
-        )
+        rejected_owned = []
+        for rejected_fixture, _, _ in rejected:
+            owned = expect(
+                http_request(
+                    self.api_url,
+                    "GET",
+                    "/novels",
+                    token=rejected_fixture["token"],
+                    timeout=5,
+                ),
+                200,
+                "rejected import ownership check",
+            ).json()
+            rejected_owned.append(owned)
+            self.check(
+                "rejected_import_not_persisted",
+                owned == [],
+                fixture=rejected_fixture["index"],
+                owned_novels=len(owned),
+            )
 
         ready_samples = [
             self.wait_novel_ready(fixture, released_at)
@@ -637,11 +677,11 @@ class CapacityProfile:
         )
         # Two chapter extractions plus one whole-novel event selection.
         expected_calls = {
-            "canon": workload["import_concurrency"] * 3,
-            "character_chunk": workload["import_concurrency"],
-            "characters": workload["import_concurrency"],
-            "image": workload["import_concurrency"],
-            "nodes": workload["import_concurrency"],
+            "canon": len(accepted) * 3,
+            "character_chunk": len(accepted),
+            "characters": len(accepted),
+            "image": len(accepted),
+            "nodes": len(accepted),
         }
         initial_stats = wait_provider_calls(self.provider_url, expected_calls)
         self.check(
@@ -650,6 +690,17 @@ class CapacityProfile:
             calls=initial_stats["calls"],
             expected_calls=expected_calls,
         )
+        if rejected:
+            self.check(
+                "rejected_import_no_side_effects",
+                rejected_upload_has_no_side_effects(
+                    rejected_owned, initial_stats["calls"], expected_calls
+                ),
+                rejected_fixtures=len(rejected),
+                persisted_novel_lists=[len(novels) for novels in rejected_owned],
+                provider_calls=initial_stats["calls"],
+                expected_calls=expected_calls,
+            )
 
         provider_reset(self.provider_url)
         for fixture in self.fixtures:
@@ -662,6 +713,7 @@ class CapacityProfile:
         self.report["phases"]["import"] = {
             "source_bytes": len(source),
             "admission_seconds": [entry[2].elapsed for entry in results],
+            "overload_observed": bool(rejected),
             "ready_seconds": ready_samples,
             "provider": initial_stats,
         }
@@ -1211,7 +1263,46 @@ def self_test(policy):
     assert redact_secrets("before token after", ["token"]) == (
         "before [REDACTED] after"
     )
-    print("single-node-v1 policy and percentile self-check passed")
+    accepted, rejected = partition_import_admissions(
+        [
+            (None, None, HttpResult(202, {}, b'{"novel_id":"a"}', 0.01)),
+            (None, None, HttpResult(202, {}, b'{"novel_id":"b"}', 0.01)),
+            (None, None, HttpResult(202, {}, b'{"novel_id":"c"}', 0.01)),
+        ]
+    )
+    assert len(accepted) == 3 and not rejected
+    assert import_admission_shape_is_valid(accepted, rejected, 3)
+    busy = HttpResult(
+        429,
+        {"retry-after": "1"},
+        b'{"error":{"code":"upload_capacity_busy","message":"busy"}}',
+        0.01,
+    )
+    assert import_upload_is_retryable_busy(busy)
+    assert import_upload_is_retryable_busy(HttpResult(429, {}, busy.body, 0.01))
+    accepted, rejected = partition_import_admissions(
+        [(None, None, HttpResult(202, {}, b'{"novel_id":"a"}', 0.01)), (None, None, busy)]
+    )
+    assert len(accepted) == len(rejected) == 1
+    assert import_admission_shape_is_valid(accepted, rejected, 2)
+    assert not import_admission_shape_is_valid([], [None, None, None], 3)
+    assert rejected_upload_has_no_side_effects([[]], {"canon": 3}, {"canon": 3})
+    assert not rejected_upload_has_no_side_effects(
+        [[{"id": "unexpected"}]], {"canon": 3}, {"canon": 3}
+    )
+    assert not rejected_upload_has_no_side_effects([[]], {"canon": 4}, {"canon": 3})
+    for invalid in (
+        HttpResult(503, {"retry-after": "1"}, b'{"error":{"code":"upload_capacity_busy"}}', 0.01),
+        HttpResult(429, {"retry-after": "1"}, b'{"error":{"code":"import_capacity_busy"}}', 0.01),
+        HttpResult(429, {}, b'{"error":"malformed"}', 0.01),
+    ):
+        try:
+            import_upload_is_retryable_busy(invalid)
+        except ProfileError:
+            pass
+        else:
+            raise AssertionError("invalid upload overload response was accepted")
+    print("single-node-v1 policy, percentile, and import-admission self-check passed")
 
 
 def git_sha(value):
