@@ -115,6 +115,12 @@ fn auth_test_state() -> AppState {
         active_import_users: Arc::new(Mutex::new(HashSet::new())),
     });
     AppState {
+        series_handler: Arc::new(novel_service::application::world_series::WorldSeriesHandler {
+            series_repo: Arc::new(novel_service::infrastructure::persistence::world_series_pg_repo::PgWorldSeriesRepository::new(pool.clone())),
+            novel_repo: novel_repo.clone(),
+            canon_repo: canon_repo.clone(),
+            matcher: None,
+        }),
         handler,
         novel_repo: novel_repo.clone(),
         chapter_repo: chapter_repo.clone(),
@@ -139,7 +145,10 @@ fn auth_test_state() -> AppState {
         internal_service_token: Arc::from("expected-token"),
         readiness: Arc::new(FixedProbe),
         source_storage_readiness: None,
-        metrics: llm_client::install_metrics("novel-service-http-test").unwrap(),
+        metrics: {
+            static METRICS: std::sync::OnceLock<llm_client::MetricsHandle> = std::sync::OnceLock::new();
+            METRICS.get_or_init(|| llm_client::install_metrics("novel-service-http-test").unwrap()).clone()
+        },
     }
 }
 
@@ -170,4 +179,74 @@ async fn canon_grounding_route_rejects_missing_and_wrong_internal_tokens() {
             Some(&HeaderValue::from_static("private, no-store"))
         );
     }
+}
+
+#[tokio::test]
+async fn series_routes_reject_missing_principal_before_database_or_provider_work() {
+    let app = router(auth_test_state());
+    let novel = Uuid::new_v4();
+    let create = serde_json::json!({"name":"同一世界", "background":"用户确认的共同背景", "source_novel_id":novel});
+    for (method, uri, body) in [
+        ("GET", "/novels/world-series".into(), None),
+        (
+            "POST",
+            "/novels/world-series".into(),
+            Some(create.to_string()),
+        ),
+        ("GET", format!("/novels/{novel}/world-series"), None),
+        (
+            "PUT",
+            format!("/novels/{novel}/world-series"),
+            Some(r#"{"series_id":null}"#.into()),
+        ),
+        (
+            "POST",
+            format!("/novels/{novel}/world-series/suggestion"),
+            None,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.unwrap_or_default()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers()[CACHE_CONTROL],
+            HeaderValue::from_static("private, no-store")
+        );
+    }
+}
+
+#[tokio::test]
+async fn direct_series_generation_is_rejected_without_a_database_claim() {
+    let app = router(auth_test_state());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/internal/novels/{}/game-rules?prompt_version=series-game-rules-v1",
+                    Uuid::new_v4()
+                ))
+                .header("X-User-Id", Uuid::new_v4().to_string())
+                .header("X-Internal-Service-Token", "expected-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"]["code"], "unsupported_game_rule_version");
 }

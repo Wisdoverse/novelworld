@@ -47,6 +47,10 @@ We will acknowledge receipt within 48 hours and provide a timeline for resolutio
   fragments, explicit field allowlists, a two-request concurrency ceiling, and
   a 15-minute end-to-end deadline. See
   [docs/ACCOUNT_EXPORT.md](./docs/ACCOUNT_EXPORT.md).
+- Reader-confirmed series definitions and safe source-template snapshots are
+  Novel-owned and account-scoped. Optional Laya matching sends bounded metadata
+  only; it cannot write associations, which require reader confirmation. See
+  [ADR 0011](./docs/adr/0011-confirmed-series-worlds.md).
 
 ### Infrastructure
 - All inter-service communication over internal Docker network

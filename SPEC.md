@@ -1295,6 +1295,38 @@ ready templates and existing reader bindings. The v2 source must not be treated
 as evidence that canonical extraction captures every world rule or that
 generated mappings are semantically correct.
 
+### 7.8 Reader-confirmed series worlds
+
+Series definitions and shelf associations MUST be private to one reader and
+owned by Novel Service. Optional Laya matching is metadata-only guidance; the
+reader MUST confirm every association, and manual selection MUST remain
+available. Creation MUST capture an exact ready `novel-game-rules-v2` source
+template, including its real source novel, model version, and chapter
+provenance, as an immutable safe snapshot; it MUST NOT generate rules or claim
+provider work. Creation and association of the source book MUST be atomic.
+
+When a series-bound profile or session is resolved, Narrative MUST obtain the
+series snapshot through Novel's HTTP contract. Source-book canon and target-book
+canon remain separate; source chapter numbers MUST NOT be relabeled as target
+chapters. A bound session freezes the confirmed setting and rule identity.
+Pure narrative sessions MAY share the setting without enabling D20. Player
+attributes, inventory, progress, timeline, and checks remain per-player and
+per-target-book. Reassociation MUST NOT rewrite existing profile bindings,
+frozen session context, committed checks, or replay results. Removing a shelf
+association MUST NOT delete the series definition or frozen snapshots; account
+erasure removes the reader-owned records. Canonical source deletion MUST NOT
+erase another book's safe snapshot.
+
+Laya matching reuses `LAYA_API_URL` and `LAYA_API_KEY`, with a 300 ms connect
+and 2 s total deadline, no HTTP retries, 8 KiB request and 16 KiB response
+limits, four admission slots, at most eight candidates, and a 0.8 abstention
+threshold that is not calibrated accuracy evidence. It MUST NOT receive scope
+UUIDs, full novels, or plot text. Migration 0031 is additive and follows the
+normal managed migration path; it does not add to the existing 0021/0024/0025/
+0030 release barriers. Novel, Narrative, and frontend versions must be upgraded
+together. Older peers reject the new prompt version; once series-bound state
+exists, rollback to an application that cannot read it is unsupported.
+
 ## 8. Player Identity System
 
 ### 8.1 Identity Types

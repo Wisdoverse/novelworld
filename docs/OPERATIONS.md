@@ -226,8 +226,11 @@ An ambiguous durable claim may remain and is not budget-refilled. Before applyin
 0030, the release target must contain all four required barriers (0021/0024/0025/0030);
 old Novel and Narrative writers must both be stopped and drained, then restarted
 as compatible versions. Template generation failure and dependency failures are
-separate cases. The [D20 responsibility and evaluation plan](./ADVANCED_RULES_PLAN.md)
-explains the optional Laya (Jev) classification preview and its fallback. A
+separate cases. Migration 0031 adds series tables through the normal managed
+migration path and does not add a release barrier. Upgrade Novel, Narrative,
+and frontend together; after series-bound state exists, rollback to an
+application that cannot read it is unsupported. The [D20 responsibility and
+evaluation plan](./ADVANCED_RULES_PLAN.md) explains the optional Laya (Jev) classification preview and its fallback. A
 missing or failing classifier is not this 422 and falls back to the template
 check for a new advanced turn; frozen decisions replay without another call.
 Both names refer to the same decision capability; configuration still uses

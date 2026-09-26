@@ -2,7 +2,13 @@ import { isAxiosError } from 'axios';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from '@/shared/api/client';
 import { removeWorldTurnPendingRequest } from '@/shared/lib/worldTurnStorage';
-import type { Novel, Chapter, Character } from '@/shared/types';
+import type {
+  Novel,
+  Chapter,
+  Character,
+  WorldSeries,
+  WorldSeriesSuggestion,
+} from '@/shared/types';
 
 // ─── Query Keys ───────────────────────────────────────────────────────────────
 export const novelKeys = {
@@ -12,7 +18,18 @@ export const novelKeys = {
   detail: (id: string) => [...novelKeys.all, 'detail', id] as const,
   chapter: (id: string, num: number) => [...novelKeys.all, id, 'chapters', num] as const,
   characters: (id: string, chapter: number) => [...novelKeys.all, id, 'characters', chapter] as const,
+  worldSeriesList: (principalId: string) => [...novelKeys.all, 'world-series', principalId, 'list'] as const,
+  novelWorldSeries: (principalId: string, novelId: string) => [
+    ...novelKeys.all, 'world-series', principalId, 'novel', novelId,
+  ] as const,
 };
+
+export interface CreateWorldSeriesInput {
+  name: string;
+  background: string;
+  source_novel_id: string;
+  canon_model_version?: number;
+}
 
 // ─── Hooks ────────────────────────────────────────────────────────────────────
 
@@ -34,6 +51,67 @@ export function useNovelCatalog() {
   return useQuery({
     queryKey: novelKeys.catalog(),
     queryFn: () => apiClient.get<Novel[]>('/novels/catalog').then(r => r.data),
+  });
+}
+
+export function useWorldSeriesList(principalId: string | undefined) {
+  return useQuery({
+    queryKey: novelKeys.worldSeriesList(principalId ?? ''),
+    queryFn: ({ signal }) => apiClient
+      .get<WorldSeries[]>('/novels/world-series', { signal })
+      .then(response => response.data),
+    enabled: Boolean(principalId),
+  });
+}
+
+export function useNovelWorldSeries(principalId: string | undefined, novelId: string) {
+  return useQuery({
+    queryKey: novelKeys.novelWorldSeries(principalId ?? '', novelId),
+    queryFn: ({ signal }) => apiClient
+      .get<WorldSeries | null>(`/novels/${novelId}/world-series`, { signal })
+      .then(response => response.data),
+    enabled: Boolean(principalId && novelId),
+  });
+}
+
+export function useSuggestNovelWorldSeries() {
+  return useMutation({
+    retry: false,
+    mutationFn: (novelId: string) => apiClient
+      .post<WorldSeriesSuggestion>(`/novels/${novelId}/world-series/suggestion`)
+      .then(response => response.data),
+  });
+}
+
+export function useCreateWorldSeries(principalId: string | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    retry: false,
+    mutationFn: (input: CreateWorldSeriesInput) => apiClient
+      .post<WorldSeries>('/novels/world-series', input)
+      .then(response => response.data),
+    onSuccess: (_series, input) => {
+      if (!principalId) return;
+      queryClient.invalidateQueries({ queryKey: novelKeys.worldSeriesList(principalId) });
+      queryClient.invalidateQueries({
+        queryKey: novelKeys.novelWorldSeries(principalId, input.source_novel_id),
+      });
+    },
+  });
+}
+
+export function useAssociateNovelWorldSeries(principalId: string | undefined, novelId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    retry: false,
+    mutationFn: (seriesId: string | null) => apiClient
+      .put<WorldSeries | null>(`/novels/${novelId}/world-series`, { series_id: seriesId })
+      .then(response => response.data),
+    onSuccess: () => {
+      if (!principalId) return;
+      queryClient.invalidateQueries({ queryKey: novelKeys.novelWorldSeries(principalId, novelId) });
+      queryClient.invalidateQueries({ queryKey: novelKeys.worldSeriesList(principalId) });
+    },
   });
 }
 

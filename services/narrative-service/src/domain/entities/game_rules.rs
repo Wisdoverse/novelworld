@@ -11,6 +11,7 @@ use crate::domain::entities::{
 pub const GAME_RULE_SCHEMA_VERSION: i32 = 1;
 pub const GAME_RULE_PROMPT_VERSION: &str = "novel-game-rules-v1";
 pub const BASIC_GAME_RULE_PROMPT_VERSION: &str = "novel-game-rules-v2";
+pub const SERIES_GAME_RULE_PROMPT_VERSION: &str = "series-game-rules-v1";
 pub const BASIC_ACTION_DESCRIPTION: &str = "在世界规则内处理该类行动的不确定结果";
 pub const ACTION_ADJUDICATION_CONTEXT_LIMIT: usize = 8 * 1024;
 
@@ -54,7 +55,50 @@ pub struct GameActionRule {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct SeriesRuleBinding {
+    pub series_id: Uuid,
+    pub revision: i32,
+}
+
+impl SeriesRuleBinding {
+    pub fn validate(&self) -> Result<(), GameRulesError> {
+        if self.series_id.is_nil() || self.revision != 1 {
+            return invalid("series binding identity or revision is invalid");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SeriesSetting {
+    pub binding: SeriesRuleBinding,
+    pub name: String,
+    pub background: String,
+}
+
+impl SeriesSetting {
+    pub fn validate(&self) -> Result<(), GameRulesError> {
+        self.binding.validate()?;
+        text(&self.name, 80)?;
+        text(&self.background, 2_000)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SeriesRuleContext {
+    pub binding: SeriesRuleBinding,
+    pub target_novel_id: Uuid,
+    pub name: String,
+    pub background: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GameRuleTemplate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series: Option<SeriesRuleContext>,
     pub novel_id: Uuid,
     pub canon_model_version: i32,
     pub schema_version: i32,
@@ -78,13 +122,24 @@ impl GameRuleTemplate {
         {
             return invalid("template identity, versions, or bounds are invalid");
         }
+        validate_series_binding(
+            &self.prompt_version,
+            self.series.as_ref().map(|series| &series.binding),
+        )?;
+        if let Some(series) = &self.series {
+            if series.target_novel_id.is_nil() {
+                return invalid("series target novel is invalid");
+            }
+            text(&series.name, 80)?;
+            text(&series.background, 2_000)?;
+        }
         let mut keys = HashSet::new();
         for attribute in &self.attributes {
             key(&attribute.key)?;
             text(&attribute.label, 40)?;
             text(&attribute.description, 300)?;
             source_chapters(&attribute.source_chapters)?;
-            if self.prompt_version == BASIC_GAME_RULE_PROMPT_VERSION
+            if is_basic_prompt_version(&self.prompt_version)
                 && basic_attribute(&attribute.key)
                     != Some((attribute.label.as_str(), attribute.description.as_str()))
             {
@@ -122,7 +177,7 @@ impl GameRuleTemplate {
         for rule in &self.action_rules {
             text(&rule.description, 300)?;
             source_chapters(&rule.source_chapters)?;
-            if self.prompt_version == BASIC_GAME_RULE_PROMPT_VERSION
+            if is_basic_prompt_version(&self.prompt_version)
                 && rule.description != BASIC_ACTION_DESCRIPTION
             {
                 return invalid("basic template action description is invalid");
@@ -138,6 +193,26 @@ impl GameRuleTemplate {
             return invalid("action rules are incomplete");
         }
         Ok(())
+    }
+
+    pub fn applies_to_novel(&self, novel_id: Uuid) -> bool {
+        self.series
+            .as_ref()
+            .map_or(self.novel_id == novel_id, |series| {
+                series.target_novel_id == novel_id
+            })
+    }
+
+    pub fn series_setting(&self) -> Option<SeriesSetting> {
+        self.series.as_ref().map(|series| SeriesSetting {
+            binding: series.binding.clone(),
+            name: series.name.clone(),
+            background: series.background.clone(),
+        })
+    }
+
+    pub fn binding(&self) -> Option<&SeriesRuleBinding> {
+        self.series.as_ref().map(|series| &series.binding)
     }
 
     pub fn rule_for(&self, kind: WorldActionKind) -> Option<&GameActionRule> {
@@ -156,6 +231,8 @@ pub enum ResolutionMode {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlayerRuleProfile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series_binding: Option<SeriesRuleBinding>,
     #[serde(default)]
     pub mode: ResolutionMode,
     pub canon_model_version: Option<i32>,
@@ -181,11 +258,16 @@ impl PlayerRuleProfile {
                     || self.template_schema_version.is_some()
                     || self.template_prompt_version.is_some()
                     || !self.attributes.is_empty()
+                    || self.series_binding.is_some()
                 {
                     return invalid("narrative mode cannot bind an advanced template");
                 }
             }
             ResolutionMode::Advanced => {
+                validate_series_binding(
+                    self.template_prompt_version.as_deref().unwrap_or_default(),
+                    self.series_binding.as_ref(),
+                )?;
                 if self.canon_model_version.is_none_or(|version| version < 1)
                     || self.template_schema_version != Some(GAME_RULE_SCHEMA_VERSION)
                     || !self
@@ -196,8 +278,10 @@ impl PlayerRuleProfile {
                     || self.attributes.iter().any(|(name, score)| {
                         key(name).is_err()
                             || !(8..=15).contains(score)
-                            || (self.template_prompt_version.as_deref()
-                                == Some(BASIC_GAME_RULE_PROMPT_VERSION)
+                            || (self
+                                .template_prompt_version
+                                .as_deref()
+                                .is_some_and(is_basic_prompt_version)
                                 && basic_attribute(name).is_none())
                     })
                 {
@@ -216,6 +300,7 @@ impl PlayerRuleProfile {
             || self.template_schema_version != Some(template.schema_version)
             || self.template_prompt_version.as_deref() != Some(template.prompt_version.as_str())
             || self.attributes.len() != template.attributes.len()
+            || self.series_binding.as_ref() != template.binding()
         {
             return invalid("player profile does not bind the requested template");
         }
@@ -278,6 +363,8 @@ pub struct ActionAdjudicationContext {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActionCheck {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series_binding: Option<SeriesRuleBinding>,
     pub schema_version: i32,
     pub canon_model_version: i32,
     pub template_prompt_version: String,
@@ -306,6 +393,7 @@ impl ActionCheck {
         {
             return invalid("action check arithmetic or versions are invalid");
         }
+        validate_series_binding(&self.template_prompt_version, self.series_binding.as_ref())?;
         let expected_success = match &self.adjudication {
             Some(adjudication) => {
                 if adjudication.schema_version != 1
@@ -335,11 +423,44 @@ impl ActionCheck {
         }
         key(&self.attribute_key)?;
         text(&self.attribute_label, 40)?;
-        if self.template_prompt_version == BASIC_GAME_RULE_PROMPT_VERSION
+        if is_basic_prompt_version(&self.template_prompt_version)
             && basic_attribute(&self.attribute_key).map(|(label, _)| label)
                 != Some(self.attribute_label.as_str())
         {
             return invalid("basic action check attribute is invalid");
+        }
+        Ok(())
+    }
+
+    pub fn validate_against(
+        &self,
+        template: &GameRuleTemplate,
+        kind: WorldActionKind,
+    ) -> Result<(), GameRulesError> {
+        self.validate_resolved()?;
+        template.validate()?;
+        let rule = template
+            .rule_for(kind)
+            .ok_or_else(|| GameRulesError("check action rule is unavailable".into()))?;
+        let attribute = template
+            .attributes
+            .iter()
+            .find(|attribute| attribute.key == rule.attribute_key)
+            .ok_or_else(|| GameRulesError("check attribute is unavailable".into()))?;
+        let base_dc = self
+            .adjudication
+            .as_ref()
+            .map_or(self.difficulty_class, |value| {
+                value.template_difficulty_class
+            });
+        if self.canon_model_version != template.canon_model_version
+            || self.template_prompt_version != template.prompt_version
+            || self.series_binding.as_ref() != template.binding()
+            || self.attribute_key != attribute.key
+            || self.attribute_label != attribute.label
+            || base_dc != rule.difficulty_class
+        {
+            return invalid("action check does not bind its frozen template");
         }
         Ok(())
     }
@@ -421,6 +542,7 @@ pub fn resolve_action_check(
     let modifier = (score - 10).div_euclid(2);
     let total = i32::from(roll) + modifier;
     let check = ActionCheck {
+        series_binding: template.binding().cloned(),
         schema_version: template.schema_version,
         canon_model_version: template.canon_model_version,
         template_prompt_version: template.prompt_version.clone(),
@@ -568,7 +690,22 @@ fn invalid<T>(message: impl Into<String>) -> Result<T, GameRulesError> {
 }
 
 fn supported_prompt_version(version: &str) -> bool {
-    version == GAME_RULE_PROMPT_VERSION || version == BASIC_GAME_RULE_PROMPT_VERSION
+    version == GAME_RULE_PROMPT_VERSION || is_basic_prompt_version(version)
+}
+
+fn is_basic_prompt_version(version: &str) -> bool {
+    version == BASIC_GAME_RULE_PROMPT_VERSION || version == SERIES_GAME_RULE_PROMPT_VERSION
+}
+
+fn validate_series_binding(
+    version: &str,
+    binding: Option<&SeriesRuleBinding>,
+) -> Result<(), GameRulesError> {
+    match (version == SERIES_GAME_RULE_PROMPT_VERSION, binding) {
+        (true, Some(binding)) => binding.validate(),
+        (false, None) => Ok(()),
+        _ => invalid("series prompt and binding must be used together"),
+    }
 }
 
 #[cfg(test)]
@@ -597,6 +734,7 @@ mod tests {
             WorldActionKind::PursueGoal,
         ];
         GameRuleTemplate {
+            series: None,
             novel_id: Uuid::new_v4(),
             canon_model_version: 1,
             schema_version: GAME_RULE_SCHEMA_VERSION,
@@ -621,6 +759,7 @@ mod tests {
 
     fn profile() -> PlayerRuleProfile {
         PlayerRuleProfile {
+            series_binding: None,
             mode: ResolutionMode::Advanced,
             canon_model_version: Some(1),
             template_schema_version: Some(GAME_RULE_SCHEMA_VERSION),
@@ -671,6 +810,7 @@ mod tests {
     fn basic_profile_and_checks_validate_exact_vocabulary_while_v1_remains_valid() {
         let template = basic_template();
         let profile = PlayerRuleProfile {
+            series_binding: None,
             mode: ResolutionMode::Advanced,
             canon_model_version: Some(template.canon_model_version),
             template_schema_version: Some(template.schema_version),
@@ -696,6 +836,193 @@ mod tests {
         let mut forged = check;
         forged.attribute_label = "伪造标签".into();
         assert!(forged.validate().is_err());
+    }
+
+    fn series_template(target_novel_id: Uuid) -> GameRuleTemplate {
+        let mut template = basic_template();
+        template.canon_model_version = 7;
+        template.prompt_version = SERIES_GAME_RULE_PROMPT_VERSION.into();
+        template.series = Some(SeriesRuleContext {
+            binding: SeriesRuleBinding {
+                series_id: Uuid::new_v4(),
+                revision: 1,
+            },
+            target_novel_id,
+            name: "暮城系列".into(),
+            background: "共同设定：古城居民在城门附近生活。".into(),
+        });
+        template.attributes[0].source_chapters = vec![99];
+        template
+    }
+
+    fn series_profile(template: &GameRuleTemplate) -> PlayerRuleProfile {
+        PlayerRuleProfile {
+            series_binding: template.binding().cloned(),
+            mode: ResolutionMode::Advanced,
+            canon_model_version: Some(template.canon_model_version),
+            template_schema_version: Some(template.schema_version),
+            template_prompt_version: Some(template.prompt_version.clone()),
+            attributes: template
+                .attributes
+                .iter()
+                .map(|attribute| (attribute.key.clone(), attribute.default_score))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn series_binding_is_required_exact_and_keeps_source_provenance() {
+        let target = Uuid::new_v4();
+        let template = series_template(target);
+        let profile = series_profile(&template);
+        profile.validate_against(&template).unwrap();
+        assert_ne!(template.novel_id, target);
+        assert!(template.applies_to_novel(target));
+        assert!(!template.applies_to_novel(template.novel_id));
+        assert_eq!(template.attributes[0].source_chapters, vec![99]);
+        let check = resolve_action_check(&template, &profile, WorldActionKind::Travel, 20).unwrap();
+        assert_eq!(check.canon_model_version, 7);
+        assert_eq!(check.series_binding.as_ref(), template.binding());
+        check
+            .validate_against(&template, WorldActionKind::Travel)
+            .unwrap();
+        let mut forged = profile;
+        forged.series_binding.as_mut().unwrap().series_id = Uuid::new_v4();
+        assert!(forged.validate_against(&template).is_err());
+        let mut forged = check;
+        forged.series_binding.as_mut().unwrap().series_id = Uuid::new_v4();
+        assert!(forged
+            .validate_against(&template, WorldActionKind::Travel)
+            .is_err());
+        let mut forged = template.clone();
+        forged.attributes[0].description = "后文章节秘密".into();
+        assert!(forged.validate().is_err());
+        let mut missing = template;
+        missing.series = None;
+        assert!(missing.validate().is_err());
+        let mut mislabeled = basic_template();
+        mislabeled.series = forged.series;
+        assert!(mislabeled.validate().is_err());
+        assert!(serde_json::to_value(basic_template())
+            .unwrap()
+            .get("series")
+            .is_none());
+        assert!(serde_json::to_value(PlayerRuleProfile::narrative())
+            .unwrap()
+            .get("series_binding")
+            .is_none());
+    }
+
+    #[test]
+    fn series_session_freezes_source_rules_with_independent_target_canon() {
+        use crate::domain::entities::narrative_node::WorldState;
+        use crate::domain::entities::world_session::{
+            build_world_turn_prompt_with_check, parse_world_turn_transition_with_check,
+            WorldEntityRef, WorldEntryContext,
+        };
+        let target = Uuid::new_v4();
+        let template = series_template(target);
+        let profile = series_profile(&template);
+        let context = WorldEntryContext {
+            series_setting: template.series_setting(),
+            model_version: 2,
+            checkpoint_chapter: 1,
+            unlocked_through_chapter: 1,
+            characters: vec![],
+            locations: vec![WorldEntityRef {
+                id: "gate".into(),
+                name: "城门".into(),
+            }],
+            factions: vec![],
+            hard_rules: vec![],
+            dead_character_ids: vec![],
+            threads: vec![],
+            scheduled_events: vec![],
+            character_goals: vec![],
+        };
+        let player = PlayerEntity::new_with_rules(
+            Uuid::new_v4(),
+            target,
+            1,
+            "云舟".into(),
+            "远行者".into(),
+            vec!["观察".into()],
+            "gate".into(),
+            vec![],
+            profile,
+        )
+        .unwrap();
+        let mut state = WorldState::new(player.user_id, target);
+        state.state["player_entity"] = serde_json::to_value(&player).unwrap();
+        let session = state
+            .start_open_world_with_rules(&context, Some(&template))
+            .unwrap();
+        assert_eq!(session.entry_context.model_version, 2);
+        assert_eq!(session.game_rules.as_ref().unwrap().canon_model_version, 7);
+        let mut changed_context = context.clone();
+        changed_context.series_setting.as_mut().unwrap().background = "新背景不覆盖旧世界".into();
+        let frozen = state
+            .start_open_world_with_rules(&changed_context, Some(&template))
+            .unwrap();
+        assert_eq!(frozen, session);
+        let restored =
+            serde_json::from_value::<WorldSession>(serde_json::to_value(&frozen).unwrap()).unwrap();
+        restored.validate().unwrap();
+        let action = WorldAction {
+            kind: WorldActionKind::PursueGoal,
+            target_id: None,
+            intent: "继续探索".into(),
+        };
+        let check = resolve_action_check(&template, &player.rules, action.kind, 20).unwrap();
+        let raw = serde_json::json!({"schema_version":1,"rendered_narrative":"旅人继续在城门附近探索。","events":[{"summary":"旅人观察城门。","actor_character_ids":[],"location_id":"gate"}],"relationship_changes":[],"location_changes":[],"thread_changes":[],"player_location_id":null,"inventory_additions":[],"inventory_removals":[],"knowledge_discoveries":[],"faction_changes":[],"canonical_event_change":null}).to_string();
+        let transition = parse_world_turn_transition_with_check(
+            &raw,
+            &action,
+            &context,
+            &restored,
+            Some(&check),
+        )
+        .unwrap();
+        assert_eq!(transition.canon_model_version, 2);
+        let mut wrong_target = transition.clone();
+        wrong_target.canon_model_version = 7;
+        assert!(wrong_target
+            .validate_against_with_check(&action, &context, &restored, Some(&check))
+            .is_err());
+        let mut wrong_source = check.clone();
+        wrong_source.canon_model_version = 2;
+        assert!(transition
+            .validate_against_with_check(&action, &context, &restored, Some(&wrong_source))
+            .is_err());
+        let prompt = build_world_turn_prompt_with_check(
+            "暮城",
+            &player,
+            &action,
+            &restored,
+            &state.state,
+            &[],
+            Some(&check),
+        )
+        .unwrap();
+        assert!(prompt.contains("共同设定"));
+        assert!(prompt.contains("hard_rules take precedence"));
+        let mut future_context = context.clone();
+        future_context
+            .hard_rules
+            .push(crate::domain::entities::world_session::WorldRuleRef {
+                id: "future".into(),
+                description: "隐蔽信息".into(),
+            });
+        assert!(transition
+            .validate_against_with_check(&action, &future_context, &restored, Some(&check))
+            .is_err());
+        let mut another = template;
+        another.series.as_mut().unwrap().target_novel_id = Uuid::new_v4();
+        let mut fresh_state = WorldState::new(player.user_id, target);
+        fresh_state.state["player_entity"] = serde_json::to_value(&player).unwrap();
+        assert!(fresh_state
+            .start_open_world_with_rules(&context, Some(&another))
+            .is_err());
     }
 
     #[test]

@@ -155,6 +155,9 @@ describe('setup status', () => {
   });
 
   it('routes the journey registration destination to registration mode', async () => {
+    // Module transformation is setup, not the route/auth behavior under test.
+    await import('@/pages/home');
+    await import('@/pages/login');
     const request = vi.spyOn(apiClient, 'get').mockResolvedValue({
       data: { contract: 4, configured: true, admin_configured: true, llm_configured: false },
     });

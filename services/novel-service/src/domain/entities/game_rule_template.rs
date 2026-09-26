@@ -1,14 +1,20 @@
 use std::collections::HashSet;
 
+pub use super::world_series::{SeriesRuleBinding, SeriesRuleContext};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub const GAME_RULE_SCHEMA_VERSION: i32 = 1;
 pub const GAME_RULE_PROMPT_VERSION: &str = "novel-game-rules-v1";
 pub const BASIC_GAME_RULE_PROMPT_VERSION: &str = "novel-game-rules-v2";
+pub const SERIES_GAME_RULE_PROMPT_VERSION: &str = "series-game-rules-v1";
 pub const BASIC_ACTION_DESCRIPTION: &str = "在世界规则内处理该类行动的不确定结果";
 
 pub fn supported_prompt_version(version: &str) -> bool {
+    supported_novel_prompt_version(version) || version == SERIES_GAME_RULE_PROMPT_VERSION
+}
+
+pub fn supported_novel_prompt_version(version: &str) -> bool {
     matches!(
         version,
         GAME_RULE_PROMPT_VERSION | BASIC_GAME_RULE_PROMPT_VERSION
@@ -97,6 +103,8 @@ pub struct GameRuleTemplate {
     pub point_budget: i32,
     pub attributes: Vec<GameAttribute>,
     pub action_rules: Vec<GameActionRule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series: Option<SeriesRuleContext>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -138,12 +146,22 @@ impl GameRuleTemplate {
             point_budget,
             attributes,
             action_rules,
+            series: None,
         };
         template.validate(i32::MAX)?;
         Ok(template)
     }
 
     pub fn validate(&self, maximum_source_chapter: i32) -> Result<(), GameRuleTemplateError> {
+        match (&self.series, self.prompt_version.as_str()) {
+            (Some(context), SERIES_GAME_RULE_PROMPT_VERSION) => context
+                .validate()
+                .map_err(|_| GameRuleTemplateError("series context is invalid".into()))?,
+            (None, SERIES_GAME_RULE_PROMPT_VERSION) | (Some(_), _) => {
+                return invalid("template series context does not match prompt version")
+            }
+            (None, _) => {}
+        }
         if self.novel_id.is_nil() {
             return invalid("novel_id must not be nil");
         }
@@ -167,9 +185,11 @@ impl GameRuleTemplate {
             key("attribute key", &attribute.key)?;
             text("attribute label", &attribute.label, 40)?;
             text("attribute description", &attribute.description, 300)?;
-            if self.prompt_version == BASIC_GAME_RULE_PROMPT_VERSION
-                && basic_attribute(&attribute.key)
-                    != Some((attribute.label.as_str(), attribute.description.as_str()))
+            if matches!(
+                self.prompt_version.as_str(),
+                BASIC_GAME_RULE_PROMPT_VERSION | SERIES_GAME_RULE_PROMPT_VERSION
+            ) && basic_attribute(&attribute.key)
+                != Some((attribute.label.as_str(), attribute.description.as_str()))
             {
                 return invalid("basic attribute text must match the server vocabulary");
             }
@@ -205,8 +225,10 @@ impl GameRuleTemplate {
                 return invalid("action difficulty class must be between 5 and 30");
             }
             text("action rule description", &rule.description, 300)?;
-            if self.prompt_version == BASIC_GAME_RULE_PROMPT_VERSION
-                && rule.description != BASIC_ACTION_DESCRIPTION
+            if matches!(
+                self.prompt_version.as_str(),
+                BASIC_GAME_RULE_PROMPT_VERSION | SERIES_GAME_RULE_PROMPT_VERSION
+            ) && rule.description != BASIC_ACTION_DESCRIPTION
             {
                 return invalid("basic action text must match the server vocabulary");
             }
@@ -222,7 +244,10 @@ impl GameRuleTemplate {
     }
 
     pub fn visible_at(&self, unlocked_chapter: i32) -> Option<Self> {
-        if self.prompt_version == BASIC_GAME_RULE_PROMPT_VERSION {
+        if matches!(
+            self.prompt_version.as_str(),
+            BASIC_GAME_RULE_PROMPT_VERSION | SERIES_GAME_RULE_PROMPT_VERSION
+        ) {
             // Basic rules expose only trusted vocabulary and bounded numbers.
             // Real citations are provenance, not story-unlock prerequisites.
             return (unlocked_chapter >= 1 && self.validate(i32::MAX).is_ok())
