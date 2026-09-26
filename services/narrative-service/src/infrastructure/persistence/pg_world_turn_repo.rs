@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{prelude::FromRow, PgPool};
 use uuid::Uuid;
 
+use crate::domain::entities::game_rules::{ActionCheck, AdjudicationDecision};
 use crate::domain::{
     entities::{narrative_node::WorldState, world_session::WorldEntryContext},
     repositories::{
@@ -218,6 +219,9 @@ impl PgWorldTurnRepository {
         ensure!(result.turn_id == row.id);
         ensure!(result.action == row.action()?);
         ensure!(result.resolution == row.resolution()?);
+        if let Some(check) = &result.resolution {
+            check.validate_resolved()?;
+        }
         ensure!(result.world_state.user_id == row.user_id);
         ensure!(result.world_state.novel_id == row.novel_id);
         let session = result
@@ -362,6 +366,42 @@ impl WorldTurnRepository for PgWorldTurnRepository {
         })
     }
 
+    async fn settle_adjudication(
+        &self,
+        claim: &WorldTurnClaim,
+        attempt: i64,
+        decision: AdjudicationDecision,
+    ) -> Result<Option<ActionCheck>> {
+        validate_claim(claim)?;
+        let previous = claim
+            .resolution
+            .as_ref()
+            .context("action check is missing")?;
+        let resolved = previous.settle_adjudication(decision)?;
+        let result = sqlx::query(
+            r#"
+            UPDATE world_turns
+            SET resolution = $1, updated_at = NOW()
+            WHERE id = $2 AND user_id = $3 AND novel_id = $4
+              AND expected_turn_number = $5 AND request_fingerprint = $6
+              AND action = $7 AND resolution = $8 AND attempt = $9
+              AND status = 'in_progress' AND lease_expires_at > NOW()
+            "#,
+        )
+        .bind(serde_json::to_value(&resolved)?)
+        .bind(claim.id)
+        .bind(claim.user_id)
+        .bind(claim.novel_id)
+        .bind(claim.expected_turn_number)
+        .bind(&claim.request_fingerprint)
+        .bind(serde_json::to_value(&claim.action)?)
+        .bind(serde_json::to_value(previous)?)
+        .bind(attempt)
+        .execute(&self.pool)
+        .await?;
+        Ok((result.rows_affected() == 1).then_some(resolved))
+    }
+
     async fn recoverable_turn(
         &self,
         user_id: Uuid,
@@ -457,6 +497,9 @@ impl WorldTurnRepository for PgWorldTurnRepository {
         context: &WorldEntryContext,
     ) -> Result<WorldTurnResult> {
         validate_claim(claim)?;
+        if let Some(check) = &claim.resolution {
+            check.validate_resolved()?;
+        }
         context.validate()?;
         let mut transaction = self.pool.begin().await?;
 
@@ -476,7 +519,11 @@ impl WorldTurnRepository for PgWorldTurnRepository {
         .fetch_one(&mut *transaction)
         .await?;
         ensure!(turn.matches(claim)?, "world turn claim conflicts");
-        ensure!(turn.status == "in_progress" && turn.attempt == attempt);
+        ensure!(
+            turn.resolution()? == claim.resolution,
+            "action check is not the frozen resolution"
+        );
+        ensure!(turn.status == "in_progress" && turn.attempt == attempt && !turn.lease_expired);
 
         let state_row = sqlx::query_as::<_, WorldStateRow>(
             r#"

@@ -206,4 +206,8 @@ chapters the reader has not unlocked. Continue reading or choose narrative mode;
 do not regenerate the template, advance stored progress, or retry provider work
 to bypass that boundary. Template generation failure and dependency failures are
 separate cases. The [D20 responsibility and evaluation plan](./ADVANCED_RULES_PLAN.md)
-explains current checks and why Laya hints are not a semantic referee.
+explains the optional Laya (Jev) classification preview and its fallback. A
+missing or failing classifier is not this 422 and falls back to the template
+check for a new advanced turn; frozen decisions replay without another call.
+Both names refer to the same decision capability; configuration still uses
+`LAYA_API_URL` and `LAYA_API_KEY`. No semantic-quality qualification is implied.

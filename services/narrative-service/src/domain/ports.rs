@@ -1,3 +1,4 @@
+use crate::domain::entities::game_rules::{ActionAdjudicationContext, AdjudicationDecision};
 use crate::domain::entities::world_session::WorldActionKind;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -76,4 +77,13 @@ pub trait ActionSuggestionPort: Send + Sync {
         intent: &str,
         available: &[WorldActionKind],
     ) -> Result<Option<WorldActionKind>>;
+}
+
+/// Classifies an authorized action; code maps and freezes the bounded decision.
+#[async_trait]
+pub trait ActionAdjudicationPort: Send + Sync {
+    async fn adjudicate(
+        &self,
+        context: &ActionAdjudicationContext,
+    ) -> Result<Option<AdjudicationDecision>>;
 }

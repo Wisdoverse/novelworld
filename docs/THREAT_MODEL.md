@@ -154,12 +154,26 @@ limit but cannot enforce.
    accidental instruction confusion but are not an authorization mechanism.
    Structured responses must pass JSON and domain validation before durable
    state changes; free-form chat remains untrusted display data.
-   Optional Narrative-to-Laya action hints use a separately configured private
-   HTTP endpoint and bearer token. Only a bounded reader-authored intent and
-   permitted action-type descriptions cross that boundary after the owned,
-   self-identity, source-visible world read. The response is untrusted advice;
-   it cannot select a target, bypass turn validation, or commit state. Laya
-   errors and overload return no suggestion, leaving manual actions available.
+   Optional Narrative-to-Laya (Jev) action hints use a separately configured
+   private HTTP endpoint and bearer token. The hint sends a bounded
+   reader-authored intent and permitted action-type descriptions after the
+   owned, self-identity, source-visible world read; it cannot select a target,
+   bypass turn validation, or commit state. Advanced-turn adjudication is a
+   separate use, enabled only by paired endpoint/key configuration. It sends a
+   bounded JSON allowlist of intent, action kind, selected target and current
+   location display names, player background/capabilities/inventory, current
+   attribute details and score, template base DC, and source-visible hard-rule
+   descriptions. It excludes scope UUIDs, novel full text, history,
+   future-event lists, dice, and results. An `investigate` target that exists
+   only as a scheduled event has no adjudication context and falls back to the
+   template. The context is capped at 8 KiB. All included strings are untrusted
+   data, not instructions. A valid bounded
+   decision can affect only the check band or select a no-check outcome; server
+   validation, progress and hard rules remain authoritative. Confidence is an
+   uncalibrated abstention signal. Errors and uncertainty fall back to the
+   template check. Fencing persists the decision before DeepSeek prose, and
+   unknown outcomes or lost leases stop before prose. Provider retention of this
+   allowlisted player/world context remains an external boundary.
    For user-initiated work, the trusted Gateway principal selects a user-owned
    encrypted credential when present and otherwise falls back to the platform
    credential. Accounting uses only a one-way fingerprint of the credential

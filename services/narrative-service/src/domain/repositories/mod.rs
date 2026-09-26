@@ -1,5 +1,5 @@
 use crate::domain::entities::{
-    game_rules::{ActionCheck, GameRuleTemplate},
+    game_rules::{ActionCheck, AdjudicationDecision, GameRuleTemplate},
     narrative_node::{NarrativeNode, WorldState},
     player_entity::PlayerEntity,
     world_session::{WorldAction, WorldEntryContext, WorldTurnTransition},
@@ -171,6 +171,13 @@ pub struct RecoverableWorldTurn {
 #[async_trait]
 pub trait WorldTurnRepository: Send + Sync {
     async fn begin_turn(&self, claim: &WorldTurnClaim) -> Result<BeginWorldTurn>;
+    /// Freeze a pending decision under the exact live attempt and old resolution.
+    async fn settle_adjudication(
+        &self,
+        claim: &WorldTurnClaim,
+        attempt: i64,
+        decision: AdjudicationDecision,
+    ) -> Result<Option<ActionCheck>>;
     async fn recoverable_turn(
         &self,
         user_id: Uuid,
