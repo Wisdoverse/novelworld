@@ -99,6 +99,50 @@ URL-safe `REDIS_PASSWORD`（`A-Z a-z 0-9 . _ ~ -`），再重新运行 `start.sh
 生成 Redis 密码但没有 `CACHE_MODE` 的安装，首次运行新脚本会一次性持久化
 `redis`，避免升级后静默切换适配器。
 
+Redis 为 Agent Service 提供可重建的消息投影，不承接小说解析队列。上传接收后
+持久化的 PostgreSQL 导入任务通过 claim、lease 和恢复扫描等待解析槽位；解析
+繁忙不阻止有接收容量的新书入队。批量上传最多选择 50 本，浏览器按每批最多
+5 本、合计 40 MiB 顺序发送。共享书库可直接添加已有 Ready 小说，避免重新
+上传和解析；尚未提供自动文件哈希去重。
+
+### 显式启用 RustFS 原文件存储
+
+RustFS 使用已有 S3 适配器，由管理员独立部署；仓库 Compose 不会自动创建
+RustFS 容器或 bucket。为其固定镜像 digest、配置独立持久化数据卷，并让
+Novel Service 通过共同的私有 Docker 网络访问。无需向宿主机发布 S3 或
+控制台端口；应用凭据与管理员 root 凭据分开保管。
+
+例如容器网络别名为 `novel-rustfs`、S3 端口为 `9000` 时，在私有 `.env` 设置：
+
+```dotenv
+S3_ENABLED=true
+S3_ENDPOINT=http://novel-rustfs:9000
+S3_BUCKET=novel-world-uploads
+S3_REGION=us-east-1
+S3_FORCE_PATH_STYLE=true
+```
+
+先创建 bucket，再从本地秘密配置填写配套的 `S3_ACCESS_KEY` 与
+`S3_SECRET_KEY`；长期应用账户的 `S3_SESSION_TOKEN` 留空。此 HTTP 示例仅用于
+同主机私有容器网络；跨主机连接须提供受信任 TLS 边界。不要在容器里使用
+`127.0.0.1` 指向另一容器，也不要提交 `.env` 或在命令输出中展示凭据。
+
+应用账户仅需 bucket 上的 `s3:ListBucket`，以及该 bucket 的 `source-files/*`
+对象上的 `s3:GetObject`、`s3:PutObject`、`s3:DeleteObject`。`ListBucket` 用于
+`HeadBucket` readiness，不能加上只适用于列举对象的前缀条件而阻断 HEAD。
+RustFS 服务账户继承父账户权限：给父 IAM 用户附加上述最小权限策略，或在创建
+派生服务账户时附带限制性的 session policy；不要把服务账户当作独立 IAM 用户
+直接绑定策略。须检查最终生效权限，见
+[官方 IAM 说明](https://docs.rustfs.com/en/security-compliance/iam)。
+
+按受管部署流程重建 Novel Service 后，验证其 `/ready`、用应用账户执行
+HEAD 和一次私有测试对象的 PUT/GET/DELETE，并确认前缀外对象与其他 bucket
+访问被拒绝。不得用真实小说解析来代替存储探针。启用只保留之后上传的原文件，
+不会为历史上传补齐源对象；原文件保留不等于自动去重。已保留源对象的恢复、
+删除仍需要此 bucket，停用前需明确这些任务的处理方式。PostgreSQL 备份不含
+RustFS 数据卷，管理员须单独安排对象存储备份与恢复，见
+[备份边界](./docs/BACKUP_RESTORE.md#scope)。
+
 ---
 
 ## 生产升级与回滚
