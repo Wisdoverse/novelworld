@@ -31,3 +31,34 @@ test('captures bounded batch novel import', async ({ page }) => {
   await expectNoA11yViolations(page);
   await dialog.screenshot({ path: '../docs/evidence/batch-novel-import.png' });
 });
+
+
+test('submits 50 books as bounded sequential uploads', async ({ page }) => {
+  await installStubs(page);
+  let requests = 0;
+  let active = 0;
+  let maxActive = 0;
+  await page.route('**/api/novels/upload/batch', async route => {
+    active++;
+    maxActive = Math.max(maxActive, active);
+    const body = route.request().postData() ?? '';
+    expect((body.match(/filename="/g) ?? []).length).toBe(5);
+    const batch = requests++;
+    await new Promise(resolve => setTimeout(resolve, 50));
+    active--;
+    await route.fulfill({ status: 202, json: { novels: Array.from({ length: 5 }, (_, index) => ({ novel_id: `accepted-${batch}-${index}`, status: 'accepted' })) } });
+  });
+  await page.goto('/shelf');
+  await page.getByRole('button', { name: '导入小说' }).first().click();
+  const dialog = page.getByRole('dialog', { name: '导入小说' });
+  await dialog.locator('input[type=file]').setInputFiles(Array.from({ length: 50 }, (_, index) => ({
+    name: `测试小说${index}.txt`, mimeType: 'text/plain', buffer: Buffer.from('第一章 测试故事。'.repeat(20)),
+  })));
+  await expect(dialog.getByText('已选择 50 本小说')).toBeVisible();
+  await expectNoA11yViolations(page);
+  await dialog.getByRole('button', { name: '导入 50 本' }).click();
+  await expect(dialog.getByRole('button', { name: '取消' })).toBeDisabled();
+  await expect(dialog).toBeHidden();
+  expect(requests).toBe(10);
+  expect(maxActive).toBe(1);
+});

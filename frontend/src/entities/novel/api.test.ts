@@ -6,6 +6,7 @@ import { apiClient } from '@/shared/api/client';
 import { worldTurnPendingStorageKey } from '@/shared/lib/worldTurnStorage';
 import {
   buildNovelBatchUploadFormData,
+  splitNovelUploadBatches,
   buildNovelUploadFormData,
   novelKeys,
   novelTitleFromFile,
@@ -63,13 +64,26 @@ describe('novel file uploads', () => {
       new File(['two'], 'two.pdf'),
     ])).toBeNull();
     expect(validateNovelBatchFiles(
-      Array.from({ length: 6 }, (_, index) => new File(['x'], `${index}.txt`)),
-    )).toContain('最多导入 5 本');
+      Array.from({ length: 51 }, (_, index) => new File(['x'], `${index}.txt`)),
+    )).toContain('最多导入 50 本');
     expect(validateNovelBatchFiles([
       { name: 'one.epub', size: 20 * 1024 * 1024 } as File,
       { name: 'two.epub', size: 20 * 1024 * 1024 } as File,
       { name: 'three.txt', size: 1 } as File,
-    ])).toContain('合计不能超过 40 MiB');
+    ])).toBeNull();
+  });
+});
+
+describe('upload batch planning', () => {
+  it('splits 50 selected novels into ten requests, preserving order', () => {
+    const files = Array.from({ length: 50 }, (_, index) => new File(['x'], `${index}.txt`));
+    const batches = splitNovelUploadBatches(files);
+    expect(batches.map(batch => batch.length)).toEqual(Array(10).fill(5));
+    expect(batches.flat()).toEqual(files);
+  });
+  it('splits on the byte boundary independently of the file count', () => {
+    const files = [20, 20, 1, 20].map((mib, index) => ({ name: `${index}.epub`, size: mib * 1024 * 1024 } as File));
+    expect(splitNovelUploadBatches(files)).toEqual([files.slice(0, 2), files.slice(2)]);
   });
 });
 

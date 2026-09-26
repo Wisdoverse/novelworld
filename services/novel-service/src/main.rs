@@ -181,7 +181,8 @@ async fn run_body() -> Result<()> {
             source_deletions,
             document_extractor: document_extractor.clone(),
             // ponytail: process-local admission matches the single service replica;
-            // replace with a durable queue before horizontally scaling imports.
+            // keep a single replica until admission is coordinated across workers.
+            acceptance_permits: Arc::new(Semaphore::new(2)),
             import_permits: Arc::new(Semaphore::new(2)),
             active_import_users: Arc::new(Mutex::new(HashSet::new())),
         });

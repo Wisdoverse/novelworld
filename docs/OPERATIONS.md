@@ -162,3 +162,16 @@ and Grafana serves the dashboard.
 Journey SLIs, the initial SLO/error budget, alert notification
 routing/dedup/paging (the rules fire; nothing pages yet), and postmortem
 tooling.
+
+### Uploads while parsing is busy
+
+Parsing capacity is independent of upload acceptance. New accepted books remain
+`pending` in `novel_import_jobs` with attempt zero until the existing worker can
+claim them. `429 upload_capacity_busy` means short-lived upload preparation is
+busy; `503 import_capacity_busy` remains a bounded retry admission response.
+A 202 confirms durable acceptance, not completion or model quality. The UI can
+select 50 books and submits bounded batches sequentially; partial acceptance
+preserves confirmed books. After an unknown batch response, check the shelf
+before resubmitting those files. PostgreSQL owns the queue; Redis is optional
+projection/cache infrastructure. Original files are retained only when the
+S3-compatible storage configuration is enabled.

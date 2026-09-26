@@ -95,9 +95,10 @@ PostgreSQL is authoritative for application state. Redis, provider-hosted
 avatars, generated prose, and search/cache data are projections with explicit
 loss or reconstruction boundaries. Optional S3 retention owns original upload
 bytes. Before returning `202`, import acceptance atomically commits deterministic
-chapters and a PostgreSQL job; claims use renewable leases, and restart recovery
-resumes from the `chapters` or `enriched` boundary. The runtime does not yet read
-retained S3 objects for full reprocessing.
+chapters (or the retained-source boundary) and a PostgreSQL job; claims use
+renewable leases, and restart recovery resumes from `source`, `chapters`, or
+`enriched`. With S3 enabled, the claimed job reads the retained object before
+provider enrichment.
 
 Chat and world turns reserve a UUID idempotency key, perform model work outside
 the transaction, validate bounded output, and emit success only after the
@@ -203,3 +204,22 @@ contracts, consistency semantics, or availability targets requires an
 [architecture decision record](./adr/0000-template.md). The record must include
 alternatives, rollout and rollback, and linked evidence; ordinary local design
 choices remain in the pull request.
+
+### Upload acceptance and parsing admission
+
+The Gateway bounds all three import request bodies with two short-lived upload
+permits before buffering. Novel Service separately bounds deterministic
+preparation, optional source retention, and atomic database acceptance. Parsing
+slots and per-owner parsing limits do not reject new uploads: accepted jobs stay
+in PostgreSQL as `pending`, attempt zero, with no lease until a worker claims
+them. The existing recovery loop starts pending jobs when capacity returns.
+Import POST responses report `accepted`; list/status reads own current progress.
+
+The browser accepts a selection of 50 files and sends sequential requests of at
+most five files and 40 MiB. Each request commits atomically; the full selection
+is not one transaction. Confirmed files leave the retry list. Network failures,
+5xx, or malformed confirmations leave the current batch unknown, stop later
+batches, and refresh the shelf; users must inspect the shelf before resubmitting
+unknown files. Batch credentials stay bound to the initiating session; a token change stops
+later submissions. No browser or proxy automatically retries an upload after
+an ambiguous outcome.

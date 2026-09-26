@@ -110,6 +110,7 @@ fn auth_test_state() -> AppState {
         source_storage: None,
         source_deletions,
         document_extractor: document_extractor.clone(),
+        acceptance_permits: Arc::new(Semaphore::new(2)),
         import_permits: Arc::new(Semaphore::new(1)),
         active_import_users: Arc::new(Mutex::new(HashSet::new())),
     });

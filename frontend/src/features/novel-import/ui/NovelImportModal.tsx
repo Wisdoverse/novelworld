@@ -4,6 +4,7 @@ import { Loader2, Upload, X } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   novelTitleFromFile,
+  NovelBatchUploadError,
   useImportNovel,
   useUploadNovel,
   useUploadNovelsBatch,
@@ -22,11 +23,13 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
   const [author, setAuthor] = useState('');
   const [content, setContent] = useState('');
   const [files, setFiles] = useState<File[]>([]);
+  const [submitting, setSubmitting] = useState(false);
+  const [unknownFiles, setUnknownFiles] = useState<string[]>([]);
   const [deviationMode, setDeviationMode] = useState('canon');
   const importNovel = useImportNovel();
   const uploadNovel = useUploadNovel();
   const uploadBatch = useUploadNovelsBatch();
-  const isPending = importNovel.isPending || uploadNovel.isPending || uploadBatch.isPending;
+  const isPending = submitting || importNovel.isPending || uploadNovel.isPending || uploadBatch.isPending;
   const isBatch = files.length > 1;
 
   const selectFiles = (selected: File[]) => {
@@ -50,6 +53,8 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
     if ((!isBatch && !title.trim()) || (!files.length && !content.trim())) return;
+    if (isPending) return;
+    setSubmitting(true);
     try {
       if (isBatch) {
         await uploadBatch.mutateAsync({
@@ -72,11 +77,31 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
           deviation_mode: deviationMode,
         });
       }
-      toast.success(isBatch ? `已开始导入 ${files.length} 本小说` : '小说导入已开始');
+      toast.success(isBatch ? `已接收 ${files.length} 本小说，等待解析` : '小说已接收，等待解析');
       onClose();
     } catch (error) {
+      if (error instanceof NovelBatchUploadError) {
+        if (error.reason === 'session_changed') {
+          toast.error('登录状态已变化，已停止后续上传。请核对原账号书架。');
+          onClose();
+          return;
+        }
+        setFiles(error.remainingFiles);
+        setTitle(error.remainingFiles.length === 1 ? novelTitleFromFile(error.remainingFiles[0]) : '');
+        if (error.unknownFiles.length) {
+          setUnknownFiles(error.unknownFiles.map(file => file.name));
+          toast.error(`已确认接收 ${error.accepted.length} 本；另有 ${error.unknownFiles.length} 本结果未知，请先核对书架，避免重复上传。`);
+          return;
+        }
+        const prefix = error.accepted.length ? `已接收 ${error.accepted.length} 本；剩余文件未接收。` : '';
+        toast.error(prefix + (getApiErrorCode(error.cause) === 'upload_capacity_busy'
+          ? '上传繁忙，请稍后重试。' : getApiErrorMessage(error.cause, '上传失败，请检查剩余文件后重试。')));
+        return;
+      }
       const code = getApiErrorCode(error);
-      const message = code === 'import_capacity_busy'
+      const message = code === 'upload_capacity_busy'
+        ? '上传繁忙，请稍后重试。'
+        : code === 'import_capacity_busy'
         ? '解析任务繁忙，请稍后再导入。'
         : code === 'source_storage_unavailable'
           ? '文件存储暂时不可用，请稍后重试。'
@@ -84,11 +109,13 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
             ? '导入服务暂时不可用，请稍后重试。'
             : getApiErrorMessage(error, isBatch ? '批量导入失败' : '小说导入失败');
       toast.error(message);
+    } finally {
+      setSubmitting(false);
     }
   };
 
   return (
-    <Dialog.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
+    <Dialog.Root open onOpenChange={(open) => { if (!open && !isPending) onClose(); }}>
       <Dialog.Portal>
         <Dialog.Overlay
           className="fixed inset-0 z-50"
@@ -96,6 +123,8 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
         />
         <Dialog.Content
           className="surface-card fixed left-1/2 top-1/2 z-50 max-h-[90dvh] w-[calc(100%_-_2rem)] max-w-2xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto scroll-py-4 outline-none"
+          onEscapeKeyDown={(event) => { if (isPending) event.preventDefault(); }}
+          onPointerDownOutside={(event) => { if (isPending) event.preventDefault(); }}
           onCloseAutoFocus={(event) => {
             event.preventDefault();
             const returnFocus = returnFocusRef.current;
@@ -108,7 +137,7 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
         </div>
 
         <form onSubmit={handleSubmit}>
-          <div className="space-y-5 px-6 py-6 sm:px-8">
+          <fieldset disabled={isPending} className="space-y-5 px-6 py-6 sm:px-8">
             <div className="grid gap-4 sm:grid-cols-2">
               {isBatch ? (
                 <div>
@@ -217,7 +246,7 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
                 </ul>
               )}
               <p className="mt-1.5 text-xs text-[#5f6368]">
-                每次最多 5 本、合计 40 MiB；单个 TXT 最大 10 MiB，EPUB/PDF 最大 20 MiB
+                每次可选 50 本，自动分批上传并排队解析；单个 TXT 最大 10 MiB，EPUB/PDF 最大 20 MiB
               </p>
             </div>
 
@@ -253,11 +282,17 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
             <p className="rounded-xl border border-[#a8c7fa] bg-[#eef3fe] px-3 py-2.5 text-xs leading-5 text-[#174ea6]">
               提交并被系统接受的正文，以及启用原文件存储时的上传文件，包括仍在解析或随后解析失败的内容，都会随共享原著保留。解析成功后其他用户可从共享书库加入；你的阅读进度、身份、对话、记忆和时间线仍为私有。移出书架或删除账号不会删除这些共享内容。
             </p>
-          </div>
+            {unknownFiles.length > 0 && (
+              <p role="alert" className="text-sm text-[#b3261e]">
+                以下文件的接收结果未知，请先核对书架再决定是否重新选择：{unknownFiles.join('、')}。
+                剩余列表仅包含尚未确认接收的文件。
+              </p>
+            )}
+          </fieldset>
 
           <div className="flex shrink-0 justify-end gap-3 border-t border-[#e8eaed] px-6 py-4 sm:px-8">
             <Dialog.Close asChild>
-              <button type="button" className="tonal-action text-sm">取消</button>
+              <button type="button" disabled={isPending} className="tonal-action text-sm">取消</button>
             </Dialog.Close>
             <button
               type="submit"

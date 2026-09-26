@@ -14,9 +14,9 @@ use uuid::Uuid;
 
 use crate::application::commands::ImportNovelCommand;
 use crate::application::handlers::{
-    GameRuleTemplateRequest, GameRuleTemplateRequestError, ImportBudgetExceeded,
-    ImportCapacityUnavailable, ImportRetryConflict, NovelCommandHandler, ReadingProgressError,
-    ReadingProgressHandler, ShelfMutationError, SourceFileStorageUnavailable,
+    GameRuleTemplateRequest, GameRuleTemplateRequestError, ImportAcceptanceUnavailable,
+    ImportBudgetExceeded, ImportCapacityUnavailable, ImportRetryConflict, NovelCommandHandler,
+    ReadingProgressError, ReadingProgressHandler, ShelfMutationError, SourceFileStorageUnavailable,
     TranslateChapterHandler, TranslationError, MAX_BATCH_IMPORTS,
 };
 use crate::domain::entities::novel::Novel;
@@ -653,8 +653,8 @@ async fn import_novel(
             StatusCode::ACCEPTED,
             Json(ImportNovelResponse {
                 novel_id,
-                status: "parsing".into(),
-                message: "Novel import started. Poll /novels/:id/status for progress.".into(),
+                status: "accepted".into(),
+                message: "Novel import accepted. Poll /novels/:id/status for progress.".into(),
             }),
         )
             .into_response(),
@@ -699,6 +699,16 @@ fn coded_api_error(status: StatusCode, code: &'static str, message: impl Into<St
 }
 
 fn import_error_response(error: anyhow::Error) -> Response {
+    if error
+        .downcast_ref::<ImportAcceptanceUnavailable>()
+        .is_some()
+    {
+        return coded_api_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "upload_capacity_busy",
+            "Upload acceptance is busy; retry later",
+        );
+    }
     if error.downcast_ref::<ImportCapacityUnavailable>().is_some() {
         tracing::warn!(
             error_code = "import_capacity_busy",
@@ -998,9 +1008,9 @@ async fn upload_novel(
             StatusCode::ACCEPTED,
             Json(ImportNovelResponse {
                 novel_id,
-                status: "parsing".into(),
+                status: "accepted".into(),
                 message:
-                    "Novel file uploaded and import started. Poll /novels/:id/status for progress."
+                    "Novel file uploaded and import accepted. Poll /novels/:id/status for progress."
                         .into(),
             }),
         )
@@ -1143,10 +1153,9 @@ async fn upload_novel_batch(
             Json(BatchImportResponse {
                 novels: novel_ids
                     .into_iter()
-                    .enumerate()
-                    .map(|(index, novel_id)| BatchImportItemResponse {
+                    .map(|novel_id| BatchImportItemResponse {
                         novel_id,
-                        status: if index == 0 { "parsing" } else { "pending" },
+                        status: "accepted",
                     })
                     .collect(),
                 message: format!("{batch_size} novel imports accepted. Poll /novels for progress."),
