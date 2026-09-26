@@ -241,6 +241,8 @@ struct LlmUsageResponse {
     tokens: LlmUsageTokensResponse,
     costs: LlmUsageCostsResponse,
     unpriced_tokens: String,
+    estimates: Vec<LlmCostEstimateResponse>,
+    pricing_references: Vec<LlmPricingReferenceResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -256,6 +258,31 @@ struct LlmUsageTokensResponse {
 struct LlmUsageCostsResponse {
     usd_micros: Option<String>,
     cny_micros: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct LlmCostEstimateResponse {
+    currency: &'static str,
+    minimum_micros: String,
+    maximum_micros: String,
+}
+
+#[derive(Debug, Serialize)]
+struct LlmPricingReferenceResponse {
+    provider: String,
+    model: String,
+    source_url: Option<String>,
+    verified_on: Option<String>,
+    note: String,
+    billing_kind: &'static str,
+    plans: Vec<LlmSubscriptionPlanResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct LlmSubscriptionPlanResponse {
+    name: String,
+    currency: &'static str,
+    monthly_micros: String,
 }
 
 fn user_dto(u: &crate::domain::entities::user::User) -> UserDto {
@@ -619,6 +646,36 @@ async fn get_llm_usage(State(state): State<AppState>, headers: HeaderMap) -> imp
                     cny_micros: summary.cny_micros.map(|value| value.to_string()),
                 },
                 unpriced_tokens: summary.unpriced_tokens.to_string(),
+                estimates: summary
+                    .estimates
+                    .into_iter()
+                    .map(|estimate| LlmCostEstimateResponse {
+                        currency: estimate.currency.as_str(),
+                        minimum_micros: estimate.minimum_micros.to_string(),
+                        maximum_micros: estimate.maximum_micros.to_string(),
+                    })
+                    .collect(),
+                pricing_references: summary
+                    .pricing_references
+                    .into_iter()
+                    .map(|reference| LlmPricingReferenceResponse {
+                        provider: reference.provider,
+                        model: reference.model,
+                        source_url: reference.source_url,
+                        verified_on: reference.verified_on,
+                        note: reference.note,
+                        billing_kind: reference.billing_kind.as_str(),
+                        plans: reference
+                            .plans
+                            .into_iter()
+                            .map(|plan| LlmSubscriptionPlanResponse {
+                                name: plan.name,
+                                currency: plan.currency.as_str(),
+                                monthly_micros: plan.monthly_micros.to_string(),
+                            })
+                            .collect(),
+                    })
+                    .collect(),
             }),
         )
             .into_response(),
