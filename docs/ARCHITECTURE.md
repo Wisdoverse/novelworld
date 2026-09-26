@@ -106,10 +106,10 @@ keys. The user and novel deletion triggers also make two exact writes into the
 platform-owned erasure journal; five cross-owner trigger/routine bindings cover
 those hooks and the shared row-local timestamp routine. Novel Service readiness
 has exact, declared checks against platform lineage/erasure relations and the
-User Service deletion trigger. Ten historical migrations with executable `DO`
+User Service deletion trigger. Nine historical migrations with executable `DO`
 bodies are pinned by normalized full-file hashes because their effects are not
-claimed as semantically parsed. These are single-node migration/audit debt, not
-proof of database isolation. The static gate pins FK identities,
+claimed as semantically parsed; migration 0002 is strictly scanned instead.
+These are single-node migration/audit debt, not proof of database isolation. The static gate pins FK identities,
 trigger/function/relation/access/body/definition hashes, and readiness SQL
 fingerprints. It rejects undeclared additions and
 stale entries; declaring new debt changes the versioned policy and remains a
@@ -177,7 +177,7 @@ Test-only or unreachable files cannot satisfy a runtime hook.
 | Invariant | Blocking evidence | Evidence limit |
 |---|---|---|
 | Domain and application purity | The architecture checker follows each crate's reachable module graph, enforces the layer matrix, rejects unknown production layers, and allows only reviewed pure/orchestration crates in domain/application code. | Static source structure does not prove that a domain rule is behaviorally correct. |
-| HTTP and data ownership | Cargo graph checks reject runtime-to-runtime dependencies and unreviewed local/path helpers; source checks constrain reviewed raw/non-HTTP transports and keep service HTTP clients in `infrastructure/http/`; SQL and known routine calls are resolved against the owner manifest; views and routine-call closures are checked transitively; relation/routine inventory, trigger bindings, and cross-owner FK/trigger debt must match exactly. | One PostgreSQL role/schema, 20 acknowledged cascading FKs, two lifecycle-trigger accesses, five cross-owner trigger/routine bindings, ten full-file historical migration audit debts, and the exact readiness exceptions remain. Unknown external crates, proc-macro expansion, generated code, and runtime behavior are not exhaustively proven by source scanning. |
+| HTTP and data ownership | Cargo graph checks reject runtime-to-runtime dependencies and unreviewed local/path helpers; source checks constrain reviewed raw/non-HTTP transports and keep service HTTP clients in `infrastructure/http/`; SQL and known routine calls are resolved against the owner manifest; views and routine-call closures are checked transitively; relation/routine inventory, trigger bindings, and cross-owner FK/trigger debt must match exactly. | One PostgreSQL role/schema, 20 acknowledged cascading FKs, two lifecycle-trigger accesses, five cross-owner trigger/routine bindings, nine full-file historical migration audit debts, strictly scanned migration 0002, and the exact readiness exceptions remain. Unknown external crates, proc-macro expansion, generated code, and runtime behavior are not exhaustively proven by source scanning. |
 | External configuration | Each production runtime must contain the policy's environment-backed configuration markers; launcher validation and the production Compose smoke exercise required values. | This does not prove secret-manager integration, rotation, or every optional provider combination. |
 | Liveness and readiness | Static checks require distinct handlers and local/dependency response semantics; the required Production Compose Smoke starts the topology and verifies dependency-failure transitions. | Probe presence does not prove every dependency failure mode or long-running degradation path. |
 | Graceful termination | Static checks require Axum graceful shutdown wired to SIGINT and SIGTERM. | Readiness draining, background-task joins, bounded drain deadlines, and forced-termination drills are not yet qualified. |

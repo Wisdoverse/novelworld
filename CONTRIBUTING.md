@@ -94,10 +94,11 @@ missing static runtime hooks. Existing shared-schema debt is exact and visible,
 not a general allowlist; adding declared debt is a versioned policy change that
 must be justified in review.
 
-Ten existing migrations contain executable `DO` bodies that the conservative
+Nine existing migrations contain executable `DO` bodies that the conservative
 parser intentionally does not interpret. Each is an exact normalized full-file
 hash debt; any edit reopens the blocker. New or changed migrations must pass the
 strict statement, ownership, view, routine, trigger, and foreign-key audit.
+Migration 0002 is strictly scanned and is not part of that hash-debt count.
 
 Frontend changes must preserve Feature-Sliced Design:
 

@@ -232,3 +232,32 @@ missing or failing classifier is not this 422 and falls back to the template
 check for a new advanced turn; frozen decisions replay without another call.
 Both names refer to the same decision capability; configuration still uses
 `LAYA_API_URL` and `LAYA_API_KEY`. No semantic-quality qualification is implied.
+
+### Migration 0002 rejects a legacy progress row
+
+Migration 0002 replay must preserve import-created progress metadata for
+`pending`, `parsing`, or `error` novels that have no effective chapter within
+their advertised `total_chapters`; `current_chapter = 1` does not prove a
+chapter exists. It must still fail closed when a `ready` or missing/unrecognized
+status has no effective chapter. Only normalize against an existing effective
+chapter. Before a managed release replays migrations, take and verify a
+PostgreSQL backup. Do not delete or rewrite progress rows to make migration 0002
+pass. If the error persists, collect only aggregate counts grouped by novel
+status, advertised chapter count, actual chapter shape, and progress validity;
+keep book, reader, and chapter content out of logs and review artifacts.
+
+The one-click `start.sh` runs `docker compose down` and brings the full stack
+back up, including migration replay. It is not an ingress-only recovery command.
+For an existing stopped edge container, follow the single-container Nginx
+restart procedure in [DEPLOY.md](../DEPLOY.md); do not start dependent services
+as a side effect.
+
+Migration 0019 detects first adoption by checking whether `user_novels` exists
+before creating it. It captures that decision in a transaction-local setting
+while holding the `novels` lock. A missing relation permits the initial
+uploader-shelf backfill; an existing relation, even an empty one, is preserved
+as the adopted state so replay cannot resurrect an intentional detach. This is
+not a general repair for an arbitrary partial historical migration. The
+`full_migration_replay_preserves_incomplete_progress_and_terminal_imports` integration regression
+covers repeated full migration replay and detached-shelf preservation. Issue
+#424 tracks the final CI and live deployment evidence.

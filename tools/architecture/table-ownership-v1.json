@@ -147,11 +147,6 @@
       "reason": "this replayed historical migration embeds catalog SELECTs and repair DML in PL/pgSQL DO guards, including an explicit player-timeline schema marker that prevents restoration of its retired global narrative-node key; the complete normalized source is pinned because executable DO bodies are no longer treated as statically safe"
     },
     {
-      "path": "infra/postgres/migrations/0002_reading_progress_contract.sql",
-      "source_sha256": "5c8fca1d95c065212c08239942d0f497efdc7117091a9cff714bbbb856c6b65f",
-      "reason": "this historical migration embeds repair queries in PL/pgSQL DO guards; the complete normalized source is pinned because executable DO bodies are no longer treated as statically safe"
-    },
-    {
       "path": "infra/postgres/migrations/0003_chat_turn_contract.sql",
       "source_sha256": "6b83bd6e8c620b98bff26154c3ebe419fd53a62c53b252d05b81785bb46eda96",
       "reason": "this historical migration embeds PERFORM and catalog-driven repair logic in PL/pgSQL DO guards; the complete normalized source is pinned because executable DO bodies are no longer treated as statically safe"
