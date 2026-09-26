@@ -40,7 +40,7 @@ EXPECTED_MODEL = "deepseek-v4-flash"
 EXPECTED_API_URL = "https://api.deepseek.com"
 EXPECTED_CANON_PROMPT = "canon-chunk-v10+event-grouping-v5"
 EXPECTED_BRANCH_PROMPT = "narrative-transition-v1"
-EXPECTED_WORLD_PROMPT = "world-turn-v2"
+EXPECTED_WORLD_PROMPT = "world-turn-v3"
 PROJECT_PATTERN = re.compile(r"^nwq-(?:[a-f0-9]{10}|[a-f0-9]{32})$")
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 IMAGE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._/:@-]*@sha256:[0-9a-f]{64}$")
@@ -4109,7 +4109,7 @@ class Journey:
                 f"WHERE novel_id = '{novel_id}'",
             ),
         }
-        if include_world:
+        if include_world and self.diagnostic_registration is None:
             prompt_checks["world"] = (
                 EXPECTED_WORLD_PROMPT,
                 "SELECT transition ->> 'prompt_version' AS version FROM world_turns "
@@ -4125,6 +4125,36 @@ class Journey:
             if observed != "ok":
                 raise QualificationFailure("prompt_identity_mismatch")
             prompt_identity[name] = expected
+        if include_world and self.diagnostic_registration is not None:
+            # Preflight bound these identities to the exact base/candidate
+            # commits and manifests. Reuse that immutable registration rather
+            # than relabeling historical base turns with the current prompt.
+            try:
+                identities = self.diagnostic_registration.value["prompt_schema_identities"]
+                base = identities["base"]["prompt_versions"]["world"]
+                candidate = identities["candidate"]["prompt_versions"]["world"]
+            except (KeyError, TypeError):
+                raise QualificationFailure("prompt_identity_mismatch") from None
+            if any(not isinstance(version, str)
+                   or re.fullmatch(r"[a-z0-9+_-]{1,100}", version) is None
+                   for version in (base, candidate)):
+                raise QualificationFailure("prompt_identity_mismatch")
+            # The unchanged journey commits turns 1-6 before upgrade and
+            # turns 7-12 after upgrade; persisted expected_turn_number is zero based.
+            observed = self.db_scalar(
+                "SELECT CASE WHEN COUNT(*) = 12 "
+                "AND COUNT(DISTINCT expected_turn_number) = 12 "
+                "AND COUNT(*) FILTER (WHERE "
+                f"(expected_turn_number BETWEEN 0 AND 5 AND version = '{base}') "
+                f"OR (expected_turn_number BETWEEN 6 AND 11 AND version = '{candidate}')) = 12 "
+                "THEN 'ok' ELSE 'invalid' END FROM ("
+                "SELECT expected_turn_number, transition ->> 'prompt_version' AS version "
+                "FROM world_turns "
+                f"WHERE novel_id = '{novel_id}' AND status = 'completed') versions"
+            )
+            if observed != "ok":
+                raise QualificationFailure("prompt_identity_mismatch")
+            prompt_identity["world"] = {"base": base, "candidate": candidate}
         self.report["journey"]["prompt_identity"] = prompt_identity
 
     def adopt_initial_release(self, *, prestart: bool = False) -> None:

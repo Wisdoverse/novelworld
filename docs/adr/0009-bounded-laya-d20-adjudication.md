@@ -112,6 +112,11 @@ Clippy with warnings denied, DDD/FSD gates, frontend lint/type/build and
 dependency audit, and browser checks (52) passed. The frontend unit suite
 passed with two workers; the default highly concurrent run timed out in an
 unchanged lazy-route test. CI, merge, and deployment status are tracked
-separately in issue #418 and are not asserted here. Acceptance covers the bounded structural preview only. No provider
+separately in issue #418 and are not asserted here. The offline journey runner self-test and 77 Diagnostic controls also passed
+with isolated PostgreSQL. Registered upgrade checks compare the first six
+turns to the bound base prompt identity and the next six to the candidate,
+rejecting wrong-stage, missing, duplicate or out-of-range turns. Frozen
+registrations, thresholds and historical records remain unchanged.
+Acceptance covers the bounded structural preview only. No provider
 benchmark or human semantic-quality approval is required for this decision;
 those remain separate and unqualified.
