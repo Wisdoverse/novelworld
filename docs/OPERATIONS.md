@@ -175,3 +175,35 @@ preserves confirmed books. After an unknown batch response, check the shelf
 before resubmitting those files. PostgreSQL owns the queue; Redis is optional
 projection/cache infrastructure. Original files are retained only when the
 S3-compatible storage configuration is enabled.
+
+### Optional RustFS storage and Redis projection
+
+[Deployment configuration](../DEPLOY.md#显式启用-rustfs-原文件存储) covers the
+operator-managed RustFS endpoint, application credentials, prefix permissions,
+and the separate object-storage backup boundary. RustFS is not provisioned by
+the repository Compose stack. Novel Service `/ready` includes `HeadBucket`
+when S3 is enabled; the health script does not independently manage or qualify
+an external RustFS deployment. Check both the operator's storage health and an
+application-account PUT/GET/DELETE probe, including denied out-of-scope access.
+An unreachable endpoint, missing bucket, or denied HEAD must be resolved before
+accepting retained-source uploads; never treat lost source bytes as recoverable
+from Redis.
+
+With `CACHE_MODE=redis`, confirm authenticated Redis readiness and Agent Service
+readiness after recreation. Redis holds disposable message projections, while
+PostgreSQL owns imports, leases, and committed turns. Enabling either optional
+dependency does not backfill old source files, rerun terminal imports, implement
+automatic content deduplication, or qualify model quality. Ready shared-catalog
+attachment is the current reuse path; replacing a failed shelf entry must
+preserve terminal import history and use a separately authorized successful
+import/attachment followed by supported shelf removal.
+
+### Advanced D20 entry reports unavailable
+
+Inspect the typed response before treating this as a service outage.
+`422 game_rules_unavailable_at_progress` means the immutable template references
+chapters the reader has not unlocked. Continue reading or choose narrative mode;
+do not regenerate the template, advance stored progress, or retry provider work
+to bypass that boundary. Template generation failure and dependency failures are
+separate cases. The [D20 responsibility and evaluation plan](./ADVANCED_RULES_PLAN.md)
+explains current checks and why Laya hints are not a semantic referee.

@@ -473,6 +473,14 @@ Primary SPEC focus: §4.1.4–§4.1.7 and §6.
 accessible interface while canon, character agency, memory, choices, and the
 open world remain one coherent causal system.
 
+The [D20 preview and evaluation plan](./ADVANCED_RULES_PLAN.md) separates the
+implemented template/DC, server dice, and replay path from optional Laya type
+hints. A Jev semantic referee is not connected. Evaluating it against direct
+DeepSeek structured judgment is a conditional proposal, not an adopted H4
+dependency or completed outcome; it requires reviewed paid-run authorization
+and measured benefit before a runtime boundary change. Neither model confidence
+nor a dice success permits bypassing canon, progress, or agency constraints.
+
 Scope:
 
 - Make branch choices, world actions, character conversations, generated

@@ -16,7 +16,7 @@ Browser (React static app)
      -> Agent Service (:8003)
      -> Narrative Service (:8004)
   -> PostgreSQL 18 + pgvector
-  -> Redis
+  -> optional Redis message projection
   -> optional private S3-compatible source storage
   -> operator-configured model and image providers
 ```
@@ -67,6 +67,15 @@ owner declared in `tools/architecture/table-ownership-v1.json`. A single
 PostgreSQL instance is a deployment choice, not shared business ownership.
 External databases, Redis, object storage, model providers, password hashing,
 and HTTP services are reached through domain ports and infrastructure adapters.
+
+For the opt-in [D20 preview](./ADVANCED_RULES_PLAN.md), Novel Service owns shared,
+immutable source-bound attribute/DC templates. Narrative Service owns private
+player allocations, hard validation, dice resolution, and durable check replay;
+DeepSeek renders H3/H4 journey prose behind that validation. Optional Laya hints
+suggest an action type from bounded intent/candidates and do not judge feasibility
+or success. No Jev semantic referee is connected. The proposed evaluation is
+offline work; adding per-action adjudication would require a new reviewed ADR
+superseding that exclusion in [ADR 0001](./adr/0001-source-bound-advanced-game-rules.md).
 
 User Service validates fixed provider/region/plan endpoints and owns encrypted
 Keys; only an unchanged preset and endpoint may reuse a stored Key. Its internal
