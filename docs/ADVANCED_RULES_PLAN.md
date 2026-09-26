@@ -1,12 +1,77 @@
-# Advanced novel rules implementation plan
+# Advanced novel rules: current behavior and evaluation plan
+
+This document owns the D20 preview's responsibilities and the proposed semantic
+judgment evaluation. The implementation below is structurally verified; live
+template/narrative quality and arbitrary free-text judgment remain unqualified.
+[ADR 0001](./adr/0001-source-bound-advanced-game-rules.md) owns the accepted
+runtime boundary. The evaluation proposal below does not change that decision.
 
 ## Outcome
 
-Add an optional rules-forward open-world mode without changing the default
+Provide an optional rules-forward open-world mode without changing the default
 narrative experience. A novel-specific rule template is generated once, owned
 by novel-service, and reused by every authorized reader. Advanced player turns
 are resolved by a server-owned D20 check before the existing narrative model
 renders the outcome.
+
+## Current D20 responsibilities
+
+This is a novel-specific, D20-inspired preview, not a complete D&D rules engine.
+
+| Responsibility | Current owner and behavior |
+|---|---|
+| Attributes and check difficulty | Novel Service owns one immutable, source-backed template per canon model version. Each supported action type maps to a template attribute and DC; the runtime does not ask a model to assign a new DC for each free-text intent. |
+| Eligibility and hard constraints | Narrative Service enforces identity, ownership, reading progress, supported targets, world state, and turn ordering. A successful roll never bypasses these checks. |
+| Die and result | Narrative's secret-derived die is bound to user, novel, turn number, and request fingerprint. The domain computes `modifier = floor((score - 10) / 2)` and success as `d20 + modifier >= DC`. The claimed result is persisted before prose and replayed for the same key. |
+| Narration | H3/H4 journey generation uses DeepSeek under the repository's provider policy. It receives the resolved check and proposes prose/transitions; server validation remains the commit authority. Failed checks discard action-granted mutations, while world time and scheduled mainline events may still advance. |
+| Optional action suggestion | Laya receives bounded intent and candidate action-type descriptions only. The reader must choose/confirm the type and target and submit manually. A hint cannot authorize an action, set its DC, roll the die, or determine success. |
+| Semantic referee | No Jev/Laya per-action semantic judge is connected. Free-text feasibility, context-sensitive difficulty, tactical combat, and full D&D rules are not delivered by this preview. |
+
+Implementation entrypoints:
+[template validation/progress](../services/novel-service/src/domain/entities/game_rule_template.rs),
+[check resolver](../services/narrative-service/src/domain/entities/game_rules.rs),
+[dice adapter](../services/narrative-service/src/infrastructure/dice.rs),
+[world-turn orchestration](../services/narrative-service/src/application/handlers/mod.rs),
+[turn persistence](../services/narrative-service/src/infrastructure/persistence/pg_world_turn_repo.rs),
+[transition validation](../services/narrative-service/src/domain/entities/world_session.rs),
+and [Laya hints](./adr/0006-optional-laya-action-hints.md).
+
+If a cited template chapter is still locked, both services preserve the
+content-free `422 game_rules_unavailable_at_progress`. The Chinese entry form
+guides the reader to continue reading or use narrative mode; this is not a
+generic Novel Service outage. Template generation failure remains a separate
+failure case. Reader profiles and journeys stay private even when readers reuse
+the same canonical novel and ready template.
+
+## Proposed Jev evaluation — not an integration commitment
+
+Jev's [official description](https://typesafe.ai/) presents bounded typed
+decisions with probabilities/confidence. This makes it a candidate for a narrow
+classification experiment; that suitability is an inference, not evidence that
+it judges Chinese D20 play better than DeepSeek. Laya's current compatible hint
+API also does not establish equivalent semantic judgment quality.
+
+Start with the simplest direct DeepSeek structured-judgment baseline. Before any
+paid execution, review the exact registration and obtain authorization for its
+provider/model, corpus, budget, and stopping conditions. Freeze human-labeled
+Chinese action examples from authorized novels, including impossible actions,
+ambiguous intent, ordinary actions, hostile instructions, and locked-chapter
+traps. Give each candidate identical bounded, progress-authorized context and
+compare blinded judgments for action type, feasibility, and whether a check is
+needed. Any difficulty band is an offline candidate, not a runtime DC change.
+
+Measure incorrect approvals, useful abstention, canon/spoiler/agency violations,
+latency, cost, and context disclosure. Register the rubric and meaningful
+improvement threshold before execution; do not invent a passing threshold after
+seeing results. An uncertain decision must abstain to manual confirmation or a
+predefined baseline, never grant new authority. Confidence describes a model's
+judgment, not a character's probability of passing a D20 check.
+
+Only measured benefit can justify a runtime proposal. Such a proposal needs an
+ADR replacing the per-action-adjudication exclusion, a reviewed data boundary,
+deadlines and retry/idempotency rules, and persisted/replayed decisions before
+any narration. Hard validation and dice arithmetic remain server-owned. No
+provider benchmark or qualification result is claimed by this documentation.
 
 ## Product contract
 

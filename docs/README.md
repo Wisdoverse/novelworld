@@ -55,6 +55,7 @@ roadmap status only when its required evidence exists.
 | Document | Purpose | Update when |
 |---|---|---|
 | [Product contract](./PRODUCT_CONTRACT.md) | Supported envelope, claims, and responsibility boundaries | A user-visible claim, supported input, or deployment boundary changes |
+| [Advanced novel rules](./ADVANCED_RULES_PLAN.md) | Current D20 preview, model/dice responsibilities, and proposed Jev evaluation | Template/check behavior, hint authority, or the reviewed semantic-judgment proposal changes |
 | [Specification](../SPEC.md) | Candidate normative behavior | The intended cross-component contract changes |
 | [SPEC conformance ledger](./SPEC_CONFORMANCE.md) | Evidence and disposition for every normative clause | Implementation evidence or a clause disposition changes |
 | [Qualification policy](./QUALIFICATION_POLICY.md) | Release evidence classes and thresholds | A qualification slice, guardrail, or approval rule changes |
