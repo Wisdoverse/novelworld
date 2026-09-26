@@ -135,6 +135,19 @@ WITH shelf_novels AS (
            )
     FROM reading_progress p
     WHERE p.user_id = $1
+
+    UNION ALL
+    SELECT 70, s.id::text, 0::bigint, s.id::text, 'world_series',
+           jsonb_build_object('id', s.id, 'name', s.name, 'background', s.background,
+               'revision', s.revision, 'source_template', s.source_template, 'created_at', s.created_at)
+    FROM user_world_series s
+    WHERE s.user_id = $1
+
+    UNION ALL
+    SELECT 80, m.novel_id::text, 0::bigint, m.novel_id::text, 'novel_world_series',
+           jsonb_build_object('user_id', m.user_id, 'novel_id', m.novel_id, 'series_id', m.series_id)
+    FROM user_novel_world_series m
+    WHERE m.user_id = $1
 )
 SELECT kind, data
 FROM export_records

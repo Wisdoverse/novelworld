@@ -1,5 +1,5 @@
 use crate::domain::entities::{
-    game_rules::{ActionCheck, AdjudicationDecision, GameRuleTemplate},
+    game_rules::{ActionCheck, AdjudicationDecision, GameRuleTemplate, SeriesRuleBinding},
     narrative_node::{NarrativeNode, WorldState},
     player_entity::PlayerEntity,
     world_session::{WorldAction, WorldEntryContext, WorldTurnTransition},
@@ -279,6 +279,8 @@ pub trait ChapterReadRepository: Send + Sync {
         canon_model_version: i32,
         user_id: Uuid,
         prompt_version: &str,
+        series_binding: Option<&SeriesRuleBinding>,
+        require_current_series: bool,
     ) -> Result<Option<GameRuleTemplate>>;
 }
 

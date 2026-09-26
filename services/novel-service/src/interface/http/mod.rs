@@ -22,7 +22,8 @@ use crate::application::handlers::{
     TranslateChapterHandler, TranslationError, MAX_BATCH_IMPORTS,
 };
 use crate::domain::entities::game_rule_template::{
-    supported_prompt_version, BASIC_GAME_RULE_PROMPT_VERSION, GAME_RULE_PROMPT_VERSION,
+    supported_novel_prompt_version, supported_prompt_version, BASIC_GAME_RULE_PROMPT_VERSION,
+    GAME_RULE_PROMPT_VERSION,
 };
 use crate::domain::entities::novel::Novel;
 use crate::domain::ports::{
@@ -36,10 +37,12 @@ use crate::domain::services::canon_story_context::{
 };
 use crate::domain::value_objects::{DeviationMode, NovelStatus};
 use axum::routing::put;
+mod world_series;
 
 #[derive(Clone)]
 pub struct AppState {
     pub handler: Arc<NovelCommandHandler>,
+    pub series_handler: Arc<crate::application::world_series::WorldSeriesHandler>,
     pub novel_repo: Arc<dyn NovelRepository>,
     pub chapter_repo: Arc<dyn ChapterRepository>,
     pub character_repo: Arc<dyn CharacterRepository>,
@@ -69,6 +72,18 @@ fn routes() -> Router<AppState> {
         )
         .route("/novels", get(list_novels))
         .route("/novels/catalog", get(list_catalog))
+        .route(
+            "/novels/world-series",
+            get(world_series::list).post(world_series::create),
+        )
+        .route(
+            "/novels/{id}/world-series",
+            get(world_series::get_for_novel).put(world_series::associate),
+        )
+        .route(
+            "/novels/{id}/world-series/suggestion",
+            post(world_series::suggestion),
+        )
         .route("/novels/{id}", get(get_novel))
         .route("/novels/{id}", delete(delete_novel))
         .route("/novels/{id}/shelf", post(attach_novel))
@@ -125,6 +140,12 @@ fn routes() -> Router<AppState> {
 #[serde(deny_unknown_fields)]
 struct GameRuleVersionQuery {
     prompt_version: Option<String>,
+    #[serde(default)]
+    prefer_series: bool,
+    series_id: Option<Uuid>,
+    series_revision: Option<i32>,
+    #[serde(default)]
+    require_current_series: bool,
 }
 
 impl GameRuleVersionQuery {
@@ -151,7 +172,11 @@ async fn request_game_rule_template(
         Some(id) => id,
         None => return api_error(StatusCode::UNAUTHORIZED, "Missing user ID"),
     };
-    if !supported_prompt_version(query.version()) {
+    if !supported_novel_prompt_version(query.version())
+        || query.series_id.is_some()
+        || query.series_revision.is_some()
+        || query.require_current_series
+    {
         return coded_api_error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "unsupported_game_rule_version",
@@ -161,6 +186,30 @@ async fn request_game_rule_template(
     match state.progress_handler.get(user_id, novel_id).await {
         Ok(_) => {}
         Err(error) => return progress_error_response(error),
+    }
+    if query.prefer_series && query.version() == BASIC_GAME_RULE_PROMPT_VERSION {
+        match state.series_handler.get_for_novel(user_id, novel_id).await {
+            Ok(Some(series)) => {
+                let template = match series.rules_for(novel_id) {
+                    Ok(template) => template,
+                    Err(_) => return world_series::error(crate::application::world_series::WorldSeriesApplicationError::SourceUnavailable),
+                };
+                let progress = match state.progress_handler.get(user_id, novel_id).await {
+                    Ok(progress) => progress,
+                    Err(error) => return progress_error_response(error),
+                };
+                return match template.visible_at(progress.current_chapter) {
+                    Some(template) => world_series::private(Json(template).into_response()),
+                    None => coded_api_error(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "game_rules_unavailable_at_progress",
+                        "Game rules are not yet available at current reading progress",
+                    ),
+                };
+            }
+            Ok(None) => {}
+            Err(error) => return world_series::error(error),
+        }
     }
     match state
         .handler
@@ -255,6 +304,47 @@ async fn get_game_rule_template(
     match state.progress_handler.get(user_id, novel_id).await {
         Ok(_) => {}
         Err(error) => return progress_error_response(error),
+    }
+    if query.version()
+        == crate::domain::entities::game_rule_template::SERIES_GAME_RULE_PROMPT_VERSION
+    {
+        let (Some(series_id), Some(revision)) = (query.series_id, query.series_revision) else {
+            return world_series::error(
+                crate::application::world_series::WorldSeriesApplicationError::InvalidInput,
+            );
+        };
+        let template = match state
+            .series_handler
+            .frozen_rules(
+                user_id,
+                novel_id,
+                series_id,
+                revision,
+                model_version,
+                query.require_current_series,
+            )
+            .await
+        {
+            Ok(template) => template,
+            Err(error) => return world_series::error(error),
+        };
+        let progress = match state.progress_handler.get(user_id, novel_id).await {
+            Ok(progress) => progress,
+            Err(error) => return progress_error_response(error),
+        };
+        return match template.visible_at(progress.current_chapter) {
+            Some(template) => world_series::private(Json(template).into_response()),
+            None => api_error(
+                StatusCode::NOT_FOUND,
+                "Game rule template is unavailable at current reading progress",
+            ),
+        };
+    }
+    if query.series_id.is_some() || query.series_revision.is_some() || query.require_current_series
+    {
+        return world_series::error(
+            crate::application::world_series::WorldSeriesApplicationError::InvalidInput,
+        );
     }
     if query.version() == BASIC_GAME_RULE_PROMPT_VERSION {
         match state.novel_repo.find_by_id(novel_id).await {
@@ -580,7 +670,25 @@ async fn get_world_entry_context(
         }
     };
     match build_world_entry_context(&model, &characters, checkpoint, progress.current_chapter) {
-        Ok(context) => (StatusCode::OK, Json(context)).into_response(),
+        Ok(mut context) => {
+            let series = match state.series_handler.get_for_novel(user_id, novel_id).await {
+                Ok(series) => series,
+                Err(error) => return world_series::error(error),
+            };
+            context.series_setting = series.map(|series| series.setting());
+            let latest = match state.progress_handler.get(user_id, novel_id).await {
+                Ok(latest) => latest,
+                Err(error) => return progress_error_response(error),
+            };
+            if latest.current_chapter != progress.current_chapter {
+                return coded_api_error(
+                    StatusCode::CONFLICT,
+                    "reading_progress_changed",
+                    "Reading progress changed while loading world context",
+                );
+            }
+            world_series::private((StatusCode::OK, Json(context)).into_response())
+        }
         Err(error) => {
             tracing::error!(%error, %novel_id, checkpoint, "invalid world-entry context");
             api_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")

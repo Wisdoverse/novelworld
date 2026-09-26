@@ -372,7 +372,7 @@ impl WorldState {
         if session
             .game_rules
             .as_ref()
-            .is_some_and(|template| template.novel_id != self.novel_id)
+            .is_some_and(|template| !template.applies_to_novel(self.novel_id))
         {
             return Err(WorldStateError::InvalidWorldSession(
                 "game rule template belongs to another novel".into(),
@@ -415,6 +415,17 @@ impl WorldState {
             return Ok(existing);
         }
 
+        if let Some(template) = game_rules {
+            if !template.applies_to_novel(self.novel_id) {
+                return Err(WorldStateError::InvalidWorldSession(
+                    "game rule template belongs to another novel".into(),
+                ));
+            }
+            player
+                .rules
+                .validate_against(template)
+                .map_err(|error| WorldStateError::InvalidWorldSession(error.to_string()))?;
+        }
         self.validate_world_entry_checkpoint(context.checkpoint_chapter)?;
         let session = WorldSession::from_context_with_rules(context, game_rules)
             .map_err(|error| WorldStateError::InvalidWorldSession(error.to_string()))?;
@@ -1172,6 +1183,7 @@ mod causality_tests {
             "branch": {"status": "open", "description": "玩家后续", "origin": "player"}
         });
         let context = WorldEntryContext {
+            series_setting: None,
             model_version: 1,
             checkpoint_chapter: 1,
             unlocked_through_chapter: 1,
@@ -1200,6 +1212,7 @@ mod causality_tests {
         state.state["threads"]["siege"] =
             serde_json::json!({"status": "resolved", "description": "围城", "origin": "canon"});
         let context = WorldEntryContext {
+            series_setting: None,
             model_version: 1,
             checkpoint_chapter: 1,
             unlocked_through_chapter: 1,

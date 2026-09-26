@@ -190,6 +190,13 @@ limit but cannot enforce.
    encrypted credential when present and otherwise falls back to the platform
    credential. Accounting uses only a one-way fingerprint of the credential
    actually selected, never the principal or raw key.
+   Novel-to-Laya series matching uses the same paired configuration but sends
+   only bounded book and candidate metadata, never scope UUIDs, full novels, or
+   plot text. Suggestions cannot create or change associations; readers must
+   confirm or select manually. The 0.8 threshold is an abstention heuristic,
+   not calibrated accuracy evidence. Requests use four local slots, 300 ms
+   connect/2 s total deadlines, 8 KiB request and 16 KiB response limits, and
+   no HTTP retries.
    Open-world prompts label the novel, action, session, and state as untrusted
    data. The model proposes bounded typed changes over IDs in a persisted entry
    snapshot; it cannot select the acting player or commit.

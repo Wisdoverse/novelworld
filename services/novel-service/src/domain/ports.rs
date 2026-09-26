@@ -4,6 +4,8 @@ use std::pin::Pin;
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod series_matcher;
+
 #[derive(Debug)]
 pub struct AccountExportRecord {
     pub kind: String,

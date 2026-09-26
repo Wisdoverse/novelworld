@@ -78,6 +78,7 @@ fn journey_result(
 ) -> WorldTurnResult {
     let mut world_state = WorldState::new(user_id, novel_id);
     let entry_context = WorldEntryContext {
+        series_setting: None,
         model_version: 1,
         checkpoint_chapter: 1,
         unlocked_through_chapter: source_chapter_high_water,
@@ -213,6 +214,8 @@ impl ChapterReadRepository for FixedChapterRepo {
         _canon_model_version: i32,
         _user_id: Uuid,
         _prompt_version: &str,
+        _series_binding: Option<&crate::domain::entities::game_rules::SeriesRuleBinding>,
+        _require_current_series: bool,
     ) -> Result<Option<GameRuleTemplate>> {
         Ok(None)
     }
@@ -331,6 +334,7 @@ fn open_world_start_is_first_writer_wins_and_later_calls_resume() {
     .unwrap();
     state.state["player_entity"] = serde_json::to_value(player).unwrap();
     let context = WorldEntryContext {
+        series_setting: None,
         model_version: 1,
         checkpoint_chapter: 1,
         unlocked_through_chapter: 1,

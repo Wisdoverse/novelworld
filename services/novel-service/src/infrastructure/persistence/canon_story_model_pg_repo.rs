@@ -9,7 +9,7 @@ use crate::domain::{
     entities::{
         canon_story_model::{CanonStoryContent, CanonStoryModel},
         game_rule_template::{
-            supported_prompt_version, GameRuleTemplate, GAME_RULE_SCHEMA_VERSION,
+            supported_novel_prompt_version, GameRuleTemplate, GAME_RULE_SCHEMA_VERSION,
         },
     },
     repositories::{
@@ -236,7 +236,7 @@ impl CanonStoryModelRepository for PgCanonStoryModelRepository {
         // outcome stops before provider dispatch; a durable claim may remain.
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             anyhow::ensure!(
-                supported_prompt_version(prompt_version),
+                supported_novel_prompt_version(prompt_version),
                 "unsupported game-rule prompt"
             );
             let mut transaction = self.pool.begin().await?;
@@ -374,6 +374,10 @@ impl CanonStoryModelRepository for PgCanonStoryModelRepository {
         attempt: i64,
     ) -> Result<bool> {
         template.validate(i32::MAX)?;
+        anyhow::ensure!(
+            supported_novel_prompt_version(&template.prompt_version),
+            "series rules cannot consume novel generation claims"
+        );
         let result = sqlx::query(
             r#"UPDATE novel_game_rule_templates
                SET status = 'ready', lease_expires_at = NULL, content = $4,
@@ -458,6 +462,10 @@ fn decode_game_rule_template(
 ) -> Result<GameRuleTemplate> {
     let template = serde_json::from_value::<GameRuleTemplate>(content)
         .context("persisted game rule template is invalid")?;
+    anyhow::ensure!(
+        supported_novel_prompt_version(&template.prompt_version),
+        "persisted novel template cannot be a series wrapper"
+    );
     anyhow::ensure!(
         template.novel_id == novel_id
             && template.canon_model_version == canon_model_version

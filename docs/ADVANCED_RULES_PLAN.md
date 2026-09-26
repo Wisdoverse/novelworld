@@ -37,6 +37,8 @@ This is a novel-specific, D20-inspired preview, not a complete D&D rules engine.
 | Persistence and replay | The adjudication and resulting resolution are fenced with the existing world-turn claim. A frozen result is reused on replay; a reclaimed pending classification is not called again and falls back. Unknown database outcome or lost fencing stops before prose. |
 | Semantic and game limits | This preview does not implement tactical combat, classes, spells, multiplayer fairness, arbitrary free-text semantic guarantees, or a full D&D rules engine. |
 
+For reader-confirmed series sharing, see [ADR 0011](./adr/0011-confirmed-series-worlds.md): Novel snapshots a ready v2 source template without provider work; Narrative keeps source and target canon separate and freezes the setting and rule binding. Series backgrounds do not share player attributes, inventory, progress, or checks. This structural preview has pending CI, merge, deployment, and live matcher-quality evidence.
+
 Implementation entrypoints:
 [template validation/progress](../services/novel-service/src/domain/entities/game_rule_template.rs),
 [check resolver](../services/narrative-service/src/domain/entities/game_rules.rs),

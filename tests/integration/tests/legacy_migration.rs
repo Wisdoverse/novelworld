@@ -74,6 +74,8 @@ const BUDGETED_EMBEDDING_MIGRATION: &str =
 
 const VERSIONED_GAME_RULE_TEMPLATES_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0030_versioned_game_rule_templates.sql");
+const USER_WORLD_SERIES_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0031_user_world_series.sql");
 
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
@@ -111,6 +113,7 @@ const ALL_MIGRATIONS: &[&str] = &[
     DEEPSEEK_V41_DIAGNOSTIC_COST_MIGRATION,
     BUDGETED_EMBEDDING_MIGRATION,
     VERSIONED_GAME_RULE_TEMPLATES_MIGRATION,
+    USER_WORLD_SERIES_MIGRATION,
 ];
 
 async fn assert_progress_migration_fails_and_rolls_back(pool: &sqlx::PgPool, expected_error: &str) {
@@ -2422,6 +2425,7 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
         "0028_deepseek_v41_diagnostic_cost.sql",
         "0029_budgeted_embedding.sql",
         "0030_versioned_game_rule_templates.sql",
+        "0031_user_world_series.sql",
     ] {
         let migration_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../infra/postgres/migrations")

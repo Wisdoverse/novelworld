@@ -966,6 +966,8 @@ impl NarrativeCommandHandler {
                             })?,
                             user_id,
                             prompt_version,
+                            player.rules.series_binding.as_ref(),
+                            false,
                         )
                         .await
                         .map_err(NarrativeError::Unavailable)?
@@ -1071,6 +1073,14 @@ impl NarrativeCommandHandler {
             .rules
             .validate()
             .map_err(|error| NarrativeError::Validation(error.to_string()))?;
+        let world_state = self
+            .world_state_repo
+            .get_or_create(user_id, novel_id)
+            .await
+            .map_err(NarrativeError::Internal)?;
+        let existing_player = world_state
+            .player_entity()
+            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?;
         let _validated_game_rules = match command.rules.mode {
             ResolutionMode::Narrative => None,
             ResolutionMode::Advanced => {
@@ -1088,7 +1098,16 @@ impl NarrativeCommandHandler {
                     })?;
                 let template = self
                     .chapter_repo
-                    .get_game_rule_template(novel_id, version, user_id, prompt_version)
+                    .get_game_rule_template(
+                        novel_id,
+                        version,
+                        user_id,
+                        prompt_version,
+                        command.rules.series_binding.as_ref(),
+                        existing_player
+                            .as_ref()
+                            .is_none_or(|player| !player.matches_rules(&command.rules)),
+                    )
                     .await
                     .map_err(NarrativeError::Unavailable)?
                     .ok_or_else(|| {
@@ -1103,15 +1122,7 @@ impl NarrativeCommandHandler {
                 Some(template)
             }
         };
-        let world_state = self
-            .world_state_repo
-            .get_or_create(user_id, novel_id)
-            .await
-            .map_err(NarrativeError::Internal)?;
-        if let Some(existing) = world_state
-            .player_entity()
-            .map_err(|error| NarrativeError::Internal(anyhow::anyhow!(error)))?
-        {
+        if let Some(existing) = existing_player {
             let checkpoint_matches = command
                 .checkpoint_chapter
                 .is_none_or(|chapter| chapter == existing.canonical_checkpoint_chapter);
@@ -1271,7 +1282,14 @@ impl NarrativeCommandHandler {
                 })?;
                 let template = self
                     .chapter_repo
-                    .get_game_rule_template(novel_id, version, user_id, prompt_version)
+                    .get_game_rule_template(
+                        novel_id,
+                        version,
+                        user_id,
+                        prompt_version,
+                        player.rules.series_binding.as_ref(),
+                        false,
+                    )
                     .await
                     .map_err(NarrativeError::Unavailable)?
                     .ok_or_else(|| {
@@ -1286,18 +1304,21 @@ impl NarrativeCommandHandler {
                 Some(template)
             }
         };
-        let context = self
+        let mut context = self
             .chapter_repo
             .get_world_entry_context(novel_id, player.canonical_checkpoint_chapter, user_id)
             .await
             .map_err(NarrativeError::Unavailable)?
             .ok_or(NarrativeError::NotFound)?;
         if let Some(template) = &game_rules {
-            if template.canon_model_version != context.model_version {
+            if template.series.is_none() && template.canon_model_version != context.model_version {
                 return Err(NarrativeError::Conflict(
                     "Game rule template no longer matches the world entry canon".into(),
                 ));
             }
+        }
+        if let Some(template) = &game_rules {
+            context.series_setting = template.series_setting();
         }
         self.require_self_reader_identity(user_id, novel_id).await?;
         let state = self
@@ -3464,6 +3485,7 @@ mod timeline_tests {
         };
 
         let entry_context = crate::domain::entities::world_session::WorldEntryContext {
+            series_setting: None,
             model_version: 1,
             checkpoint_chapter: 3,
             unlocked_through_chapter: 7,

@@ -4,6 +4,7 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { apiClient } from '@/shared/api/client';
 import { worldTurnPendingStorageKey } from '@/shared/lib/worldTurnStorage';
+import type { WorldSeries } from '@/shared/types';
 import {
   buildNovelBatchUploadFormData,
   splitNovelUploadBatches,
@@ -14,6 +15,7 @@ import {
   shouldPollNovelList,
   useCharacters,
   useDeleteNovel,
+  useWorldSeriesList,
   validateNovelBatchFiles,
   validateNovelFile,
 } from './api';
@@ -271,5 +273,35 @@ describe('novel lifecycle pending-turn cleanup', () => {
     });
 
     expect(sessionStorage.getItem(pendingKey)).toBe('recoverable intent');
+  });
+});
+
+describe('principal-scoped world-series queries', () => {
+  it('keeps a late prior-principal response under its own cache key', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const wrapper = ({ children }: PropsWithChildren) => React.createElement(
+      QueryClientProvider,
+      { client: queryClient },
+      children,
+    );
+    let resolveFirst!: (response: { data: WorldSeries[] }) => void;
+    const firstResponse = new Promise<{ data: WorldSeries[] }>(resolve => { resolveFirst = resolve; });
+    const first = [{ id: 'series-a', name: 'A' }] as WorldSeries[];
+    const second = [{ id: 'series-b', name: 'B' }] as WorldSeries[];
+    vi.spyOn(apiClient, 'get')
+      .mockReturnValueOnce(firstResponse as never)
+      .mockResolvedValueOnce({ data: second } as never);
+
+    const previousPrincipal = renderHook(() => useWorldSeriesList('reader-a'), { wrapper });
+    const currentPrincipal = renderHook(() => useWorldSeriesList('reader-b'), { wrapper });
+    await waitFor(() => expect(currentPrincipal.result.current.data).toEqual(second));
+    resolveFirst({ data: first });
+    await waitFor(() => expect(previousPrincipal.result.current.data).toEqual(first));
+
+    expect(queryClient.getQueryData(novelKeys.worldSeriesList('reader-a'))).toEqual(first);
+    expect(queryClient.getQueryData(novelKeys.worldSeriesList('reader-b'))).toEqual(second);
+    vi.restoreAllMocks();
   });
 });

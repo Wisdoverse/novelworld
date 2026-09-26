@@ -713,10 +713,11 @@ async fn startup_recovery_claims_a_pending_import() {
         .create_import(&novel, &[chapter])
         .await
         .unwrap();
+    // Other recovery fixtures are 500 years old; this job must actually be oldest.
     sqlx::query(
         "UPDATE novel_import_jobs \
-         SET created_at = NOW() - INTERVAL '100 years', \
-             updated_at = NOW() - INTERVAL '100 years' \
+         SET created_at = NOW() - INTERVAL '1000 years', \
+             updated_at = NOW() - INTERVAL '1000 years' \
          WHERE novel_id = $1",
     )
     .bind(novel.id)
@@ -5462,6 +5463,7 @@ async fn production_repositories_match_fresh_schema() {
     assert_eq!(competing_choice_count, 1);
 
     let world_context = WorldEntryContext {
+        series_setting: None,
         model_version: 1,
         checkpoint_chapter: 5,
         unlocked_through_chapter: 6,
@@ -5917,6 +5919,7 @@ async fn open_world_and_choice_race_linearizes_without_partial_commit() {
     .unwrap();
     world_repo.create_player_entity(&player).await.unwrap();
     let context = WorldEntryContext {
+        series_setting: None,
         model_version: 1,
         checkpoint_chapter: 1,
         unlocked_through_chapter: 1,
@@ -6138,6 +6141,7 @@ async fn legacy_orphan_choice_blocks_sealed_world_boundaries_and_exact_replay() 
     ));
 
     let context = WorldEntryContext {
+        series_setting: None,
         model_version: 1,
         checkpoint_chapter: 1,
         unlocked_through_chapter: 1,
@@ -6460,6 +6464,7 @@ async fn seed_world_turn(pool: &PgPool) -> (Uuid, Uuid, WorldEntryContext) {
         .await
         .unwrap();
     let context = WorldEntryContext {
+        series_setting: None,
         model_version: 1,
         checkpoint_chapter: 1,
         unlocked_through_chapter: 2,
@@ -7097,6 +7102,7 @@ async fn world_turn_persists_and_exactly_replays_the_server_action_check() {
     let (user_id, novel_id, context) = seed_world_turn(&pool).await;
     let repo = PgWorldTurnRepository::new(pool.clone());
     let resolution = ActionCheck {
+        series_binding: None,
         schema_version: 1,
         canon_model_version: 1,
         template_prompt_version: "novel-game-rules-v1".into(),
@@ -7152,6 +7158,7 @@ async fn world_turn_persists_and_exactly_replays_the_server_action_check() {
 
 fn pending_world_turn_check() -> ActionCheck {
     ActionCheck {
+        series_binding: None,
         schema_version: 1,
         canon_model_version: 1,
         template_prompt_version: "novel-game-rules-v1".into(),
@@ -8560,4 +8567,40 @@ async fn summary_worker_invalid_sources_outputs_and_collision_are_terminal() {
             .await
             .unwrap();
     }
+}
+
+#[path = "../../../services/novel-service/tests/support/world_series_contract.rs"]
+mod world_series_contract;
+
+#[tokio::test]
+async fn private_series_rules_preserve_provenance_budget_and_erasure() {
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (user, source) = seed_game_rule_model(&pool, "series-contract").await;
+    let other = insert_test_user(&pool, "series-contract-other").await;
+    world_series_contract::run(&pool, user, other, source).await;
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for sql in [
+        "SELECT COUNT(*) FROM user_world_series WHERE user_id = $1",
+        "SELECT COUNT(*) FROM user_novel_world_series WHERE user_id = $1",
+    ] {
+        let count: i64 = sqlx::query_scalar(sql)
+            .bind(user)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "account erasure must remove private series rows");
+    }
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(other)
+        .execute(&pool)
+        .await
+        .unwrap();
 }

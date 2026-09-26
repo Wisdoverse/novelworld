@@ -113,6 +113,38 @@ export interface PlayerRuleProfile {
   template_schema_version: number | null;
   template_prompt_version: string | null;
   attributes: Record<string, number>;
+  series_binding?: SeriesRuleBinding | null;
+}
+
+export interface SeriesRuleBinding {
+  series_id: string;
+  revision: number;
+}
+
+export interface SeriesRuleContext {
+  binding: SeriesRuleBinding;
+  target_novel_id: string;
+  name: string;
+  background: string;
+}
+
+export interface WorldSeries {
+  id: string;
+  name: string;
+  background: string;
+  revision: 1;
+  source_template: GameRuleTemplate;
+  created_at: string;
+}
+
+export interface WorldSeriesSuggestion {
+  status: 'suggested' | 'unconfigured' | 'uncertain' | 'unavailable';
+  suggestion: {
+    series_id: string | null;
+    source_novel_id: string;
+    name: string;
+    book: { title: string; author: string | null; genre: string | null };
+  } | null;
 }
 
 export interface GameAttribute {
@@ -141,6 +173,7 @@ export interface GameRuleTemplate {
   point_budget: number;
   attributes: GameAttribute[];
   action_rules: GameActionRule[];
+  series?: SeriesRuleContext | null;
 }
 
 export interface PlayerEntry {
@@ -246,6 +279,7 @@ export interface ActionCheck {
       | 'standard_check'
       | 'hard_check';
   } | null;
+  series_binding?: SeriesRuleBinding | null;
 }
 
 export interface WorldTurnTransition {

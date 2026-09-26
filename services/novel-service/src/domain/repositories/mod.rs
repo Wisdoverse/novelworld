@@ -21,6 +21,46 @@ pub const IMPORT_BUDGET_EXHAUSTED_MESSAGE: &str =
 // when real support cases justify more provider-facing state and UI.
 pub const MAX_GAME_RULE_GENERATION_ATTEMPTS: i64 = 3;
 
+#[async_trait]
+pub trait WorldSeriesRepository: Send + Sync {
+    /// Freeze only an exact Ready source template still authorized on this shelf.
+    async fn create(
+        &self,
+        user_id: Uuid,
+        series: &crate::domain::entities::world_series::WorldSeries,
+    ) -> Result<CreateWorldSeriesResult>;
+    async fn list(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<crate::domain::entities::world_series::WorldSeries>>;
+    /// Owner-scoped book-to-series associations for advisory candidate grouping.
+    async fn memberships(&self, user_id: Uuid) -> Result<Vec<(Uuid, Uuid)>>;
+    async fn find(
+        &self,
+        user_id: Uuid,
+        series_id: Uuid,
+    ) -> Result<Option<crate::domain::entities::world_series::WorldSeries>>;
+    async fn find_for_novel(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+    ) -> Result<Option<crate::domain::entities::world_series::WorldSeries>>;
+    /// Target shelf authorization, readiness and series ownership are atomic.
+    async fn associate(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        series_id: Option<Uuid>,
+    ) -> Result<bool>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateWorldSeriesResult {
+    Created,
+    SourceUnavailable,
+    SourceAlreadyAssociated,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportClaim {
     pub novel_id: Uuid,

@@ -2,7 +2,7 @@ import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import * as Dialog from '@radix-ui/react-dialog';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Plus, BookOpen, Clock, BookMinus, Loader2, CheckCircle, AlertCircle, RotateCcw, Settings, Library } from 'lucide-react';
+import { Plus, BookOpen, Clock, BookMinus, Loader2, CheckCircle, AlertCircle, RotateCcw, Settings, Library, Sparkles } from 'lucide-react';
 import {
   useNovels,
   useDeleteNovel,
@@ -12,6 +12,7 @@ import {
 } from '@/entities/novel';
 import { useAuthStore } from '@/features/auth';
 import { NovelImportModal } from '@/features/novel-import';
+import { WorldSeriesDialog } from '@/features/novel-world-series';
 import type { Novel } from '@/shared/types';
 import { getApiErrorMessage } from '@/shared/api/client';
 import { toast } from 'sonner';
@@ -64,12 +65,13 @@ function getRetryErrorMessage(error: unknown) {
   }
 }
 
-function NovelCard({ novel, onOpen, onDelete, onRetry, onImport, retrying }: {
+function NovelCard({ novel, onOpen, onDelete, onRetry, onImport, onManageWorldSeries, retrying }: {
   novel: Novel;
   onOpen: () => void;
   onDelete: () => void;
   onRetry: () => void;
   onImport: () => void;
+  onManageWorldSeries: () => void;
   retrying: boolean;
 }) {
   const failureGuidance = getFailureGuidance(novel.parse_error);
@@ -166,6 +168,16 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, onImport, retrying }: {
             {novel.genre}
           </div>
         )}
+        {novel.status === 'ready' ? (
+          <button
+            type="button"
+            className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg border border-[#d2e3fc] px-3 py-2 text-xs font-medium text-[#174ea6] hover:bg-[#f3f7ff]"
+            onClick={event => { event.stopPropagation(); onManageWorldSeries(); }}
+          >
+            <Sparkles size={13} />
+            识别同系列 / 共享世界背景
+          </button>
+        ) : null}
         {novel.status === 'error' && (
           <>
             <p
@@ -324,6 +336,7 @@ export function ShelfPage() {
   ).length ?? 0;
   const [showImport, setShowImport] = useState(false);
   const [showSharedLibrary, setShowSharedLibrary] = useState(false);
+  const [worldSeriesNovel, setWorldSeriesNovel] = useState<Novel>();
 
   return (
     <div className="app-surface min-h-screen">
@@ -430,6 +443,7 @@ export function ShelfPage() {
                     onError: (error) => toast.error(getRetryErrorMessage(error)),
                   })}
                   onImport={() => setShowImport(true)}
+                  onManageWorldSeries={() => setWorldSeriesNovel(novel)}
                   retrying={retryNovel.isPending && retryNovel.variables === novel.id}
                 />
               ))}
@@ -441,6 +455,16 @@ export function ShelfPage() {
       <AnimatePresence>
         {showImport && <NovelImportModal onClose={() => setShowImport(false)} />}
         {showSharedLibrary && <SharedLibraryModal onClose={() => setShowSharedLibrary(false)} shelfNovels={novels} />}
+        {worldSeriesNovel && user?.id ? (
+          <WorldSeriesDialog
+            key={`${user.id}:${worldSeriesNovel.id}`}
+            principalId={user.id}
+            isPrincipalCurrent={() => useAuthStore.getState().user?.id === user.id}
+            novel={worldSeriesNovel}
+            readyNovels={novels?.filter(novel => novel.status === 'ready') ?? []}
+            onClose={() => setWorldSeriesNovel(undefined)}
+          />
+        ) : null}
       </AnimatePresence>
     </div>
   );

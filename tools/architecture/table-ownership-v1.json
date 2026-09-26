@@ -11,6 +11,8 @@
 
     { "name": "novels", "kind": "table", "owner": "novel-service" },
     { "name": "user_novels", "kind": "table", "owner": "novel-service" },
+    { "name": "user_world_series", "kind": "table", "owner": "novel-service" },
+    { "name": "user_novel_world_series", "kind": "table", "owner": "novel-service" },
     { "name": "novel_import_jobs", "kind": "table", "owner": "novel-service" },
     { "name": "source_file_deletions", "kind": "table", "owner": "novel-service" },
     { "name": "chapters", "kind": "table", "owner": "novel-service" },
@@ -44,10 +46,12 @@
     { "name": "record_novel_erasure", "owner": "platform" },
     { "name": "reject_canon_story_model_update", "owner": "novel-service" },
     { "name": "reject_ready_game_rule_template_update", "owner": "novel-service" },
+    { "name": "reject_world_series_update", "owner": "novel-service" },
     { "name": "update_updated_at", "owner": "platform" },
     { "name": "search_memories", "owner": "agent-service" }
   ],
   "acknowledged_cross_owner_foreign_keys": [
+    { "child": "user_world_series", "child_columns": ["user_id"], "parent": "users", "parent_columns": ["id"], "on_delete": "cascade" },
     { "child": "user_novels", "child_columns": ["user_id"], "parent": "users", "parent_columns": ["id"], "on_delete": "cascade" },
     { "child": "character_memories", "child_columns": ["character_id"], "parent": "characters", "parent_columns": ["id"], "on_delete": "cascade" },
     { "child": "character_memories", "child_columns": ["user_id"], "parent": "users", "parent_columns": ["id"], "on_delete": "cascade" },

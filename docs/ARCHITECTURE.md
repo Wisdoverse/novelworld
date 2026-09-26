@@ -88,6 +88,14 @@ protected. Migration 0030 requires coordinated Novel and Narrative writer
 shutdown. The rest of [ADR 0001](./adr/0001-source-bound-advanced-game-rules.md)
 remains in force.
 
+ADR 0011 adds Novel-owned `user_world_series` definitions and
+`user_novel_world_series` shelf links. Novel snapshots an exact ready v2 basic
+template; Narrative resolves it through HTTP and freezes the confirmed setting
+with the target book's independent canon. The shared schema now has 21
+declared cross-owner cascading FKs; the owner-user cascade is single-node schema
+debt, not database-role isolation. Migration 0031 is additive and does not
+change the existing release barriers.
+
 User Service validates fixed provider/region/plan endpoints and owns encrypted
 Keys; only an unchanged preset and endpoint may reuse a stored Key. Its internal
 HTTP config supplies provider identity for metrics, including plans sharing a URL.
@@ -101,7 +109,7 @@ amounts or ranges. Subscription quotes stay separate from API token rates.
 No price-site HTTP dependency, account billing authority, or Diagnostic ledger
 ownership is added; see [pricing boundaries](./LLM_PRICING.md).
 
-The shared schema still contains 20 cross-owner `ON DELETE CASCADE` foreign
+The shared schema now contains 21 cross-owner `ON DELETE CASCADE` foreign
 keys. The user and novel deletion triggers also make two exact writes into the
 platform-owned erasure journal; five cross-owner trigger/routine bindings cover
 those hooks and the shared row-local timestamp routine. Novel Service readiness
@@ -177,7 +185,7 @@ Test-only or unreachable files cannot satisfy a runtime hook.
 | Invariant | Blocking evidence | Evidence limit |
 |---|---|---|
 | Domain and application purity | The architecture checker follows each crate's reachable module graph, enforces the layer matrix, rejects unknown production layers, and allows only reviewed pure/orchestration crates in domain/application code. | Static source structure does not prove that a domain rule is behaviorally correct. |
-| HTTP and data ownership | Cargo graph checks reject runtime-to-runtime dependencies and unreviewed local/path helpers; source checks constrain reviewed raw/non-HTTP transports and keep service HTTP clients in `infrastructure/http/`; SQL and known routine calls are resolved against the owner manifest; views and routine-call closures are checked transitively; relation/routine inventory, trigger bindings, and cross-owner FK/trigger debt must match exactly. | One PostgreSQL role/schema, 20 acknowledged cascading FKs, two lifecycle-trigger accesses, five cross-owner trigger/routine bindings, nine full-file historical migration audit debts, strictly scanned migration 0002, and the exact readiness exceptions remain. Unknown external crates, proc-macro expansion, generated code, and runtime behavior are not exhaustively proven by source scanning. |
+| HTTP and data ownership | Cargo graph checks reject runtime-to-runtime dependencies and unreviewed local/path helpers; source checks constrain reviewed raw/non-HTTP transports and keep service HTTP clients in `infrastructure/http/`; SQL and known routine calls are resolved against the owner manifest; views and routine-call closures are checked transitively; relation/routine inventory, trigger bindings, and cross-owner FK/trigger debt must match exactly. | One PostgreSQL role/schema, 21 acknowledged cascading FKs, two lifecycle-trigger accesses, five cross-owner trigger/routine bindings, nine full-file historical migration audit debts, strictly scanned migration 0002, and the exact readiness exceptions remain. Unknown external crates, proc-macro expansion, generated code, and runtime behavior are not exhaustively proven by source scanning. |
 | External configuration | Each production runtime must contain the policy's environment-backed configuration markers; launcher validation and the production Compose smoke exercise required values. | This does not prove secret-manager integration, rotation, or every optional provider combination. |
 | Liveness and readiness | Static checks require distinct handlers and local/dependency response semantics; the required Production Compose Smoke starts the topology and verifies dependency-failure transitions. | Probe presence does not prove every dependency failure mode or long-running degradation path. |
 | Graceful termination | Static checks require Axum graceful shutdown wired to SIGINT and SIGTERM. | Readiness draining, background-task joins, bounded drain deadlines, and forced-termination drills are not yet qualified. |

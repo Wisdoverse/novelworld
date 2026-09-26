@@ -114,6 +114,8 @@ pub struct WorldEntryContext {
     pub threads: Vec<CanonEntityRef>,
     pub scheduled_events: Vec<CanonEventRef>,
     pub character_goals: Vec<CanonCharacterGoalRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series_setting: Option<crate::domain::entities::world_series::SeriesSetting>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -387,6 +389,7 @@ pub fn build_world_entry_context(
         threads: checkpoint.threads,
         scheduled_events,
         character_goals,
+        series_setting: None,
     })
 }
 
@@ -601,6 +604,13 @@ mod tests {
         character.first_appearance_chapter = Some(1);
 
         let context = build_world_entry_context(&model, &[character], 1, 2).unwrap();
+        let legacy_bytes = serde_json::to_vec(&context).unwrap();
+        assert!(serde_json::to_value(&context)
+            .unwrap()
+            .get("series_setting")
+            .is_none());
+        let restored: super::WorldEntryContext = serde_json::from_slice(&legacy_bytes).unwrap();
+        assert_eq!(serde_json::to_vec(&restored).unwrap(), legacy_bytes);
 
         assert_eq!(context.checkpoint_chapter, 1);
         assert_eq!(context.unlocked_through_chapter, 2);

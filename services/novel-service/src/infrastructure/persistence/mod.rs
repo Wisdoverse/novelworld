@@ -6,6 +6,7 @@ pub mod character_pg_repo;
 pub mod novel_pg_repo;
 pub mod pg_progress_repo;
 pub mod source_file_deletion_pg_repo;
+pub mod world_series_pg_repo;
 
 pub(crate) const SOURCE_UPLOAD_PENDING: &str = "__source_upload_pending__";
 pub(crate) const SOURCE_DELETE_CLAIM_PREFIX: &str = "__source_delete_claimed__";
@@ -28,7 +29,8 @@ impl PgReadinessProbe {
 #[async_trait]
 impl ReadinessProbe for PgReadinessProbe {
     async fn is_ready(&self) -> bool {
-        matches!(
+        let legacy = async {
+            matches!(
             tokio::time::timeout(
                 Duration::from_secs(2),
                 sqlx::query_scalar::<_, bool>(
@@ -334,5 +336,20 @@ impl ReadinessProbe for PgReadinessProbe {
             .await,
             Ok(Ok(true))
         )
+        };
+        let series = async {
+            matches!(tokio::time::timeout(Duration::from_secs(2), sqlx::query_scalar::<_, bool>(
+                r#"WITH definitions AS MATERIALIZED (
+                        SELECT id, user_id, name, background, revision, source_template, created_at
+                        FROM public.user_world_series LIMIT 1
+                    ), memberships AS MATERIALIZED (
+                        SELECT user_id, novel_id, series_id FROM public.user_novel_world_series LIMIT 1
+                    )
+                    SELECT (SELECT pg_catalog.count(*) >= 0 FROM definitions)
+                       AND (SELECT pg_catalog.count(*) >= 0 FROM memberships)"#
+            ).fetch_one(&self.pool)).await, Ok(Ok(true)))
+        };
+        let (legacy, series) = tokio::join!(legacy, series);
+        legacy && series
     }
 }

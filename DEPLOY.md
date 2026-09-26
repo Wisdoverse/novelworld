@@ -379,12 +379,15 @@ A: 两者共用可选的 Laya (Jev) decision 服务，但用途不同：行动�
 服务商的数据保留由其策略决定。裁定错误、低置信度或上下文超限会回退到模板
 DC，服务器校验和骰子仍是权威，语义质量尚未认证。它不替代 DeepSeek 故事生成。
 让 Laya 服务与
-`narrative-service` 处于同一条私有 Docker 网络，在 `.env` 中填写
-`LAYA_API_URL=http://<Laya容器名>:8000` 和 `LAYA_API_KEY`，然后重建并重启
-Narrative。地址必须从 Narrative 容器内可达；宿主机的
+`novel-service`、`narrative-service` 处于同一条私有 Docker 网络，在 `.env` 中填写
+`LAYA_API_URL=http://<Laya容器名>:8000` 和 `LAYA_API_KEY`，然后重建并重启 Novel 与 Narrative，以启用 D20 裁定和系列匹配。地址必须分别从
+Novel 和 Narrative 容器内可达；宿主机的
 `127.0.0.1:18881` 在容器内指向 Narrative 自己。只使用私有网络，
-不要公开 Narrative 或 Laya 端口。未同时配置 URL 和密钥时，界面不显示
-建议入口；Laya 失效时建议功能仍可手动选行动，高级检定则回退到模板 DC。
+不要公开 Novel、Narrative 或 Laya 端口。未同时配置 URL 和密钥时，行动
+建议入口隐藏，系列识别返回未配置并保留手动关联。系列推荐需用户确认；
+Laya 失效时仍可手动选择系列或行动，高级检定回退到模板 DC。系列绑定需要
+匹配的 Novel、Narrative 和前端版本；0031 经正常受管停机迁移执行，且不新增
+发布屏障。绑定状态产生后，旧版本回滚不受支持。
 
 **Q: pgvector 扩展安装失败？**
 

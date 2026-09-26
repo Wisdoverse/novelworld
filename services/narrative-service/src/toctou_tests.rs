@@ -91,6 +91,7 @@ fn advanced_adjudication_fixture_with_prompt_version(prompt_version: &str) -> Ar
     let mut state = fixture.world_state.lock().unwrap();
     let mut player = state.player_entity().unwrap().unwrap();
     player.rules = PlayerRuleProfile {
+        series_binding: None,
         mode: ResolutionMode::Advanced,
         canon_model_version: Some(1),
         template_schema_version: Some(1),
@@ -145,6 +146,7 @@ fn game_rule_template(
         })
         .collect();
     GameRuleTemplate {
+        series: None,
         novel_id,
         canon_model_version,
         schema_version: 1,
@@ -202,6 +204,7 @@ async fn player_profiles_create_and_reload_with_their_exact_pinned_prompt_versio
         });
         let template = game_rule_template(fixture.novel_id, 1, prompt_version, 2);
         let profile = PlayerRuleProfile {
+            series_binding: None,
             mode: ResolutionMode::Advanced,
             canon_model_version: Some(1),
             template_schema_version: Some(1),
@@ -242,6 +245,98 @@ async fn player_profiles_create_and_reload_with_their_exact_pinned_prompt_versio
             .unwrap();
         assert_eq!(entry.game_rules.unwrap().prompt_version, prompt_version);
     }
+}
+
+#[tokio::test]
+async fn new_series_profile_requires_membership_but_exact_retry_and_read_use_frozen_binding() {
+    use crate::domain::entities::game_rules::{
+        SeriesRuleBinding, SeriesRuleContext, SERIES_GAME_RULE_PROMPT_VERSION,
+    };
+    let fixture = Arc::new(ToctouFixture::new(false));
+    fixture.clear_world_state();
+    *fixture.player_entry_context.lock().unwrap() = Some(PlayerEntryContext {
+        checkpoint_chapter: 2,
+        name_available: true,
+        locations: vec![CanonEntityRef {
+            id: "city-gate".into(),
+            name: "城门".into(),
+        }],
+    });
+    let mut template = game_rule_template(Uuid::new_v4(), 7, BASIC_GAME_RULE_PROMPT_VERSION, 99);
+    template.prompt_version = SERIES_GAME_RULE_PROMPT_VERSION.into();
+    template.series = Some(SeriesRuleContext {
+        binding: SeriesRuleBinding {
+            series_id: Uuid::new_v4(),
+            revision: 1,
+        },
+        target_novel_id: fixture.novel_id,
+        name: "暮城系列".into(),
+        background: "古城居民生活在城门附近。".into(),
+    });
+    let profile = PlayerRuleProfile {
+        series_binding: template.binding().cloned(),
+        mode: ResolutionMode::Advanced,
+        canon_model_version: Some(7),
+        template_schema_version: Some(1),
+        template_prompt_version: Some(SERIES_GAME_RULE_PROMPT_VERSION.into()),
+        attributes: template
+            .attributes
+            .iter()
+            .map(|attribute| (attribute.key.clone(), attribute.default_score))
+            .collect(),
+    };
+    *fixture.series_template.lock().unwrap() = Some(template.clone());
+    let command = || CreatePlayerEntityCommand {
+        checkpoint_chapter: Some(2),
+        name: "云舟".into(),
+        background: "远行者".into(),
+        capabilities: vec!["观察".into()],
+        location_id: "city-gate".into(),
+        inventory: vec![],
+        rules: profile.clone(),
+    };
+    fixture.series_is_current.store(false, Ordering::SeqCst);
+    assert!(matches!(
+        fixture
+            .handler()
+            .create_player_entity(fixture.user_id, fixture.novel_id, command())
+            .await,
+        Err(NarrativeError::Validation(_))
+    ));
+    assert!(fixture
+        .world_state
+        .lock()
+        .unwrap()
+        .player_entity()
+        .unwrap()
+        .is_none());
+    fixture.series_is_current.store(true, Ordering::SeqCst);
+    let created = fixture
+        .handler()
+        .create_player_entity(fixture.user_id, fixture.novel_id, command())
+        .await
+        .unwrap();
+    fixture.series_is_current.store(false, Ordering::SeqCst);
+    let entry = fixture
+        .handler()
+        .get_player_entry(fixture.user_id, fixture.novel_id, None)
+        .await
+        .unwrap();
+    assert_eq!(entry.game_rules.unwrap(), template);
+    let retry = fixture
+        .handler()
+        .create_player_entity(fixture.user_id, fixture.novel_id, command())
+        .await
+        .unwrap();
+    assert_eq!(retry, created);
+    let mut forged = command();
+    forged.rules.series_binding.as_mut().unwrap().series_id = Uuid::new_v4();
+    assert!(fixture
+        .handler()
+        .create_player_entity(fixture.user_id, fixture.novel_id, forged)
+        .await
+        .is_err());
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -838,6 +933,8 @@ struct ToctouFixture {
     node_read_entered: Notify,
     node_read_release: Notify,
     player_entry_context: Mutex<Option<PlayerEntryContext>>,
+    series_template: Mutex<Option<GameRuleTemplate>>,
+    series_is_current: AtomicBool,
     block_next_player_entry_context: AtomicBool,
     player_entry_context_entered: Notify,
     player_entry_context_release: Notify,
@@ -966,6 +1063,8 @@ impl ToctouFixture {
             node_read_entered: Notify::new(),
             node_read_release: Notify::new(),
             player_entry_context: Mutex::new(None),
+            series_template: Mutex::new(None),
+            series_is_current: AtomicBool::new(true),
             block_next_player_entry_context: AtomicBool::new(false),
             player_entry_context_entered: Notify::new(),
             player_entry_context_release: Notify::new(),
@@ -1104,6 +1203,7 @@ impl ToctouFixture {
         character_id: Option<Uuid>,
     ) -> WorldEntryContext {
         WorldEntryContext {
+            series_setting: None,
             model_version: 1,
             checkpoint_chapter: self.source_chapter,
             unlocked_through_chapter,
@@ -1624,7 +1724,25 @@ impl ChapterReadRepository for ToctouFixture {
         canon_model_version: i32,
         _user_id: Uuid,
         prompt_version: &str,
+        series_binding: Option<&crate::domain::entities::game_rules::SeriesRuleBinding>,
+        require_current_series: bool,
     ) -> Result<Option<crate::domain::entities::game_rules::GameRuleTemplate>> {
+        if let Some(binding) = series_binding {
+            if require_current_series && !self.series_is_current.load(Ordering::SeqCst) {
+                return Ok(None);
+            }
+            return Ok(self
+                .series_template
+                .lock()
+                .unwrap()
+                .clone()
+                .filter(|template| {
+                    template.binding() == Some(binding)
+                        && template.applies_to_novel(novel_id)
+                        && template.canon_model_version == canon_model_version
+                        && template.prompt_version == prompt_version
+                }));
+        }
         if prompt_version != GAME_RULE_PROMPT_VERSION
             && prompt_version != BASIC_GAME_RULE_PROMPT_VERSION
         {
@@ -3085,6 +3203,7 @@ async fn cached_branch_node_is_hidden_when_open_world_starts_during_the_read() {
 
     fixture.wait_for_node_read().await;
     let context = WorldEntryContext {
+        series_setting: None,
         model_version: 1,
         checkpoint_chapter: source_chapter,
         unlocked_through_chapter: source_chapter,
@@ -3217,6 +3336,7 @@ async fn player_entry_rechecks_context_checkpoint_before_returning_locations() {
 async fn open_world_view_rechecks_progress_after_loading_the_journal() {
     let fixture = Arc::new(ToctouFixture::new(false));
     let entry_context = WorldEntryContext {
+        series_setting: None,
         model_version: 1,
         checkpoint_chapter: 2,
         unlocked_through_chapter: 2,
@@ -3264,6 +3384,7 @@ async fn open_world_view_rechecks_progress_after_loading_the_journal() {
 async fn open_world_view_does_not_mix_a_future_journal_with_an_older_state_snapshot() {
     let fixture = Arc::new(ToctouFixture::new(false));
     let entry_context = WorldEntryContext {
+        series_setting: None,
         model_version: 1,
         checkpoint_chapter: 2,
         unlocked_through_chapter: 2,
@@ -3869,6 +3990,7 @@ async fn post_commit_identity_flip_is_outcome_unknown_and_same_key_replays() {
 async fn pending_projection_stays_pending_if_progress_rewinds_before_acknowledgement() {
     let fixture = Arc::new(ToctouFixture::new(false));
     let entry_context = WorldEntryContext {
+        series_setting: None,
         model_version: 1,
         checkpoint_chapter: 2,
         unlocked_through_chapter: 2,
