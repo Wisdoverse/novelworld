@@ -205,6 +205,7 @@ struct SetupRequest {
 
 #[derive(Serialize)]
 struct RuntimeLlmConfigResponse {
+    provider: String,
     contract: u8,
     #[serde(skip_serializing_if = "Option::is_none")]
     diagnostic_budget: Option<llm_client::diagnostic_budget::Binding>,
@@ -539,6 +540,7 @@ async fn runtime_llm_config(
             StatusCode::OK,
             [(CACHE_CONTROL, "no-store")],
             Json(RuntimeLlmConfigResponse {
+                provider: config.provider,
                 contract: if state.diagnostic_budget.is_some() {
                     3
                 } else {

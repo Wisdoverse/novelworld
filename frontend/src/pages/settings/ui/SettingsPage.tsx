@@ -10,6 +10,7 @@ import { apiClient, getApiErrorCode, getApiErrorMessage } from '@/shared/api/cli
 import { queryClient } from '@/shared/api/queryClient';
 import { useAuthStore } from '@/features/auth';
 import { LlmUsageCard } from '@/features/llm-usage';
+import { PROVIDERS, providerOptions, type EditableProvider } from '../model/providers';
 
 type LlmSettings = {
   scope: LlmUsageScope;
@@ -34,8 +35,6 @@ const LEGACY_DEEPSEEK_MODELS = new Set([
   'deepseek-v4-pro',
 ]);
 
-type EditableProvider = keyof typeof MODELS;
-
 export function SettingsPage() {
   const navigate = useNavigate();
   const user = useAuthStore(state => state.user);
@@ -45,11 +44,17 @@ export function SettingsPage() {
   const [settingsLoading, setSettingsLoading] = useState(true);
   const [settingsError, setSettingsError] = useState(false);
   const [apiKey, setApiKey] = useState('');
+  const [savedProvider, setSavedProvider] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const isAdmin = user?.role === 'admin';
-  const models = settings && settings.provider !== 'environment' ? MODELS[settings.provider] : [];
+  const preset = settings && settings.provider !== 'environment'
+    ? providerOptions.find(([id]) => id === settings.provider)?.[1]
+    : undefined;
+  const fixedModels = settings?.provider === 'deepseek' || settings?.provider === 'openai';
+  const models = fixedModels ? MODELS[settings.provider as keyof typeof MODELS] : [];
+  const keyRequired = !!settings && (!settings.api_key_configured || settings.provider !== savedProvider);
   const isEnvironmentManaged = isAdmin && settings?.provider === 'environment';
   const legacyDeepSeekModel = settings?.provider === 'deepseek'
     && LEGACY_DEEPSEEK_MODELS.has(settings.model)
@@ -66,6 +71,7 @@ export function SettingsPage() {
       const response = await apiClient.get<LlmSettings>('/settings/llm');
       const currentUser = useAuthStore.getState().user;
       if (currentUser?.id !== principalId) return;
+      setSavedProvider(response.data.provider);
       setSettings(currentUser.role !== 'admin' && response.data.provider === 'environment'
         ? {
             ...response.data,
@@ -102,10 +108,12 @@ export function SettingsPage() {
   }, [user?.id]);
 
   const selectProvider = (provider: EditableProvider) => {
+    if (provider === settings?.provider) return;
+    setApiKey('');
     setSettings(current => current ? {
       ...current,
       provider,
-      model: MODELS[provider][0].id,
+      model: PROVIDERS[provider].models[0] ?? '',
       thinking_enabled: provider === 'deepseek' ? current.thinking_enabled : false,
     } : current);
   };
@@ -115,7 +123,7 @@ export function SettingsPage() {
     const principalId = user?.id;
     if (!settings || !principalId || settings.provider === 'environment') return;
     const trimmedApiKey = apiKey.trim();
-    if (!settings.api_key_configured && !trimmedApiKey) {
+    if (keyRequired && !trimmedApiKey) {
       toast.error(`请输入${isAdmin ? '平台' : '个人'} API Key`);
       return;
     }
@@ -129,6 +137,7 @@ export function SettingsPage() {
       });
       if (useAuthStore.getState().user?.id !== principalId) return;
       setSettings(response.data);
+      setSavedProvider(response.data.provider);
       setApiKey('');
       void queryClient.invalidateQueries({
         queryKey: llmUsageKeys.summary(principalId, response.data.scope),
@@ -253,30 +262,38 @@ export function SettingsPage() {
               <p className="mt-1 leading-6">当前模型：{settings.model}。请在部署环境中更新平台配置。</p>
             </div>
           ) : <form onSubmit={submit} className="space-y-6">
-            <fieldset>
-              <legend className="mb-2 text-sm font-medium text-[#3c4043]">服务商</legend>
-              <div className="grid grid-cols-2 gap-3">
-                {(['deepseek', 'openai'] as const).map(provider => {
-                  const selected = settings.provider === provider;
-                  return (
-                    <button key={provider} type="button" aria-pressed={selected} onClick={() => selectProvider(provider)} className={`rounded-xl border px-4 py-3 text-left text-sm font-semibold transition-colors ${selected ? 'border-[#0b57d0] bg-[#e8f0fe] text-[#174ea6]' : 'border-[#dadce0] bg-white text-[#3c4043] hover:bg-[#f8fafd]'}`}>
-                      {provider === 'deepseek' ? 'DeepSeek' : 'OpenAI'}
-                    </button>
-                  );
-                })}
-              </div>
-            </fieldset>
+            <label className="block text-sm font-medium text-[#3c4043]">
+              服务商 / 地区 / 套餐
+              <select value={settings.provider} onChange={event => selectProvider(event.target.value as EditableProvider)} className="field-control mt-2">
+                <optgroup label="普通 API">
+                  {providerOptions.filter(([, provider]) => !provider.plan).map(([id, provider]) => <option key={id} value={id}>{provider.label}</option>)}
+                </optgroup>
+                <optgroup label="Coding Plan / Token Plan">
+                  {providerOptions.filter(([, provider]) => provider.plan).map(([id, provider]) => <option key={id} value={id}>{provider.label}</option>)}
+                </optgroup>
+              </select>
+            </label>
+            {preset && <div className="text-xs leading-5 text-[#5f6368]">
+              <p className="font-medium">当前选项：{preset.label}</p>
+              <p className="break-all">端点：{preset.endpoint}</p>
+              <p>API Key 须来自所选地区和套餐；切换后需要重新填写。</p>
+              {preset.plan && <p className="mt-2">套餐额度及支持模型以账号控制台为准。应用不会切换到普通 API；服务商额外用量计费以账号设置为准。</p>}
+              {preset.restricted && <p className="mt-2">此套餐官方限制用于指定编程工具，NovelWorld 应用后端不在已核实的支持范围内，个人套餐不可作为多人共享的平台 Key。请使用普通 API，或先取得服务商对本用途的授权。</p>}
+            </div>}
 
             <label className="block text-sm font-medium text-[#3c4043]">
               模型
-              <select value={settings.model} onChange={event => setSettings({ ...settings, model: event.target.value })} className="field-control mt-2">
+              {fixedModels ? <select value={settings.model} onChange={event => setSettings({ ...settings, model: event.target.value })} className="field-control mt-2">
                 {legacyDeepSeekModel && (
                   <option value={legacyDeepSeekModel} disabled>
                     {legacyDeepSeekModel} — 旧标识；保存后改用 DeepSeek V4.1 Flash
                   </option>
                 )}
                 {models.map(model => <option key={model.id} value={model.id}>{model.label} — {model.hint}</option>)}
-              </select>
+              </select> : <input value={settings.model} onChange={event => setSettings({ ...settings, model: event.target.value })} list="llm-model-suggestions" maxLength={200} required placeholder="填写账号可用的模型 ID 或推理接入点 ID" className="field-control mt-2" />}
+              <datalist id="llm-model-suggestions">
+                {preset?.models.map(model => <option key={model} value={model} />)}
+              </datalist>
             </label>
 
             {settings.provider === 'deepseek' && (
@@ -297,10 +314,10 @@ export function SettingsPage() {
                 <span className="flex items-center gap-2">
                   <Key size={15} />
                   {isAdmin
-                    ? settings.api_key_configured
+                    ? !keyRequired
                       ? '平台 API Key（留空则保持现有 Key）'
                       : '平台 API Key'
-                    : settings.api_key_configured
+                    : !keyRequired
                       ? '个人 API Key（留空则保持现有 Key）'
                       : '个人 API Key'}
                 </span>
@@ -311,15 +328,15 @@ export function SettingsPage() {
                 value={apiKey}
                 onChange={event => setApiKey(event.target.value)}
                 autoComplete="off"
-                required={!settings.api_key_configured}
-                aria-describedby={!settings.api_key_configured ? 'llm-api-key-help' : undefined}
-                placeholder={settings.api_key_configured ? '已配置' : '请输入 API Key'}
+                required={keyRequired}
+                aria-describedby={keyRequired ? 'llm-api-key-help' : undefined}
+                placeholder={keyRequired ? '请输入所选地区和套餐的 API Key' : '已配置'}
                 className="field-control mt-2"
               />
-              {!settings.api_key_configured && (
+              {keyRequired && (
                 <p id="llm-api-key-help" className="mt-2 text-xs font-normal leading-5 text-[#5f6368]">
                   {isAdmin
-                    ? '首次配置平台模型需要 API Key；保存前会验证连接。'
+                    ? '此选项需要对应的 API Key；保存前会验证连接。'
                     : '配置个人 Key 后，可查看该 Key 的消耗；配置前继续使用平台模型。'}
                 </p>
               )}

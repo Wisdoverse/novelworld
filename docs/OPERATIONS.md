@@ -9,6 +9,11 @@ SLO/error budget, and alert notification routing/paging — is explicitly
 
 ## Service map and health checks
 
+For model connection failures, verify the selected provider, region and API/plan
+Key against [LLM provider configuration](./LLM_PROVIDERS.md). Settings switches
+require a freshly entered Key. A successful bounded probe proves connectivity,
+not live model quality or remaining subscription quota.
+
 | Surface | Probe |
 |---|---|
 | Gateway | `/live`, `/ready`, `/health` on the gateway port; `/metrics` (Prometheus text, internal only) |

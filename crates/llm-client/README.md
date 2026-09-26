@@ -2,6 +2,11 @@
 
 NovelWorld's internal OpenAI-compatible LLM transport.
 
+[Provider configuration](../../docs/LLM_PROVIDERS.md) lists Chinese APIs and
+CN/international Coding/Token Plan presets. Explicit API bases retain their
+path/version; root URLs use `/v1`. The adapter handles documented thinking
+parameters and MiniMax's separate reasoning content.
+
 Production services construct `RuntimeLlmClient::from_env()`. It retrieves the
 active, user-scoped provider configuration from user-service using
 `USER_SERVICE_URL` and `INTERNAL_SERVICE_TOKEN`; provider credentials are not

@@ -1415,6 +1415,14 @@ routes are outside this public contract.
 | GET | `/api/settings/llm/usage` | User | JWT | Read key-scoped usage: platform for administrators, personal for other users; return 403 when no personal key is configured |
 | GET | `/api/account/export` | Gateway | JWT | Stream the acting user's complete `account-export-v1` NDJSON data |
 
+Protected LLM Settings MUST use fixed official HTTPS presets. Region and API/plan
+variants MUST be distinct provider identities, even when their endpoint is shared.
+A stored Key MAY be reused only for the same canonical preset and fixed endpoint;
+switching variants requires a newly submitted Key. New provider model IDs are
+bounded to 200 bytes without whitespace/control characters. Plan compatibility
+does not imply provider approval or qualification; limitations and endpoint mappings
+are recorded in [`LLM_PROVIDERS.md`](docs/LLM_PROVIDERS.md).
+
 ### 10.2 Novel Endpoints
 
 | Method | Path | Service | Auth | Description |

@@ -83,6 +83,10 @@ docker compose logs -f gateway
 
 默认仅在本机通过 `http://localhost` 访问；非本机访问必须先增加加密传输边界。
 首次访问只需创建唯一的首位管理员。未配置 LLM 时基础服务仍可 ready，
+国内模型 API、Coding/Token Plan 的中国版与国际版在 Settings 中分开选择；
+各版本的端点、模型和 Key 说明见 [LLM 服务商配置](./docs/LLM_PROVIDERS.md)。
+切换服务商、地区或套餐须重新填写 Key，套餐耗尽不会自动转到普通 API。
+
 AI 操作返回明确的 `503 llm_not_configured`。LLM 密钥由 User Service 加密保存
 或从环境变量读取，浏览器不会保存密钥。
 

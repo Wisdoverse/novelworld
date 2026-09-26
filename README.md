@@ -70,7 +70,9 @@ restarts itself once, and builds the application. When the services are ready,
 open **http://localhost**.
 
 1. Create the first administrator account. No model API key is needed for this step.
-2. Open **Settings** and configure your provider, model, and API key.
+2. Open **Settings** and configure your provider, region, API/plan variant,
+   model, and API key. See [provider configuration](./docs/LLM_PROVIDERS.md) for
+   Chinese APIs and CN/international Coding/Token Plans and their use limits.
 3. Import a novel, wait for processing, and start reading.
 4. Open a character conversation, follow a branch choice, or create an original
    player at an unlocked chapter to enter the world.
