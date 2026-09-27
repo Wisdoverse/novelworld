@@ -868,6 +868,16 @@ class DiagnosticJourneyTest(unittest.TestCase):
     def test_bounded_command_keeps_input_out_of_argv_and_bounds_output_and_time(self):
         command = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"]
         self.assertEqual(CONTROL.bounded_command(command, stdin=b"test-only", maximum=10), b"test-only")
+        failed_command = [
+            sys.executable,
+            "-c",
+            "import sys; print('private stderr marker', file=sys.stderr); sys.exit(22)",
+        ]
+        with self.assertRaises(CONTROL.DiagnosticFailure) as failed:
+            CONTROL.bounded_command(failed_command)
+        self.assertEqual(failed.exception.code, "diagnostic_command_failed")
+        self.assertEqual(failed.exception.exit_code, 22)
+        self.assertNotIn("private stderr marker", str(failed.exception))
         with self.assertRaises(CONTROL.DiagnosticFailure) as oversized:
             CONTROL.bounded_command(command, stdin=b"test-only", maximum=3)
         self.assertEqual(oversized.exception.code, "diagnostic_command_output_oversized")
@@ -1160,7 +1170,9 @@ class DiagnosticJourneyTest(unittest.TestCase):
         journey.prestart_release_log = prestart_log
         cleaned = []
         with mock.patch.object(
-            journey, "prestart_v5", side_effect=RUNNER.QualificationFailure("probe_failed")
+            journey, "prestart_v5",
+            side_effect=RUNNER.diagnostic.DiagnosticFailure(
+                "local_embedding_embedding_command_failed_exit_22", exit_code=22),
         ), mock.patch.object(
             journey, "prestart_cleanup_v5", side_effect=lambda: cleaned.append(True)
         ), mock.patch.object(journey, "execute") as execute, mock.patch.object(
@@ -1170,7 +1182,10 @@ class DiagnosticJourneyTest(unittest.TestCase):
         self.assertEqual(cleaned, [True])
         evidence = (self.output / "prestart-failure-private.json").read_bytes()
         private = json.loads(evidence)
-        self.assertEqual(private["primary_failure_code"], "probe_failed")
+        self.assertEqual(
+            private["primary_failure_code"],
+            "local_embedding_embedding_command_failed_exit_22",
+        )
         self.assertEqual(private["prestart_release_log"], {
             "byte_count": len(prestart_log.read_bytes()),
             "sha256": CONTROL.digest(prestart_log.read_bytes()),
@@ -1179,7 +1194,9 @@ class DiagnosticJourneyTest(unittest.TestCase):
         self.assertNotIn("test-only", evidence.decode())
         row = json.loads(Path(self.value["ledger_path"]).read_text())
         self.assertEqual(row["schema"], CONTROL.PRESTART_SCHEMA_V2)
-        self.assertEqual(row["failure_codes"], ["probe_failed"])
+        self.assertEqual(row["failure_codes"], [
+            "local_embedding_embedding_command_failed_exit_22",
+        ])
         self.assertEqual(row["prestart_evidence_file"], "prestart-failure-private.json")
         self.assertEqual(row["prestart_evidence_sha256"], CONTROL.digest(evidence))
         self.assertTrue(row["cleanup_proven"])
@@ -1298,14 +1315,39 @@ class DiagnosticJourneyTest(unittest.TestCase):
                 return {"Id": image_id, "RepoDigests": ["registry.invalid/image@" + digest]}
 
             calls = []
+            embedding_response = {
+                "model": profile["embedding_model"],
+                "usage": {"prompt_tokens": 6, "total_tokens": 6},
+                "data": [{"embedding": [0.0] * 1024}],
+            }
+            info_response = {
+                "model_id": profile["embedding_model"],
+                "model_sha": profile["embedding_model_revision"],
+            }
+            command_failures = {}
 
             def bounded(command, *, stdin=b"", **_kwargs):
                 calls.append((command, stdin))
+                if command[-1] == "/usr/bin/curl":
+                    step = "curl_check"
+                elif command[-1].endswith("/health"):
+                    step = "health"
+                elif command[-1].endswith("/info"):
+                    step = "info"
+                elif command[-1].endswith("/v1/embeddings"):
+                    step = "embedding"
+                else:
+                    step = None
+                if step in command_failures:
+                    failure = command_failures[step]
+                    if isinstance(failure, list):
+                        failure = failure.pop(0)
+                        if not command_failures[step]:
+                            del command_failures[step]
+                    raise failure
                 if command[-1].endswith("/info"):
-                    return CONTROL.canonical({
-                        "model_id": profile["embedding_model"],
-                        "model_sha": profile["embedding_model_revision"],
-                    })
+                    return (info_response if isinstance(info_response, bytes)
+                            else CONTROL.canonical(info_response))
                 if command[-1].endswith("/v1/embeddings"):
                     # Docker forwards stdin only when exec is interactive.
                     options = command[2:command.index(journey.prefix + "-nginx")]
@@ -1315,11 +1357,8 @@ class DiagnosticJourneyTest(unittest.TestCase):
                         "model": profile["embedding_model"],
                     })
                     self.assertEqual(command[command.index("--data-binary") + 1], "@-")
-                    return CONTROL.canonical({
-                        "model": profile["embedding_model"],
-                        "usage": {"prompt_tokens": 6, "total_tokens": 6},
-                        "data": [{"embedding": [0.0] * 1024}],
-                    })
+                    return (embedding_response if isinstance(embedding_response, bytes)
+                            else CONTROL.canonical(embedding_response))
                 return b""
 
             with mock.patch.object(RUNNER, "docker_inspect", side_effect=inspect), \
@@ -1334,6 +1373,115 @@ class DiagnosticJourneyTest(unittest.TestCase):
             )
             self.assertTrue(all("Authorization" not in command for command, _ in calls))
             self.assertEqual(list(self.output.iterdir()), [])
+
+            for invalid_response in (None, [], "not-an-object"):
+                with self.subTest(profile=path, response=invalid_response):
+                    embedding_response = invalid_response
+                    with mock.patch.object(RUNNER, "docker_inspect", side_effect=inspect), \
+                            mock.patch.object(RUNNER.diagnostic, "bounded_command", side_effect=bounded):
+                        with self.assertRaises(RUNNER.QualificationFailure) as invalid:
+                            journey.prestart_v5()
+                    self.assertEqual(invalid.exception.code, "local_embedding_probe_invalid")
+
+            for step, malformed, expected in (
+                ("info", b"{not-json", "local_embedding_model_identity_invalid"),
+                ("embedding", b"{not-json", "local_embedding_probe_invalid"),
+            ):
+                with self.subTest(profile=path, malformed_json=step):
+                    if step == "info":
+                        info_response = malformed
+                    else:
+                        embedding_response = malformed
+                    with mock.patch.object(RUNNER, "docker_inspect", side_effect=inspect), \
+                            mock.patch.object(RUNNER.diagnostic, "bounded_command", side_effect=bounded):
+                        with self.assertRaises(RUNNER.QualificationFailure) as invalid:
+                            journey.prestart_v5()
+                    self.assertEqual(invalid.exception.code, expected)
+                    info_response = {
+                        "model_id": profile["embedding_model"],
+                        "model_sha": profile["embedding_model_revision"],
+                    }
+                    embedding_response = {
+                        "model": profile["embedding_model"],
+                        "usage": {"prompt_tokens": 6, "total_tokens": 6},
+                        "data": [{"embedding": [0.0] * 1024}],
+                    }
+
+            embedding_response = {
+                "model": profile["embedding_model"],
+                "usage": {"prompt_tokens": 6, "total_tokens": 6},
+                "data": [{"embedding": [0.0] * 1024}],
+            }
+            command_cases = (
+                ("curl_check", RUNNER.diagnostic.DiagnosticFailure(
+                    "diagnostic_command_failed", exit_code=22),
+                 "local_embedding_curl_check_command_failed_exit_22"),
+                ("info", RUNNER.diagnostic.DiagnosticFailure(
+                    "diagnostic_command_failed", exit_code=28),
+                 "local_embedding_info_command_failed_exit_28"),
+                ("embedding", RUNNER.diagnostic.DiagnosticFailure("diagnostic_command_timeout"),
+                 "local_embedding_embedding_command_timeout"),
+            )
+            for step, failure, expected in command_cases:
+                with self.subTest(profile=path, step=step):
+                    command_failures.clear()
+                    command_failures[step] = failure
+                    with mock.patch.object(RUNNER, "docker_inspect", side_effect=inspect), \
+                            mock.patch.object(RUNNER.diagnostic, "bounded_command", side_effect=bounded):
+                        with self.assertRaises(RUNNER.diagnostic.DiagnosticFailure) as classified:
+                            journey.prestart_v5()
+                    self.assertEqual(classified.exception.code, expected)
+
+            with self.subTest(profile=path, health_failure="retryable_curl_exit_6"):
+                command_failures.clear()
+                command_failures["health"] = [RUNNER.diagnostic.DiagnosticFailure(
+                    "diagnostic_command_failed", exit_code=6)]
+                calls.clear()
+                with mock.patch.object(RUNNER, "docker_inspect", side_effect=inspect), \
+                        mock.patch.object(RUNNER.diagnostic, "bounded_command", side_effect=bounded), \
+                        mock.patch.object(RUNNER.time, "sleep") as sleep:
+                    journey.prestart_v5()
+                sleep.assert_called_once_with(1)
+                self.assertEqual(sum(command[-1].endswith("/health") for command, _ in calls), 2)
+
+            for failure_code, expected_code in (
+                ("diagnostic_command_stop_unproven", "diagnostic_command_stop_unproven"),
+                ("diagnostic_command_output_oversized", "diagnostic_command_output_oversized"),
+                ("diagnostic_command_bounds_invalid", "diagnostic_command_bounds_invalid"),
+                ("diagnostic_command_failed_unknown", "diagnostic_command_failed_unknown"),
+                ("diagnostic_command_failed", "local_embedding_health_command_failed"),
+            ):
+                with self.subTest(profile=path, health_failure=failure_code):
+                    command_failures.clear()
+                    command_failures["health"] = RUNNER.diagnostic.DiagnosticFailure(failure_code)
+                    calls.clear()
+                    with mock.patch.object(RUNNER, "docker_inspect", side_effect=inspect), \
+                            mock.patch.object(RUNNER.diagnostic, "bounded_command", side_effect=bounded), \
+                            mock.patch.object(RUNNER.time, "sleep") as sleep:
+                        with self.assertRaises(RUNNER.diagnostic.DiagnosticFailure) as propagated:
+                            journey.prestart_v5()
+                    self.assertEqual(propagated.exception.code, expected_code)
+                    sleep.assert_not_called()
+                    self.assertEqual(sum(command[-1].endswith("/health") for command, _ in calls), 1)
+
+            for exit_code, expected in ((5, "exit_5"), (125, "exit_125"), (-9, "signal_9")):
+                with self.subTest(profile=path, health_exit=exit_code):
+                    command_failures.clear()
+                    command_failures["health"] = RUNNER.diagnostic.DiagnosticFailure(
+                        "diagnostic_command_failed", exit_code=exit_code)
+                    calls.clear()
+                    with mock.patch.object(RUNNER, "docker_inspect", side_effect=inspect), \
+                            mock.patch.object(RUNNER.diagnostic, "bounded_command", side_effect=bounded), \
+                            mock.patch.object(RUNNER.time, "sleep") as sleep:
+                        with self.assertRaises(RUNNER.diagnostic.DiagnosticFailure) as propagated:
+                            journey.prestart_v5()
+                    self.assertEqual(
+                        propagated.exception.code,
+                        f"local_embedding_health_command_failed_{expected}",
+                    )
+                    self.assertEqual(propagated.exception.exit_code, exit_code)
+                    sleep.assert_not_called()
+                    self.assertEqual(sum(command[-1].endswith("/health") for command, _ in calls), 1)
 
     def test_v5_prestart_cleanup_removes_only_labelled_project_resources(self):
         journey = object.__new__(RUNNER.Journey)

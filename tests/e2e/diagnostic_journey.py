@@ -65,9 +65,10 @@ REGISTRATION_KEYS = {
 
 
 class DiagnosticFailure(RuntimeError):
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, exit_code: int | None = None):
         super().__init__(code)
         self.code = code
+        self.exit_code = exit_code
 
 
 def require(condition: bool, code: str = "diagnostic_registration_invalid") -> None:
@@ -785,8 +786,10 @@ def bounded_command(command: list[str], *, stdin: bytes = b"", timeout: float = 
                 chunk = os.read(process.stdout.fileno(), min(65536, maximum + 1 - len(output)))
                 if not chunk:
                     remaining = io_deadline - time.monotonic()
-                    require(remaining > 0 and process.wait(timeout=remaining) == 0,
-                            "diagnostic_command_failed")
+                    require(remaining > 0, "diagnostic_command_failed")
+                    exit_code = process.wait(timeout=remaining)
+                    if exit_code != 0:
+                        raise DiagnosticFailure("diagnostic_command_failed", exit_code=exit_code)
                     return bytes(output)
                 output.extend(chunk)
                 require(len(output) <= maximum, "diagnostic_command_output_oversized")
