@@ -4259,6 +4259,17 @@ class Journey:
                            for flag, value in required_args.items())):
                 raise QualificationFailure("local_embedding_runtime_identity_invalid")
 
+            def checked_command(step: str, argv: list[str], *, payload: bytes = b"") -> bytes:
+                try:
+                    return diagnostic.bounded_command(argv, stdin=payload)
+                except diagnostic.DiagnosticFailure as error:
+                    if error.code not in {"diagnostic_command_failed", "diagnostic_command_timeout"}:
+                        raise
+                    code = "local_embedding_" + step + "_" + error.code.removeprefix("diagnostic_")
+                    if type(error.exit_code) is int and 0 < abs(error.exit_code) <= 255:
+                        code += ("_exit_" if error.exit_code > 0 else "_signal_") + str(abs(error.exit_code))
+                    raise diagnostic.DiagnosticFailure(code, exit_code=error.exit_code) from error
+
             def probe(path: str, *, payload: bytes = b"") -> bytes:
                 argv = ["docker", "exec", "-i", nginx_name, "/usr/bin/curl", "--fail",
                         "--silent", "--show-error", "--max-time", "5"]
@@ -4266,21 +4277,37 @@ class Journey:
                     argv.extend(["--header", "Content-Type: application/json",
                                  "--data-binary", "@-"])
                 argv.append("http://embedding:80" + path)
-                return diagnostic.bounded_command(argv, stdin=payload)
+                step = {"/health": "health", "/info": "info", "/v1/embeddings": "embedding"}[path]
+                return checked_command(step, argv, payload=payload)
 
-            diagnostic.bounded_command(
-                ["docker", "exec", nginx_name, "test", "-x", "/usr/bin/curl"]
+            def json_probe(path: str, *, payload: bytes = b"") -> Any:
+                raw = probe(path, payload=payload)
+                try:
+                    return diagnostic.strict_json(raw)
+                except diagnostic.DiagnosticFailure as error:
+                    code = ("local_embedding_probe_invalid" if path == "/v1/embeddings"
+                            else "local_embedding_model_identity_invalid")
+                    raise QualificationFailure(code) from error
+
+            checked_command(
+                "curl_check", ["docker", "exec", nginx_name, "test", "-x", "/usr/bin/curl"]
             )
             deadline = time.monotonic() + 1_200
             while True:
                 try:
                     probe("/health")
                     break
-                except diagnostic.DiagnosticFailure:
+                except diagnostic.DiagnosticFailure as error:
+                    if (error.code != "local_embedding_health_command_timeout"
+                            and error.code not in {
+                                f"local_embedding_health_command_failed_exit_{code}"
+                                for code in (6, 7, 22, 28)
+                            }):
+                        raise
                     if time.monotonic() >= deadline:
                         raise QualificationFailure("local_embedding_health_timeout")
                     time.sleep(1)
-            info = diagnostic.strict_json(probe("/info"))
+            info = json_probe("/info")
             if (not isinstance(info, dict)
                     or info.get("model_id") != profile["embedding_model"]
                     or info.get("model_sha") != profile["embedding_model_revision"]):
@@ -4289,12 +4316,13 @@ class Journey:
                 "input": "NovelWorld local embedding probe",
                 "model": profile["embedding_model"],
             })
-            response = diagnostic.strict_json(probe("/v1/embeddings", payload=payload))
+            response = json_probe("/v1/embeddings", payload=payload)
             data = response.get("data") if isinstance(response, dict) else None
             usage = response.get("usage") if isinstance(response, dict) else None
             vector = data[0].get("embedding") if isinstance(data, list) and len(data) == 1 \
                 and isinstance(data[0], dict) else None
-            if (response.get("model") != profile["embedding_model"]
+            if (not isinstance(response, dict)
+                    or response.get("model") != profile["embedding_model"]
                     or not isinstance(usage, dict)
                     or type(usage.get("prompt_tokens")) is not int
                     or usage["prompt_tokens"] <= 0
