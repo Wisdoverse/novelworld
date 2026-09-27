@@ -12,6 +12,41 @@ use crate::{ChatRequest, ChatResponse, ChatStream, LlmClient};
 #[derive(Debug)]
 pub struct NotConfigured;
 
+#[derive(Debug)]
+pub struct UnsupportedSeriesProvider;
+impl std::fmt::Display for UnsupportedSeriesProvider {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .write_str("series matching requires configured DeepSeek without a Diagnostic binding")
+    }
+}
+impl std::error::Error for UnsupportedSeriesProvider {}
+
+/// One resolved configuration: cache identity and dispatch cannot drift apart.
+pub struct PreparedSeriesMatch {
+    resolved: Arc<ResolvedClient>,
+    runtime_user_id: String,
+    deadline: Instant,
+}
+
+impl PreparedSeriesMatch {
+    pub fn identity(&self) -> &str {
+        &self.resolved.series_identity
+    }
+
+    pub async fn complete(&self, prompt: &str) -> Result<String> {
+        let mut request = production_json_request(crate::LlmOperation::SeriesMatching, prompt)
+            .runtime_user_id(self.runtime_user_id.clone())
+            .thinking(self.resolved.thinking_enabled);
+        request.model.clone_from(&self.resolved.model);
+        self.resolved
+            .client
+            .chat_with_deadline(request, Some(self.deadline))
+            .await
+            .map(|response| response.content)
+    }
+}
+
 impl std::fmt::Display for NotConfigured {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("runtime LLM configuration is not configured")
@@ -46,6 +81,8 @@ struct RuntimeConfig {
 
 struct ResolvedClient {
     client: LlmClient,
+    provider: String,
+    series_identity: String,
     model: String,
     thinking_enabled: bool,
 }
@@ -63,6 +100,30 @@ struct RemoteConfig {
 }
 
 impl RuntimeLlmClient {
+    pub async fn prepare_series_match(
+        &self,
+        user_id: impl Into<String>,
+    ) -> Result<PreparedSeriesMatch> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        if self.budget.as_ref().map_err(|error| *error)?.is_some() {
+            return Err(UnsupportedSeriesProvider.into());
+        }
+        let runtime_user_id = user_id.into();
+        let resolved = self
+            .resolved_with_deadline(
+                Some(&runtime_user_id),
+                Some(Instant::now() + Duration::from_secs(5)),
+            )
+            .await?;
+        if resolved.provider != "deepseek" {
+            return Err(UnsupportedSeriesProvider.into());
+        }
+        Ok(PreparedSeriesMatch {
+            resolved,
+            runtime_user_id,
+            deadline,
+        })
+    }
     pub fn from_env() -> Result<Self> {
         let user_service_url =
             std::env::var("USER_SERVICE_URL").unwrap_or_else(|_| "http://127.0.0.1:8001".into());
@@ -310,11 +371,35 @@ pub fn production_json_request(operation: crate::LlmOperation, prompt: &str) -> 
 
 fn build_resolved(config: RuntimeConfig, budget: Option<Arc<BudgetClient>>) -> ResolvedClient {
     let model = format!("{}/{}", config.provider, config.model);
+    use sha2::{Digest, Sha256};
+    let endpoint = reqwest::Url::parse(&config.api_url)
+        .map(|mut endpoint| {
+            let _ = endpoint.set_username("");
+            let _ = endpoint.set_password(None);
+            endpoint.set_query(None);
+            endpoint.set_fragment(None);
+            endpoint.to_string()
+        })
+        .unwrap_or_default();
+    let settings = format!(
+        "{}\n{}\n{}\n{}\nseries-match-v2/no-retry/512-total-tokens",
+        config.provider, config.model, endpoint, config.thinking_enabled
+    );
+    let series_identity = format!(
+        "{}/{}",
+        model,
+        Sha256::digest(settings.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
     let mut client =
         LlmClient::new().with_openai_compatible(&config.provider, config.api_key, config.api_url);
     client.budget = Ok(budget);
     ResolvedClient {
         client,
+        provider: config.provider,
+        series_identity,
         model,
         thinking_enabled: config.thinking_enabled,
     }
@@ -408,6 +493,137 @@ fn provider_for_url(api_url: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn series_preparation_pins_the_single_resolved_config_and_rejects_diagnostics() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for index in 0..2 {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                loop {
+                    let mut chunk = [0; 4096];
+                    let count = socket.read(&mut chunk).unwrap();
+                    assert!(count > 0);
+                    bytes.extend_from_slice(&chunk[..count]);
+                    assert!(bytes.len() <= 16 * 1024);
+                    if let Some(end) = bytes.windows(4).position(|chunk| chunk == b"\r\n\r\n") {
+                        let header = String::from_utf8_lossy(&bytes[..end]);
+                        let length = header
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length: ")
+                                    .map(|length| length.parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if bytes.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                let request = String::from_utf8_lossy(&bytes);
+                let body = if index == 0 {
+                    assert!(request.starts_with("GET /internal/runtime/llm"));
+                    serde_json::json!({"contract":2,"provider":"deepseek","api_url":"https://api.deepseek.com","model":"snapshot-model","api_key":"synthetic","thinking_enabled":true}).to_string()
+                } else {
+                    assert!(
+                        request.starts_with("POST /v1/chat/completions"),
+                        "configuration must not be resolved twice"
+                    );
+                    let (_, body) = request.split_once("\r\n\r\n").unwrap();
+                    let wire: serde_json::Value = serde_json::from_str(body).unwrap();
+                    assert_eq!(wire["model"], "snapshot-model");
+                    assert_eq!(wire["max_tokens"], 512);
+                    assert_eq!(wire["thinking"]["type"], "enabled");
+                    r#"{"choices":[{"message":{"content":"{\"choice\":null,\"same_world\":false,\"basis\":\"insufficient\"}"},"finish_reason":"stop"}],"model":"snapshot-model","usage":{"prompt_tokens":3,"completion_tokens":2}}"#.into()
+                };
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            }
+        });
+        let client = RuntimeLlmClient {
+            budget: Ok(None),
+            source: ConfigSource::Remote {
+                client: reqwest::Client::new(),
+                user_service_url: format!("http://{address}"),
+                token: "synthetic".into(),
+                allow_insecure_http: true,
+            },
+            resolved: OnceCell::new(),
+        };
+        let mut prepared = client.prepare_series_match("fixture-user").await.unwrap();
+        Arc::get_mut(&mut prepared.resolved)
+            .unwrap()
+            .client
+            .test_dispatch_to(format!("http://{address}"));
+        assert!(prepared.identity().starts_with("deepseek/snapshot-model/"));
+        assert!(prepared
+            .complete("synthetic prompt")
+            .await
+            .unwrap()
+            .contains("insufficient"));
+        server.join().unwrap();
+
+        let budget = BudgetClient::new(
+            diagnostic_binding(),
+            "http://127.0.0.1:1",
+            "0123456789abcdef".repeat(4),
+        )
+        .unwrap();
+        let bound = RuntimeLlmClient {
+            budget: Ok(Some(Arc::new(budget))),
+            source: ConfigSource::Static(RuntimeConfig {
+                provider: "deepseek".into(),
+                api_url: "http://127.0.0.1:1".into(),
+                model: "model".into(),
+                api_key: "synthetic".into(),
+                thinking_enabled: false,
+            }),
+            resolved: OnceCell::new(),
+        };
+        assert!(bound
+            .prepare_series_match("fixture")
+            .await
+            .err()
+            .unwrap()
+            .is::<UnsupportedSeriesProvider>());
+        let unsupported = RuntimeLlmClient::static_config(
+            "https://api.openai.com".into(),
+            "deepseek/fake-name".into(),
+            "synthetic".into(),
+            false,
+        );
+        assert!(unsupported
+            .prepare_series_match("fixture")
+            .await
+            .err()
+            .unwrap()
+            .is::<UnsupportedSeriesProvider>());
+        let endpoint = |api_url: &str| RuntimeConfig {
+            provider: "deepseek".into(),
+            api_url: api_url.into(),
+            model: "same-model".into(),
+            api_key: "synthetic".into(),
+            thinking_enabled: false,
+        };
+        let first = build_resolved(endpoint("https://api.deepseek.com"), None);
+        let second = build_resolved(endpoint("https://api.deepseek.com/v1"), None);
+        assert_ne!(first.series_identity, second.series_identity);
+        assert!(!first.series_identity.contains("https://"));
+        let secret_parts = build_resolved(
+            endpoint("https://private:token@api.deepseek.com/?key=hidden#secret"),
+            None,
+        );
+        assert_eq!(first.series_identity, secret_parts.series_identity);
+    }
 
     fn diagnostic_binding() -> Binding {
         diagnostic_binding_for("vision-journey-diagnostic-v1")

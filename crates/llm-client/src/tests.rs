@@ -21,6 +21,129 @@ fn http_response(status: &str, content_type: &str, body: &str, extra: &str) -> V
     .into_bytes()
 }
 
+#[test]
+fn series_matching_dispatches_once_on_http_and_empty_json_failures() {
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    for (status, body) in [
+        ("503 Service Unavailable", "{}"),
+        (
+            "200 OK",
+            r#"{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"model":"model","usage":{"prompt_tokens":5,"completion_tokens":0}}"#,
+        ),
+        (
+            "200 OK",
+            r#"{"choices":[{"message":{"content":"partial"},"finish_reason":"length"}],"model":"model","usage":{"prompt_tokens":5,"completion_tokens":512}}"#,
+        ),
+        (
+            "200 OK",
+            r#"{"choices":[{"message":{"content":"{}"},"finish_reason":"stop"}],"model":"model","usage":{"prompt_tokens":5,"completion_tokens":700}}"#,
+        ),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let done = Arc::new(AtomicBool::new(false));
+        let counted = calls.clone();
+        let stop = done.clone();
+        let response = http_response(status, "application/json", body, "");
+        let server = thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut socket, _)) => {
+                        socket
+                            .set_read_timeout(Some(Duration::from_secs(1)))
+                            .unwrap();
+                        let mut request = [0; 8192];
+                        let read = socket.read(&mut request).unwrap();
+                        assert!(String::from_utf8_lossy(&request[..read])
+                            .starts_with("POST /v1/chat/completions"));
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        socket.write_all(&response).unwrap();
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(2))
+                    }
+                    Err(error) => panic!("mock accept failed: {error}"),
+                }
+            }
+        });
+        let client = LlmClient::new().with_openai_compatible(
+            "deepseek",
+            "synthetic",
+            format!("http://{address}"),
+        );
+        let mut request =
+            crate::production_json_request(crate::LlmOperation::SeriesMatching, "synthetic")
+                .runtime_user_id("synthetic");
+        request.model = "deepseek/model".into();
+        request.thinking = Some(true);
+        let failure = runtime.block_on(client.chat(request)).unwrap_err();
+        done.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        if status == "200 OK" {
+            let rendered = handle.render();
+            assert_eq!(
+                metric_value(
+                    &rendered,
+                    "novelworld_llm_usage_reports_total",
+                    &[("operation", "series_matching"), ("status", "present")]
+                ),
+                1.0
+            );
+            assert_eq!(
+                metric_value(
+                    &rendered,
+                    "novelworld_llm_billable_tokens_total",
+                    &[
+                        ("operation", "series_matching"),
+                        ("class", "uncached_input")
+                    ]
+                ),
+                5.0
+            );
+            if body.contains("length") {
+                assert!(failure
+                    .chain()
+                    .any(|cause| cause.is::<crate::TruncatedCompletion>()));
+            }
+            if body.contains("700") {
+                assert_eq!(
+                    metric_value(
+                        &rendered,
+                        "novelworld_llm_billable_tokens_total",
+                        &[("operation", "series_matching"), ("class", "output")]
+                    ),
+                    700.0
+                );
+            }
+        }
+        let unsupported = LlmClient::new().with_openai_compatible(
+            "openai",
+            "synthetic",
+            format!("http://{address}"),
+        );
+        let error = runtime
+            .block_on(
+                unsupported.chat(
+                    ChatRequest::new(crate::LlmOperation::SeriesMatching, "openai/model")
+                        .max_tokens(512)
+                        .thinking(false),
+                ),
+            )
+            .unwrap_err();
+        assert!(error.is::<crate::UnsupportedSeriesProvider>());
+    }
+}
+
 fn metric_value(rendered: &str, name: &str, labels: &[(&str, &str)]) -> f64 {
     rendered
         .lines()

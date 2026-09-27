@@ -22,6 +22,23 @@ pub trait AccountExportPort: Send + Sync {
 #[async_trait]
 pub trait LlmPort: Send + Sync {
     async fn chat_json(&self, user_id: Uuid, task: NovelLlmTask, prompt: &str) -> Result<String>;
+    async fn prepare_series_match(&self, _user_id: Uuid) -> Result<Box<dyn SeriesCompletionPort>> {
+        Err(SeriesProviderUnavailable::NotConfigured.into())
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum SeriesProviderUnavailable {
+    #[error("series provider is not configured")]
+    NotConfigured,
+    #[error("series provider is unsupported")]
+    Unsupported,
+}
+
+#[async_trait]
+pub trait SeriesCompletionPort: Send + Sync {
+    fn identity(&self) -> &str;
+    async fn complete(&self, prompt: &str) -> Result<String>;
 }
 
 #[derive(Debug, Error)]

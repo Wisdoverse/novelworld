@@ -7,3 +7,4 @@ target
 frontend/node_modules
 frontend/dist
 infra/nginx/certs
+.local

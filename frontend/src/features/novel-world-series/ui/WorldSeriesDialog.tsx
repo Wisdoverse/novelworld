@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Loader2, Sparkles, X } from 'lucide-react';
 import {
@@ -6,6 +7,7 @@ import {
   useCreateWorldSeries,
   useNovelWorldSeries,
   useSuggestNovelWorldSeries,
+  useSuggestNovelWorldSeriesDeepSeek,
   useWorldSeriesList,
 } from '@/entities/novel';
 import type { Novel, WorldSeries, WorldSeriesSuggestion } from '@/shared/types';
@@ -32,6 +34,16 @@ function seriesErrorMessage(error: unknown) {
 }
 
 function suggestionMessage(result: WorldSeriesSuggestion | undefined) {
+  if (result?.method === 'deepseek') {
+    switch (result.reason) {
+      case 'not_configured':
+        return '请先在模型设置中配置 DeepSeek API 后再补判。';
+      case 'unsupported_provider':
+        return '当前配置不支持系列补判。请在模型设置中配置 DeepSeek API 后再试。';
+      case 'unknown_outcome':
+        return '这次补判结果未确认，系统不会再次发起模型请求，请手动关联。';
+    }
+  }
   switch (result?.status) {
     case 'suggested':
       return '系统找到可能的同系列小说。请核对建议并明确确认后再关联。';
@@ -41,15 +53,19 @@ function suggestionMessage(result: WorldSeriesSuggestion | undefined) {
       return '系统无法确定系列关系。请手动选择已有系列或创建系列。';
     case 'unavailable':
       return '系列识别暂不可用。你仍可手动选择已有系列或创建系列。';
+    case 'in_progress':
+      return 'DeepSeek 补判正在处理中。你可以手动查询结果。';
     default:
       return undefined;
   }
 }
 
 export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, readyNovels, onClose }: WorldSeriesDialogProps) {
+  const navigate = useNavigate();
   const seriesList = useWorldSeriesList(principalId);
   const currentSeries = useNovelWorldSeries(principalId, novel.id);
   const suggest = useSuggestNovelWorldSeries();
+  const suggestDeepSeek = useSuggestNovelWorldSeriesDeepSeek();
   const create = useCreateWorldSeries(principalId);
   const associate = useAssociateNovelWorldSeries(principalId, novel.id);
   const [suggestion, setSuggestion] = useState<WorldSeriesSuggestion>();
@@ -62,7 +78,13 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
   const [createdSeries, setCreatedSeries] = useState<WorldSeries>();
   const [saving, setSaving] = useState(false);
   const selection = selectedSeriesId ?? currentSeries.data?.id ?? '';
-  const isPending = saving || suggest.isPending || create.isPending || associate.isPending;
+  const isPending = saving || suggest.isPending || suggestDeepSeek.isPending
+    || create.isPending || associate.isPending;
+  const canUseDeepSeek = suggestion?.method === 'deepseek'
+    ? suggestion.status === 'in_progress'
+    : suggestion?.status === 'uncertain'
+      || suggestion?.status === 'unavailable'
+      || suggestion?.status === 'unconfigured';
 
   const ensurePrincipal = () => isPrincipalCurrent();
 
@@ -81,6 +103,8 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
 
   const runSuggestion = async () => {
     if (!ensurePrincipal()) return;
+    suggestDeepSeek.reset();
+    setSuggestion(undefined);
     try {
       const result = await suggest.mutateAsync(novel.id);
       if (!ensurePrincipal()) return;
@@ -92,6 +116,20 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
       if (ensurePrincipal()) {
         setSuggestion({ status: 'unavailable', suggestion: null });
       }
+    }
+  };
+
+  const runDeepSeekSuggestion = async (checkOnly: boolean) => {
+    if (!ensurePrincipal()) return;
+    try {
+      const result = await suggestDeepSeek.mutateAsync({ novelId: novel.id, checkOnly });
+      if (!ensurePrincipal()) return;
+      setSuggestion(result);
+      if (result.status === 'suggested' && result.suggestion) {
+        toast.success('已生成 DeepSeek 系列建议，请核对后确认');
+      }
+    } catch {
+      // The paid supplement is only run again after another explicit click.
     }
   };
 
@@ -180,9 +218,52 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
               识别同系列
             </button>
             {suggest.isError ? <p role="alert" className="text-sm text-[#b3261e]">识别服务暂不可用，可手动选择或创建系列。</p> : null}
+            {canUseDeepSeek ? (
+              <div className="space-y-2 rounded-lg border border-[#dadce0] p-3">
+                <p className="text-xs leading-5 text-[#5f6368]">
+                  DeepSeek 补判是可选操作，可能产生模型费用；相同证据和模型配置会复用结果，失败不会自动重试。
+                </p>
+                <button
+                  type="button"
+                  className="tonal-action w-full justify-center"
+                  disabled={isPending}
+                  onClick={() => void runDeepSeekSuggestion(
+                    suggestDeepSeek.isError || suggestion?.method === 'deepseek',
+                  )}
+                >
+                  {suggestDeepSeek.isPending ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
+                  {suggestDeepSeek.isPending
+                    ? '正在请求 DeepSeek 补判'
+                    : suggestDeepSeek.isError
+                      ? '查询 DeepSeek 补判结果'
+                      : suggestion?.method === 'deepseek'
+                        ? '查询 DeepSeek 补判结果'
+                        : '使用 DeepSeek 补判'}
+                </button>
+              </div>
+            ) : null}
+            {suggestDeepSeek.isError ? (
+              <p role="alert" className="text-sm text-[#b3261e]">
+                补判结果可能尚未确认。查询结果不会重新发起模型请求；也可以手动选择系列。
+              </p>
+            ) : null}
             {suggestion ? (
               <div className="rounded-lg border border-[#dadce0] p-3" role="status">
                 <p className="text-sm text-[#3c4043]">{suggestionMessage(suggestion)}</p>
+                {suggestion.method === 'deepseek'
+                  && (suggestion.reason === 'not_configured'
+                    || suggestion.reason === 'unsupported_provider') ? (
+                    <button
+                      type="button"
+                      className="mt-2 text-sm text-[#0b57d0] underline"
+                      onClick={() => navigate('/settings')}
+                    >
+                      打开模型设置
+                    </button>
+                  ) : null}
+                {suggestion.method === 'deepseek' && suggestion.cached === true ? (
+                  <p className="mt-1 text-xs text-[#5f6368]">已复用相同证据和模型配置的补判结果。</p>
+                ) : null}
                 {suggestion.status === 'suggested' && suggestion.suggestion ? (
                   <div className="mt-2 flex flex-wrap items-center justify-between gap-3 text-sm">
                     <span>

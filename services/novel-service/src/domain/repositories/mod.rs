@@ -23,6 +23,23 @@ pub const MAX_GAME_RULE_GENERATION_ATTEMPTS: i64 = 3;
 
 #[async_trait]
 pub trait WorldSeriesRepository: Send + Sync {
+    async fn begin_match(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        method: crate::domain::ports::series_matcher::SeriesMatchMethod,
+        evidence_key: &str,
+        check_only: bool,
+    ) -> Result<crate::domain::ports::series_matcher::BeginSeriesMatch>;
+    async fn complete_match(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        method: crate::domain::ports::series_matcher::SeriesMatchMethod,
+        evidence_key: &str,
+        token: Uuid,
+        result: &crate::domain::ports::series_matcher::SeriesSuggestion,
+    ) -> Result<bool>;
     /// Freeze only an exact Ready source template still authorized on this shelf.
     async fn create(
         &self,

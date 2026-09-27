@@ -84,6 +84,10 @@ fn routes() -> Router<AppState> {
             "/novels/{id}/world-series/suggestion",
             post(world_series::suggestion),
         )
+        .route(
+            "/novels/{id}/world-series/suggestion/deepseek",
+            post(world_series::suggestion_deepseek),
+        )
         .route("/novels/{id}", get(get_novel))
         .route("/novels/{id}", delete(delete_novel))
         .route("/novels/{id}/shelf", post(attach_novel))

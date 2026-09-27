@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::domain::ports::{
     LlmOutputTruncated, LlmPort, LlmProviderFailure, LlmProviderFailureKind, NovelLlmTask,
-    TextTranslator,
+    SeriesCompletionPort, SeriesProviderUnavailable, TextTranslator,
 };
 
 pub struct LlmAdapter {
@@ -22,6 +22,21 @@ impl LlmAdapter {
 
 #[async_trait]
 impl LlmPort for LlmAdapter {
+    async fn prepare_series_match(&self, user_id: Uuid) -> Result<Box<dyn SeriesCompletionPort>> {
+        self.client
+            .prepare_series_match(user_id.to_string())
+            .await
+            .map(|prepared| Box::new(prepared) as Box<dyn SeriesCompletionPort>)
+            .map_err(|error| {
+                if error.is::<llm_client::UnsupportedSeriesProvider>() {
+                    SeriesProviderUnavailable::Unsupported.into()
+                } else if error.is::<llm_client::NotConfigured>() {
+                    SeriesProviderUnavailable::NotConfigured.into()
+                } else {
+                    error
+                }
+            })
+    }
     async fn chat_json(&self, user_id: Uuid, task: NovelLlmTask, prompt: &str) -> Result<String> {
         let operation = match task {
             NovelLlmTask::ChapterBoundaryDetection => {
@@ -38,6 +53,16 @@ impl LlmPort for LlmAdapter {
             .json_chat_for_user(user_id.to_string(), operation, prompt)
             .await
             .map_err(classify_llm_error)
+    }
+}
+
+#[async_trait]
+impl SeriesCompletionPort for llm_client::PreparedSeriesMatch {
+    fn identity(&self) -> &str {
+        self.identity()
+    }
+    async fn complete(&self, prompt: &str) -> Result<String> {
+        self.complete(prompt).await
     }
 }
 

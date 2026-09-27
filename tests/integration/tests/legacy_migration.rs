@@ -77,6 +77,9 @@ const VERSIONED_GAME_RULE_TEMPLATES_MIGRATION: &str =
 const USER_WORLD_SERIES_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0031_user_world_series.sql");
 
+const SERIES_MATCH_DECISIONS_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0032_series_match_decisions.sql");
+
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
         .unwrap_or_else(|_| "postgres://test:test@localhost:25432/novelworld_test".into())
@@ -114,6 +117,7 @@ const ALL_MIGRATIONS: &[&str] = &[
     BUDGETED_EMBEDDING_MIGRATION,
     VERSIONED_GAME_RULE_TEMPLATES_MIGRATION,
     USER_WORLD_SERIES_MIGRATION,
+    SERIES_MATCH_DECISIONS_MIGRATION,
 ];
 
 async fn assert_progress_migration_fails_and_rolls_back(pool: &sqlx::PgPool, expected_error: &str) {
@@ -2426,6 +2430,7 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
         "0029_budgeted_embedding.sql",
         "0030_versioned_game_rule_templates.sql",
         "0031_user_world_series.sql",
+        "0032_series_match_decisions.sql",
     ] {
         let migration_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../infra/postgres/migrations")

@@ -83,6 +83,22 @@ export function useSuggestNovelWorldSeries() {
   });
 }
 
+export function useSuggestNovelWorldSeriesDeepSeek() {
+  return useMutation({
+    retry: false,
+    mutationFn: ({ novelId, checkOnly = false }: { novelId: string; checkOnly?: boolean }) => apiClient
+      .post<WorldSeriesSuggestion>(
+        `/novels/${novelId}/world-series/suggestion/deepseek`,
+        undefined,
+        {
+          timeout: 60_000,
+          ...(checkOnly ? { params: { check_only: true } } : {}),
+        },
+      )
+      .then(response => response.data),
+  });
+}
+
 export function useCreateWorldSeries(principalId: string | undefined) {
   const queryClient = useQueryClient();
   return useMutation({

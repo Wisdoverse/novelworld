@@ -138,7 +138,18 @@ export interface WorldSeries {
 }
 
 export interface WorldSeriesSuggestion {
-  status: 'suggested' | 'unconfigured' | 'uncertain' | 'unavailable';
+  status: 'suggested' | 'unconfigured' | 'uncertain' | 'unavailable' | 'in_progress';
+  method?: 'laya' | 'deepseek';
+  reason?:
+    | 'no_candidates'
+    | 'low_confidence'
+    | 'not_configured'
+    | 'unsupported_provider'
+    | 'unavailable'
+    | 'in_progress'
+    | 'suggested'
+    | 'unknown_outcome';
+  cached?: boolean;
   suggestion: {
     series_id: string | null;
     source_novel_id: string;

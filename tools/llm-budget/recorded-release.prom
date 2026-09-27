@@ -93,3 +93,4 @@ novelworld_llm_tokens_total{contract="llm-observability-v1",service="agent-servi
 novelworld_llm_tokens_total{contract="llm-observability-v1",service="agent-service",provider="environment",model="e2e",operation="character_chat",type="output"} 10
 novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="agent-service",provider="environment",model="e2e",operation="character_chat",class="uncached_input",usage_key="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} 80
 novelworld_llm_billable_tokens_total{contract="llm-observability-v1",service="agent-service",provider="environment",model="e2e",operation="character_chat",class="output",usage_key="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} 10
+novelworld_llm_operation_output_token_ceiling{contract="llm-observability-v1",service="user-service",operation="series_matching"} 512

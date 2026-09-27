@@ -70,13 +70,13 @@ impl LlmClient {
         let mut client = Self::new().with_openai_compatible(provider, "synthetic-test-key", origin);
         client.budget = Ok(Some(budget));
         client.admission = Arc::new(Semaphore::new(8));
+        client.test_dispatch_to(dispatch_base);
         client
-            .provider
-            .as_mut()
-            .unwrap()
-            .transport
-            .test_dispatch_base = Some(dispatch_base);
-        client
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_dispatch_to(&mut self, dispatch_base: String) {
+        self.provider.as_mut().unwrap().transport.test_dispatch_base = Some(dispatch_base);
     }
     pub fn new() -> Self {
         Self {
@@ -151,10 +151,16 @@ impl LlmClient {
         deadline: Option<TokioInstant>,
     ) -> Result<ChatResponse> {
         let budget = self.budget.as_ref().map_err(|error| *error)?.clone();
+        if request.operation == LlmOperation::SeriesMatching && budget.is_some() {
+            return Err(BudgetControlError.into());
+        }
         validate_request(&request)?;
         let started = Instant::now();
         let (provider, api_key, provider_name, model_name) =
             self.resolve_provider(&request.model)?;
+        if request.operation == LlmOperation::SeriesMatching && provider_name != "deepseek" {
+            return Err(crate::UnsupportedSeriesProvider.into());
+        }
         let _permit = self.admit()?;
         let labels = RequestLabels::new(
             &provider_name,
@@ -170,6 +176,11 @@ impl LlmClient {
         req.stream = false;
 
         let deadline = deadline.unwrap_or_else(|| TokioInstant::now() + LLM_TOTAL_TIMEOUT);
+        let deadline = if req.operation == LlmOperation::SeriesMatching {
+            deadline.min(TokioInstant::now() + Duration::from_secs(30))
+        } else {
+            deadline
+        };
         let mut provider_started = false;
         let mut pending_attempt = None;
         match tokio::time::timeout_at(deadline, async {
@@ -221,6 +232,14 @@ impl LlmClient {
                                 return Err(error.into());
                             }
                         }
+                        if req.operation == LlmOperation::SeriesMatching
+                            && resp.usage.as_ref().is_some_and(|usage| {
+                                usage.output_tokens > req.operation.max_output_tokens()
+                            })
+                        {
+                            labels.finish("error", started);
+                            return Err(anyhow!("series response exceeded total output budget"));
+                        }
                         labels.finish("success", started);
                         return Ok(resp);
                     }
@@ -238,7 +257,36 @@ impl LlmClient {
                             labels.finish("evidence_error", started);
                             return Err(e);
                         }
-                        if req.json_mode && e.downcast_ref::<JsonModeEmpty>().is_some() {
+                        if req.operation == LlmOperation::SeriesMatching {
+                            let receipt = e
+                                .downcast_ref::<JsonModeEmpty>()
+                                .map(|empty| {
+                                    ("empty_json_mode", &empty.model, empty.usage.as_ref())
+                                })
+                                .or_else(|| {
+                                    e.downcast_ref::<IncompleteSeriesCompletion>().map(
+                                        |incomplete| {
+                                            (
+                                                "truncated",
+                                                &incomplete.model,
+                                                incomplete.usage.as_ref(),
+                                            )
+                                        },
+                                    )
+                                });
+                            if let Some((status, model, usage)) = receipt {
+                                // Known empty/truncated usage is real; neither permits redispatch.
+                                labels.attempt(status, attempt_started.elapsed().as_secs_f64());
+                                labels.response_model(model);
+                                labels.usage(usage);
+                                labels.finish("error", started);
+                                return Err(e);
+                            }
+                        }
+                        if req.operation != LlmOperation::SeriesMatching
+                            && req.json_mode
+                            && e.downcast_ref::<JsonModeEmpty>().is_some()
+                        {
                             let empty = e.downcast_ref::<JsonModeEmpty>().unwrap();
                             labels.attempt(
                                 "empty_json_mode",
@@ -284,7 +332,9 @@ impl LlmClient {
                             return Err(e);
                         }
 
-                        if RetryPolicy::should_retry(status, retry_attempt) {
+                        if req.operation != LlmOperation::SeriesMatching
+                            && RetryPolicy::should_retry(status, retry_attempt)
+                        {
                             labels.retry(metric_status);
                             let delay = RetryPolicy::delay(
                                 status,
@@ -334,6 +384,9 @@ impl LlmClient {
         request: ChatRequest,
         deadline: Option<TokioInstant>,
     ) -> Result<ChatStream> {
+        if request.operation == LlmOperation::SeriesMatching {
+            return Err(crate::UnsupportedSeriesProvider.into());
+        }
         let budget = self.budget.as_ref().map_err(|error| *error)?.clone();
         if request.response_observer.is_some() {
             return Err(anyhow!(

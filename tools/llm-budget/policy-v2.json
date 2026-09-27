@@ -90,6 +90,12 @@
       "min_samples": 0,
       "max_p95_seconds": 60,
       "max_average_billable_tokens": 32000
+    },
+    "series_matching": {
+      "output_token_ceiling": 512,
+      "min_samples": 0,
+      "max_p95_seconds": 30,
+      "max_average_billable_tokens": 10000
     }
   }
 }

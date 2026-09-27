@@ -191,12 +191,19 @@ limit but cannot enforce.
    credential. Accounting uses only a one-way fingerprint of the credential
    actually selected, never the principal or raw key.
    Novel-to-Laya series matching uses the same paired configuration but sends
-   only bounded book and candidate metadata, never scope UUIDs, full novels, or
-   plot text. Suggestions cannot create or change associations; readers must
+   only bounded book/candidate metadata and strictly chapter-1-evidenced
+   location/faction names. Descriptions, excerpts, world-rule prose and later
+   clues are excluded, as are scope UUIDs, full novels and plot text. Suggestions cannot create or change associations; readers must
    confirm or select manually. The 0.8 threshold is an abstention heuristic,
    not calibrated accuracy evidence. Requests use four local slots, 300 ms
    connect/2 s total deadlines, 8 KiB request and 16 KiB response limits, and
-   no HTTP retries.
+   no HTTP retries. Reader-requested DeepSeek second opinions use the same
+   allowlist, a dedicated operation, one resolved configuration and a 30 s
+   total deadline. No ordinary recognition request triggers paid fallback;
+   non-DeepSeek and Diagnostic-bound configurations fail before reserve. A
+   Novel-owned durable claim prevents duplicate dispatch, including after
+   unknown outcomes; HTTP retries, JSON fallback and repair are disabled.
+   Cached responses recheck shelf/Ready access and exclude raw model rationale.
    Open-world prompts label the novel, action, session, and state as untrusted
    data. The model proposes bounded typed changes over IDs in a persisted entry
    snapshot; it cannot select the acting player or commit.

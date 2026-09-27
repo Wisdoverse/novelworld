@@ -16,8 +16,11 @@ use novel_service::{
             world_series::WorldSeries,
         },
         ports::{
-            series_matcher::{SeriesBookMetadata, SeriesMatchCandidate, SeriesMatcherPort},
-            AccountExportPort,
+            series_matcher::{
+                BeginSeriesMatch, SeriesBookMetadata, SeriesMatchCandidate, SeriesMatchMethod,
+                SeriesMatchReason, SeriesMatcherPort, SeriesSuggestion,
+            },
+            AccountExportPort, LlmPort, NovelLlmTask, SeriesCompletionPort,
         },
         repositories::{CanonStoryModelRepository, CreateWorldSeriesResult, WorldSeriesRepository},
     },
@@ -34,6 +37,46 @@ use std::sync::{
 use uuid::Uuid;
 
 struct MatcherSpy(AtomicUsize, AtomicI32);
+
+struct CompletionSpy {
+    calls: Arc<AtomicUsize>,
+    identity: std::sync::Mutex<String>,
+    fails: Arc<std::sync::atomic::AtomicBool>,
+}
+struct PreparedSpy {
+    calls: Arc<AtomicUsize>,
+    identity: String,
+    fails: Arc<std::sync::atomic::AtomicBool>,
+}
+#[async_trait::async_trait]
+impl LlmPort for CompletionSpy {
+    async fn chat_json(&self, _: Uuid, _: NovelLlmTask, _: &str) -> anyhow::Result<String> {
+        anyhow::bail!("unexpected ordinary chat")
+    }
+    async fn prepare_series_match(&self, _: Uuid) -> anyhow::Result<Box<dyn SeriesCompletionPort>> {
+        Ok(Box::new(PreparedSpy {
+            calls: self.calls.clone(),
+            identity: self.identity.lock().unwrap().clone(),
+            fails: self.fails.clone(),
+        }))
+    }
+}
+#[async_trait::async_trait]
+impl SeriesCompletionPort for PreparedSpy {
+    fn identity(&self) -> &str {
+        &self.identity
+    }
+    async fn complete(&self, prompt: &str) -> anyhow::Result<String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        assert!(!prompt.contains("source_novel_id"));
+        assert!(!prompt.contains("series_id"));
+        assert!(!prompt.contains("secret ending"));
+        if self.fails.load(Ordering::SeqCst) {
+            anyhow::bail!("synthetic unknown provider outcome")
+        }
+        Ok(r#"{"choice":0,"same_world":true,"basis":"explicit_series"}"#.into())
+    }
+}
 #[async_trait::async_trait]
 impl SeriesMatcherPort for MatcherSpy {
     async fn suggest(
@@ -132,6 +175,7 @@ pub async fn run(pool: &PgPool, user: Uuid, other_user: Uuid, source: Uuid) {
         novel_repo: Arc::new(NovelPgRepository::new(pool.clone())),
         canon_repo: canon.clone(),
         matcher: Some(matcher.clone()),
+        llm: None,
     };
 
     // Missing source rules do not create a series, member or generation claim.
@@ -246,8 +290,16 @@ pub async fn run(pool: &PgPool, user: Uuid, other_user: Uuid, source: Uuid) {
     ));
     assert_eq!(suggestion.suggestion.unwrap().series_id, Some(series.id));
     assert_eq!(matcher.0.load(Ordering::SeqCst), 1);
+    assert!(handler.suggest(user, target).await.unwrap().cached);
+    assert_eq!(matcher.0.load(Ordering::SeqCst), 1);
     assert_eq!(repository.list(user).await.unwrap().len(), 1);
     for (outcome, expected) in [(-1, "uncertain"), (99, "uncertain"), (-2, "unavailable")] {
+        sqlx::query("UPDATE novels SET genre = $2 WHERE id = $1")
+            .bind(target)
+            .bind(format!("scenario {outcome}"))
+            .execute(pool)
+            .await
+            .unwrap();
         matcher.1.store(outcome, Ordering::SeqCst);
         let advisory = handler.suggest(user, target).await.unwrap();
         assert_eq!(serde_json::to_value(&advisory.status).unwrap(), expected);
@@ -263,6 +315,7 @@ pub async fn run(pool: &PgPool, user: Uuid, other_user: Uuid, source: Uuid) {
         novel_repo: handler.novel_repo.clone(),
         canon_repo: canon.clone(),
         matcher: None,
+        llm: None,
     };
     let advisory = unconfigured.suggest(user, target).await.unwrap();
     assert!(matches!(
@@ -288,6 +341,210 @@ pub async fn run(pool: &PgPool, user: Uuid, other_user: Uuid, source: Uuid) {
         repository.find_for_novel(user, source).await.unwrap(),
         Some(series.clone())
     );
+
+    // User-triggered paid-path semantics without making any provider request.
+    let completion = Arc::new(CompletionSpy {
+        calls: Arc::new(AtomicUsize::new(0)),
+        identity: std::sync::Mutex::new("deepseek/test-a".into()),
+        fails: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
+    let deepseek_handler = WorldSeriesHandler {
+        series_repo: repository.clone(),
+        novel_repo: handler.novel_repo.clone(),
+        canon_repo: canon.clone(),
+        matcher: Some(matcher.clone()),
+        llm: Some(completion.clone()),
+    };
+    let decisions = || {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM series_match_decisions WHERE user_id = $1 AND novel_id = $2",
+        )
+        .bind(user)
+        .bind(target)
+        .fetch_one(pool)
+    };
+    let before_query = decisions().await.unwrap();
+    assert!(matches!(
+        deepseek_handler
+            .check_deepseek(user, target)
+            .await
+            .unwrap()
+            .reason,
+        SeriesMatchReason::UnknownOutcome
+    ));
+    assert_eq!(decisions().await.unwrap(), before_query);
+    assert_eq!(completion.calls.load(Ordering::SeqCst), 0);
+    let (first, second) = tokio::join!(
+        deepseek_handler.suggest_deepseek(user, target),
+        deepseek_handler.suggest_deepseek(user, target)
+    );
+    let results = [first.unwrap(), second.unwrap()];
+    assert!(results
+        .iter()
+        .any(|result| matches!(result.status, SeriesSuggestionStatus::Suggested)));
+    assert_eq!(completion.calls.load(Ordering::SeqCst), 1);
+    assert!(
+        deepseek_handler
+            .check_deepseek(user, target)
+            .await
+            .unwrap()
+            .cached
+    );
+    assert!(
+        deepseek_handler
+            .suggest_deepseek(user, target)
+            .await
+            .unwrap()
+            .cached
+    );
+    assert_eq!(completion.calls.load(Ordering::SeqCst), 1);
+    *completion.identity.lock().unwrap() = "deepseek/test-b".into();
+    let before_query = decisions().await.unwrap();
+    assert!(matches!(
+        deepseek_handler
+            .check_deepseek(user, target)
+            .await
+            .unwrap()
+            .reason,
+        SeriesMatchReason::UnknownOutcome
+    ));
+    assert_eq!(decisions().await.unwrap(), before_query);
+    assert_eq!(completion.calls.load(Ordering::SeqCst), 1);
+    assert!(
+        !deepseek_handler
+            .suggest_deepseek(user, target)
+            .await
+            .unwrap()
+            .cached
+    );
+    assert_eq!(completion.calls.load(Ordering::SeqCst), 2);
+    sqlx::query("UPDATE novels SET genre = 'query-only changed evidence' WHERE id = $1")
+        .bind(target)
+        .execute(pool)
+        .await
+        .unwrap();
+    let before_query = decisions().await.unwrap();
+    assert!(matches!(
+        deepseek_handler
+            .check_deepseek(user, target)
+            .await
+            .unwrap()
+            .reason,
+        SeriesMatchReason::UnknownOutcome
+    ));
+    assert_eq!(decisions().await.unwrap(), before_query);
+    assert_eq!(completion.calls.load(Ordering::SeqCst), 2);
+    completion.fails.store(true, Ordering::SeqCst);
+    *completion.identity.lock().unwrap() = "deepseek/test-unknown".into();
+    assert!(matches!(
+        deepseek_handler
+            .suggest_deepseek(user, target)
+            .await
+            .unwrap()
+            .reason,
+        SeriesMatchReason::UnknownOutcome
+    ));
+    assert!(
+        deepseek_handler
+            .suggest_deepseek(user, target)
+            .await
+            .unwrap()
+            .cached
+    );
+    assert_eq!(completion.calls.load(Ordering::SeqCst), 3);
+    assert!(matches!(
+        unconfigured
+            .suggest_deepseek(user, target)
+            .await
+            .unwrap()
+            .status,
+        SeriesSuggestionStatus::Unconfigured
+    ));
+    assert!(deepseek_handler
+        .suggest_deepseek(other_user, target)
+        .await
+        .is_err());
+    assert_eq!(completion.calls.load(Ordering::SeqCst), 3);
+    assert!(repository
+        .find_for_novel(user, target)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(repository.list(user).await.unwrap().len(), 1);
+
+    let claim_key = "a".repeat(64);
+    let (first, second) = tokio::join!(
+        repository.begin_match(user, target, SeriesMatchMethod::Deepseek, &claim_key, false),
+        repository.begin_match(user, target, SeriesMatchMethod::Deepseek, &claim_key, false)
+    );
+    let claims = [first.unwrap(), second.unwrap()];
+    let token = claims
+        .iter()
+        .find_map(|claim| match claim {
+            BeginSeriesMatch::Acquired { token } => Some(*token),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        claims
+            .iter()
+            .filter(|claim| matches!(claim, BeginSeriesMatch::InProgress))
+            .count(),
+        1
+    );
+    let outcome = SeriesSuggestion {
+        status: SeriesSuggestionStatus::Unavailable,
+        suggestion: None,
+        method: SeriesMatchMethod::Deepseek,
+        reason: SeriesMatchReason::UnknownOutcome,
+        cached: false,
+    };
+    assert!(!repository
+        .complete_match(
+            user,
+            target,
+            SeriesMatchMethod::Deepseek,
+            &claim_key,
+            Uuid::new_v4(),
+            &outcome
+        )
+        .await
+        .unwrap());
+    sqlx::query("UPDATE series_match_decisions SET claimed_at = NOW() - INTERVAL '61 seconds' WHERE user_id = $1 AND novel_id = $2 AND evidence_key = $3")
+        .bind(user).bind(target).bind(&claim_key).execute(pool).await.unwrap();
+    assert!(matches!(
+        repository
+            .begin_match(user, target, SeriesMatchMethod::Deepseek, &claim_key, false)
+            .await
+            .unwrap(),
+        BeginSeriesMatch::UnknownOutcome
+    ));
+    // A late response may finish only the original token; no retry acquires it.
+    assert!(repository
+        .complete_match(
+            user,
+            target,
+            SeriesMatchMethod::Deepseek,
+            &claim_key,
+            token,
+            &outcome
+        )
+        .await
+        .unwrap());
+    assert!(matches!(
+        repository
+            .begin_match(user, target, SeriesMatchMethod::Deepseek, &claim_key, false)
+            .await
+            .unwrap(),
+        BeginSeriesMatch::Cached(_)
+    ));
+    assert!(matches!(
+        repository
+            .begin_match(user, target, SeriesMatchMethod::Laya, &claim_key, false)
+            .await
+            .unwrap(),
+        BeginSeriesMatch::Acquired { .. }
+    ));
 
     // Forged content cannot create a definition or partial source association.
     handler.associate(user, source, None).await.unwrap();
@@ -336,6 +593,18 @@ pub async fn run(pool: &PgPool, user: Uuid, other_user: Uuid, source: Uuid) {
         .try_collect::<Vec<_>>()
         .await
         .unwrap();
+    assert!(exported
+        .iter()
+        .any(|row| row.kind == "series_match_decision"));
+    assert!(!serde_json::to_string(
+        &exported
+            .iter()
+            .filter(|row| row.kind == "series_match_decision")
+            .map(|row| &row.data)
+            .collect::<Vec<_>>()
+    )
+    .unwrap()
+    .contains("synthetic unknown provider outcome"));
     assert_eq!(
         exported
             .iter()

@@ -148,6 +148,14 @@ WITH shelf_novels AS (
            jsonb_build_object('user_id', m.user_id, 'novel_id', m.novel_id, 'series_id', m.series_id)
     FROM user_novel_world_series m
     WHERE m.user_id = $1
+
+    UNION ALL
+    SELECT 90, d.novel_id::text, 0::bigint, d.evidence_key, 'series_match_decision',
+           jsonb_build_object('novel_id', d.novel_id, 'method', d.method,
+               'evidence_key', d.evidence_key, 'claimed_at', d.claimed_at,
+               'completed_at', d.completed_at, 'result', d.result)
+    FROM series_match_decisions d
+    WHERE d.user_id = $1
 )
 SELECT kind, data
 FROM export_records

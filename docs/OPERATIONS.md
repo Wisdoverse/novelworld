@@ -264,3 +264,29 @@ not a general repair for an arbitrary partial historical migration. The
 `full_migration_replay_preserves_incomplete_progress_and_terminal_imports` integration regression
 covers repeated full migration replay and detached-shelf preservation. Issue
 #424 tracks the final CI and live deployment evidence.
+
+### Series recognition abstains
+
+A low-confidence Laya result is a valid abstention, not an association failure.
+Check the configured endpoint/version and the owned Ready candidate set.
+Author omissions are not proof of a shared author. Recognition sends only the
+reviewed metadata and bounded chapter-1 location/faction names; it does not send
+raw excerpts, summaries or later plot. The optional pinned private endpoint
+rejects state overflow instead of silently truncating it. A runtime upgrade
+alone does not qualify matching accuracy.
+
+The dialog offers manual association and an explicit DeepSeek second opinion.
+Ordinary recognition never triggers a paid fallback. The second opinion requires
+an actual DeepSeek configuration and no Diagnostic binding, has a 30 s total
+deadline and one physical attempt, with at most 512 total output tokens including
+reasoning when enabled, and caches only a validated candidate or
+fixed reason. Pending/unknown claims are not reclaimed after restart; do not
+delete them to force a retry. Result-only queries (`check_only=true`) never
+create a claim or dispatch, even when inputs have changed. Laya endpoint changes
+change cache identity; for an in-place model upgrade, use a new endpoint identity
+to avoid retaining prior-version suggestions. Repeated requests reuse state while rechecking
+current shelf permissions and Ready sources. Apply 0032 before starting the new
+Novel service. Shelf/account deletion and safe export include this owner state.
+See [ADR 0011](./adr/0011-confirmed-series-worlds.md) and
+[matching delivery #438](https://github.com/Wisdoverse/novelworld/issues/438) for
+source, test, CI, deployment and semantic-quality evidence limits.

@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
+use crate::domain::ports::series_matcher::{BeginSeriesMatch, SeriesMatchMethod, SeriesSuggestion};
 use crate::domain::{
     entities::world_series::WorldSeries,
     repositories::{CreateWorldSeriesResult, WorldSeriesRepository},
@@ -45,6 +46,64 @@ impl SeriesRow {
 
 #[async_trait]
 impl WorldSeriesRepository for PgWorldSeriesRepository {
+    async fn begin_match(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        method: SeriesMatchMethod,
+        evidence_key: &str,
+        check_only: bool,
+    ) -> Result<BeginSeriesMatch> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            if !check_only {
+                let token = Uuid::new_v4();
+                let inserted = sqlx::query(
+                r#"INSERT INTO series_match_decisions (user_id, novel_id, method, evidence_key, claim_token)
+                   SELECT $1, $2, $3, $4, $5 FROM user_novels AS shelf JOIN novels AS n ON n.id = shelf.novel_id
+                   WHERE shelf.user_id = $1 AND shelf.novel_id = $2
+                     AND n.status = 'ready'::novel_status AND n.total_chapters > 0
+                   ON CONFLICT (user_id, novel_id, method, evidence_key) DO NOTHING"#)
+                .bind(user_id).bind(novel_id).bind(method.as_str()).bind(evidence_key).bind(token)
+                .execute(&self.pool).await?;
+                if inserted.rows_affected() == 1 { return Ok(BeginSeriesMatch::Acquired { token }); }
+            }
+            let row = sqlx::query_as::<_, (Option<serde_json::Value>, bool)>(
+                r#"SELECT d.result, d.claimed_at < NOW() - INTERVAL '60 seconds'
+                   FROM series_match_decisions AS d
+                   JOIN user_novels AS shelf ON shelf.user_id = d.user_id AND shelf.novel_id = d.novel_id
+                   JOIN novels AS n ON n.id = shelf.novel_id
+                   WHERE d.user_id = $1 AND d.novel_id = $2 AND d.method = $3 AND d.evidence_key = $4
+                     AND n.status = 'ready'::novel_status AND n.total_chapters > 0"#)
+                .bind(user_id).bind(novel_id).bind(method.as_str()).bind(evidence_key).fetch_optional(&self.pool).await?;
+            match row {
+                Some((Some(result), _)) => Ok(BeginSeriesMatch::Cached(serde_json::from_value(result)?)),
+                Some((None, false)) => Ok(BeginSeriesMatch::InProgress),
+                Some((None, true)) | None => Ok(BeginSeriesMatch::UnknownOutcome),
+            }
+        }).await.context("series match claim deadline exceeded")?
+    }
+
+    async fn complete_match(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        method: SeriesMatchMethod,
+        evidence_key: &str,
+        token: Uuid,
+        result: &SeriesSuggestion,
+    ) -> Result<bool> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            Ok(sqlx::query(
+                r#"UPDATE series_match_decisions AS d SET result = $6, completed_at = NOW()
+                   WHERE user_id = $1 AND novel_id = $2 AND method = $3 AND evidence_key = $4
+                     AND claim_token = $5 AND result IS NULL
+                     AND EXISTS (SELECT 1 FROM user_novels AS shelf JOIN novels AS n ON n.id = shelf.novel_id
+                       WHERE shelf.user_id = d.user_id AND shelf.novel_id = d.novel_id
+                         AND n.status = 'ready'::novel_status AND n.total_chapters > 0)"#)
+                .bind(user_id).bind(novel_id).bind(method.as_str()).bind(evidence_key).bind(token)
+                .bind(serde_json::to_value(result)?).execute(&self.pool).await?.rows_affected() == 1)
+        }).await.context("series match completion deadline exceeded")?
+    }
     async fn create(&self, user_id: Uuid, series: &WorldSeries) -> Result<CreateWorldSeriesResult> {
         series.validate()?;
         // Lock the authorized source shelf, freeze exact rules and associate

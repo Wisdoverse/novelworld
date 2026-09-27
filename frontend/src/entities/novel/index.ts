@@ -26,6 +26,7 @@ export {
   useCreateWorldSeries,
   useNovelWorldSeries,
   useSuggestNovelWorldSeries,
+  useSuggestNovelWorldSeriesDeepSeek,
   useWorldSeriesList,
 } from './api';
 export type {

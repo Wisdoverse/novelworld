@@ -38,6 +38,7 @@ uploads_data/
 # Remember (session state)
 .remember/
 .release/
+.local/
 
 # Claude
 .claude/

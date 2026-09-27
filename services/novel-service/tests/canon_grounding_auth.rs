@@ -120,6 +120,7 @@ fn auth_test_state() -> AppState {
             novel_repo: novel_repo.clone(),
             canon_repo: canon_repo.clone(),
             matcher: None,
+            llm: None,
         }),
         handler,
         novel_repo: novel_repo.clone(),
@@ -188,6 +189,11 @@ async fn series_routes_reject_missing_principal_before_database_or_provider_work
     let create = serde_json::json!({"name":"同一世界", "background":"用户确认的共同背景", "source_novel_id":novel});
     for (method, uri, body) in [
         ("GET", "/novels/world-series".into(), None),
+        (
+            "POST",
+            format!("/novels/{novel}/world-series/suggestion/deepseek"),
+            None,
+        ),
         (
             "POST",
             "/novels/world-series".into(),

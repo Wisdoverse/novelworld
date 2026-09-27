@@ -94,7 +94,11 @@ template; Narrative resolves it through HTTP and freezes the confirmed setting
 with the target book's independent canon. The shared schema now has 21
 declared cross-owner cascading FKs; the owner-user cascade is single-node schema
 debt, not database-role isolation. Migration 0031 is additive and does not
-change the existing release barriers.
+change the existing release barriers. Migration 0032 adds Novel-owned,
+shelf-scoped matching cache/claims. Optional Laya inference remains a bounded
+HTTP adapter; explicit DeepSeek second opinions use a dedicated, non-Diagnostic
+operation with a durable single-dispatch claim and no retry or repair. Both
+paths provide suggestions only.
 
 User Service validates fixed provider/region/plan endpoints and owns encrypted
 Keys; only an unchanged preset and endpoint may reuse a stored Key. Its internal
