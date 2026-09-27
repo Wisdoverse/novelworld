@@ -1307,6 +1307,14 @@ class DiagnosticJourneyTest(unittest.TestCase):
                         "model_sha": profile["embedding_model_revision"],
                     })
                 if command[-1].endswith("/v1/embeddings"):
+                    # Docker forwards stdin only when exec is interactive.
+                    options = command[2:command.index(journey.prefix + "-nginx")]
+                    container_stdin = stdin if "-i" in options else b""
+                    self.assertEqual(CONTROL.strict_json(container_stdin), {
+                        "input": "NovelWorld local embedding probe",
+                        "model": profile["embedding_model"],
+                    })
+                    self.assertEqual(command[command.index("--data-binary") + 1], "@-")
                     return CONTROL.canonical({
                         "model": profile["embedding_model"],
                         "usage": {"prompt_tokens": 6, "total_tokens": 6},

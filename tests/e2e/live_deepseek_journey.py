@@ -4260,7 +4260,7 @@ class Journey:
                 raise QualificationFailure("local_embedding_runtime_identity_invalid")
 
             def probe(path: str, *, payload: bytes = b"") -> bytes:
-                argv = ["docker", "exec", nginx_name, "/usr/bin/curl", "--fail",
+                argv = ["docker", "exec", "-i", nginx_name, "/usr/bin/curl", "--fail",
                         "--silent", "--show-error", "--max-time", "5"]
                 if payload:
                     argv.extend(["--header", "Content-Type: application/json",
