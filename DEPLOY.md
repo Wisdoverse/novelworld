@@ -401,6 +401,33 @@ Laya 失效时仍可手动选择系列或行动，高级检定回退到模板 DC
 匹配的 Novel、Narrative 和前端版本；0031 经正常受管停机迁移执行，且不新增
 发布屏障。绑定状态产生后，旧版本回滚不受支持。
 
+**Q: 如何独立升级 NovelWorld 的 Laya？**
+
+A: 可叠加 `docker-compose.laya.yml`，使用包含 `laya==0.3.20` 和已审查的
+multilingual checkpoint 的不可变镜像。在根 `.env` 设置 `LAYA_IMAGE` 为镜像
+digest（本机测试也可用精确 image ID）、`LAYA_MODEL_PATH` 为镜像内固定 revision
+的本地 checkpoint 路径、`LAYA_API_URL=http://laya:8000`，保持既有密钥。先验证
+镜像包版本、checkpoint 内容和权限；不要使用浮动 `latest`。该 endpoint 不下载
+模型，不发布宿主机端口，只加载 multilingual，限制 CPU/内存/线程，并对会截断
+state 的请求返回 422；问题头部和选项仍使用上游 token 预算。升级不会自动提升
+识别准确率或改变 0.8 弃权阈值。
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.laya.yml --profile laya up -d laya
+```
+
+验证健康、鉴权以及系列/行动/D20 协议兼容后，按正常部署流程更新 Novel 与
+Narrative 的 URL；保留原共享服务和其他消费者。回滚只恢复这两个消费者原来的
+URL 并重建，随后可停止本项目独立 Laya。不要删除共享模型缓存或其他项目容器。
+
+系列识别默认只调用本地 Laya。用户可主动点击 DeepSeek 补判，使用设置页当前
+配置的 DeepSeek API 与现有计费路径；其他 provider 或 Diagnostic 绑定会被拒绝。
+相同证据/候选/策略/模型复用 PostgreSQL 结果。每条 claim 最多一次实际请求，输出上限为 512 tokens（启用思考时包含思考 tokens），
+不做 HTTP 重试、JSON fallback 或修复重发；未知结果也不自动重试。“查询结果”使用只读的 `check_only=true` 模式；证据或
+模型配置改变时，也不会把查询变成新的付费请求。0032 缓存迁移
+必须先于新版 Novel 启动，缓存不会改已有系列或 D20 绑定。本功能测试和部署不
+构成执行新的付费 Diagnostic 的授权。
+
 **Q: pgvector 扩展安装失败？**
 
 A: pgvector 是当前 schema 的必需扩展。不要修改 `init.sql` 绕过它；修复镜像或扩展

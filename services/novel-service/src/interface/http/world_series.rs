@@ -1,5 +1,13 @@
 use super::*;
 use crate::application::world_series::{CreateWorldSeries, WorldSeriesApplicationError};
+use axum::extract::Query;
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SuggestionQuery {
+    #[serde(default)]
+    check_only: bool,
+}
 
 pub(super) fn private(response: Response) -> Response {
     let mut response = response;
@@ -105,9 +113,53 @@ pub(super) async fn suggestion(
     }
 }
 
+pub(super) async fn suggestion_deepseek(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(novel_id): Path<Uuid>,
+    Query(query): Query<SuggestionQuery>,
+) -> Response {
+    let Some(user_id) = extract_user_id(&headers) else {
+        return private(api_error(StatusCode::UNAUTHORIZED, "Missing user ID"));
+    };
+    let result = if query.check_only {
+        state.series_handler.check_deepseek(user_id, novel_id).await
+    } else {
+        state
+            .series_handler
+            .suggest_deepseek(user_id, novel_id)
+            .await
+    };
+    match result {
+        Ok(suggestion) => private(Json(suggestion).into_response()),
+        Err(err) => error(err),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Selection;
+
+    #[test]
+    fn query_only_defaults_off_and_rejects_unknown_options() {
+        use super::{Query, SuggestionQuery};
+        use axum::http::Uri;
+        assert!(
+            !Query::<SuggestionQuery>::try_from_uri(&Uri::from_static("/path"))
+                .unwrap()
+                .0
+                .check_only
+        );
+        assert!(
+            Query::<SuggestionQuery>::try_from_uri(&Uri::from_static("/path?check_only=true"))
+                .unwrap()
+                .0
+                .check_only
+        );
+        assert!(
+            Query::<SuggestionQuery>::try_from_uri(&Uri::from_static("/path?retry=true")).is_err()
+        );
+    }
 
     #[test]
     fn clearing_a_series_requires_an_explicit_null_selection() {

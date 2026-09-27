@@ -15,6 +15,7 @@ import {
   shouldPollNovelList,
   useCharacters,
   useDeleteNovel,
+  useSuggestNovelWorldSeriesDeepSeek,
   useWorldSeriesList,
   validateNovelBatchFiles,
   validateNovelFile,
@@ -302,6 +303,56 @@ describe('principal-scoped world-series queries', () => {
 
     expect(queryClient.getQueryData(novelKeys.worldSeriesList('reader-a'))).toEqual(first);
     expect(queryClient.getQueryData(novelKeys.worldSeriesList('reader-b'))).toEqual(second);
+    vi.restoreAllMocks();
+  });
+
+  it('calls the explicit DeepSeek supplement route once without retrying', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { mutations: { retry: true, retryDelay: 0 } },
+    });
+    const wrapper = ({ children }: PropsWithChildren) => React.createElement(
+      QueryClientProvider,
+      { client: queryClient },
+      children,
+    );
+    const post = vi.spyOn(apiClient, 'post').mockRejectedValue(new Error('temporary failure'));
+    const { result } = renderHook(() => useSuggestNovelWorldSeriesDeepSeek(), { wrapper });
+
+    await act(async () => {
+      await expect(result.current.mutateAsync({ novelId: 'novel-42' })).rejects.toThrow('temporary failure');
+    });
+
+    expect(post).toHaveBeenCalledOnce();
+    expect(post).toHaveBeenCalledWith(
+      '/novels/novel-42/world-series/suggestion/deepseek',
+      undefined,
+      { timeout: 60_000 },
+    );
+    vi.restoreAllMocks();
+  });
+
+  it('uses read-only check mode for an explicit result query', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { mutations: { retry: false } },
+    });
+    const wrapper = ({ children }: PropsWithChildren) => React.createElement(
+      QueryClientProvider,
+      { client: queryClient },
+      children,
+    );
+    const response = { status: 'unknown_outcome', data: undefined };
+    const post = vi.spyOn(apiClient, 'post').mockResolvedValue({ data: response } as never);
+    const { result } = renderHook(() => useSuggestNovelWorldSeriesDeepSeek(), { wrapper });
+
+    await act(async () => {
+      await result.current.mutateAsync({ novelId: 'novel-42', checkOnly: true });
+    });
+
+    expect(post).toHaveBeenCalledWith(
+      '/novels/novel-42/world-series/suggestion/deepseek',
+      undefined,
+      { timeout: 60_000, params: { check_only: true } },
+    );
     vi.restoreAllMocks();
   });
 });

@@ -5,3 +5,4 @@ pub mod character_extractor;
 pub mod game_rule_generator;
 pub mod node_detector;
 pub mod novel_parser;
+pub mod series_matching;

@@ -344,9 +344,13 @@ impl ReadinessProbe for PgReadinessProbe {
                         FROM public.user_world_series LIMIT 1
                     ), memberships AS MATERIALIZED (
                         SELECT user_id, novel_id, series_id FROM public.user_novel_world_series LIMIT 1
+                    ), decisions AS MATERIALIZED (
+                        SELECT user_id, novel_id, method, evidence_key, claim_token, claimed_at, completed_at, result
+                        FROM public.series_match_decisions LIMIT 1
                     )
                     SELECT (SELECT pg_catalog.count(*) >= 0 FROM definitions)
-                       AND (SELECT pg_catalog.count(*) >= 0 FROM memberships)"#
+                       AND (SELECT pg_catalog.count(*) >= 0 FROM memberships)
+                       AND (SELECT pg_catalog.count(*) >= 0 FROM decisions)"#
             ).fetch_one(&self.pool)).await, Ok(Ok(true)))
         };
         let (legacy, series) = tokio::join!(legacy, series);

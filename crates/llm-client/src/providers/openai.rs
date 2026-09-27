@@ -618,6 +618,17 @@ impl OpenAIProvider {
                 }
                 .into());
             }
+            Err(error)
+                if request.operation == LlmOperation::SeriesMatching
+                    && error.is::<TruncatedCompletion>() =>
+            {
+                return Err(IncompleteSeriesCompletion {
+                    model: resp.model,
+                    usage,
+                    source: error,
+                }
+                .into());
+            }
             Err(error) => return Err(invalid_completion(error)),
         };
 

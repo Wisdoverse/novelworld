@@ -14,6 +14,7 @@ fn diagnostic_profile_operations_match_the_transport_contract() {
     assert_eq!(profile.output_micro_cny, 12);
     let expected = llm_client::LlmOperation::ALL
         .into_iter()
+        .filter(|operation| operation.diagnostic_supported())
         .map(|operation| (operation.to_str().to_owned(), operation.max_output_tokens()))
         .collect::<std::collections::BTreeMap<_, _>>();
     assert_eq!(profile.operations, expected);

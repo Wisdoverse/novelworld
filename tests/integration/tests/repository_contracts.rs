@@ -8590,6 +8590,7 @@ async fn private_series_rules_preserve_provenance_budget_and_erasure() {
     for sql in [
         "SELECT COUNT(*) FROM user_world_series WHERE user_id = $1",
         "SELECT COUNT(*) FROM user_novel_world_series WHERE user_id = $1",
+        "SELECT COUNT(*) FROM series_match_decisions WHERE user_id = $1",
     ] {
         let count: i64 = sqlx::query_scalar(sql)
             .bind(user)

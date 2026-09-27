@@ -1298,9 +1298,15 @@ generated mappings are semantically correct.
 ### 7.8 Reader-confirmed series worlds
 
 Series definitions and shelf associations MUST be private to one reader and
-owned by Novel Service. Optional Laya matching is metadata-only guidance; the
+owned by Novel Service. Optional matching is bounded, nonspoiler guidance; the
 reader MUST confirm every association, and manual selection MUST remain
-available. Creation MUST capture an exact ready `novel-game-rules-v2` source
+available. Evidence MAY include existing title/author/genre and at most six
+deduplicated location or faction names, each at most 40 characters, only when
+all valid source citations refer to chapter 1 and a citation contains that name.
+Descriptions, excerpts, world-rule prose, later-chapter clues and plot MUST NOT
+be sent or returned as matching evidence. Missing authors MUST NOT count as an
+author match. Confirmed memberships organize candidates; title families are
+only candidate organization, never proof of a shared world. Creation MUST capture an exact ready `novel-game-rules-v2` source
 template, including its real source novel, model version, and chapter
 provenance, as an immutable safe snapshot; it MUST NOT generate rules or claim
 provider work. Creation and association of the source book MUST be atomic.
@@ -1321,7 +1327,26 @@ Laya matching reuses `LAYA_API_URL` and `LAYA_API_KEY`, with a 300 ms connect
 and 2 s total deadline, no HTTP retries, 8 KiB request and 16 KiB response
 limits, four admission slots, at most eight candidates, and a 0.8 abstention
 threshold that is not calibrated accuracy evidence. It MUST NOT receive scope
-UUIDs, full novels, or plot text. Migration 0031 is additive and follows the
+UUIDs, full novels, or plot text. Suggestions MUST be cached as reader-owned
+PostgreSQL state, bound to the current bounded evidence, candidate set, method
+and policy. Cache hits MUST recheck current shelf access and Ready sources.
+An explicit DeepSeek second opinion MAY use the existing user/platform provider
+configuration and accounting under the dedicated `series_matching` operation.
+It MUST refuse non-DeepSeek providers and Diagnostic bindings before dispatch,
+bind the actual resolved provider/model to its cache identity, and make at most
+one physical provider attempt within a 30 s total deadline and a 512-token
+total output ceiling, including reasoning tokens when thinking is enabled.
+Insufficient output or invalid JSON MUST abstain without increasing that ceiling.
+HTTP retries, JSON
+fallback and application repair dispatches MUST be disabled. A durable unique
+claim MUST precede dispatch; unknown, failed or interrupted outcomes MUST NOT
+be automatically redispatched. A result-only query MUST NOT create a claim or
+dispatch, including when evidence or configuration has changed. No ordinary
+recognition request may implicitly
+invoke paid fallback. Results contain only a validated candidate and fixed
+status/reason codes, never raw model rationale. Matching cache rows follow
+shelf removal and account erasure, and their safe results are exportable.
+Migration 0031 is additive and follows the
 normal managed migration path; it does not add to the existing 0021/0024/0025/
 0030 release barriers. Novel, Narrative, and frontend versions must be upgraded
 together. Older peers reject the new prompt version; once series-bound state

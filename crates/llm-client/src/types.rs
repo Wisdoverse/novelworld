@@ -72,6 +72,23 @@ impl std::fmt::Display for JsonModeEmpty {
 
 impl std::error::Error for JsonModeEmpty {}
 
+#[derive(Debug)]
+pub(crate) struct IncompleteSeriesCompletion {
+    pub(crate) model: String,
+    pub(crate) usage: Option<Usage>,
+    pub(crate) source: anyhow::Error,
+}
+impl std::fmt::Display for IncompleteSeriesCompletion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("series completion is incomplete")
+    }
+}
+impl std::error::Error for IncompleteSeriesCompletion {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
@@ -176,6 +193,7 @@ pub enum LlmOperation {
     CharacterExtraction,
     CanonExtraction,
     GameRuleGeneration,
+    SeriesMatching,
     NarrativeNodeDetection,
     BranchGeneration,
     NarrativeTransition,
@@ -186,13 +204,14 @@ pub enum LlmOperation {
 }
 
 impl LlmOperation {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::SetupConnection,
         Self::Translation,
         Self::ChapterBoundaryDetection,
         Self::CharacterExtraction,
         Self::CanonExtraction,
         Self::GameRuleGeneration,
+        Self::SeriesMatching,
         Self::NarrativeNodeDetection,
         Self::BranchGeneration,
         Self::NarrativeTransition,
@@ -210,6 +229,7 @@ impl LlmOperation {
             Self::CharacterExtraction => "character_extraction",
             Self::CanonExtraction => "canon_extraction",
             Self::GameRuleGeneration => "game_rule_generation",
+            Self::SeriesMatching => "series_matching",
             Self::NarrativeNodeDetection => "narrative_node_detection",
             Self::BranchGeneration => "branch_generation",
             Self::NarrativeTransition => "narrative_transition",
@@ -225,6 +245,7 @@ impl LlmOperation {
             Self::SetupConnection => 8,
             Self::Translation => 8_192,
             Self::MemorySummary => 256,
+            Self::SeriesMatching => 512,
             Self::OfflineEvaluation => 800,
             Self::ChapterBoundaryDetection => 2_048,
             Self::CharacterChat => 5_120,
@@ -236,12 +257,17 @@ impl LlmOperation {
             Self::PlayerChapter => 8_192,
         }
     }
+
+    /// Existing immutable Diagnostics predate this user-triggered operation.
+    pub const fn diagnostic_supported(self) -> bool {
+        !matches!(self, Self::SeriesMatching)
+    }
 }
 
 impl ChatRequest {
     pub(crate) fn effective_max_output_tokens(&self) -> Option<u32> {
         self.max_tokens.map(|limit| {
-            if self.thinking == Some(true) {
+            if self.thinking == Some(true) && self.operation != LlmOperation::SeriesMatching {
                 limit.saturating_add(4_096).min(8_192)
             } else {
                 limit
@@ -327,5 +353,12 @@ mod tests {
             .collect::<BTreeMap<_, _>>();
 
         assert_eq!(runtime, budget);
+        assert_eq!(
+            super::ChatRequest::new(LlmOperation::SeriesMatching, "test")
+                .max_tokens(512)
+                .thinking(true)
+                .effective_max_output_tokens(),
+            Some(512)
+        );
     }
 }

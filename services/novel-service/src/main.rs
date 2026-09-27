@@ -165,6 +165,7 @@ async fn run_body() -> Result<()> {
             novel_repo: novel_repo.clone(),
             canon_repo: canon_repo.clone(),
             matcher,
+            llm: Some(llm_adapter.clone()),
         });
         let account_export: Arc<dyn AccountExportPort> =
             Arc::new(PgAccountExport::new(pool.clone()));
