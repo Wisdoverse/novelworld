@@ -272,8 +272,9 @@ the v2 bytes. Generation remains DeepSeek-only. Before Started, the runner cold
 adopts the registered base with no provider setting, starts the digest-pinned
 CPU TEI service without a host port, and uses the release's pinned Nginx curl to
 verify the exact Hub revision, served model, usage, and 1,024 finite provider
-values. Agent zero-pads this exact local model to the existing 1,536-dimension
-store; external provider behavior is unchanged. A
+values. The JSON probe uses `docker exec -i` so curl's `--data-binary @-`
+reads the request body from stdin. Agent zero-pads this exact local model to the
+existing 1,536-dimension store; external provider behavior is unchanged. A
 pre-Started failure writes bounded private evidence containing only its stable
 error code, stage, and optional release-log digest metadata; it never copies log
 content. The runner then removes only resources carrying the registration-bound
