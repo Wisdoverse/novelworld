@@ -2,7 +2,8 @@ use crate::domain::entities::canon_story_model::CanonStoryModel;
 use std::collections::BTreeSet;
 
 pub const SERIES_MATCH_PROMPT_VERSION: &str = "series-match-v3";
-pub const MAX_PRIVATE_NAMES_PER_BOOK: usize = 128;
+// ponytail: 256-name ceiling; use a bounded overlap scan if real shelves exceed it.
+pub const MAX_PRIVATE_NAMES_PER_BOOK: usize = 256;
 
 pub fn chapter_one_entities(model: &CanonStoryModel) -> Vec<String> {
     attested_names(model, true, 6).expect("chapter-one names are capped")
@@ -226,6 +227,9 @@ mod tests {
                 description: "source".into(),
                 evidence: evidence(&[9], &name),
             });
+            if index == 193 {
+                assert_eq!(whole_book_entities(&model).unwrap().len(), 197);
+            }
         }
         assert!(whole_book_entities(&model).is_none());
     }
