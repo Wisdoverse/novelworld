@@ -89,11 +89,16 @@ shutdown. The rest of [ADR 0001](./adr/0001-source-bound-advanced-game-rules.md)
 remains in force.
 
 ADR 0011 adds Novel-owned `user_world_series` definitions and
-`user_novel_world_series` shelf links. Novel records the confirmed background
-and source book at creation, then freezes an exact ready v2 basic template
-immediately if available or once after explicit source-book generation.
-Narrative resolves the setting and any ready rules through HTTP, keeping the
-target book's independent canon. The shared schema now has 21
+`user_novel_world_series` shelf links. Novel records the source book and
+association at creation; a shared background may remain pending until a
+separate explicit reader confirmation. Pending backgrounds are not returned as
+Narrative settings and cannot enable shared D20 rules. Confirmation is
+owner-scoped and write-once. Creation may freeze an already-ready v2 basic
+template, but that snapshot is unusable for shared D20 rules until background
+confirmation; a later explicit source-book generation may bind one ready
+template if none exists. Narrative resolves only confirmed settings and usable
+rules through HTTP, keeping the target book's independent canon. Existing
+frozen sessions remain unchanged. The shared schema now has 21
 declared cross-owner cascading FKs; the owner-user cascade is single-node schema
 debt, not database-role isolation. Migration 0031 is additive and does not
 change the existing release barriers. Migration 0032 adds Novel-owned,
@@ -103,6 +108,8 @@ operation with a durable single-dispatch claim and no retry or repair. Both
 paths provide suggestions only.
 Migration 0033 permits a pending rules snapshot while preserving the immutable
 source identity and allowing only a one-time bind of a ready source template.
+Migration 0034 permits a null pending background and allows only a one-time
+transition to a valid confirmed background.
 
 User Service validates fixed provider/region/plan endpoints and owns encrypted
 Keys; only an unchanged preset and endpoint may reuse a stored Key. Its internal

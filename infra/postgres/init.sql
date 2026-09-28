@@ -1046,8 +1046,8 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Private, confirmed series worlds (migration 0031).
--- A user's immutable, explicitly confirmed background and sourced basic rules.
+-- Private series worlds (migrations 0031, 0033, 0034).
+-- A user can associate books before confirming a shared background.
 -- The safe template snapshot has only fixed vocabulary, numeric values and
 -- source identity/chapter references. No source text or provider prose is kept.
 -- Source FKs intentionally do not cascade: removing a source novel must not
@@ -1056,7 +1056,7 @@ CREATE TABLE IF NOT EXISTS public.user_world_series (
     id UUID PRIMARY KEY,
     user_id UUID NOT NULL,
     name TEXT NOT NULL CHECK (pg_catalog.char_length(name) BETWEEN 1 AND 80),
-    background TEXT NOT NULL CHECK (pg_catalog.char_length(background) BETWEEN 1 AND 2000),
+    background TEXT CHECK (background IS NULL OR pg_catalog.char_length(background) BETWEEN 1 AND 2000),
     revision INTEGER NOT NULL CHECK (revision = 1),
     source_novel_id UUID NOT NULL,
     source_template JSONB CHECK (pg_catalog.jsonb_typeof(source_template) = 'object'),
@@ -1083,19 +1083,22 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $function$
 BEGIN
-    IF OLD.source_template IS NULL
-       AND NEW.source_template IS NOT NULL
-       AND pg_catalog.jsonb_typeof(NEW.source_template) = 'object'
-       AND (NEW.source_template->>'novel_id')::UUID = OLD.source_novel_id
-       AND (NEW.id, NEW.user_id, NEW.name, NEW.background, NEW.revision,
-            NEW.source_novel_id, NEW.created_at)
-           IS NOT DISTINCT FROM
-           (OLD.id, OLD.user_id, OLD.name, OLD.background, OLD.revision,
-            OLD.source_novel_id, OLD.created_at)
+    IF (NEW.id, NEW.user_id, NEW.name, NEW.revision, NEW.source_novel_id, NEW.created_at)
+       IS DISTINCT FROM
+       (OLD.id, OLD.user_id, OLD.name, OLD.revision, OLD.source_novel_id, OLD.created_at)
+       OR (OLD.background IS DISTINCT FROM NEW.background AND NOT (
+           OLD.background IS NULL AND NEW.background IS NOT NULL
+           AND pg_catalog.char_length(NEW.background) BETWEEN 1 AND 2000
+       ))
+       OR (OLD.source_template IS DISTINCT FROM NEW.source_template AND (
+           OLD.source_template IS NULL AND NEW.source_template IS NOT NULL
+           AND pg_catalog.jsonb_typeof(NEW.source_template) = 'object'
+           AND (NEW.source_template->>'novel_id')::UUID = OLD.source_novel_id
+       ) IS NOT TRUE)
     THEN
-        RETURN NEW;
+        RAISE EXCEPTION 'world series definitions are immutable' USING ERRCODE = '55000';
     END IF;
-    RAISE EXCEPTION 'world series definitions are immutable' USING ERRCODE = '55000';
+    RETURN NEW;
 END
 $function$;
 

@@ -414,6 +414,8 @@ pub enum NarrativeError {
     GameRuleSourcesUnavailable,
     #[error("Series source rules are not ready")]
     SeriesSourcePending,
+    #[error("Shared series background is not confirmed")]
+    SeriesBackgroundPending,
     #[error("Novel analysis is not ready")]
     GameRuleCanonUnavailable,
     #[error("Reading progress is behind the committed world context")]
@@ -1039,6 +1041,9 @@ impl NarrativeCommandHandler {
                 }
                 GameRuleTemplateRequestError::SeriesSourcePending => {
                     NarrativeError::SeriesSourcePending
+                }
+                GameRuleTemplateRequestError::SeriesBackgroundPending => {
+                    NarrativeError::SeriesBackgroundPending
                 }
                 GameRuleTemplateRequestError::CanonUnavailable => {
                     NarrativeError::GameRuleCanonUnavailable

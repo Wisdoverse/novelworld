@@ -231,7 +231,10 @@ migration path and does not add a release barrier. Migration 0033 permits a
 background-only series with a pending D20 snapshot; it also follows the normal
 managed migration path. `409 series_rule_source_unavailable` for a pending
 target member means the selected source book has not yet supplied a ready v2
-template. Narrative mode remains available. The reader may explicitly generate
+template. Migration 0034 allows the reader to associate books before confirming
+a shared background; `409 series_background_pending` means shared D20 is not
+available until that one-time confirmation. Narrative mode remains available.
+The reader may explicitly generate
 rules for the source book in series management; do not generate target-book
 substitutes, reset a terminal generation claim, or treat the 409 as an outage.
 Upgrade Novel, Narrative,

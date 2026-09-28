@@ -99,9 +99,9 @@ parser intentionally does not interpret. Each is an exact normalized full-file
 hash debt; any edit reopens the blocker. New or changed migrations must pass the
 strict statement, ownership, view, routine, trigger, and foreign-key audit.
 Migration 0002 is strictly scanned and is not part of that hash-debt count.
-The unchanged 0031 migration has one additional exact-file debt because 0033
-replaces its historical immutable-series trigger function. The new 0033
-definition remains strictly audited against `init.sql`.
+The unchanged 0031 and 0033 migrations have two additional exact-file debts
+because later migrations replace their historical series trigger functions.
+The new 0034 definition remains strictly audited against `init.sql`.
 
 Frontend changes must preserve Feature-Sliced Design:
 

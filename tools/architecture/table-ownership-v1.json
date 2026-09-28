@@ -195,6 +195,11 @@
       "path": "infra/postgres/migrations/0031_user_world_series.sql",
       "source_sha256": "f71c62b81d8cef155ab740794a5b236d0c7d71bdc02671f08eceb01e48826794",
       "reason": "the exact historical immutable-series trigger routine is superseded by the audited one-time source-template bind routine in migration 0033; the prior function body remains fixed for replay and differs intentionally from current init.sql"
+    },
+    {
+      "path": "infra/postgres/migrations/0033_deferred_series_rules.sql",
+      "source_sha256": "f90b9022a5277bc2ffb82d1899266ec052dd31028db143cc8a06281c3b187c3f",
+      "reason": "the exact historical source-template bind trigger routine is superseded by the audited independent background-confirmation and template-bind routine in migration 0034; the prior function body remains fixed for replay and differs intentionally from current init.sql"
     }
   ],
   "access_exceptions": [

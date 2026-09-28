@@ -10,7 +10,8 @@ use crate::domain::{
     },
     ports::{LlmPort, SeriesProviderUnavailable},
     repositories::{
-        CanonStoryModelRepository, CreateWorldSeriesResult, NovelRepository, WorldSeriesRepository,
+        CanonStoryModelRepository, ConfirmWorldSeriesBackgroundResult, CreateWorldSeriesResult,
+        NovelRepository, WorldSeriesRepository,
     },
     services::series_matching::{
         chapter_one_entities, confirmed_group_score, parse_deepseek_choice, shared_entity_count,
@@ -42,7 +43,8 @@ struct MatchInputs {
 #[serde(deny_unknown_fields)]
 pub struct CreateWorldSeries {
     pub name: String,
-    pub background: String,
+    #[serde(default)]
+    pub background: Option<String>,
     pub source_novel_id: Uuid,
     pub canon_model_version: Option<i32>,
 }
@@ -57,6 +59,10 @@ pub enum WorldSeriesApplicationError {
     SourceUnavailable,
     #[error("source novel is already associated with a series")]
     SourceAlreadyAssociated,
+    #[error("series background was already confirmed with different text")]
+    BackgroundConflict,
+    #[error("series background is pending confirmation")]
+    BackgroundPending,
     #[error("novel is not ready")]
     NovelNotReady,
     #[error("series repository is unavailable")]
@@ -80,8 +86,10 @@ impl WorldSeriesHandler {
         command: CreateWorldSeries,
     ) -> Result<WorldSeries, WorldSeriesApplicationError> {
         validate_text(&command.name, 80).map_err(|_| WorldSeriesApplicationError::InvalidInput)?;
-        validate_text(&command.background, 2_000)
-            .map_err(|_| WorldSeriesApplicationError::InvalidInput)?;
+        if let Some(background) = &command.background {
+            validate_text(background, 2_000)
+                .map_err(|_| WorldSeriesApplicationError::InvalidInput)?;
+        }
         if command.source_novel_id.is_nil() || command.canon_model_version.is_some_and(|v| v < 1) {
             return Err(WorldSeriesApplicationError::InvalidInput);
         }
@@ -134,6 +142,31 @@ impl WorldSeriesHandler {
             }
         }
         Ok(series)
+    }
+
+    pub async fn confirm_background(
+        &self,
+        user_id: Uuid,
+        series_id: Uuid,
+        background: String,
+    ) -> Result<WorldSeries, WorldSeriesApplicationError> {
+        if series_id.is_nil() || validate_text(&background, 2_000).is_err() {
+            return Err(WorldSeriesApplicationError::InvalidInput);
+        }
+        match self
+            .series_repo
+            .confirm_background(user_id, series_id, &background)
+            .await
+            .map_err(WorldSeriesApplicationError::Repository)?
+        {
+            ConfirmWorldSeriesBackgroundResult::Confirmed(series) => Ok(*series),
+            ConfirmWorldSeriesBackgroundResult::NotFound => {
+                Err(WorldSeriesApplicationError::NotFound)
+            }
+            ConfirmWorldSeriesBackgroundResult::Conflict => {
+                Err(WorldSeriesApplicationError::BackgroundConflict)
+            }
+        }
     }
 
     pub async fn list(

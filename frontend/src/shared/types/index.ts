@@ -131,7 +131,7 @@ export interface SeriesRuleContext {
 export interface WorldSeries {
   id: string;
   name: string;
-  background: string;
+  background: string | null;
   revision: 1;
   source_novel_id: string;
   source_template: GameRuleTemplate | null;

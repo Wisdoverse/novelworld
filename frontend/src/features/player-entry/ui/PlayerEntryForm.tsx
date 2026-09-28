@@ -190,6 +190,8 @@ export function PlayerEntryForm({
                     ? '当前小说的世界规则不足以生成基础检定。可关闭高级项，以纯叙事模式进入故事。'
                     : getApiErrorCode(generateRules.error) === 'series_rule_source_unavailable'
                       ? '系列来源书的 D20 规则尚未生成。可先以纯叙事模式进入故事，或在书架的系列管理中生成来源书规则。'
+                    : getApiErrorCode(generateRules.error) === 'series_background_pending'
+                      ? '请先在书架的系列管理中确认共享世界背景，再启用系列 D20 规则。也可关闭高级项，以纯叙事模式进入故事。'
                     : getApiErrorCode(generateRules.error) === 'canon_unavailable'
                       ? '小说解析尚未完成，请等待解析成功后生成规则。'
                       : getApiErrorCode(generateRules.error) === 'game_rules_unavailable_at_progress'

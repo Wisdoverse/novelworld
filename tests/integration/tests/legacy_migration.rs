@@ -81,6 +81,8 @@ const SERIES_MATCH_DECISIONS_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0032_series_match_decisions.sql");
 const DEFERRED_SERIES_RULES_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0033_deferred_series_rules.sql");
+const PENDING_SERIES_BACKGROUND_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0034_pending_series_background.sql");
 
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
@@ -121,6 +123,7 @@ const ALL_MIGRATIONS: &[&str] = &[
     USER_WORLD_SERIES_MIGRATION,
     SERIES_MATCH_DECISIONS_MIGRATION,
     DEFERRED_SERIES_RULES_MIGRATION,
+    PENDING_SERIES_BACKGROUND_MIGRATION,
 ];
 
 async fn assert_progress_migration_fails_and_rolls_back(pool: &sqlx::PgPool, expected_error: &str) {
@@ -2435,6 +2438,7 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
         "0031_user_world_series.sql",
         "0032_series_match_decisions.sql",
         "0033_deferred_series_rules.sql",
+        "0034_pending_series_background.sql",
     ] {
         let migration_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../infra/postgres/migrations")

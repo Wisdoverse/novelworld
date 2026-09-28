@@ -26,7 +26,7 @@ export const novelKeys = {
 
 export interface CreateWorldSeriesInput {
   name: string;
-  background: string;
+  background: string | null;
   source_novel_id: string;
   canon_model_version?: number;
 }
@@ -112,6 +112,21 @@ export function useCreateWorldSeries(principalId: string | undefined) {
       queryClient.invalidateQueries({
         queryKey: novelKeys.novelWorldSeries(principalId, input.source_novel_id),
       });
+    },
+  });
+}
+
+export function useConfirmWorldSeriesBackground(principalId: string | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    retry: false,
+    mutationFn: ({ seriesId, background }: { seriesId: string; background: string }) => apiClient
+      .put<WorldSeries>(`/novels/world-series/${seriesId}/background`, { background })
+      .then(response => response.data),
+    onSuccess: () => {
+      if (!principalId) return;
+      queryClient.invalidateQueries({ queryKey: novelKeys.worldSeriesList(principalId) });
+      queryClient.invalidateQueries({ queryKey: [...novelKeys.all, 'world-series', principalId, 'novel'] });
     },
   });
 }

@@ -24,6 +24,7 @@ export {
   validateNovelFile,
   useAssociateNovelWorldSeries,
   useCreateWorldSeries,
+  useConfirmWorldSeriesBackground,
   useNovelWorldSeries,
   useSuggestNovelWorldSeries,
   useSuggestNovelWorldSeriesDeepSeek,

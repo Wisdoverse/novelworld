@@ -23,6 +23,8 @@ pub enum GameRuleTemplateRequestError {
     SourcesUnavailable,
     #[error("Series source rules are not ready")]
     SeriesSourcePending,
+    #[error("Shared series background is not confirmed")]
+    SeriesBackgroundPending,
     #[error("Canonical novel analysis is not ready")]
     CanonUnavailable,
     #[error("Novel service is unavailable")]

@@ -1315,16 +1315,21 @@ Missing authors MUST NOT count as an author match. Confirmed memberships
 organize candidates; title similarity is never proof of a shared world.
 Creation MUST preserve the selected source novel identity and atomically
 associate that source book. It MUST NOT generate rules or claim provider work.
-If an exact ready `novel-game-rules-v2` template exists for the source book's
-current canonical model, creation MUST freeze it as an immutable safe snapshot.
-Otherwise the series MAY be created with only its reader-confirmed setting;
-D20 MUST remain unavailable for every member while the source template is
-pending, and target-book rules MUST NOT be substituted. A later explicit
-source-book generation request MAY bind the exact ready v2 template once,
-preserving its real source novel, model version, and chapter provenance. The
-pending-to-ready transition MUST be owner-scoped, idempotent under concurrency,
-and unable to replace an existing snapshot. Narrative-only sessions MAY use
-the confirmed setting before D20 rules are ready.
+A series MAY be created or associated with no shared setting yet. In that state
+its background is pending: it MUST NOT be returned as a setting to Narrative,
+shown as shared to readers, or used to make shared D20 rules available. The
+reader MAY explicitly confirm a supplied background at creation or later through
+a separate confirmation. That transition MUST be owner-scoped and write-once;
+empty or invalid backgrounds MUST be
+rejected. Creation MAY freeze an exact ready `novel-game-rules-v2` template
+from the source book as an immutable safe snapshot, but before background
+confirmation that template MUST NOT make shared D20 rules available. If no
+ready source template exists, a later explicit source-book generation request
+MAY bind the exact ready v2 template once, preserving its real source novel,
+model version, and chapter provenance. The pending-to-ready transition MUST be
+owner-scoped, idempotent under concurrency, and unable to replace an existing
+snapshot. Narrative-only sessions MAY use the setting only after it has been
+confirmed, including while D20 rules are still pending.
 
 When a series-bound profile or session is resolved, Narrative MUST obtain the
 series snapshot through Novel's HTTP contract. Source-book canon and target-book
