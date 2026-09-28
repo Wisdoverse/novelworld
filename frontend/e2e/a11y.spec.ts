@@ -178,6 +178,8 @@ test('branch and world outcomes have named committed logs and pending status', a
     await route.fallback();
   });
   await page.reload();
+  await page.getByRole('combobox', { name: '行动', exact: true }).selectOption('travel');
+  await page.getByRole('combobox', { name: '目标', exact: true }).selectOption('loc-2');
   await page.getByRole('textbox', { name: '你的意图' }).fill('沿山路下行');
   await page.getByRole('button', { name: '执行行动', exact: true }).click();
   await expect(page.getByRole('status', { name: '世界行动状态' })).toContainText('正在确认世界行动');

@@ -122,7 +122,7 @@ test.describe('critical journey — keyboard operability', () => {
       for (let i = 0; i < 6; i++) {
         await page.keyboard.press(key);
         await expectFocusWithin(drawer);
-        expect((await currentFocus(page))?.inViewport).toBe(true);
+        await expect.poll(async () => (await currentFocus(page))?.inViewport).toBe(true);
       }
     }
     await page.keyboard.press('Escape');
@@ -204,6 +204,8 @@ test.describe('critical journey — keyboard operability', () => {
     await installStubs(page, { openWorld: true });
     await page.goto('/reader/novel-1/1');
     await expect(page.getByText(/的开放世界/).first()).toBeVisible();
+    await page.getByRole('combobox', { name: '行动', exact: true }).selectOption('travel');
+    await page.getByRole('combobox', { name: '目标', exact: true }).selectOption('loc-2');
     await page.getByRole('textbox', { name: '你的意图' }).fill('沿山路下行');
     const submit = page.getByRole('button', { name: '执行行动', exact: true });
     await tabTo(page, submit);

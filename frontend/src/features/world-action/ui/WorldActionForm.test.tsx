@@ -9,6 +9,7 @@ vi.mock('@/entities/narrative', () => ({ suggestWorldAction: vi.fn() }));
 const view = {
   player: { name: '云舟', novel_id: 'novel', location_id: 'gate' },
   session: {
+    turn_number: 1,
     entry_context: {
       locations: [{ id: 'gate', name: '旧城门' }],
       characters: [{ id: 'character', name: '守门人' }],
@@ -19,6 +20,9 @@ const view = {
     dead_character_ids: [],
   },
   world_state: { state: { threads: {} } },
+  journal: [{ turn_number: 1, transition: { events: [
+    { location_id: 'gate', actor_character_ids: ['character'] },
+  ] } }],
 } as unknown as OpenWorldView;
 
 describe('WorldActionForm', () => {
@@ -36,7 +40,7 @@ describe('WorldActionForm', () => {
     expect(suggestWorldAction).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: '建议行动类型' }));
     await waitFor(() => expect(screen.getByRole('status').textContent).toContain('调查线索'));
-    expect(screen.getByLabelText('行动')).toHaveProperty('value', 'travel');
+    expect(screen.getByLabelText('行动')).toHaveProperty('value', '');
     expect(onSubmit).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: '调查线索' }));
     expect(screen.getByLabelText('行动')).toHaveProperty('value', 'investigate');
@@ -91,6 +95,9 @@ describe('WorldActionForm', () => {
     render(<WorldActionForm view={view} isPending={false} onSubmit={onSubmit} />);
 
     expect(screen.getByText(/行动者始终是你创建的角色“云舟”/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: '执行行动' }).hasAttribute('disabled')).toBe(true);
+    fireEvent.change(screen.getByLabelText('行动'), { target: { value: 'travel' } });
+    fireEvent.change(screen.getByLabelText('目标'), { target: { value: 'gate' } });
     fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '沿城墙寻找安全入口' } });
     fireEvent.click(screen.getByRole('button', { name: '执行行动' }));
 
@@ -130,6 +137,7 @@ describe('WorldActionForm', () => {
 
     expect(screen.queryByRole('option', { name: '解决事件线（旧版）' })).toBeNull();
     fireEvent.change(screen.getByLabelText('行动'), { target: { value: 'advance_thread' } });
+    fireEvent.change(screen.getByLabelText('目标'), { target: { value: 'siege' } });
     fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '回去与刘备会合' } });
     fireEvent.click(screen.getByRole('button', { name: '执行行动' }));
 
@@ -149,7 +157,31 @@ describe('WorldActionForm', () => {
 
     fireEvent.change(screen.getByLabelText('行动'), { target: { value: 'converse' } });
 
-    expect(screen.getByText('当前世界状态没有适合此行动的目标。')).toBeTruthy();
+    expect(screen.getByText('当前没有已确认同场、可供此行动选择的角色或目标。')).toBeTruthy();
+  });
+
+  it('offers only characters recorded at the player’s current location', () => {
+    render(<WorldActionForm
+      view={{
+        ...view,
+        session: {
+          ...view.session,
+          entry_context: {
+            ...view.session.entry_context,
+            characters: [
+              ...view.session.entry_context.characters,
+              { id: 'away', name: '远方信使' },
+            ],
+          },
+        },
+      }}
+      isPending={false}
+      onSubmit={vi.fn()}
+    />);
+
+    fireEvent.change(screen.getByLabelText('行动'), { target: { value: 'converse' } });
+    expect(screen.getByRole('option', { name: '守门人' })).toBeTruthy();
+    expect(screen.queryByRole('option', { name: '远方信使' })).toBeNull();
   });
 
   it('previews the server-owned D20 rule for an advanced player', () => {
@@ -174,6 +206,7 @@ describe('WorldActionForm', () => {
     } as unknown as OpenWorldView;
 
     render(<WorldActionForm view={advancedView} isPending={false} onSubmit={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText('行动'), { target: { value: 'travel' } });
 
     expect(screen.getByText('检定预览')).toBeTruthy();
     expect(screen.getByText(/D20 \+ 轻功 \+1，模板基础难度 13/)).toBeTruthy();
@@ -190,7 +223,7 @@ describe('WorldActionForm', () => {
       onSubmit={onSubmit}
     />);
 
-    for (const label of ['行动', '目标', '你的意图']) {
+    for (const label of ['行动', '目标（可选）', '你的意图']) {
       expect(screen.getByLabelText(label).hasAttribute('disabled')).toBe(true);
     }
     expect(screen.getByRole('button', { name: '执行行动' }).hasAttribute('disabled')).toBe(true);

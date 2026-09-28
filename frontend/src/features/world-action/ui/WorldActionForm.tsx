@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { suggestWorldAction } from '@/entities/narrative';
+import { localWorldCharacterIds } from '@/shared/lib/localWorldCharacters';
 import type { OpenWorldView, WorldAction, WorldActionKind } from '@/shared/types';
 
 interface WorldActionFormProps {
@@ -34,9 +35,8 @@ function targets(view: OpenWorldView, kind: WorldActionKind) {
   const { entry_context: context } = view.session;
   if (kind === 'travel') return context.locations;
   if (kind === 'converse' || kind === 'ally' || kind === 'oppose') {
-    return context.characters.filter(character => (
-      !view.session.dead_character_ids.includes(character.id)
-    ));
+    const local = localWorldCharacterIds(view);
+    return context.characters.filter(character => local.has(character.id));
   }
   if (kind === 'advance_thread' || kind === 'resolve_thread') {
     return Object.entries(view.world_state.state.threads ?? {})
@@ -56,14 +56,14 @@ function targets(view: OpenWorldView, kind: WorldActionKind) {
 }
 
 export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }: WorldActionFormProps) {
-  const [kind, setKind] = useState<WorldActionKind>('travel');
+  const [kind, setKind] = useState<WorldActionKind | ''>('');
   const [targetId, setTargetId] = useState<string | null>('');
   const [intent, setIntent] = useState('');
   const [suggesting, setSuggesting] = useState(false);
   const [suggestion, setSuggestion] = useState<{ kind: WorldActionKind | null; view: OpenWorldView } | null>(null);
   const suggestionRequest = useRef<AbortController | null>(null);
-  const targetOptions = useMemo(() => targets(view, kind), [kind, view]);
-  const targetRequired = kind !== 'pursue_goal';
+  const targetOptions = useMemo(() => kind ? targets(view, kind) : [], [kind, view]);
+  const targetRequired = kind !== '' && kind !== 'pursue_goal';
   const controlsDisabled = isPending || isLocked;
   const latest = useRef({ view, intent, kind, controlsDisabled });
   latest.current = { view, intent, kind, controlsDisabled };
@@ -109,9 +109,8 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
       }
     }
   };
-  const selectedTarget = targetId === null ? '' : targetOptions.some(option => option.id === targetId)
-    ? targetId
-    : targetRequired ? targetOptions[0]?.id ?? '' : '';
+  const selectedTarget = targetId && targetOptions.some(option => option.id === targetId)
+    ? targetId : '';
   const actionRule = view.session.game_rules?.action_rules.find(rule => rule.kind === kind);
   const actionAttribute = view.session.game_rules?.attributes.find(
     attribute => attribute.key === actionRule?.attribute_key,
@@ -123,7 +122,7 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (controlsDisabled || (targetRequired && !selectedTarget)) return;
+    if (controlsDisabled || !kind || (targetRequired && !selectedTarget)) return;
     clearSuggestion();
     try {
       await onSubmit({
@@ -154,6 +153,7 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
             setTargetId('');
           }}
         >
+          <option value="" disabled>请选择行动方式</option>
           {availableActions.map(value => (
             <option key={value} value={value}>{actionLabels[value]}</option>
           ))}
@@ -181,7 +181,7 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
           required={targetRequired}
         >
           {!targetRequired ? <option value="">自定目标</option> : null}
-          {targetRequired && targetId === null ? <option value="" disabled>请选择目标</option> : null}
+          {targetRequired ? <option value="" disabled>请选择目标</option> : null}
           {targetOptions.map(option => (
             <option key={option.id} value={option.id}>{option.name}</option>
           ))}
@@ -189,7 +189,7 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
       </label>
       {targetRequired && targetOptions.length === 0 ? (
         <p role="alert" className="text-sm text-[#b3261e]">
-          当前世界状态没有适合此行动的目标。
+          当前没有已确认同场、可供此行动选择的角色或目标。
         </p>
       ) : null}
       <label className="block text-sm font-medium text-[#3c4043]">
@@ -245,7 +245,7 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
       ) : null}
       <button
         type="submit"
-        disabled={controlsDisabled || !intent.trim() || (targetRequired && !selectedTarget)}
+        disabled={controlsDisabled || !kind || !intent.trim() || (targetRequired && !selectedTarget)}
         className="primary-action"
       >
         {isPending ? '世界正在回应…' : '执行行动'}

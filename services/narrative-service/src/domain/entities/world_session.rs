@@ -900,38 +900,42 @@ impl WorldTurnTransition {
             .target_id
             .as_deref()
             .and_then(|value| Uuid::parse_str(value).ok());
-        match action.kind {
-            WorldActionKind::Ally
-                if !self.relationship_changes.iter().any(|change| {
-                    Some(change.character_id) == target_character && change.delta > 0
-                }) =>
-            {
-                return invalid("ally must improve the target relationship")
-            }
-            WorldActionKind::Oppose
-                if !self.relationship_changes.iter().any(|change| {
-                    Some(change.character_id) == target_character && change.delta < 0
-                }) =>
-            {
-                return invalid("oppose must reduce the target relationship")
-            }
-            WorldActionKind::ResolveThread
-                if !self.thread_changes.iter().any(|change| {
-                    Some(change.thread_id.as_str()) == action.target_id.as_deref()
+        // A failed check strips the player's proposed mutations above. Requiring
+        // the success effect here would make every failed targeted action invalid.
+        if resolution.is_none_or(|check| check.succeeded) {
+            match action.kind {
+                WorldActionKind::Ally
+                    if !self.relationship_changes.iter().any(|change| {
+                        Some(change.character_id) == target_character && change.delta > 0
+                    }) =>
+                {
+                    return invalid("ally must improve the target relationship")
+                }
+                WorldActionKind::Oppose
+                    if !self.relationship_changes.iter().any(|change| {
+                        Some(change.character_id) == target_character && change.delta < 0
+                    }) =>
+                {
+                    return invalid("oppose must reduce the target relationship")
+                }
+                WorldActionKind::ResolveThread
+                    if !self.thread_changes.iter().any(|change| {
+                        Some(change.thread_id.as_str()) == action.target_id.as_deref()
                         && change.status
                             == crate::domain::services::narrative_transition::ThreadStatus::Resolved
-                }) =>
-            {
-                return invalid("resolve_thread must resolve the target thread")
+                    }) =>
+                {
+                    return invalid("resolve_thread must resolve the target thread")
+                }
+                WorldActionKind::AdvanceThread
+                    if !self.thread_changes.iter().any(|change| {
+                        Some(change.thread_id.as_str()) == action.target_id.as_deref()
+                    }) =>
+                {
+                    return invalid("advance_thread must update the target thread")
+                }
+                _ => {}
             }
-            WorldActionKind::AdvanceThread
-                if !self.thread_changes.iter().any(|change| {
-                    Some(change.thread_id.as_str()) == action.target_id.as_deref()
-                }) =>
-            {
-                return invalid("advance_thread must update the target thread")
-            }
-            _ => {}
         }
 
         if let Some(change) = &self.canonical_event_change {
@@ -1561,6 +1565,67 @@ mod tests {
         .unwrap();
         assert_eq!(succeeded.player_location_id.as_deref(), Some("gate"));
         assert_eq!(succeeded.inventory_additions, vec!["城门令牌"]);
+    }
+
+    #[test]
+    fn failed_targeted_actions_do_not_require_success_effects() {
+        let character_id = Uuid::new_v4();
+        let context = context(character_id);
+        let session = state(&context).open_world().unwrap().unwrap();
+        let raw = serde_json::json!({
+            "schema_version": 1,
+            "rendered_narrative": "你尝试推进计划，但这次没有达到目标。",
+            "events": [{
+                "summary": "玩家尝试失败",
+                "actor_character_ids": [],
+                "location_id": "gate"
+            }],
+            "relationship_changes": [],
+            "location_changes": [],
+            "thread_changes": [],
+            "player_location_id": null,
+            "inventory_additions": [],
+            "inventory_removals": [],
+            "knowledge_discoveries": [],
+            "faction_changes": [],
+            "canonical_event_change": null
+        })
+        .to_string();
+
+        for (kind, target_id) in [
+            (WorldActionKind::Ally, character_id.to_string()),
+            (WorldActionKind::Oppose, character_id.to_string()),
+            (WorldActionKind::AdvanceThread, "spy".into()),
+            (WorldActionKind::ResolveThread, "spy".into()),
+        ] {
+            let action = WorldAction {
+                kind,
+                target_id: Some(target_id),
+                intent: "尝试推进目标".into(),
+            };
+            assert!(
+                parse_world_turn_transition_with_check(
+                    &raw,
+                    &action,
+                    &context,
+                    &session,
+                    Some(&check(&context, false)),
+                )
+                .is_ok(),
+                "failed {kind:?} must be a valid outcome"
+            );
+            assert!(
+                parse_world_turn_transition_with_check(
+                    &raw,
+                    &action,
+                    &context,
+                    &session,
+                    Some(&check(&context, true)),
+                )
+                .is_err(),
+                "successful {kind:?} still needs its target effect"
+            );
+        }
     }
 
     #[test]

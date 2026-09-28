@@ -263,6 +263,12 @@ const OPEN_WORLD_STATE = {
   ...WORLD_STATE,
   state: {
     ...WORLD_STATE.state,
+    player_entity: { ...PLAYER, location_id: 'loc-2' },
+    world_events: [{
+      ...WORLD_STATE.state.world_events[0],
+      summary: '林晚在海港检查系泊的船只。',
+      actor_character_ids: ['char-1'],
+    }],
     choices: [{
       chapter: 1,
       choice: `长选择起点\n${LONG_TIMELINE_TOKEN}`,
@@ -279,11 +285,12 @@ const OPEN_WORLD_JOURNAL_ENTRY = {
   transition: {
     ...JOURNAL_ENTRY.transition,
     rendered_narrative: `${JOURNAL_ENTRY.transition.rendered_narrative}\n长行动投影起点\n${LONG_TIMELINE_TOKEN}`,
+    events: [{ summary: '林晚在海港检查系泊的船只。', actor_character_ids: ['char-1'], location_id: 'loc-2' }],
   },
 };
 
 export const OPEN_WORLD = {
-  player: PLAYER,
+  player: { ...PLAYER, location_id: 'loc-2' },
   session: SESSION,
   world_state: OPEN_WORLD_STATE,
   journal: [OPEN_WORLD_JOURNAL_ENTRY],
