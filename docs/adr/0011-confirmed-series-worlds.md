@@ -4,7 +4,8 @@
 - Date: 2026-09-26
 - Owners: Novel and Narrative service maintainers
 - Related: [Issue #426](https://github.com/Wisdoverse/novelworld/issues/426),
-  [evidence-backed matching #438](https://github.com/Wisdoverse/novelworld/issues/438)
+  [evidence-backed matching #438](https://github.com/Wisdoverse/novelworld/issues/438),
+  [arbitrary-title matching #440](https://github.com/Wisdoverse/novelworld/issues/440)
 
 ## Context
 
@@ -46,14 +47,20 @@ never sent. Unknown, low-confidence, malformed, busy and unavailable results req
 manual selection. A probability of 0.8 is conservative abstention, not evidence
 of calibrated accuracy. Laya never generates setting prose or authorizes writes.
 
-Confirmed memberships organize candidates. Unconfirmed title families are
-only candidate groups: a missing author is not an author match, and grouping
-without a verified author requires at least two deduplicated shared chapter-1
-entities as well as a nonempty title stem. Every original member must match;
-conflicting known authors and aggregate-only entity overlap cannot merge groups.
-Neither heuristic writes a series.
+Confirmed memberships organize candidates. The arbitrary-title revision
+removes the title-stem gate, unconfirmed title-family grouping, and pre-Canon
+title ranking. Novel privately ranks a bounded Ready shelf by source-cited whole-book
+location/faction names, after verifying that a citation contains each name.
+Those later-book names remain inside Novel: they are absent from Laya and
+DeepSeek inputs, public suggestions, and cached result bodies. A scan that
+exceeds its fixed limit, or overlapping/ambiguous evidence, abstains. Only
+when Laya normally abstains can a unique strong private-evidence candidate be
+shown as a separately labeled server heuristic. Confirmed groups require
+agreement from every member; reader confirmation is still the only
+association authority. This does not rewrite prior decisions or associations.
 
-Ordinary recognition remains Laya-only. A separate reader-clicked DeepSeek
+Ordinary recognition calls Laya, then may use the bounded internal heuristic
+only after a normal Laya abstention. A separate reader-clicked DeepSeek
 second opinion uses a dedicated `series_matching` operation and the existing
 credential/accounting path. One resolved configuration supplies both the cache
 provider/model identity and the physical dispatch. Non-DeepSeek providers and
@@ -64,8 +71,10 @@ truncated or invalid output safely abstains without increasing the allowance.
 HTTP retries, empty-JSON
 fallback and application repair are disabled.
 
-Novel-owned PostgreSQL suggestions bind the reader, target, bounded evidence,
-candidates, method and policy. A unique durable claim allows one dispatch;
+Novel-owned PostgreSQL suggestions bind the reader, target, provider evidence,
+candidates, method and policy. Laya's key also binds a digest of private
+ranking evidence; DeepSeek's key does not change when its exact prompt and
+candidate scope are unchanged. A unique durable claim allows one dispatch;
 concurrent requests reuse the state. Failed, interrupted or unknown outcomes
 are never reclaimed for another attempt. Result-only requests (`check_only=true`)
 never insert a claim or dispatch, even after configuration/evidence changes.

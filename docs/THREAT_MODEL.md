@@ -193,7 +193,12 @@ limit but cannot enforce.
    Novel-to-Laya series matching uses the same paired configuration but sends
    only bounded book/candidate metadata and strictly chapter-1-evidenced
    location/faction names. Descriptions, excerpts, world-rule prose and later
-   clues are excluded, as are scope UUIDs, full novels and plot text. Suggestions cannot create or change associations; readers must
+   clues are excluded, as are scope UUIDs, full novels and plot text. Novel may
+   privately compare source-cited whole-book names to rank candidates with
+   arbitrary uploaded titles; these names are never serialized to Laya,
+   DeepSeek, the browser, or the cached suggestion. A bounded scan abstains on
+   overflow or ambiguity, and its local conclusion is labeled separately from
+   Laya. Suggestions cannot create or change associations; readers must
    confirm or select manually. The 0.8 threshold is an abstention heuristic,
    not calibrated accuracy evidence. Requests use four local slots, 300 ms
    connect/2 s total deadlines, 8 KiB request and 16 KiB response limits, and

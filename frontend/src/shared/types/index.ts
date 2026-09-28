@@ -142,6 +142,8 @@ export interface WorldSeriesSuggestion {
   method?: 'laya' | 'deepseek';
   reason?:
     | 'no_candidates'
+    | 'local_evidence'
+    | 'too_many_books'
     | 'low_confidence'
     | 'not_configured'
     | 'unsupported_provider'

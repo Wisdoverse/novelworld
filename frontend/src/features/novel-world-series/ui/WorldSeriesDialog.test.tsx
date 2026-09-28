@@ -134,6 +134,42 @@ describe('WorldSeriesDialog', () => {
     expect(mocks.create).not.toHaveBeenCalled();
   });
 
+  it('labels server source-evidence candidates without treating them as Laya conclusions', async () => {
+    mocks.suggestionResult = {
+      status: 'suggested', method: 'laya', reason: 'local_evidence', cached: false,
+      suggestion: {
+        series_id: null, source_novel_id: 'source-book', name: '候选系列',
+        book: { title: '来源书', author: null, genre: null },
+      },
+    };
+    renderDialog();
+
+    fireEvent.click(screen.getByRole('button', { name: '识别同系列' }));
+    await screen.findByText('服务器依据小说原文证据给出候选；这不是 Laya 结论。请核对后手动确认关联。');
+    expect(mocks.associate).not.toHaveBeenCalled();
+    expect(mocks.create).not.toHaveBeenCalled();
+  });
+
+  it('explains an oversized ready shelf and keeps manual series options available', async () => {
+    mocks.seriesList = [series];
+    mocks.suggestionResult = {
+      status: 'uncertain', method: 'laya', reason: 'too_many_books', cached: false,
+      suggestion: null,
+    };
+    renderDialog();
+
+    fireEvent.click(screen.getByRole('button', { name: '识别同系列' }));
+    await screen.findByText('可参与识别的已就绪书籍数量超过上限。请手动选择已有系列或创建系列。');
+    expect(screen.getByRole('button', { name: '创建系列' })).toBeTruthy();
+    expect(mocks.associate).not.toHaveBeenCalled();
+  });
+
+  it('does not use an arbitrary uploaded title as a new series name', () => {
+    renderDialog();
+    fireEvent.click(screen.getByRole('button', { name: '创建系列' }));
+    expect((screen.getByLabelText('系列名称') as HTMLInputElement).value).toBe('');
+  });
+
   it('creates from a confirmed ready source and retries a failed target PUT without recreating', async () => {
     mocks.associate.mockRejectedValueOnce(new Error('temporary failure')).mockResolvedValueOnce(series);
     renderDialog();
@@ -156,7 +192,7 @@ describe('WorldSeriesDialog', () => {
     expect(mocks.create).toHaveBeenCalledOnce();
   });
 
-  it('lets a reader create a series from a suggested name without auto-association', async () => {
+  it('requires a reader-entered series name for a candidate without auto-association', async () => {
     mocks.suggestionResult = {
       status: 'suggested',
       suggestion: {
@@ -168,7 +204,8 @@ describe('WorldSeriesDialog', () => {
     fireEvent.click(screen.getByRole('button', { name: '识别同系列' }));
     await screen.findByText('系统找到可能的同系列小说。请核对建议并明确确认后再关联。');
     fireEvent.click(screen.getByRole('button', { name: '用此建议创建系列' }));
-    expect((screen.getByLabelText('系列名称') as HTMLInputElement).value).toBe('建议系列名');
+    expect((screen.getByLabelText('系列名称') as HTMLInputElement).value).toBe('');
+    expect((screen.getByLabelText('D20 规则来源书') as HTMLSelectElement).value).toBe('source-book');
     expect(mocks.create).not.toHaveBeenCalled();
     expect(mocks.associate).not.toHaveBeenCalled();
   });

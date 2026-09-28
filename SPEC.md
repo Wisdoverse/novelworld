@@ -1300,14 +1300,21 @@ generated mappings are semantically correct.
 Series definitions and shelf associations MUST be private to one reader and
 owned by Novel Service. Optional matching is bounded, nonspoiler guidance; the
 reader MUST confirm every association, and manual selection MUST remain
-available. Evidence MAY include existing title/author/genre and at most six
+available. Book titles and authors MAY aid display but MUST NOT be required to
+find candidates: reader uploads may use arbitrary names and omit authors.
+Provider evidence MAY include existing title/author/genre and at most six
 deduplicated location or faction names, each at most 40 characters, only when
 all valid source citations refer to chapter 1 and a citation contains that name.
 Descriptions, excerpts, world-rule prose, later-chapter clues and plot MUST NOT
-be sent or returned as matching evidence. Missing authors MUST NOT count as an
-author match. Confirmed memberships organize candidates; title families are
-only candidate organization, never proof of a shared world. Creation MUST capture an exact ready `novel-game-rules-v2` source
-template, including its real source novel, model version, and chapter
+be sent to a provider or returned as matching evidence. Novel MAY use bounded
+whole-book location/faction names with citations containing the name solely for
+private candidate ranking. It MUST abstain on scan overflow or ambiguous local
+evidence. A local evidence suggestion after Laya abstains MUST be labeled as a
+server heuristic and MUST NOT become a confirmed series without reader action.
+Missing authors MUST NOT count as an author match. Confirmed memberships
+organize candidates; title similarity is never proof of a shared world.
+Creation MUST capture an exact ready `novel-game-rules-v2` source template,
+including its real source novel, model version, and chapter
 provenance, as an immutable safe snapshot; it MUST NOT generate rules or claim
 provider work. Creation and association of the source book MUST be atomic.
 
@@ -1329,7 +1336,9 @@ limits, four admission slots, at most eight candidates, and a 0.8 abstention
 threshold that is not calibrated accuracy evidence. It MUST NOT receive scope
 UUIDs, full novels, or plot text. Suggestions MUST be cached as reader-owned
 PostgreSQL state, bound to the current bounded evidence, candidate set, method
-and policy. Cache hits MUST recheck current shelf access and Ready sources.
+and policy. Laya's identity MUST also bind private ranking evidence; DeepSeek
+MUST reuse a completed result while its exact provider input and candidate
+scope remain unchanged. Cache hits MUST recheck current shelf access and Ready sources.
 An explicit DeepSeek second opinion MAY use the existing user/platform provider
 configuration and accounting under the dedicated `series_matching` operation.
 It MUST refuse non-DeepSeek providers and Diagnostic bindings before dispatch,
