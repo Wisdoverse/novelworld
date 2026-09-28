@@ -139,7 +139,8 @@ WITH shelf_novels AS (
     UNION ALL
     SELECT 70, s.id::text, 0::bigint, s.id::text, 'world_series',
            jsonb_build_object('id', s.id, 'name', s.name, 'background', s.background,
-               'revision', s.revision, 'source_template', s.source_template, 'created_at', s.created_at)
+               'revision', s.revision, 'source_novel_id', s.source_novel_id,
+               'source_template', s.source_template, 'created_at', s.created_at)
     FROM user_world_series s
     WHERE s.user_id = $1
 

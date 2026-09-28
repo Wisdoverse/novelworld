@@ -327,6 +327,13 @@ fn narrative_error_response(error: NarrativeError) -> axum::response::Response {
                 "Canonical sources cannot support game rules",
             )
         }
+        NarrativeError::SeriesSourcePending => {
+            return error_response(
+                StatusCode::CONFLICT,
+                "series_rule_source_unavailable",
+                "Generate advanced rules in the source novel first",
+            )
+        }
         NarrativeError::GameRuleCanonUnavailable => {
             return error_response(
                 StatusCode::CONFLICT,

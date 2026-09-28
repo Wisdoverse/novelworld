@@ -1058,7 +1058,8 @@ CREATE TABLE IF NOT EXISTS public.user_world_series (
     name TEXT NOT NULL CHECK (pg_catalog.char_length(name) BETWEEN 1 AND 80),
     background TEXT NOT NULL CHECK (pg_catalog.char_length(background) BETWEEN 1 AND 2000),
     revision INTEGER NOT NULL CHECK (revision = 1),
-    source_template JSONB NOT NULL CHECK (pg_catalog.jsonb_typeof(source_template) = 'object'),
+    source_novel_id UUID NOT NULL,
+    source_template JSONB CHECK (pg_catalog.jsonb_typeof(source_template) = 'object'),
     created_at TIMESTAMPTZ NOT NULL,
     CONSTRAINT user_world_series_owner_key UNIQUE (id, user_id),
     CONSTRAINT user_world_series_user_fkey FOREIGN KEY (user_id)
@@ -1082,6 +1083,18 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $function$
 BEGIN
+    IF OLD.source_template IS NULL
+       AND NEW.source_template IS NOT NULL
+       AND pg_catalog.jsonb_typeof(NEW.source_template) = 'object'
+       AND (NEW.source_template->>'novel_id')::UUID = OLD.source_novel_id
+       AND (NEW.id, NEW.user_id, NEW.name, NEW.background, NEW.revision,
+            NEW.source_novel_id, NEW.created_at)
+           IS NOT DISTINCT FROM
+           (OLD.id, OLD.user_id, OLD.name, OLD.background, OLD.revision,
+            OLD.source_novel_id, OLD.created_at)
+    THEN
+        RETURN NEW;
+    END IF;
     RAISE EXCEPTION 'world series definitions are immutable' USING ERRCODE = '55000';
 END
 $function$;

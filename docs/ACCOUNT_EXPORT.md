@@ -44,8 +44,9 @@ provider-returned asset URLs, not provider-hosted bytes. Narrative nodes include
 the user's own nodes and shared/canonical nodes referenced by that user's
 choices.
 
-`world_series` exports the reader-owned confirmed definition and safe immutable
-source-template snapshot; `novel_world_series` exports that reader's shelf
+`world_series` exports the reader-owned confirmed definition, stable source
+book identity, and a safe immutable source-template snapshot when one has been
+bound; a pending series has a null snapshot. `novel_world_series` exports that reader's shelf
 associations. Source provenance remains the original novel/version/chapter
 identity. Export does not turn those records into shared player state.
 

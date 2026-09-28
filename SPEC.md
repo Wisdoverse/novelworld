@@ -1313,10 +1313,18 @@ evidence. A local evidence suggestion after Laya abstains MUST be labeled as a
 server heuristic and MUST NOT become a confirmed series without reader action.
 Missing authors MUST NOT count as an author match. Confirmed memberships
 organize candidates; title similarity is never proof of a shared world.
-Creation MUST capture an exact ready `novel-game-rules-v2` source template,
-including its real source novel, model version, and chapter
-provenance, as an immutable safe snapshot; it MUST NOT generate rules or claim
-provider work. Creation and association of the source book MUST be atomic.
+Creation MUST preserve the selected source novel identity and atomically
+associate that source book. It MUST NOT generate rules or claim provider work.
+If an exact ready `novel-game-rules-v2` template exists for the source book's
+current canonical model, creation MUST freeze it as an immutable safe snapshot.
+Otherwise the series MAY be created with only its reader-confirmed setting;
+D20 MUST remain unavailable for every member while the source template is
+pending, and target-book rules MUST NOT be substituted. A later explicit
+source-book generation request MAY bind the exact ready v2 template once,
+preserving its real source novel, model version, and chapter provenance. The
+pending-to-ready transition MUST be owner-scoped, idempotent under concurrency,
+and unable to replace an existing snapshot. Narrative-only sessions MAY use
+the confirmed setting before D20 rules are ready.
 
 When a series-bound profile or session is resolved, Narrative MUST obtain the
 series snapshot through Novel's HTTP contract. Source-book canon and target-book

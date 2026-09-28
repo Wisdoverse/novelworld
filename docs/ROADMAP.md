@@ -495,6 +495,10 @@ adds cached suggestions and an explicit single-attempt DeepSeek second opinion.
 tracks private source-evidence candidate ranking because uploaded names and
 missing authors cannot be reliable match keys; reader confirmation remains
 mandatory.
+[Deferred series D20 rules #442](https://github.com/Wisdoverse/novelworld/issues/442)
+tracks creating the shared setting before the source book has generated rules,
+then freezing those rules after a separate explicit reader action. Pending
+series allow narrative sharing; advanced checks wait for the source template.
 Project fields and the linked issue own execution/CI/deployment status;
 representative match-quality qualification remains separate.
 

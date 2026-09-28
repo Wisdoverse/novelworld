@@ -21,7 +21,7 @@ pub(super) fn error(error: WorldSeriesApplicationError) -> Response {
     let (status, code, message) = match error {
         WorldSeriesApplicationError::InvalidInput => (StatusCode::UNPROCESSABLE_ENTITY, "invalid_world_series", "Invalid world series input"),
         WorldSeriesApplicationError::NotFound => (StatusCode::NOT_FOUND, "not_found", "Novel or series not found"),
-        WorldSeriesApplicationError::SourceUnavailable => (StatusCode::CONFLICT, "series_rule_source_unavailable", "Generate ready advanced rules in the source novel before creating a series"),
+        WorldSeriesApplicationError::SourceUnavailable => (StatusCode::CONFLICT, "series_rule_source_unavailable", "Series source advanced rules are not ready"),
         WorldSeriesApplicationError::SourceAlreadyAssociated => (StatusCode::CONFLICT, "source_already_in_series", "Source novel already belongs to a series; select that series or explicitly clear its association"),
         WorldSeriesApplicationError::NovelNotReady => (StatusCode::CONFLICT, "canon_unavailable", "Novel is not ready"),
         WorldSeriesApplicationError::Repository(_) => (StatusCode::SERVICE_UNAVAILABLE, "series_unavailable", "World series is temporarily unavailable"),

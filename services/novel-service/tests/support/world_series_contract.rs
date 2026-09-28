@@ -195,16 +195,65 @@ pub async fn run(pool: &PgPool, user: Uuid, other_user: Uuid, source: Uuid) {
         llm: None,
     };
 
-    // Missing source rules do not create a series, member or generation claim.
-    assert!(matches!(
-        handler.create(user, command(source, "Missing rules")).await,
-        Err(WorldSeriesApplicationError::SourceUnavailable)
-    ));
+    // Missing source rules create a pending series and source association only.
+    let mut pending = handler
+        .create(user, command(source, "Confirmed series"))
+        .await
+        .unwrap();
+    pending.created_at = pending
+        .created_at
+        .with_nanosecond(pending.created_at.nanosecond() / 1_000 * 1_000)
+        .unwrap();
+    assert_eq!(pending.source_novel_id, source);
+    assert!(pending.source_template.is_none());
+    assert!(pending.rules_for(target).is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM novel_game_rule_templates WHERE novel_id = $1"
+        )
+        .bind(source)
+        .fetch_one(pool)
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        repository.find_for_novel(user, source).await.unwrap(),
+        Some(pending.clone())
+    );
+    let pending_export = PgAccountExport::new(pool.clone())
+        .export_user(user)
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    let exported_series = pending_export
+        .iter()
+        .find(|row| row.kind == "world_series")
+        .unwrap();
+    assert_eq!(exported_series.data["source_novel_id"], source.to_string());
+    assert!(exported_series.data["source_template"].is_null());
+    assert!(handler
+        .bind_ready_source(user, pending.id)
+        .await
+        .unwrap()
+        .source_template
+        .is_none());
     let template = source_template(source);
     sqlx::query("INSERT INTO novel_game_rule_templates (novel_id,canon_model_version,schema_version,prompt_version,status,attempt,content,completed_at) VALUES ($1,1,1,'novel-game-rules-v2','ready',1,$2,NOW())")
         .bind(source).bind(serde_json::to_value(&template).unwrap()).execute(pool).await.unwrap();
     let baseline = sqlx::query_scalar::<_, serde_json::Value>("SELECT jsonb_agg(to_jsonb(t) ORDER BY prompt_version) FROM novel_game_rule_templates t WHERE novel_id = $1")
         .bind(source).fetch_one(pool).await.unwrap();
+    handler.associate(user, source, None).await.unwrap();
+    assert!(handler
+        .bind_ready_source(user, pending.id)
+        .await
+        .unwrap()
+        .source_template
+        .is_none());
+    handler
+        .associate(user, source, Some(pending.id))
+        .await
+        .unwrap();
     assert!(matches!(
         handler
             .create(other_user, command(source, "Foreign source"))
@@ -217,11 +266,7 @@ pub async fn run(pool: &PgPool, user: Uuid, other_user: Uuid, source: Uuid) {
         handler.create(user, wrong).await,
         Err(WorldSeriesApplicationError::SourceUnavailable)
     ));
-    assert!(repository.list(user).await.unwrap().is_empty());
-    let mut series = handler
-        .create(user, command(source, "Confirmed series"))
-        .await
-        .unwrap();
+    let mut series = handler.bind_ready_source(user, pending.id).await.unwrap();
     // PostgreSQL timestamptz stores microseconds; compare the complete frozen
     // definition at the database's precision without changing runtime values.
     series.created_at = series
@@ -232,7 +277,25 @@ pub async fn run(pool: &PgPool, user: Uuid, other_user: Uuid, source: Uuid) {
         repository.find_for_novel(user, source).await.unwrap(),
         Some(series.clone())
     );
-    assert_eq!(series.source_template, template);
+    assert_eq!(series.source_template, Some(template.clone()));
+    assert_eq!(
+        handler.bind_ready_source(user, pending.id).await.unwrap(),
+        series
+    );
+    assert!(
+        sqlx::query("UPDATE user_world_series SET source_template = NULL WHERE id = $1")
+            .bind(series.id)
+            .execute(pool)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("UPDATE user_world_series SET name = 'rewritten' WHERE id = $1")
+            .bind(series.id)
+            .execute(pool)
+            .await
+            .is_err()
+    );
     assert!(repository
         .find(other_user, series.id)
         .await
@@ -570,10 +633,11 @@ pub async fn run(pool: &PgPool, user: Uuid, other_user: Uuid, source: Uuid) {
         name: "Forged source".into(),
         background: series.background.clone(),
         revision: 1,
-        source_template: template.clone(),
+        source_novel_id: source,
+        source_template: Some(template.clone()),
         created_at: Utc::now(),
     };
-    forged.source_template.action_rules[0].difficulty_class += 1;
+    forged.source_template.as_mut().unwrap().action_rules[0].difficulty_class += 1;
     assert_eq!(
         repository.create(user, &forged).await.unwrap(),
         CreateWorldSeriesResult::SourceUnavailable
