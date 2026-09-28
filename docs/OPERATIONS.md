@@ -246,6 +246,11 @@ check for a new advanced turn; frozen decisions replay without another call.
 Both names refer to the same decision capability; configuration still uses
 `LAYA_API_URL` and `LAYA_API_KEY`. No semantic-quality qualification is implied.
 
+An original player may enter with no initial place. Deploy Narrative, Agent,
+and frontend together while ingress is quiesced. Once a `null` player location
+is stored, an older runtime that requires a place cannot safely read it;
+recovery requires a compatible forward release.
+
 ### Migration 0002 rejects a legacy progress row
 
 Migration 0002 replay must preserve import-created progress metadata for

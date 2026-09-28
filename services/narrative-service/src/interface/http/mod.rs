@@ -213,7 +213,7 @@ pub struct CreatePlayerEntityRequest {
     pub name: String,
     pub background: String,
     pub capabilities: Vec<String>,
-    pub location_id: String,
+    pub location_id: Option<String>,
     pub inventory: Vec<String>,
     #[serde(default)]
     pub rules: PlayerRuleProfile,

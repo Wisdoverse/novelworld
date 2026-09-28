@@ -881,7 +881,7 @@ describe('ReaderPage progress gate', () => {
     expect(pendingEntry.hasAttribute('disabled')).toBe(true);
     expect(mocks.playerEntryCheckpoint).toBe(1);
     for (const label of [
-      '入场章节', '名字', '背景', '能力（用逗号分隔）', '初始地点', '随身物品（可选，用逗号分隔）',
+      '入场章节', '名字', '背景', '能力（用逗号分隔）', /初始地点/, '随身物品（可选，用逗号分隔）',
     ]) {
       expect((screen.getByLabelText(label) as HTMLInputElement).hasAttribute('disabled')).toBe(true);
     }

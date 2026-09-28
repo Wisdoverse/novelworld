@@ -349,7 +349,7 @@ pub struct ActionAdjudicationContext {
     pub kind: WorldActionKind,
     pub intent: String,
     pub target: Option<String>,
-    pub location: String,
+    pub location: Option<String>,
     pub background: String,
     pub capabilities: Vec<String>,
     pub inventory: Vec<String>,
@@ -622,12 +622,17 @@ pub fn build_action_adjudication_context(
         kind: action.kind,
         intent: action.intent.clone(),
         target,
-        location: context
-            .locations
-            .iter()
-            .find(|item| item.id == player.location_id)?
-            .name
-            .clone(),
+        location: match player.location_id.as_deref() {
+            Some(id) => Some(
+                context
+                    .locations
+                    .iter()
+                    .find(|item| item.id == id)?
+                    .name
+                    .clone(),
+            ),
+            None => None,
+        },
         background: player.background.clone(),
         capabilities: player.capabilities.clone(),
         inventory: player.inventory.clone(),
@@ -947,7 +952,7 @@ mod tests {
             "云舟".into(),
             "远行者".into(),
             vec!["观察".into()],
-            "gate".into(),
+            Some("gate".into()),
             vec![],
             profile,
         )

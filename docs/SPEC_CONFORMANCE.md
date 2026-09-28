@@ -258,6 +258,13 @@ state in two places.
   world action also revalidates the full committed prefix against the sealed
   entry checkpoint; inconsistent legacy state conflicts before provider
   invocation or world commit rather than projecting a fact at a lower chapter.
+- Original-player entry accepts `location_id: null` when no Canon place is
+  visible at the chosen checkpoint or the reader leaves it unspecified. A
+  supplied place is still checked against that checkpoint, so future-only
+  names remain hidden and forged IDs fail before persistence. Local Narrative
+  tests cover empty-list creation, exact retry, world entry and forged-ID
+  rejection; Agent's private context decoder accepts the absent location, and
+  frontend component tests cover empty-list submission and display.
 - Browser principal transitions fence delayed protected responses by the
   initiating bearer and, when known, user id. Tests hold an A-session `401`,
   identity refresh, account deletion, and account export across a B login: B's

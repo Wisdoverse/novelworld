@@ -119,7 +119,7 @@ impl WorldStateRepository for PgWorldStateRepository {
                     &player.name,
                     &player.background,
                     &player.capabilities,
-                    &player.location_id,
+                    player.location_id.as_deref(),
                     &player.inventory,
                 )
                 || !existing.matches_rules(&player.rules)

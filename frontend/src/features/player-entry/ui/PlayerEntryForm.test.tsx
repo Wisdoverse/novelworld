@@ -39,6 +39,35 @@ describe('PlayerEntryForm advanced rules', () => {
     mocks.mutate.mockImplementation((_input, options) => options.onSuccess(template));
   });
 
+  it('creates a character without an initial location when none are available', async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(
+      <PlayerEntryForm
+        novelId="novel"
+        checkpointChapter={1}
+        unlockedThroughChapter={1}
+        locations={[]}
+        isPending={false}
+        isTimelineLocked={false}
+        onCheckpointChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    expect((screen.getByRole('combobox', { name: /初始地点/ }) as HTMLSelectElement).value)
+      .toBe('');
+    expect(screen.getByRole('button', { name: '进入故事' }).hasAttribute('disabled')).toBe(false);
+    fireEvent.change(screen.getByLabelText('名字'), { target: { value: '燕七' } });
+    fireEvent.change(screen.getByLabelText('背景'), { target: { value: '独自行走江湖' } });
+    fireEvent.change(screen.getByLabelText('能力（用逗号分隔）'), { target: { value: '听风' } });
+    fireEvent.click(screen.getByRole('button', { name: '进入故事' }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      name: '燕七',
+      location_id: null,
+    })));
+  });
+
   it('explains locked rules and lets the reader return to narrative mode', () => {
     mocks.error = new AxiosError('Request failed', undefined, undefined, undefined, {
       status: 422,

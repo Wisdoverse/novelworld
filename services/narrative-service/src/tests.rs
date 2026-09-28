@@ -328,7 +328,7 @@ fn open_world_start_is_first_writer_wins_and_later_calls_resume() {
         "云舟".into(),
         "远行者".into(),
         vec!["观察".into()],
-        "gate".into(),
+        Some("gate".into()),
         vec![],
     )
     .unwrap();

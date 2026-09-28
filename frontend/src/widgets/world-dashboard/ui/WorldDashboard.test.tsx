@@ -67,6 +67,15 @@ describe('WorldDashboard', () => {
     vi.useRealTimers();
   });
 
+  it('shows an unspecified location for a player created before any place is available', () => {
+    render(<WorldDashboard novelId="novel" view={{
+      ...view,
+      player: { ...view.player, location_id: null },
+      session: { ...view.session, entry_context: { ...view.session.entry_context, locations: [] } },
+    }} />);
+    expect(screen.getByText(/当前地点 未指定/)).toBeTruthy();
+  });
+
   it('keeps canon provenance distinct and retries a failed turn with the same key', async () => {
     mocks.submit.mockRejectedValue({ outcomeUnknown: true, message: 'offline' });
     const page = render(<WorldDashboard novelId="novel" view={view} />);

@@ -253,7 +253,7 @@ export function WorldDashboard({
           {view.player.name} 的开放世界
         </h2>
         <p className="mt-2 text-sm text-[#5f6368]">
-          世界时间 {view.session.world_time} · 已完成 {view.session.turn_number} 回合 · 当前地点 {location?.name ?? view.player.location_id}
+          世界时间 {view.session.world_time} · 已完成 {view.session.turn_number} 回合 · 当前地点 {location?.name ?? view.player.location_id ?? '未指定'}
         </p>
       </div>
 
