@@ -65,6 +65,13 @@ pub trait WorldSeriesRepository: Send + Sync {
     ) -> Result<Vec<crate::domain::entities::world_series::WorldSeries>>;
     /// Owner-scoped book-to-series associations for advisory candidate grouping.
     async fn memberships(&self, user_id: Uuid) -> Result<Vec<(Uuid, Uuid)>>;
+    /// Bounded, owner-scoped members of one confirmed series, source first.
+    async fn member_novels(
+        &self,
+        user_id: Uuid,
+        series_id: Uuid,
+        limit: usize,
+    ) -> Result<Vec<Uuid>>;
     async fn find(
         &self,
         user_id: Uuid,

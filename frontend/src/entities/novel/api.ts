@@ -8,6 +8,7 @@ import type {
   Character,
   WorldSeries,
   WorldSeriesBackgroundDraft,
+  SeriesBackgroundDraft,
   WorldSeriesSuggestion,
 } from '@/shared/types';
 
@@ -80,6 +81,15 @@ export function useWorldSeriesBackgroundDraft() {
     retry: false,
     mutationFn: (novelId: string) => apiClient
       .get<WorldSeriesBackgroundDraft>(`/novels/${novelId}/world-series/background-draft`)
+      .then(response => response.data),
+  });
+}
+
+export function useSeriesBackgroundDraft() {
+  return useMutation({
+    retry: false,
+    mutationFn: (seriesId: string) => apiClient
+      .get<SeriesBackgroundDraft>(`/novels/world-series/${seriesId}/background-draft`)
       .then(response => response.data),
   });
 }

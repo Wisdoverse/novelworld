@@ -1346,6 +1346,15 @@ within the 2,000-character background bound, use `no-store`, and dispatch no
 provider work. It MUST NOT save or share the draft before the reader explicitly
 confirms the background, or expose draft content as matching evidence. If extraction is unavailable, manual entry remains
 possible; a suggested series match never confirms the background.
+For a pending series, Novel MAY instead compose a bounded reader-requested draft
+from every confirmed member's saved extraction. It MUST verify ownership and
+Ready access for every included book, report which members supplied evidence,
+and fail rather than silently omit a missing or over-limit member. The draft is
+editable before confirmation; it is a compact overview, not proof that every
+book has identical characters, chronology, or world rules. A target book's
+Canon owns its own changes and takes precedence over shared background. Later
+plot secrets MUST NOT become opening knowledge solely because they appeared in
+the draft; the reader reviews and removes such material before confirmation.
 
 When a series-bound profile or session is resolved, Narrative MUST obtain the
 series snapshot through Novel's HTTP contract. Source-book canon and target-book

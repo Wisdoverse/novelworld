@@ -80,6 +80,10 @@ fn routes() -> Router<AppState> {
             put(world_series::confirm_background),
         )
         .route(
+            "/novels/world-series/{id}/background-draft",
+            get(world_series::series_background_draft),
+        )
+        .route(
             "/novels/{id}/world-series",
             get(world_series::get_for_novel).put(world_series::associate),
         )
