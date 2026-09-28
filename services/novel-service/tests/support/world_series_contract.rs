@@ -114,7 +114,7 @@ impl SeriesMatcherPort for MatcherSpy {
 fn command(source: Uuid, name: &str) -> CreateWorldSeries {
     CreateWorldSeries {
         name: name.into(),
-        background: "用户确认的共同世界设定".into(),
+        background: Some("用户确认的共同世界设定".into()),
         source_novel_id: source,
         canon_model_version: None,
     }
@@ -965,6 +965,78 @@ pub async fn run(pool: &PgPool, user: Uuid, other_user: Uuid, source: Uuid) {
     assert!(matches!(overflow.status, SeriesSuggestionStatus::Uncertain));
     assert!(matches!(overflow.reason, SeriesMatchReason::TooManyBooks));
     assert_eq!(matcher.0.load(Ordering::SeqCst), before_overflow);
+
+    let mut pending_command = command(extra_books[1], "Pending shared background");
+    pending_command.background = None;
+    let pending_background = handler.create(user, pending_command).await.unwrap();
+    assert_eq!(pending_background.background, None);
+    assert!(pending_background.setting().is_none());
+    assert!(pending_background.rules_for(target).is_err());
+    handler
+        .associate(user, target, Some(pending_background.id))
+        .await
+        .unwrap();
+    assert_eq!(
+        repository
+            .find_for_novel(user, target)
+            .await
+            .unwrap()
+            .unwrap()
+            .background,
+        None
+    );
+    assert!(matches!(
+        handler
+            .confirm_background(other_user, pending_background.id, "Shared facts".into())
+            .await,
+        Err(WorldSeriesApplicationError::NotFound)
+    ));
+    let malformed =
+        sqlx::query("UPDATE user_world_series SET source_template = '{}'::jsonb WHERE id = $1")
+            .bind(pending_background.id)
+            .execute(pool)
+            .await
+            .unwrap_err();
+    assert_eq!(
+        malformed.as_database_error().unwrap().code().as_deref(),
+        Some("55000")
+    );
+    let mut ready_source = source_template(extra_books[1]);
+    ready_source.canon_model_version = 2;
+    sqlx::query("INSERT INTO novel_game_rule_templates (novel_id,canon_model_version,schema_version,prompt_version,status,attempt,content,completed_at) VALUES ($1,2,1,'novel-game-rules-v2','ready',1,$2,NOW())")
+        .bind(extra_books[1])
+        .bind(serde_json::to_value(&ready_source).unwrap())
+        .execute(pool)
+        .await
+        .unwrap();
+    let bound_before_background = handler
+        .bind_ready_source(user, pending_background.id)
+        .await
+        .unwrap();
+    assert_eq!(bound_before_background.source_template, Some(ready_source));
+    assert!(bound_before_background.rules_for(target).is_err());
+    let (first, retry) = tokio::join!(
+        handler.confirm_background(user, pending_background.id, "Shared facts".into()),
+        handler.confirm_background(user, pending_background.id, "Shared facts".into())
+    );
+    let confirmed = first.unwrap();
+    assert_eq!(retry.unwrap(), confirmed);
+    assert_eq!(confirmed.background.as_deref(), Some("Shared facts"));
+    assert_eq!(confirmed.setting().unwrap().background, "Shared facts");
+    assert!(confirmed.rules_for(target).is_ok());
+    assert_eq!(
+        handler
+            .confirm_background(user, pending_background.id, "Shared facts".into())
+            .await
+            .unwrap(),
+        confirmed
+    );
+    assert!(matches!(
+        handler
+            .confirm_background(user, pending_background.id, "Changed facts".into())
+            .await,
+        Err(WorldSeriesApplicationError::BackgroundConflict)
+    ));
     // The caller deletes fixture users to verify account cascades and cleanup.
     sqlx::query("DELETE FROM novels WHERE id = $1")
         .bind(target)

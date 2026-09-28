@@ -46,6 +46,13 @@ pub trait WorldSeriesRepository: Send + Sync {
         user_id: Uuid,
         series: &crate::domain::entities::world_series::WorldSeries,
     ) -> Result<CreateWorldSeriesResult>;
+    /// Confirm a pending background once; an exact retry is idempotent.
+    async fn confirm_background(
+        &self,
+        user_id: Uuid,
+        series_id: Uuid,
+        background: &str,
+    ) -> Result<ConfirmWorldSeriesBackgroundResult>;
     /// Bind a pending series to the exact currently Ready source template once.
     async fn bind_ready_source(
         &self,
@@ -82,6 +89,13 @@ pub enum CreateWorldSeriesResult {
     Created,
     SourceUnavailable,
     SourceAlreadyAssociated,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfirmWorldSeriesBackgroundResult {
+    Confirmed(Box<crate::domain::entities::world_series::WorldSeries>),
+    NotFound,
+    Conflict,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

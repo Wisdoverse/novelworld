@@ -4,6 +4,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { Loader2, Sparkles, X } from 'lucide-react';
 import {
   useAssociateNovelWorldSeries,
+  useConfirmWorldSeriesBackground,
   useCreateWorldSeries,
   useNovelWorldSeries,
   useSuggestNovelWorldSeries,
@@ -87,8 +88,11 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
   const suggest = useSuggestNovelWorldSeries();
   const suggestDeepSeek = useSuggestNovelWorldSeriesDeepSeek();
   const create = useCreateWorldSeries(principalId);
+  const confirmBackground = useConfirmWorldSeriesBackground(principalId);
   const associate = useAssociateNovelWorldSeries(principalId, novel.id);
-  const pendingSeries = currentSeries.data?.source_template === null ? currentSeries.data : undefined;
+  const backgroundPending = currentSeries.data?.background === null ? currentSeries.data : undefined;
+  const pendingSeries = currentSeries.data?.background !== null && currentSeries.data?.source_template === null
+    ? currentSeries.data : undefined;
   const pendingSource = readyNovels.find(book => book.id === pendingSeries?.source_novel_id);
   const generateRules = useGenerateGameRules(pendingSeries?.source_novel_id ?? '');
   const [suggestion, setSuggestion] = useState<WorldSeriesSuggestion>();
@@ -96,13 +100,14 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
   const [creating, setCreating] = useState(false);
   const [seriesName, setSeriesName] = useState('');
   const [seriesBackground, setSeriesBackground] = useState('');
+  const [backgroundDraft, setBackgroundDraft] = useState('');
   const [sourceNovelId, setSourceNovelId] = useState('');
   const [createdSeriesId, setCreatedSeriesId] = useState<string>();
   const [createdSeries, setCreatedSeries] = useState<WorldSeries>();
   const [saving, setSaving] = useState(false);
   const selection = selectedSeriesId ?? currentSeries.data?.id ?? '';
   const isPending = saving || suggest.isPending || suggestDeepSeek.isPending
-    || create.isPending || associate.isPending || generateRules.isPending;
+    || create.isPending || associate.isPending || confirmBackground.isPending || generateRules.isPending;
   const canUseDeepSeek = suggestion?.method === 'deepseek'
     ? suggestion.status === 'in_progress'
     : suggestion?.status === 'uncertain'
@@ -172,7 +177,7 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
   };
 
   const createAndAssociate = async () => {
-    if (!seriesName.trim() || !seriesBackground.trim() || !sourceNovelId || !ensurePrincipal()) return;
+    if (!seriesName.trim() || !sourceNovelId || !ensurePrincipal()) return;
     setSaving(true);
     try {
       let series: WorldSeries | undefined;
@@ -181,7 +186,7 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
       } else {
         series = await create.mutateAsync({
           name: seriesName.trim(),
-          background: seriesBackground.trim(),
+          background: seriesBackground.trim() || null,
           source_novel_id: sourceNovelId,
         });
         setCreatedSeriesId(series.id);
@@ -201,6 +206,23 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
       if (ensurePrincipal()) toast.error(seriesErrorMessage(error));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const confirmSharedBackground = async () => {
+    if (!backgroundPending || !backgroundDraft.trim() || !ensurePrincipal()) return;
+    try {
+      await confirmBackground.mutateAsync({ seriesId: backgroundPending.id, background: backgroundDraft.trim() });
+      if (!ensurePrincipal()) return;
+      toast.success('共享世界背景已确认');
+    } catch (error) {
+      if (!ensurePrincipal()) return;
+      if (getApiErrorCode(error) === 'series_background_conflict') {
+        await Promise.all([currentSeries.refetch(), seriesList.refetch()]);
+        toast.error('共享背景已在其他页面确认，确认后不能修改。');
+      } else {
+        toast.error('背景确认失败，请稍后重试。');
+      }
     }
   };
 
@@ -235,7 +257,7 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
                 关联系列 / 共享世界背景
               </Dialog.Title>
               <Dialog.Description id="world-series-description" className="mt-2 text-sm leading-6 text-[#5f6368]">
-                为《{novel.title}》选择同系列背景。系统只提供建议；关联、背景和规则来源都由你确认。
+                为《{novel.title}》选择系列。系统只提供建议；关联、共享背景和规则来源都由你确认。
               </Dialog.Description>
             </div>
             <Dialog.Close asChild>
@@ -244,7 +266,7 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
           </div>
 
           <p className="mt-4 rounded-lg bg-[#f8fafd] p-3 text-xs leading-5 text-[#5f6368]">
-            系列可先共享基础背景，D20 基础规则以后由你明确生成并固定到来源书；属性点、装备、阅读进度和个人世界状态保持独立。
+            系列可先关联小说，稍后确认共享背景；D20 基础规则可在背景确认后从来源书生成。属性点、装备、阅读进度和个人世界状态保持独立。
           </p>
 
           <section className="mt-5 space-y-3" aria-label="系列识别建议">
@@ -335,7 +357,7 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
               >
                 <option value="">暂不关联</option>
                 {(seriesList.data ?? []).map(series => (
-                  <option key={series.id} value={series.id}>{series.name}{series.source_template ? '' : '（D20 待生成）'}</option>
+                  <option key={series.id} value={series.id}>{series.name}{series.background === null ? '（背景待确认）' : series.source_template ? '' : '（D20 待生成）'}</option>
                 ))}
               </select>
             </label>
@@ -371,7 +393,7 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
             <section className="mt-5 space-y-3 rounded-xl border border-[#dadce0] p-4" aria-label="创建共享系列">
               <h3 className="text-sm font-semibold text-[#1f1f1f]">创建系列并确认关联</h3>
               <p className="text-xs leading-5 text-[#5f6368]">
-                来源书和当前书将加入同一系列。基础背景立即共享；D20 基础规则可稍后从来源书生成。
+                来源书和当前书将加入同一系列。背景留空时只建立分组；确认共享背景后才会共享背景或显示 D20 状态。D20 基础规则可稍后从来源书生成。
               </p>
               <label className="block text-sm font-medium text-[#3c4043]">
                 系列名称
@@ -381,8 +403,9 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
                 共享世界背景（最多 2000 字）
                 <textarea className="field-control mt-1 min-h-28" maxLength={2000} value={seriesBackground} disabled={Boolean(createdSeriesId)} onChange={event => setSeriesBackground(event.target.value)} />
               </label>
+              <p className="text-xs text-[#5f6368]">留空可稍后确认；现在填写并创建后即固定，不能修改。</p>
               <label className="block text-sm font-medium text-[#3c4043]">
-                世界观及未来 D20 规则来源书
+                系列来源书（未来 D20 规则来源）
                 <select className="field-control mt-1" value={sourceNovelId} disabled={Boolean(createdSeriesId)} onChange={event => setSourceNovelId(event.target.value)}>
                   <option value="">选择一本已就绪的书</option>
                   {readyNovels.map(book => (
@@ -396,7 +419,7 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
               <button
                 type="button"
                 className="primary-action"
-                disabled={isPending || !seriesName.trim() || !seriesBackground.trim() || !sourceNovelId}
+                disabled={isPending || !seriesName.trim() || !sourceNovelId}
                 onClick={() => void createAndAssociate()}
               >
                 {create.isPending || associate.isPending || saving ? <Loader2 size={15} className="animate-spin" /> : null}
@@ -405,7 +428,22 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
             </section>
           ) : null}
 
-          {currentSeries.data ? (
+          {backgroundPending ? (
+            <section className="mt-4 space-y-2 rounded-lg border border-[#dadce0] p-4" aria-label="确认共享背景">
+              <p className="text-sm font-medium text-[#3c4043]">当前系列仅用于分组；共享世界背景尚未确认，D20 状态也暂不显示。</p>
+              <label className="block text-sm font-medium text-[#3c4043]">
+                共享世界背景（最多 2000 字）
+                <textarea className="field-control mt-1 min-h-28" maxLength={2000} value={backgroundDraft} onChange={event => setBackgroundDraft(event.target.value)} />
+              </label>
+              <p className="text-xs text-[#5f6368]">确认后不能修改；仅之后进入的故事使用共享背景，已有故事保持原有设定。</p>
+              <button type="button" className="primary-action" disabled={isPending || !backgroundDraft.trim()} onClick={() => void confirmSharedBackground()}>
+                {confirmBackground.isPending ? <Loader2 size={15} className="animate-spin" /> : null}
+                确认共享背景
+              </button>
+            </section>
+          ) : null}
+
+          {currentSeries.data && !backgroundPending ? (
             <div className="mt-4 space-y-2 text-xs text-[#5f6368]" role="status">
               <p>当前系列：{currentSeries.data.name}（背景共享；角色和进度独立）。</p>
               {pendingSeries ? (

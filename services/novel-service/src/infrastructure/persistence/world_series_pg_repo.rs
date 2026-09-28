@@ -7,7 +7,9 @@ use uuid::Uuid;
 use crate::domain::ports::series_matcher::{BeginSeriesMatch, SeriesMatchMethod, SeriesSuggestion};
 use crate::domain::{
     entities::world_series::WorldSeries,
-    repositories::{CreateWorldSeriesResult, WorldSeriesRepository},
+    repositories::{
+        ConfirmWorldSeriesBackgroundResult, CreateWorldSeriesResult, WorldSeriesRepository,
+    },
 };
 
 pub struct PgWorldSeriesRepository {
@@ -23,7 +25,7 @@ impl PgWorldSeriesRepository {
 struct SeriesRow {
     id: Uuid,
     name: String,
-    background: String,
+    background: Option<String>,
     revision: i32,
     source_novel_id: Uuid,
     source_template: Option<serde_json::Value>,
@@ -155,6 +157,48 @@ impl WorldSeriesRepository for PgWorldSeriesRepository {
             transaction.commit().await?;
             Ok(CreateWorldSeriesResult::Created)
         }).await.context("series creation deadline exceeded")?
+    }
+
+    async fn confirm_background(
+        &self,
+        user_id: Uuid,
+        series_id: Uuid,
+        background: &str,
+    ) -> Result<ConfirmWorldSeriesBackgroundResult> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let updated = sqlx::query_as::<_, SeriesRow>(
+                r#"UPDATE user_world_series SET background = $3
+                   WHERE user_id = $1 AND id = $2 AND background IS NULL
+                   RETURNING id, name, background, revision, source_novel_id, source_template, created_at"#,
+            )
+            .bind(user_id)
+            .bind(series_id)
+            .bind(background)
+            .fetch_optional(&self.pool)
+            .await?;
+            if let Some(row) = updated {
+                return Ok(ConfirmWorldSeriesBackgroundResult::Confirmed(Box::new(
+                    row.decode()?,
+                )));
+            }
+            let existing = sqlx::query_as::<_, SeriesRow>(
+                "SELECT id, name, background, revision, source_novel_id, source_template, created_at \
+                 FROM user_world_series WHERE user_id = $1 AND id = $2",
+            )
+            .bind(user_id)
+            .bind(series_id)
+            .fetch_optional(&self.pool)
+            .await?;
+            Ok(match existing {
+                Some(row) if row.background.as_deref() == Some(background) => {
+                    ConfirmWorldSeriesBackgroundResult::Confirmed(Box::new(row.decode()?))
+                }
+                Some(_) => ConfirmWorldSeriesBackgroundResult::Conflict,
+                None => ConfirmWorldSeriesBackgroundResult::NotFound,
+            })
+        })
+        .await
+        .context("series background confirmation deadline exceeded")?
     }
 
     async fn bind_ready_source(

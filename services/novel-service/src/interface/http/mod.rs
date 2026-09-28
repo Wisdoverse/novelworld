@@ -5,7 +5,7 @@ use axum::{
     },
     http::{header::CACHE_CONTROL, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Router,
 };
 use futures::StreamExt;
@@ -36,7 +36,6 @@ use crate::domain::services::canon_story_context::{
     build_canon_context, build_world_entry_context, original_player_name_available,
 };
 use crate::domain::value_objects::{DeviationMode, NovelStatus};
-use axum::routing::put;
 mod world_series;
 
 #[derive(Clone)]
@@ -75,6 +74,10 @@ fn routes() -> Router<AppState> {
         .route(
             "/novels/world-series",
             get(world_series::list).post(world_series::create),
+        )
+        .route(
+            "/novels/world-series/{id}/background",
+            put(world_series::confirm_background),
         )
         .route(
             "/novels/{id}/world-series",
@@ -195,6 +198,11 @@ async fn request_game_rule_template(
     if query.prefer_series && query.version() == BASIC_GAME_RULE_PROMPT_VERSION {
         match state.series_handler.get_for_novel(user_id, novel_id).await {
             Ok(Some(series)) => {
+                if series.background.is_none() {
+                    return world_series::error(
+                        crate::application::world_series::WorldSeriesApplicationError::BackgroundPending,
+                    );
+                }
                 let series = if series.source_template.is_none() {
                     match state
                         .series_handler
@@ -720,7 +728,7 @@ async fn get_world_entry_context(
                 Ok(series) => series,
                 Err(error) => return world_series::error(error),
             };
-            context.series_setting = series.map(|series| series.setting());
+            context.series_setting = series.and_then(|series| series.setting());
             let latest = match state.progress_handler.get(user_id, novel_id).await {
                 Ok(latest) => latest,
                 Err(error) => return progress_error_response(error),

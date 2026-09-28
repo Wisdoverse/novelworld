@@ -23,6 +23,8 @@ pub(super) fn error(error: WorldSeriesApplicationError) -> Response {
         WorldSeriesApplicationError::NotFound => (StatusCode::NOT_FOUND, "not_found", "Novel or series not found"),
         WorldSeriesApplicationError::SourceUnavailable => (StatusCode::CONFLICT, "series_rule_source_unavailable", "Series source advanced rules are not ready"),
         WorldSeriesApplicationError::SourceAlreadyAssociated => (StatusCode::CONFLICT, "source_already_in_series", "Source novel already belongs to a series; select that series or explicitly clear its association"),
+        WorldSeriesApplicationError::BackgroundConflict => (StatusCode::CONFLICT, "series_background_conflict", "Series background was already confirmed"),
+        WorldSeriesApplicationError::BackgroundPending => (StatusCode::CONFLICT, "series_background_pending", "Confirm the shared series background before using shared rules"),
         WorldSeriesApplicationError::NovelNotReady => (StatusCode::CONFLICT, "canon_unavailable", "Novel is not ready"),
         WorldSeriesApplicationError::Repository(_) => (StatusCode::SERVICE_UNAVAILABLE, "series_unavailable", "World series is temporarily unavailable"),
     };
@@ -39,6 +41,31 @@ pub(super) async fn create(
     };
     match state.series_handler.create(user_id, command).await {
         Ok(series) => private((StatusCode::CREATED, Json(series)).into_response()),
+        Err(err) => error(err),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ConfirmBackground {
+    background: String,
+}
+
+pub(super) async fn confirm_background(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(series_id): Path<Uuid>,
+    Json(command): Json<ConfirmBackground>,
+) -> Response {
+    let Some(user_id) = extract_user_id(&headers) else {
+        return private(api_error(StatusCode::UNAUTHORIZED, "Missing user ID"));
+    };
+    match state
+        .series_handler
+        .confirm_background(user_id, series_id, command.background)
+        .await
+    {
+        Ok(series) => private(Json(series).into_response()),
         Err(err) => error(err),
     }
 }

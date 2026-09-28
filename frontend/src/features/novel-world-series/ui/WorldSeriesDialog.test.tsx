@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { AxiosError } from 'axios';
 import type { WorldSeries } from '@/shared/types';
 import { WorldSeriesDialog } from './WorldSeriesDialog';
 
@@ -7,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   suggestion: vi.fn(),
   deepSeek: vi.fn(),
   create: vi.fn(),
+  confirmBackground: vi.fn(),
   associate: vi.fn(),
   generateRules: vi.fn(),
   seriesListRefetch: vi.fn(),
@@ -36,6 +38,7 @@ vi.mock('@/entities/novel', () => ({
     isError: mocks.deepSeekError,
   }),
   useCreateWorldSeries: () => ({ mutateAsync: mocks.create, isPending: false }),
+  useConfirmWorldSeriesBackground: () => ({ mutateAsync: mocks.confirmBackground, isPending: false }),
   useAssociateNovelWorldSeries: () => ({ mutateAsync: mocks.associate, isPending: false }),
 }));
 
@@ -99,6 +102,7 @@ describe('WorldSeriesDialog', () => {
     mocks.suggestion.mockReset();
     mocks.deepSeek.mockReset();
     mocks.create.mockReset();
+    mocks.confirmBackground.mockReset();
     mocks.associate.mockReset();
     mocks.generateRules.mockReset();
     mocks.seriesListRefetch.mockReset();
@@ -189,11 +193,49 @@ describe('WorldSeriesDialog', () => {
     fireEvent.click(screen.getByRole('button', { name: '创建系列' }));
     fireEvent.change(screen.getByLabelText('系列名称'), { target: { value: '共同世界' } });
     fireEvent.change(screen.getByLabelText('共享世界背景（最多 2000 字）'), { target: { value: '读者确认的背景' } });
-    fireEvent.change(screen.getByLabelText('世界观及未来 D20 规则来源书'), { target: { value: 'source-book' } });
+    fireEvent.change(screen.getByLabelText('系列来源书（未来 D20 规则来源）'), { target: { value: 'source-book' } });
     fireEvent.click(screen.getByRole('button', { name: '创建系列并关联来源书与当前书' }));
 
     await waitFor(() => expect(mocks.associate).toHaveBeenCalledWith(series.id));
     expect(mocks.generateRules).not.toHaveBeenCalled();
+  });
+
+  it('creates a grouping with null background', async () => {
+    mocks.create.mockResolvedValueOnce({ ...series, background: null, source_template: series.source_template });
+    renderDialog();
+    fireEvent.click(screen.getByRole('button', { name: '创建系列' }));
+    fireEvent.change(screen.getByLabelText('系列名称'), { target: { value: '共同世界' } });
+    fireEvent.change(screen.getByLabelText('系列来源书（未来 D20 规则来源）'), { target: { value: 'source-book' } });
+    fireEvent.click(screen.getByRole('button', { name: '创建系列并关联来源书与当前书' }));
+    await waitFor(() => expect(mocks.create).toHaveBeenCalledWith({
+      name: '共同世界', background: null, source_novel_id: 'source-book',
+    }));
+  });
+
+  it('requires explicit background confirmation before showing background or D20 readiness', async () => {
+    mocks.currentSeries = { ...series, background: null };
+    renderDialog();
+    expect(screen.getByText(/当前系列仅用于分组/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: '确认共享背景' })).toBeTruthy();
+    expect(screen.queryByText('D20 基础规则已从来源书固定到系列。')).toBeNull();
+    fireEvent.change(screen.getByLabelText('共享世界背景（最多 2000 字）'), { target: { value: '确认后的背景' } });
+    fireEvent.click(screen.getByRole('button', { name: '确认共享背景' }));
+    await waitFor(() => expect(mocks.confirmBackground).toHaveBeenCalledWith({
+      seriesId: series.id, background: '确认后的背景',
+    }));
+  });
+
+  it('refreshes a stale pending series after another page has confirmed it', async () => {
+    mocks.currentSeries = { ...series, background: null };
+    mocks.confirmBackground.mockRejectedValue(new AxiosError('conflict', undefined, undefined, undefined, {
+      status: 409,
+      data: { error: { code: 'series_background_conflict' } },
+    } as never));
+    renderDialog();
+    fireEvent.change(screen.getByLabelText('共享世界背景（最多 2000 字）'), { target: { value: 'different facts' } });
+    fireEvent.click(screen.getByRole('button', { name: '确认共享背景' }));
+    await waitFor(() => expect(mocks.currentSeriesRefetch).toHaveBeenCalledOnce());
+    expect(mocks.seriesListRefetch).toHaveBeenCalledOnce();
   });
 
   it('generates D20 rules only after a separate click on a pending series', async () => {
@@ -219,7 +261,7 @@ describe('WorldSeriesDialog', () => {
     fireEvent.click(screen.getByRole('button', { name: '创建系列' }));
     fireEvent.change(screen.getByLabelText('系列名称'), { target: { value: '山海系列' } });
     fireEvent.change(screen.getByLabelText('共享世界背景（最多 2000 字）'), { target: { value: '用户确认的背景' } });
-    fireEvent.change(screen.getByLabelText('世界观及未来 D20 规则来源书'), { target: { value: 'source-book' } });
+    fireEvent.change(screen.getByLabelText('系列来源书（未来 D20 规则来源）'), { target: { value: 'source-book' } });
     fireEvent.click(screen.getByRole('button', { name: '创建系列并关联来源书与当前书' }));
 
     await screen.findByText('系列已创建；确认按钮会重试关联，不会重复创建。');
@@ -248,7 +290,7 @@ describe('WorldSeriesDialog', () => {
     await screen.findByText('系统找到可能的同系列小说。请核对建议并明确确认后再关联。');
     fireEvent.click(screen.getByRole('button', { name: '用此建议创建系列' }));
     expect((screen.getByLabelText('系列名称') as HTMLInputElement).value).toBe('');
-    expect((screen.getByLabelText('世界观及未来 D20 规则来源书') as HTMLSelectElement).value).toBe('source-book');
+    expect((screen.getByLabelText('系列来源书（未来 D20 规则来源）') as HTMLSelectElement).value).toBe('source-book');
     expect(mocks.create).not.toHaveBeenCalled();
     expect(mocks.associate).not.toHaveBeenCalled();
   });

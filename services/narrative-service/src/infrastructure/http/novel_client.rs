@@ -424,6 +424,10 @@ impl ChapterReadRepository for NovelServiceClient {
             {
                 return Err(GameRuleTemplateRequestError::SeriesSourcePending);
             }
+            if status == reqwest::StatusCode::CONFLICT && code == Some("series_background_pending")
+            {
+                return Err(GameRuleTemplateRequestError::SeriesBackgroundPending);
+            }
             if status == reqwest::StatusCode::CONFLICT && code == Some("canon_unavailable") {
                 return Err(GameRuleTemplateRequestError::CanonUnavailable);
             }
@@ -665,31 +669,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_series_rules_keep_a_specific_error_across_http() {
+    async fn pending_series_prerequisites_keep_specific_errors_across_http() {
         use axum::{routing::post, Json, Router};
 
-        let app = Router::new().route(
-            "/internal/novels/{id}/game-rules",
-            post(|| async {
-                (
-                    axum::http::StatusCode::CONFLICT,
-                    Json(serde_json::json!({
-                        "error": {"code": "series_rule_source_unavailable"}
-                    })),
-                )
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let client = NovelServiceClient::new(format!("http://{address}"), "test-token".into());
-        assert!(matches!(
-            client
+        for (code, background_pending) in [
+            ("series_rule_source_unavailable", false),
+            ("series_background_pending", true),
+        ] {
+            let app = Router::new().route(
+                "/internal/novels/{id}/game-rules",
+                post(move || async move {
+                    (
+                        axum::http::StatusCode::CONFLICT,
+                        Json(serde_json::json!({"error": {"code": code}})),
+                    )
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let client = NovelServiceClient::new(format!("http://{address}"), "test-token".into());
+            let result = client
                 .request_game_rule_template(NOVEL_ID, USER_ID, BASIC_GAME_RULE_PROMPT_VERSION)
-                .await,
-            Err(GameRuleTemplateRequestError::SeriesSourcePending)
-        ));
-        server.abort();
+                .await;
+            assert!(if background_pending {
+                matches!(
+                    result,
+                    Err(GameRuleTemplateRequestError::SeriesBackgroundPending)
+                )
+            } else {
+                matches!(
+                    result,
+                    Err(GameRuleTemplateRequestError::SeriesSourcePending)
+                )
+            });
+            server.abort();
+        }
     }
 
     #[tokio::test]

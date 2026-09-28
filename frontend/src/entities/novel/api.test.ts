@@ -15,6 +15,7 @@ import {
   shouldPollNovelList,
   useCharacters,
   useDeleteNovel,
+  useConfirmWorldSeriesBackground,
   useSuggestNovelWorldSeriesDeepSeek,
   useWorldSeriesList,
   validateNovelBatchFiles,
@@ -278,6 +279,32 @@ describe('novel lifecycle pending-turn cleanup', () => {
 });
 
 describe('principal-scoped world-series queries', () => {
+  it('confirms a background once and invalidates the list and every associated novel', async () => {
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: true, retryDelay: 0 } } });
+    const wrapper = ({ children }: PropsWithChildren) => React.createElement(
+      QueryClientProvider, { client: queryClient }, children,
+    );
+    const series = { id: 'series-1', name: 'Series', background: 'Confirmed', source_novel_id: 'source-1' } as WorldSeries;
+    queryClient.setQueryData(novelKeys.worldSeriesList('reader-1'), [series]);
+    queryClient.setQueryData(novelKeys.novelWorldSeries('reader-1', 'novel-1'), series);
+    queryClient.setQueryData(novelKeys.novelWorldSeries('reader-1', 'novel-2'), series);
+    queryClient.setQueryData(novelKeys.novelWorldSeries('reader-2', 'novel-3'), series);
+    const put = vi.spyOn(apiClient, 'put').mockResolvedValue({ data: series } as never);
+    const { result } = renderHook(() => useConfirmWorldSeriesBackground('reader-1'), { wrapper });
+
+    await act(async () => {
+      await result.current.mutateAsync({ seriesId: 'series-1', background: 'Confirmed' });
+    });
+
+    expect(put).toHaveBeenCalledOnce();
+    expect(put).toHaveBeenCalledWith('/novels/world-series/series-1/background', { background: 'Confirmed' });
+    expect(queryClient.getQueryState(novelKeys.worldSeriesList('reader-1'))?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(novelKeys.novelWorldSeries('reader-1', 'novel-1'))?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(novelKeys.novelWorldSeries('reader-1', 'novel-2'))?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(novelKeys.novelWorldSeries('reader-2', 'novel-3'))?.isInvalidated).toBe(false);
+    vi.restoreAllMocks();
+  });
+
   it('keeps a late prior-principal response under its own cache key', async () => {
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },

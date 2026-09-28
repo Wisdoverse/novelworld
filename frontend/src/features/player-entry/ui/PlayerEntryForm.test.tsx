@@ -114,6 +114,29 @@ describe('PlayerEntryForm advanced rules', () => {
     expect(mocks.mutate).not.toHaveBeenCalled();
   });
 
+  it('explains that pending shared background blocks series D20 rules', () => {
+    mocks.error = new AxiosError('Request failed', undefined, undefined, undefined, {
+      status: 409,
+      data: { error: { code: 'series_background_pending', message: 'upstream message' } },
+    } as never);
+    render(
+      <PlayerEntryForm
+        novelId="novel"
+        checkpointChapter={1}
+        unlockedThroughChapter={1}
+        locations={[{ id: 'temple', name: '破庙' }]}
+        isPending={false}
+        isTimelineLocked={false}
+        onCheckpointChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole('checkbox', { name: /启用小说专属 D20/ }));
+    expect(screen.getByRole('alert').textContent).toContain('确认共享世界背景');
+    fireEvent.click(screen.getByRole('checkbox', { name: /启用小说专属 D20/ }));
+    expect(screen.getByRole('button', { name: '进入故事' }).hasAttribute('disabled')).toBe(false);
+  });
+
   it('asks the reader to wait while the novel canon is still being analyzed', () => {
     mocks.error = new AxiosError('Request failed', undefined, undefined, undefined, {
       status: 409,

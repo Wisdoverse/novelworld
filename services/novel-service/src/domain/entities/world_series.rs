@@ -62,7 +62,7 @@ impl SeriesRuleContext {
 pub struct WorldSeries {
     pub id: Uuid,
     pub name: String,
-    pub background: String,
+    pub background: Option<String>,
     pub revision: i32,
     pub source_novel_id: Uuid,
     pub source_template: Option<GameRuleTemplate>,
@@ -74,15 +74,15 @@ pub struct WorldSeries {
 pub struct WorldSeriesError(pub String);
 
 impl WorldSeries {
-    pub fn setting(&self) -> SeriesSetting {
-        SeriesSetting {
+    pub fn setting(&self) -> Option<SeriesSetting> {
+        self.background.as_ref().map(|background| SeriesSetting {
             binding: SeriesRuleBinding {
                 series_id: self.id,
                 revision: self.revision,
             },
             name: self.name.clone(),
-            background: self.background.clone(),
-        }
+            background: background.clone(),
+        })
     }
     pub fn validate(&self) -> Result<(), WorldSeriesError> {
         if self.id.is_nil() || self.source_novel_id.is_nil() || self.revision != 1 {
@@ -91,7 +91,9 @@ impl WorldSeries {
             ));
         }
         validate_text(&self.name, 80)?;
-        validate_text(&self.background, 2_000)?;
+        if let Some(background) = &self.background {
+            validate_text(background, 2_000)?;
+        }
         if let Some(template) = &self.source_template {
             if template.novel_id != self.source_novel_id
                 || template.prompt_version != BASIC_GAME_RULE_PROMPT_VERSION
@@ -110,6 +112,10 @@ impl WorldSeries {
 
     pub fn rules_for(&self, target_novel_id: Uuid) -> Result<GameRuleTemplate, WorldSeriesError> {
         self.validate()?;
+        let background = self
+            .background
+            .as_ref()
+            .ok_or_else(|| WorldSeriesError("series background is pending".into()))?;
         let mut template = self
             .source_template
             .clone()
@@ -122,7 +128,7 @@ impl WorldSeries {
             },
             target_novel_id,
             name: self.name.clone(),
-            background: self.background.clone(),
+            background: background.clone(),
         });
         template
             .validate(i32::MAX)
@@ -180,7 +186,7 @@ mod tests {
         WorldSeries {
             id: Uuid::new_v4(),
             name: "江湖系列".into(),
-            background: "用户确认的共同设定".into(),
+            background: Some("用户确认的共同设定".into()),
             revision: 1,
             source_novel_id,
             source_template: Some(
@@ -244,9 +250,9 @@ mod tests {
     #[test]
     fn bounded_user_setting_does_not_accept_wrapped_source_or_invalid_text() {
         let mut definition = series();
-        definition.background = "界".repeat(2_001);
+        definition.background = Some("界".repeat(2_001));
         assert!(definition.validate().is_err());
-        definition.background = "界".repeat(2_000);
+        definition.background = Some("界".repeat(2_000));
         assert!(definition.validate().is_ok());
         definition.name = " name ".into();
         assert!(definition.validate().is_err());
@@ -258,7 +264,7 @@ mod tests {
     #[test]
     fn series_setting_contains_only_confirmed_background_and_versioned_binding() {
         let series = series();
-        let setting = series.setting();
+        let setting = series.setting().unwrap();
         setting.validate().unwrap();
         let value = serde_json::to_value(&setting).unwrap();
         let mut keys = value
@@ -283,7 +289,18 @@ mod tests {
         let mut series = series();
         series.source_template = None;
         assert!(series.validate().is_ok());
-        assert_eq!(series.setting().binding.series_id, series.id);
+        assert_eq!(series.setting().unwrap().binding.series_id, series.id);
         assert!(series.rules_for(series.source_novel_id).is_err());
+    }
+
+    #[test]
+    fn pending_background_cannot_supply_setting_or_shared_rules() {
+        let mut series = series();
+        series.background = None;
+        assert!(series.validate().is_ok());
+        assert!(series.setting().is_none());
+        assert!(series.rules_for(Uuid::new_v4()).is_err());
+        series.background = Some("".into());
+        assert!(series.validate().is_err());
     }
 }

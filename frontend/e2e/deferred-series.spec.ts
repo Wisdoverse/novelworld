@@ -54,7 +54,7 @@ test('create shared background first, then explicitly generate source D20 rules'
   await page.getByRole('button', { name: '创建系列', exact: true }).click();
   await page.getByLabel('系列名称').fill(pending.name);
   await page.getByLabel('共享世界背景（最多 2000 字）').fill(pending.background);
-  await page.getByLabel('世界观及未来 D20 规则来源书').selectOption('novel-1');
+  await page.getByLabel('系列来源书（未来 D20 规则来源）').selectOption('novel-1');
   await page.getByRole('button', { name: '创建系列并关联来源书与当前书' }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   expect(generationCalls).toBe(0);

@@ -334,6 +334,13 @@ fn narrative_error_response(error: NarrativeError) -> axum::response::Response {
                 "Generate advanced rules in the source novel first",
             )
         }
+        NarrativeError::SeriesBackgroundPending => {
+            return error_response(
+                StatusCode::CONFLICT,
+                "series_background_pending",
+                "Confirm the shared series background before using shared rules",
+            )
+        }
         NarrativeError::GameRuleCanonUnavailable => {
             return error_response(
                 StatusCode::CONFLICT,
