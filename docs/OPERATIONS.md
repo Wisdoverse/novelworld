@@ -269,8 +269,13 @@ covers repeated full migration replay and detached-shelf preservation. Issue
 
 A low-confidence Laya result is a valid abstention, not an association failure.
 Check the configured endpoint/version and the owned Ready candidate set.
-Author omissions are not proof of a shared author. Recognition sends only the
-reviewed metadata and bounded chapter-1 location/faction names; it does not send
+Book titles may be arbitrary and authors absent; neither is a required match
+key. Novel can rank candidates using internally stored, source-cited whole-book
+location/faction names. Only a unique strong local candidate after a normal
+Laya abstention is shown, labeled as a server heuristic and still requiring
+reader confirmation. Tied, incomplete-Canon or oversized Ready shelves
+abstain; use manual selection rather than retrying paid work. Recognition sends only the reviewed
+metadata and bounded chapter-1 location/faction names; it does not send
 raw excerpts, summaries or later plot. The optional pinned private endpoint
 rejects state overflow instead of silently truncating it. A runtime upgrade
 alone does not qualify matching accuracy.
@@ -288,5 +293,5 @@ to avoid retaining prior-version suggestions. Repeated requests reuse state whil
 current shelf permissions and Ready sources. Apply 0032 before starting the new
 Novel service. Shelf/account deletion and safe export include this owner state.
 See [ADR 0011](./adr/0011-confirmed-series-worlds.md) and
-[matching delivery #438](https://github.com/Wisdoverse/novelworld/issues/438) for
+[arbitrary-title matching #440](https://github.com/Wisdoverse/novelworld/issues/440) for
 source, test, CI, deployment and semantic-quality evidence limits.

@@ -134,6 +134,14 @@ pub trait NovelRepository: Send + Sync {
     async fn find_by_id(&self, id: Uuid) -> Result<Option<Novel>>;
     async fn find_for_user(&self, user_id: Uuid, novel_id: Uuid) -> Result<Option<Novel>>;
     async fn find_by_user(&self, user_id: Uuid) -> Result<Vec<Novel>>;
+    /// Ready shelf books for private series matching, in stable shelf order.
+    /// The caller requests one extra row to detect an overlarge corpus.
+    async fn find_ready_for_series(
+        &self,
+        user_id: Uuid,
+        exclude_novel_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<Novel>>;
     async fn find_catalog(&self) -> Result<Vec<Novel>>;
     async fn attach_to_user(
         &self,

@@ -34,6 +34,12 @@ function seriesErrorMessage(error: unknown) {
 }
 
 function suggestionMessage(result: WorldSeriesSuggestion | undefined) {
+  if (result?.reason === 'local_evidence') {
+    return '服务器依据小说原文证据给出候选；这不是 Laya 结论。请核对后手动确认关联。';
+  }
+  if (result?.reason === 'too_many_books') {
+    return '可参与识别的已就绪书籍数量超过上限。请手动选择已有系列或创建系列。';
+  }
   if (result?.method === 'deepseek') {
     switch (result.reason) {
       case 'not_configured':
@@ -94,7 +100,7 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
       setCreating(false);
       return;
     }
-    setSeriesName(value.name);
+    setSeriesName('');
     if (readyNovels.some(book => book.id === value.source_novel_id)) {
       setSourceNovelId(value.source_novel_id);
     }

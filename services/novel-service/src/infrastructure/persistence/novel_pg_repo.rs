@@ -566,6 +566,31 @@ impl NovelRepository for NovelPgRepository {
         Ok(rows.into_iter().map(|r| r.into()).collect())
     }
 
+    async fn find_ready_for_series(
+        &self,
+        user_id: Uuid,
+        exclude_novel_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<Novel>> {
+        ensure!((1..=129).contains(&limit), "invalid series shelf limit");
+        let rows = sqlx::query_as::<_, NovelRow>(
+            "SELECT n.id, n.user_id, n.title, n.author, n.cover_url, n.description, n.world_summary, n.genre, \
+                    n.original_file_key, n.total_chapters, n.status::text, n.parse_error, \
+                    n.deviation_mode::text, n.created_at, n.updated_at \
+             FROM user_novels AS shelf \
+             JOIN novels AS n ON n.id = shelf.novel_id \
+             WHERE shelf.user_id = $1 AND n.id <> $2 \
+               AND n.status = 'ready'::novel_status AND n.total_chapters > 0 \
+             ORDER BY shelf.added_at DESC, n.id LIMIT $3",
+        )
+        .bind(user_id)
+        .bind(exclude_novel_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
     async fn find_for_user(&self, user_id: Uuid, novel_id: Uuid) -> Result<Option<Novel>> {
         let row = sqlx::query_as::<_, NovelRow>(
             "SELECT n.id, n.user_id, n.title, n.author, n.cover_url, n.description, n.world_summary, n.genre, \

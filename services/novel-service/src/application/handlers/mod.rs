@@ -4078,6 +4078,15 @@ mod reading_progress_handler_tests {
             unreachable!("unused test repository method")
         }
 
+        async fn find_ready_for_series(
+            &self,
+            _user_id: Uuid,
+            _exclude_novel_id: Uuid,
+            _limit: i64,
+        ) -> Result<Vec<Novel>> {
+            unreachable!("unused test repository method")
+        }
+
         async fn find_catalog(&self) -> Result<Vec<Novel>> {
             unreachable!("unused test repository method")
         }

@@ -488,9 +488,13 @@ ADR 0011 reader-confirmed series worlds are a structural preview within H4,
 not evidence that the horizon is complete. Novel stores immutable safe snapshots
 and private associations; Narrative keeps source and target canon separate and
 freezes setting/rule bindings. Optional recognition uses bounded nonspoiler
-evidence, candidate groups and reader confirmation.
+evidence, source-ranked candidates and reader confirmation.
 [Evidence-backed matching #438](https://github.com/Wisdoverse/novelworld/issues/438)
 adds cached suggestions and an explicit single-attempt DeepSeek second opinion.
+[Arbitrary-title matching #440](https://github.com/Wisdoverse/novelworld/issues/440)
+tracks private source-evidence candidate ranking because uploaded names and
+missing authors cannot be reliable match keys; reader confirmation remains
+mandatory.
 Project fields and the linked issue own execution/CI/deployment status;
 representative match-quality qualification remains separate.
 

@@ -9,6 +9,10 @@ use novel_service::{
     },
     domain::{
         entities::{
+            canon_story_model::{
+                CanonEndingSnapshot, CanonEvent, CanonLocation, CanonStoryContent, CanonStoryModel,
+                SourceCitation, SourceEvidence, StoryArc,
+            },
             game_rule_template::{
                 basic_attribute, GameActionKind, GameActionRule, GameAttribute, GameRuleTemplate,
                 BASIC_ACTION_DESCRIPTION,
@@ -71,6 +75,8 @@ impl SeriesCompletionPort for PreparedSpy {
         assert!(!prompt.contains("source_novel_id"));
         assert!(!prompt.contains("series_id"));
         assert!(!prompt.contains("secret ending"));
+        assert!(!prompt.contains("Hidden Tower"));
+        assert!(!prompt.contains("Moon Guild"));
         if self.fails.load(Ordering::SeqCst) {
             anyhow::bail!("synthetic unknown provider outcome")
         }
@@ -81,11 +87,22 @@ impl SeriesCompletionPort for PreparedSpy {
 impl SeriesMatcherPort for MatcherSpy {
     async fn suggest(
         &self,
-        _: &SeriesBookMetadata,
+        target: &SeriesBookMetadata,
         candidates: &[SeriesMatchCandidate],
     ) -> anyhow::Result<Option<usize>> {
-        self.0.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(candidates.len(), 8);
+        let calls = self.0.fetch_add(1, Ordering::SeqCst);
+        if calls == 0 {
+            assert_eq!(candidates.len(), 8);
+        } else {
+            assert!(!candidates.is_empty() && candidates.len() <= 8);
+        }
+        assert!(!target.world_entities.contains(&"Hidden Tower".into()));
+        assert!(candidates.iter().all(|candidate| {
+            !candidate
+                .book
+                .world_entities
+                .contains(&"Hidden Tower".into())
+        }));
         match self.1.load(Ordering::SeqCst) {
             -2 => Err(anyhow::anyhow!("fixture classifier unavailable")),
             -1 => Ok(None),
@@ -678,6 +695,212 @@ pub async fn run(pool: &PgPool, user: Uuid, other_user: Uuid, source: Uuid) {
             .unwrap(),
         frozen
     );
+    // Filenames are arbitrary. Two names first attested in chapter 2 are
+    // private ranking evidence, never Laya/DeepSeek input or a public spoiler.
+    for book in extra_books.iter().filter(|book| **book != extra_books[1]) {
+        sqlx::query("DELETE FROM user_novels WHERE user_id = $1 AND novel_id = $2")
+            .bind(user)
+            .bind(*book)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+    let mut candidate_model = None;
+    for (book, title) in [
+        (target, "upload-93f1-random.txt"),
+        (extra_books[1], "another-unrelated-filename.epub"),
+    ] {
+        sqlx::query("UPDATE novels SET title = $2, total_chapters = 2 WHERE id = $1")
+            .bind(book)
+            .bind(title)
+            .execute(pool)
+            .await
+            .unwrap();
+        for (number, text) in [
+            (1, "A hero begins the journey."),
+            (2, "The hero reaches Hidden Tower and Moon Guild."),
+        ] {
+            sqlx::query(
+                "INSERT INTO chapters (novel_id, chapter_number, content) VALUES ($1, $2, $3)",
+            )
+            .bind(book)
+            .bind(number)
+            .bind(text)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        let character = Uuid::new_v4();
+        sqlx::query("INSERT INTO characters (id, novel_id, name) VALUES ($1, $2, 'Hero')")
+            .bind(character)
+            .bind(book)
+            .execute(pool)
+            .await
+            .unwrap();
+        let chapter_one = SourceEvidence {
+            confidence: 1.0,
+            provenance: vec![SourceCitation {
+                chapter_number: 1,
+                excerpt: "A hero begins the journey.".into(),
+            }],
+        };
+        let later = SourceEvidence {
+            confidence: 1.0,
+            provenance: vec![SourceCitation {
+                chapter_number: 2,
+                excerpt: "The hero reaches Hidden Tower and Moon Guild.".into(),
+            }],
+        };
+        let model = CanonStoryModel {
+            id: Uuid::new_v4(),
+            novel_id: book,
+            model_version: 1,
+            schema_version: 1,
+            prompt_version: "test-series-evidence-v1".into(),
+            content: CanonStoryContent {
+                arcs: vec![StoryArc {
+                    id: "arc".into(),
+                    title: "Journey".into(),
+                    summary: "A hero begins the journey.".into(),
+                    event_ids: vec!["event".into()],
+                    evidence: chapter_one.clone(),
+                }],
+                events: vec![CanonEvent {
+                    id: "event".into(),
+                    sequence: 1,
+                    summary: "A hero begins the journey.".into(),
+                    caused_by: vec![],
+                    location_ids: vec![],
+                    character_ids: vec![character],
+                    faction_ids: vec![],
+                    evidence: chapter_one.clone(),
+                }],
+                locations: ["Hidden Tower", "Moon Guild"]
+                    .into_iter()
+                    .map(|name| CanonLocation {
+                        id: name.into(),
+                        name: name.into(),
+                        description: "A named place in the source.".into(),
+                        evidence: later.clone(),
+                    })
+                    .collect(),
+                factions: vec![],
+                world_rules: vec![],
+                character_goals: vec![],
+                relationships: vec![],
+                deaths: vec![],
+                unresolved_threads: vec![],
+                ending: CanonEndingSnapshot {
+                    summary: "The journey reaches its ending.".into(),
+                    character_states: Default::default(),
+                    faction_states: Default::default(),
+                    location_states: Default::default(),
+                    unresolved_thread_ids: vec![],
+                    evidence: later,
+                },
+            },
+            created_at: Utc::now(),
+        };
+        model
+            .validate(
+                &std::collections::BTreeMap::from([
+                    (1, "A hero begins the journey.".into()),
+                    (2, "The hero reaches Hidden Tower and Moon Guild.".into()),
+                ]),
+                &std::collections::HashSet::from([character]),
+            )
+            .unwrap();
+        sqlx::query("INSERT INTO canon_story_models (id, novel_id, model_version, schema_version, prompt_version, content, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)")
+            .bind(model.id).bind(model.novel_id).bind(model.model_version)
+            .bind(model.schema_version).bind(&model.prompt_version)
+            .bind(serde_json::to_value(&model.content).unwrap())
+            .bind(model.created_at).execute(pool).await.unwrap();
+        if book == extra_books[1] {
+            candidate_model = Some((model, character));
+        }
+    }
+    matcher.1.store(-1, Ordering::SeqCst);
+    let advisory = handler.suggest(user, target).await.unwrap();
+    assert!(matches!(advisory.status, SeriesSuggestionStatus::Suggested));
+    assert!(matches!(advisory.reason, SeriesMatchReason::LocalEvidence));
+    assert!(!serde_json::to_string(&advisory)
+        .unwrap()
+        .contains("Hidden Tower"));
+    assert_eq!(advisory.suggestion.unwrap().source_novel_id, extra_books[1]);
+    let before_check = decisions().await.unwrap();
+    let before_calls = completion.calls.load(Ordering::SeqCst);
+    assert!(matches!(
+        deepseek_handler
+            .check_deepseek(user, target)
+            .await
+            .unwrap()
+            .reason,
+        SeriesMatchReason::UnknownOutcome
+    ));
+    assert_eq!(decisions().await.unwrap(), before_check);
+    assert_eq!(completion.calls.load(Ordering::SeqCst), before_calls);
+    completion.fails.store(false, Ordering::SeqCst);
+    *completion.identity.lock().unwrap() = "deepseek/test-private".into();
+    assert!(matches!(
+        deepseek_handler
+            .suggest_deepseek(user, target)
+            .await
+            .unwrap()
+            .status,
+        SeriesSuggestionStatus::Suggested
+    ));
+    assert_eq!(completion.calls.load(Ordering::SeqCst), before_calls + 1);
+    assert!(repository
+        .find_for_novel(user, target)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(handler.suggest(user, target).await.unwrap().cached);
+    let (mut changed, character) = candidate_model.unwrap();
+    changed.id = Uuid::new_v4();
+    changed.model_version = 2;
+    changed.content.locations.clear();
+    changed
+        .validate(
+            &std::collections::BTreeMap::from([
+                (1, "A hero begins the journey.".into()),
+                (2, "The hero reaches Hidden Tower and Moon Guild.".into()),
+            ]),
+            &std::collections::HashSet::from([character]),
+        )
+        .unwrap();
+    sqlx::query("INSERT INTO canon_story_models (id, novel_id, model_version, schema_version, prompt_version, content, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)")
+        .bind(changed.id).bind(changed.novel_id).bind(changed.model_version)
+        .bind(changed.schema_version).bind(&changed.prompt_version)
+        .bind(serde_json::to_value(&changed.content).unwrap())
+        .bind(changed.created_at).execute(pool).await.unwrap();
+    let changed_advisory = handler.suggest(user, target).await.unwrap();
+    assert!(!changed_advisory.cached);
+    assert!(matches!(
+        changed_advisory.status,
+        SeriesSuggestionStatus::Uncertain
+    ));
+    assert!(matches!(
+        changed_advisory.reason,
+        SeriesMatchReason::LowConfidence
+    ));
+    let before_check = decisions().await.unwrap();
+    let before_calls = completion.calls.load(Ordering::SeqCst);
+    let paid_check = deepseek_handler.check_deepseek(user, target).await.unwrap();
+    assert!(paid_check.cached);
+    assert!(matches!(
+        paid_check.status,
+        SeriesSuggestionStatus::Suggested
+    ));
+    assert_eq!(decisions().await.unwrap(), before_check);
+    assert_eq!(completion.calls.load(Ordering::SeqCst), before_calls);
+    let before_overflow = matcher.0.load(Ordering::SeqCst);
+    sqlx::query("WITH added AS (INSERT INTO novels (id, user_id, title, total_chapters, status) SELECT public.uuid_generate_v4(), $1, 'arbitrary-' || number, 1, 'ready'::novel_status FROM generate_series(1, 129) AS number RETURNING id) INSERT INTO user_novels (user_id, novel_id) SELECT $1, id FROM added")
+        .bind(user).execute(pool).await.unwrap();
+    let overflow = handler.suggest(user, target).await.unwrap();
+    assert!(matches!(overflow.status, SeriesSuggestionStatus::Uncertain));
+    assert!(matches!(overflow.reason, SeriesMatchReason::TooManyBooks));
+    assert_eq!(matcher.0.load(Ordering::SeqCst), before_overflow);
     // The caller deletes fixture users to verify account cascades and cleanup.
     sqlx::query("DELETE FROM novels WHERE id = $1")
         .bind(target)

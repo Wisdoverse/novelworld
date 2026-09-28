@@ -13,15 +13,30 @@ use crate::domain::{
         CanonStoryModelRepository, CreateWorldSeriesResult, NovelRepository, WorldSeriesRepository,
     },
     services::series_matching::{
-        chapter_one_entities, group_candidates, parse_deepseek_choice, title_stem,
-        SERIES_MATCH_PROMPT_VERSION,
+        chapter_one_entities, confirmed_group_score, parse_deepseek_choice, shared_entity_count,
+        unique_strongest, whole_book_entities, SERIES_MATCH_PROMPT_VERSION,
     },
     value_objects::NovelStatus,
 };
 use chrono::Utc;
 use serde::Deserialize;
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, future::Future, sync::Arc, time::Duration};
 use uuid::Uuid;
+
+const MAX_SERIES_SCAN_BOOKS: usize = 128;
+
+#[derive(serde::Serialize)]
+struct BookClues {
+    chapter_one: Vec<String>,
+    private_all: Option<Vec<String>>,
+}
+
+struct MatchInputs {
+    target: SeriesBookMetadata,
+    candidates: Vec<SeriesMatchCandidate>,
+    local_choice: Option<usize>,
+    private_digest: String,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -278,30 +293,19 @@ impl WorldSeriesHandler {
         &self,
         user_id: Uuid,
         novel_id: Uuid,
-    ) -> Result<(SeriesBookMetadata, Vec<SeriesMatchCandidate>), WorldSeriesApplicationError> {
+    ) -> Result<Option<MatchInputs>, WorldSeriesApplicationError> {
         let target = self.ready_novel(user_id, novel_id).await?;
-        let mut books = bounded_read(self.novel_repo.find_by_user(user_id))
-            .await?
-            .into_iter()
-            .filter(|book| {
-                book.id != novel_id && book.status == NovelStatus::Ready && book.total_chapters > 0
-            })
-            .collect::<Vec<_>>();
-        books.sort_by_key(|book| {
-            (
-                title_stem(&target.title).is_none()
-                    || title_stem(&target.title) != title_stem(&book.title),
-                target
-                    .author
-                    .as_deref()
-                    .is_none_or(|author| author.trim().is_empty())
-                    || target.author != book.author,
-                book.title.clone(),
-                book.id,
-            )
-        });
-        // Bounded source reads; grouping cannot scan an unbounded canon corpus.
-        books.truncate(32);
+        // ponytail: scan up to 128 Ready shelf books; larger shelves abstain
+        // rather than let an upload filename decide which books are omitted.
+        let books = bounded_read(self.novel_repo.find_ready_for_series(
+            user_id,
+            novel_id,
+            (MAX_SERIES_SCAN_BOOKS + 1) as i64,
+        ))
+        .await?;
+        if books.len() > MAX_SERIES_SCAN_BOOKS {
+            return Ok(None);
+        }
         let mut all_books = vec![target.clone()];
         all_books.extend(books.clone());
         use futures::{StreamExt, TryStreamExt};
@@ -313,12 +317,18 @@ impl WorldSeriesHandler {
                     let model = canon.find_latest(book.id).await?;
                     Ok::<_, anyhow::Error>((
                         book.id,
-                        model.as_ref().map(chapter_one_entities).unwrap_or_default(),
+                        BookClues {
+                            chapter_one: model
+                                .as_ref()
+                                .map(chapter_one_entities)
+                                .unwrap_or_default(),
+                            private_all: model.as_ref().and_then(whole_book_entities),
+                        },
                     ))
                 }
             }))
             .buffer_unordered(4)
-            .try_collect::<std::collections::HashMap<_, _>>(),
+            .try_collect::<BTreeMap<_, _>>(),
         )
         .await
         .map_err(|_| {
@@ -326,7 +336,21 @@ impl WorldSeriesHandler {
         })?
         .map_err(WorldSeriesApplicationError::Repository)?;
         let series = bounded_read(self.series_repo.list(user_id)).await?;
-        let memberships = bounded_read(self.series_repo.memberships(user_id)).await?;
+        let mut memberships = bounded_read(self.series_repo.memberships(user_id)).await?;
+        memberships.sort();
+        let target_names = clues
+            .get(&novel_id)
+            .expect("target clue entry")
+            .private_all
+            .as_deref()
+            .unwrap_or_default();
+        let overlap = |id: Uuid| {
+            clues
+                .get(&id)
+                .and_then(|book| book.private_all.as_deref())
+                .map(|names| shared_entity_count(target_names, names))
+                .unwrap_or(0)
+        };
         let mut candidates = Vec::new();
         for definition in series {
             let mut members = books
@@ -345,50 +369,83 @@ impl WorldSeriesHandler {
                 )
             });
             if let Some(book) = members.first() {
-                candidates.push(SeriesMatchCandidate {
-                    series_id: Some(definition.id),
-                    source_novel_id: book.id,
-                    name: definition.name,
-                    book: metadata(book, clues.get(&book.id).cloned().unwrap_or_default()),
-                    member_titles: members
+                let expected_members = memberships
+                    .iter()
+                    .filter(|(member, series)| *series == definition.id && *member != novel_id)
+                    .count();
+                let score = confirmed_group_score(
+                    &members
                         .iter()
-                        .take(8)
-                        .map(|book| book.title.clone())
-                        .collect(),
-                });
+                        .map(|member| overlap(member.id))
+                        .collect::<Vec<_>>(),
+                    expected_members,
+                );
+                candidates.push((
+                    SeriesMatchCandidate {
+                        series_id: Some(definition.id),
+                        source_novel_id: book.id,
+                        name: definition.name,
+                        book: metadata(book, &clues),
+                        member_titles: members
+                            .iter()
+                            .take(8)
+                            .map(|book| book.title.clone())
+                            .collect(),
+                    },
+                    score,
+                ));
             }
         }
         for book in &books {
             if !memberships.iter().any(|(novel, _)| *novel == book.id) {
-                candidates.push(SeriesMatchCandidate {
-                    series_id: None,
-                    source_novel_id: book.id,
-                    name: book.title.clone(),
-                    book: metadata(book, clues.get(&book.id).cloned().unwrap_or_default()),
-                    member_titles: vec![book.title.clone()],
-                });
+                candidates.push((
+                    SeriesMatchCandidate {
+                        series_id: None,
+                        source_novel_id: book.id,
+                        name: book.title.clone(),
+                        book: metadata(book, &clues),
+                        member_titles: vec![book.title.clone()],
+                    },
+                    overlap(book.id),
+                ));
             }
         }
-        let mut candidates = group_candidates(candidates);
-        candidates.sort_by_key(|candidate| {
+        candidates.sort_by_key(|(candidate, score)| {
             (
-                title_stem(&target.title).is_none()
-                    || title_stem(&target.title) != title_stem(&candidate.book.title),
-                target
-                    .author
-                    .as_deref()
-                    .is_none_or(|author| author.trim().is_empty())
-                    || target.author != candidate.book.author,
+                std::cmp::Reverse(*score),
                 candidate.series_id.is_none(),
-                candidate.name.clone(),
                 candidate.source_novel_id,
             )
         });
         candidates.truncate(MAX_SERIES_MATCH_CANDIDATES);
-        Ok((
-            metadata(&target, clues.get(&novel_id).cloned().unwrap_or_default()),
-            candidates,
-        ))
+        let local_choice = clues
+            .values()
+            .all(|book| book.private_all.is_some())
+            .then(|| {
+                unique_strongest(
+                    &candidates
+                        .iter()
+                        .map(|(_, score)| *score)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .flatten();
+        use sha2::{Digest, Sha256};
+        let private_digest = Sha256::digest(
+            serde_json::to_vec(&(&clues, &memberships)).expect("private evidence serializes"),
+        )
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+        Ok(Some(MatchInputs {
+            target: metadata(&target, &clues),
+            candidates: candidates
+                .into_iter()
+                .map(|(candidate, _)| candidate)
+                .collect(),
+            local_choice,
+            private_digest,
+        }))
     }
 
     async fn suggest_using(
@@ -441,7 +498,19 @@ impl WorldSeriesHandler {
             }
             None
         };
-        let (target, candidates) = self.match_inputs(user_id, novel_id).await?;
+        let Some(MatchInputs {
+            target,
+            candidates,
+            local_choice,
+            private_digest,
+        }) = self.match_inputs(user_id, novel_id).await?
+        else {
+            return Ok(empty(
+                method,
+                SeriesSuggestionStatus::Uncertain,
+                SeriesMatchReason::TooManyBooks,
+            ));
+        };
         if candidates.is_empty() {
             return Ok(empty(
                 method,
@@ -461,13 +530,16 @@ impl WorldSeriesHandler {
                 SeriesMatchReason::Unavailable,
             ));
         }
-        let key_input = serde_json::json!({"prompt":SERIES_MATCH_PROMPT_VERSION,"identity":identity,"input":provider_inputs,
-            "scope":candidates.iter().map(|candidate| (candidate.series_id, candidate.source_novel_id)).collect::<Vec<_>>()});
-        use sha2::{Digest, Sha256};
-        let evidence_key = Sha256::digest(key_input.to_string().as_bytes())
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
+        let evidence_key = series_match_evidence_key(
+            method,
+            identity,
+            &provider_inputs,
+            &candidates
+                .iter()
+                .map(|candidate| (candidate.series_id, candidate.source_novel_id))
+                .collect::<Vec<_>>(),
+            &private_digest,
+        );
         let begin = bounded_read(self.series_repo.begin_match(
             user_id,
             novel_id,
@@ -541,6 +613,15 @@ impl WorldSeriesHandler {
                 reason: SeriesMatchReason::Suggested,
                 cached: false,
             },
+            Ok(None) if method == SeriesMatchMethod::Laya && local_choice.is_some() => {
+                SeriesSuggestion {
+                    status: SeriesSuggestionStatus::Suggested,
+                    suggestion: Some(candidates[local_choice.expect("checked choice")].clone()),
+                    method,
+                    reason: SeriesMatchReason::LocalEvidence,
+                    cached: false,
+                }
+            }
             Ok(_) => empty(
                 method,
                 SeriesSuggestionStatus::Uncertain,
@@ -618,19 +699,47 @@ fn empty(
 
 fn metadata(
     book: &crate::domain::entities::novel::Novel,
-    world_entities: Vec<String>,
+    clues: &BTreeMap<Uuid, BookClues>,
 ) -> SeriesBookMetadata {
     SeriesBookMetadata {
         title: book.title.clone(),
         author: book.author.clone(),
         genre: book.genre.clone(),
-        world_entities,
+        world_entities: clues
+            .get(&book.id)
+            .map(|clues| clues.chapter_one.clone())
+            .unwrap_or_default(),
     }
+}
+
+fn series_match_evidence_key(
+    method: SeriesMatchMethod,
+    identity: &str,
+    provider_inputs: &serde_json::Value,
+    scope: &[(Option<Uuid>, Uuid)],
+    private_digest: &str,
+) -> String {
+    let mut input = serde_json::json!({
+        "prompt": SERIES_MATCH_PROMPT_VERSION,
+        "identity": identity,
+        "input": provider_inputs,
+        "scope": scope,
+    });
+    // Only the ordinary route can turn private clues into a local advisory.
+    // A paid DeepSeek claim depends on the exact sent prompt and candidate scope.
+    if method == SeriesMatchMethod::Laya {
+        input["private_digest"] = private_digest.into();
+    }
+    use sha2::{Digest, Sha256};
+    Sha256::digest(input.to_string().as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::CreateWorldSeries;
+    use super::{series_match_evidence_key, CreateWorldSeries, SeriesMatchMethod};
 
     #[test]
     fn source_version_is_optional_but_source_and_user_confirmation_are_required() {
@@ -640,5 +749,22 @@ mod tests {
         let mut forged = input;
         forged["source_template"] = serde_json::json!({"attributes":[]});
         assert!(serde_json::from_value::<CreateWorldSeries>(forged).is_err());
+    }
+
+    #[test]
+    fn an_off_candidate_private_clue_change_cannot_open_a_new_paid_claim() {
+        let prompt = serde_json::json!({"target":{"title":"file.txt"},"candidates":[{"choice":0}]});
+        let scope = [(None, uuid::Uuid::new_v4())];
+        let key = |method, digest| {
+            series_match_evidence_key(method, "resolved-provider", &prompt, &scope, digest)
+        };
+        assert_eq!(
+            key(SeriesMatchMethod::Deepseek, "off-top8-before"),
+            key(SeriesMatchMethod::Deepseek, "off-top8-after")
+        );
+        assert_ne!(
+            key(SeriesMatchMethod::Laya, "off-top8-before"),
+            key(SeriesMatchMethod::Laya, "off-top8-after")
+        );
     }
 }

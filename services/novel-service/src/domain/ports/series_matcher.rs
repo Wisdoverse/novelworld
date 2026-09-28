@@ -56,7 +56,9 @@ pub enum SeriesSuggestionStatus {
 #[serde(rename_all = "snake_case")]
 pub enum SeriesMatchReason {
     NoCandidates,
+    TooManyBooks,
     LowConfidence,
+    LocalEvidence,
     NotConfigured,
     UnsupportedProvider,
     Unavailable,
