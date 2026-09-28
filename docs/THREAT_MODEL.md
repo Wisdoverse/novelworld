@@ -202,7 +202,12 @@ limit but cannot enforce.
    confirm or select manually. The 0.8 threshold is an abstention heuristic,
    not calibrated accuracy evidence. Requests use four local slots, 300 ms
    connect/2 s total deadlines, 8 KiB request and 16 KiB response limits, and
-   no HTTP retries. Reader-requested DeepSeek second opinions use the same
+   no HTTP retries. A confirmed series may initially hold only background and a
+   stable source identity. Its pending D20 state must never trigger target-book
+   rule generation or accept a target template as the source snapshot. Only a
+   later explicit source-book request can take the existing generation claim;
+   Novel binds one exact ready source template under the reader's authority.
+   Reader-requested DeepSeek second opinions use the same
    allowlist, a dedicated operation, one resolved configuration and a 30 s
    total deadline. No ordinary recognition request triggers paid fallback;
    non-DeepSeek and Diagnostic-bound configurations fail before reserve. A

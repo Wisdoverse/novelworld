@@ -133,7 +133,8 @@ export interface WorldSeries {
   name: string;
   background: string;
   revision: 1;
-  source_template: GameRuleTemplate;
+  source_novel_id: string;
+  source_template: GameRuleTemplate | null;
   created_at: string;
 }
 

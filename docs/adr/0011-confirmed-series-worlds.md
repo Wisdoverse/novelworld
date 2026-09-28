@@ -5,7 +5,8 @@
 - Owners: Novel and Narrative service maintainers
 - Related: [Issue #426](https://github.com/Wisdoverse/novelworld/issues/426),
   [evidence-backed matching #438](https://github.com/Wisdoverse/novelworld/issues/438),
-  [arbitrary-title matching #440](https://github.com/Wisdoverse/novelworld/issues/440)
+  [arbitrary-title matching #440](https://github.com/Wisdoverse/novelworld/issues/440),
+  [deferred D20 rules #442](https://github.com/Wisdoverse/novelworld/issues/442)
 
 ## Context
 
@@ -20,10 +21,21 @@ Novel Service owns private `user_world_series` definitions and
 `user_novel_world_series` shelf associations. Laya (Jev) suggests a candidate;
 only an authenticated reader's explicit confirmation creates or associates a
 series. No global canonical novel is changed. The immutable revision-1
-definition contains a reader-confirmed, bounded background and an exact ready
-v2 basic template snapshot. Creating it atomically associates its source book;
-an already associated source returns a conflict. Creation never generates a
-template, takes a generation claim, refills a budget, or retries terminal work.
+definition contains a reader-confirmed, bounded background and a stable source
+book identity. Creating it atomically associates its source book; an already
+associated source returns a conflict. If an exact ready v2 basic template for
+the current source Canon exists, creation freezes it. Otherwise the definition
+is pending D20 rules and immediately supports the shared background. Creation
+never generates a template, takes a generation claim, refills a budget, or
+retries terminal work.
+
+A later explicit source-book D20 request uses the existing bounded generation
+claim. Once a ready source template exists, Novel alone binds that exact
+template to a pending definition in one owner-scoped, idempotent transition.
+No target member generates substitute rules while the source is pending. The
+source identity and confirmed background never change; a nonempty snapshot is
+immutable. Existing ready definitions and previously frozen Narrative sessions
+are not rewritten.
 
 Source template novel/version/chapter identities remain real source identities.
 The `series-game-rules-v1` wrapper carries series ID, revision and target novel
@@ -100,14 +112,17 @@ not database-role isolation. Shelf removal deletes only that association;
 definitions and frozen sessions remain until account erasure. Source IDs have
 no cascading source FK so deleting the source cannot destroy another book's
 frozen mechanics. Snapshots contain fixed dictionaries/numbers/provenance,
-not source text. Account export includes definitions and associations; account
+not source text. Migration 0033 backfills a stable source ID for existing
+definitions, permits a missing template for new background-only definitions,
+and narrows the trigger to allow only one empty-to-ready snapshot bind. Account
+export includes definitions and associations; account
 deletion erases both through owner-scoped cascades. Migration 0032 adds the
 Novel-owned suggestion cache with a cascading shelf FK and no new cross-owner
 relation. It is applied before the matching service starts.
 
 ## Rollout and rollback
 
-Apply 0031 and 0032 through the normal migration path with ingress/writers quiesced and
+Apply 0031, 0032, and 0033 through the normal migration path with ingress/writers quiesced and
 deploy matching Novel, Narrative and frontend versions together. This additive
 schema does not replace the existing 0021/0024/0025/0030 release barriers.
 Older peers reject the new prompt version; mixed versions cannot support the

@@ -40,12 +40,18 @@ pub trait WorldSeriesRepository: Send + Sync {
         token: Uuid,
         result: &crate::domain::ports::series_matcher::SeriesSuggestion,
     ) -> Result<bool>;
-    /// Freeze only an exact Ready source template still authorized on this shelf.
+    /// Atomically create and associate a series; freeze a source template when supplied.
     async fn create(
         &self,
         user_id: Uuid,
         series: &crate::domain::entities::world_series::WorldSeries,
     ) -> Result<CreateWorldSeriesResult>;
+    /// Bind a pending series to the exact currently Ready source template once.
+    async fn bind_ready_source(
+        &self,
+        user_id: Uuid,
+        series_id: Uuid,
+    ) -> Result<Option<crate::domain::entities::world_series::WorldSeries>>;
     async fn list(
         &self,
         user_id: Uuid,

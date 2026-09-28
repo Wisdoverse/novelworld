@@ -139,6 +139,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0032_series_match_decisions.sql",
         include_str!("../../../infra/postgres/migrations/0032_series_match_decisions.sql"),
     ),
+    (
+        "0033_deferred_series_rules.sql",
+        include_str!("../../../infra/postgres/migrations/0033_deferred_series_rules.sql"),
+    ),
 ];
 
 #[derive(Serialize, Deserialize)]
@@ -491,7 +495,7 @@ mod tests {
         assert_eq!(MIGRATIONS.first().unwrap().0, "0001_runtime_contract.sql");
         assert_eq!(
             MIGRATIONS.last().unwrap().0,
-            "0032_series_match_decisions.sql"
+            "0033_deferred_series_rules.sql"
         );
         assert!(MIGRATIONS.windows(2).all(|pair| pair[0].0 < pair[1].0));
     }

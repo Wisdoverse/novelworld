@@ -191,25 +191,45 @@ async fn request_game_rule_template(
         Ok(_) => {}
         Err(error) => return progress_error_response(error),
     }
+    let mut pending_source_series = None;
     if query.prefer_series && query.version() == BASIC_GAME_RULE_PROMPT_VERSION {
         match state.series_handler.get_for_novel(user_id, novel_id).await {
             Ok(Some(series)) => {
-                let template = match series.rules_for(novel_id) {
+                let series = if series.source_template.is_none() {
+                    match state
+                        .series_handler
+                        .bind_ready_source(user_id, series.id)
+                        .await
+                    {
+                        Ok(series) => series,
+                        Err(error) => return world_series::error(error),
+                    }
+                } else {
+                    series
+                };
+                if series.source_template.is_none() {
+                    if series.source_novel_id != novel_id {
+                        return world_series::error(crate::application::world_series::WorldSeriesApplicationError::SourceUnavailable);
+                    }
+                    pending_source_series = Some(series.id);
+                } else {
+                    let template = match series.rules_for(novel_id) {
                     Ok(template) => template,
                     Err(_) => return world_series::error(crate::application::world_series::WorldSeriesApplicationError::SourceUnavailable),
                 };
-                let progress = match state.progress_handler.get(user_id, novel_id).await {
-                    Ok(progress) => progress,
-                    Err(error) => return progress_error_response(error),
-                };
-                return match template.visible_at(progress.current_chapter) {
-                    Some(template) => world_series::private(Json(template).into_response()),
-                    None => coded_api_error(
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        "game_rules_unavailable_at_progress",
-                        "Game rules are not yet available at current reading progress",
-                    ),
-                };
+                    let progress = match state.progress_handler.get(user_id, novel_id).await {
+                        Ok(progress) => progress,
+                        Err(error) => return progress_error_response(error),
+                    };
+                    return match template.visible_at(progress.current_chapter) {
+                        Some(template) => world_series::private(Json(template).into_response()),
+                        None => coded_api_error(
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            "game_rules_unavailable_at_progress",
+                            "Game rules are not yet available at current reading progress",
+                        ),
+                    };
+                }
             }
             Ok(None) => {}
             Err(error) => return world_series::error(error),
@@ -221,6 +241,27 @@ async fn request_game_rule_template(
         .await
     {
         Ok(GameRuleTemplateRequest::Ready(template)) => {
+            let template = if let Some(series_id) = pending_source_series {
+                let series = match state
+                    .series_handler
+                    .bind_ready_source(user_id, series_id)
+                    .await
+                {
+                    Ok(series) => series,
+                    Err(error) => return world_series::error(error),
+                };
+                match state.series_handler.get_for_novel(user_id, novel_id).await {
+                    Ok(Some(current)) if current.id == series_id => {}
+                    Ok(_) => return world_series::error(crate::application::world_series::WorldSeriesApplicationError::SourceUnavailable),
+                    Err(error) => return world_series::error(error),
+                }
+                match series.rules_for(novel_id) {
+                    Ok(series_template) if series_template.canon_model_version == template.canon_model_version => series_template,
+                    _ => return world_series::error(crate::application::world_series::WorldSeriesApplicationError::SourceUnavailable),
+                }
+            } else {
+                template
+            };
             let progress = match state.progress_handler.get(user_id, novel_id).await {
                 Ok(progress) => progress,
                 Err(error) => return progress_error_response(error),

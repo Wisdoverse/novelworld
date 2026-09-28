@@ -340,7 +340,7 @@ impl ReadinessProbe for PgReadinessProbe {
         let series = async {
             matches!(tokio::time::timeout(Duration::from_secs(2), sqlx::query_scalar::<_, bool>(
                 r#"WITH definitions AS MATERIALIZED (
-                        SELECT id, user_id, name, background, revision, source_template, created_at
+                        SELECT id, user_id, name, background, revision, source_novel_id, source_template, created_at
                         FROM public.user_world_series LIMIT 1
                     ), memberships AS MATERIALIZED (
                         SELECT user_id, novel_id, series_id FROM public.user_novel_world_series LIMIT 1

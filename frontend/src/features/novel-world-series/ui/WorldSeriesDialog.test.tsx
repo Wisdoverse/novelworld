@@ -8,6 +8,9 @@ const mocks = vi.hoisted(() => ({
   deepSeek: vi.fn(),
   create: vi.fn(),
   associate: vi.fn(),
+  generateRules: vi.fn(),
+  seriesListRefetch: vi.fn(),
+  currentSeriesRefetch: vi.fn(),
   userId: 'reader-1',
   suggestionResult: undefined as unknown,
   deepSeekResult: undefined as unknown,
@@ -19,8 +22,8 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('@/entities/novel', () => ({
-  useWorldSeriesList: () => ({ data: mocks.seriesList, isLoading: false, isError: false }),
-  useNovelWorldSeries: () => ({ data: mocks.currentSeries, isError: false }),
+  useWorldSeriesList: () => ({ data: mocks.seriesList, isLoading: false, isError: false, refetch: mocks.seriesListRefetch }),
+  useNovelWorldSeries: () => ({ data: mocks.currentSeries, isError: false, refetch: mocks.currentSeriesRefetch }),
   useSuggestNovelWorldSeries: () => ({
     mutateAsync: mocks.suggestion,
     isPending: false,
@@ -36,6 +39,10 @@ vi.mock('@/entities/novel', () => ({
   useAssociateNovelWorldSeries: () => ({ mutateAsync: mocks.associate, isPending: false }),
 }));
 
+vi.mock('@/entities/narrative', () => ({
+  useGenerateGameRules: () => ({ mutateAsync: mocks.generateRules, isPending: false }),
+}));
+
 vi.mock('react-router-dom', () => ({
   useNavigate: () => mocks.navigate,
 }));
@@ -47,6 +54,7 @@ const series: WorldSeries = {
   name: '山海系列',
   background: '共享基础背景',
   revision: 1,
+  source_novel_id: 'source-book',
   source_template: {
     novel_id: 'source-book', canon_model_version: 2, schema_version: 1,
     prompt_version: 'novel-game-rules-v2', minimum_score: 8, maximum_score: 12,
@@ -92,6 +100,11 @@ describe('WorldSeriesDialog', () => {
     mocks.deepSeek.mockReset();
     mocks.create.mockReset();
     mocks.associate.mockReset();
+    mocks.generateRules.mockReset();
+    mocks.seriesListRefetch.mockReset();
+    mocks.currentSeriesRefetch.mockReset();
+    mocks.seriesListRefetch.mockResolvedValue(undefined);
+    mocks.currentSeriesRefetch.mockResolvedValue(undefined);
     mocks.suggestion.mockImplementation(async () => mocks.suggestionResult);
     mocks.deepSeek.mockImplementation(async () => mocks.deepSeekResult);
     mocks.create.mockResolvedValue(series);
@@ -170,13 +183,43 @@ describe('WorldSeriesDialog', () => {
     expect((screen.getByLabelText('系列名称') as HTMLInputElement).value).toBe('');
   });
 
+  it('creates a background-only series without silently generating D20 rules', async () => {
+    mocks.create.mockResolvedValueOnce({ ...series, source_template: null });
+    renderDialog();
+    fireEvent.click(screen.getByRole('button', { name: '创建系列' }));
+    fireEvent.change(screen.getByLabelText('系列名称'), { target: { value: '共同世界' } });
+    fireEvent.change(screen.getByLabelText('共享世界背景（最多 2000 字）'), { target: { value: '读者确认的背景' } });
+    fireEvent.change(screen.getByLabelText('世界观及未来 D20 规则来源书'), { target: { value: 'source-book' } });
+    fireEvent.click(screen.getByRole('button', { name: '创建系列并关联来源书与当前书' }));
+
+    await waitFor(() => expect(mocks.associate).toHaveBeenCalledWith(series.id));
+    expect(mocks.generateRules).not.toHaveBeenCalled();
+  });
+
+  it('generates D20 rules only after a separate click on a pending series', async () => {
+    mocks.currentSeries = { ...series, source_template: null };
+    mocks.seriesList = [mocks.currentSeries];
+    mocks.generateRules.mockResolvedValue({
+      ...series.source_template,
+      series: { binding: { series_id: series.id, revision: 1 }, target_novel_id: 'source-book', name: series.name, background: series.background },
+    });
+    renderDialog();
+
+    expect(screen.getByText(/此系列的 D20 基础规则尚未生成/)).toBeTruthy();
+    expect(mocks.generateRules).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '生成来源书 D20 基础规则' }));
+    await waitFor(() => expect(mocks.generateRules).toHaveBeenCalledOnce());
+    expect(mocks.seriesListRefetch).toHaveBeenCalledOnce();
+    expect(mocks.currentSeriesRefetch).toHaveBeenCalledOnce();
+  });
+
   it('creates from a confirmed ready source and retries a failed target PUT without recreating', async () => {
     mocks.associate.mockRejectedValueOnce(new Error('temporary failure')).mockResolvedValueOnce(series);
     renderDialog();
     fireEvent.click(screen.getByRole('button', { name: '创建系列' }));
     fireEvent.change(screen.getByLabelText('系列名称'), { target: { value: '山海系列' } });
     fireEvent.change(screen.getByLabelText('共享世界背景（最多 2000 字）'), { target: { value: '用户确认的背景' } });
-    fireEvent.change(screen.getByLabelText('D20 规则来源书'), { target: { value: 'source-book' } });
+    fireEvent.change(screen.getByLabelText('世界观及未来 D20 规则来源书'), { target: { value: 'source-book' } });
     fireEvent.click(screen.getByRole('button', { name: '创建系列并关联来源书与当前书' }));
 
     await screen.findByText('系列已创建；确认按钮会重试关联，不会重复创建。');
@@ -205,7 +248,7 @@ describe('WorldSeriesDialog', () => {
     await screen.findByText('系统找到可能的同系列小说。请核对建议并明确确认后再关联。');
     fireEvent.click(screen.getByRole('button', { name: '用此建议创建系列' }));
     expect((screen.getByLabelText('系列名称') as HTMLInputElement).value).toBe('');
-    expect((screen.getByLabelText('D20 规则来源书') as HTMLSelectElement).value).toBe('source-book');
+    expect((screen.getByLabelText('世界观及未来 D20 规则来源书') as HTMLSelectElement).value).toBe('source-book');
     expect(mocks.create).not.toHaveBeenCalled();
     expect(mocks.associate).not.toHaveBeenCalled();
   });

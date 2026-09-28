@@ -21,6 +21,8 @@ pub enum GameRuleTemplateRequestError {
     UnavailableAtProgress,
     #[error("Canonical sources cannot support game rules")]
     SourcesUnavailable,
+    #[error("Series source rules are not ready")]
+    SeriesSourcePending,
     #[error("Canonical novel analysis is not ready")]
     CanonUnavailable,
     #[error("Novel service is unavailable")]

@@ -25,7 +25,8 @@ struct SeriesRow {
     name: String,
     background: String,
     revision: i32,
-    source_template: serde_json::Value,
+    source_novel_id: Uuid,
+    source_template: Option<serde_json::Value>,
     created_at: DateTime<Utc>,
 }
 impl SeriesRow {
@@ -35,7 +36,11 @@ impl SeriesRow {
             name: self.name,
             background: self.background,
             revision: self.revision,
-            source_template: serde_json::from_value(self.source_template)
+            source_novel_id: self.source_novel_id,
+            source_template: self
+                .source_template
+                .map(serde_json::from_value)
+                .transpose()
                 .context("invalid persisted series source")?,
             created_at: self.created_at,
         };
@@ -115,42 +120,107 @@ impl WorldSeriesRepository for PgWorldSeriesRepository {
                    WHERE shelf.user_id = $1 AND shelf.novel_id = $2
                      AND n.status = 'ready'::novel_status AND n.total_chapters > 0
                    FOR UPDATE OF shelf, n"#)
-                .bind(user_id).bind(series.source_template.novel_id).fetch_optional(&mut *transaction).await?;
+                .bind(user_id).bind(series.source_novel_id).fetch_optional(&mut *transaction).await?;
             if source.is_none() { return Ok(CreateWorldSeriesResult::SourceUnavailable); }
             let associated = sqlx::query_scalar::<_, bool>(
                 "SELECT EXISTS(SELECT 1 FROM user_novel_world_series WHERE user_id = $1 AND novel_id = $2)")
-                .bind(user_id).bind(series.source_template.novel_id).fetch_one(&mut *transaction).await?;
+                .bind(user_id).bind(series.source_novel_id).fetch_one(&mut *transaction).await?;
             if associated { return Ok(CreateWorldSeriesResult::SourceAlreadyAssociated); }
             let inserted = sqlx::query(
                 r#"INSERT INTO user_world_series
-                       (id, user_id, name, background, revision, source_template, created_at)
-                   SELECT $1, $2, $3, $4, 1, t.content, $5
+                       (id, user_id, name, background, revision, source_novel_id, source_template, created_at)
+                   SELECT $1, $2, $3, $4, 1, $6, $8, $5
                    FROM user_novels AS shelf
                    JOIN novels AS n ON n.id = shelf.novel_id
-                   JOIN novel_game_rule_templates AS t ON t.novel_id = n.id
                    WHERE shelf.user_id = $2 AND shelf.novel_id = $6
                      AND n.status = 'ready'::novel_status AND n.total_chapters > 0
-                     AND t.canon_model_version = $7 AND t.prompt_version = 'novel-game-rules-v2'
-                     AND t.status = 'ready' AND t.content = $8
-                     AND t.canon_model_version = (
+                     AND EXISTS (SELECT 1 FROM canon_story_models AS m WHERE m.novel_id = n.id)
+                     AND ($8::jsonb IS NULL OR $7 = (
                          SELECT MAX(m.model_version) FROM canon_story_models AS m WHERE m.novel_id = n.id
-                     )"#)
+                     ))
+                     AND ($8::jsonb IS NULL OR EXISTS (
+                         SELECT 1 FROM novel_game_rule_templates AS t
+                         WHERE t.novel_id = n.id AND t.canon_model_version = $7
+                           AND t.prompt_version = 'novel-game-rules-v2'
+                           AND t.status = 'ready' AND t.content = $8
+                     ))"#)
                 .bind(series.id).bind(user_id).bind(&series.name).bind(&series.background)
-                .bind(series.created_at).bind(series.source_template.novel_id)
-                .bind(series.source_template.canon_model_version).bind(serde_json::to_value(&series.source_template)?)
+                .bind(series.created_at).bind(series.source_novel_id)
+                .bind(series.source_template.as_ref().map(|template| template.canon_model_version).unwrap_or(0).max(1))
+                .bind(series.source_template.as_ref().map(serde_json::to_value).transpose()?)
                 .execute(&mut *transaction).await?;
             if inserted.rows_affected() != 1 { return Ok(CreateWorldSeriesResult::SourceUnavailable); }
             sqlx::query("INSERT INTO user_novel_world_series (user_id, novel_id, series_id) VALUES ($1, $2, $3)")
-                .bind(user_id).bind(series.source_template.novel_id).bind(series.id).execute(&mut *transaction).await?;
+                .bind(user_id).bind(series.source_novel_id).bind(series.id).execute(&mut *transaction).await?;
             transaction.commit().await?;
             Ok(CreateWorldSeriesResult::Created)
         }).await.context("series creation deadline exceeded")?
     }
 
+    async fn bind_ready_source(
+        &self,
+        user_id: Uuid,
+        series_id: Uuid,
+    ) -> Result<Option<WorldSeries>> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut transaction = self.pool.begin().await?;
+            let row = sqlx::query_as::<_, SeriesRow>(
+                "SELECT id, name, background, revision, source_novel_id, source_template, created_at \
+                 FROM user_world_series WHERE user_id = $1 AND id = $2")
+                .bind(user_id).bind(series_id).fetch_optional(&mut *transaction).await?;
+            let Some(series) = row.map(SeriesRow::decode).transpose()? else {
+                return Ok(None);
+            };
+            if series.source_template.is_some() {
+                return Ok(Some(series));
+            }
+                let authorized = sqlx::query_scalar::<_, Uuid>(
+                    r#"SELECT shelf.novel_id FROM user_novels AS shelf
+                       JOIN novels AS n ON n.id = shelf.novel_id
+                       JOIN user_novel_world_series AS member
+                         ON member.user_id = shelf.user_id AND member.novel_id = shelf.novel_id
+                       WHERE shelf.user_id = $1 AND shelf.novel_id = $2
+                         AND member.series_id = $3
+                         AND n.status = 'ready'::novel_status AND n.total_chapters > 0
+                       FOR UPDATE OF shelf, n, member"#)
+                    .bind(user_id).bind(series.source_novel_id).bind(series.id)
+                    .fetch_optional(&mut *transaction).await?.is_some();
+                if !authorized {
+                    return Ok(Some(series));
+                }
+                let row = sqlx::query_as::<_, SeriesRow>(
+                    "SELECT id, name, background, revision, source_novel_id, source_template, created_at \
+                     FROM user_world_series WHERE user_id = $1 AND id = $2 FOR UPDATE")
+                    .bind(user_id).bind(series_id).fetch_optional(&mut *transaction).await?;
+                let Some(mut series) = row.map(SeriesRow::decode).transpose()? else {
+                    return Ok(None);
+                };
+                if series.source_template.is_none() {
+                    sqlx::query(
+                        r#"UPDATE user_world_series AS s SET source_template = t.content
+                           FROM novel_game_rule_templates AS t
+                           WHERE s.user_id = $1 AND s.id = $2 AND s.source_template IS NULL
+                             AND t.novel_id = s.source_novel_id
+                             AND t.prompt_version = 'novel-game-rules-v2' AND t.status = 'ready'
+                             AND t.canon_model_version = (
+                                 SELECT MAX(m.model_version) FROM canon_story_models AS m
+                                 WHERE m.novel_id = s.source_novel_id)"#)
+                        .bind(user_id).bind(series_id).execute(&mut *transaction).await?;
+                    series = sqlx::query_as::<_, SeriesRow>(
+                        "SELECT id, name, background, revision, source_novel_id, source_template, created_at \
+                         FROM user_world_series WHERE user_id = $1 AND id = $2")
+                        .bind(user_id).bind(series_id).fetch_one(&mut *transaction).await?
+                        .decode()?;
+                }
+            transaction.commit().await?;
+            Ok(Some(series))
+        }).await.context("series rule bind deadline exceeded")?
+    }
+
     async fn list(&self, user_id: Uuid) -> Result<Vec<WorldSeries>> {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             sqlx::query_as::<_, SeriesRow>(
-                "SELECT id, name, background, revision, source_template, created_at FROM user_world_series \
+                "SELECT id, name, background, revision, source_novel_id, source_template, created_at FROM user_world_series \
                  WHERE user_id = $1 ORDER BY created_at, id")
                 .bind(user_id).fetch_all(&self.pool).await?.into_iter().map(SeriesRow::decode).collect()
         }).await.context("series list deadline exceeded")?
@@ -159,7 +229,7 @@ impl WorldSeriesRepository for PgWorldSeriesRepository {
     async fn find(&self, user_id: Uuid, series_id: Uuid) -> Result<Option<WorldSeries>> {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             sqlx::query_as::<_, SeriesRow>(
-                "SELECT id, name, background, revision, source_template, created_at FROM user_world_series \
+                "SELECT id, name, background, revision, source_novel_id, source_template, created_at FROM user_world_series \
                  WHERE user_id = $1 AND id = $2")
                 .bind(user_id).bind(series_id).fetch_optional(&self.pool).await?.map(SeriesRow::decode).transpose()
         }).await.context("series lookup deadline exceeded")?
@@ -182,7 +252,7 @@ impl WorldSeriesRepository for PgWorldSeriesRepository {
     async fn find_for_novel(&self, user_id: Uuid, novel_id: Uuid) -> Result<Option<WorldSeries>> {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             sqlx::query_as::<_, SeriesRow>(
-                r#"SELECT s.id, s.name, s.background, s.revision, s.source_template, s.created_at
+                r#"SELECT s.id, s.name, s.background, s.revision, s.source_novel_id, s.source_template, s.created_at
                    FROM user_novel_world_series AS member
                    JOIN user_world_series AS s ON s.id = member.series_id AND s.user_id = member.user_id
                    JOIN user_novels AS shelf ON shelf.user_id = member.user_id AND shelf.novel_id = member.novel_id

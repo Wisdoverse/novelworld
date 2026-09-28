@@ -10,6 +10,7 @@ import {
   useSuggestNovelWorldSeriesDeepSeek,
   useWorldSeriesList,
 } from '@/entities/novel';
+import { useGenerateGameRules } from '@/entities/narrative';
 import type { Novel, WorldSeries, WorldSeriesSuggestion } from '@/shared/types';
 import { getApiErrorCode } from '@/shared/api/client';
 import { toast } from 'sonner';
@@ -25,11 +26,24 @@ interface WorldSeriesDialogProps {
 function seriesErrorMessage(error: unknown) {
   switch (getApiErrorCode(error)) {
     case 'series_rule_source_unavailable':
-      return '所选来源书还没有可用的 D20 基础规则。请先打开来源书，在进入故事页面的高级项中生成规则，再回来创建系列。';
+      return '来源书状态已变化，请刷新书架后重试。';
     case 'source_already_in_series':
       return '来源书已经属于其他系列。请选择已有系列，将当前书加入其中。';
     default:
       return '操作失败，请稍后重试。';
+  }
+}
+
+function ruleGenerationErrorMessage(error: unknown) {
+  switch (getApiErrorCode(error)) {
+    case 'game_rule_sources_unavailable':
+      return '来源书的世界规则不足以生成 D20 基础规则；系列背景仍可使用。';
+    case 'game_rules_unavailable_at_progress':
+      return '请先阅读来源书的第一章，再生成 D20 基础规则。';
+    case 'game_rule_generation_exhausted':
+      return '来源书的规则生成次数已用尽；系列背景仍可使用。';
+    default:
+      return 'D20 规则暂未生成，系列背景仍可使用。请稍后查看状态。';
   }
 }
 
@@ -74,6 +88,9 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
   const suggestDeepSeek = useSuggestNovelWorldSeriesDeepSeek();
   const create = useCreateWorldSeries(principalId);
   const associate = useAssociateNovelWorldSeries(principalId, novel.id);
+  const pendingSeries = currentSeries.data?.source_template === null ? currentSeries.data : undefined;
+  const pendingSource = readyNovels.find(book => book.id === pendingSeries?.source_novel_id);
+  const generateRules = useGenerateGameRules(pendingSeries?.source_novel_id ?? '');
   const [suggestion, setSuggestion] = useState<WorldSeriesSuggestion>();
   const [selectedSeriesId, setSelectedSeriesId] = useState<string>();
   const [creating, setCreating] = useState(false);
@@ -85,7 +102,7 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
   const [saving, setSaving] = useState(false);
   const selection = selectedSeriesId ?? currentSeries.data?.id ?? '';
   const isPending = saving || suggest.isPending || suggestDeepSeek.isPending
-    || create.isPending || associate.isPending;
+    || create.isPending || associate.isPending || generateRules.isPending;
   const canUseDeepSeek = suggestion?.method === 'deepseek'
     ? suggestion.status === 'in_progress'
     : suggestion?.status === 'uncertain'
@@ -187,6 +204,23 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
     }
   };
 
+  const generateSourceRules = async () => {
+    if (!pendingSeries || !ensurePrincipal()) return;
+    try {
+      const template = await generateRules.mutateAsync();
+      if (!ensurePrincipal()) return;
+      await Promise.all([seriesList.refetch(), currentSeries.refetch()]);
+      if (!ensurePrincipal()) return;
+      if (template.series?.binding.series_id === pendingSeries.id) {
+        toast.success('来源书的 D20 基础规则已生成并固定到系列');
+      } else {
+        toast.error('来源规则已生成，但系列关联可能已变化；请刷新后核对。');
+      }
+    } catch (error) {
+      if (ensurePrincipal()) toast.error(ruleGenerationErrorMessage(error));
+    }
+  };
+
   return (
     <Dialog.Root open onOpenChange={open => { if (!open) onClose(); }}>
       <Dialog.Portal>
@@ -210,7 +244,7 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
           </div>
 
           <p className="mt-4 rounded-lg bg-[#f8fafd] p-3 text-xs leading-5 text-[#5f6368]">
-            系列共享基础背景和 D20 基础规则；你的属性点、装备、阅读进度和个人世界状态保持独立。
+            系列可先共享基础背景，D20 基础规则以后由你明确生成并固定到来源书；属性点、装备、阅读进度和个人世界状态保持独立。
           </p>
 
           <section className="mt-5 space-y-3" aria-label="系列识别建议">
@@ -301,7 +335,7 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
               >
                 <option value="">暂不关联</option>
                 {(seriesList.data ?? []).map(series => (
-                  <option key={series.id} value={series.id}>{series.name}</option>
+                  <option key={series.id} value={series.id}>{series.name}{series.source_template ? '' : '（D20 待生成）'}</option>
                 ))}
               </select>
             </label>
@@ -337,7 +371,7 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
             <section className="mt-5 space-y-3 rounded-xl border border-[#dadce0] p-4" aria-label="创建共享系列">
               <h3 className="text-sm font-semibold text-[#1f1f1f]">创建系列并确认关联</h3>
               <p className="text-xs leading-5 text-[#5f6368]">
-                来源书和当前书将加入同一系列。基础背景由你填写；D20 基础规则沿用来源书。
+                来源书和当前书将加入同一系列。基础背景立即共享；D20 基础规则可稍后从来源书生成。
               </p>
               <label className="block text-sm font-medium text-[#3c4043]">
                 系列名称
@@ -348,7 +382,7 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
                 <textarea className="field-control mt-1 min-h-28" maxLength={2000} value={seriesBackground} disabled={Boolean(createdSeriesId)} onChange={event => setSeriesBackground(event.target.value)} />
               </label>
               <label className="block text-sm font-medium text-[#3c4043]">
-                D20 规则来源书
+                世界观及未来 D20 规则来源书
                 <select className="field-control mt-1" value={sourceNovelId} disabled={Boolean(createdSeriesId)} onChange={event => setSourceNovelId(event.target.value)}>
                   <option value="">选择一本已就绪的书</option>
                   {readyNovels.map(book => (
@@ -372,9 +406,19 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
           ) : null}
 
           {currentSeries.data ? (
-            <p className="mt-4 text-xs text-[#5f6368]" role="status">
-              当前系列：{currentSeries.data.name}（背景与基础规则共享，角色和进度独立）。
-            </p>
+            <div className="mt-4 space-y-2 text-xs text-[#5f6368]" role="status">
+              <p>当前系列：{currentSeries.data.name}（背景共享；角色和进度独立）。</p>
+              {pendingSeries ? (
+                <>
+                  <p>此系列的 D20 基础规则尚未生成。纯叙事模式可先使用共享背景。</p>
+                  <p>{pendingSource ? `规则来源：《${pendingSource.title}》。` : '规则来源书不在当前已就绪书架，暂不能生成。'}</p>
+                  <p>点击生成可能产生模型费用；成功后会将来源书的规则固定到系列。</p>
+                  <button type="button" className="tonal-action" disabled={isPending || !pendingSource} onClick={() => void generateSourceRules()}>
+                    {generateRules.isPending ? '正在生成来源书 D20 规则…' : '生成来源书 D20 基础规则'}
+                  </button>
+                </>
+              ) : <p>D20 基础规则已从来源书固定到系列。</p>}
+            </div>
           ) : null}
           <div className="mt-6 flex justify-end">
             <Dialog.Close asChild><button type="button" className="tonal-action">完成</button></Dialog.Close>

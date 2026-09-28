@@ -55,7 +55,7 @@ impl SeriesRuleContext {
     }
 }
 
-/// User-provided setting and an exact, immutable source-book basic ruleset.
+/// User-provided setting with an optional, one-time frozen source-book ruleset.
 /// Source chapters always remain chapters of source_template.novel_id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -64,7 +64,8 @@ pub struct WorldSeries {
     pub name: String,
     pub background: String,
     pub revision: i32,
-    pub source_template: GameRuleTemplate,
+    pub source_novel_id: Uuid,
+    pub source_template: Option<GameRuleTemplate>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -84,28 +85,35 @@ impl WorldSeries {
         }
     }
     pub fn validate(&self) -> Result<(), WorldSeriesError> {
-        if self.id.is_nil() || self.revision != 1 {
+        if self.id.is_nil() || self.source_novel_id.is_nil() || self.revision != 1 {
             return Err(WorldSeriesError(
                 "series identity or revision is invalid".into(),
             ));
         }
         validate_text(&self.name, 80)?;
         validate_text(&self.background, 2_000)?;
-        if self.source_template.prompt_version != BASIC_GAME_RULE_PROMPT_VERSION
-            || self.source_template.series.is_some()
-        {
-            return Err(WorldSeriesError(
-                "series requires an original basic template".into(),
-            ));
+        if let Some(template) = &self.source_template {
+            if template.novel_id != self.source_novel_id
+                || template.prompt_version != BASIC_GAME_RULE_PROMPT_VERSION
+                || template.series.is_some()
+            {
+                return Err(WorldSeriesError(
+                    "series requires an original basic template from its source".into(),
+                ));
+            }
+            template
+                .validate(i32::MAX)
+                .map_err(|_| WorldSeriesError("source template is invalid".into()))?;
         }
-        self.source_template
-            .validate(i32::MAX)
-            .map_err(|_| WorldSeriesError("source template is invalid".into()))
+        Ok(())
     }
 
     pub fn rules_for(&self, target_novel_id: Uuid) -> Result<GameRuleTemplate, WorldSeriesError> {
         self.validate()?;
-        let mut template = self.source_template.clone();
+        let mut template = self
+            .source_template
+            .clone()
+            .ok_or_else(|| WorldSeriesError("series source rules are pending".into()))?;
         template.prompt_version = super::game_rule_template::SERIES_GAME_RULE_PROMPT_VERSION.into();
         template.series = Some(SeriesRuleContext {
             binding: SeriesRuleBinding {
@@ -145,6 +153,7 @@ mod tests {
     };
 
     fn series() -> WorldSeries {
+        let source_novel_id = Uuid::new_v4();
         let attributes = ["root", "agility", "resolve"]
             .into_iter()
             .map(|key| {
@@ -173,13 +182,10 @@ mod tests {
             name: "江湖系列".into(),
             background: "用户确认的共同设定".into(),
             revision: 1,
-            source_template: GameRuleTemplate::new_basic(
-                Uuid::new_v4(),
-                7,
-                attributes,
-                action_rules,
-            )
-            .unwrap(),
+            source_novel_id,
+            source_template: Some(
+                GameRuleTemplate::new_basic(source_novel_id, 7, attributes, action_rules).unwrap(),
+            ),
             created_at: Utc::now(),
         }
     }
@@ -190,11 +196,17 @@ mod tests {
         let source_bytes = serde_json::to_vec(&series.source_template).unwrap();
         let target = Uuid::new_v4();
         let shared = series.rules_for(target).unwrap();
-        assert_eq!(shared.novel_id, series.source_template.novel_id);
+        assert_eq!(shared.novel_id, series.source_novel_id);
         assert_eq!(shared.canon_model_version, 7);
         assert_eq!(shared.prompt_version, SERIES_GAME_RULE_PROMPT_VERSION);
-        assert_eq!(shared.attributes, series.source_template.attributes);
-        assert_eq!(shared.action_rules, series.source_template.action_rules);
+        assert_eq!(
+            shared.attributes,
+            series.source_template.as_ref().unwrap().attributes
+        );
+        assert_eq!(
+            shared.action_rules,
+            series.source_template.as_ref().unwrap().action_rules
+        );
         assert_eq!(shared.series.as_ref().unwrap().target_novel_id, target);
         assert!(shared.visible_at(0).is_none());
         assert!(shared.visible_at(1).is_some());
@@ -239,7 +251,7 @@ mod tests {
         definition.name = " name ".into();
         assert!(definition.validate().is_err());
         definition.name = "name".into();
-        definition.source_template = series().rules_for(Uuid::new_v4()).unwrap();
+        definition.source_template = Some(series().rules_for(Uuid::new_v4()).unwrap());
         assert!(definition.validate().is_err());
     }
 
@@ -264,5 +276,14 @@ mod tests {
         forged.binding.revision = 1;
         forged.background = "hidden\u{0}instruction".into();
         assert!(forged.validate().is_err());
+    }
+
+    #[test]
+    fn pending_series_keeps_setting_but_has_no_advanced_rules() {
+        let mut series = series();
+        series.source_template = None;
+        assert!(series.validate().is_ok());
+        assert_eq!(series.setting().binding.series_id, series.id);
+        assert!(series.rules_for(series.source_novel_id).is_err());
     }
 }

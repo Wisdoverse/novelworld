@@ -227,7 +227,14 @@ An ambiguous durable claim may remain and is not budget-refilled. Before applyin
 old Novel and Narrative writers must both be stopped and drained, then restarted
 as compatible versions. Template generation failure and dependency failures are
 separate cases. Migration 0031 adds series tables through the normal managed
-migration path and does not add a release barrier. Upgrade Novel, Narrative,
+migration path and does not add a release barrier. Migration 0033 permits a
+background-only series with a pending D20 snapshot; it also follows the normal
+managed migration path. `409 series_rule_source_unavailable` for a pending
+target member means the selected source book has not yet supplied a ready v2
+template. Narrative mode remains available. The reader may explicitly generate
+rules for the source book in series management; do not generate target-book
+substitutes, reset a terminal generation claim, or treat the 409 as an outage.
+Upgrade Novel, Narrative,
 and frontend together; after series-bound state exists, rollback to an
 application that cannot read it is unsupported. The [D20 responsibility and
 evaluation plan](./ADVANCED_RULES_PLAN.md) explains the optional Laya (Jev) classification preview and its fallback. A

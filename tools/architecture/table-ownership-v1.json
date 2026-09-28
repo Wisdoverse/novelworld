@@ -190,6 +190,11 @@
       "path": "infra/postgres/migrations/0022_chapter_translations.sql",
       "source_sha256": "6f8616a88fe9fdc24c8f61e30b871d0b4be12207087f91e77f251fafc42e807d",
       "reason": "this historical migration embeds catalog SELECT validation in a PL/pgSQL DO guard; the complete normalized source is pinned because executable DO bodies are no longer treated as statically safe"
+    },
+    {
+      "path": "infra/postgres/migrations/0031_user_world_series.sql",
+      "source_sha256": "f71c62b81d8cef155ab740794a5b236d0c7d71bdc02671f08eceb01e48826794",
+      "reason": "the exact historical immutable-series trigger routine is superseded by the audited one-time source-template bind routine in migration 0033; the prior function body remains fixed for replay and differs intentionally from current init.sql"
     }
   ],
   "access_exceptions": [

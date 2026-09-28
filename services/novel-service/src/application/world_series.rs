@@ -100,11 +100,11 @@ impl WorldSeriesHandler {
             model.model_version,
             BASIC_GAME_RULE_PROMPT_VERSION,
         ))
-        .await?
-        .ok_or(WorldSeriesApplicationError::SourceUnavailable)?;
-        if source_template.novel_id != command.source_novel_id
-            || source_template.canon_model_version != model.model_version
-        {
+        .await?;
+        if source_template.as_ref().is_some_and(|template| {
+            template.novel_id != command.source_novel_id
+                || template.canon_model_version != model.model_version
+        }) {
             return Err(WorldSeriesApplicationError::SourceUnavailable);
         }
         let series = WorldSeries {
@@ -112,6 +112,7 @@ impl WorldSeriesHandler {
             name: command.name,
             background: command.background,
             revision: 1,
+            source_novel_id: command.source_novel_id,
             source_template,
             created_at: Utc::now(),
         };
@@ -143,6 +144,18 @@ impl WorldSeriesHandler {
             .list(user_id)
             .await
             .map_err(WorldSeriesApplicationError::Repository)
+    }
+
+    pub async fn bind_ready_source(
+        &self,
+        user_id: Uuid,
+        series_id: Uuid,
+    ) -> Result<WorldSeries, WorldSeriesApplicationError> {
+        self.series_repo
+            .bind_ready_source(user_id, series_id)
+            .await
+            .map_err(WorldSeriesApplicationError::Repository)?
+            .ok_or(WorldSeriesApplicationError::NotFound)
     }
 
     async fn ready_novel(
@@ -219,7 +232,11 @@ impl WorldSeriesHandler {
             .await
             .map_err(WorldSeriesApplicationError::Repository)?
             .ok_or(WorldSeriesApplicationError::NotFound)?;
-        if series.revision != revision || series.source_template.canon_model_version != source_canon
+        if series.revision != revision
+            || series
+                .source_template
+                .as_ref()
+                .is_none_or(|template| template.canon_model_version != source_canon)
         {
             return Err(WorldSeriesApplicationError::NotFound);
         }
@@ -363,7 +380,7 @@ impl WorldSeriesHandler {
                 .collect::<Vec<_>>();
             members.sort_by_key(|book| {
                 (
-                    book.id != definition.source_template.novel_id,
+                    book.id != definition.source_novel_id,
                     book.title.clone(),
                     book.id,
                 )
