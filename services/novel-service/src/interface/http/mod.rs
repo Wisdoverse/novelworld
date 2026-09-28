@@ -84,6 +84,10 @@ fn routes() -> Router<AppState> {
             get(world_series::get_for_novel).put(world_series::associate),
         )
         .route(
+            "/novels/{id}/world-series/background-draft",
+            get(world_series::background_draft),
+        )
+        .route(
             "/novels/{id}/world-series/suggestion",
             post(world_series::suggestion),
         )

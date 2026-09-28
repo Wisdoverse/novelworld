@@ -138,6 +138,12 @@ export interface WorldSeries {
   created_at: string;
 }
 
+export interface WorldSeriesBackgroundDraft {
+  source_novel_id: string;
+  canon_model_version: number;
+  background: string;
+}
+
 export interface WorldSeriesSuggestion {
   status: 'suggested' | 'unconfigured' | 'uncertain' | 'unavailable' | 'in_progress';
   method?: 'laya' | 'deepseek';

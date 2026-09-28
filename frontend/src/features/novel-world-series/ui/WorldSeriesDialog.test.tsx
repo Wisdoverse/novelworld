@@ -21,11 +21,17 @@ const mocks = vi.hoisted(() => ({
   navigate: vi.fn(),
   seriesList: [] as WorldSeries[],
   currentSeries: null as WorldSeries | null,
+  backgroundDraft: null as { source_novel_id: string; canon_model_version: number; background: string } | null,
+  previewBackground: vi.fn(),
 }));
 
 vi.mock('@/entities/novel', () => ({
   useWorldSeriesList: () => ({ data: mocks.seriesList, isLoading: false, isError: false, refetch: mocks.seriesListRefetch }),
   useNovelWorldSeries: () => ({ data: mocks.currentSeries, isError: false, refetch: mocks.currentSeriesRefetch }),
+  useWorldSeriesBackgroundDraft: () => ({
+    data: mocks.backgroundDraft, variables: mocks.backgroundDraft?.source_novel_id,
+    mutate: mocks.previewBackground, isPending: false, isError: false,
+  }),
   useSuggestNovelWorldSeries: () => ({
     mutateAsync: mocks.suggestion,
     isPending: false,
@@ -99,6 +105,8 @@ describe('WorldSeriesDialog', () => {
     mocks.navigate.mockReset();
     mocks.seriesList = [];
     mocks.currentSeries = null;
+    mocks.backgroundDraft = null;
+    mocks.previewBackground.mockReset();
     mocks.suggestion.mockReset();
     mocks.deepSeek.mockReset();
     mocks.create.mockReset();
@@ -222,6 +230,29 @@ describe('WorldSeriesDialog', () => {
     fireEvent.click(screen.getByRole('button', { name: '确认共享背景' }));
     await waitFor(() => expect(mocks.confirmBackground).toHaveBeenCalledWith({
       seriesId: series.id, background: '确认后的背景',
+    }));
+  });
+
+  it('keeps the extracted source draft private until the reader copies and confirms it', async () => {
+    mocks.currentSeries = { ...series, background: null };
+    const extracted = {
+      source_novel_id: 'source-book', canon_model_version: 1,
+      background: '世界背景：两座城邦。\n人物关系：甲与乙：盟友',
+    };
+    const view = renderDialog();
+    expect(screen.queryByText(extracted.background)).toBeNull();
+    expect((screen.getByLabelText('共享世界背景（最多 2000 字）') as HTMLTextAreaElement).value).toBe('');
+    expect(mocks.confirmBackground).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '查看来源书的全书背景建议（可能含后文）' }));
+    expect(mocks.previewBackground).toHaveBeenCalledWith('source-book');
+    mocks.backgroundDraft = extracted;
+    view.rerender(dialogElement());
+    fireEvent.click(screen.getByRole('button', { name: '填入原著背景建议' }));
+    expect((screen.getByLabelText('共享世界背景（最多 2000 字）') as HTMLTextAreaElement).value).toBe(extracted.background);
+    expect(mocks.confirmBackground).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '确认共享背景' }));
+    await waitFor(() => expect(mocks.confirmBackground).toHaveBeenCalledWith({
+      seriesId: series.id, background: extracted.background,
     }));
   });
 

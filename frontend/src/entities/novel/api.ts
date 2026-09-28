@@ -7,6 +7,7 @@ import type {
   Chapter,
   Character,
   WorldSeries,
+  WorldSeriesBackgroundDraft,
   WorldSeriesSuggestion,
 } from '@/shared/types';
 
@@ -71,6 +72,15 @@ export function useNovelWorldSeries(principalId: string | undefined, novelId: st
       .get<WorldSeries | null>(`/novels/${novelId}/world-series`, { signal })
       .then(response => response.data),
     enabled: Boolean(principalId && novelId),
+  });
+}
+
+export function useWorldSeriesBackgroundDraft() {
+  return useMutation({
+    retry: false,
+    mutationFn: (novelId: string) => apiClient
+      .get<WorldSeriesBackgroundDraft>(`/novels/${novelId}/world-series/background-draft`)
+      .then(response => response.data),
   });
 }
 

@@ -29,6 +29,7 @@ export {
   useSuggestNovelWorldSeries,
   useSuggestNovelWorldSeriesDeepSeek,
   useWorldSeriesList,
+  useWorldSeriesBackgroundDraft,
 } from './api';
 export type {
   CreateWorldSeriesInput,

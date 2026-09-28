@@ -1338,6 +1338,15 @@ owner-scoped, idempotent under concurrency, and unable to replace an existing
 snapshot. Narrative-only sessions MAY use the setting only after it has been
 confirmed, including while D20 rules are still pending.
 
+Novel MAY offer a reader-requested private, read-only background draft composed
+from the source book's persisted LLM world summary, source-cited whole-book
+Canon rules, locations and factions, and named character relationships. Preview
+MUST require the reader's Ready source access, stay
+within the 2,000-character background bound, use `no-store`, and dispatch no
+provider work. It MUST NOT save or share the draft before the reader explicitly
+confirms the background, or expose draft content as matching evidence. If extraction is unavailable, manual entry remains
+possible; a suggested series match never confirms the background.
+
 When a series-bound profile or session is resolved, Narrative MUST obtain the
 series snapshot through Novel's HTTP contract. Source-book canon and target-book
 canon remain separate; source chapter numbers MUST NOT be relabeled as target

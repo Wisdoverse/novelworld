@@ -164,6 +164,7 @@ async fn run_body() -> Result<()> {
             series_repo: Arc::new(PgWorldSeriesRepository::new(pool.clone())),
             novel_repo: novel_repo.clone(),
             canon_repo: canon_repo.clone(),
+            character_repo: character_repo.clone(),
             matcher,
             llm: Some(llm_adapter.clone()),
         });
