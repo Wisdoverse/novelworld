@@ -144,6 +144,12 @@ export interface WorldSeriesBackgroundDraft {
   background: string;
 }
 
+export interface SeriesBackgroundDraft {
+  series_id: string;
+  member_novel_ids: string[];
+  background: string;
+}
+
 export interface WorldSeriesSuggestion {
   status: 'suggested' | 'unconfigured' | 'uncertain' | 'unavailable' | 'in_progress';
   method?: 'laya' | 'deepseek';

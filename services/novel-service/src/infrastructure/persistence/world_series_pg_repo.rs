@@ -293,6 +293,33 @@ impl WorldSeriesRepository for PgWorldSeriesRepository {
         .context("series membership list deadline exceeded")?
     }
 
+    async fn member_novels(
+        &self,
+        user_id: Uuid,
+        series_id: Uuid,
+        limit: usize,
+    ) -> Result<Vec<Uuid>> {
+        let limit = i64::try_from(limit).context("series member limit overflow")?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            sqlx::query_scalar::<_, Uuid>(
+                r#"SELECT member.novel_id FROM user_novel_world_series AS member
+                   JOIN user_world_series AS series
+                     ON series.id = member.series_id AND series.user_id = member.user_id
+                   WHERE member.user_id = $1 AND member.series_id = $2
+                   ORDER BY (member.novel_id = series.source_novel_id) DESC, member.novel_id
+                   LIMIT $3"#,
+            )
+            .bind(user_id)
+            .bind(series_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(Into::into)
+        })
+        .await
+        .context("series member list deadline exceeded")?
+    }
+
     async fn find_for_novel(&self, user_id: Uuid, novel_id: Uuid) -> Result<Option<WorldSeries>> {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             sqlx::query_as::<_, SeriesRow>(

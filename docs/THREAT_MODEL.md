@@ -202,6 +202,12 @@ limit but cannot enforce.
    only to an authenticated reader with
    Ready source access, after a spoiler warning. It makes no model call, is
    private/no-store, and cannot persist or share anything before confirmation.
+   A pending-series aggregate draft reads only confirmed members with current
+   owner/Ready checks, enforces a member and output bound, and fails if a member
+   lacks saved extraction. The browser shows the included members and warns that
+   later plot facts and book-specific changes require reader review. It never
+   writes the draft automatically; a target book's Canon remains authoritative
+   for its own setting and characters.
    A bounded scan abstains on
    overflow or ambiguity, and its local conclusion is labeled separately from
    Laya. Suggestions cannot create or change associations; readers must

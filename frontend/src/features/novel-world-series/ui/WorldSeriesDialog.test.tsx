@@ -23,6 +23,8 @@ const mocks = vi.hoisted(() => ({
   currentSeries: null as WorldSeries | null,
   backgroundDraft: null as { source_novel_id: string; canon_model_version: number; background: string } | null,
   previewBackground: vi.fn(),
+  seriesBackgroundDraft: null as { series_id: string; member_novel_ids: string[]; background: string } | null,
+  previewSeriesBackground: vi.fn(),
 }));
 
 vi.mock('@/entities/novel', () => ({
@@ -30,7 +32,11 @@ vi.mock('@/entities/novel', () => ({
   useNovelWorldSeries: () => ({ data: mocks.currentSeries, isError: false, refetch: mocks.currentSeriesRefetch }),
   useWorldSeriesBackgroundDraft: () => ({
     data: mocks.backgroundDraft, variables: mocks.backgroundDraft?.source_novel_id,
-    mutate: mocks.previewBackground, isPending: false, isError: false,
+    mutateAsync: mocks.previewBackground, isPending: false, isError: false,
+  }),
+  useSeriesBackgroundDraft: () => ({
+    data: mocks.seriesBackgroundDraft, variables: mocks.seriesBackgroundDraft?.series_id,
+    mutateAsync: mocks.previewSeriesBackground, isPending: false, isError: false,
   }),
   useSuggestNovelWorldSeries: () => ({
     mutateAsync: mocks.suggestion,
@@ -106,7 +112,11 @@ describe('WorldSeriesDialog', () => {
     mocks.seriesList = [];
     mocks.currentSeries = null;
     mocks.backgroundDraft = null;
+    mocks.seriesBackgroundDraft = null;
     mocks.previewBackground.mockReset();
+    mocks.previewSeriesBackground.mockReset();
+    mocks.previewBackground.mockImplementation(async () => mocks.backgroundDraft);
+    mocks.previewSeriesBackground.mockImplementation(async () => mocks.seriesBackgroundDraft);
     mocks.suggestion.mockReset();
     mocks.deepSeek.mockReset();
     mocks.create.mockReset();
@@ -233,27 +243,82 @@ describe('WorldSeriesDialog', () => {
     }));
   });
 
-  it('keeps the extracted source draft private until the reader copies and confirms it', async () => {
+  it('fills an editable draft from every confirmed member without saving it before confirmation', async () => {
     mocks.currentSeries = { ...series, background: null };
     const extracted = {
-      source_novel_id: 'source-book', canon_model_version: 1,
-      background: '世界背景：两座城邦。\n人物关系：甲与乙：盟友',
+      series_id: 'series-1', member_novel_ids: ['source-book', 'target-book'],
+      background: '系列世界背景素材：\n成员书1：城邦\n成员书2：海洋',
     };
-    const view = renderDialog();
-    expect(screen.queryByText(extracted.background)).toBeNull();
+    mocks.previewSeriesBackground.mockResolvedValue(extracted);
+    renderDialog();
     expect((screen.getByLabelText('共享世界背景（最多 2000 字）') as HTMLTextAreaElement).value).toBe('');
+    expect(screen.queryByText(/本已关联小说的素材/)).toBeNull();
     expect(mocks.confirmBackground).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: '查看来源书的全书背景建议（可能含后文）' }));
-    expect(mocks.previewBackground).toHaveBeenCalledWith('source-book');
-    mocks.backgroundDraft = extracted;
-    view.rerender(dialogElement());
-    fireEvent.click(screen.getByRole('button', { name: '填入原著背景建议' }));
-    expect((screen.getByLabelText('共享世界背景（最多 2000 字）') as HTMLTextAreaElement).value).toBe(extracted.background);
+    fireEvent.click(screen.getByRole('button', { name: '汇总已关联小说并填入背景初稿（可能含后文）' }));
+    await waitFor(() => expect(mocks.previewSeriesBackground).toHaveBeenCalledWith('series-1'));
+    await waitFor(() => expect((screen.getByLabelText('共享世界背景（最多 2000 字）') as HTMLTextAreaElement).value).toBe(extracted.background));
     expect(mocks.confirmBackground).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText('共享世界背景（最多 2000 字）'), { target: { value: '用户整理后的全系列共同背景' } });
     fireEvent.click(screen.getByRole('button', { name: '确认共享背景' }));
     await waitFor(() => expect(mocks.confirmBackground).toHaveBeenCalledWith({
-      seriesId: series.id, background: extracted.background,
+      seriesId: series.id, background: '用户整理后的全系列共同背景',
     }));
+  });
+
+  it('keeps a reader edit made while the series draft is loading', async () => {
+    mocks.currentSeries = { ...series, background: null };
+    let finish!: (value: { series_id: string; member_novel_ids: string[]; background: string }) => void;
+    mocks.previewSeriesBackground.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    renderDialog();
+    fireEvent.click(screen.getByRole('button', { name: '汇总已关联小说并填入背景初稿（可能含后文）' }));
+    fireEvent.change(screen.getByLabelText('共享世界背景（最多 2000 字）'), { target: { value: '用户自己写的背景' } });
+    finish({ series_id: series.id, member_novel_ids: ['source-book', 'target-book'], background: '迟到的建议' });
+    await waitFor(() => expect(mocks.previewSeriesBackground).toHaveBeenCalledOnce());
+    expect((screen.getByLabelText('共享世界背景（最多 2000 字）') as HTMLTextAreaElement).value).toBe('用户自己写的背景');
+    expect(mocks.confirmBackground).not.toHaveBeenCalled();
+  });
+
+  it('clears an untouched source-book draft when its source changes', async () => {
+    const extracted = {
+      source_novel_id: 'source-book', canon_model_version: 2,
+      background: '来源书自己的背景',
+    };
+    mocks.previewBackground.mockImplementation(async () => {
+      mocks.backgroundDraft = extracted;
+      return extracted;
+    });
+    renderDialog();
+    fireEvent.click(screen.getByRole('button', { name: '创建系列' }));
+    fireEvent.change(screen.getByLabelText('系列来源书（未来 D20 规则来源）'), { target: { value: 'source-book' } });
+    fireEvent.click(screen.getByRole('button', { name: '填入来源书背景初稿（可能含后文）' }));
+    await waitFor(() => expect((screen.getByLabelText('共享世界背景（最多 2000 字）') as HTMLTextAreaElement).value).toBe(extracted.background));
+    fireEvent.change(screen.getByLabelText('系列来源书（未来 D20 规则来源）'), { target: { value: 'target-book' } });
+    expect((screen.getByLabelText('共享世界背景（最多 2000 字）') as HTMLTextAreaElement).value).toBe('');
+    expect(mocks.create).not.toHaveBeenCalled();
+  });
+
+  it('also clears the source-book draft when a new-series suggestion changes the source', async () => {
+    const extracted = { source_novel_id: 'source-book', canon_model_version: 2, background: '来源书自己的背景' };
+    mocks.previewBackground.mockImplementation(async () => {
+      mocks.backgroundDraft = extracted;
+      return extracted;
+    });
+    mocks.suggestionResult = {
+      status: 'suggested', suggestion: {
+        series_id: null, source_novel_id: 'target-book', name: '候选系列',
+        book: { title: '当前书', author: null, genre: null },
+      },
+    };
+    renderDialog();
+    fireEvent.click(screen.getByRole('button', { name: '创建系列' }));
+    fireEvent.change(screen.getByLabelText('系列来源书（未来 D20 规则来源）'), { target: { value: 'source-book' } });
+    fireEvent.click(screen.getByRole('button', { name: '填入来源书背景初稿（可能含后文）' }));
+    await waitFor(() => expect((screen.getByLabelText('共享世界背景（最多 2000 字）') as HTMLTextAreaElement).value).toBe(extracted.background));
+    fireEvent.click(screen.getByRole('button', { name: '识别同系列' }));
+    await screen.findByRole('button', { name: '用此建议创建系列' });
+    fireEvent.click(screen.getByRole('button', { name: '用此建议创建系列' }));
+    expect((screen.getByLabelText('共享世界背景（最多 2000 字）') as HTMLTextAreaElement).value).toBe('');
+    expect(mocks.create).not.toHaveBeenCalled();
   });
 
   it('refreshes a stale pending series after another page has confirmed it', async () => {

@@ -203,6 +203,11 @@ async fn series_routes_reject_missing_principal_before_database_or_provider_work
         ("GET", format!("/novels/{novel}/world-series"), None),
         (
             "GET",
+            format!("/novels/world-series/{novel}/background-draft"),
+            None,
+        ),
+        (
+            "GET",
             format!("/novels/{novel}/world-series/background-draft"),
             None,
         ),

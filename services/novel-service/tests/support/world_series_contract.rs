@@ -1002,6 +1002,45 @@ pub async fn run(pool: &PgPool, user: Uuid, other_user: Uuid, source: Uuid) {
         .associate(user, target, Some(pending_background.id))
         .await
         .unwrap();
+    assert!(matches!(
+        handler
+            .series_background_draft(user, pending_background.id)
+            .await,
+        Err(WorldSeriesApplicationError::BackgroundDraftUnavailable)
+    ));
+    sqlx::query("UPDATE novels SET world_summary = CASE id WHEN $1 THEN '第二册补充了新的城邦。' WHEN $2 THEN '第三册补充了海上贸易。' END WHERE id IN ($1, $2)")
+        .bind(extra_books[1]).bind(target)
+        .execute(pool).await.unwrap();
+    let target_first = Uuid::new_v4();
+    let target_second = Uuid::new_v4();
+    for (id, name) in [(target_first, "丙"), (target_second, "丁")] {
+        sqlx::query("INSERT INTO characters (id, novel_id, name) VALUES ($1, $2, $3)")
+            .bind(id)
+            .bind(target)
+            .bind(name)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO character_relationships (novel_id, from_character_id, to_character_id, relationship_type, strength) VALUES ($1, $2, $3, '伙伴', 90)")
+        .bind(target).bind(target_first).bind(target_second).execute(pool).await.unwrap();
+    let draft = handler
+        .series_background_draft(user, pending_background.id)
+        .await
+        .unwrap();
+    assert_eq!(draft.member_novel_ids.len(), 2);
+    assert!(draft.member_novel_ids.contains(&extra_books[1]));
+    assert!(draft.member_novel_ids.contains(&target));
+    assert!(draft.background.contains("第二册补充了新的城邦"));
+    assert!(draft.background.contains("第三册补充了海上贸易"));
+    assert!(draft.background.contains("丙与丁：伙伴"));
+    assert!(draft.background.chars().count() <= 2_000);
+    assert!(matches!(
+        handler
+            .series_background_draft(other_user, pending_background.id)
+            .await,
+        Err(WorldSeriesApplicationError::NotFound)
+    ));
     assert_eq!(
         repository
             .find_for_novel(user, target)
@@ -1048,6 +1087,12 @@ pub async fn run(pool: &PgPool, user: Uuid, other_user: Uuid, source: Uuid) {
     let confirmed = first.unwrap();
     assert_eq!(retry.unwrap(), confirmed);
     assert_eq!(confirmed.background.as_deref(), Some("Shared facts"));
+    assert!(matches!(
+        handler
+            .series_background_draft(user, pending_background.id)
+            .await,
+        Err(WorldSeriesApplicationError::BackgroundConflict)
+    ));
     assert_eq!(confirmed.setting().unwrap().background, "Shared facts");
     assert!(confirmed.rules_for(target).is_ok());
     assert_eq!(

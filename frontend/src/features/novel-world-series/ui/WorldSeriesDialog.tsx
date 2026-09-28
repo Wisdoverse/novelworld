@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Loader2, Sparkles, X } from 'lucide-react';
@@ -7,6 +7,7 @@ import {
   useConfirmWorldSeriesBackground,
   useCreateWorldSeries,
   useNovelWorldSeries,
+  useSeriesBackgroundDraft,
   useSuggestNovelWorldSeries,
   useSuggestNovelWorldSeriesDeepSeek,
   useWorldSeriesBackgroundDraft,
@@ -108,13 +109,21 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
   const [saving, setSaving] = useState(false);
   const draftSourceId = creating ? sourceNovelId : backgroundPending?.source_novel_id ?? '';
   const backgroundSuggestion = useWorldSeriesBackgroundDraft();
+  const seriesBackgroundSuggestion = useSeriesBackgroundDraft();
+  const draftScope = useRef({ creating, sourceNovelId, seriesId: backgroundPending?.id });
+  draftScope.current = { creating, sourceNovelId, seriesId: backgroundPending?.id };
   const suggestedBackground = backgroundSuggestion.data?.source_novel_id === draftSourceId
     ? backgroundSuggestion.data : undefined;
   const suggestionPending = backgroundSuggestion.isPending && backgroundSuggestion.variables === draftSourceId;
   const suggestionError = backgroundSuggestion.isError && backgroundSuggestion.variables === draftSourceId;
+  const aggregateSuggestion = seriesBackgroundSuggestion.data?.series_id === backgroundPending?.id
+    ? seriesBackgroundSuggestion.data : undefined;
+  const aggregatePending = seriesBackgroundSuggestion.isPending && seriesBackgroundSuggestion.variables === backgroundPending?.id;
+  const aggregateError = seriesBackgroundSuggestion.isError && seriesBackgroundSuggestion.variables === backgroundPending?.id;
   const selection = selectedSeriesId ?? currentSeries.data?.id ?? '';
   const isPending = saving || suggest.isPending || suggestDeepSeek.isPending
-    || create.isPending || associate.isPending || confirmBackground.isPending || generateRules.isPending;
+    || create.isPending || associate.isPending || confirmBackground.isPending || generateRules.isPending
+    || suggestionPending || aggregatePending;
   const canUseDeepSeek = suggestion?.method === 'deepseek'
     ? suggestion.status === 'in_progress'
     : suggestion?.status === 'uncertain'
@@ -122,6 +131,41 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
       || suggestion?.status === 'unconfigured';
 
   const ensurePrincipal = () => isPrincipalCurrent();
+
+  const fillSourceBackground = async () => {
+    if (!sourceNovelId || !ensurePrincipal()) return;
+    const selectedSource = sourceNovelId;
+    const before = seriesBackground;
+    try {
+      const draft = await backgroundSuggestion.mutateAsync(selectedSource);
+      if (!ensurePrincipal() || !draftScope.current.creating || draftScope.current.sourceNovelId !== selectedSource) return;
+      setSeriesBackground(current => current === before ? draft.background : current);
+    } catch {
+      // Manual entry stays available when saved extraction cannot be read.
+    }
+  };
+
+  const fillSeriesBackground = async () => {
+    if (!backgroundPending || !ensurePrincipal()) return;
+    const selectedSeries = backgroundPending.id;
+    const before = backgroundDraft;
+    try {
+      const draft = await seriesBackgroundSuggestion.mutateAsync(selectedSeries);
+      if (!ensurePrincipal() || draftScope.current.seriesId !== selectedSeries) return;
+      setBackgroundDraft(current => current === before ? draft.background : current);
+    } catch {
+      // The reader can still compose a shared background manually.
+    }
+  };
+
+  const changeSourceNovel = (nextSourceId: string) => {
+    if (nextSourceId !== sourceNovelId
+      && backgroundSuggestion.data?.source_novel_id === sourceNovelId
+      && seriesBackground === backgroundSuggestion.data.background) {
+      setSeriesBackground('');
+    }
+    setSourceNovelId(nextSourceId);
+  };
 
   const applySuggestion = (value: NonNullable<WorldSeriesSuggestion['suggestion']>) => {
     if (value.series_id && seriesList.data?.some(series => series.id === value.series_id)) {
@@ -131,7 +175,7 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
     }
     setSeriesName('');
     if (readyNovels.some(book => book.id === value.source_novel_id)) {
-      setSourceNovelId(value.source_novel_id);
+      changeSourceNovel(value.source_novel_id);
     }
     setCreating(true);
   };
@@ -411,10 +455,10 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
                 共享世界背景（最多 2000 字）
                 <textarea className="field-control mt-1 min-h-28" maxLength={2000} value={seriesBackground} disabled={Boolean(createdSeriesId)} onChange={event => setSeriesBackground(event.target.value)} />
               </label>
-              <p className="text-xs text-[#5f6368]">留空可稍后确认；现在填写并创建后即固定，不能修改。</p>
+              <p className="text-xs text-[#5f6368]">可直接填写全系列共同背景，或留空并先关联其它书；确认前可编辑，保存后固定。各书独有的角色和设定仍以该书为准。</p>
               <label className="block text-sm font-medium text-[#3c4043]">
                 系列来源书（未来 D20 规则来源）
-                <select className="field-control mt-1" value={sourceNovelId} disabled={Boolean(createdSeriesId)} onChange={event => setSourceNovelId(event.target.value)}>
+                <select className="field-control mt-1" value={sourceNovelId} disabled={Boolean(createdSeriesId)} onChange={event => changeSourceNovel(event.target.value)}>
                   <option value="">选择一本已就绪的书</option>
                   {readyNovels.map(book => (
                     <option key={book.id} value={book.id}>{book.title}</option>
@@ -422,19 +466,17 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
                 </select>
               </label>
               {sourceNovelId ? (
-                <button type="button" className="tonal-action" disabled={suggestionPending} onClick={() => { if (ensurePrincipal()) backgroundSuggestion.mutate(sourceNovelId); }}>
-                  查看来源书的全书背景建议（可能含后文）
+                <button type="button" className="tonal-action" disabled={isPending} onClick={() => void fillSourceBackground()}>
+                  填入来源书背景初稿（可能含后文）
                 </button>
               ) : null}
-              {sourceNovelId && suggestionPending ? <p className="text-xs text-[#5f6368]">正在读取原著提取的背景…</p> : null}
-              {sourceNovelId && suggestionError ? <p className="text-xs text-[#5f6368]">来源书暂无可用的原著背景建议，可以留空后再确认，或手动填写。</p> : null}
+              {sourceNovelId && suggestionPending ? <p className="text-xs text-[#5f6368]">正在读取来源书的背景素材…</p> : null}
+              {sourceNovelId && suggestionError ? <p className="text-xs text-[#5f6368]">来源书暂无可用的背景建议，可手动填写或稍后确认。</p> : null}
+              {sourceNovelId && backgroundSuggestion.data && backgroundSuggestion.data.source_novel_id !== sourceNovelId && seriesBackground.trim() ? (
+                <p role="status" className="text-xs text-[#5f6368]">已更换来源书；请核对当前填写的背景是否仍适用。</p>
+              ) : null}
               {suggestedBackground ? (
-                <div className="rounded-lg bg-[#f8fafd] p-3 text-xs leading-5 text-[#3c4043]">
-                  <p className="font-medium">来源书解析建议（世界设定与人物关系）</p>
-                  <p className="mt-2 whitespace-pre-wrap">{suggestedBackground.background}</p>
-                  <p className="mt-2 text-[#5f6368]">可能包含后续设定，也可能遗漏细节；请核对并编辑，确认后不能修改。此建议复用已保存的模型提取结果。</p>
-                  <button type="button" className="tonal-action mt-2" onClick={() => setSeriesBackground(suggestedBackground.background)}>填入原著背景建议</button>
-                </div>
+                <p role="status" className="text-xs text-[#5f6368]">{seriesBackground === suggestedBackground.background ? '已填入来源书初稿。' : '来源书初稿已读取，当前背景已由你编辑。'}它只参考一本书；要参考全系列，请先创建空背景并关联其它书，再回来填入。请删去不宜跨书共享的后文内容。</p>
               ) : null}
               {createdSeriesId ? (
                 <p role="status" className="text-xs text-[#5f6368]">系列已创建；确认按钮会重试关联，不会重复创建。</p>
@@ -454,17 +496,17 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
           {backgroundPending ? (
             <section className="mt-4 space-y-2 rounded-lg border border-[#dadce0] p-4" aria-label="确认共享背景">
               <p className="text-sm font-medium text-[#3c4043]">当前系列仅用于分组；共享世界背景尚未确认，D20 状态也暂不显示。</p>
-              <button type="button" className="tonal-action" disabled={suggestionPending} onClick={() => { if (ensurePrincipal()) backgroundSuggestion.mutate(backgroundPending.source_novel_id); }}>
-                查看来源书的全书背景建议（可能含后文）
+              <button type="button" className="tonal-action" disabled={isPending} onClick={() => void fillSeriesBackground()}>
+                汇总已关联小说并填入背景初稿（可能含后文）
               </button>
-              {suggestionPending ? <p className="text-xs text-[#5f6368]">正在读取原著提取的背景…</p> : null}
-              {suggestionError ? <p className="text-xs text-[#5f6368]">来源书暂无可用的原著背景建议，仍可手动填写。</p> : null}
-              {suggestedBackground ? (
-                <div className="rounded-lg bg-[#f8fafd] p-3 text-xs leading-5 text-[#3c4043]">
-                  <p className="font-medium">来源书解析建议（世界设定与人物关系）</p>
-                  <p className="mt-2 whitespace-pre-wrap">{suggestedBackground.background}</p>
-                  <p className="mt-2 text-[#5f6368]">可能包含后续设定，也可能遗漏细节；请核对并编辑，确认后不能修改。此建议复用已保存的模型提取结果。</p>
-                  <button type="button" className="tonal-action mt-2" onClick={() => setBackgroundDraft(suggestedBackground.background)}>填入原著背景建议</button>
+              {aggregatePending ? <p className="text-xs text-[#5f6368]">正在读取已关联小说的背景素材…</p> : null}
+              {aggregateError ? <p className="text-xs text-[#5f6368]">有成员缺少可用解析或成员过多，仍可手动填写。</p> : null}
+              {aggregateSuggestion ? (
+                <div className="text-xs leading-5 text-[#5f6368]" role="status">
+                  <p>{backgroundDraft === aggregateSuggestion.background ? '已填入' : '已读取'} {aggregateSuggestion.member_novel_ids.length} 本已关联小说的素材；请归并共同设定，并删去各部独有的后文情节。</p>
+                  <ol className="list-inside list-decimal">
+                    {aggregateSuggestion.member_novel_ids.map(id => <li key={id}>{readyNovels.find(book => book.id === id)?.title ?? '当前书架中的成员书'}</li>)}
+                  </ol>
                 </div>
               ) : null}
               <label className="block text-sm font-medium text-[#3c4043]">

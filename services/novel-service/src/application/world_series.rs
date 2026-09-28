@@ -21,6 +21,7 @@ use crate::domain::{
     value_objects::NovelStatus,
 };
 use chrono::Utc;
+use futures::{stream, StreamExt, TryStreamExt};
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -31,6 +32,7 @@ use std::{
 use uuid::Uuid;
 
 const MAX_SERIES_SCAN_BOOKS: usize = 128;
+const MAX_SERIES_DRAFT_MEMBERS: usize = 16;
 
 #[derive(serde::Serialize)]
 struct BookClues {
@@ -60,6 +62,23 @@ pub struct WorldSeriesBackgroundDraft {
     pub source_novel_id: Uuid,
     pub canon_model_version: i32,
     pub background: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct SeriesBackgroundDraft {
+    pub series_id: Uuid,
+    pub member_novel_ids: Vec<Uuid>,
+    pub background: String,
+}
+
+struct BookBackgroundEvidence {
+    novel_id: Uuid,
+    model_version: i32,
+    summary: String,
+    rules: Vec<String>,
+    locations: Vec<String>,
+    factions: Vec<String>,
+    relations: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -101,13 +120,72 @@ impl WorldSeriesHandler {
         user_id: Uuid,
         source_novel_id: Uuid,
     ) -> Result<WorldSeriesBackgroundDraft, WorldSeriesApplicationError> {
+        let evidence = self.background_evidence(user_id, source_novel_id).await?;
+        let background = compose_background_draft(&evidence)?;
+        Ok(WorldSeriesBackgroundDraft {
+            source_novel_id,
+            canon_model_version: evidence.model_version,
+            background,
+        })
+    }
+
+    pub async fn series_background_draft(
+        &self,
+        user_id: Uuid,
+        series_id: Uuid,
+    ) -> Result<SeriesBackgroundDraft, WorldSeriesApplicationError> {
+        let series = bounded_read(self.series_repo.find(user_id, series_id))
+            .await?
+            .ok_or(WorldSeriesApplicationError::NotFound)?;
+        if series.background.is_some() {
+            return Err(WorldSeriesApplicationError::BackgroundConflict);
+        }
+        let members = bounded_read(self.series_repo.member_novels(
+            user_id,
+            series_id,
+            MAX_SERIES_DRAFT_MEMBERS + 1,
+        ))
+        .await?;
+        if members.is_empty()
+            || members.len() > MAX_SERIES_DRAFT_MEMBERS
+            || !members.contains(&series.source_novel_id)
+        {
+            return Err(WorldSeriesApplicationError::BackgroundDraftUnavailable);
+        }
+        let evidence = tokio::time::timeout(
+            Duration::from_secs(15),
+            stream::iter(
+                members
+                    .iter()
+                    .copied()
+                    .map(|novel_id| self.background_evidence(user_id, novel_id)),
+            )
+            .buffered(3)
+            .try_collect::<Vec<_>>(),
+        )
+        .await
+        .map_err(|error| WorldSeriesApplicationError::Repository(error.into()))??;
+        let background = compose_series_background_draft(&evidence)?;
+        Ok(SeriesBackgroundDraft {
+            series_id,
+            member_novel_ids: evidence.iter().map(|book| book.novel_id).collect(),
+            background,
+        })
+    }
+
+    async fn background_evidence(
+        &self,
+        user_id: Uuid,
+        source_novel_id: Uuid,
+    ) -> Result<BookBackgroundEvidence, WorldSeriesApplicationError> {
         let novel = self.ready_novel(user_id, source_novel_id).await?;
         let summary = novel
             .world_summary
             .as_deref()
             .map(str::trim)
             .filter(|text| !text.is_empty())
-            .ok_or(WorldSeriesApplicationError::BackgroundDraftUnavailable)?;
+            .ok_or(WorldSeriesApplicationError::BackgroundDraftUnavailable)?
+            .to_owned();
         let model = bounded_read(self.canon_repo.find_latest(source_novel_id))
             .await?
             .ok_or(WorldSeriesApplicationError::BackgroundDraftUnavailable)?;
@@ -137,18 +215,14 @@ impl WorldSeriesHandler {
             .iter()
             .map(|group| group.name.clone())
             .collect::<Vec<_>>();
-        let background = compose_background_draft(
+        Ok(BookBackgroundEvidence {
+            novel_id: source_novel_id,
+            model_version: model.model_version,
             summary,
-            &rules,
-            &locations,
-            &factions,
-            &names,
-            relationships,
-        )?;
-        Ok(WorldSeriesBackgroundDraft {
-            source_novel_id,
-            canon_model_version: model.model_version,
-            background,
+            rules,
+            locations,
+            factions,
+            relations: compose_relations(&names, relationships),
         })
     }
 
@@ -792,14 +866,10 @@ impl WorldSeriesHandler {
     }
 }
 
-fn compose_background_draft(
-    summary: &str,
-    rules: &[String],
-    locations: &[String],
-    factions: &[String],
+fn compose_relations(
     names: &HashMap<Uuid, &str>,
     mut relationships: Vec<CharacterRelationshipRecord>,
-) -> Result<String, WorldSeriesApplicationError> {
+) -> String {
     relationships.sort_by(|left, right| {
         right
             .strength
@@ -830,12 +900,19 @@ fn compose_background_draft(
         relations.push_str(&detail);
         relation_count += 1;
     }
-    let relation_section = if relations.is_empty() {
+    relations
+}
+
+fn compose_background_draft(
+    evidence: &BookBackgroundEvidence,
+) -> Result<String, WorldSeriesApplicationError> {
+    let relation_section = if evidence.relations.is_empty() {
         String::new()
     } else {
-        format!("\n人物关系：{relations}")
+        format!("\n人物关系：{}", evidence.relations)
     };
-    let rules = rules
+    let rules = evidence
+        .rules
         .iter()
         .take(4)
         .map(|rule| rule.trim().chars().take(100).collect::<String>())
@@ -846,7 +923,8 @@ fn compose_background_draft(
     } else {
         format!("\n世界规则：{}", rules.join("；"))
     };
-    let places = locations
+    let places = evidence
+        .locations
         .iter()
         .take(5)
         .map(|place| place.trim().chars().take(40).collect::<String>())
@@ -857,7 +935,8 @@ fn compose_background_draft(
     } else {
         format!("\n主要地点：{}", places.join("、"))
     };
-    let groups = factions
+    let groups = evidence
+        .factions
         .iter()
         .take(5)
         .map(|group| group.trim().chars().take(40).collect::<String>())
@@ -872,22 +951,91 @@ fn compose_background_draft(
     let prefix = "世界背景：";
     let summary_limit = 2_000 - prefix.chars().count() - sections.chars().count();
     // ponytail: a character-bound cut can end mid-sentence; a curated synopsis is needed if that harms quality.
-    let summary_text = if summary.chars().count() > summary_limit {
+    let summary_text = if evidence.summary.chars().count() > summary_limit {
         format!(
             "{}…",
-            summary
+            evidence
+                .summary
                 .chars()
                 .take(summary_limit - 1)
                 .collect::<String>()
                 .trim_end()
         )
     } else {
-        summary.to_owned()
+        evidence.summary.clone()
     };
     let background = format!("{prefix}{summary_text}{sections}");
     validate_text(&background, 2_000)
         .map_err(|_| WorldSeriesApplicationError::BackgroundDraftUnavailable)?;
     Ok(background)
+}
+
+fn compose_series_background_draft(
+    books: &[BookBackgroundEvidence],
+) -> Result<String, WorldSeriesApplicationError> {
+    if books.is_empty() || books.len() > MAX_SERIES_DRAFT_MEMBERS {
+        return Err(WorldSeriesApplicationError::BackgroundDraftUnavailable);
+    }
+    let prefix = "系列世界背景素材（各部变化以当前书为准）：\n";
+    let per_book = (2_000 - prefix.chars().count() - (books.len() - 1)) / books.len();
+    let mut lines = Vec::with_capacity(books.len());
+    for (index, book) in books.iter().enumerate() {
+        let mut details = String::new();
+        let detail_budget = (per_book / 3).min(160);
+        append_draft_field(
+            &mut details,
+            detail_budget,
+            "人物关系",
+            book.relations.split('；').next().unwrap_or_default(),
+            60,
+        );
+        if let Some(rule) = book.rules.first() {
+            append_draft_field(&mut details, detail_budget, "世界规则", rule, 60);
+        }
+        if let Some(place) = book.locations.first() {
+            append_draft_field(&mut details, detail_budget, "地点", place, 30);
+        }
+        if let Some(faction) = book.factions.first() {
+            append_draft_field(&mut details, detail_budget, "势力", faction, 30);
+        }
+        let mut line = format!("成员书{}：", index + 1);
+        append_draft_field(
+            &mut line,
+            per_book - details.chars().count(),
+            "背景",
+            &book.summary,
+            per_book,
+        );
+        line.push_str(&details);
+        lines.push(line);
+    }
+    let background = format!("{prefix}{}", lines.join("\n"));
+    validate_text(&background, 2_000)
+        .map_err(|_| WorldSeriesApplicationError::BackgroundDraftUnavailable)?;
+    Ok(background)
+}
+
+fn append_draft_field(line: &mut String, limit: usize, label: &str, value: &str, cap: usize) {
+    let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let value = value.trim();
+    let field_prefix = if line.ends_with('：') {
+        format!("{label}：")
+    } else {
+        format!("；{label}：")
+    };
+    let remaining = limit.saturating_sub(line.chars().count() + field_prefix.chars().count());
+    let take = remaining.min(cap);
+    if value.is_empty() || take < 8 {
+        return;
+    }
+    line.push_str(&field_prefix);
+    if value.chars().count() > take {
+        // ponytail: character-bound excerpts may cut a sentence; a curated synopsis is needed for semantic quality.
+        line.extend(value.chars().take(take - 1));
+        line.push('…');
+    } else {
+        line.push_str(value);
+    }
 }
 
 // These existing read ports do not impose an adapter deadline. Bound only the
@@ -960,7 +1108,8 @@ fn series_match_evidence_key(
 #[cfg(test)]
 mod tests {
     use super::{
-        compose_background_draft, series_match_evidence_key, CreateWorldSeries, SeriesMatchMethod,
+        compose_background_draft, compose_relations, compose_series_background_draft,
+        series_match_evidence_key, BookBackgroundEvidence, CreateWorldSeries, SeriesMatchMethod,
     };
     use crate::domain::repositories::CharacterRelationshipRecord;
     use std::collections::HashMap;
@@ -979,21 +1128,70 @@ mod tests {
             description: None,
             strength: 95,
         };
-        let draft = compose_background_draft(
-            &"城邦与海洋。".repeat(250),
-            &["海潮遵循古老誓约".into()],
-            &["北塔".into()],
-            &["星海联盟".into()],
-            &names,
-            vec![relationship],
-        )
-        .unwrap();
+        let evidence = BookBackgroundEvidence {
+            novel_id: uuid::Uuid::new_v4(),
+            model_version: 1,
+            summary: "城邦与海洋。".repeat(250),
+            rules: vec!["海潮遵循古老誓约".into()],
+            locations: vec!["北塔".into()],
+            factions: vec!["星海联盟".into()],
+            relations: compose_relations(&names, vec![relationship]),
+        };
+        let draft = compose_background_draft(&evidence).unwrap();
         assert!(draft.starts_with("世界背景：城邦与海洋。"));
         assert!(draft.contains("世界规则：海潮遵循古老誓约"));
         assert!(draft.contains("主要地点：北塔"));
         assert!(draft.contains("主要势力：星海联盟"));
         assert!(draft.contains("人物关系：甲与乙：师徒"));
         assert!(draft.chars().count() <= 2_000);
+    }
+
+    #[test]
+    fn series_draft_includes_all_seven_books_without_claiming_their_changes_are_shared() {
+        let books = (0..7)
+            .map(|number| BookBackgroundEvidence {
+                novel_id: uuid::Uuid::new_v4(),
+                model_version: 1,
+                summary: format!("第{number}本的城市与时代变化。").repeat(20),
+                rules: vec![format!("第{number}本的新规则")],
+                locations: vec![format!("第{number}本的地点")],
+                factions: vec![],
+                relations: format!("甲与乙：第{number}本的关系"),
+            })
+            .collect::<Vec<_>>();
+        let draft = compose_series_background_draft(&books).unwrap();
+        assert!(draft.chars().count() <= 2_000);
+        assert!(draft.contains("各部变化以当前书为准"));
+        for number in 0..7 {
+            assert!(draft.contains(&format!("第{number}本的城市")));
+            assert!(draft.contains(&format!("第{number}本的关系")));
+        }
+        let single = BookBackgroundEvidence {
+            novel_id: uuid::Uuid::new_v4(),
+            model_version: 1,
+            summary: format!("{}后段重要设定", "前段。".repeat(120)),
+            rules: vec![],
+            locations: vec![],
+            factions: vec![],
+            relations: String::new(),
+        };
+        let single_draft = compose_series_background_draft(&[single]).unwrap();
+        assert!(single_draft.contains("后段重要设定"));
+        let seven_long = (0..7)
+            .map(|number| BookBackgroundEvidence {
+                novel_id: uuid::Uuid::new_v4(),
+                model_version: 1,
+                summary: format!("{}第{number}本的后段补充", "前段设定。".repeat(36)),
+                rules: vec![],
+                locations: vec![],
+                factions: vec![],
+                relations: String::new(),
+            })
+            .collect::<Vec<_>>();
+        let seven_draft = compose_series_background_draft(&seven_long).unwrap();
+        for number in 0..7 {
+            assert!(seven_draft.contains(&format!("第{number}本的后段补充")));
+        }
     }
 
     #[test]

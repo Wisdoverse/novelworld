@@ -82,7 +82,8 @@ test('recognize a second book, require confirmation, then share the confirmed ba
   const bindings: Record<string, string | null> = { 'novel-1': null, 'novel-2': null };
   let associationCalls = 0;
   let generationCalls = 0;
-  let draftCalls = 0;
+  let sourceDraftCalls = 0;
+  let seriesDraftCalls = 0;
 
   await page.route('**/api/novels', async route => {
     if (route.request().method() !== 'GET') return route.fallback();
@@ -99,7 +100,7 @@ test('recognize a second book, require confirmation, then share the confirmed ba
   await page.route('**/api/novels/world-series', async route => {
     if (route.request().method() === 'POST') {
       expect(route.request().postDataJSON()).toMatchObject({
-        name: '星海系列', background: null, source_novel_id: 'novel-1', canon_model_version: 1,
+        name: '星海系列', background: null, source_novel_id: 'novel-1',
       });
       series = {
         id: 'series-1', name: '星海系列', background: null, revision: 1,
@@ -123,18 +124,25 @@ test('recognize a second book, require confirmation, then share the confirmed ba
       }),
     });
   });
-  const extractedBackground = '世界背景：星海诸城共享航道。\n人物关系：甲与乙：伙伴';
+  const extractedBackground = '系列世界背景素材（各部变化以当前书为准）：\n成员书1：背景：星海诸城共享航道\n成员书2：背景：归途增加新港口；人物关系：甲与乙成为伙伴';
   await page.route('**/api/novels/novel-1/world-series/background-draft', async route => {
-    draftCalls += 1;
+    sourceDraftCalls += 1;
     await route.fulfill({
       status: 200, contentType: 'application/json',
       body: JSON.stringify({ source_novel_id: 'novel-1', canon_model_version: 1, background: extractedBackground }),
     });
   });
+  await page.route('**/api/novels/world-series/series-1/background-draft', async route => {
+    seriesDraftCalls += 1;
+    await route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({ series_id: 'series-1', member_novel_ids: ['novel-1', 'novel-2'], background: extractedBackground }),
+    });
+  });
   await page.route('**/api/novels/world-series/series-1/background', async route => {
-    expect(route.request().postDataJSON()).toEqual({ background: extractedBackground });
+    expect(route.request().postDataJSON()).toEqual({ background: '读者整理后的系列背景' });
     expect(series).not.toBeNull();
-    series = { ...series!, background: extractedBackground };
+    series = { ...series!, background: '读者整理后的系列背景' };
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(series) });
   });
   await page.route('**/api/narrative/novel-1/game-rules', async route => {
@@ -148,10 +156,8 @@ test('recognize a second book, require confirmation, then share the confirmed ba
   await page.getByRole('button', { name: '创建系列', exact: true }).click();
   await page.getByLabel('系列名称').fill('星海系列');
   await page.getByLabel('系列来源书（未来 D20 规则来源）').selectOption('novel-1');
-  expect(draftCalls).toBe(0);
-  await page.getByRole('button', { name: '查看来源书的全书背景建议（可能含后文）' }).click();
-  await expect(page.getByText('来源书解析建议（世界设定与人物关系）')).toBeVisible();
-  expect(draftCalls).toBe(1);
+  expect(sourceDraftCalls).toBe(0);
+  expect(seriesDraftCalls).toBe(0);
   await page.getByRole('button', { name: '创建系列并关联来源书与当前书' }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   expect(bindings['novel-1']).toBe('series-1');
@@ -171,11 +177,13 @@ test('recognize a second book, require confirmation, then share the confirmed ba
   await page.getByRole('button', { name: '识别同系列 / 共享世界背景' }).first().click();
   await expect(page.getByText(/当前系列仅用于分组/)).toBeVisible();
   await expect(page.getByText('D20 基础规则已从来源书固定到系列。')).toHaveCount(0);
-  expect(draftCalls).toBe(1);
-  await page.getByRole('button', { name: '查看来源书的全书背景建议（可能含后文）' }).click();
-  await page.getByRole('button', { name: '填入原著背景建议' }).click();
-  expect(draftCalls).toBe(2);
+  expect(seriesDraftCalls).toBe(0);
+  await page.getByRole('button', { name: '汇总已关联小说并填入背景初稿（可能含后文）' }).click();
+  expect(seriesDraftCalls).toBe(1);
+  expect(sourceDraftCalls).toBe(0);
   await expect(page.getByLabel('共享世界背景（最多 2000 字）')).toHaveValue(extractedBackground);
+  await expect(page.getByText('2 本已关联小说的素材', { exact: false })).toBeVisible();
+  await page.getByLabel('共享世界背景（最多 2000 字）').fill('读者整理后的系列背景');
   await page.getByRole('button', { name: '确认共享背景' }).click();
   await expect(page.getByText('此系列的 D20 基础规则尚未生成。纯叙事模式可先使用共享背景。')).toBeVisible();
   await page.getByRole('button', { name: '完成' }).click();
