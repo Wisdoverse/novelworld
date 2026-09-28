@@ -10,8 +10,9 @@ use crate::domain::{
     },
     ports::{LlmPort, SeriesProviderUnavailable},
     repositories::{
-        CanonStoryModelRepository, ConfirmWorldSeriesBackgroundResult, CreateWorldSeriesResult,
-        NovelRepository, WorldSeriesRepository,
+        CanonStoryModelRepository, CharacterRelationshipRecord, CharacterRepository,
+        ConfirmWorldSeriesBackgroundResult, CreateWorldSeriesResult, NovelRepository,
+        WorldSeriesRepository,
     },
     services::series_matching::{
         chapter_one_entities, confirmed_group_score, parse_deepseek_choice, shared_entity_count,
@@ -21,7 +22,12 @@ use crate::domain::{
 };
 use chrono::Utc;
 use serde::Deserialize;
-use std::{collections::BTreeMap, future::Future, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    future::Future,
+    sync::Arc,
+    time::Duration,
+};
 use uuid::Uuid;
 
 const MAX_SERIES_SCAN_BOOKS: usize = 128;
@@ -49,6 +55,13 @@ pub struct CreateWorldSeries {
     pub canon_model_version: Option<i32>,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct WorldSeriesBackgroundDraft {
+    pub source_novel_id: Uuid,
+    pub canon_model_version: i32,
+    pub background: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum WorldSeriesApplicationError {
     #[error("invalid series input")]
@@ -57,6 +70,8 @@ pub enum WorldSeriesApplicationError {
     NotFound,
     #[error("ready source rules are unavailable")]
     SourceUnavailable,
+    #[error("source extraction is unavailable")]
+    BackgroundDraftUnavailable,
     #[error("source novel is already associated with a series")]
     SourceAlreadyAssociated,
     #[error("series background was already confirmed with different text")]
@@ -73,6 +88,7 @@ pub struct WorldSeriesHandler {
     pub series_repo: Arc<dyn WorldSeriesRepository>,
     pub novel_repo: Arc<dyn NovelRepository>,
     pub canon_repo: Arc<dyn CanonStoryModelRepository>,
+    pub character_repo: Arc<dyn CharacterRepository>,
     pub matcher: Option<Arc<dyn SeriesMatcherPort>>,
     pub llm: Option<Arc<dyn LlmPort>>,
 }
@@ -80,6 +96,62 @@ pub struct WorldSeriesHandler {
 pub use crate::domain::ports::series_matcher::{SeriesSuggestion, SeriesSuggestionStatus};
 
 impl WorldSeriesHandler {
+    pub async fn background_draft(
+        &self,
+        user_id: Uuid,
+        source_novel_id: Uuid,
+    ) -> Result<WorldSeriesBackgroundDraft, WorldSeriesApplicationError> {
+        let novel = self.ready_novel(user_id, source_novel_id).await?;
+        let summary = novel
+            .world_summary
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .ok_or(WorldSeriesApplicationError::BackgroundDraftUnavailable)?;
+        let model = bounded_read(self.canon_repo.find_latest(source_novel_id))
+            .await?
+            .ok_or(WorldSeriesApplicationError::BackgroundDraftUnavailable)?;
+        let (characters, relationships) = tokio::try_join!(
+            bounded_read(self.character_repo.find_by_novel(source_novel_id)),
+            bounded_read(self.character_repo.find_relationships(source_novel_id)),
+        )?;
+        let names = characters
+            .iter()
+            .map(|character| (character.id, character.name.as_str()))
+            .collect::<HashMap<_, _>>();
+        let rules = model
+            .content
+            .world_rules
+            .iter()
+            .map(|rule| rule.description.clone())
+            .collect::<Vec<_>>();
+        let locations = model
+            .content
+            .locations
+            .iter()
+            .map(|place| place.name.clone())
+            .collect::<Vec<_>>();
+        let factions = model
+            .content
+            .factions
+            .iter()
+            .map(|group| group.name.clone())
+            .collect::<Vec<_>>();
+        let background = compose_background_draft(
+            summary,
+            &rules,
+            &locations,
+            &factions,
+            &names,
+            relationships,
+        )?;
+        Ok(WorldSeriesBackgroundDraft {
+            source_novel_id,
+            canon_model_version: model.model_version,
+            background,
+        })
+    }
+
     pub async fn create(
         &self,
         user_id: Uuid,
@@ -720,6 +792,104 @@ impl WorldSeriesHandler {
     }
 }
 
+fn compose_background_draft(
+    summary: &str,
+    rules: &[String],
+    locations: &[String],
+    factions: &[String],
+    names: &HashMap<Uuid, &str>,
+    mut relationships: Vec<CharacterRelationshipRecord>,
+) -> Result<String, WorldSeriesApplicationError> {
+    relationships.sort_by(|left, right| {
+        right
+            .strength
+            .cmp(&left.strength)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let mut relations = String::new();
+    let mut relation_count = 0;
+    for relation in relationships {
+        if relations.chars().count() >= 440 || relation_count >= 8 {
+            break;
+        }
+        let (Some(from), Some(to)) = (
+            names.get(&relation.from_character_id),
+            names.get(&relation.to_character_id),
+        ) else {
+            continue;
+        };
+        let detail = format!("{from}与{to}：{}", relation.relationship_type.trim());
+        if detail.chars().count() > 100 || validate_text(&detail, 100).is_err() {
+            continue;
+        }
+        let separator = if relations.is_empty() { "" } else { "；" };
+        if relations.chars().count() + separator.chars().count() + detail.chars().count() > 440 {
+            break;
+        }
+        relations.push_str(separator);
+        relations.push_str(&detail);
+        relation_count += 1;
+    }
+    let relation_section = if relations.is_empty() {
+        String::new()
+    } else {
+        format!("\n人物关系：{relations}")
+    };
+    let rules = rules
+        .iter()
+        .take(4)
+        .map(|rule| rule.trim().chars().take(100).collect::<String>())
+        .filter(|rule| !rule.is_empty())
+        .collect::<Vec<_>>();
+    let rule_section = if rules.is_empty() {
+        String::new()
+    } else {
+        format!("\n世界规则：{}", rules.join("；"))
+    };
+    let places = locations
+        .iter()
+        .take(5)
+        .map(|place| place.trim().chars().take(40).collect::<String>())
+        .filter(|place| !place.is_empty())
+        .collect::<Vec<_>>();
+    let location_section = if places.is_empty() {
+        String::new()
+    } else {
+        format!("\n主要地点：{}", places.join("、"))
+    };
+    let groups = factions
+        .iter()
+        .take(5)
+        .map(|group| group.trim().chars().take(40).collect::<String>())
+        .filter(|group| !group.is_empty())
+        .collect::<Vec<_>>();
+    let faction_section = if groups.is_empty() {
+        String::new()
+    } else {
+        format!("\n主要势力：{}", groups.join("、"))
+    };
+    let sections = format!("{rule_section}{location_section}{faction_section}{relation_section}");
+    let prefix = "世界背景：";
+    let summary_limit = 2_000 - prefix.chars().count() - sections.chars().count();
+    // ponytail: a character-bound cut can end mid-sentence; a curated synopsis is needed if that harms quality.
+    let summary_text = if summary.chars().count() > summary_limit {
+        format!(
+            "{}…",
+            summary
+                .chars()
+                .take(summary_limit - 1)
+                .collect::<String>()
+                .trim_end()
+        )
+    } else {
+        summary.to_owned()
+    };
+    let background = format!("{prefix}{summary_text}{sections}");
+    validate_text(&background, 2_000)
+        .map_err(|_| WorldSeriesApplicationError::BackgroundDraftUnavailable)?;
+    Ok(background)
+}
+
 // These existing read ports do not impose an adapter deadline. Bound only the
 // new Series callers; cancellation cannot hide a side effect because they read.
 async fn bounded_read<T>(
@@ -789,7 +959,42 @@ fn series_match_evidence_key(
 
 #[cfg(test)]
 mod tests {
-    use super::{series_match_evidence_key, CreateWorldSeries, SeriesMatchMethod};
+    use super::{
+        compose_background_draft, series_match_evidence_key, CreateWorldSeries, SeriesMatchMethod,
+    };
+    use crate::domain::repositories::CharacterRelationshipRecord;
+    use std::collections::HashMap;
+
+    #[test]
+    fn draft_reuses_extracted_setting_and_named_relationships_within_series_limit() {
+        let from = uuid::Uuid::new_v4();
+        let to = uuid::Uuid::new_v4();
+        let names = HashMap::from([(from, "甲"), (to, "乙")]);
+        let relationship = CharacterRelationshipRecord {
+            id: uuid::Uuid::new_v4(),
+            novel_id: uuid::Uuid::new_v4(),
+            from_character_id: from,
+            to_character_id: to,
+            relationship_type: "师徒".into(),
+            description: None,
+            strength: 95,
+        };
+        let draft = compose_background_draft(
+            &"城邦与海洋。".repeat(250),
+            &["海潮遵循古老誓约".into()],
+            &["北塔".into()],
+            &["星海联盟".into()],
+            &names,
+            vec![relationship],
+        )
+        .unwrap();
+        assert!(draft.starts_with("世界背景：城邦与海洋。"));
+        assert!(draft.contains("世界规则：海潮遵循古老誓约"));
+        assert!(draft.contains("主要地点：北塔"));
+        assert!(draft.contains("主要势力：星海联盟"));
+        assert!(draft.contains("人物关系：甲与乙：师徒"));
+        assert!(draft.chars().count() <= 2_000);
+    }
 
     #[test]
     fn source_version_is_optional_but_source_and_user_confirmation_are_required() {

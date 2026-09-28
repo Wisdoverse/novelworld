@@ -30,7 +30,8 @@ use novel_service::{
     },
     infrastructure::persistence::{
         account_export::PgAccountExport, canon_story_model_pg_repo::PgCanonStoryModelRepository,
-        novel_pg_repo::NovelPgRepository, world_series_pg_repo::PgWorldSeriesRepository,
+        character_pg_repo::CharacterPgRepository, novel_pg_repo::NovelPgRepository,
+        world_series_pg_repo::PgWorldSeriesRepository,
     },
 };
 use sqlx::PgPool;
@@ -157,7 +158,7 @@ pub async fn run(pool: &PgPool, user: Uuid, other_user: Uuid, source: Uuid) {
     .execute(pool)
     .await
     .unwrap();
-    sqlx::query("UPDATE novels SET status = 'ready'::novel_status WHERE id = $1")
+    sqlx::query("UPDATE novels SET status = 'ready'::novel_status, world_summary = '群岛城邦依靠星海航道往来。' WHERE id = $1")
         .bind(source)
         .execute(pool)
         .await
@@ -191,9 +192,32 @@ pub async fn run(pool: &PgPool, user: Uuid, other_user: Uuid, source: Uuid) {
         series_repo: repository.clone(),
         novel_repo: Arc::new(NovelPgRepository::new(pool.clone())),
         canon_repo: canon.clone(),
+        character_repo: Arc::new(CharacterPgRepository::new(pool.clone())),
         matcher: Some(matcher.clone()),
         llm: None,
     };
+
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    for (id, name) in [(first, "甲"), (second, "乙")] {
+        sqlx::query("INSERT INTO characters (id, novel_id, name) VALUES ($1, $2, $3)")
+            .bind(id)
+            .bind(source)
+            .bind(name)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO character_relationships (novel_id, from_character_id, to_character_id, relationship_type, strength) VALUES ($1, $2, $3, '师徒', 90)")
+        .bind(source).bind(first).bind(second).execute(pool).await.unwrap();
+    let draft = handler.background_draft(user, source).await.unwrap();
+    assert_eq!(draft.source_novel_id, source);
+    assert!(draft.background.contains("群岛城邦依靠星海航道往来"));
+    assert!(draft.background.contains("人物关系：甲与乙：师徒"));
+    assert!(matches!(
+        handler.background_draft(other_user, source).await,
+        Err(WorldSeriesApplicationError::NotFound)
+    ));
 
     // Missing source rules create a pending series and source association only.
     let mut pending = handler
@@ -394,6 +418,7 @@ pub async fn run(pool: &PgPool, user: Uuid, other_user: Uuid, source: Uuid) {
         series_repo: repository.clone(),
         novel_repo: handler.novel_repo.clone(),
         canon_repo: canon.clone(),
+        character_repo: handler.character_repo.clone(),
         matcher: None,
         llm: None,
     };
@@ -432,6 +457,7 @@ pub async fn run(pool: &PgPool, user: Uuid, other_user: Uuid, source: Uuid) {
         series_repo: repository.clone(),
         novel_repo: handler.novel_repo.clone(),
         canon_repo: canon.clone(),
+        character_repo: handler.character_repo.clone(),
         matcher: Some(matcher.clone()),
         llm: Some(completion.clone()),
     };

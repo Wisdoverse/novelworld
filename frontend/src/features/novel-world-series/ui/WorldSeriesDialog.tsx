@@ -9,6 +9,7 @@ import {
   useNovelWorldSeries,
   useSuggestNovelWorldSeries,
   useSuggestNovelWorldSeriesDeepSeek,
+  useWorldSeriesBackgroundDraft,
   useWorldSeriesList,
 } from '@/entities/novel';
 import { useGenerateGameRules } from '@/entities/narrative';
@@ -105,6 +106,12 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
   const [createdSeriesId, setCreatedSeriesId] = useState<string>();
   const [createdSeries, setCreatedSeries] = useState<WorldSeries>();
   const [saving, setSaving] = useState(false);
+  const draftSourceId = creating ? sourceNovelId : backgroundPending?.source_novel_id ?? '';
+  const backgroundSuggestion = useWorldSeriesBackgroundDraft();
+  const suggestedBackground = backgroundSuggestion.data?.source_novel_id === draftSourceId
+    ? backgroundSuggestion.data : undefined;
+  const suggestionPending = backgroundSuggestion.isPending && backgroundSuggestion.variables === draftSourceId;
+  const suggestionError = backgroundSuggestion.isError && backgroundSuggestion.variables === draftSourceId;
   const selection = selectedSeriesId ?? currentSeries.data?.id ?? '';
   const isPending = saving || suggest.isPending || suggestDeepSeek.isPending
     || create.isPending || associate.isPending || confirmBackground.isPending || generateRules.isPending;
@@ -188,6 +195,7 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
           name: seriesName.trim(),
           background: seriesBackground.trim() || null,
           source_novel_id: sourceNovelId,
+          ...(suggestedBackground ? { canon_model_version: suggestedBackground.canon_model_version } : {}),
         });
         setCreatedSeriesId(series.id);
         setCreatedSeries(series);
@@ -413,6 +421,21 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
                   ))}
                 </select>
               </label>
+              {sourceNovelId ? (
+                <button type="button" className="tonal-action" disabled={suggestionPending} onClick={() => { if (ensurePrincipal()) backgroundSuggestion.mutate(sourceNovelId); }}>
+                  查看来源书的全书背景建议（可能含后文）
+                </button>
+              ) : null}
+              {sourceNovelId && suggestionPending ? <p className="text-xs text-[#5f6368]">正在读取原著提取的背景…</p> : null}
+              {sourceNovelId && suggestionError ? <p className="text-xs text-[#5f6368]">来源书暂无可用的原著背景建议，可以留空后再确认，或手动填写。</p> : null}
+              {suggestedBackground ? (
+                <div className="rounded-lg bg-[#f8fafd] p-3 text-xs leading-5 text-[#3c4043]">
+                  <p className="font-medium">来源书解析建议（世界设定与人物关系）</p>
+                  <p className="mt-2 whitespace-pre-wrap">{suggestedBackground.background}</p>
+                  <p className="mt-2 text-[#5f6368]">可能包含后续设定，也可能遗漏细节；请核对并编辑，确认后不能修改。此建议复用已保存的模型提取结果。</p>
+                  <button type="button" className="tonal-action mt-2" onClick={() => setSeriesBackground(suggestedBackground.background)}>填入原著背景建议</button>
+                </div>
+              ) : null}
               {createdSeriesId ? (
                 <p role="status" className="text-xs text-[#5f6368]">系列已创建；确认按钮会重试关联，不会重复创建。</p>
               ) : null}
@@ -431,6 +454,19 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
           {backgroundPending ? (
             <section className="mt-4 space-y-2 rounded-lg border border-[#dadce0] p-4" aria-label="确认共享背景">
               <p className="text-sm font-medium text-[#3c4043]">当前系列仅用于分组；共享世界背景尚未确认，D20 状态也暂不显示。</p>
+              <button type="button" className="tonal-action" disabled={suggestionPending} onClick={() => { if (ensurePrincipal()) backgroundSuggestion.mutate(backgroundPending.source_novel_id); }}>
+                查看来源书的全书背景建议（可能含后文）
+              </button>
+              {suggestionPending ? <p className="text-xs text-[#5f6368]">正在读取原著提取的背景…</p> : null}
+              {suggestionError ? <p className="text-xs text-[#5f6368]">来源书暂无可用的原著背景建议，仍可手动填写。</p> : null}
+              {suggestedBackground ? (
+                <div className="rounded-lg bg-[#f8fafd] p-3 text-xs leading-5 text-[#3c4043]">
+                  <p className="font-medium">来源书解析建议（世界设定与人物关系）</p>
+                  <p className="mt-2 whitespace-pre-wrap">{suggestedBackground.background}</p>
+                  <p className="mt-2 text-[#5f6368]">可能包含后续设定，也可能遗漏细节；请核对并编辑，确认后不能修改。此建议复用已保存的模型提取结果。</p>
+                  <button type="button" className="tonal-action mt-2" onClick={() => setBackgroundDraft(suggestedBackground.background)}>填入原著背景建议</button>
+                </div>
+              ) : null}
               <label className="block text-sm font-medium text-[#3c4043]">
                 共享世界背景（最多 2000 字）
                 <textarea className="field-control mt-1 min-h-28" maxLength={2000} value={backgroundDraft} onChange={event => setBackgroundDraft(event.target.value)} />

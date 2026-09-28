@@ -119,6 +119,7 @@ fn auth_test_state() -> AppState {
             series_repo: Arc::new(novel_service::infrastructure::persistence::world_series_pg_repo::PgWorldSeriesRepository::new(pool.clone())),
             novel_repo: novel_repo.clone(),
             canon_repo: canon_repo.clone(),
+            character_repo: character_repo.clone(),
             matcher: None,
             llm: None,
         }),
@@ -200,6 +201,11 @@ async fn series_routes_reject_missing_principal_before_database_or_provider_work
             Some(create.to_string()),
         ),
         ("GET", format!("/novels/{novel}/world-series"), None),
+        (
+            "GET",
+            format!("/novels/{novel}/world-series/background-draft"),
+            None,
+        ),
         (
             "PUT",
             format!("/novels/{novel}/world-series"),

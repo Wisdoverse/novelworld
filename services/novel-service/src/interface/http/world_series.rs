@@ -22,6 +22,7 @@ pub(super) fn error(error: WorldSeriesApplicationError) -> Response {
         WorldSeriesApplicationError::InvalidInput => (StatusCode::UNPROCESSABLE_ENTITY, "invalid_world_series", "Invalid world series input"),
         WorldSeriesApplicationError::NotFound => (StatusCode::NOT_FOUND, "not_found", "Novel or series not found"),
         WorldSeriesApplicationError::SourceUnavailable => (StatusCode::CONFLICT, "series_rule_source_unavailable", "Series source advanced rules are not ready"),
+        WorldSeriesApplicationError::BackgroundDraftUnavailable => (StatusCode::CONFLICT, "series_background_draft_unavailable", "Source novel has no usable extracted background"),
         WorldSeriesApplicationError::SourceAlreadyAssociated => (StatusCode::CONFLICT, "source_already_in_series", "Source novel already belongs to a series; select that series or explicitly clear its association"),
         WorldSeriesApplicationError::BackgroundConflict => (StatusCode::CONFLICT, "series_background_conflict", "Series background was already confirmed"),
         WorldSeriesApplicationError::BackgroundPending => (StatusCode::CONFLICT, "series_background_pending", "Confirm the shared series background before using shared rules"),
@@ -76,6 +77,24 @@ pub(super) async fn list(State(state): State<AppState>, headers: HeaderMap) -> R
     };
     match state.series_handler.list(user_id).await {
         Ok(series) => private(Json(series).into_response()),
+        Err(err) => error(err),
+    }
+}
+
+pub(super) async fn background_draft(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(source_novel_id): Path<Uuid>,
+) -> Response {
+    let Some(user_id) = extract_user_id(&headers) else {
+        return private(api_error(StatusCode::UNAUTHORIZED, "Missing user ID"));
+    };
+    match state
+        .series_handler
+        .background_draft(user_id, source_novel_id)
+        .await
+    {
+        Ok(draft) => private(Json(draft).into_response()),
         Err(err) => error(err),
     }
 }

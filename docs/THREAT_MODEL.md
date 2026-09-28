@@ -196,7 +196,13 @@ limit but cannot enforce.
    clues are excluded, as are scope UUIDs, full novels and plot text. Novel may
    privately compare source-cited whole-book names to rank candidates with
    arbitrary uploaded titles; these names are never serialized to Laya,
-   DeepSeek, the browser, or the cached suggestion. A bounded scan abstains on
+   DeepSeek, the browser, or the cached suggestion as matching evidence. The
+   separate reader-requested background draft may show the persisted world
+   summary, source-cited whole-book Canon setting facts, and named relationships
+   only to an authenticated reader with
+   Ready source access, after a spoiler warning. It makes no model call, is
+   private/no-store, and cannot persist or share anything before confirmation.
+   A bounded scan abstains on
    overflow or ambiguity, and its local conclusion is labeled separately from
    Laya. Suggestions cannot create or change associations; readers must
    confirm or select manually. The 0.8 threshold is an abstention heuristic,
