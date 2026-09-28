@@ -771,6 +771,23 @@ impl WorldTurnTransition {
                 .map_err(|error| WorldSessionError(error.to_string()))?;
             session.validate_resolution(action, check)?;
         }
+        if resolution.is_some_and(|check| !check.succeeded)
+            && (self
+                .events
+                .iter()
+                .any(|event| !event.actor_character_ids.is_empty() || event.location_id.is_some())
+                || !self.relationship_changes.is_empty()
+                || !self.location_changes.is_empty()
+                || !self.thread_changes.is_empty()
+                || self.player_location_id.is_some()
+                || !self.inventory_additions.is_empty()
+                || !self.inventory_removals.is_empty()
+                || !self.knowledge_discoveries.is_empty()
+                || !self.faction_changes.is_empty()
+                || self.canonical_event_change.is_some())
+        {
+            return invalid("failed action must not change world state");
+        }
         if self.schema_version != WORLD_TURN_SCHEMA_VERSION
             || !matches!(
                 self.prompt_version.as_str(),
@@ -1626,6 +1643,28 @@ mod tests {
                 "successful {kind:?} still needs its target effect"
             );
         }
+
+        let action = WorldAction {
+            kind: WorldActionKind::Ally,
+            target_id: Some(character_id.to_string()),
+            intent: "尝试结盟".into(),
+        };
+        let mut forged = parse_world_turn_transition_with_check(
+            &raw,
+            &action,
+            &context,
+            &session,
+            Some(&check(&context, false)),
+        )
+        .unwrap();
+        forged.relationship_changes.push(RelationshipChange {
+            character_id,
+            delta: 1,
+            reason: "伪造的成功效果".into(),
+        });
+        assert!(forged
+            .validate_against_with_check(&action, &context, &session, Some(&check(&context, false)))
+            .is_err());
     }
 
     #[test]
