@@ -160,7 +160,7 @@ pub struct CharacterWorldContext {
     pub world_time: i64,
     pub player_id: Uuid,
     pub player_name: String,
-    pub player_location_id: String,
+    pub player_location_id: Option<String>,
     pub relationship: Option<WorldRelationship>,
     pub goals: Vec<WorldCharacterGoal>,
     pub perception_of_player: Option<String>,

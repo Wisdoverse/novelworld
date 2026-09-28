@@ -1102,10 +1102,17 @@ future migration tooling, while the source `Chapter` and canonical graph remain
 immutable.
 
 The user MUST enter as a durable `PlayerEntity`: a new person who does not exist
-in source canon and has a chosen identity, background, capabilities, location,
+in source canon and has a chosen identity, background, capabilities, optional initial location,
 inventory, relationships, faction standing, and discovered knowledge. The
 primary interaction MUST describe actions taken by this player. It MUST NOT ask
 the player to choose actions on behalf of canonical characters.
+
+The initial location MAY be unspecified. A supplied location MUST be a Canon
+place whose source evidence is visible at the chosen unlocked checkpoint; the
+selector MUST NOT reveal later-chapter place names. The absence of extracted
+places MUST NOT block player creation: store an unspecified location as `null`, not as a
+fabricated Canon place. Open-world entry and character context MUST preserve
+that absence; a later valid travel transition MAY set a visible place.
 
 An open-world session is reconstructed from a canonical checkpoint plus its
 player entity and player timeline. Canonical events continue when their

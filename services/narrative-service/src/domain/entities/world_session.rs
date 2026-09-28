@@ -1001,7 +1001,7 @@ pub struct CharacterWorldContext {
     pub world_time: i64,
     pub player_id: Uuid,
     pub player_name: String,
-    pub player_location_id: String,
+    pub player_location_id: Option<String>,
     pub relationship: Option<crate::domain::entities::player_entity::RelationshipState>,
     pub goals: Vec<CharacterGoalRef>,
     pub perception_of_player: Option<String>,
@@ -1390,7 +1390,7 @@ mod tests {
             "云舟".into(),
             "来自边城的地图学徒。".into(),
             vec!["识图".into()],
-            "gate".into(),
+            Some("gate".into()),
             vec!["旧地图".into()],
         )
         .unwrap();
@@ -2112,7 +2112,7 @@ mod tests {
             "云舟".into(),
             "来自边城的地图学徒。".into(),
             vec!["识图".into()],
-            "gate".into(),
+            Some("gate".into()),
             vec![],
         )
         .unwrap();

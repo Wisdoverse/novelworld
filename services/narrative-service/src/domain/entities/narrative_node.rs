@@ -557,7 +557,7 @@ impl WorldState {
             .discovered_knowledge
             .extend(transition.knowledge_discoveries.iter().cloned());
         if let Some(location_id) = &transition.player_location_id {
-            player.location_id = location_id.clone();
+            player.location_id = Some(location_id.clone());
         }
         for change in &transition.relationship_changes {
             let relationship = player
@@ -1105,7 +1105,7 @@ mod causality_tests {
             "云舟".into(),
             "学徒".into(),
             vec!["识图".into()],
-            "gate".into(),
+            Some("gate".into()),
             vec![],
         )
         .unwrap();

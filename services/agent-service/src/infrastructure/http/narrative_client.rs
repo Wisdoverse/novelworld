@@ -198,7 +198,9 @@ fn validate_world_context(
     ensure!(!context.player_id.is_nil());
     ensure!(serde_json::to_string(context)?.chars().count() <= MAX_WORLD_CONTEXT_CHARS);
     bounded_token(&context.player_name, 100)?;
-    bounded_token(&context.player_location_id, 200)?;
+    if let Some(location_id) = &context.player_location_id {
+        bounded_token(location_id, 200)?;
+    }
     // Preserve the pre-choice wire bounds during rolling deploys. The new
     // narrative producer emits a smaller context; the existing Agent prompt
     // budget remains the final aggregate guard.
@@ -335,7 +337,7 @@ mod tests {
             world_time: 1,
             player_id: Uuid::new_v4(),
             player_name: "云舟".into(),
-            player_location_id: "gate".into(),
+            player_location_id: Some("gate".into()),
             relationship: None,
             goals: vec![],
             perception_of_player: None,
@@ -395,6 +397,23 @@ mod tests {
         .unwrap();
 
         assert_eq!(decoded, Some(envelope));
+
+        let mut without_location = valid_envelope(user_id, novel_id, character_id);
+        without_location
+            .world_context
+            .as_mut()
+            .unwrap()
+            .player_location_id = None;
+        assert_eq!(
+            decode_context(
+                &serde_json::to_vec(&without_location).unwrap(),
+                user_id,
+                novel_id,
+                character_id,
+            )
+            .unwrap(),
+            Some(without_location)
+        );
     }
 
     #[test]

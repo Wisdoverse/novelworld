@@ -19,6 +19,8 @@ function tokens(value: string) {
   return value.split(/[,，]/).map(token => token.trim()).filter(Boolean);
 }
 
+const unspecifiedLocation = '';
+
 export function PlayerEntryForm({
   novelId,
   checkpointChapter,
@@ -33,7 +35,7 @@ export function PlayerEntryForm({
   const [name, setName] = useState('');
   const [background, setBackground] = useState('');
   const [capabilities, setCapabilities] = useState('');
-  const [locationId, setLocationId] = useState(locations[0]?.id ?? '');
+  const [locationId, setLocationId] = useState<string | null>(locations[0]?.id ?? null);
   const [inventory, setInventory] = useState('');
   const [resolutionMode, setResolutionMode] = useState<ResolutionMode>('narrative');
   const [gameRules, setGameRules] = useState<GameRuleTemplate>();
@@ -53,14 +55,14 @@ export function PlayerEntryForm({
   const controlsLocked = isPending || isTimelineLocked;
 
   useEffect(() => {
-    if (!locations.some(location => location.id === locationId)) {
-      setLocationId(locations[0]?.id ?? '');
+    if (locationId !== null && !locations.some(location => location.id === locationId)) {
+      setLocationId(locations[0]?.id ?? null);
     }
   }, [locationId, locations]);
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (isPending || isTimelineLocked || !locationId) return;
+    if (isPending || isTimelineLocked) return;
     try {
       await onSubmit({
         checkpoint_chapter: checkpointChapter,
@@ -242,18 +244,23 @@ export function PlayerEntryForm({
           />
         </label>
         <label className="block text-sm font-medium text-[#3c4043]">
-          初始地点
+          初始地点（可选）
           <select
             className="field-control mt-1"
-            value={locationId}
+            value={locationId ?? unspecifiedLocation}
             disabled={controlsLocked}
-            onChange={event => setLocationId(event.target.value)}
-            required
+            onChange={event => setLocationId(
+              event.target.value === unspecifiedLocation ? null : event.target.value,
+            )}
           >
+            <option value={unspecifiedLocation}>暂不指定</option>
             {locations.map(location => (
               <option key={location.id} value={location.id}>{location.name}</option>
             ))}
           </select>
+          <span className="mt-1 block text-xs font-normal text-[#5f6368]">
+            可从入场章节已出现的地点中选择，也可以暂不指定。
+          </span>
         </label>
         <label className="block text-sm font-medium text-[#3c4043]">
           随身物品（可选，用逗号分隔）
@@ -265,11 +272,10 @@ export function PlayerEntryForm({
             maxLength={6400}
           />
         </label>
-        {locations.length === 0 ? <p role="alert" className="text-sm text-[#b3261e]">当前进度没有可用地点。</p> : null}
         {error ? <p role="alert" className="text-sm text-[#b3261e]">{error}</p> : null}
         <button
           type="submit"
-          disabled={controlsLocked || locations.length === 0 || !advancedReady}
+          disabled={controlsLocked || !advancedReady}
           className="primary-action"
         >
           {isPending ? '正在进入世界…' : '进入故事'}

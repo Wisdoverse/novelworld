@@ -72,7 +72,7 @@ impl ActionAdjudicationPort for TestAdjudicator {
         context: &ActionAdjudicationContext,
     ) -> Result<Option<AdjudicationDecision>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(context.location, "城门");
+        assert_eq!(context.location.as_deref(), Some("城门"));
         if self.block.load(Ordering::SeqCst) {
             self.entered.notify_one();
             self.release.notified().await;
@@ -226,7 +226,7 @@ async fn player_profiles_create_and_reload_with_their_exact_pinned_prompt_versio
                     name: "云舟".into(),
                     background: "远行者".into(),
                     capabilities: vec!["观察".into()],
-                    location_id: "city-gate".into(),
+                    location_id: Some("city-gate".into()),
                     inventory: vec![],
                     rules: profile,
                 },
@@ -245,6 +245,67 @@ async fn player_profiles_create_and_reload_with_their_exact_pinned_prompt_versio
             .unwrap();
         assert_eq!(entry.game_rules.unwrap().prompt_version, prompt_version);
     }
+}
+
+#[tokio::test]
+async fn player_can_enter_without_an_extracted_location_but_cannot_forge_one() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    fixture.clear_world_state();
+    *fixture.player_entry_context.lock().unwrap() = Some(PlayerEntryContext {
+        checkpoint_chapter: fixture.source_chapter,
+        name_available: true,
+        locations: vec![],
+    });
+    let command = CreatePlayerEntityCommand {
+        checkpoint_chapter: Some(fixture.source_chapter),
+        name: "云舟".into(),
+        background: "远行者".into(),
+        capabilities: vec!["观察".into()],
+        location_id: None,
+        inventory: vec![],
+        rules: PlayerRuleProfile::narrative(),
+    };
+    let mut forged = command.clone();
+    forged.location_id = Some("future-place".into());
+    assert!(matches!(
+        fixture
+            .handler()
+            .create_player_entity(fixture.user_id, fixture.novel_id, forged)
+            .await,
+        Err(NarrativeError::Validation(_))
+    ));
+    let created = fixture
+        .handler()
+        .create_player_entity(fixture.user_id, fixture.novel_id, command.clone())
+        .await
+        .unwrap();
+    assert_eq!(created.location_id, None);
+    assert_eq!(
+        fixture
+            .handler()
+            .create_player_entity(fixture.user_id, fixture.novel_id, command)
+            .await
+            .unwrap(),
+        created
+    );
+    fixture
+        .world_state
+        .lock()
+        .unwrap()
+        .start_open_world(&fixture.entry_context(fixture.source_chapter, None))
+        .unwrap();
+    assert_eq!(
+        fixture
+            .world_state
+            .lock()
+            .unwrap()
+            .player_entity()
+            .unwrap()
+            .unwrap()
+            .location_id,
+        None
+    );
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -291,7 +352,7 @@ async fn new_series_profile_requires_membership_but_exact_retry_and_read_use_fro
         name: "云舟".into(),
         background: "远行者".into(),
         capabilities: vec!["观察".into()],
-        location_id: "city-gate".into(),
+        location_id: Some("city-gate".into()),
         inventory: vec![],
         rules: profile.clone(),
     };
@@ -980,7 +1041,7 @@ impl ToctouFixture {
             "云舟".into(),
             "远行者".into(),
             vec!["观察".into()],
-            "city-gate".into(),
+            Some("city-gate".into()),
             vec![],
         )
         .unwrap();
@@ -993,7 +1054,7 @@ impl ToctouFixture {
             "霜璃".into(),
             "只向自己公开身份的旧廷密探".into(),
             vec!["解读暗号".into()],
-            "city-gate".into(),
+            Some("city-gate".into()),
             vec![],
         )
         .unwrap();
@@ -2123,7 +2184,7 @@ async fn character_identity_rejects_open_world_paths_before_side_effects() {
                     name: "不应创建".into(),
                     background: "角色身份不能创建玩家实体".into(),
                     capabilities: vec!["观察".into()],
-                    location_id: "city-gate".into(),
+                    location_id: Some("city-gate".into()),
                     inventory: vec![],
                     rules: crate::domain::entities::game_rules::PlayerRuleProfile::narrative(),
                 },
@@ -3250,7 +3311,7 @@ async fn cached_branch_node_is_hidden_when_player_checkpoint_seals_during_the_re
         "云舟".into(),
         "远行者".into(),
         vec!["观察".into()],
-        "city-gate".into(),
+        Some("city-gate".into()),
         vec![],
     )
     .unwrap();

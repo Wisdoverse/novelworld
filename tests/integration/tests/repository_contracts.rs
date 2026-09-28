@@ -4819,7 +4819,7 @@ async fn production_repositories_match_fresh_schema() {
         "云舟".into(),
         "来自边城的地图学徒。".into(),
         vec!["辨认古地图".into()],
-        "north-tower".into(),
+        Some("north-tower".into()),
         vec!["旧地图".into()],
     )
     .unwrap();
@@ -4890,7 +4890,7 @@ async fn production_repositories_match_fresh_schema() {
         "另一名玩家".into(),
         "来自另一条时间线。".into(),
         vec!["观察".into()],
-        "north-tower".into(),
+        Some("north-tower".into()),
         vec![],
     )
     .unwrap();
@@ -5831,7 +5831,7 @@ async fn player_checkpoint_race_elects_exactly_one_timeline() {
         "云舟".into(),
         "来自边城的地图学徒。".into(),
         vec!["辨认古地图".into()],
-        "north-tower".into(),
+        Some("north-tower".into()),
         vec!["旧地图".into()],
     )
     .unwrap();
@@ -5913,7 +5913,7 @@ async fn open_world_and_choice_race_linearizes_without_partial_commit() {
         "云舟".into(),
         "来自边城的地图学徒。".into(),
         vec!["辨认古地图".into()],
-        "north-tower".into(),
+        Some("north-tower".into()),
         vec![],
     )
     .unwrap();
@@ -6129,7 +6129,7 @@ async fn legacy_orphan_choice_blocks_sealed_world_boundaries_and_exact_replay() 
         "云舟".into(),
         "来自边城的地图学徒。".into(),
         vec!["辨认古地图".into()],
-        "north-tower".into(),
+        Some("north-tower".into()),
         vec![],
     )
     .unwrap();
@@ -6455,7 +6455,7 @@ async fn seed_world_turn(pool: &PgPool) -> (Uuid, Uuid, WorldEntryContext) {
         "云舟".into(),
         "来自边城的地图学徒。".into(),
         vec!["辨认古地图".into()],
-        "north-tower".into(),
+        Some("north-tower".into()),
         vec!["旧地图".into()],
     )
     .unwrap();
@@ -7789,7 +7789,7 @@ async fn world_turn_multi_turn_journal_rebuilds_equivalent_state() {
     assert_eq!(rebuilt.state, completed.world_state.state);
     assert_eq!(rebuilt.open_world().unwrap().unwrap().turn_number, 2);
     let player = rebuilt.player_entity().unwrap().unwrap();
-    assert_eq!(player.location_id, "harbor");
+    assert_eq!(player.location_id.as_deref(), Some("harbor"));
     assert!(player.inventory.contains(&"隐秘地图".to_string()));
     assert!(player
         .discovered_knowledge

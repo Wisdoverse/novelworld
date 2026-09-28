@@ -91,7 +91,7 @@ export interface CreatePlayerEntityInput {
   name: string;
   background: string;
   capabilities: string[];
-  location_id: string;
+  location_id: string | null;
   inventory: string[];
   rules: PlayerRuleProfile;
 }

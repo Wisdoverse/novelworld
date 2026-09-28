@@ -96,7 +96,7 @@ export interface PlayerEntity {
   name: string;
   background: string;
   capabilities: string[];
-  location_id: string;
+  location_id: string | null;
   inventory: string[];
   relationships: Record<string, { score: number; last_change: string }>;
   faction_standing: Record<string, number>;

@@ -492,7 +492,7 @@ pub struct CreatePlayerEntityCommand {
     pub name: String,
     pub background: String,
     pub capabilities: Vec<String>,
-    pub location_id: String,
+    pub location_id: Option<String>,
     pub inventory: Vec<String>,
     pub rules: PlayerRuleProfile,
 }
@@ -1075,7 +1075,7 @@ impl NarrativeCommandHandler {
             &command.name,
             &command.background,
             &command.capabilities,
-            &command.location_id,
+            command.location_id.as_deref(),
             &command.inventory,
         )
         .map_err(|error| NarrativeError::Validation(error.to_string()))?;
@@ -1141,7 +1141,7 @@ impl NarrativeCommandHandler {
                     &command.name,
                     &command.background,
                     &command.capabilities,
-                    &command.location_id,
+                    command.location_id.as_deref(),
                     &command.inventory,
                 )
                 || !existing.matches_rules(&command.rules)
@@ -1177,10 +1177,10 @@ impl NarrativeCommandHandler {
                 "Player name conflicts with a canonical character".into(),
             ));
         }
-        if !context
-            .locations
-            .iter()
-            .any(|location| location.id == command.location_id)
+        if command
+            .location_id
+            .as_ref()
+            .is_some_and(|id| !context.locations.iter().any(|location| location.id == *id))
         {
             return Err(NarrativeError::Validation(
                 "Player location is not visible at the unlocked checkpoint".into(),
@@ -1212,7 +1212,7 @@ impl NarrativeCommandHandler {
                 &candidate.name,
                 &candidate.background,
                 &candidate.capabilities,
-                &candidate.location_id,
+                candidate.location_id.as_deref(),
                 &candidate.inventory,
             )
             || !stored.matches_rules(&candidate.rules)

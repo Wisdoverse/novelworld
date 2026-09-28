@@ -29,7 +29,7 @@ pub struct PlayerEntity {
     pub name: String,
     pub background: String,
     pub capabilities: Vec<String>,
-    pub location_id: String,
+    pub location_id: Option<String>,
     pub inventory: Vec<String>,
     pub relationships: BTreeMap<Uuid, RelationshipState>,
     pub faction_standing: BTreeMap<String, i32>,
@@ -52,7 +52,7 @@ impl PlayerEntity {
         name: String,
         background: String,
         capabilities: Vec<String>,
-        location_id: String,
+        location_id: Option<String>,
         inventory: Vec<String>,
     ) -> Result<Self, PlayerEntityError> {
         Self::new_with_rules(
@@ -76,7 +76,7 @@ impl PlayerEntity {
         name: String,
         background: String,
         capabilities: Vec<String>,
-        location_id: String,
+        location_id: Option<String>,
         inventory: Vec<String>,
         rules: PlayerRuleProfile,
     ) -> Result<Self, PlayerEntityError> {
@@ -111,7 +111,7 @@ impl PlayerEntity {
             &self.name,
             &self.background,
             &self.capabilities,
-            &self.location_id,
+            self.location_id.as_deref(),
             &self.inventory,
         )?;
         if self.relationships.len() > MAX_RELATIONSHIPS
@@ -147,13 +147,15 @@ impl PlayerEntity {
         name: &str,
         background: &str,
         capabilities: &[String],
-        location_id: &str,
+        location_id: Option<&str>,
         inventory: &[String],
     ) -> Result<(), PlayerEntityError> {
         token("name", name, 100)?;
         text("background", background, 2_000)?;
         list("capabilities", capabilities, 1, MAX_CAPABILITIES, 200)?;
-        token("location_id", location_id, 100)?;
+        if let Some(location_id) = location_id {
+            token("location_id", location_id, 100)?;
+        }
         list("inventory", inventory, 0, MAX_INVENTORY, 200)
     }
 
@@ -162,13 +164,13 @@ impl PlayerEntity {
         name: &str,
         background: &str,
         capabilities: &[String],
-        location_id: &str,
+        location_id: Option<&str>,
         inventory: &[String],
     ) -> bool {
         self.name == name
             && self.background == background
             && self.capabilities == capabilities
-            && self.location_id == location_id
+            && self.location_id.as_deref() == location_id
             && self.inventory == inventory
     }
 
@@ -244,7 +246,7 @@ mod tests {
             "云舟".into(),
             "来自边城的地图学徒。".into(),
             vec!["辨认古地图".into()],
-            "north-tower".into(),
+            Some("north-tower".into()),
             vec!["旧地图".into()],
         )
         .unwrap()

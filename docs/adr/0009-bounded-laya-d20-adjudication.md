@@ -36,7 +36,8 @@ After existing ownership, source-visibility, turn, target, and hard validation,
 recheck player identity and progress immediately before classification and
 again after its response. Build an allowlisted JSON context containing only:
 intent; action kind; selected target display name; current location display
-name; player background, capabilities, and inventory; current action attribute
+name (or `null` when no initial place was chosen); player background,
+capabilities, and inventory; current action attribute
 label, description, and score; template base DC; and visible hard-rule
 descriptions. Quote all included strings as untrusted data. Resolve target
 display names from the authorized entry context according to action kind. If
