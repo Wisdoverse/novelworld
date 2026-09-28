@@ -6,6 +6,7 @@ import {
   MAX_CHAPTER_TRANSLATION_BYTES,
   chapterTranslationByteLength,
   isChapterTranslationSupported,
+  isPredominantlyChinese,
   chapterTranslationRetryDelay,
   shouldRetryChapterTranslation,
   useChapterTranslation,
@@ -73,6 +74,13 @@ describe('chapter translation query', () => {
 
   it('measures the UTF-8 payload rather than JavaScript code units', () => {
     expect(chapterTranslationByteLength('中')).toBe(3);
+  });
+
+  it('skips Chinese prose but keeps English and Japanese eligible for translation', () => {
+    expect(isPredominantlyChinese('第一章：欢迎来到魔法世界。Harry 抬起头。')).toBe(true);
+    expect(isPredominantlyChinese('第一章：繁體中文也不需要翻譯。')).toBe(true);
+    expect(isPredominantlyChinese('Harry opened the door. 第一章')).toBe(false);
+    expect(isPredominantlyChinese('彼は学校に行きました。')).toBe(false);
   });
 
   it.each([409, 429])('keeps retrying HTTP %i responses within the busy budget', (status) => {

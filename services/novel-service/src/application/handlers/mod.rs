@@ -510,6 +510,9 @@ impl TranslateChapterHandler {
         if !chapter.content.starts_with(source) {
             return Err(TranslationError::SourceMismatch);
         }
+        if is_predominantly_chinese(source) {
+            return Ok(source.to_owned());
+        }
         let source_hash = Sha256::digest(source.as_bytes()).to_vec();
         let key = ChapterTranslationKey {
             chapter_id: chapter.id,
@@ -619,6 +622,24 @@ impl TranslateChapterHandler {
         }
         Ok(translated.join("\n\n"))
     }
+}
+
+fn is_predominantly_chinese(source: &str) -> bool {
+    // ponytail: script ratio is a hint; use source-language metadata if mixed chapters need exact handling.
+    let (mut han, mut letters, mut kana) = (0, 0, 0);
+    for character in source.chars() {
+        let code = character as u32;
+        if character.is_alphabetic() {
+            letters += 1;
+        }
+        if matches!(code, 0x3400..=0x9fff | 0xf900..=0xfaff | 0x20000..=0x2fa1f) {
+            han += 1;
+        }
+        if matches!(code, 0x3040..=0x30ff | 0x31f0..=0x31ff | 0xff66..=0xff9d) {
+            kana += 1;
+        }
+    }
+    han > 0 && han * 3 >= letters * 2 && kana * 20 < letters
 }
 
 fn split_translation_chunks(source: &str, limit: usize) -> Vec<&str> {
@@ -819,6 +840,41 @@ mod translation_tests {
         assert!(chunks
             .iter()
             .all(|chunk| chunk.is_char_boundary(chunk.len())));
+    }
+
+    #[tokio::test]
+    async fn chinese_source_returns_unchanged_without_a_claim_or_provider_call() {
+        let source = "第一章：欢迎来到魔法世界。Harry 抬起头。".to_owned();
+        let translator = Arc::new(EchoTranslator {
+            calls: AtomicUsize::new(0),
+            delay: Duration::ZERO,
+        });
+        let translation_repo = Arc::new(MemoryTranslationRepository::default());
+        let handler = TranslateChapterHandler {
+            chapter_repo: Arc::new(FixedChapterRepository::new(source.clone())),
+            translation_repo: translation_repo.clone(),
+            translator: translator.clone(),
+            permits: Arc::new(Semaphore::new(0)),
+        };
+
+        assert_eq!(
+            handler
+                .translate(Uuid::nil(), Uuid::nil(), 1, &source)
+                .await
+                .unwrap(),
+            source
+        );
+        assert_eq!(translator.calls.load(Ordering::Relaxed), 0);
+        assert!(translation_repo.values.lock().unwrap().is_empty());
+        assert!(matches!(
+            handler
+                .translate(Uuid::nil(), Uuid::nil(), 1, "第一章：伪造正文")
+                .await,
+            Err(TranslationError::SourceMismatch)
+        ));
+        assert!(is_predominantly_chinese("第一章：繁體中文也不需要翻譯。"));
+        assert!(!is_predominantly_chinese("Harry opened the door. 第一章"));
+        assert!(!is_predominantly_chinese("彼は学校に行きました。"));
     }
 
     #[tokio::test]

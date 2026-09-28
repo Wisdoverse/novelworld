@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { useParams, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
@@ -32,6 +32,7 @@ import {
   TranslationControls,
   chapterTranslationByteLength,
   isChapterTranslationSupported,
+  isPredominantlyChinese,
   useChapterTranslation,
 } from '@/features/chapter-translation';
 import { getApiErrorCode, getApiErrorMessage } from '@/shared/api/client';
@@ -329,7 +330,9 @@ export function ReaderPage() {
     ? splitChapterAtAnchor(displayContent, activeBranchNode.anchor_quote)
     : undefined;
   const sourceContent = inlineChapter?.before ?? displayContent;
-  const canOfferTranslation = Boolean(sourceContent) && (!isPlayerChapter || showCanonReference);
+  const sourceIsChinese = useMemo(() => isPredominantlyChinese(sourceContent), [sourceContent]);
+  const canOfferTranslation = Boolean(sourceContent) && !sourceIsChinese
+    && (!isPlayerChapter || showCanonReference);
   const translationByteLength = chapterTranslationByteLength(sourceContent);
   const translationSupported = isChapterTranslationSupported(sourceContent);
   const canTranslate = canOfferTranslation && translationSupported;

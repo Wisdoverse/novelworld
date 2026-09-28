@@ -51,6 +51,7 @@ test.describe('critical journey — full axe rule set', () => {
     await page.goto('/reader/novel-1/1');
     await expect(page.getByText('第一章 北塔来信').first()).toBeVisible();
     await expect(page.getByRole('button', { name: /收下信/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: '翻译成中文' })).toHaveCount(0);
     await expect(page.getByRole('main')).toHaveCount(1);
     await page.waitForLoadState('networkidle');
     await expectNoA11yViolations(page);

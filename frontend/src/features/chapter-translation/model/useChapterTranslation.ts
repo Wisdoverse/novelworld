@@ -16,6 +16,26 @@ export function isChapterTranslationSupported(content: string) {
   return chapterTranslationByteLength(content) <= MAX_CHAPTER_TRANSLATION_BYTES;
 }
 
+const LETTER = /\p{L}/u;
+
+export function isPredominantlyChinese(content: string) {
+  // ponytail: script ratio is a hint; use source-language metadata if mixed chapters need exact handling.
+  let han = 0;
+  let letters = 0;
+  let kana = 0;
+  for (const character of content) {
+    const code = character.codePointAt(0) ?? 0;
+    if (LETTER.test(character)) letters += 1;
+    if ((code >= 0x3400 && code <= 0x9fff)
+      || (code >= 0xf900 && code <= 0xfaff)
+      || (code >= 0x20000 && code <= 0x2fa1f)) han += 1;
+    if ((code >= 0x3040 && code <= 0x30ff)
+      || (code >= 0x31f0 && code <= 0x31ff)
+      || (code >= 0xff66 && code <= 0xff9d)) kana += 1;
+  }
+  return han > 0 && han * 3 >= letters * 2 && kana * 20 < letters;
+}
+
 // Covers the backend's four-minute ownership lease when a replica disappears.
 const BUSY_RETRY_LIMIT = 55;
 const STANDARD_RETRY_LIMIT = 3;

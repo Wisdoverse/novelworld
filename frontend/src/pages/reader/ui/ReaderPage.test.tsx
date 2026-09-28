@@ -150,6 +150,7 @@ vi.mock('@/features/chapter-translation', () => ({
   MAX_CHAPTER_TRANSLATION_BYTES: 48_000,
   chapterTranslationByteLength: (content: string) => new TextEncoder().encode(content).byteLength,
   isChapterTranslationSupported: (content: string) => new TextEncoder().encode(content).byteLength <= 48_000,
+  isPredominantlyChinese: (content: string) => content.startsWith('第一章'),
   useChapterTranslation: (
     _novelId: string,
     _chapterNumber: number,
@@ -474,6 +475,17 @@ describe('ReaderPage progress gate', () => {
     expect(screen.getByText('第二章')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '显示原文' }));
     expect(screen.getByText('Chapter two')).toBeTruthy();
+  });
+
+  it('does not offer or request translation for an already Chinese chapter', () => {
+    mocks.progressError = false;
+    mocks.progressChapter = 2;
+    mocks.effectiveContent = '第一章：旅人来到城门。';
+    render(<ReaderPage />);
+
+    expect(screen.getByText('第一章：旅人来到城门。')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '翻译成中文' })).toBeNull();
+    expect(mocks.translationQueryEnabled).toBe(false);
   });
 
   it('keeps the source visible when translation fails', () => {
