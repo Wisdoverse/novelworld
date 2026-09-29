@@ -41,11 +41,15 @@ retrying the same action/state cannot reroll it. The browser never supplies the
 roll or success result.
 
 An advanced failure is authoritative: before validation and commit, the domain
-normalizer replaces model-proposed events with one neutral failed-attempt event
-and clears relationship, location, thread, player-location, inventory,
-knowledge, faction, and explicit canon-event mutations. World time and the
-scheduled canon mainline may still advance deterministically. A successful
-check still passes the existing hard-rule and source-context validators.
+normalizer replaces model-proposed events with a neutral failed-attempt event
+and source-backed independent character continuations. It clears relationship,
+location, thread, player-location, inventory, knowledge, faction, attribute,
+and explicit canon-event mutations. The added character events must derive
+from the frozen current event or goal; a character with no such source has no
+fabricated fallback action. They cannot grant the player's failed intent.
+World time and the scheduled canon mainline may still advance
+deterministically. A successful check still passes the existing hard-rule and
+source-context validators.
 
 Narrative player/session fields use serde defaults and are omitted while in the
 legacy narrative state. Advanced fields remain explicit. The public API adds

@@ -1127,7 +1127,7 @@ impl NarrativeCommandHandler {
                     })?;
                 command
                     .rules
-                    .validate_against(&template)
+                    .validate_initial_allocation_against(&template)
                     .map_err(|error| NarrativeError::Validation(error.to_string()))?;
                 Some(template)
             }
@@ -3109,6 +3109,7 @@ mod timeline_tests {
                 inventory_removals: vec![],
                 knowledge_discoveries: vec![],
                 faction_changes: vec![],
+                attribute_changes: vec![],
                 canonical_event_change: None,
             },
             created_at: now,
@@ -3489,6 +3490,7 @@ mod timeline_tests {
                 inventory_removals: vec![],
                 knowledge_discoveries: vec!["守门人曾修改换防表".into()],
                 faction_changes: vec![],
+                attribute_changes: vec![],
                 canonical_event_change: None,
             },
             world_state: WorldState::new(user_id, novel_id),
@@ -3643,6 +3645,7 @@ mod timeline_tests {
                     delta: 1,
                     reason: repeated,
                 }],
+                attribute_changes: vec![],
                 canonical_event_change: Some(CanonicalEventChange {
                     event_id: "changing-of-the-guard".into(),
                     status: CanonicalEventStatus::Witnessed,

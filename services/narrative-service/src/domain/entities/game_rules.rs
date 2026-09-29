@@ -14,6 +14,8 @@ pub const BASIC_GAME_RULE_PROMPT_VERSION: &str = "novel-game-rules-v2";
 pub const SERIES_GAME_RULE_PROMPT_VERSION: &str = "series-game-rules-v1";
 pub const BASIC_ACTION_DESCRIPTION: &str = "在世界规则内处理该类行动的不确定结果";
 pub const ACTION_ADJUDICATION_CONTEXT_LIMIT: usize = 8 * 1024;
+pub const MIN_EVOLVED_ATTRIBUTE_SCORE: i32 = 1;
+pub const MAX_EVOLVED_ATTRIBUTE_SCORE: i32 = 20;
 
 pub fn basic_attribute(key: &str) -> Option<(&'static str, &'static str)> {
     Some(match key {
@@ -277,7 +279,8 @@ impl PlayerRuleProfile {
                     || !(3..=6).contains(&self.attributes.len())
                     || self.attributes.iter().any(|(name, score)| {
                         key(name).is_err()
-                            || !(8..=15).contains(score)
+                            || !(MIN_EVOLVED_ATTRIBUTE_SCORE..=MAX_EVOLVED_ATTRIBUTE_SCORE)
+                                .contains(score)
                             || (self
                                 .template_prompt_version
                                 .as_deref()
@@ -304,19 +307,30 @@ impl PlayerRuleProfile {
         {
             return invalid("player profile does not bind the requested template");
         }
-        let mut total = 0;
         for attribute in &template.attributes {
             let score = self
                 .attributes
                 .get(&attribute.key)
                 .ok_or_else(|| GameRulesError("player attribute set is incomplete".into()))?;
-            if !(template.minimum_score..=template.maximum_score).contains(score) {
-                return invalid("player attribute score is outside template bounds");
+            if !(MIN_EVOLVED_ATTRIBUTE_SCORE..=MAX_EVOLVED_ATTRIBUTE_SCORE).contains(score) {
+                return invalid("player attribute score is outside evolved bounds");
             }
-            total += score;
         }
-        if total != template.point_budget {
-            return invalid("player attributes must spend the exact point budget");
+        Ok(())
+    }
+
+    pub fn validate_initial_allocation_against(
+        &self,
+        template: &GameRuleTemplate,
+    ) -> Result<(), GameRulesError> {
+        self.validate_against(template)?;
+        if self
+            .attributes
+            .values()
+            .any(|score| !(template.minimum_score..=template.maximum_score).contains(score))
+            || self.attributes.values().sum::<i32>() != template.point_budget
+        {
+            return invalid("initial attributes must follow template bounds and point budget");
         }
         Ok(())
     }
@@ -385,7 +399,7 @@ impl ActionCheck {
         if self.schema_version != GAME_RULE_SCHEMA_VERSION
             || self.canon_model_version < 1
             || !supported_prompt_version(&self.template_prompt_version)
-            || !(8..=15).contains(&self.score)
+            || !(MIN_EVOLVED_ATTRIBUTE_SCORE..=MAX_EVOLVED_ATTRIBUTE_SCORE).contains(&self.score)
             || self.modifier != (self.score - 10).div_euclid(2)
             || !(1..=20).contains(&self.roll)
             || !(5..=30).contains(&self.difficulty_class)
@@ -1123,26 +1137,50 @@ mod tests {
         let template = template();
         let mut missing = profile();
         missing.attributes.remove("influence");
-        assert!(missing.validate_against(&template).is_err());
+        assert!(missing
+            .validate_initial_allocation_against(&template)
+            .is_err());
 
         let mut extra = profile();
         extra.attributes.insert("luck".into(), 8);
-        assert!(extra.validate_against(&template).is_err());
+        assert!(extra
+            .validate_initial_allocation_against(&template)
+            .is_err());
 
         for invalid_score in [7, 16] {
             let mut outside_bounds = profile();
             outside_bounds
                 .attributes
                 .insert("vigor".into(), invalid_score);
-            assert!(outside_bounds.validate_against(&template).is_err());
+            assert!(outside_bounds
+                .validate_initial_allocation_against(&template)
+                .is_err());
         }
 
         let mut wrong_total = profile();
         wrong_total.attributes.insert("insight".into(), 9);
-        assert!(wrong_total.validate_against(&template).is_err());
+        assert!(wrong_total
+            .validate_initial_allocation_against(&template)
+            .is_err());
 
         let mut wrong_version = profile();
         wrong_version.canon_model_version = Some(2);
-        assert!(wrong_version.validate_against(&template).is_err());
+        assert!(wrong_version
+            .validate_initial_allocation_against(&template)
+            .is_err());
+    }
+
+    #[test]
+    fn evolved_scores_change_later_checks_without_changing_creation_budget() {
+        let template = template();
+        let mut evolved = profile();
+        evolved.attributes.insert("vigor".into(), 16);
+        evolved.validate_against(&template).unwrap();
+        assert!(evolved
+            .validate_initial_allocation_against(&template)
+            .is_err());
+        let check = resolve_action_check(&template, &evolved, WorldActionKind::Travel, 10).unwrap();
+        assert_eq!(check.score, 16);
+        assert_eq!(check.modifier, 3);
     }
 }

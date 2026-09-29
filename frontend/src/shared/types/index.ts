@@ -102,6 +102,7 @@ export interface PlayerEntity {
   faction_standing: Record<string, number>;
   discovered_knowledge: string[];
   rules?: PlayerRuleProfile;
+  initial_rule_attributes?: Record<string, number> | null;
   created_at: string;
 }
 
@@ -268,6 +269,7 @@ export type CanonicalEventStatus =
 export interface CanonicalEventState extends ScheduledCanonEvent {
   status: CanonicalEventStatus;
   reason: string | null;
+  advanced_at_world_time?: number | null;
 }
 
 export interface WorldSession {
@@ -331,6 +333,12 @@ export interface WorldTurnTransition {
   inventory_removals: string[];
   knowledge_discoveries: string[];
   faction_changes: Array<{ faction_id: string; delta: number; reason: string }>;
+  attribute_changes?: Array<{
+    attribute_key: string;
+    delta: number;
+    reason: string;
+    event_index: number;
+  }>;
   canonical_event_change: {
     event_id: string;
     status: CanonicalEventStatus;

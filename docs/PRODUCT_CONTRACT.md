@@ -116,6 +116,16 @@ named as actors in the latest committed turn's event at the player's current
 location. An absent or stale event leaves the list empty; this is encounter
 evidence, not a persisted NPC location or a guarantee of an NPC action every
 turn. Failed D20 actions require no successful ally, oppose, or thread effect.
+For new world turns, one generation selects at most four relevant living
+characters. A committed successful turn requires their actor-attributed events;
+missing events may be filled from an eligible frozen canon event or goal. On a
+failed advanced check, model-proposed effects are discarded and only the
+neutral failed attempt plus source-backed character continuations are stored;
+characters with no source-backed continuation receive no invented action.
+Each reader's committed action advances only their world time by one step.
+Advanced attributes may change by a bounded amount when linked to a player
+event, and later checks use the committed score. The reader shows the complete
+latest narrative once, with a journal link back to it.
 
 For H4, server-authoritative checks are the ones the runtime can execute:
 identity/ownership, membership of supported targets, death,

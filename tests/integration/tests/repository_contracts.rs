@@ -5594,11 +5594,18 @@ async fn production_repositories_match_fresh_schema() {
         canon_model_version: 1,
         canonical_checkpoint_chapter: 5,
         rendered_narrative: "你在塔中找到一条隐秘道路，守门人开始相信你的判断。".into(),
-        events: vec![TransitionEvent {
-            summary: "玩家找到隐秘道路".into(),
-            actor_character_ids: vec![],
-            location_id: Some("north-tower".into()),
-        }],
+        events: vec![
+            TransitionEvent {
+                summary: "玩家找到隐秘道路".into(),
+                actor_character_ids: vec![],
+                location_id: Some("north-tower".into()),
+            },
+            TransitionEvent {
+                summary: "守门人继续巡视北塔".into(),
+                actor_character_ids: vec![character_id],
+                location_id: Some("north-tower".into()),
+            },
+        ],
         relationship_changes: vec![RelationshipChange {
             character_id,
             delta: 5,
@@ -5615,6 +5622,7 @@ async fn production_repositories_match_fresh_schema() {
             delta: 5,
             reason: "帮助守军".into(),
         }],
+        attribute_changes: vec![],
         canonical_event_change: None,
     };
     let completed = world_turn_repo
@@ -6534,6 +6542,7 @@ fn world_turn_transition() -> WorldTurnTransition {
         inventory_removals: vec![],
         knowledge_discoveries: vec![],
         faction_changes: vec![],
+        attribute_changes: vec![],
         canonical_event_change: None,
     }
 }
@@ -7249,8 +7258,17 @@ async fn world_turn_adjudication_cas_freezes_exact_resolution_before_commit_and_
         resolution: Some(frozen.clone()),
         ..claim.clone()
     };
+    let mut transition = world_turn_transition();
+    if !frozen.succeeded {
+        transition.events = vec![TransitionEvent {
+            summary: "玩家行动检定失败，主要意图未实现".into(),
+            actor_character_ids: vec![],
+            location_id: None,
+        }];
+        transition.player_location_id = None;
+    }
     let completed = repo
-        .complete_turn(&settled, attempt, &world_turn_transition(), &context)
+        .complete_turn(&settled, attempt, &transition, &context)
         .await
         .unwrap();
     assert_eq!(completed.resolution, Some(frozen.clone()));
@@ -7718,6 +7736,7 @@ async fn world_turn_multi_turn_journal_rebuilds_equivalent_state() {
         inventory_removals: vec![],
         knowledge_discoveries: vec![],
         faction_changes: vec![],
+        attribute_changes: vec![],
         canonical_event_change: Some(CanonicalEventChange {
             event_id: "siege-event".into(),
             status: CanonicalEventStatus::Witnessed,
@@ -7767,6 +7786,7 @@ async fn world_turn_multi_turn_journal_rebuilds_equivalent_state() {
         inventory_removals: vec![],
         knowledge_discoveries: vec!["港湾有走私暗号".into()],
         faction_changes: vec![],
+        attribute_changes: vec![],
         canonical_event_change: None,
     };
     let completed = repo
