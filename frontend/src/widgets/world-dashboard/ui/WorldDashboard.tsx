@@ -3,6 +3,7 @@ import { BookOpen, Compass, Dices, GitBranch, History, Users } from 'lucide-reac
 import { isWorldTurnOutcomeUnknown, useSubmitWorldTurn } from '@/entities/narrative';
 import { WorldActionForm, actionLabels } from '@/features/world-action';
 import { getApiErrorMessage } from '@/shared/api/client';
+import { localWorldCharacterIds } from '@/shared/lib/localWorldCharacters';
 import {
   removeWorldTurnPendingRequest,
   worldTurnPendingStorageKey,
@@ -167,6 +168,15 @@ export function WorldDashboard({
   const activeThreads = Object.entries(view.world_state.state.threads ?? {})
     .filter(([, thread]) => thread.status === 'open');
   const choices = view.world_state.state.choices;
+  const lastEntry = view.journal[view.journal.length - 1];
+  const latestTurn = lastEntry?.turn_number === view.session.turn_number ? lastEntry : undefined;
+  const latestNarrative = latestTurn?.transition.rendered_narrative;
+  const localCharacterIds = localWorldCharacterIds(view);
+  const localCharacters = context.characters.filter(character => localCharacterIds.has(character.id));
+  const localCharacterEvents = latestTurn?.transition.events.filter(event => (
+    event.location_id === view.player.location_id
+      && event.actor_character_ids.some(id => localCharacterIds.has(id))
+  )) ?? [];
 
   const rememberPendingRequest = (request: PendingRequest) => {
     storePendingRequest(view.player.user_id, novelId, request);
@@ -242,19 +252,92 @@ export function WorldDashboard({
 
   return (
     <section
-      className="surface-card mt-12 space-y-8 p-5 md:p-6"
+      className="mt-6 space-y-7 rounded-[28px] border border-[#d8c8a9] bg-[#faf7ef] p-4 shadow-[0_18px_50px_rgba(53,49,35,0.08)] sm:p-6"
       aria-labelledby="living-world-title"
     >
-      <div>
-        <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-widest text-[#0b57d0]">
-          <Compass size={14} /> 单一时间线
+      <div className="rounded-[22px] bg-[#203a35] px-5 py-7 text-[#f6f1e6] sm:px-8 sm:py-9">
+        <div className="flex flex-wrap items-center gap-2 text-xs font-semibold tracking-[0.18em] text-[#d4e4c6]">
+          <Compass size={14} aria-hidden="true" /> 正在发生的故事
+          <span className="ml-auto rounded-full border border-white/25 px-3 py-1 tracking-normal text-[#f6f1e6]">
+            第 {view.session.turn_number} 回合
+          </span>
         </div>
-        <h2 id="living-world-title" tabIndex={-1} className="mt-2 scroll-mt-24 text-xl font-semibold text-[#1f1f1f]">
+        <h2 id="living-world-title" tabIndex={-1} className="mt-5 scroll-mt-24 text-2xl font-semibold leading-tight sm:text-3xl">
           {view.player.name} 的开放世界
         </h2>
-        <p className="mt-2 text-sm text-[#5f6368]">
-          世界时间 {view.session.world_time} · 已完成 {view.session.turn_number} 回合 · 当前地点 {location?.name ?? view.player.location_id ?? '未指定'}
+        <p className="mt-3 text-sm text-[#d5e1d7]">
+          {location?.name ?? view.player.location_id ?? '地点未确认'} · 世界时间 {view.session.world_time}
         </p>
+        <div className="mt-7 border-t border-white/20 pt-6">
+          <p className="text-xs font-semibold tracking-[0.16em] text-[#d4e4c6]">{latestTurn ? '刚刚发生' : '故事从这里继续'}</p>
+          <p className="mt-3 line-clamp-4 max-w-3xl whitespace-pre-wrap text-base leading-8 text-[#f6f1e6] [overflow-wrap:anywhere] sm:text-lg">
+            {latestNarrative ?? '世界已经就绪。选定行动与目标，故事中的人物会按各自的处境作出回应。'}
+          </p>
+          {latestNarrative && [...latestNarrative].length > 160 ? (
+            <details className="mt-3 text-sm text-[#d4e4c6]">
+              <summary className="w-fit cursor-pointer underline underline-offset-4">展开完整经过</summary>
+              <p className="mt-3 whitespace-pre-wrap leading-7 text-[#f6f1e6] [overflow-wrap:anywhere]">{latestNarrative}</p>
+            </details>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(220px,0.75fr)]">
+        <div className="rounded-2xl border border-[#ded4bf] bg-white p-5">
+          <h3 className="flex items-center gap-2 text-sm font-semibold text-[#203a35]">
+            <Users size={16} aria-hidden="true" /> 此刻同场的角色
+          </h3>
+          {localCharacters.length ? (
+            <ul className="mt-4 flex flex-wrap gap-2">
+              {localCharacters.map(character => (
+                <li key={character.id} className="rounded-full bg-[#e8efe5] px-3 py-1.5 text-sm font-medium text-[#203a35]">
+                  {character.name}
+                </li>
+              ))}
+            </ul>
+          ) : <p className="mt-3 text-sm leading-6 text-[#59645f]">还没有能由本回合现场事件确认的角色。</p>}
+        </div>
+        <div className="rounded-2xl border border-[#ded4bf] bg-white p-5">
+          <h3 className="text-sm font-semibold text-[#203a35]">角色正在做什么</h3>
+          {localCharacterEvents.length ? (
+            <ul className="mt-3 space-y-3 text-sm leading-6 text-[#3d4842]">
+              {localCharacterEvents.map((event, index) => (
+                <li key={index} className="border-l-2 border-[#81a68d] pl-3">
+                  <span className="font-semibold">{event.actor_character_ids
+                    .filter(id => localCharacterIds.has(id))
+                    .map(id => context.characters.find(character => character.id === id)?.name)
+                    .join('、')}：</span>{event.summary}
+                </li>
+              ))}
+            </ul>
+          ) : <p className="mt-3 text-sm leading-6 text-[#59645f]">本回合没有已记录的同场角色动作。</p>}
+        </div>
+      </div>
+
+      <div className="rounded-2xl border border-[#d8c8a9] bg-white p-5 sm:p-6">
+        <h3 id="world-action-form" tabIndex={-1} className="scroll-mt-24 text-lg font-semibold text-[#203a35]">你接下来做什么？</h3>
+        <p className="mb-5 mt-1 text-sm text-[#59645f]">先选择行动方式，再选择目标；只有已确认同场的角色会成为人物目标。</p>
+        <WorldActionForm
+          view={view}
+          isPending={turn.isPending}
+          isLocked={actionsDisabled || Boolean(pendingRequest)}
+          onSubmit={submit}
+        />
+        <p role="status" aria-label="世界行动状态" className="sr-only">
+          {turn.isPending ? '正在确认世界行动，请等待已保存的结果。' : ''}
+        </p>
+        {!turn.isPending && (error || pendingRequest) ? (
+          <div role="alert" className="mt-4 text-sm text-[#b3261e]">
+            {error ? `${error} ` : ''}{pendingRequest
+              ? '尚未确认这次行动的最终结果；请使用原请求继续确认，避免重复行动。'
+              : '请求已被明确拒绝；请根据最新世界状态修改行动后重试。'}
+            {pendingRequest ? (
+              <button className="ml-2 underline" disabled={turn.isPending || actionsDisabled} onClick={() => void run(pendingRequest).catch(() => undefined)}>
+                继续确认结果
+              </button>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
@@ -383,30 +466,6 @@ export function WorldDashboard({
         </div>
       </div>
 
-      <div className="border-t border-[#e1e3e8] pt-6">
-        <h3 id="world-action-form" tabIndex={-1} className="mb-4 scroll-mt-24 text-sm font-semibold text-[#1f1f1f]">采取下一步行动</h3>
-        <WorldActionForm
-          view={view}
-          isPending={turn.isPending}
-          isLocked={actionsDisabled || Boolean(pendingRequest)}
-          onSubmit={submit}
-        />
-        <p role="status" aria-label="世界行动状态" className="sr-only">
-          {turn.isPending ? '正在确认世界行动，请等待已保存的结果。' : ''}
-        </p>
-        {!turn.isPending && (error || pendingRequest) ? (
-          <div role="alert" className="mt-4 text-sm text-[#b3261e]">
-            {error ? `${error} ` : ''}{pendingRequest
-              ? '尚未确认这次行动的最终结果；请使用原请求继续确认，避免重复行动。'
-              : '请求已被明确拒绝；请根据最新世界状态修改行动后重试。'}
-            {pendingRequest ? (
-              <button className="ml-2 underline" disabled={turn.isPending || actionsDisabled} onClick={() => void run(pendingRequest).catch(() => undefined)}>
-                继续确认结果
-              </button>
-            ) : null}
-          </div>
-        ) : null}
-      </div>
     </section>
   );
 }

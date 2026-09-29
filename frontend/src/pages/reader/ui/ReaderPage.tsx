@@ -37,6 +37,7 @@ import {
 } from '@/features/chapter-translation';
 import { getApiErrorCode, getApiErrorMessage } from '@/shared/api/client';
 import { getReaderIdentityScope } from '@/shared/lib/readerIdentityScope';
+import { localWorldCharacterIds } from '@/shared/lib/localWorldCharacters';
 import { prefersReducedMotion } from '@/shared/lib/reducedMotion';
 import type { NarrativeChoice } from '@/shared/types';
 
@@ -274,10 +275,17 @@ export function ReaderPage() {
       && readingProgress
       && readerIdentityScope !== 'unresolved'
       && readingProgress.current_chapter === currentChapter
+      && (!openWorldEnabled || (worldSourceVisible && !isOpenWorldLoading && !isOpenWorldError))
       && !isProgressSaving,
   );
+  const localCharacterIds = openWorld ? localWorldCharacterIds(openWorld) : null;
+  const visibleCharacters = openWorldEnabled && (!worldSourceVisible || isOpenWorldLoading || isOpenWorldError)
+    ? []
+    : localCharacterIds
+      ? characters?.filter(character => localCharacterIds.has(character.id))
+      : characters;
   const activeChatCharacter = activeChatCharacterId
-    ? characters?.find(character => character.id === activeChatCharacterId) ?? null
+    ? visibleCharacters?.find(character => character.id === activeChatCharacterId) ?? null
     : null;
   const activeCharacterIsAvailable = Boolean(
     activeChatCharacter
@@ -285,14 +293,14 @@ export function ReaderPage() {
   );
 
   useEffect(() => {
-    if (activeChatCharacterId && characters && !activeCharacterIsAvailable) {
+    if (activeChatCharacterId && visibleCharacters && !activeCharacterIsAvailable) {
       setActiveChatCharacterId(null);
     }
     if (timelineMutationLocked) setShowCharacterList(false);
   }, [
     activeCharacterIsAvailable,
     activeChatCharacterId,
-    characters,
+    visibleCharacters,
     timelineMutationLocked,
   ]);
 
@@ -508,7 +516,7 @@ export function ReaderPage() {
               {novel?.title}
             </div>
             <div className="truncate text-xs text-[#5f6368]">
-              {chapter?.title || `第 ${currentChapter} 章`}
+              {openWorld ? `开放世界 · ${openWorld.player?.name ?? playerEntry?.player?.name ?? '你的角色'}` : chapter?.title || `第 ${currentChapter} 章`}
             </div>
           </div>
         </div>
@@ -567,6 +575,14 @@ export function ReaderPage() {
             onSubmit={createPlayerEntity.mutateAsync}
           />
         ) : null}
+        {openWorld ? (
+          <WorldDashboard
+            novelId={novelId || ''}
+            view={openWorld}
+            actionsDisabled={isOpenWorldError || timelineMutationLocked}
+            onRefresh={refetchOpenWorld}
+          />
+        ) : null}
         {isLoading || (worldSourceVisible && isEffectiveChapterLoading) ? (
           <div className="flex items-center justify-center h-64">
             <div className="h-8 w-8 animate-spin rounded-full border-2 border-[#0b57d0] border-t-transparent" />
@@ -580,6 +596,12 @@ export function ReaderPage() {
             <button className="text-sm underline" onClick={() => refetchEffectiveChapter()}>重新生成</button>
           </div>
         ) : chapter && visibleEffectiveChapter ? (
+          <details key={openWorld ? 'world-reference' : 'reader-chapter'} open={!openWorld} className={openWorld ? 'mt-8' : ''}>
+            <summary className={openWorld
+              ? 'cursor-pointer rounded-2xl border border-[#ded4bf] bg-white px-5 py-4 text-sm font-semibold text-[#203a35] hover:bg-[#faf7ef]'
+              : 'hidden'}>
+              阅读章节与原著参考 · 第 {currentChapter} 章
+            </summary>
           <motion.div
             key={currentChapter}
             initial={{ opacity: 0, y: 20 }}
@@ -702,6 +724,7 @@ export function ReaderPage() {
               </div>
             )}
           </motion.div>
+          </details>
         ) : null}
         {openWorldEnabled && isOpenWorldLoading ? (
           <p className="mt-12 text-sm text-[#5f6368]">正在恢复开放世界…</p>
@@ -768,14 +791,6 @@ export function ReaderPage() {
             </div>
           </section>
         ) : null}
-        {openWorld ? (
-          <WorldDashboard
-            novelId={novelId || ''}
-            view={openWorld}
-            actionsDisabled={isOpenWorldError || timelineMutationLocked}
-            onRefresh={refetchOpenWorld}
-          />
-        ) : null}
       </main>
 
       {/* 底部翻页导航 */}
@@ -840,7 +855,7 @@ export function ReaderPage() {
               <X size={16} />
             </Dialog.Close>
           </div>
-            {characters?.map((char) => {
+            {visibleCharacters?.length ? visibleCharacters.map((char) => {
               const isDead = openWorld?.session.dead_character_ids.includes(char.id) ?? false;
               return (
                 <button
@@ -881,7 +896,11 @@ export function ReaderPage() {
                   <MessageCircle size={14} className="ml-auto flex-shrink-0 text-[#0b57d0]" />
                 </button>
               );
-            })}
+            }) : <p className="text-sm leading-6 text-[#5f6368]">
+              {openWorldEnabled
+                ? '当前没有已确认同场的角色。行动后会根据已提交的现场事件更新。'
+                : '当前章节没有可见角色。'}
+            </p>}
         </Dialog.Content>
       </Dialog.Portal>
 

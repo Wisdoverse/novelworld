@@ -110,6 +110,13 @@ provider-hosted image bytes, operator logs, or backups.
 | Retry/restart without duplicate committed chat, world, or import authority | Structurally verified at persisted boundaries | Chat and world turns fence logical keys and replay committed results. One database authority slot spans an in-progress world turn and a committed `pending` projection; exact-key replay or Narrative's bounded periodic scan retries eligible rows through the same idempotent memory fact. Identity/progress-ineligible or invalid rows remain `pending` and are durably rotated so they cannot starve later rows; post-commit identity or visibility races return a content-free unknown outcome. The browser scopes the bounded action/key by user+novel in same-tab `sessionStorage`, retains it across failed post-commit confirmation, and clears it only on terminal result/rejection or principal lifecycle. When browser storage is blocked, a stable open-world view exposes the same-session, semantically valid `in_progress` action/key for explicit replay; completed turns remain journal-owned, and expired-lease supersession still applies. The H4-v1 90-second live dependency-recovery drill remains an H4 gap; sustained long-window recovery/SLO observation remains H5 | H1, H3, H4, H5 |
 | Complete export and deletion | Structurally verified within the documented application boundary | Provider/operator data and non-atomic backups remain outside the portable export and application erasure boundary | H2, H5 |
 
+The open-world reader shows the current scene before the chapter reference.
+Its character list, character targets, and chat entry use only living characters
+named as actors in the latest committed turn's event at the player's current
+location. An absent or stale event leaves the list empty; this is encounter
+evidence, not a persisted NPC location or a guarantee of an NPC action every
+turn. Failed D20 actions require no successful ally, oppose, or thread effect.
+
 For H4, server-authoritative checks are the ones the runtime can execute:
 identity/ownership, membership of supported targets, death,
 location/thread availability, source-progress bounds, state revision, turn

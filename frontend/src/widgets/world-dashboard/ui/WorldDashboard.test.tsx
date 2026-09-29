@@ -57,6 +57,13 @@ const view = {
   }],
 } satisfies OpenWorldView;
 
+function chooseTravel() {
+  const action = screen.getByLabelText('行动') as HTMLSelectElement;
+  if (action.disabled) return;
+  fireEvent.change(action, { target: { value: 'travel' } });
+  fireEvent.change(screen.getByLabelText('目标'), { target: { value: 'gate' } });
+}
+
 describe('WorldDashboard', () => {
   beforeEach(() => {
     mocks.submit.mockReset();
@@ -73,7 +80,37 @@ describe('WorldDashboard', () => {
       player: { ...view.player, location_id: null },
       session: { ...view.session, entry_context: { ...view.session.entry_context, locations: [] } },
     }} />);
-    expect(screen.getByText(/当前地点 未指定/)).toBeTruthy();
+    expect(screen.getByText(/地点未确认/)).toBeTruthy();
+  });
+
+  it('shows independently recorded local character actions without showing distant actors', () => {
+    render(<WorldDashboard novelId="novel" view={{
+      ...view,
+      session: {
+        ...view.session,
+        entry_context: {
+          ...view.session.entry_context,
+          characters: [
+            { id: 'near', name: '守门人' },
+            { id: 'away', name: '信使' },
+          ],
+        },
+      },
+      journal: [{
+        ...view.journal[0],
+        transition: {
+          ...view.journal[0].transition,
+          events: [
+            { summary: '守门人关上侧门。', actor_character_ids: ['near'], location_id: 'gate' },
+            { summary: '信使已在驿站出发。', actor_character_ids: ['away'], location_id: 'station' },
+          ],
+        },
+      }],
+    }} />);
+
+    expect(screen.getByText('守门人关上侧门。')).toBeTruthy();
+    expect(screen.queryByText('信使已在驿站出发。')).toBeNull();
+    expect(screen.getByText('守门人')).toBeTruthy();
   });
 
   it('keeps canon provenance distinct and retries a failed turn with the same key', async () => {
@@ -95,11 +132,12 @@ describe('WorldDashboard', () => {
     expect(screen.getByText(/读者行动/)).toBeTruthy();
     expect(screen.getByText(/调查线索：探查城门/)).toBeTruthy();
     expect(screen.getAllByText(/生成投影/)).toHaveLength(2);
-    expect(screen.getByText(/云舟发现守军换防。/)).toBeTruthy();
+    expect(screen.getAllByText(/云舟发现守军换防。/).length).toBeGreaterThan(0);
     expect(screen.getByText(/2026-08-13T00:00:01Z/)).toBeTruthy();
     expect(branchChoice.compareDocumentPosition(screen.getByText(/回合 1/))
       & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
 
+    chooseTravel();
     fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '前往城门' } });
     fireEvent.click(screen.getByRole('button', { name: '执行行动' }));
     await waitFor(() => expect(mocks.submit).toHaveBeenCalledTimes(1));
@@ -170,6 +208,7 @@ describe('WorldDashboard', () => {
     mocks.submit.mockRejectedValue({ outcomeUnknown: false });
     render(<WorldDashboard novelId="novel" view={view} />);
 
+    chooseTravel();
     const intent = screen.getByLabelText('你的意图');
     fireEvent.change(intent, { target: { value: '违反规则的行动' } });
     fireEvent.click(screen.getByRole('button', { name: '执行行动' }));
@@ -184,6 +223,7 @@ describe('WorldDashboard', () => {
     mocks.submit.mockResolvedValue({ memory_projection_status: 'saved' });
     render(<WorldDashboard novelId="novel" view={{ ...view, journal: [] }} />);
 
+    chooseTravel();
     fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '穿过城门' } });
     fireEvent.click(screen.getByRole('button', { name: '执行行动' }));
 
@@ -203,6 +243,7 @@ describe('WorldDashboard', () => {
     }));
     render(<WorldDashboard novelId="novel" view={{ ...view, journal: [] }} />);
 
+    chooseTravel();
     fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '穿过城门' } });
     fireEvent.click(screen.getByRole('button', { name: '执行行动' }));
     await waitFor(() => expect(mocks.submit).toHaveBeenCalledTimes(1));
@@ -223,6 +264,7 @@ describe('WorldDashboard', () => {
   it('keeps a committed pending projection locked and unlocks only after terminal status', async () => {
     mocks.submit.mockRejectedValue({ outcomeUnknown: true, message: 'refresh failed' });
     const page = render(<WorldDashboard novelId="novel" view={view} />);
+    chooseTravel();
     const intent = screen.getByLabelText('你的意图');
     fireEvent.change(intent, { target: { value: '前往城门' } });
     fireEvent.click(screen.getByRole('button', { name: '执行行动' }));
@@ -393,6 +435,7 @@ describe('WorldDashboard', () => {
   it('reconstructs the same pending request after tab storage is lost', async () => {
     mocks.submit.mockRejectedValue({ outcomeUnknown: true, message: 'connection lost' });
     const page = render(<WorldDashboard novelId="novel" view={view} />);
+    chooseTravel();
     fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '沿城墙寻找暗门' } });
     fireEvent.click(screen.getByRole('button', { name: '执行行动' }));
     await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy());
@@ -481,6 +524,7 @@ describe('WorldDashboard', () => {
 
     expect(screen.queryByRole('button', { name: '继续确认结果' })).toBeNull();
     expect(screen.getByLabelText('你的意图').hasAttribute('disabled')).toBe(false);
+    chooseTravel();
     fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '继续前进' } });
     expect(screen.getByRole('button', { name: '执行行动' }).hasAttribute('disabled')).toBe(false);
   });
@@ -488,6 +532,7 @@ describe('WorldDashboard', () => {
   it('restores an ambiguous request after a real unmount with the same action and key', async () => {
     mocks.submit.mockRejectedValue({ outcomeUnknown: true, message: 'connection lost' });
     const page = render(<WorldDashboard novelId="novel" view={view} />);
+    chooseTravel();
     fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '沿城墙寻找暗门' } });
     fireEvent.click(screen.getByRole('button', { name: '执行行动' }));
 
@@ -503,6 +548,7 @@ describe('WorldDashboard', () => {
         view={{ ...view, session: { ...view.session, turn_number: 2 } }}
       />,
     );
+    chooseTravel();
     fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '另一次行动' } });
     expect(screen.getByRole('button', { name: '执行行动' }).hasAttribute('disabled')).toBe(true);
     expect(screen.getByRole('alert').textContent).toContain('尚未确认这次行动的最终结果');
@@ -520,6 +566,7 @@ describe('WorldDashboard', () => {
       .mockResolvedValueOnce({ memory_projection_status: 'saved' });
     const page = render(<WorldDashboard novelId="novel" view={view} />);
 
+    chooseTravel();
     fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '旧世界行动' } });
     fireEvent.click(screen.getByRole('button', { name: '执行行动' }));
     await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('请求已被明确拒绝'));
@@ -532,6 +579,7 @@ describe('WorldDashboard', () => {
         view={{ ...view, session: { ...view.session, turn_number: 2 } }}
       />,
     );
+    chooseTravel();
     fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '刷新后的行动' } });
     fireEvent.click(screen.getByRole('button', { name: '执行行动' }));
 
@@ -544,6 +592,7 @@ describe('WorldDashboard', () => {
   it('does not retry an ambiguous request while timeline mutations are locked', async () => {
     mocks.submit.mockRejectedValue({ outcomeUnknown: true, message: 'connection lost' });
     const page = render(<WorldDashboard novelId="novel" view={view} />);
+    chooseTravel();
     fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '沿城墙寻找暗门' } });
     fireEvent.click(screen.getByRole('button', { name: '执行行动' }));
     await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy());
@@ -560,12 +609,14 @@ describe('WorldDashboard', () => {
   it('isolates restored requests by user and novel and removes invalid storage', async () => {
     mocks.submit.mockRejectedValue({ outcomeUnknown: true, message: 'connection lost' });
     const page = render(<WorldDashboard novelId="novel" view={view} />);
+    chooseTravel();
     fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '留在城门观察' } });
     fireEvent.click(screen.getByRole('button', { name: '执行行动' }));
     await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy());
     page.unmount();
 
     const otherNovel = render(<WorldDashboard novelId="other-novel" view={view} />);
+    chooseTravel();
     fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '另一本小说的行动' } });
     expect(screen.getByRole('button', { name: '执行行动' }).hasAttribute('disabled')).toBe(false);
     otherNovel.unmount();
@@ -576,12 +627,14 @@ describe('WorldDashboard', () => {
         view={{ ...view, player: { ...view.player, user_id: 'other-user' } }}
       />,
     );
+    chooseTravel();
     fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '另一位用户的行动' } });
     expect(screen.getByRole('button', { name: '执行行动' }).hasAttribute('disabled')).toBe(false);
     otherUser.unmount();
 
     window.sessionStorage.setItem('novelworld:pending-world-turn:user:broken', '{bad json');
     const broken = render(<WorldDashboard novelId="broken" view={view} />);
+    chooseTravel();
     fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '损坏数据后的行动' } });
     expect(screen.getByRole('button', { name: '执行行动' }).hasAttribute('disabled')).toBe(false);
     expect(window.sessionStorage.getItem('novelworld:pending-world-turn:user:broken')).toBeNull();
@@ -592,6 +645,7 @@ describe('WorldDashboard', () => {
       JSON.stringify({ idempotencyKey: crypto.randomUUID(), action: { kind: 'travel', target_id: 'gate', intent: 'A'.repeat(5_000) } }),
     );
     render(<WorldDashboard novelId="oversized" view={view} />);
+    chooseTravel();
     fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '越界数据后的行动' } });
     expect(screen.getByRole('button', { name: '执行行动' }).hasAttribute('disabled')).toBe(false);
     expect(window.sessionStorage.getItem('novelworld:pending-world-turn:user:oversized')).toBeNull();
@@ -624,7 +678,7 @@ describe('WorldDashboard', () => {
       />,
     );
 
-    const timelineText = Array.from(container.querySelectorAll('.whitespace-pre-wrap'));
+    const timelineText = Array.from(container.querySelectorAll('[role="log"] .whitespace-pre-wrap'));
     expect(timelineText).toHaveLength(4);
     expect(timelineText.every(element => (
       element.classList.contains('[overflow-wrap:anywhere]')

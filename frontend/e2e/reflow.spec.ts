@@ -13,10 +13,10 @@ const PAGES: Array<[string, string, (page: import('@playwright/test').Page) => P
     await page.getByText('星海拾遗').first().waitFor();
   }],
   ['reader with open world', '/reader/novel-1/1', async (page) => {
-    await page.getByText('第一章 北塔来信').first().waitFor();
-    await page.getByText(/的开放世界/).first().waitFor();
-    const choice = page.getByText(/长选择起点/);
-    const projection = page.getByText(/长行动投影起点/);
+    await page.getByRole('heading', { name: /的开放世界/ }).waitFor();
+    const timeline = page.getByRole('log', { name: '旅程时间线' });
+    const choice = timeline.getByText(/长选择起点/);
+    const projection = timeline.getByText(/长行动投影起点/);
     await expect(choice).toHaveCSS('white-space', 'pre-wrap');
     await expect(choice).toHaveCSS('overflow-wrap', 'anywhere');
     await expect(projection).toHaveCSS('white-space', 'pre-wrap');

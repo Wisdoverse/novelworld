@@ -668,8 +668,7 @@ describe('ReaderPage progress gate', () => {
     await waitFor(() => expect(screen.queryByTestId('chat-panel')).toBeNull());
 
     fireEvent.click(screen.getByRole('button', { name: '角色' }));
-    expect(screen.getByRole('button', { name: /Future/ }).hasAttribute('disabled')).toBe(true);
-    expect(screen.getByText('当前时间线已死亡')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Future/ })).toBeNull();
   });
 
   it('allows canon reading but requires a durable player before self-mode branches', async () => {
