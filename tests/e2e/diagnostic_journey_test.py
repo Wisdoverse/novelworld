@@ -1867,10 +1867,11 @@ class DiagnosticJourneyTest(unittest.TestCase):
                 self.assertEqual(rejected.exception.code, "prompt_identity_mismatch")
 
     def test_unregistered_world_prompts_still_require_current_version_for_every_row(self):
-        current = [(number, "world-turn-v3") for number in range(12)]
+        current = [(number, RUNNER.EXPECTED_WORLD_PROMPT) for number in range(12)]
         journey, _ = self.prompt_identity_journey(current, registered=False)
         journey.verify_prompt_identity("novel", include_world=True)
-        self.assertEqual(journey.report["journey"]["prompt_identity"]["world"], "world-turn-v3")
+        self.assertEqual(journey.report["journey"]["prompt_identity"]["world"],
+                         RUNNER.EXPECTED_WORLD_PROMPT)
         mixed = [(0, "world-turn-v2"), *current[1:]]
         journey, _ = self.prompt_identity_journey(mixed, registered=False)
         with self.assertRaises(RUNNER.QualificationFailure) as rejected:

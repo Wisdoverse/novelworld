@@ -1122,6 +1122,25 @@ redirect those events. A world turn MUST produce a structured transition contain
 event, relationship, location, and thread changes alongside the narrative
 rendering. The transition MUST be schema-valid, entity-valid, spoiler-bounded,
 idempotent, and atomically committed before its prose is shown as complete.
+Each committed action advances only that reader's `world_time` by one step and
+records the time when the next eligible canonical event advances. Exact-key
+replay MUST return the same committed step without advancing time again.
+One world-turn generation selects at most four relevant living characters from
+the action target, current event, and rotating source-backed goals. Their
+independent actions are recorded as actor-attributed events in that reader's
+timeline; an absent generated action MAY be filled from the frozen current
+event or goal, without inventing a character location. This is bounded
+character agency within one world turn, not a separate provider call per actor.
+When an advanced action fails, the player's proposed effects are discarded;
+the neutral failed attempt and independently source-backed character actions
+may still be recorded as that reader's world time advances.
+In advanced mode, initial attribute allocation still obeys the template's
+8–15 bounds and point budget. Later turns MAY apply one bounded change per
+attribute only when it cites a player-only event in the committed transition;
+each delta
+is −2 to +2 and the resulting score stays within 1–20. Subsequent server-owned
+D20 checks use that committed score. Failed checks discard proposed attribute
+changes with the other model-proposed player mutations.
 The first successfully committed start MUST seal its `WorldSession.entry_context`.
 A later valid start request is a resume hint and MUST return that persisted
 winner without replacing it with a freshly derived candidate context.

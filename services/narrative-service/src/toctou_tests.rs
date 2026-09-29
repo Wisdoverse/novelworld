@@ -1319,6 +1319,7 @@ impl ToctouFixture {
             inventory_removals: vec![],
             knowledge_discoveries: vec![],
             faction_changes: vec![],
+            attribute_changes: vec![],
             canonical_event_change: None,
         };
         let mut committed_state = self.world_state.lock().unwrap().clone();
@@ -1364,6 +1365,7 @@ impl ToctouFixture {
                 inventory_removals: vec![],
                 knowledge_discoveries: vec![],
                 faction_changes: vec![],
+                attribute_changes: vec![],
                 canonical_event_change: None,
             },
             created_at: now,
@@ -3977,6 +3979,7 @@ async fn post_commit_identity_flip_is_outcome_unknown_and_same_key_replays() {
         inventory_removals: vec![],
         knowledge_discoveries: vec![],
         faction_changes: vec![],
+        attribute_changes: vec![],
         canonical_event_change: None,
     };
     let mut committed_state = fixture.world_state.lock().unwrap().clone();
@@ -4095,6 +4098,7 @@ async fn pending_projection_stays_pending_if_progress_rewinds_before_acknowledge
             inventory_removals: vec![],
             knowledge_discoveries: vec![],
             faction_changes: vec![],
+            attribute_changes: vec![],
             canonical_event_change: None,
         },
         world_state: fixture.world_state.lock().unwrap().clone(),

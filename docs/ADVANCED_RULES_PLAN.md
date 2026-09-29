@@ -32,6 +32,7 @@ This is a novel-specific, D20-inspired preview, not a complete D&D rules engine.
 | Eligibility and hard constraints | Narrative Service enforces identity, ownership, reading progress, supported targets, world state, and turn ordering. A successful roll never bypasses these checks. |
 | Die and result | For a check, Narrative's secret-derived die is bound to user, novel, turn number, and request fingerprint. The domain computes `modifier = floor((score - 10) / 2)` and success as `d20 + modifier >= DC`. For `impossible` or `automatic_success`, there is no check result and no die is shown as evidence; the frozen category and server code determine the failed or automatic-success result. The resolution is persisted before prose and replayed for the same key. |
 | Narration | H3/H4 journey generation uses DeepSeek under the repository's provider policy. It receives the resolved check and proposes prose/transitions; server validation remains the commit authority. Failed checks discard action-granted mutations, while world time and scheduled mainline events may still advance. |
+| Attribute progression | The creation-time template still limits each initial score to 8–15 and fixes the point budget. An advanced world turn may propose a −2..+2 change to a bound attribute only with an event index and reason; the committed score stays within 1–20 and is used by later server-owned checks. Failed checks discard proposed changes. The immutable novel template and initial allocation are never rewritten. |
 | Optional action suggestion | Laya (Jev) receives bounded intent and candidate action-type descriptions only. The reader chooses/confirms the type and target and submits manually. A hint cannot authorize an action, set its DC, roll the die, or determine success. |
 | Optional semantic adjudication | In advanced mode only, paired `LAYA_API_URL` and `LAYA_API_KEY` enable one bounded classification for a new turn. It may select impossible, automatic success, or a difficulty band; uncertainty and all unavailable/error paths fall back to the existing template check. Its confidence is not calibrated. It cannot bypass hard validation, choose an arbitrary DC, or choose a check's die/result. |
 | Persistence and replay | The adjudication and resulting resolution are fenced with the existing world-turn claim. A frozen result is reused on replay; a reclaimed pending classification is not called again and falls back. Unknown database outcome or lost fencing stops before prose. |
@@ -108,8 +109,9 @@ legacy rows remain on the existing behavior and already-final rows are never
 reclassified. An unknown database result or lost lease stops processing. If
 prose fails after the decision is frozen, same-key replay reuses it. Disabling
 Laya configuration stops new calls and selects template fallback; it does not
-rewrite frozen results. World-turn prompts advance to version 3 while retaining
-version 1 and 2 replay compatibility. Game-rule schema version is 1 for both
+rewrite frozen results. Adjudication introduced world-turn prompt version 3;
+the later character-agency and attribute-progression turn uses version 4 while
+retaining versions 1–3 for replay. Game-rule schema version is 1 for both
 supported prompt versions, `novel-game-rules-v1` and `novel-game-rules-v2`;
 profiles and sessions resolve their exact bound prompt version. Adjudication
 metadata also has schema version 1. An older binary may not understand this
@@ -303,14 +305,20 @@ persisted.
 Unset either Laya setting to stop new adjudicator calls; new advanced turns then
 use the template fallback, and already-frozen results remain unchanged. Before
 rolling back the implementation, disable advanced-mode template requests.
-Narrative profiles omit
-the new optional player/session fields when serialized, so state written by this
-version retains the previous binary's exact JSON shape. Ready templates and the
-nullable world-turn resolution column are additive and can be ignored. Existing
-advanced profiles and resolutions with adjudication metadata intentionally fail
-closed on a previous binary rather than silently becoming narrative turns.
-Restore those readers by forward-deploying this version again; no down migration
-or data rewrite is required. The game-rule template format is unchanged.
+Ready templates and the nullable world-turn resolution column are additive.
+New advanced players retain their initial allocation at creation, which already
+requires a compatible reader. Once a v4 turn commits, both narrative and advanced
+journeys may contain canon event timestamps, and advanced scores may evolve.
+Older binaries reject these fields or v4 transitions, so these
+journeys require forward recovery rather than rollback to a pre-v4 binary.
+Do not strip fields, rewrite scores, or relabel saved transitions to make an
+older binary accept them. Restore service by forward-deploying a compatible
+version; no down migration is required. The game-rule template format is unchanged.
+
+The [world-agency UI screenshot](./evidence/world-agency-attributes.png) uses
+synthetic browser fixtures to show the full latest story, character actions,
+attribute deltas and canon event time. It is presentation evidence only, not
+live-provider quality or deployment evidence.
 
 ## Review record
 

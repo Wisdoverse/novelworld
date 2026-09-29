@@ -116,6 +116,7 @@ fn journey_result(
             inventory_removals: vec![],
             knowledge_discoveries: vec![],
             faction_changes: vec![],
+            attribute_changes: vec![],
             canonical_event_change: None,
         },
         world_state,

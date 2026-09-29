@@ -16,11 +16,15 @@ const PAGES: Array<[string, string, (page: import('@playwright/test').Page) => P
     await page.getByRole('heading', { name: /的开放世界/ }).waitFor();
     const timeline = page.getByRole('log', { name: '旅程时间线' });
     const choice = timeline.getByText(/长选择起点/);
-    const projection = timeline.getByText(/长行动投影起点/);
+    const narrative = page.locator('#latest-world-narrative');
+    const journalLink = timeline.getByRole('link', { name: '查看本回合完整叙事' });
     await expect(choice).toHaveCSS('white-space', 'pre-wrap');
     await expect(choice).toHaveCSS('overflow-wrap', 'anywhere');
-    await expect(projection).toHaveCSS('white-space', 'pre-wrap');
-    await expect(projection).toHaveCSS('overflow-wrap', 'anywhere');
+    await expect(narrative).toHaveAttribute('role', 'status');
+    await expect(narrative).toContainText('长行动投影起点');
+    await expect(narrative).toHaveCSS('white-space', 'pre-wrap');
+    await expect(narrative).toHaveCSS('overflow-wrap', 'anywhere');
+    await expect(journalLink).toHaveAttribute('href', '#latest-world-narrative');
   }],
   ['characters', '/characters/novel-1', async (page) => {
     await page.getByRole('button', { name: /对话/ }).first().waitFor();

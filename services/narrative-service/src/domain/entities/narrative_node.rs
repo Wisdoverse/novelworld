@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::domain::entities::game_rules::{ActionCheck, GameRuleTemplate};
+use crate::domain::entities::game_rules::{
+    ActionCheck, GameRuleTemplate, MAX_EVOLVED_ATTRIBUTE_SCORE, MIN_EVOLVED_ATTRIBUTE_SCORE,
+};
 use crate::domain::entities::player_entity::PlayerEntity;
 use crate::domain::entities::world_session::{
     CanonicalEventStatus, CharacterWorldContext, WorldAction, WorldActionKind, WorldEntryContext,
@@ -537,6 +539,15 @@ impl WorldState {
         let mut player = self.player_entity()?.ok_or_else(|| {
             WorldStateError::InvalidWorldSession("PlayerEntity is missing".into())
         })?;
+        if session.game_rules.is_some()
+            && resolution.is_some_and(|check| {
+                player.rules.attributes.get(&check.attribute_key) != Some(&check.score)
+            })
+        {
+            return Err(WorldStateError::InvalidWorldSession(
+                "action check score no longer matches the player".into(),
+            ));
+        }
 
         for removed in &transition.inventory_removals {
             let index = player
@@ -582,9 +593,45 @@ impl WorldState {
                 .or_insert(0);
             *standing = (*standing + change.delta).clamp(-100, 100);
         }
+        if player.rules.mode == crate::domain::entities::game_rules::ResolutionMode::Advanced
+            && player.initial_rule_attributes.is_none()
+        {
+            player.initial_rule_attributes = Some(player.rules.attributes.clone());
+        }
+        for change in &transition.attribute_changes {
+            let score = player
+                .rules
+                .attributes
+                .get_mut(&change.attribute_key)
+                .ok_or_else(|| {
+                    WorldStateError::InvalidWorldSession(
+                        "attribute change does not match the player profile".into(),
+                    )
+                })?;
+            let next = score.checked_add(change.delta).filter(|score| {
+                (MIN_EVOLVED_ATTRIBUTE_SCORE..=MAX_EVOLVED_ATTRIBUTE_SCORE).contains(score)
+            });
+            *score = next.ok_or_else(|| {
+                WorldStateError::InvalidWorldSession("attribute change exceeds score bounds".into())
+            })?;
+        }
         player
             .validate()
             .map_err(|error| WorldStateError::InvalidPlayerEntity(error.to_string()))?;
+        if let Some(template) = &session.game_rules {
+            player
+                .rules
+                .validate_against(template)
+                .map_err(|error| WorldStateError::InvalidPlayerEntity(error.to_string()))?;
+        }
+
+        let next_turn_number = session.turn_number.checked_add(1).ok_or_else(|| {
+            WorldStateError::InvalidWorldSession("world turn counter overflowed".into())
+        })?;
+        let next_world_time = session
+            .world_time
+            .checked_add(1)
+            .ok_or_else(|| WorldStateError::InvalidWorldSession("world time overflowed".into()))?;
 
         let mut canonical_deaths = Vec::new();
         if let Some(index) = session
@@ -609,6 +656,7 @@ impl WorldState {
                 event.status = CanonicalEventStatus::Occurred;
                 event.reason = Some("canonical mainline advanced".into());
             }
+            event.advanced_at_world_time = Some(next_world_time);
             if matches!(
                 event.status,
                 CanonicalEventStatus::Occurred
@@ -623,21 +671,8 @@ impl WorldState {
                 session.dead_character_ids.push(character_id);
             }
         }
-        for event in &transition.events {
-            for actor in &event.actor_character_ids {
-                session
-                    .character_perceptions
-                    .entry(*actor)
-                    .or_insert_with(|| event.summary.clone());
-            }
-        }
-        session.turn_number = session.turn_number.checked_add(1).ok_or_else(|| {
-            WorldStateError::InvalidWorldSession("world turn counter overflowed".into())
-        })?;
-        session.world_time = session
-            .world_time
-            .checked_add(1)
-            .ok_or_else(|| WorldStateError::InvalidWorldSession("world time overflowed".into()))?;
+        session.turn_number = next_turn_number;
+        session.world_time = next_world_time;
         session
             .validate()
             .map_err(|error| WorldStateError::InvalidWorldSession(error.to_string()))?;
@@ -1253,6 +1288,7 @@ mod causality_tests {
             inventory_removals: vec![],
             knowledge_discoveries: vec![],
             faction_changes: vec![],
+            attribute_changes: vec![],
             canonical_event_change: None,
         };
 

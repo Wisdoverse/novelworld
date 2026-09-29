@@ -5594,11 +5594,18 @@ async fn production_repositories_match_fresh_schema() {
         canon_model_version: 1,
         canonical_checkpoint_chapter: 5,
         rendered_narrative: "你在塔中找到一条隐秘道路，守门人开始相信你的判断。".into(),
-        events: vec![TransitionEvent {
-            summary: "玩家找到隐秘道路".into(),
-            actor_character_ids: vec![],
-            location_id: Some("north-tower".into()),
-        }],
+        events: vec![
+            TransitionEvent {
+                summary: "玩家找到隐秘道路".into(),
+                actor_character_ids: vec![],
+                location_id: Some("north-tower".into()),
+            },
+            TransitionEvent {
+                summary: "守门人继续巡视北塔".into(),
+                actor_character_ids: vec![character_id],
+                location_id: Some("north-tower".into()),
+            },
+        ],
         relationship_changes: vec![RelationshipChange {
             character_id,
             delta: 5,
@@ -5615,6 +5622,7 @@ async fn production_repositories_match_fresh_schema() {
             delta: 5,
             reason: "帮助守军".into(),
         }],
+        attribute_changes: vec![],
         canonical_event_change: None,
     };
     let completed = world_turn_repo
@@ -6441,6 +6449,70 @@ async fn seed_character(pool: &PgPool, novel_id: Uuid) -> Uuid {
     character_id
 }
 
+#[tokio::test]
+async fn player_creation_replay_preserves_evolved_attributes() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (user_id, novel_id) = seed_ready_novel(&pool, "evolved-player", "Evolved player").await;
+    let repo = PgWorldStateRepository::new(pool.clone());
+    repo.get_or_create(user_id, novel_id).await.unwrap();
+    let rules = serde_json::from_value(serde_json::json!({
+        "mode": "advanced",
+        "canon_model_version": 1,
+        "template_schema_version": 1,
+        "template_prompt_version": "novel-game-rules-v1",
+        "attributes": {"vigor": 12, "insight": 10, "influence": 8}
+    }))
+    .unwrap();
+    let original = PlayerEntity::new_with_rules(
+        user_id,
+        novel_id,
+        1,
+        "云舟".into(),
+        "地图学徒".into(),
+        vec!["识图".into()],
+        None,
+        vec![],
+        rules,
+    )
+    .unwrap();
+    repo.create_player_entity(&original).await.unwrap();
+    let mut state = repo.get_or_create(user_id, novel_id).await.unwrap();
+    let mut evolved = original.clone();
+    evolved.rules.attributes.insert("insight".into(), 12);
+    state.state["player_entity"] = serde_json::to_value(&evolved).unwrap();
+    repo.update(&state).await.unwrap();
+    let before = repo.get_or_create(user_id, novel_id).await.unwrap();
+
+    assert_eq!(repo.create_player_entity(&original).await.unwrap(), evolved);
+    // The handler's replay path passes the already persisted player to the repository.
+    assert_eq!(repo.create_player_entity(&evolved).await.unwrap(), evolved);
+    let mut different_initial = evolved.clone();
+    different_initial
+        .initial_rule_attributes
+        .as_mut()
+        .unwrap()
+        .insert("insight".into(), 11);
+    assert!(matches!(
+        repo.create_player_entity(&different_initial)
+            .await
+            .unwrap_err()
+            .downcast_ref::<WorldStateError>(),
+        Some(WorldStateError::TimelineConflict(_))
+    ));
+    let after = repo.get_or_create(user_id, novel_id).await.unwrap();
+    assert_eq!(after.state, before.state);
+    assert_eq!(after.updated_at, before.updated_at);
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
 async fn seed_world_turn(pool: &PgPool) -> (Uuid, Uuid, WorldEntryContext) {
     let (user_id, novel_id) = seed_ready_novel(pool, "world-turn", "World turn contract").await;
     let world_state_repo = PgWorldStateRepository::new(pool.clone());
@@ -6534,6 +6606,7 @@ fn world_turn_transition() -> WorldTurnTransition {
         inventory_removals: vec![],
         knowledge_discoveries: vec![],
         faction_changes: vec![],
+        attribute_changes: vec![],
         canonical_event_change: None,
     }
 }
@@ -7249,8 +7322,17 @@ async fn world_turn_adjudication_cas_freezes_exact_resolution_before_commit_and_
         resolution: Some(frozen.clone()),
         ..claim.clone()
     };
+    let mut transition = world_turn_transition();
+    if !frozen.succeeded {
+        transition.events = vec![TransitionEvent {
+            summary: "玩家行动检定失败，主要意图未实现".into(),
+            actor_character_ids: vec![],
+            location_id: None,
+        }];
+        transition.player_location_id = None;
+    }
     let completed = repo
-        .complete_turn(&settled, attempt, &world_turn_transition(), &context)
+        .complete_turn(&settled, attempt, &transition, &context)
         .await
         .unwrap();
     assert_eq!(completed.resolution, Some(frozen.clone()));
@@ -7718,6 +7800,7 @@ async fn world_turn_multi_turn_journal_rebuilds_equivalent_state() {
         inventory_removals: vec![],
         knowledge_discoveries: vec![],
         faction_changes: vec![],
+        attribute_changes: vec![],
         canonical_event_change: Some(CanonicalEventChange {
             event_id: "siege-event".into(),
             status: CanonicalEventStatus::Witnessed,
@@ -7767,6 +7850,7 @@ async fn world_turn_multi_turn_journal_rebuilds_equivalent_state() {
         inventory_removals: vec![],
         knowledge_discoveries: vec!["港湾有走私暗号".into()],
         faction_changes: vec![],
+        attribute_changes: vec![],
         canonical_event_change: None,
     };
     let completed = repo

@@ -131,8 +131,8 @@ describe('WorldDashboard', () => {
     expect(screen.getByText(/回合 1/)).toBeTruthy();
     expect(screen.getByText(/读者行动/)).toBeTruthy();
     expect(screen.getByText(/调查线索：探查城门/)).toBeTruthy();
-    expect(screen.getAllByText(/生成投影/)).toHaveLength(2);
-    expect(screen.getAllByText(/云舟发现守军换防。/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/生成投影/)).toHaveLength(1);
+    expect(screen.getAllByText(/云舟发现守军换防。/)).toHaveLength(1);
     expect(screen.getByText(/2026-08-13T00:00:01Z/)).toBeTruthy();
     expect(branchChoice.compareDocumentPosition(screen.getByText(/回合 1/))
       & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
@@ -166,7 +166,7 @@ describe('WorldDashboard', () => {
         canonical_events: [
           ...view.session.canonical_events,
           { id: 'scheduled-event', sequence: 2, summary: '尚未发生的事件', character_ids: [], location_ids: ['gate'], faction_ids: [], death_character_ids: [], source_chapters: [5], status: 'scheduled' as const, reason: '尚未触发' },
-          { id: 'assisted-event', sequence: 3, summary: '玩家影响的事件', character_ids: [], location_ids: ['gate'], faction_ids: [], death_character_ids: [], source_chapters: [3, 4], status: 'assisted' as const, reason: '读者守住城门' },
+          { id: 'assisted-event', sequence: 3, summary: '玩家影响的事件', character_ids: [], location_ids: ['gate'], faction_ids: [], death_character_ids: [], source_chapters: [3, 4], status: 'assisted' as const, reason: '读者守住城门', advanced_at_world_time: 2 },
         ],
       },
     } satisfies OpenWorldView;
@@ -175,7 +175,7 @@ describe('WorldDashboard', () => {
     const rows = screen.getAllByRole('listitem').map(row => row.textContent ?? '');
     expect(rows.some(row => row.includes('围城开始') && row.includes('原著抽取') && row.includes('被延迟') && row.includes('来源章节 2') && row.includes('城门未开'))).toBe(true);
     expect(rows.some(row => row.includes('尚未发生的事件') && row.includes('原著抽取') && row.includes('等待发生') && row.includes('来源章节 5') && row.includes('尚未触发'))).toBe(true);
-    expect(rows.some(row => row.includes('玩家影响的事件') && row.includes('原著抽取') && row.includes('玩家协助') && row.includes('来源章节 3、4') && row.includes('读者守住城门'))).toBe(true);
+    expect(rows.some(row => row.includes('玩家影响的事件') && row.includes('原著抽取') && row.includes('玩家协助') && row.includes('世界时间 2') && row.includes('来源章节 3、4') && row.includes('读者守住城门'))).toBe(true);
     expect(screen.getByText('事件由模型从原著中抽取，可能存在遗漏或误读，请结合来源章节核对。')).toBeTruthy();
   });
 
@@ -679,7 +679,7 @@ describe('WorldDashboard', () => {
     );
 
     const timelineText = Array.from(container.querySelectorAll('[role="log"] .whitespace-pre-wrap'));
-    expect(timelineText).toHaveLength(4);
+    expect(timelineText).toHaveLength(3);
     expect(timelineText.every(element => (
       element.classList.contains('[overflow-wrap:anywhere]')
     ))).toBe(true);
@@ -687,7 +687,6 @@ describe('WorldDashboard', () => {
       choice,
       consequence,
       `调查线索：${action}`,
-      projection,
     ]);
   });
 
@@ -718,6 +717,54 @@ describe('WorldDashboard', () => {
 
     expect(screen.getByText('小说属性')).toBeTruthy();
     expect(screen.getByText('轻功检定：D20 14 + 1 = 15 / 难度 13 · 成功')).toBeTruthy();
+  });
+
+  it('shows the full latest narrative, world-time tick rule, and event-linked attribute deltas', () => {
+    const narrative = '守门人打开城门。'.repeat(35);
+    const advancedView = {
+      ...view,
+      player: {
+        ...view.player,
+        rules: { mode: 'advanced', attributes: { qinggong: 12, neili: 8 } },
+      },
+      session: {
+        ...view.session,
+        game_rules: {
+          attributes: [
+            { key: 'qinggong', label: '轻功', description: '腾挪身法' },
+            { key: 'neili', label: '内力', description: '内息修为' },
+          ],
+          action_rules: [],
+        },
+      },
+      journal: [{
+        ...view.journal[0],
+        transition: {
+          ...view.journal[0].transition,
+          rendered_narrative: narrative,
+          events: [{ summary: '守门人打开城门。', actor_character_ids: [], location_id: 'gate' }],
+          attribute_changes: [
+            { attribute_key: 'qinggong', delta: 2, reason: '借助城墙跃上门楼', event_index: 0 },
+            { attribute_key: 'neili', delta: -1, reason: '消耗内息', event_index: 0 },
+          ],
+        },
+      }],
+    } as unknown as OpenWorldView;
+
+    render(<WorldDashboard novelId="novel" view={advancedView} />);
+
+    expect(screen.getByText(/世界时间 1 · 每次已提交回合推进 1 步/)).toBeTruthy();
+    expect(screen.getAllByText(narrative)).toHaveLength(1);
+    expect(screen.queryByText('展开完整经过')).toBeNull();
+    const announcedNarrative = screen.getByText(narrative);
+    expect(announcedNarrative.getAttribute('role')).toBe('status');
+    expect(announcedNarrative.getAttribute('aria-live')).toBe('polite');
+    expect(screen.getByRole('link', { name: '查看本回合完整叙事' }).getAttribute('href'))
+      .toBe('#latest-world-narrative');
+    expect(screen.getByText('+2 · 借助城墙跃上门楼')).toBeTruthy();
+    expect(screen.getByText('-1 · 消耗内息').className).toContain('text-[#b3261e]');
+    expect(screen.getByText(/守门人打开城门。：轻功 \+2 · 借助城墙跃上门楼/)).toBeTruthy();
+    expect(screen.getByText(/内力 -1 · 消耗内息/).className).toContain('text-[#b3261e]');
   });
 
   it('renders adjudicated no-check, semantic-check, fallback, and pending journal outcomes', () => {

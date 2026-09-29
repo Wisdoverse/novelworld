@@ -266,19 +266,12 @@ export function WorldDashboard({
           {view.player.name} 的开放世界
         </h2>
         <p className="mt-3 text-sm text-[#d5e1d7]">
-          {location?.name ?? view.player.location_id ?? '地点未确认'} · 世界时间 {view.session.world_time}
+          {location?.name ?? view.player.location_id ?? '地点未确认'} · 世界时间 {view.session.world_time} · 每次已提交回合推进 1 步
         </p>
         <div className="mt-7 border-t border-white/20 pt-6">
-          <p className="text-xs font-semibold tracking-[0.16em] text-[#d4e4c6]">{latestTurn ? '刚刚发生' : '故事从这里继续'}</p>
-          <p className="mt-3 line-clamp-4 max-w-3xl whitespace-pre-wrap text-base leading-8 text-[#f6f1e6] [overflow-wrap:anywhere] sm:text-lg">
+          <p id="latest-world-narrative" role="status" aria-live="polite" tabIndex={-1} className="mt-3 max-w-3xl whitespace-pre-wrap text-base leading-8 text-[#f6f1e6] [overflow-wrap:anywhere] sm:text-lg">
             {latestNarrative ?? '世界已经就绪。选定行动与目标，故事中的人物会按各自的处境作出回应。'}
           </p>
-          {latestNarrative && [...latestNarrative].length > 160 ? (
-            <details className="mt-3 text-sm text-[#d4e4c6]">
-              <summary className="w-fit cursor-pointer underline underline-offset-4">展开完整经过</summary>
-              <p className="mt-3 whitespace-pre-wrap leading-7 text-[#f6f1e6] [overflow-wrap:anywhere]">{latestNarrative}</p>
-            </details>
-          ) : null}
         </div>
       </div>
 
@@ -350,7 +343,14 @@ export function WorldDashboard({
               {view.session.game_rules.attributes.map(attribute => (
                 <div key={attribute.key} className="rounded-lg bg-white p-3">
                   <dt className="text-xs text-[#5f6368]">{attribute.label}</dt>
-                  <dd className="text-lg font-semibold text-[#1f1f1f]">{view.player.rules?.attributes[attribute.key]}</dd>
+                  <dd className="text-lg font-semibold text-[#1f1f1f]">
+                    {view.player.rules?.attributes[attribute.key]}
+                    {latestTurn?.transition.attribute_changes?.filter(change => change.attribute_key === attribute.key).map((change, index) => (
+                      <span key={`${change.event_index}-${index}`} className={`ml-2 text-xs font-medium ${change.delta < 0 ? 'text-[#b3261e]' : 'text-[#0d652d]'}`}>
+                        {change.delta > 0 ? '+' : ''}{change.delta} · {change.reason}
+                      </span>
+                    ))}
+                  </dd>
                 </div>
               ))}
             </dl>
@@ -397,7 +397,7 @@ export function WorldDashboard({
                   <span className="mr-2 text-xs font-semibold text-[#0b57d0]">原著抽取</span>
                   {event.summary}
                   <div className="mt-1 text-xs text-[#5f6368]">
-                    {eventStatus[event.status]} · 来源章节 {event.source_chapters.join('、')}{event.reason ? ` · ${event.reason}` : ''}
+                    {eventStatus[event.status]}{event.advanced_at_world_time != null ? ` · 世界时间 ${event.advanced_at_world_time}` : ''} · 来源章节 {event.source_chapters.join('、')}{event.reason ? ` · ${event.reason}` : ''}
                   </div>
                 </li>
               ))}
@@ -439,6 +439,11 @@ export function WorldDashboard({
                 <span className="whitespace-pre-wrap [overflow-wrap:anywhere]">
                   {actionLabels[entry.action.kind]}：{entry.action.intent}
                 </span>
+                {entry.turn_id === latestTurn?.turn_id ? (
+                  <a href="#latest-world-narrative" className="ml-2 text-xs font-medium text-[#0b57d0] underline underline-offset-2">
+                    查看本回合完整叙事
+                  </a>
+                ) : null}
                 {entry.resolution ? (
                   <div className={`mt-2 text-xs font-semibold ${entry.resolution.adjudication?.decision === 'impossible'
                     ? 'text-[#b3261e]'
@@ -450,12 +455,25 @@ export function WorldDashboard({
                     {actionCheckSummary(entry.resolution)}
                   </div>
                 ) : null}
-                <div className="mt-1 text-xs text-[#5f6368]">
+                {entry.transition.attribute_changes?.length ? (
+                  <ul className="mt-2 space-y-1 text-xs">
+                    {entry.transition.attribute_changes.map((change, index) => {
+                      const attribute = view.session.game_rules?.attributes.find(item => item.key === change.attribute_key);
+                      const event = entry.transition.events[change.event_index];
+                      return (
+                        <li key={`${change.event_index}-${change.attribute_key}-${index}`} className={change.delta < 0 ? 'text-[#b3261e]' : 'text-[#0d652d]'}>
+                          {event ? `${event.summary}：` : ''}{attribute?.label ?? change.attribute_key} {change.delta > 0 ? '+' : ''}{change.delta} · {change.reason}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : null}
+                {entry.turn_id !== latestTurn?.turn_id ? <div className="mt-1 text-xs text-[#5f6368]">
                   <span className="mr-2 font-semibold text-[#0b57d0]">生成投影</span>
                   <span className="whitespace-pre-wrap [overflow-wrap:anywhere]">
                     {entry.transition.rendered_narrative}
                   </span>
-                </div>
+                </div> : null}
                 <time dateTime={entry.completed_at} className="mt-1 block text-xs text-[#5f6368]">
                   {entry.completed_at}
                 </time>

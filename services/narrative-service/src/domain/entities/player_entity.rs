@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domain::entities::game_rules::PlayerRuleProfile;
+use crate::domain::entities::game_rules::{PlayerRuleProfile, ResolutionMode};
 
 const MAX_CAPABILITIES: usize = 16;
 const MAX_INVENTORY: usize = 32;
@@ -36,6 +36,8 @@ pub struct PlayerEntity {
     pub discovered_knowledge: Vec<String>,
     #[serde(default, skip_serializing_if = "PlayerRuleProfile::is_narrative")]
     pub rules: PlayerRuleProfile,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_rule_attributes: Option<BTreeMap<String, i32>>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -80,6 +82,8 @@ impl PlayerEntity {
         inventory: Vec<String>,
         rules: PlayerRuleProfile,
     ) -> Result<Self, PlayerEntityError> {
+        let initial_rule_attributes =
+            (rules.mode == ResolutionMode::Advanced).then(|| rules.attributes.clone());
         let entity = Self {
             id: Uuid::new_v4(),
             user_id,
@@ -94,6 +98,7 @@ impl PlayerEntity {
             faction_standing: BTreeMap::new(),
             discovered_knowledge: Vec::new(),
             rules,
+            initial_rule_attributes,
             created_at: Utc::now(),
         };
         entity.validate()?;
@@ -140,6 +145,16 @@ impl PlayerEntity {
         self.rules
             .validate()
             .map_err(|error| PlayerEntityError(error.to_string()))?;
+        if let Some(initial) = &self.initial_rule_attributes {
+            if self.rules.mode != ResolutionMode::Advanced
+                || initial.len() != self.rules.attributes.len()
+                || initial.iter().any(|(key, score)| {
+                    !self.rules.attributes.contains_key(key) || !(8..=15).contains(score)
+                })
+            {
+                return invalid("initial rule attributes are invalid");
+            }
+        }
         Ok(())
     }
 
@@ -175,7 +190,15 @@ impl PlayerEntity {
     }
 
     pub fn matches_rules(&self, rules: &PlayerRuleProfile) -> bool {
-        &self.rules == rules
+        &self.initial_rules() == rules
+    }
+
+    pub fn initial_rules(&self) -> PlayerRuleProfile {
+        let mut original = self.rules.clone();
+        if let Some(initial) = &self.initial_rule_attributes {
+            original.attributes.clone_from(initial);
+        }
+        original
     }
 }
 
