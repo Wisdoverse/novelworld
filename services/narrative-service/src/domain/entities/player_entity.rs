@@ -190,11 +190,15 @@ impl PlayerEntity {
     }
 
     pub fn matches_rules(&self, rules: &PlayerRuleProfile) -> bool {
+        &self.initial_rules() == rules
+    }
+
+    pub fn initial_rules(&self) -> PlayerRuleProfile {
         let mut original = self.rules.clone();
         if let Some(initial) = &self.initial_rule_attributes {
             original.attributes.clone_from(initial);
         }
-        &original == rules
+        original
     }
 }
 

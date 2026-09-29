@@ -305,14 +305,20 @@ persisted.
 Unset either Laya setting to stop new adjudicator calls; new advanced turns then
 use the template fallback, and already-frozen results remain unchanged. Before
 rolling back the implementation, disable advanced-mode template requests.
-Narrative profiles omit
-the new optional player/session fields when serialized, so state written by this
-version retains the previous binary's exact JSON shape. Ready templates and the
-nullable world-turn resolution column are additive and can be ignored. Existing
-advanced profiles and resolutions with adjudication metadata intentionally fail
-closed on a previous binary rather than silently becoming narrative turns.
-Restore those readers by forward-deploying this version again; no down migration
-or data rewrite is required. The game-rule template format is unchanged.
+Ready templates and the nullable world-turn resolution column are additive.
+New advanced players retain their initial allocation at creation, which already
+requires a compatible reader. Once a v4 turn commits, both narrative and advanced
+journeys may contain canon event timestamps, and advanced scores may evolve.
+Older binaries reject these fields or v4 transitions, so these
+journeys require forward recovery rather than rollback to a pre-v4 binary.
+Do not strip fields, rewrite scores, or relabel saved transitions to make an
+older binary accept them. Restore service by forward-deploying a compatible
+version; no down migration is required. The game-rule template format is unchanged.
+
+The [world-agency UI screenshot](./evidence/world-agency-attributes.png) uses
+synthetic browser fixtures to show the full latest story, character actions,
+attribute deltas and canon event time. It is presentation evidence only, not
+live-provider quality or deployment evidence.
 
 ## Review record
 

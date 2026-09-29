@@ -122,7 +122,7 @@ impl WorldStateRepository for PgWorldStateRepository {
                     player.location_id.as_deref(),
                     &player.inventory,
                 )
-                || !existing.matches_rules(&player.rules)
+                || !existing.matches_rules(&player.initial_rules())
             {
                 return Err(WorldStateError::TimelineConflict(
                     "PlayerEntity was concurrently created with a different checkpoint or definition"
