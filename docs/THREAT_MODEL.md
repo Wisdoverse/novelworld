@@ -208,6 +208,15 @@ limit but cannot enforce.
    later plot facts and book-specific changes require reader review. It never
    writes the draft automatically; a target book's Canon remains authoritative
    for its own setting and characters.
+   Community suggestions introduce a separate, consented cross-reader aggregate
+   inside Novel's PostgreSQL adapter (ADR 0012). Default-off series consent
+   covers current/future membership pairs only. The API returns only the acting
+   reader's Ready shelf candidate, with no donor IDs/counts/names/backgrounds.
+   Direct pair support excludes the requester, deduplicates donor accounts and
+   requires three; conflicting groups and unsupported recipient-series members
+   abstain. Consent withdrawal, regrouping and deletion affect the next uncached
+   read. The threshold does not establish anonymity, correct world relations,
+   Sybil resistance or production scale. No provider receives aggregate data.
    A bounded scan abstains on
    overflow or ambiguity, and its local conclusion is labeled separately from
    Laya. Suggestions cannot create or change associations; readers must

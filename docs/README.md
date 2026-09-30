@@ -59,6 +59,7 @@ roadmap status only when its required evidence exists.
 | [Advanced novel rules](./ADVANCED_RULES_PLAN.md) | D20 preview, bounded Laya (Jev) adjudication, model/dice responsibilities, and qualification limits | Template/check behavior, adjudication context or authority, fallback, or qualification evidence changes |
 | [Specification](../SPEC.md) | Candidate normative behavior | The intended cross-component contract changes |
 | [ADR 0011: Confirmed series worlds](./adr/0011-confirmed-series-worlds.md) | Reader-confirmed private series, immutable source snapshots, and rollout boundaries | Series ownership, binding, or lifecycle decisions change |
+| [ADR 0012: Opt-in community series](./adr/0012-opt-in-community-series.md) | Consented membership aggregation, private grouping hints and withdrawal | Contribution, identity or recommendation boundaries change |
 | [SPEC conformance ledger](./SPEC_CONFORMANCE.md) | Evidence and disposition for every normative clause | Implementation evidence or a clause disposition changes |
 | [Qualification policy](./QUALIFICATION_POLICY.md) | Release evidence classes and thresholds | A qualification slice, guardrail, or approval rule changes |
 | [Roadmap](./ROADMAP.md) | Ordered outcomes, invariants, and exit criteria | Product direction or evidence-gated sequencing changes |

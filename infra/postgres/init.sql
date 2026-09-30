@@ -1123,3 +1123,16 @@ CREATE TABLE IF NOT EXISTS public.series_match_decisions (
         REFERENCES public.user_novels(user_id, novel_id) ON DELETE CASCADE,
     CHECK ((completed_at IS NULL) = (result IS NULL))
 );
+
+-- Presence is explicit consent to contribute current canonical-book grouping.
+-- No private series definition, provider prose, or cached recommendation is copied.
+CREATE TABLE IF NOT EXISTS public.world_series_contributions (
+    series_id UUID NOT NULL,
+    user_id UUID NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (series_id, user_id),
+    CONSTRAINT world_series_contributions_owner_fkey FOREIGN KEY (series_id, user_id)
+        REFERENCES public.user_world_series(id, user_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS user_novel_world_series_pair_lookup
+    ON public.user_novel_world_series (novel_id, user_id, series_id);

@@ -151,6 +151,12 @@ WITH shelf_novels AS (
     WHERE m.user_id = $1
 
     UNION ALL
+    SELECT 85, c.series_id::text, 0::bigint, c.series_id::text, 'world_series_contribution',
+           jsonb_build_object('series_id', c.series_id, 'enabled', true, 'created_at', c.created_at)
+    FROM world_series_contributions c
+    WHERE c.user_id = $1
+
+    UNION ALL
     SELECT 90, d.novel_id::text, 0::bigint, d.evidence_key, 'series_match_decision',
            jsonb_build_object('novel_id', d.novel_id, 'method', d.method,
                'evidence_key', d.evidence_key, 'claimed_at', d.claimed_at,

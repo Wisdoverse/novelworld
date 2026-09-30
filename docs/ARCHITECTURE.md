@@ -110,6 +110,12 @@ Migration 0033 permits a pending rules snapshot while preserving the immutable
 source identity and allowing only a one-time bind of a ready source template.
 Migration 0034 permits a null pending background and allows only a one-time
 transition to a valid confirmed background.
+Migration 0035 adds Novel-owned, default-off series contribution consent with a
+same-owner cascading FK. Community hints aggregate current exact canonical
+membership pairs directly in PostgreSQL, require recipient-only candidates and
+explicit association, and dispatch no provider. There is no additional worker,
+cache or cross-owner FK. [ADR 0012](./adr/0012-opt-in-community-series.md) owns
+the privacy, ambiguity and qualification limits.
 
 User Service validates fixed provider/region/plan endpoints and owns encrypted
 Keys; only an unchanged preset and endpoint may reuse a stored Key. Its internal

@@ -460,3 +460,12 @@ docker exec novel-postgres pg_dump -U novel novel_world > backup_$(date +%Y%m%d)
 
 公网托管需要 H2 的独立安全、隐私、内容、滥用、供应链、TLS/CORS 和恢复审查；
 上述基线不能替代该资格门槛。
+
+### Community series suggestions (migration 0035)
+
+Apply additive migration 0035 before starting the matching Novel/frontend pair;
+normal managed migrations and desktop startup include it. Existing series do
+not contribute until their owner opts in. No provider credential or additional
+configuration is needed. Rolling back the frontend/API keeps the additive table
+and all prior private backgrounds, rules and frozen sessions intact; no down
+migration is required. See [ADR 0012](docs/adr/0012-opt-in-community-series.md).

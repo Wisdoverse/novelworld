@@ -115,6 +115,57 @@ pub struct WorldSeriesHandler {
 pub use crate::domain::ports::series_matcher::{SeriesSuggestion, SeriesSuggestionStatus};
 
 impl WorldSeriesHandler {
+    pub async fn contribution(
+        &self,
+        user_id: Uuid,
+        series_id: Uuid,
+    ) -> Result<bool, WorldSeriesApplicationError> {
+        bounded_read(self.series_repo.contribution(user_id, series_id))
+            .await?
+            .ok_or(WorldSeriesApplicationError::NotFound)
+    }
+
+    pub async fn set_contribution(
+        &self,
+        user_id: Uuid,
+        series_id: Uuid,
+        enabled: bool,
+    ) -> Result<bool, WorldSeriesApplicationError> {
+        if !bounded_read(
+            self.series_repo
+                .set_contribution(user_id, series_id, enabled),
+        )
+        .await?
+        {
+            return Err(WorldSeriesApplicationError::NotFound);
+        }
+        Ok(enabled)
+    }
+
+    pub async fn suggest_community(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+    ) -> Result<SeriesSuggestion, WorldSeriesApplicationError> {
+        self.ready_novel(user_id, novel_id).await?;
+        let candidates =
+            bounded_read(self.series_repo.community_candidates(user_id, novel_id)).await?;
+        if candidates.len() != 1 {
+            return Ok(empty(
+                SeriesMatchMethod::Community,
+                SeriesSuggestionStatus::Uncertain,
+                SeriesMatchReason::LowConfidence,
+            ));
+        }
+        Ok(SeriesSuggestion {
+            status: SeriesSuggestionStatus::Suggested,
+            suggestion: candidates.into_iter().next(),
+            method: SeriesMatchMethod::Community,
+            reason: SeriesMatchReason::CommunityConsensus,
+            cached: false,
+        })
+    }
+
     pub async fn background_draft(
         &self,
         user_id: Uuid,
@@ -1038,8 +1089,9 @@ fn append_draft_field(line: &mut String, limit: usize, label: &str, value: &str,
     }
 }
 
-// These existing read ports do not impose an adapter deadline. Bound only the
-// new Series callers; cancellation cannot hide a side effect because they read.
+// Bound Series repository calls even when an existing read port has no deadline.
+// The contribution desired-state write also has an adapter transaction deadline
+// and is safe to repeat after an unknown response; it never dispatches a provider.
 async fn bounded_read<T>(
     read: impl Future<Output = anyhow::Result<T>>,
 ) -> Result<T, WorldSeriesApplicationError> {

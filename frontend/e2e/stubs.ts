@@ -65,6 +65,7 @@ export async function installStubs(page: Page, opts: StubOptions = {}): Promise<
     ['POST', /^\/auth\/register$/, () => json(200, AUTH_TOKENS)],
     ['GET', /^\/novels$/, () => json(200, NOVELS)],
     ['GET', /^\/novels\/catalog$/, () => json(200, NOVELS)],
+    ['GET', /^\/novels\/world-series\/[^/]+\/contribution$/, () => json(200, { enabled: false })],
     ['GET', /^\/novels\/[^/]+$/, () => json(200, NOVEL)],
     ['GET', /^\/novels\/[^/]+\/status$/, () => json(200, { status: 'ready', total_chapters: 5 })],
     ['GET', /^\/novels\/[^/]+\/chapters$/, () => json(200, [CHAPTER])],

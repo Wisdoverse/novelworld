@@ -50,7 +50,7 @@ test('create shared background first, then explicitly generate source D20 rules'
   });
 
   await page.goto('/shelf');
-  await page.getByRole('button', { name: '识别同系列 / 共享世界背景' }).click();
+  await page.getByRole('button', { name: '系列管理' }).click();
   await page.getByRole('button', { name: '创建系列', exact: true }).click();
   await page.getByLabel('系列名称').fill(pending.name);
   await page.getByLabel('共享世界背景（最多 2000 字）').fill(pending.background);
@@ -59,7 +59,7 @@ test('create shared background first, then explicitly generate source D20 rules'
   await expect(page.getByRole('dialog')).toHaveCount(0);
   expect(generationCalls).toBe(0);
 
-  await page.getByRole('button', { name: '识别同系列 / 共享世界背景' }).click();
+  await page.getByRole('button', { name: '系列管理' }).click();
   await expect(page.getByText('此系列的 D20 基础规则尚未生成。纯叙事模式可先使用共享背景。')).toBeVisible();
   await settleAnimations(page);
   await expectNoA11yViolations(page);
@@ -151,8 +151,8 @@ test('recognize a second book, require confirmation, then share the confirmed ba
   });
 
   await page.goto('/shelf');
-  await expect(page.getByRole('button', { name: '识别同系列 / 共享世界背景' })).toHaveCount(2);
-  await page.getByRole('button', { name: '识别同系列 / 共享世界背景' }).first().click();
+  await expect(page.getByRole('button', { name: '系列管理' })).toHaveCount(2);
+  await page.getByRole('button', { name: '系列管理' }).first().click();
   await page.getByRole('button', { name: '创建系列', exact: true }).click();
   await page.getByLabel('系列名称').fill('星海系列');
   await page.getByLabel('系列来源书（未来 D20 规则来源）').selectOption('novel-1');
@@ -163,7 +163,7 @@ test('recognize a second book, require confirmation, then share the confirmed ba
   expect(bindings['novel-1']).toBe('series-1');
   expect(associationCalls).toBe(0);
 
-  await page.getByRole('button', { name: '识别同系列 / 共享世界背景' }).nth(1).click();
+  await page.getByRole('button', { name: '系列管理' }).nth(1).click();
   await page.getByRole('button', { name: '识别同系列', exact: true }).click();
   await expect(page.getByRole('button', { name: '选择此系列建议' })).toBeVisible();
   expect(bindings['novel-2']).toBeNull();
@@ -174,7 +174,7 @@ test('recognize a second book, require confirmation, then share the confirmed ba
   expect(bindings['novel-2']).toBe('series-1');
   expect(associationCalls).toBe(1);
 
-  await page.getByRole('button', { name: '识别同系列 / 共享世界背景' }).first().click();
+  await page.getByRole('button', { name: '系列管理' }).first().click();
   await expect(page.getByText(/当前系列仅用于分组/)).toBeVisible();
   await expect(page.getByText('D20 基础规则已从来源书固定到系列。')).toHaveCount(0);
   expect(seriesDraftCalls).toBe(0);
@@ -187,7 +187,7 @@ test('recognize a second book, require confirmation, then share the confirmed ba
   await page.getByRole('button', { name: '确认共享背景' }).click();
   await expect(page.getByText('此系列的 D20 基础规则尚未生成。纯叙事模式可先使用共享背景。')).toBeVisible();
   await page.getByRole('button', { name: '完成' }).click();
-  await page.getByRole('button', { name: '识别同系列 / 共享世界背景' }).nth(1).click();
+  await page.getByRole('button', { name: '系列管理' }).nth(1).click();
   await expect(page.getByText('当前系列：星海系列（背景共享；角色和进度独立）。')).toBeVisible();
   await expect(page.getByText('此系列的 D20 基础规则尚未生成。纯叙事模式可先使用共享背景。')).toBeVisible();
   expect(generationCalls).toBe(0);

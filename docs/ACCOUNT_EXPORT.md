@@ -34,7 +34,7 @@ never create additional records.
 | Service | Kinds |
 |---|---|
 | user | `profile` |
-| novel | `novel`, `chapter`, `character`, `character_relationship`, `canon_story_model`, `reading_progress`, `world_series`, `novel_world_series` |
+| novel | `novel`, `chapter`, `character`, `character_relationship`, `canon_story_model`, `reading_progress`, `world_series`, `novel_world_series`, `world_series_contribution` |
 | agent | `chat_message`, `character_memory` |
 | narrative | `narrative_node`, `user_choice`, `world_state`, `player_chapter`, `world_turn` |
 
@@ -49,6 +49,11 @@ book identity, and a safe immutable source-template snapshot when one has been
 bound; a pending series has a null snapshot. `novel_world_series` exports that reader's shelf
 associations. Source provenance remains the original novel/version/chapter
 identity. Export does not turn those records into shared player state.
+
+`world_series_contribution` exports only the reader's currently enabled consent
+rows (`series_id`, `enabled: true`, `created_at`). Missing rows mean disabled;
+withdrawal removes them. It contains no donor identities, support counts or
+cached community recommendations.
 
 Every narrative record's data carries a uniform source label so clients can
 programmatically separate canonical history, reader-created history, and

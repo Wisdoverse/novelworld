@@ -175,7 +175,7 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, onImport, onManageWorldSe
             onClick={event => { event.stopPropagation(); onManageWorldSeries(); }}
           >
             <Sparkles size={13} />
-            识别同系列 / 共享世界背景
+            系列管理
           </button>
         ) : null}
         {novel.status === 'error' && (

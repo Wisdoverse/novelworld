@@ -13,6 +13,7 @@
     { "name": "user_novels", "kind": "table", "owner": "novel-service" },
     { "name": "user_world_series", "kind": "table", "owner": "novel-service" },
     { "name": "user_novel_world_series", "kind": "table", "owner": "novel-service" },
+    { "name": "world_series_contributions", "kind": "table", "owner": "novel-service" },
     { "name": "series_match_decisions", "kind": "table", "owner": "novel-service" },
     { "name": "novel_import_jobs", "kind": "table", "owner": "novel-service" },
     { "name": "source_file_deletions", "kind": "table", "owner": "novel-service" },

@@ -205,6 +205,21 @@ mod tests {
     use super::Selection;
 
     #[test]
+    fn contribution_requires_explicit_consent_and_rejects_forged_scope() {
+        assert!(serde_json::from_str::<super::Contribution>("{}").is_err());
+        assert!(serde_json::from_str::<super::Contribution>(r#"{"enabled":null}"#).is_err());
+        assert!(serde_json::from_str::<super::Contribution>(
+            r#"{"enabled":true,"user_id":"forged"}"#
+        )
+        .is_err());
+        assert!(
+            !serde_json::from_str::<super::Contribution>(r#"{"enabled":false}"#)
+                .unwrap()
+                .enabled
+        );
+    }
+
+    #[test]
     fn query_only_defaults_off_and_rejects_unknown_options() {
         use super::{Query, SuggestionQuery};
         use axum::http::Uri;
@@ -235,5 +250,62 @@ mod tests {
         assert!(
             serde_json::from_str::<Selection>(r#"{"series_id":null,"user_id":"forged"}"#).is_err()
         );
+    }
+}
+
+#[derive(Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Contribution {
+    enabled: bool,
+}
+
+pub(super) async fn contribution(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(series_id): Path<Uuid>,
+) -> Response {
+    let Some(user_id) = extract_user_id(&headers) else {
+        return private(api_error(StatusCode::UNAUTHORIZED, "Missing user ID"));
+    };
+    match state.series_handler.contribution(user_id, series_id).await {
+        Ok(enabled) => private(Json(Contribution { enabled }).into_response()),
+        Err(err) => error(err),
+    }
+}
+
+pub(super) async fn set_contribution(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(series_id): Path<Uuid>,
+    Json(command): Json<Contribution>,
+) -> Response {
+    let Some(user_id) = extract_user_id(&headers) else {
+        return private(api_error(StatusCode::UNAUTHORIZED, "Missing user ID"));
+    };
+    match state
+        .series_handler
+        .set_contribution(user_id, series_id, command.enabled)
+        .await
+    {
+        Ok(enabled) => private(Json(Contribution { enabled }).into_response()),
+        Err(err) => error(err),
+    }
+}
+
+pub(super) async fn community_suggestion(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(novel_id): Path<Uuid>,
+) -> Response {
+    let Some(user_id) = extract_user_id(&headers) else {
+        return private(api_error(StatusCode::UNAUTHORIZED, "Missing user ID"));
+    };
+    match state
+        .series_handler
+        .suggest_community(user_id, novel_id)
+        .await
+    {
+        Ok(suggestion) => private(Json(suggestion).into_response()),
+        Err(err) => error(err),
     }
 }
