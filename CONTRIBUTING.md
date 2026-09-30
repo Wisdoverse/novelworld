@@ -232,8 +232,18 @@ changes and unchanged runtime inputs need not change every image or binary. For
 the current Diagnostic path, the order is merged A (#428), cache-freshness C
 (#432), then remote-profile B (#429); only an actual merged C baseline and
 strict-descendant B candidate with the guard on both sides can be considered.
+For a fresh prospective v6 registration, the exact merged B descendant
+`e8835db5d5c9042011a66f52a6eb06d0ffd014f4` is also eligible against actual C
+`70eb066a7c529769a9fe5dc3d8259b8f85d16c7d`: it includes the #435/#437 prestart
+fixes while retaining B's application build inputs, profile, fixture, Compose
+and cache guard. The clean runner checkout must equal the registered candidate
+SHA. Build and review artifacts from that exact source; never relabel B's
+manifest or reuse a consumed registration. All artifact, scan, budget and
+mandatory prestart gates remain required. This is an exact prospective pair,
+not permission to use an arbitrary later descendant.
 Preserve the old A baseline and failed preview pair as failed evidence; both are
-ineligible.
+ineligible. Existing C→B artifacts and Frozen records retain their original
+identities and results.
 
 For Vision journey tooling changes, also run
 `python3 tests/e2e/live_deepseek_journey.py --self-test`. CI runs
