@@ -23,6 +23,18 @@ pub const MAX_GAME_RULE_GENERATION_ATTEMPTS: i64 = 3;
 
 #[async_trait]
 pub trait WorldSeriesRepository: Send + Sync {
+    /// None means the acting user does not own this series; absent consent is false.
+    async fn contribution(&self, user_id: Uuid, series_id: Uuid) -> Result<Option<bool>>;
+    /// Idempotent, owner-locked consent change; false means no authorized series.
+    async fn set_contribution(&self, user_id: Uuid, series_id: Uuid, enabled: bool)
+        -> Result<bool>;
+    /// Live consensus, projected only onto the recipient's own Ready shelf and series.
+    async fn community_candidates(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+    ) -> Result<Vec<crate::domain::ports::series_matcher::SeriesMatchCandidate>>;
+
     async fn begin_match(
         &self,
         user_id: Uuid,

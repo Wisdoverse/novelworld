@@ -32,12 +32,14 @@ pub struct SeriesMatchCandidate {
 pub enum SeriesMatchMethod {
     Laya,
     Deepseek,
+    Community,
 }
 impl SeriesMatchMethod {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Laya => "laya",
             Self::Deepseek => "deepseek",
+            Self::Community => "community",
         }
     }
 }
@@ -59,6 +61,7 @@ pub enum SeriesMatchReason {
     TooManyBooks,
     LowConfidence,
     LocalEvidence,
+    CommunityConsensus,
     NotConfigured,
     UnsupportedProvider,
     Unavailable,

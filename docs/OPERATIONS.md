@@ -231,7 +231,13 @@ migration path and does not add a release barrier. Migration 0033 permits a
 background-only series with a pending D20 snapshot; it also follows the normal
 managed migration path. `409 series_rule_source_unavailable` for a pending
 target member means the selected source book has not yet supplied a ready v2
-template. Migration 0034 allows the reader to associate books before confirming
+template. Migration 0035 adds default-off series contribution consent. Apply it
+before using the matching Novel/frontend version; desktop embeds it. Community
+suggestions read live membership pairs without model dispatch, and withdrawal
+or account deletion removes contributions from subsequent reads. A suggestion
+is a grouping hint, not a verified common setting. No operator key or new
+environment variable is needed; see [ADR 0012](./adr/0012-opt-in-community-series.md).
+Migration 0034 allows the reader to associate books before confirming
 a shared background; `409 series_background_pending` means shared D20 is not
 available until that one-time confirmation. Narrative mode remains available.
 The reader may explicitly generate

@@ -18,6 +18,9 @@ import {
   useConfirmWorldSeriesBackground,
   useSuggestNovelWorldSeriesDeepSeek,
   useWorldSeriesList,
+  useWorldSeriesContribution,
+  useSetWorldSeriesContribution,
+  useCommunitySeriesSuggestion,
   validateNovelBatchFiles,
   validateNovelFile,
 } from './api';
@@ -279,6 +282,68 @@ describe('novel lifecycle pending-turn cleanup', () => {
 });
 
 describe('principal-scoped world-series queries', () => {
+  it('keeps contribution settings scoped to the principal and series', async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: PropsWithChildren) => React.createElement(QueryClientProvider, { client: queryClient }, children);
+    const get = vi.spyOn(apiClient, 'get')
+      .mockResolvedValueOnce({ data: { enabled: true } } as never)
+      .mockResolvedValueOnce({ data: { enabled: false } } as never);
+    const first = renderHook(() => useWorldSeriesContribution('reader-a', 'series-a'), { wrapper });
+    const second = renderHook(() => useWorldSeriesContribution('reader-b', 'series-b'), { wrapper });
+    await waitFor(() => expect(first.result.current.data).toEqual({ enabled: true }));
+    await waitFor(() => expect(second.result.current.data).toEqual({ enabled: false }));
+    expect(get).toHaveBeenCalledWith('/novels/world-series/series-a/contribution', { signal: expect.any(AbortSignal) });
+    expect(queryClient.getQueryData(novelKeys.worldSeriesContribution('reader-a', 'series-a'))).toEqual({ enabled: true });
+    expect(queryClient.getQueryData(novelKeys.worldSeriesContribution('reader-b', 'series-b'))).toEqual({ enabled: false });
+    vi.restoreAllMocks();
+  });
+
+  it('writes explicit consent once and invalidates only its scoped query', async () => {
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: true, retryDelay: 0 } } });
+    const wrapper = ({ children }: PropsWithChildren) => React.createElement(QueryClientProvider, { client: queryClient }, children);
+    queryClient.setQueryData(novelKeys.worldSeriesContribution('reader-b', 'series-a'), { enabled: false });
+    queryClient.setQueryData(novelKeys.worldSeriesContribution('reader-a', 'series-a'), { enabled: false });
+    const put = vi.spyOn(apiClient, 'put').mockResolvedValue({ data: { enabled: true } } as never);
+    const { result } = renderHook(() => useSetWorldSeriesContribution('reader-a'), { wrapper });
+    await act(async () => { await result.current.mutateAsync({ seriesId: 'series-a', enabled: true }); });
+    expect(put).toHaveBeenCalledOnce();
+    expect(put).toHaveBeenCalledWith('/novels/world-series/series-a/contribution', { enabled: true });
+    expect(queryClient.getQueryState(novelKeys.worldSeriesContribution('reader-a', 'series-a'))?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(novelKeys.worldSeriesContribution('reader-b', 'series-a'))?.isInvalidated).toBe(false);
+    expect(queryClient.getQueryData(novelKeys.worldSeriesContribution('reader-b', 'series-a'))).toEqual({ enabled: false });
+    vi.restoreAllMocks();
+  });
+
+  it('does not recreate private consent cache from a late mutation after logout', async () => {
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    const wrapper = ({ children }: PropsWithChildren) => React.createElement(QueryClientProvider, { client: queryClient }, children);
+    let resolvePut!: (value: { data: { enabled: boolean } }) => void;
+    const response = new Promise<{ data: { enabled: boolean } }>(resolve => { resolvePut = resolve; });
+    vi.spyOn(apiClient, 'put').mockReturnValue(response as never);
+    const key = novelKeys.worldSeriesContribution('reader-a', 'series-a');
+    queryClient.setQueryData(key, { enabled: false });
+    const { result } = renderHook(() => useSetWorldSeriesContribution('reader-a'), { wrapper });
+    let pending!: Promise<{ enabled: boolean }>;
+    act(() => { pending = result.current.mutateAsync({ seriesId: 'series-a', enabled: true }); });
+    await waitFor(() => expect(apiClient.put).toHaveBeenCalledOnce());
+    queryClient.clear();
+    await act(async () => { resolvePut({ data: { enabled: true } }); await pending; });
+    expect(queryClient.getQueryData(key)).toBeUndefined();
+    expect(queryClient.getQueryState(key)).toBeUndefined();
+    vi.restoreAllMocks();
+  });
+
+  it('queries community evidence without retrying or invoking a provider endpoint', async () => {
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: true, retryDelay: 0 } } });
+    const wrapper = ({ children }: PropsWithChildren) => React.createElement(QueryClientProvider, { client: queryClient }, children);
+    const post = vi.spyOn(apiClient, 'post').mockRejectedValue(new Error('unavailable'));
+    const { result } = renderHook(() => useCommunitySeriesSuggestion(), { wrapper });
+    await act(async () => { await expect(result.current.mutateAsync('novel-1')).rejects.toThrow('unavailable'); });
+    expect(post).toHaveBeenCalledOnce();
+    expect(post).toHaveBeenCalledWith('/novels/novel-1/world-series/community-suggestion');
+    vi.restoreAllMocks();
+  });
+
   it('confirms a background once and invalidates the list and every associated novel', async () => {
     const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: true, retryDelay: 0 } } });
     const wrapper = ({ children }: PropsWithChildren) => React.createElement(

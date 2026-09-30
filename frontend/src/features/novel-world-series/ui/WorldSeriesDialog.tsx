@@ -4,6 +4,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { Loader2, Sparkles, X } from 'lucide-react';
 import {
   useAssociateNovelWorldSeries,
+  useCommunitySeriesSuggestion,
   useConfirmWorldSeriesBackground,
   useCreateWorldSeries,
   useNovelWorldSeries,
@@ -12,6 +13,8 @@ import {
   useSuggestNovelWorldSeriesDeepSeek,
   useWorldSeriesBackgroundDraft,
   useWorldSeriesList,
+  useWorldSeriesContribution,
+  useSetWorldSeriesContribution,
 } from '@/entities/novel';
 import { useGenerateGameRules } from '@/entities/narrative';
 import type { Novel, WorldSeries, WorldSeriesSuggestion } from '@/shared/types';
@@ -51,6 +54,13 @@ function ruleGenerationErrorMessage(error: unknown) {
 }
 
 function suggestionMessage(result: WorldSeriesSuggestion | undefined) {
+  if (result?.method === 'community') {
+    return result.status === 'suggested'
+      ? '多个读者确认过这些作品的关联。这里只建议分组，不证明共享世界背景相同；请核对后确认。'
+      : result.status === 'unavailable'
+        ? '读者关联建议暂不可用，仍可手动选择或识别系列。'
+        : '暂无明确的读者关联建议，仍可手动选择或识别系列。';
+  }
   if (result?.reason === 'local_evidence') {
     return '服务器依据小说原文证据给出候选；这不是 Laya 结论。请核对后手动确认关联。';
   }
@@ -87,6 +97,9 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
   const navigate = useNavigate();
   const seriesList = useWorldSeriesList(principalId);
   const currentSeries = useNovelWorldSeries(principalId, novel.id);
+  const contribution = useWorldSeriesContribution(principalId, currentSeries.data?.id);
+  const setContribution = useSetWorldSeriesContribution(principalId);
+  const community = useCommunitySeriesSuggestion();
   const suggest = useSuggestNovelWorldSeries();
   const suggestDeepSeek = useSuggestNovelWorldSeriesDeepSeek();
   const create = useCreateWorldSeries(principalId);
@@ -123,14 +136,37 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
   const selection = selectedSeriesId ?? currentSeries.data?.id ?? '';
   const isPending = saving || suggest.isPending || suggestDeepSeek.isPending
     || create.isPending || associate.isPending || confirmBackground.isPending || generateRules.isPending
-    || suggestionPending || aggregatePending;
-  const canUseDeepSeek = suggestion?.method === 'deepseek'
+    || suggestionPending || aggregatePending || community.isPending || setContribution.isPending;
+  const canUseDeepSeek = suggestion?.method !== 'community' && (suggestion?.method === 'deepseek'
     ? suggestion.status === 'in_progress'
     : suggestion?.status === 'uncertain'
       || suggestion?.status === 'unavailable'
-      || suggestion?.status === 'unconfigured';
+      || suggestion?.status === 'unconfigured');
 
   const ensurePrincipal = () => isPrincipalCurrent();
+
+  const changeContribution = async (enabled: boolean) => {
+    if (!currentSeries.data || !ensurePrincipal()) return;
+    try {
+      await setContribution.mutateAsync({ seriesId: currentSeries.data.id, enabled });
+    } catch {
+      if (ensurePrincipal()) {
+        toast.error('贡献设置未确认，请重新读取后核对。');
+        void contribution.refetch();
+      }
+    }
+  };
+
+  const runCommunitySuggestion = async () => {
+    if (!ensurePrincipal()) return;
+    setSuggestion(undefined);
+    try {
+      const result = await community.mutateAsync(novel.id);
+      if (ensurePrincipal()) setSuggestion(result);
+    } catch {
+      if (ensurePrincipal()) setSuggestion({ status: 'unavailable', method: 'community', suggestion: null });
+    }
+  };
 
   const fillSourceBackground = async () => {
     if (!sourceNovelId || !ensurePrincipal()) return;
@@ -306,10 +342,12 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
           <div className="flex items-start justify-between gap-4">
             <div>
               <Dialog.Title className="text-xl font-semibold text-[#1f1f1f]">
-                关联系列 / 共享世界背景
+                {currentSeries.data ? '系列管理' : '关联系列 / 共享世界背景'}
               </Dialog.Title>
               <Dialog.Description id="world-series-description" className="mt-2 text-sm leading-6 text-[#5f6368]">
-                为《{novel.title}》选择系列。系统只提供建议；关联、共享背景和规则来源都由你确认。
+                {currentSeries.data
+                  ? `《${novel.title}》已关联“${currentSeries.data.name}”系列。共享世界背景${currentSeries.data.background === null ? '尚未确认' : '已确认'}；角色和阅读进度保持独立。`
+                  : `为《${novel.title}》选择系列。系统只提供建议；关联、共享背景和规则来源都由你确认。`}
               </Dialog.Description>
             </div>
             <Dialog.Close asChild>
@@ -322,6 +360,15 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
           </p>
 
           <section className="mt-5 space-y-3" aria-label="系列识别建议">
+            {!currentSeries.data ? (
+              <>
+                <button type="button" className="tonal-action w-full justify-center" disabled={isPending || currentSeries.isLoading || currentSeries.isError} onClick={() => void runCommunitySuggestion()}>
+                  {community.isPending ? <Loader2 size={15} className="animate-spin" /> : null}
+                  参考读者关联
+                </button>
+                <p className="text-xs leading-5 text-[#5f6368]">只比较书架中来自共享书库的相同作品，不调用模型；分别上传的副本暂不合并。</p>
+              </>
+            ) : null}
             <button
               type="button"
               className="tonal-action w-full justify-center"
@@ -397,6 +444,19 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
               </div>
             ) : null}
           </section>
+
+          {currentSeries.data ? (
+            <section className="mt-5 space-y-2 rounded-lg border border-[#dadce0] p-3" aria-label="读者关联贡献">
+              <label className="flex items-start gap-2 text-sm text-[#3c4043]">
+                <input type="checkbox" className="mt-1" checked={contribution.data?.enabled ?? false} disabled={isPending || contribution.isFetching || contribution.isError || !contribution.data} onChange={event => void changeContribution(event.target.checked)} />
+                允许将本系列的作品关联用于读者推荐
+              </label>
+              <p className="text-xs leading-5 text-[#5f6368]">默认关闭。开启后，本系列当前及之后加入的作品关联会参与汇总；系列名称、背景和个人世界不会分享。关闭即可撤回，解除关联、移出书架或删除账号也会移除对应贡献。</p>
+              {contribution.isError ? (
+                <p role="alert" className="text-xs text-[#b3261e]">贡献设置加载失败，暂不能修改。<button type="button" className="ml-2 underline" disabled={contribution.isFetching} onClick={() => void contribution.refetch()}>重新读取贡献设置</button></p>
+              ) : null}
+            </section>
+          ) : null}
 
           <section className="mt-6 space-y-3" aria-label="手动关联系列">
             <label className="block text-sm font-medium text-[#3c4043]">

@@ -21,6 +21,11 @@ const mocks = vi.hoisted(() => ({
   navigate: vi.fn(),
   seriesList: [] as WorldSeries[],
   currentSeries: null as WorldSeries | null,
+  community: vi.fn(),
+  contribution: { enabled: false },
+  contributionError: false,
+  contributionRefetch: vi.fn(),
+  setContribution: vi.fn(),
   backgroundDraft: null as { source_novel_id: string; canon_model_version: number; background: string } | null,
   previewBackground: vi.fn(),
   seriesBackgroundDraft: null as { series_id: string; member_novel_ids: string[]; background: string } | null,
@@ -30,6 +35,9 @@ const mocks = vi.hoisted(() => ({
 vi.mock('@/entities/novel', () => ({
   useWorldSeriesList: () => ({ data: mocks.seriesList, isLoading: false, isError: false, refetch: mocks.seriesListRefetch }),
   useNovelWorldSeries: () => ({ data: mocks.currentSeries, isError: false, refetch: mocks.currentSeriesRefetch }),
+  useCommunitySeriesSuggestion: () => ({ mutateAsync: mocks.community, isPending: false }),
+  useWorldSeriesContribution: () => ({ data: mocks.contribution, isError: mocks.contributionError, isFetching: false, refetch: mocks.contributionRefetch }),
+  useSetWorldSeriesContribution: () => ({ mutateAsync: mocks.setContribution, isPending: false }),
   useWorldSeriesBackgroundDraft: () => ({
     data: mocks.backgroundDraft, variables: mocks.backgroundDraft?.source_novel_id,
     mutateAsync: mocks.previewBackground, isPending: false, isError: false,
@@ -111,6 +119,12 @@ describe('WorldSeriesDialog', () => {
     mocks.navigate.mockReset();
     mocks.seriesList = [];
     mocks.currentSeries = null;
+    mocks.community.mockReset();
+    mocks.contribution = { enabled: false };
+    mocks.contributionError = false;
+    mocks.contributionRefetch.mockReset();
+    mocks.setContribution.mockReset();
+    mocks.setContribution.mockResolvedValue({ enabled: true });
     mocks.backgroundDraft = null;
     mocks.seriesBackgroundDraft = null;
     mocks.previewBackground.mockReset();
@@ -133,6 +147,76 @@ describe('WorldSeriesDialog', () => {
     mocks.associate.mockResolvedValue(series);
   });
 
+  it('offers community grouping evidence without associating or calling a provider', async () => {
+    mocks.seriesList = [series];
+    mocks.community.mockResolvedValue({
+      status: 'suggested', method: 'community', reason: 'community_consensus', cached: false,
+      suggestion: { series_id: series.id, source_novel_id: 'source-book', name: series.name,
+        book: { title: '来源书', author: null, genre: null } },
+    });
+    renderDialog();
+    expect(mocks.community).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '参考读者关联' }));
+    await screen.findByText(/这里只建议分组，不证明共享世界背景相同/);
+    expect(mocks.community).toHaveBeenCalledWith('target-book');
+    expect(mocks.suggestion).not.toHaveBeenCalled();
+    expect(mocks.deepSeek).not.toHaveBeenCalled();
+    expect(mocks.associate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '选择此系列建议' }));
+    expect(mocks.associate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '确认关联当前书' }));
+    await waitFor(() => expect(mocks.associate).toHaveBeenCalledWith(series.id));
+  });
+
+  it('keeps uncertain community evidence manual without offering a paid supplement', async () => {
+    mocks.community.mockResolvedValue({ status: 'uncertain', method: 'community', suggestion: null });
+    renderDialog();
+    fireEvent.click(screen.getByRole('button', { name: '参考读者关联' }));
+    await screen.findByText('暂无明确的读者关联建议，仍可手动选择或识别系列。');
+    expect(screen.queryByRole('button', { name: /DeepSeek 补判/ })).toBeNull();
+    expect(mocks.associate).not.toHaveBeenCalled();
+  });
+
+  it('discards community suggestions after the active principal changes', async () => {
+    mocks.community.mockImplementation(async () => {
+      mocks.userId = 'reader-2';
+      return { status: 'suggested', method: 'community', suggestion: {
+        series_id: null, source_novel_id: 'source-book', name: 'private suggestion',
+        book: { title: 'private source', author: null, genre: null },
+      } };
+    });
+    renderDialog();
+    fireEvent.click(screen.getByRole('button', { name: '参考读者关联' }));
+    await waitFor(() => expect(mocks.community).toHaveBeenCalledOnce());
+    expect(screen.queryByText(/private source/)).toBeNull();
+  });
+
+  it('requires explicit opt-in and supports withdrawing the current series contribution', async () => {
+    mocks.currentSeries = series;
+    const view = renderDialog();
+    const checkbox = screen.getByRole('checkbox', { name: '允许将本系列的作品关联用于读者推荐' }) as HTMLInputElement;
+    expect(checkbox.checked).toBe(false);
+    expect(mocks.setContribution).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: '参考读者关联' })).toBeNull();
+    fireEvent.click(checkbox);
+    await waitFor(() => expect(mocks.setContribution).toHaveBeenCalledWith({ seriesId: series.id, enabled: true }));
+    mocks.contribution = { enabled: true };
+    view.rerender(dialogElement());
+    fireEvent.click(checkbox);
+    await waitFor(() => expect(mocks.setContribution).toHaveBeenCalledWith({ seriesId: series.id, enabled: false }));
+    expect(mocks.associate).not.toHaveBeenCalled();
+  });
+
+  it('blocks contribution updates when consent could not be loaded', () => {
+    mocks.currentSeries = series;
+    mocks.contributionError = true;
+    renderDialog();
+    expect(screen.getByRole('checkbox').hasAttribute('disabled')).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: '重新读取贡献设置' }));
+    expect(mocks.contributionRefetch).toHaveBeenCalledOnce();
+    expect(mocks.setContribution).not.toHaveBeenCalled();
+  });
+
   it('never associates a suggested series before the reader confirms it', async () => {
     mocks.seriesList = [series];
     mocks.suggestionResult = {
@@ -153,6 +237,24 @@ describe('WorldSeriesDialog', () => {
     const confirmButton = screen.getAllByRole('button', { name: '确认关联当前书' });
     fireEvent.click(confirmButton[confirmButton.length - 1]);
     await waitFor(() => expect(mocks.associate).toHaveBeenCalledWith(series.id));
+  });
+
+  it('shows series management with pending background state and keeps controls available', () => {
+    mocks.currentSeries = { ...series, background: null };
+    renderDialog();
+
+    expect(screen.getByRole('heading', { name: '系列管理' })).toBeTruthy();
+    expect(screen.getByText('《当前书》已关联“山海系列”系列。共享世界背景尚未确认；角色和阅读进度保持独立。')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '确认共享背景' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '识别同系列' })).toBeTruthy();
+  });
+
+  it('shows confirmed shared background for an associated series', () => {
+    mocks.currentSeries = series;
+    renderDialog();
+
+    expect(screen.getByRole('heading', { name: '系列管理' })).toBeTruthy();
+    expect(screen.getByText('《当前书》已关联“山海系列”系列。共享世界背景已确认；角色和阅读进度保持独立。')).toBeTruthy();
   });
 
   it('allows manual association after an uncertain suggestion', async () => {

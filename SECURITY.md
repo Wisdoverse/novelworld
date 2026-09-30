@@ -51,6 +51,11 @@ We will acknowledge receipt within 48 hours and provide a timeline for resolutio
   Novel-owned and account-scoped. Optional Laya matching sends bounded metadata
   only; it cannot write associations, which require reader confirmation. See
   [ADR 0011](./docs/adr/0011-confirmed-series-worlds.md).
+  Optional community grouping uses explicit default-off contribution consent,
+  current memberships, exact canonical identities and recipient-only candidates;
+  it never exposes donor identities, counts or private series content. The
+  support threshold is not proof of anonymity, accuracy or Sybil resistance.
+  See [ADR 0012](./docs/adr/0012-opt-in-community-series.md).
 
 ### Infrastructure
 - All inter-service communication over internal Docker network

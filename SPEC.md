@@ -1387,6 +1387,24 @@ association MUST NOT delete the series definition or frozen snapshots; account
 erasure removes the reader-owned records. Canonical source deletion MUST NOT
 erase another book's safe snapshot.
 
+Novel MAY offer reader-requested community grouping suggestions from explicitly
+opted-in private series memberships. Contribution MUST default to off, cover
+current and future members only after reader consent, support withdrawal, and
+follow account export/erasure. Names, backgrounds, rules and player state MUST
+remain private. Suggestions MUST use exact shared canonical novel identities,
+exclude the requester from support, count each distinct contributor account
+once per pair, and require at least three accounts. Separate uploads or editions
+MUST NOT be merged by title or filename. An opted-in contributor grouping a
+pair into different series makes that pair ambiguous, not a validated negative
+fact. Every existing recipient-series member MUST have direct qualifying
+evidence with the target; missing evidence, competing groups, an already-linked
+target or scan overflow MUST abstain. Only the recipient's Ready shelf metadata
+MAY be returned, without donor identity or counts. No transitive inference,
+provider dispatch, recommendation cache or automatic association is permitted.
+Current membership/consent changes MUST affect the next read. These are grouping
+hints, not proof of shared world facts, calibrated accuracy or Sybil resistance.
+See ADR 0012 for bounded deadlines and additive migration 0035.
+
 Laya matching reuses `LAYA_API_URL` and `LAYA_API_KEY`, with a 300 ms connect
 and 2 s total deadline, no HTTP retries, 8 KiB request and 16 KiB response
 limits, four admission slots, at most eight candidates, and a 0.8 abstention

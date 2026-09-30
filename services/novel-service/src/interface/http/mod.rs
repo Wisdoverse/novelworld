@@ -76,6 +76,14 @@ fn routes() -> Router<AppState> {
             get(world_series::list).post(world_series::create),
         )
         .route(
+            "/novels/world-series/{id}/contribution",
+            get(world_series::contribution).put(world_series::set_contribution),
+        )
+        .route(
+            "/novels/{id}/world-series/community-suggestion",
+            post(world_series::community_suggestion),
+        )
+        .route(
             "/novels/world-series/{id}/background",
             put(world_series::confirm_background),
         )

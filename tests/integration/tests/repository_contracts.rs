@@ -8689,3 +8689,47 @@ async fn private_series_rules_preserve_provenance_budget_and_erasure() {
         .await
         .unwrap();
 }
+
+#[path = "../../../services/novel-service/tests/support/community_series_contract.rs"]
+mod community_series_contract;
+
+#[tokio::test]
+async fn community_series_consensus_preserves_consent_privacy_and_erasure() {
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (recipient, source) = seed_game_rule_model(&pool, "community-recipient").await;
+    let mut donors = Vec::new();
+    for i in 0..4 {
+        donors.push(insert_test_user(&pool, &format!("community-donor-{i}")).await);
+    }
+    let target = community_series_contract::run(&pool, recipient, &donors, source).await;
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(donors[2])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let consent_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM world_series_contributions WHERE user_id = $1")
+            .bind(donors[2])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(consent_count, 0);
+    use novel_service::domain::repositories::WorldSeriesRepository;
+    let repo = novel_service::infrastructure::persistence::world_series_pg_repo::PgWorldSeriesRepository::new(pool.clone());
+    assert!(repo
+        .community_candidates(recipient, target)
+        .await
+        .unwrap()
+        .is_empty());
+    for user in donors.into_iter().chain(std::iter::once(recipient)) {
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+}

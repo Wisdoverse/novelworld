@@ -344,7 +344,9 @@ jobs:
         env:
           TEST_DATABASE_URL: postgres://test:test@localhost:25432/novelworld_test
           TEST_REDIS_URL: redis://localhost:26379
-        run: cargo test -p integration-tests --locked
+        run: |
+          cargo test -p integration-tests --locked
+          cargo test --locked -p novel-service --test community_series_http -- --ignored
       - name: Stop test dependencies
         if: always()
         run: docker compose -f docker-compose.test.yml down -v

@@ -24,6 +24,9 @@ export const novelKeys = {
   novelWorldSeries: (principalId: string, novelId: string) => [
     ...novelKeys.all, 'world-series', principalId, 'novel', novelId,
   ] as const,
+  worldSeriesContribution: (principalId: string, seriesId: string) => [
+    ...novelKeys.all, 'world-series', principalId, 'contribution', seriesId,
+  ] as const,
 };
 
 export interface CreateWorldSeriesInput {
@@ -81,6 +84,39 @@ export function useWorldSeriesBackgroundDraft() {
     retry: false,
     mutationFn: (novelId: string) => apiClient
       .get<WorldSeriesBackgroundDraft>(`/novels/${novelId}/world-series/background-draft`)
+      .then(response => response.data),
+  });
+}
+
+export function useWorldSeriesContribution(principalId: string | undefined, seriesId: string | undefined) {
+  return useQuery({
+    queryKey: novelKeys.worldSeriesContribution(principalId ?? '', seriesId ?? ''),
+    queryFn: ({ signal }) => apiClient
+      .get<{ enabled: boolean }>(`/novels/world-series/${seriesId}/contribution`, { signal })
+      .then(response => response.data),
+    enabled: Boolean(principalId && seriesId),
+    retry: false,
+  });
+}
+
+export function useSetWorldSeriesContribution(principalId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    retry: false,
+    mutationFn: ({ seriesId, enabled }: { seriesId: string; enabled: boolean }) => apiClient
+      .put<{ enabled: boolean }>(`/novels/world-series/${seriesId}/contribution`, { enabled })
+      .then(response => response.data),
+    onSuccess: async (_data, { seriesId }) => {
+      await queryClient.invalidateQueries({ queryKey: novelKeys.worldSeriesContribution(principalId, seriesId) });
+    },
+  });
+}
+
+export function useCommunitySeriesSuggestion() {
+  return useMutation({
+    retry: false,
+    mutationFn: (novelId: string) => apiClient
+      .post<WorldSeriesSuggestion>(`/novels/${novelId}/world-series/community-suggestion`)
       .then(response => response.data),
   });
 }

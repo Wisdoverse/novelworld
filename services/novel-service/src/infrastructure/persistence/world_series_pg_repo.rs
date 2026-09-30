@@ -4,7 +4,9 @@ use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
-use crate::domain::ports::series_matcher::{BeginSeriesMatch, SeriesMatchMethod, SeriesSuggestion};
+use crate::domain::ports::series_matcher::{
+    BeginSeriesMatch, SeriesBookMetadata, SeriesMatchCandidate, SeriesMatchMethod, SeriesSuggestion,
+};
 use crate::domain::{
     entities::world_series::WorldSeries,
     repositories::{
@@ -53,6 +55,69 @@ impl SeriesRow {
 
 #[async_trait]
 impl WorldSeriesRepository for PgWorldSeriesRepository {
+    async fn contribution(&self, user_id: Uuid, series_id: Uuid) -> Result<Option<bool>> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut tx = self.pool.begin().await?;
+            sqlx::query("SELECT pg_catalog.set_config('statement_timeout', '4s', true), pg_catalog.set_config('lock_timeout', '3s', true)")
+                .execute(&mut *tx).await?;
+            let enabled = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM world_series_contributions c WHERE c.series_id = s.id AND c.user_id = s.user_id) \
+                 FROM user_world_series s WHERE s.user_id = $1 AND s.id = $2")
+                .bind(user_id).bind(series_id).fetch_optional(&mut *tx).await?;
+            tx.commit().await?;
+            Ok(enabled)
+        }).await.context("series contribution read deadline exceeded")?
+    }
+
+    async fn set_contribution(
+        &self,
+        user_id: Uuid,
+        series_id: Uuid,
+        enabled: bool,
+    ) -> Result<bool> {
+        // No retries. The same desired state is idempotent; lock prevents an
+        // account/series deletion from racing the authorization and consent write.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut tx = self.pool.begin().await?;
+            sqlx::query("SELECT pg_catalog.set_config('statement_timeout', '4s', true), pg_catalog.set_config('lock_timeout', '3s', true)")
+                .execute(&mut *tx).await?;
+            let owned = sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM user_world_series WHERE user_id = $1 AND id = $2 FOR UPDATE")
+                .bind(user_id).bind(series_id).fetch_optional(&mut *tx).await?;
+            if owned.is_none() { return Ok(false); }
+            if enabled {
+                sqlx::query("INSERT INTO world_series_contributions (series_id, user_id) VALUES ($1, $2) ON CONFLICT (series_id, user_id) DO NOTHING")
+                    .bind(series_id).bind(user_id).execute(&mut *tx).await?;
+            } else {
+                sqlx::query("DELETE FROM world_series_contributions WHERE series_id = $1 AND user_id = $2")
+                    .bind(series_id).bind(user_id).execute(&mut *tx).await?;
+            }
+            tx.commit().await?;
+            Ok(true)
+        }).await.context("series contribution write deadline exceeded")?
+    }
+
+    async fn community_candidates(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+    ) -> Result<Vec<SeriesMatchCandidate>> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut tx = self.pool.begin().await?;
+            sqlx::query("SELECT pg_catalog.set_config('statement_timeout', '4s', true), pg_catalog.set_config('lock_timeout', '3s', true)")
+                .execute(&mut *tx).await?;
+            let rows = sqlx::query_as::<_, CommunityCandidateRow>(COMMUNITY_CANDIDATES_SQL)
+                .bind(user_id).bind(novel_id).fetch_all(&mut *tx).await?;
+            tx.commit().await?;
+            Ok(rows.into_iter().map(|row| SeriesMatchCandidate {
+                series_id: row.series_id, source_novel_id: row.novel_id, name: row.name,
+                book: SeriesBookMetadata { title: row.title, author: row.author,
+                    genre: row.genre, world_entities: Vec::new() },
+                member_titles: Vec::new(),
+            }).collect())
+        }).await.context("community series suggestion deadline exceeded")?
+    }
+
     async fn begin_match(
         &self,
         user_id: Uuid,
@@ -367,3 +432,64 @@ impl WorldSeriesRepository for PgWorldSeriesRepository {
         }).await.context("series association deadline exceeded")?
     }
 }
+
+#[derive(FromRow)]
+struct CommunityCandidateRow {
+    series_id: Option<Uuid>,
+    novel_id: Uuid,
+    name: String,
+    title: String,
+    author: Option<String>,
+    genre: Option<String>,
+}
+
+// ponytail: live aggregation over at most 128 recipient Ready books; introduce
+// a durable aggregate only if measured database load warrants its lifecycle cost.
+// Three distinct accounts is a conservative uncalibrated threshold, not proof
+// of independent people. No transitive inference or donor metadata is returned.
+const COMMUNITY_CANDIDATES_SQL: &str = r#"
+WITH authorized AS (
+    SELECT shelf.novel_id FROM user_novels shelf
+    JOIN novels n ON n.id = shelf.novel_id
+    WHERE shelf.user_id = $1 AND shelf.novel_id = $2
+      AND n.status = 'ready'::novel_status AND n.total_chapters > 0
+      AND NOT EXISTS (SELECT 1 FROM user_novel_world_series current_member
+          WHERE current_member.user_id = $1 AND current_member.novel_id = $2)
+), ready_shelf AS (
+    SELECT n.id, n.title, n.author, n.genre
+    FROM user_novels shelf JOIN novels n ON n.id = shelf.novel_id
+    WHERE shelf.user_id = $1 AND shelf.novel_id <> $2
+      AND n.status = 'ready'::novel_status AND n.total_chapters > 0
+    ORDER BY n.id LIMIT 129
+), qualifying AS (
+    SELECT candidate.id
+    FROM ready_shelf candidate
+    JOIN user_novel_world_series target_vote ON target_vote.novel_id = $2 AND target_vote.user_id <> $1
+    JOIN world_series_contributions target_consent
+      ON target_consent.series_id = target_vote.series_id AND target_consent.user_id = target_vote.user_id
+    JOIN user_novel_world_series candidate_vote
+      ON candidate_vote.novel_id = candidate.id AND candidate_vote.user_id = target_vote.user_id
+    JOIN world_series_contributions candidate_consent
+      ON candidate_consent.series_id = candidate_vote.series_id AND candidate_consent.user_id = candidate_vote.user_id
+    WHERE EXISTS (SELECT 1 FROM authorized) AND (SELECT COUNT(*) FROM ready_shelf) <= 128
+    GROUP BY candidate.id
+    HAVING COUNT(DISTINCT target_vote.user_id) FILTER (WHERE target_vote.series_id = candidate_vote.series_id) >= 3
+       AND COUNT(DISTINCT target_vote.user_id) FILTER (WHERE target_vote.series_id <> candidate_vote.series_id) = 0
+), local_candidates AS (
+    SELECT member.series_id, candidate.id AS novel_id,
+           COALESCE(series.name, candidate.title) AS name,
+           candidate.title, candidate.author, candidate.genre,
+           COALESCE(member.series_id, candidate.id) AS candidate_key,
+           candidate.id = series.source_novel_id AS is_source
+    FROM qualifying q JOIN ready_shelf candidate ON candidate.id = q.id
+    LEFT JOIN user_novel_world_series member ON member.user_id = $1 AND member.novel_id = candidate.id
+    LEFT JOIN user_world_series series ON series.id = member.series_id AND series.user_id = $1
+    WHERE member.series_id IS NULL OR NOT EXISTS (
+        SELECT 1 FROM user_novel_world_series other_member
+        WHERE other_member.user_id = $1 AND other_member.series_id = member.series_id
+          AND NOT EXISTS (SELECT 1 FROM qualifying support WHERE support.id = other_member.novel_id)
+    )
+)
+SELECT DISTINCT ON (candidate_key) series_id, novel_id, name, title, author, genre
+FROM local_candidates ORDER BY candidate_key, is_source DESC NULLS LAST, novel_id
+"#;

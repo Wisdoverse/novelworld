@@ -153,10 +153,11 @@ export interface SeriesBackgroundDraft {
 
 export interface WorldSeriesSuggestion {
   status: 'suggested' | 'unconfigured' | 'uncertain' | 'unavailable' | 'in_progress';
-  method?: 'laya' | 'deepseek';
+  method?: 'laya' | 'deepseek' | 'community';
   reason?:
     | 'no_candidates'
     | 'local_evidence'
+    | 'community_consensus'
     | 'too_many_books'
     | 'low_confidence'
     | 'not_configured'

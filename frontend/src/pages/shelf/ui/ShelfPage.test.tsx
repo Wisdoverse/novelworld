@@ -156,7 +156,7 @@ describe('ShelfPage contracts', () => {
     }];
     render(<ShelfPage />);
 
-    fireEvent.click(screen.getByRole('button', { name: '识别同系列 / 共享世界背景' }));
+    fireEvent.click(screen.getByRole('button', { name: '系列管理' }));
     expect(screen.getByRole('dialog', { name: '系列设置：故事' })).toBeTruthy();
     expect(mocks.navigate).not.toHaveBeenCalled();
   });
