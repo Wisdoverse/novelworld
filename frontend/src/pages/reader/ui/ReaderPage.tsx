@@ -580,6 +580,9 @@ export function ReaderPage() {
             novelId={novelId || ''}
             view={openWorld}
             actionsDisabled={isOpenWorldError || timelineMutationLocked}
+            actionsDisabledReason={isOpenWorldError
+              ? '开放世界加载失败。上方显示的是上次保存的经过；为避免基于旧状态行动，已暂停新的行动。请重试。'
+              : '阅读进度尚未保存，暂时不能执行行动。请等待进度保存后再试。'}
             onRefresh={refetchOpenWorld}
           />
         ) : null}
@@ -734,7 +737,7 @@ export function ReaderPage() {
             当前阅读位置早于这条世界线的来源。阅读到第 {worldSourceHighWater} 章后，行动与日志会自动恢复。
           </div>
         ) : null}
-        {openWorldEnabled && isOpenWorldError && worldSourceVisible ? (
+        {openWorldEnabled && isOpenWorldError && worldSourceVisible && !openWorld ? (
           <div className="mt-12 flex items-center justify-between gap-4 rounded-xl border border-[#f2b8b5] bg-[#fce8e6] p-4 text-[#b3261e]" role="alert">
             <span className="text-sm">开放世界加载失败，已暂停新的行动。</span>
             <button className="text-sm underline" onClick={() => refetchOpenWorld()}>重试</button>
@@ -824,7 +827,9 @@ export function ReaderPage() {
         >
           {branchChoiceRequired
               ? '请先选择'
-              : isPlayerTimeline
+              : openWorld
+                ? '选择下一步行动'
+                : isPlayerTimeline
                 ? '继续旅程'
                 : '下一章'}
           <ChevronRight size={14} />

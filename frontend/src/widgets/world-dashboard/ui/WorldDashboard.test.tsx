@@ -74,6 +74,26 @@ describe('WorldDashboard', () => {
     vi.useRealTimers();
   });
 
+  it('links the current narrative to the next action without submitting automatically', () => {
+    render(<WorldDashboard novelId="novel" view={view} />);
+    expect(screen.getByRole('link', { name: '去选择行动' }).getAttribute('href')).toBe('#world-action-form');
+    expect(screen.getByText(/故事会在你执行下一次行动后推进/)).toBeTruthy();
+    expect(mocks.submit).not.toHaveBeenCalled();
+  });
+
+  it('explains a stale view lock at the action form and offers a refresh', () => {
+    const refresh = vi.fn();
+    render(<WorldDashboard novelId="novel" view={view} actionsDisabled
+      actionsDisabledReason="世界加载失败，请重试。" onRefresh={refresh} />);
+    const alert = screen.getByRole('alert');
+    expect(alert.textContent).toContain('世界加载失败');
+    expect(alert.parentElement?.querySelector('form')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '执行行动' }).hasAttribute('disabled')).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: '重试' }));
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(mocks.submit).not.toHaveBeenCalled();
+  });
+
   it('shows an unspecified location for a player created before any place is available', () => {
     render(<WorldDashboard novelId="novel" view={{
       ...view,
@@ -114,7 +134,9 @@ describe('WorldDashboard', () => {
   });
 
   it('keeps canon provenance distinct and retries a failed turn with the same key', async () => {
-    mocks.submit.mockRejectedValue({ outcomeUnknown: true, message: 'offline' });
+    mocks.submit.mockRejectedValue(Object.assign(
+      new Error('已提交行动的记忆尚未确认'), { outcomeUnknown: true },
+    ));
     const page = render(<WorldDashboard novelId="novel" view={view} />);
 
     expect(screen.getAllByText(/原著主线/).length).toBeGreaterThan(0);
@@ -144,6 +166,7 @@ describe('WorldDashboard', () => {
     expect(mocks.submit.mock.calls[0][0].expectedTurnNumber).toBe(1);
     expect(screen.queryByRole('button', { name: '放弃此请求' })).toBeNull();
     expect(screen.getByRole('alert').textContent).toContain('尚未确认这次行动的最终结果');
+    expect(screen.getByRole('alert').textContent).toContain('已提交行动的记忆尚未确认');
     page.rerender(
       <WorldDashboard
         novelId="novel"
@@ -378,6 +401,7 @@ describe('WorldDashboard', () => {
       );
 
       expect(screen.getByRole('button', { name: '执行行动' }).hasAttribute('disabled')).toBe(true);
+      expect(screen.getByRole('alert').textContent).toContain('第 2 回合的经过已保存，但角色记忆尚未同步完成');
       fireEvent.click(screen.getByRole('button', { name: '继续确认结果' }));
       await waitFor(() => expect(mocks.submit).toHaveBeenCalledOnce());
       expect(mocks.submit.mock.calls[0][0]).toEqual({
@@ -419,6 +443,7 @@ describe('WorldDashboard', () => {
 
       expect(mocks.submit).not.toHaveBeenCalled();
       expect(screen.getByRole('button', { name: '执行行动' }).hasAttribute('disabled')).toBe(true);
+      expect(screen.getByRole('alert').textContent).toContain('上一行动尚未完成');
       fireEvent.click(screen.getByRole('button', { name: '继续确认结果' }));
       await waitFor(() => expect(mocks.submit).toHaveBeenCalledOnce());
       expect(mocks.submit.mock.calls[0][0]).toEqual({
@@ -716,7 +741,36 @@ describe('WorldDashboard', () => {
     render(<WorldDashboard novelId="novel" view={advancedView} />);
 
     expect(screen.getByText('小说属性')).toBeTruthy();
-    expect(screen.getByText('轻功检定：D20 14 + 1 = 15 / 难度 13 · 成功')).toBeTruthy();
+    expect(screen.getAllByText('轻功检定：D20 14 + 1 = 15 / 难度 13 · 成功')).toHaveLength(2);
+  });
+
+  it.each([
+    { decision: 'template_fallback', succeeded: false, explanation: '本次检定失败', summary: 'D20 6 + 1 = 7 / 难度 12 · 失败' },
+    { decision: 'standard_check', succeeded: false, explanation: '本次检定失败', summary: 'D20 6 + 1 = 7 / 难度 12 · 失败' },
+    { decision: 'standard_check', succeeded: true, explanation: '本回合已完成', summary: 'D20 14 + 1 = 15 / 难度 12 · 成功' },
+    { decision: 'impossible', succeeded: true, explanation: '该行动不可行', summary: '未进行骰子检定' },
+    { decision: 'pending', succeeded: true, explanation: '行动判断尚未完成', summary: '判断未完成' },
+    { decision: 'automatic_success', succeeded: false, explanation: '本回合已完成', summary: '无需检定 · 行动成功' },
+  ] as const)('explains the latest $decision result beside its narrative', ({ decision, succeeded, explanation, summary }) => {
+    render(<WorldDashboard novelId="novel" view={{
+      ...view,
+      journal: [{
+        ...view.journal[0],
+        resolution: {
+          schema_version: 1, canon_model_version: 1, template_prompt_version: 'basic-rules-v1',
+          attribute_key: 'qinggong', attribute_label: '轻功', score: 12, modifier: 1,
+          roll: succeeded ? 14 : 6, total: succeeded ? 15 : 7, difficulty_class: 12, succeeded,
+          adjudication: { schema_version: 1, template_difficulty_class: 12, decision },
+        },
+      }],
+    }} />);
+    const result = screen.getByRole('status', { name: '本回合行动结果' });
+    expect(result.textContent).toContain(explanation);
+    expect(result.textContent).toContain(summary);
+    expect(result.parentElement?.querySelector('#latest-world-narrative')).toBeTruthy();
+    expect(screen.getByText(/世界入场坐标 · 原著第 1 章/)).toBeTruthy();
+    expect(screen.getByLabelText('行动').hasAttribute('disabled')).toBe(false);
+    expect(mocks.submit).not.toHaveBeenCalled();
   });
 
   it('shows the full latest narrative, world-time tick rule, and event-linked attribute deltas', () => {

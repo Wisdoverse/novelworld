@@ -338,6 +338,24 @@ authorization for that registration. Frozen or consumed registrations remain
 terminal and cannot be renewed or rerun. Issue bodies and Project 4 own current
 execution and live-evidence status.
 
+For the next prospective v6 registration only, the exact actual merged C
+baseline `70eb066a7c529769a9fe5dc3d8259b8f85d16c7d` may pair with exact merged B
+descendant `e8835db5d5c9042011a66f52a6eb06d0ffd014f4`. This candidate includes
+#435's embedding-request stdin forwarding and #437's bounded prestart errors
+and health retry handling. Its application build inputs, compiled profile,
+product fixture, Compose and guarded Rust Dockerfile are identical to actual
+B `ee7c794ff4351e0ffb7d5667cbe660adf444813c`; the genuine C→B remote-profile
+runtime change remains the application difference. The clean runner checkout,
+registered candidate SHA and candidate manifest must all name that exact
+e883 commit. Prepare and independently review source-bound artifacts and a
+wholly new registration; do not relabel the old B manifest or use an arbitrary
+later descendant. Source-to-binary freshness, changed affected runtime layers,
+immutable image identities, matching infrastructure, scan policy, fixed
+budget/profile/fixture, mandatory prestart and exact execution authorization
+remain required. This permission neither changes historical C→B eligibility
+nor renews any consumed registration. Separate keyless readiness observations
+are prerequisites, not passed mandatory prestart or live lifecycle evidence.
+
 CI runs the real-schema regressions against its digest-pinned disposable
 `test-postgres` database. Local runs name the container with
 `NW_H4_TEST_POSTGRES` and may override `NW_H4_TEST_PGUSER` /
