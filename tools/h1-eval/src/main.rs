@@ -593,7 +593,7 @@ impl RunConfig {
             .len();
         let ticket = control
             .begin(request.max_tokens.unwrap_or(0))
-            .map_err(&fail)?;
+            .map_err(fail)?;
         let response = match client.chat(request).await {
             Ok(response) => response,
             Err(_) => return Err(fail("diagnostic_request_failed")),

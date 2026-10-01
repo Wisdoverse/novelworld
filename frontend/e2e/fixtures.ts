@@ -224,7 +224,8 @@ export const SESSION = {
       faction_ids: [],
       death_character_ids: [],
       source_chapters: [2],
-      status: 'witnessed',
+      // Keep the shared fixture in an active scene; progression cases supply their own frontier.
+      status: 'scheduled',
       reason: null,
     },
   ],

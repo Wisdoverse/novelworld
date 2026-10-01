@@ -27,7 +27,6 @@ import { ChatPanel } from '@/widgets/chat-panel';
 import { BranchChoice } from '@/widgets/branch-choice';
 import { useWorldSourceProgression } from '@/features/world-source';
 import { effectiveWorldContext } from '@/shared/lib/worldSourceContext';
-import { worldTurnPendingStorageKey } from '@/shared/lib/worldTurnStorage';
 import { WorldDashboard } from '@/widgets/world-dashboard';
 import { PlayerEntryForm } from '@/features/player-entry';
 import {
@@ -151,6 +150,7 @@ export function ReaderPage() {
   const {
     data: cachedOpenWorld,
     isLoading: isOpenWorldLoading,
+    isFetching: isOpenWorldFetching,
     isError: isOpenWorldError,
     refetch: refetchOpenWorld,
   } = useOpenWorld(novelId || '', openWorldEnabled);
@@ -188,6 +188,16 @@ export function ReaderPage() {
     ? cachedOpenWorld : null;
   const dashboardWorld = openWorld ?? sourceRecoveryWorld;
   const [worldActionLocked, setWorldActionLocked] = useState(false);
+  useEffect(() => {
+    if (openWorld && novel && !isNovelError && !isProgressError && !isProgressSaveError
+      && !isOpenWorldLoading && !isOpenWorldFetching && !isOpenWorldError
+      && !timelineMutationLocked && !worldActionLocked
+      && openWorld.player?.id === playerEntry?.player?.id) {
+      sourceProgression.advanceIfReady(openWorld, novel.total_chapters);
+    }
+  }, [openWorld, novel, isNovelError, isProgressError, isProgressSaveError,
+    isOpenWorldLoading, isOpenWorldFetching, isOpenWorldError, timelineMutationLocked,
+    worldActionLocked, playerEntry?.player?.id, sourceProgression.advanceIfReady]);
   const startOpenWorld = useStartOpenWorld(novelId || '');
   const entryLocation = playerEntry?.locations.find(
     location => location.id === playerEntry.player?.location_id,
@@ -594,7 +604,7 @@ export function ReaderPage() {
           <section aria-label="世界来源进度" className="mt-6 rounded-2xl border border-[#d8c8a9] bg-[#faf7ef] p-5">
             <p className="text-sm text-[#203a35]">
               当前世界接入至原著第 {cachedOpenWorld ? effectiveWorldContext(cachedOpenWorld.session).unlocked_through_chapter : sourceProgression.pending?.request.expected_source_chapter} 章。
-              进入下一幕会将下一章来源接入同一个世界，保留你的角色与完整旅程；接入后再执行行动推进事件。
+              当前幕的事件结束后，世界会自动进入下一幕，保留你的角色与完整旅程。
             </p>
             {sourceProgression.locked ? (
               <div role="status" className="mt-3 text-sm text-[#59645f]">
@@ -607,12 +617,7 @@ export function ReaderPage() {
                 </button> : null}
               </div>
             ) : cachedOpenWorld && novel && effectiveWorldContext(cachedOpenWorld.session).unlocked_through_chapter < novel.total_chapters ? (
-              <button type="button" className="primary-action mt-3" disabled={!cachedOpenWorld.player?.user_id || isOpenWorldError || timelineMutationLocked || worldActionLocked || Boolean(cachedOpenWorld.recoverable_turn) || cachedOpenWorld.journal?.some(entry => entry.memory_projection_status === 'pending')} onClick={() => {
-                try { if (window.sessionStorage.getItem(worldTurnPendingStorageKey(cachedOpenWorld.player.user_id, novelId || ''))) return; } catch { /* The current dashboard lock still protects this mount. */ }
-                sourceProgression.start(cachedOpenWorld);
-              }}>
-                进入下一幕
-              </button>
+              <p className="mt-3 text-sm text-[#59645f]">继续参与当前剧情，后续章节会随世界进展自动接入。</p>
             ) : <p className="mt-3 text-sm text-[#59645f]">已接入原著最后一章。你仍可在当前世界行动。</p>}
             {worldActionLocked && !sourceProgression.locked ? <p className="mt-3 text-sm text-[#59645f]">上一行动尚未确认，确认完成后才能进入下一幕。</p> : null}
             {sourceProgression.error ? <p id="world-source-error" tabIndex={-1} role="alert" className="mt-3 text-sm text-[#b3261e]">{sourceProgression.error}</p> : null}
