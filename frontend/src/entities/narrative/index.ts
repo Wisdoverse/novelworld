@@ -1,4 +1,6 @@
 export {
+  advanceWorldSource,
+  fetchOpenWorld,
   isNarrativeChoiceConflict,
   isWorldTurnOutcomeUnknown,
   narrativeKeys,

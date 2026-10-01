@@ -276,6 +276,7 @@ export interface CanonicalEventState extends ScheduledCanonEvent {
 export interface WorldSession {
   schema_version: number;
   entry_context: WorldEntryContext;
+  source_context?: WorldEntryContext | null;
   world_time: number;
   turn_number: number;
   canonical_events: CanonicalEventState[];
@@ -351,6 +352,7 @@ export interface WorldTurnJournalEntry {
   turn_id: string;
   turn_number: number;
   memory_projection_status: 'pending' | 'saved' | 'skipped';
+  expected_source_chapter?: number | null;
   action: WorldAction;
   resolution?: ActionCheck | null;
   transition: WorldTurnTransition;
@@ -408,6 +410,7 @@ export interface OpenWorldView {
     turn_id: string;
     action: WorldAction;
     expected_turn_number: number;
+    expected_source_chapter?: number | null;
   };
 }
 
@@ -445,4 +448,17 @@ export interface User {
   name?: string;
   avatar_url?: string;
   role: 'user' | 'admin';
+}
+
+export interface WorldSourceAdvanceRequest {
+  expected_turn_number: number;
+  expected_source_chapter: number;
+  target_chapter: number;
+}
+
+export interface WorldSourceAdvanceResult {
+  operation_id: string;
+  previous_source_chapter: number;
+  source_chapter: number;
+  view: OpenWorldView;
 }

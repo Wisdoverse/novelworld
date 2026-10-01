@@ -478,6 +478,7 @@ describe('WorldDashboard', () => {
             ...view.journal[0],
             turn_id: originalRequest.idempotencyKey,
             turn_number: originalRequest.expectedTurnNumber + 1,
+            expected_source_chapter: originalRequest.expectedSourceChapter,
             memory_projection_status: 'pending',
             action: originalRequest.action,
           }],

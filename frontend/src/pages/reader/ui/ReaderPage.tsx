@@ -25,6 +25,9 @@ import {
 } from '@/entities/narrative';
 import { ChatPanel } from '@/widgets/chat-panel';
 import { BranchChoice } from '@/widgets/branch-choice';
+import { useWorldSourceProgression } from '@/features/world-source';
+import { effectiveWorldContext } from '@/shared/lib/worldSourceContext';
+import { worldTurnPendingStorageKey } from '@/shared/lib/worldTurnStorage';
 import { WorldDashboard } from '@/widgets/world-dashboard';
 import { PlayerEntryForm } from '@/features/player-entry';
 import {
@@ -85,7 +88,10 @@ export function ReaderPage() {
     ? parsedChapter
     : undefined;
   const currentChapter = routeChapter ?? readingProgress?.current_chapter ?? 0;
-  const timelineMutationLocked = isProgressSaving
+  const sourceProgression = useWorldSourceProgression({
+    novelId: novelId || '', progress: readingProgress, routeChapter, navigate,
+  });
+  const timelineMutationLocked = sourceProgression.locked || isProgressSaving
     || readingProgress?.current_chapter !== currentChapter;
   const visibleChapterBoundary = Math.min(
     currentChapter,
@@ -154,10 +160,10 @@ export function ReaderPage() {
   } = useWorldState(novelId || '', Boolean(chapter));
   const worldSourceChapters = [
     ...(isSelfMode ? [
-      cachedOpenWorld?.session.entry_context?.unlocked_through_chapter,
+      cachedOpenWorld?.session && effectiveWorldContext(cachedOpenWorld.session)?.unlocked_through_chapter,
       playerEntry?.player?.canonical_checkpoint_chapter,
       worldState?.state.player_entity?.canonical_checkpoint_chapter,
-      worldState?.state.open_world?.entry_context.unlocked_through_chapter,
+      worldState?.state.open_world && effectiveWorldContext(worldState.state.open_world).unlocked_through_chapter,
     ] : []),
     ...(worldState?.state.choices.map(choice => choice.chapter) ?? []),
   ].filter((chapterNumber): chapterNumber is number => (
@@ -177,6 +183,7 @@ export function ReaderPage() {
       ? { chapter_number: currentChapter, content: chapter.content, generated: false }
       : undefined;
   const openWorld = isSelfMode && derivedTimelineVisible ? cachedOpenWorld : null;
+  const [worldActionLocked, setWorldActionLocked] = useState(false);
   const startOpenWorld = useStartOpenWorld(novelId || '');
   const entryLocation = playerEntry?.locations.find(
     location => location.id === playerEntry.player?.location_id,
@@ -237,6 +244,9 @@ export function ReaderPage() {
     refetchOpenWorld,
     refetchWorldState,
   ]);
+  useEffect(() => {
+    if (sourceProgression.error) focusSection('world-source-error');
+  }, [sourceProgression.error]);
   const submitChoice = useSubmitNarrativeChoice(novelId || '');
 
   useEffect(() => {
@@ -247,7 +257,7 @@ export function ReaderPage() {
 
   useEffect(() => {
     if (routeChapter === undefined || !chapter || !readingProgress || !novelId) return;
-    if (isProgressSaving) return;
+    if (isProgressSaving || sourceProgression.locked) return;
     if (readingProgress.current_chapter === currentChapter) return;
     const attemptKey = `${novelId}:${currentChapter}`;
     if (lastProgressAttempt.current === attemptKey) return;
@@ -257,6 +267,7 @@ export function ReaderPage() {
     chapter,
     currentChapter,
     isProgressSaving,
+    sourceProgression.locked,
     novelId,
     readingProgress,
     routeChapter,
@@ -264,7 +275,7 @@ export function ReaderPage() {
   ]);
 
   const retryProgressUpdate = () => {
-    if (!novelId || routeChapter === undefined) return;
+    if (!novelId || routeChapter === undefined || sourceProgression.locked) return;
     lastProgressAttempt.current = `${novelId}:${currentChapter}`;
     resetProgressUpdate();
     updateCurrentChapter(currentChapter);
@@ -276,7 +287,7 @@ export function ReaderPage() {
       && readerIdentityScope !== 'unresolved'
       && readingProgress.current_chapter === currentChapter
       && (!openWorldEnabled || (worldSourceVisible && !isOpenWorldLoading && !isOpenWorldError))
-      && !isProgressSaving,
+      && !isProgressSaving && !sourceProgression.locked,
   );
   const localCharacterIds = openWorld ? localWorldCharacterIds(openWorld) : null;
   const visibleCharacters = openWorldEnabled && (!worldSourceVisible || isOpenWorldLoading || isOpenWorldError)
@@ -401,7 +412,7 @@ export function ReaderPage() {
 
   const goToChapter = (num: number) => {
     if (
-      isProgressSaving
+      timelineMutationLocked
       || num < 1
       || (novel && num > novel.total_chapters)
       || (num > currentChapter && branchChoiceRequired)
@@ -575,6 +586,34 @@ export function ReaderPage() {
             onSubmit={createPlayerEntity.mutateAsync}
           />
         ) : null}
+        {isSelfMode && ((openWorld && cachedOpenWorld?.session.entry_context) || sourceProgression.locked) ? (
+          <section aria-label="世界来源进度" className="mt-6 rounded-2xl border border-[#d8c8a9] bg-[#faf7ef] p-5">
+            <p className="text-sm text-[#203a35]">
+              当前世界接入至原著第 {cachedOpenWorld ? effectiveWorldContext(cachedOpenWorld.session).unlocked_through_chapter : sourceProgression.pending?.request.expected_source_chapter} 章。
+              进入下一幕会将下一章来源接入同一个世界，保留你的角色与完整旅程；接入后再执行行动推进事件。
+            </p>
+            {sourceProgression.locked ? (
+              <div role="status" className="mt-3 text-sm text-[#59645f]">
+                {sourceProgression.isPending ? '正在接入下一幕…' : '来源接入尚未确认，已暂停其他行动与翻页。'}
+                <button type="button" className="tonal-action mt-3" disabled={sourceProgression.isPending} onClick={() => void sourceProgression.recover()}>
+                  {sourceProgression.pending?.terminal ? '恢复最新世界' : '继续确认下一幕'}
+                </button>
+                {novel && currentChapter < novel.total_chapters ? <button type="button" className="tonal-action ml-3 mt-3" disabled={sourceProgression.isPending} onClick={() => void sourceProgression.continueOriginalReading(novel.total_chapters)}>
+                  继续阅读原文下一章
+                </button> : null}
+              </div>
+            ) : cachedOpenWorld && novel && effectiveWorldContext(cachedOpenWorld.session).unlocked_through_chapter < novel.total_chapters ? (
+              <button type="button" className="primary-action mt-3" disabled={!cachedOpenWorld.player?.user_id || isOpenWorldError || timelineMutationLocked || worldActionLocked || Boolean(cachedOpenWorld.recoverable_turn) || cachedOpenWorld.journal?.some(entry => entry.memory_projection_status === 'pending')} onClick={() => {
+                try { if (window.sessionStorage.getItem(worldTurnPendingStorageKey(cachedOpenWorld.player.user_id, novelId || ''))) return; } catch { /* The current dashboard lock still protects this mount. */ }
+                sourceProgression.start(cachedOpenWorld);
+              }}>
+                进入下一幕
+              </button>
+            ) : <p className="mt-3 text-sm text-[#59645f]">已接入原著最后一章。你仍可在当前世界行动。</p>}
+            {worldActionLocked && !sourceProgression.locked ? <p className="mt-3 text-sm text-[#59645f]">上一行动尚未确认，确认完成后才能进入下一幕。</p> : null}
+            {sourceProgression.error ? <p id="world-source-error" tabIndex={-1} role="alert" className="mt-3 text-sm text-[#b3261e]">{sourceProgression.error}</p> : null}
+          </section>
+        ) : null}
         {openWorld ? (
           <WorldDashboard
             novelId={novelId || ''}
@@ -584,6 +623,7 @@ export function ReaderPage() {
               ? '开放世界加载失败。上方显示的是上次保存的经过；为避免基于旧状态行动，已暂停新的行动。请重试。'
               : '阅读进度尚未保存，暂时不能执行行动。请等待进度保存后再试。'}
             onRefresh={refetchOpenWorld}
+            onActionLockChange={setWorldActionLocked}
           />
         ) : null}
         {isLoading || (worldSourceVisible && isEffectiveChapterLoading) ? (
@@ -800,7 +840,7 @@ export function ReaderPage() {
       <nav aria-label="阅读导航" className="fixed bottom-0 left-0 right-0 z-20 flex items-center justify-between gap-2 border-t border-[#e1e3e8] bg-white/95 px-3 py-3 shadow-[0_-1px_3px_rgba(60,64,67,0.08)] backdrop-blur-xl sm:px-6 sm:py-4">
         <button
           onClick={goBack}
-          disabled={isProgressSaving || (!openWorld && currentChapter <= 1)}
+          disabled={sourceProgression.locked || isProgressSaving || (!openWorld && currentChapter <= 1)}
           className="tonal-action shrink-0 px-3 text-sm sm:px-5"
         >
           <ChevronLeft size={14} />
@@ -822,7 +862,7 @@ export function ReaderPage() {
 
         <button
           onClick={continueJourney}
-          disabled={isProgressSaving || branchChoiceRequired || !novel || (!openWorld && currentChapter >= novel.total_chapters)}
+          disabled={sourceProgression.locked || isProgressSaving || branchChoiceRequired || !novel || (!openWorld && currentChapter >= novel.total_chapters)}
           className="tonal-action min-w-0 px-3 text-sm sm:px-5"
         >
           {branchChoiceRequired

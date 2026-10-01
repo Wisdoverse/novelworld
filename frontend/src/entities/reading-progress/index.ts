@@ -1,4 +1,6 @@
 export {
+  advanceReadingProgress,
+  fetchReadingProgress,
   readingProgressKeys,
   useReadingProgress,
   useResetReaderIdentity,

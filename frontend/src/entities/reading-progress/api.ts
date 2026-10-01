@@ -40,3 +40,13 @@ export function useResetReaderIdentity(novelId: string) {
     }),
   });
 }
+
+export async function fetchReadingProgress(novelId: string) {
+  return (await apiClient.get<ReadingProgress>(`/progress/${novelId}`)).data;
+}
+
+export async function advanceReadingProgress(novelId: string, currentChapter: number) {
+  return (await apiClient.post<ReadingProgress>(`/progress/${novelId}/advance`, {
+    current_chapter: currentChapter,
+  })).data;
+}

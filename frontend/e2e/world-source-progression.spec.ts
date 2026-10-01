@@ -1,0 +1,213 @@
+import { test, expect, type Page } from '@playwright/test';
+import { installStubs } from './stubs';
+import { OPEN_WORLD, PROGRESS, JOURNAL_ENTRY } from './fixtures';
+import { expectNoA11yViolations, settleAnimations } from './helpers';
+
+async function sourceWorld(page: Page, options: { loseResponse?: boolean; busy?: boolean; progressAfter?: number; failProgress?: boolean; stale?: boolean; end?: boolean; empty?: boolean; currentSourceAfter?: number; rewindAfter?: number } = {}) {
+  await installStubs(page, { openWorld: true });
+  let progress = options.end ? 5 : 1;
+  let source = options.end ? 5 : 1;
+  let turn = 1;
+  let sourceRequests = 0;
+  let progressReads = 0;
+  const sourceCommands: Array<{ key: string | undefined; body: unknown }> = [];
+  const absoluteWrites: number[] = [];
+  const actions: Array<Record<string, unknown>> = [];
+  const nextEvent = {
+    id: 'next-scene-event', sequence: 2, summary: '第二幕的商船靠岸', character_ids: [],
+    location_ids: ['loc-2'], faction_ids: [], death_character_ids: [], source_chapters: [2],
+  };
+  let journal = structuredClone(OPEN_WORLD.journal);
+  const view = () => ({
+    ...OPEN_WORLD,
+    session: {
+      ...OPEN_WORLD.session,
+      turn_number: turn,
+      canonical_events: source >= 2 && !options.empty ? [{ ...nextEvent, status: turn > 1 ? 'witnessed' : 'scheduled', reason: null }] : [],
+      ...(source >= 2 ? { schema_version: 2, source_context: {
+        ...OPEN_WORLD.session.entry_context, unlocked_through_chapter: source,
+        scheduled_events: options.empty ? [] : [nextEvent], locations: [...OPEN_WORLD.session.entry_context.locations, { id: 'dock-2', name: '第二幕的新码头' }],
+      } } : {}),
+    },
+    journal,
+  });
+  await page.route('**/api/**', async route => {
+    const req = route.request();
+    const path = new URL(req.url()).pathname.replace(/^\/api/, '');
+    const json = (body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+    if (path === '/progress/novel-1') {
+      if (req.method() === 'PUT') { progress = req.postDataJSON().current_chapter; absoluteWrites.push(progress); }
+      progressReads++;
+      if (options.failProgress && sourceRequests > 0) return json({ error: { code: 'temporary_unavailable', message: '暂时无法恢复进度' } }, 503);
+      return json({ ...PROGRESS, current_chapter: progress });
+    }
+    if (path === '/progress/novel-1/advance') {
+      progress = Math.max(progress, req.postDataJSON().current_chapter);
+      return json({ ...PROGRESS, current_chapter: progress });
+    }
+    if (path === '/narrative/novel-1/world/source') {
+      sourceRequests++;
+      sourceCommands.push({ key: req.headers()['idempotency-key'], body: req.postDataJSON() });
+      if (options.stale) { source = 2; return json({ error: { code: 'world_source_changed', message: 'stale' } }, 409); }
+      if (options.busy && sourceRequests === 1) return json({ error: { code: 'world_source_busy', message: 'busy' } }, 409);
+      source = options.currentSourceAfter ?? 2;
+      if (options.rewindAfter && sourceRequests === 1) progress = options.rewindAfter;
+      if (options.progressAfter) progress = options.progressAfter;
+      if (options.loseResponse && sourceRequests === 1) return route.abort('failed');
+      return json({ operation_id: req.headers()['idempotency-key'], previous_source_chapter: 1, source_chapter: 2, view: view() });
+    }
+    if (path === '/narrative/novel-1/world') return json(view());
+    if (path === '/narrative/novel-1/world-state') return json(view().world_state);
+    if (path === '/narrative/novel-1/world/turns') {
+      const command = req.postDataJSON(); actions.push(command);
+      if (command.expected_source_chapter !== source) return json({ error: { code: 'world_source_changed', message: 'stale' } }, 409);
+      turn++;
+      const entry = { ...JOURNAL_ENTRY, turn_id: req.headers()['idempotency-key'], turn_number: turn,
+        action: { kind: command.kind, target_id: command.target_id, intent: command.intent },
+        transition: { ...JOURNAL_ENTRY.transition, rendered_narrative: '你见证商船靠岸，第二幕已展开。',
+          canonical_event_change: { event_id: nextEvent.id, status: 'witnessed', reason: '读者调查' } },
+      };
+      journal = [...journal, entry] as typeof journal;
+      return json({ ...entry, memory_projection_status: 'saved', world_state: view().world_state });
+    }
+    if (/^\/novels\/novel-1\/chapters\/\d+$/.test(path)) {
+      return json({ chapter_number: Number(path.split('/').pop()), title: '原著参考', content: '不可变的原著正文', is_key_node: false });
+    }
+    return route.fallback();
+  });
+  return {
+    sourceCommands, absoluteWrites, actions,
+    get source() { return source; }, get progressReads() { return progressReads; },
+    rewind() { progress = 1; }, staleAdvance() { source = 2; },
+    allowProgress() { options.failProgress = false; },
+  };
+}
+
+test('same world admits chapter 2, routes to it and executes an event-backed ordinary turn', async ({ page }) => {
+  const server = await sourceWorld(page);
+  await page.goto('/reader/novel-1/1#latest-world-narrative');
+  await page.getByRole('button', { name: '进入下一幕', exact: true }).focus();
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(/\/reader\/novel-1\/2#latest-world-narrative$/);
+  await expect(page.locator('li').filter({ hasText: '第二幕的商船靠岸' })).toBeVisible();
+  await expect(page.getByText(/世界入场坐标 · 原著第 1 章/)).toBeVisible();
+  await expect(page.getByText('长行动投影起点', { exact: false })).toBeVisible();
+  expect(server.absoluteWrites).toEqual([]);
+  expect(server.sourceCommands[0].body).toEqual({ expected_turn_number: 1, expected_source_chapter: 1, target_chapter: 2 });
+  await page.getByRole('combobox', { name: '行动', exact: true }).selectOption('investigate');
+  await page.getByRole('combobox', { name: '目标', exact: true }).selectOption('next-scene-event');
+  await page.getByLabel('你的意图').fill('观察商船靠岸');
+  await page.getByRole('button', { name: '执行行动', exact: true }).click();
+  await expect(page.locator('#latest-world-narrative')).toContainText('第二幕已展开');
+  expect(server.actions[0].expected_source_chapter).toBe(2);
+  await settleAnimations(page);
+  await expectNoA11yViolations(page);
+  await page.getByRole('region', { name: '世界来源进度' }).screenshot({ path: '/tmp/novelworld-world-source-progression-ui.png' });
+});
+
+test('lost response survives remount with the exact key and never rewinds progress', async ({ page }) => {
+  const server = await sourceWorld(page, { loseResponse: true });
+  await page.goto('/reader/novel-1/1');
+  await page.getByRole('button', { name: '进入下一幕', exact: true }).click();
+  await expect(page.getByRole('button', { name: '继续确认下一幕' })).toBeEnabled();
+  await page.reload();
+  await page.getByRole('button', { name: '继续确认下一幕' }).click();
+  await expect(page).toHaveURL(/\/reader\/novel-1\/2#latest-world-narrative$/);
+  expect(server.sourceCommands).toHaveLength(2);
+  expect(server.sourceCommands[1]).toEqual(server.sourceCommands[0]);
+  expect(server.absoluteWrites).toEqual([]);
+});
+
+test('replay admits 2 but synchronizes a concurrent authoritative progress 3', async ({ page }) => {
+  const server = await sourceWorld(page, { loseResponse: true, progressAfter: 3 });
+  await page.goto('/reader/novel-1/1');
+  await page.getByRole('button', { name: '进入下一幕', exact: true }).click();
+  await expect(page.getByRole('button', { name: '继续确认下一幕' })).toBeEnabled();
+  await page.reload();
+  await page.getByRole('button', { name: '继续确认下一幕' }).click();
+  await expect(page).toHaveURL(/\/reader\/novel-1\/3#latest-world-narrative$/);
+  await expect(page.getByRole('combobox', { name: '行动', exact: true })).toBeEnabled();
+  expect(server.absoluteWrites).toEqual([]);
+  expect(server.sourceCommands[1]).toEqual(server.sourceCommands[0]);
+});
+
+test('monotonic unlock followed by busy source retains key and fences absolute PUT on old route', async ({ page }) => {
+  const server = await sourceWorld(page, { busy: true });
+  await page.goto('/reader/novel-1/1');
+  await page.getByRole('button', { name: '进入下一幕', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('上一行动还在确认');
+  await page.reload();
+  await expect(page.getByRole('button', { name: '继续确认下一幕' })).toBeEnabled();
+  expect(server.absoluteWrites).toEqual([]);
+  await page.getByRole('button', { name: '继续确认下一幕' }).click();
+  await expect(page).toHaveURL(/\/reader\/novel-1\/2#latest-world-narrative$/);
+  expect(server.sourceCommands[1]).toEqual(server.sourceCommands[0]);
+  expect(server.absoluteWrites).toEqual([]);
+});
+
+test('failed postcommit progress confirmation locks until exact replay and fresh progress recovery', async ({ page }) => {
+  const server = await sourceWorld(page, { failProgress: true });
+  await page.goto('/reader/novel-1/1');
+  await page.getByRole('button', { name: '进入下一幕', exact: true }).click();
+  await expect(page.getByRole('button', { name: '继续确认下一幕' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: '下一章', exact: true })).toBeDisabled();
+  expect(server.absoluteWrites).toEqual([]);
+  server.allowProgress();
+  await page.getByRole('button', { name: '继续确认下一幕' }).click();
+  await expect(page).toHaveURL(/\/reader\/novel-1\/2#latest-world-narrative$/);
+  expect(server.sourceCommands[1]).toEqual(server.sourceCommands[0]);
+});
+
+test('deliberate rewind hides active source event, catalogs and chat before refetch', async ({ page }) => {
+  const server = await sourceWorld(page);
+  await page.goto('/reader/novel-1/1');
+  await page.getByRole('button', { name: '进入下一幕', exact: true }).click();
+  await expect(page).toHaveURL(/\/reader\/novel-1\/2#latest-world-narrative$/);
+  // Navigate through the router's source path. Absolute progress PUT remains
+  // the intentional rewind contract once source recovery has finished.
+  await page.evaluate(() => { window.history.pushState(null, '', '/reader/novel-1/1'); window.dispatchEvent(new PopStateEvent('popstate')); });
+  await expect(page.locator('li').filter({ hasText: '第二幕的商船靠岸' })).toHaveCount(0);
+  await expect(page.getByText('第二幕的新码头', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '进入下一幕', exact: true })).toHaveCount(0);
+  await expect.poll(() => server.absoluteWrites).toEqual([1]);
+});
+
+
+test('stale source operation restores current world without issuing a new command', async ({ page }) => {
+  const server = await sourceWorld(page, { stale: true });
+  await page.goto('/reader/novel-1/1');
+  await page.getByRole('button', { name: '进入下一幕', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('另一窗口已经改变世界');
+  await page.getByRole('button', { name: '恢复最新世界', exact: true }).click();
+  await expect(page).toHaveURL(/\/reader\/novel-1\/2#latest-world-narrative$/);
+  await expect(page.getByRole('combobox', { name: '行动', exact: true })).toBeEnabled();
+  expect(server.sourceCommands).toHaveLength(1);
+  expect(server.absoluteWrites).toEqual([]);
+});
+
+test('source end and empty extraction explain the actual available progression', async ({ page }) => {
+  await sourceWorld(page, { end: true, empty: true });
+  await page.goto('/reader/novel-1/5');
+  await expect(page.getByText('已接入原著最后一章。你仍可在当前世界行动。')).toBeVisible();
+  await expect(page.getByRole('button', { name: '进入下一幕', exact: true })).toHaveCount(0);
+  await expect(page.getByText('当前解锁范围内没有待运行的原著事件。')).toBeVisible();
+  await expect(page.getByRole('combobox', { name: '行动', exact: true })).toBeEnabled();
+});
+
+
+test('unknown source replay survives a later source and rewind by explicit original reading', async ({ page }) => {
+  const server = await sourceWorld(page, { loseResponse: true, currentSourceAfter: 3, rewindAfter: 1 });
+  await page.goto('/reader/novel-1/1');
+  await page.getByRole('button', { name: '进入下一幕', exact: true }).click();
+  await expect(page.getByRole('button', { name: '继续确认下一幕' })).toBeEnabled();
+  await page.getByRole('button', { name: '继续阅读原文下一章' }).click();
+  await expect(page).toHaveURL(/\/reader\/novel-1\/2$/);
+  await expect(page.locator('#latest-world-narrative')).toHaveCount(0);
+  await page.getByRole('button', { name: '继续阅读原文下一章' }).click();
+  await expect(page).toHaveURL(/\/reader\/novel-1\/3$/);
+  await page.getByRole('button', { name: '继续确认下一幕' }).click();
+  await expect(page).toHaveURL(/\/reader\/novel-1\/3#latest-world-narrative$/);
+  await expect(page.getByRole('combobox', { name: '行动', exact: true })).toBeEnabled();
+  expect(server.sourceCommands[1]).toEqual(server.sourceCommands[0]);
+  expect(server.absoluteWrites).toEqual([]);
+});

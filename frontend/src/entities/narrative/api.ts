@@ -2,6 +2,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import axios from 'axios';
 import { apiClient, getApiErrorCode } from '@/shared/api/client';
 import type {
+  WorldSourceAdvanceRequest,
+  WorldSourceAdvanceResult,
   NarrativeNode,
   GameRuleTemplate,
   OpenWorldView,
@@ -237,14 +239,16 @@ export async function suggestWorldAction(novelId: string, intent: string, signal
 export function useSubmitWorldTurn(novelId: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ action, idempotencyKey, expectedTurnNumber }: {
+    mutationFn: ({ action, idempotencyKey, expectedTurnNumber, expectedSourceChapter }: {
       action: WorldAction;
       idempotencyKey: string;
       expectedTurnNumber: number;
+      expectedSourceChapter?: number;
     }) => apiClient
       .post<WorldTurnResult>(`/narrative/${novelId}/world/turns`, {
         ...action,
         expected_turn_number: expectedTurnNumber,
+        ...(expectedSourceChapter === undefined ? {} : { expected_source_chapter: expectedSourceChapter }),
       }, {
         headers: { 'Idempotency-Key': idempotencyKey },
         timeout: 120_000,
@@ -334,4 +338,17 @@ export function useSubmitNarrativeChoice(novelId: string) {
       }
     },
   });
+}
+
+export async function advanceWorldSource(
+  novelId: string, request: WorldSourceAdvanceRequest, idempotencyKey: string,
+) {
+  return (await apiClient.post<WorldSourceAdvanceResult>(
+    `/narrative/${novelId}/world/source`, request,
+    { headers: { 'Idempotency-Key': idempotencyKey }, timeout: 30_000 },
+  )).data;
+}
+
+export async function fetchOpenWorld(novelId: string) {
+  return (await apiClient.get<OpenWorldView>(`/narrative/${novelId}/world`)).data;
 }
