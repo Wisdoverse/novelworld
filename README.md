@@ -65,6 +65,11 @@ cd novelworld
 
 You can also double-click `start.cmd` in the repository folder.
 
+For an optional Jenkins build and deployment on a Linux server, use the root
+[`Jenkinsfile`](./Jenkinsfile) and [setup instructions](./DEPLOY.md#jenkins-服务端部署可选).
+GitHub Actions runs CI checks; Jenkins builds and deploys the server images.
+Local launchers, desktop bundles, and other deployment choices remain user-selected.
+
 The launcher guides the initial database setup, generates the required secrets,
 restarts itself once, and builds the application. When the services are ready,
 open **http://localhost**.
