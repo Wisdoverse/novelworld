@@ -1306,6 +1306,8 @@ impl ImportLlmDispatchBudget {
         }
     }
 
+    // Keep this atomic operation compatible with the pinned Rust 1.98 release images.
+    #[allow(deprecated)]
     fn spend(&self) -> std::result::Result<(), ImportBudgetExceeded> {
         self.remaining
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
