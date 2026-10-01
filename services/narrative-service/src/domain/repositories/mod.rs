@@ -9,6 +9,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::domain::entities::world_source::{
+    WorldSourceCommand, WorldSourceDelta, WorldSourceOperation,
+};
+
 use crate::domain::services::narrative_transition::{CanonContext, NarrativeTransition};
 
 #[derive(Debug, thiserror::Error)]
@@ -82,6 +86,18 @@ pub trait WorldStateRepository: Send + Sync {
         context: &WorldEntryContext,
         game_rules: Option<&GameRuleTemplate>,
     ) -> Result<WorldState>;
+    async fn find_source_operation(
+        &self,
+        operation_id: Uuid,
+    ) -> Result<Option<WorldSourceOperation>>;
+    async fn extend_world_source(
+        &self,
+        operation_id: Uuid,
+        user_id: Uuid,
+        novel_id: Uuid,
+        command: &WorldSourceCommand,
+        delta: &WorldSourceDelta,
+    ) -> Result<WorldSourceOperation>;
     async fn update(&self, state: &WorldState) -> Result<()>;
 }
 
@@ -95,6 +111,8 @@ pub struct WorldTurnClaim {
     #[serde(default)]
     pub resolution: Option<ActionCheck>,
     pub expected_turn_number: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_source_chapter: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -160,6 +178,8 @@ pub enum BeginWorldTurn {
 pub struct WorldTurnJournalEntry {
     pub turn_id: Uuid,
     pub turn_number: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_source_chapter: Option<i32>,
     pub memory_projection_status: MemoryProjectionStatus,
     pub action: WorldAction,
     #[serde(default)]
@@ -174,6 +194,8 @@ pub struct RecoverableWorldTurn {
     pub turn_id: Uuid,
     pub action: WorldAction,
     pub expected_turn_number: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_source_chapter: Option<i32>,
 }
 
 #[async_trait]
@@ -271,6 +293,15 @@ pub trait ChapterReadRepository: Send + Sync {
         checkpoint_chapter: i32,
         user_id: Uuid,
     ) -> Result<Option<WorldEntryContext>>;
+    async fn get_world_source_delta(
+        &self,
+        novel_id: Uuid,
+        checkpoint_chapter: i32,
+        user_id: Uuid,
+        model_version: i32,
+        from_source_chapter: i32,
+        target_chapter: i32,
+    ) -> Result<Option<WorldSourceDelta>>;
     async fn request_game_rule_template(
         &self,
         novel_id: Uuid,

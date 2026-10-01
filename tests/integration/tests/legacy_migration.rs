@@ -86,6 +86,8 @@ const PENDING_SERIES_BACKGROUND_MIGRATION: &str =
 
 const WORLD_SERIES_CONTRIBUTIONS_MIGRATION: &str =
     include_str!("../../../infra/postgres/migrations/0035_world_series_contributions.sql");
+const WORLD_SOURCE_PROGRESSION_MIGRATION: &str =
+    include_str!("../../../infra/postgres/migrations/0036_world_source_progression.sql");
 
 fn db_url() -> String {
     std::env::var("TEST_DATABASE_URL")
@@ -128,6 +130,7 @@ const ALL_MIGRATIONS: &[&str] = &[
     DEFERRED_SERIES_RULES_MIGRATION,
     PENDING_SERIES_BACKGROUND_MIGRATION,
     WORLD_SERIES_CONTRIBUTIONS_MIGRATION,
+    WORLD_SOURCE_PROGRESSION_MIGRATION,
 ];
 
 async fn assert_progress_migration_fails_and_rolls_back(pool: &sqlx::PgPool, expected_error: &str) {
@@ -3495,6 +3498,126 @@ async fn legacy_schema_upgrade_is_lossless_and_replay_safe() {
 
     legacy.close().await;
     sqlx::query("DROP DATABASE novelworld_legacy_contract WITH (FORCE)")
+        .execute(&admin)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn world_source_progression_migration_replays_without_rewriting_origin_or_legacy_turns() {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let database = "novelworld_source_progression_migration";
+    sqlx::query("CREATE DATABASE novelworld_source_progression_migration")
+        .execute(&admin)
+        .await
+        .unwrap();
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            PgConnectOptions::from_str(&db_url())
+                .unwrap()
+                .database(database),
+        )
+        .await
+        .unwrap();
+    sqlx::raw_sql(FRESH_SCHEMA).execute(&pool).await.unwrap();
+    sqlx::raw_sql("DROP TABLE public.world_source_operations; ALTER TABLE public.world_turns DROP COLUMN expected_source_chapter;")
+        .execute(&pool).await.unwrap();
+    let user = uuid::Uuid::new_v4();
+    let novel = uuid::Uuid::new_v4();
+    let turn = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO users(id,email,password_hash) VALUES($1,$2,'synthetic')")
+        .bind(user)
+        .bind(format!("source-{user}@test.invalid"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO novels(id,user_id,title,status) VALUES($1,$2,'Source migration','ready')",
+    )
+    .bind(novel)
+    .bind(user)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO world_states(id,user_id,novel_id,state) VALUES($1,$2,$3,$4)")
+        .bind(uuid::Uuid::new_v4())
+        .bind(user)
+        .bind(novel)
+        .bind(serde_json::json!({
+            "open_world":{"schema_version":1,"entry_context":{"checkpoint_chapter":1,
+                "unlocked_through_chapter":1},"turn_number":19},"fixture":"legacy-preserved"}))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO world_turns(id,user_id,novel_id,request_fingerprint,action,expected_turn_number,status,lease_expires_at) \
+                VALUES($1,$2,$3,$4,'{}',19,'in_progress',NOW()+INTERVAL '2 minutes')")
+        .bind(turn).bind(user).bind(novel).bind(vec![7u8;32]).execute(&pool).await.unwrap();
+    let state_before: String = sqlx::query_scalar(
+        "SELECT md5(to_jsonb(w)::text) FROM world_states w WHERE user_id=$1 AND novel_id=$2",
+    )
+    .bind(user)
+    .bind(novel)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let turn_before: String = sqlx::query_scalar(
+        "SELECT md5((to_jsonb(t)-'expected_source_chapter')::text) FROM world_turns t WHERE id=$1",
+    )
+    .bind(turn)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    for _ in 0..2 {
+        sqlx::raw_sql(WORLD_SOURCE_PROGRESSION_MIGRATION)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let state_after: String = sqlx::query_scalar(
+        "SELECT md5(to_jsonb(w)::text) FROM world_states w WHERE user_id=$1 AND novel_id=$2",
+    )
+    .bind(user)
+    .bind(novel)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let turn_after: String = sqlx::query_scalar(
+        "SELECT md5((to_jsonb(t)-'expected_source_chapter')::text) FROM world_turns t WHERE id=$1",
+    )
+    .bind(turn)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(state_before, state_after);
+    assert_eq!(turn_before, turn_after);
+    let coordinate: Option<i32> =
+        sqlx::query_scalar("SELECT expected_source_chapter FROM world_turns WHERE id=$1")
+            .bind(turn)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(coordinate, None);
+    sqlx::query("INSERT INTO world_source_operations(id,user_id,novel_id,request_fingerprint,expected_turn_number, \
+        previous_source_chapter,source_chapter,source_context) VALUES($1,$2,$3,$4,19,1,2,'{}')")
+        .bind(uuid::Uuid::new_v4()).bind(user).bind(novel).bind(vec![8u8;32]).execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM world_states WHERE user_id=$1 AND novel_id=$2")
+        .bind(user)
+        .bind(novel)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let remains: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM world_source_operations")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(remains, 0);
+    pool.close().await;
+    sqlx::query("DROP DATABASE novelworld_source_progression_migration")
         .execute(&admin)
         .await
         .unwrap();

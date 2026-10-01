@@ -23,6 +23,7 @@ use crate::domain::entities::world_session::{
     MAX_CHARACTER_CONTEXT_TEXT_CHARS, MAX_CHARACTER_RECENT_ACTIONS, MAX_CHARACTER_RECENT_EVENTS,
     MAX_RECENT_WORLD_NARRATIVE_CHARS, MAX_RECENT_WORLD_TURNS,
 };
+use crate::domain::entities::world_source::{WorldSourceCommand, WorldSourceError};
 use crate::domain::ports::{
     ActionAdjudicationPort, ActionSuggestionPort, AgentMemoryPort, DiceRollerPort, LlmPort,
     NarrativeLlmTask,
@@ -290,7 +291,7 @@ fn world_journey_fact(
         session.turn_number,
         session.world_time,
     )?
-    .map(|fact| (fact, session.entry_context.unlocked_through_chapter)))
+    .map(|fact| (fact, session.context().unlocked_through_chapter)))
 }
 
 fn world_journey_fact_at(
@@ -420,6 +421,16 @@ pub enum NarrativeError {
     GameRuleCanonUnavailable,
     #[error("Reading progress is behind the committed world context")]
     ReadingProgressBehindWorld,
+    #[error("world source changed")]
+    WorldSourceChanged,
+    #[error("world source is busy")]
+    WorldSourceBusy,
+    #[error("world source ordering conflicts")]
+    WorldSourceOrderConflict,
+    #[error("world source is unavailable")]
+    WorldSourceUnavailable,
+    #[error("world source outcome is unknown; retry the same key")]
+    WorldSourceOutcomeUnknown,
     #[error("Novel service is unavailable")]
     Unavailable(#[source] anyhow::Error),
     #[error("Consequence generation failed")]
@@ -431,6 +442,16 @@ pub enum NarrativeError {
 pub type NarrativeResult<T> = std::result::Result<T, NarrativeError>;
 
 fn map_world_state_write_error(error: anyhow::Error) -> NarrativeError {
+    if let Some(source) = error.downcast_ref::<WorldSourceError>() {
+        return match source {
+            WorldSourceError::Changed => NarrativeError::WorldSourceChanged,
+            WorldSourceError::Busy => NarrativeError::WorldSourceBusy,
+            WorldSourceError::OrderConflict => NarrativeError::WorldSourceOrderConflict,
+            WorldSourceError::KeyConflict => {
+                NarrativeError::Conflict("Source operation key conflicts".into())
+            }
+        };
+    }
     match error.downcast_ref::<WorldStateError>() {
         Some(WorldStateError::TimelineConflict(message)) => {
             NarrativeError::Conflict(message.clone())
@@ -517,8 +538,16 @@ pub struct OpenWorldView {
     pub action_suggestions_available: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorldSourceAdvanceResult {
+    pub operation_id: Uuid,
+    pub previous_source_chapter: i32,
+    pub source_chapter: i32,
+    pub view: OpenWorldView,
+}
+
 fn available_suggestion_kinds(view: &OpenWorldView) -> Vec<WorldActionKind> {
-    let context = &view.session.entry_context;
+    let context = view.session.context();
     let locations: Vec<String> = context
         .locations
         .iter()
@@ -1368,7 +1397,7 @@ impl NarrativeCommandHandler {
             target_id: None,
             intent: intent.into(),
         }
-        .validate(&view.session.entry_context)
+        .validate(view.session.context())
         .map_err(|error| NarrativeError::Validation(error.to_string()))?;
         let available = available_suggestion_kinds(&view);
         if available.len() < 2 {
@@ -1581,8 +1610,13 @@ impl NarrativeCommandHandler {
                 .map_err(NarrativeError::Internal)?
                 .filter(|turn| {
                     turn.expected_turn_number == session.turn_number
+                        && turn
+                            .expected_source_chapter
+                            .map_or(session.source_context.is_none(), |chapter| {
+                                chapter == session.context().unlocked_through_chapter
+                            })
                         && world_state
-                            .validate_world_action(&turn.action, &session.entry_context)
+                            .validate_world_action(&turn.action, session.context())
                             .is_ok()
                 });
             let latest_world_state = self
@@ -1748,7 +1782,84 @@ impl NarrativeCommandHandler {
         )
     }
 
-    #[tracing::instrument(skip(self, action), fields(turn_id = %turn_id))]
+    pub async fn advance_world_source(
+        &self,
+        operation_id: Uuid,
+        user_id: Uuid,
+        novel_id: Uuid,
+        command: WorldSourceCommand,
+    ) -> NarrativeResult<WorldSourceAdvanceResult> {
+        command
+            .validate()
+            .map_err(|error| NarrativeError::Validation(error.to_string()))?;
+        self.owned_novel(novel_id, user_id).await?;
+        self.require_self_reader_identity(user_id, novel_id).await?;
+        let old = self
+            .world_state_repo
+            .find_source_operation(operation_id)
+            .await
+            .map_err(NarrativeError::Internal)?;
+        let operation = if let Some(old) = old {
+            if old.user_id != user_id || old.novel_id != novel_id || old.command != command {
+                return Err(NarrativeError::Conflict(
+                    "Source operation key conflicts".into(),
+                ));
+            }
+            old
+        } else {
+            let state = self
+                .world_state_repo
+                .get_or_create(user_id, novel_id)
+                .await
+                .map_err(NarrativeError::Internal)?;
+            self.require_world_source_visible(user_id, novel_id, &state)
+                .await?;
+            let session = state
+                .open_world()
+                .map_err(|error| NarrativeError::Internal(error.into()))?
+                .ok_or(NarrativeError::NotFound)?;
+            if session.turn_number != command.expected_turn_number
+                || session.context().unlocked_through_chapter != command.expected_source_chapter
+            {
+                return Err(NarrativeError::WorldSourceChanged);
+            }
+            self.require_source_chapter_visible(user_id, novel_id, command.target_chapter)
+                .await?;
+            let delta = self
+                .chapter_repo
+                .get_world_source_delta(
+                    novel_id,
+                    session.entry_context.checkpoint_chapter,
+                    user_id,
+                    session.entry_context.model_version,
+                    command.expected_source_chapter,
+                    command.target_chapter,
+                )
+                .await
+                .map_err(NarrativeError::Unavailable)?
+                .ok_or(NarrativeError::WorldSourceUnavailable)?;
+            self.require_self_reader_identity(user_id, novel_id).await?;
+            self.require_source_chapter_visible(user_id, novel_id, command.target_chapter)
+                .await?;
+            self.world_state_repo
+                .extend_world_source(operation_id, user_id, novel_id, &command, &delta)
+                .await
+                .map_err(map_world_state_write_error)?
+        };
+        // The operation is committed/replayed. A response fence failure cannot
+        // turn it into a fresh command or expose an old cached world snapshot.
+        let view = self
+            .get_open_world(user_id, novel_id)
+            .await
+            .map_err(|_| NarrativeError::WorldSourceOutcomeUnknown)?;
+        Ok(WorldSourceAdvanceResult {
+            operation_id,
+            previous_source_chapter: operation.command.expected_source_chapter,
+            source_chapter: operation.command.target_chapter,
+            view,
+        })
+    }
+
     pub async fn submit_world_turn(
         &self,
         turn_id: Uuid,
@@ -1757,7 +1868,28 @@ impl NarrativeCommandHandler {
         expected_turn_number: i64,
         action: WorldAction,
     ) -> NarrativeResult<WorldTurnResponse> {
-        if expected_turn_number < 0 {
+        self.submit_world_turn_with_source(
+            turn_id,
+            user_id,
+            novel_id,
+            expected_turn_number,
+            None,
+            action,
+        )
+        .await
+    }
+
+    #[tracing::instrument(skip(self, action), fields(turn_id = %turn_id))]
+    pub async fn submit_world_turn_with_source(
+        &self,
+        turn_id: Uuid,
+        user_id: Uuid,
+        novel_id: Uuid,
+        expected_turn_number: i64,
+        expected_source_chapter: Option<i32>,
+        action: WorldAction,
+    ) -> NarrativeResult<WorldTurnResponse> {
+        if expected_turn_number < 0 || expected_source_chapter.is_some_and(|chapter| chapter < 1) {
             return Err(NarrativeError::Validation(
                 "expected_turn_number must be non-negative".into(),
             ));
@@ -1781,8 +1913,13 @@ impl NarrativeCommandHandler {
             .ok_or(NarrativeError::NotFound)?;
         self.require_world_source_visible(user_id, novel_id, &world_state)
             .await?;
-        let request = serde_json::to_vec(&(expected_turn_number, &action))
-            .map_err(|error| NarrativeError::Internal(error.into()))?;
+        let request = if let Some(chapter) = expected_source_chapter {
+            serde_json::to_vec(&(2, expected_turn_number, chapter, &action))
+        } else {
+            // Exact legacy bytes keep pre-contract idempotency and dice stable.
+            serde_json::to_vec(&(expected_turn_number, &action))
+        }
+        .map_err(|error| NarrativeError::Internal(error.into()))?;
         let request_fingerprint: [u8; 32] = Sha256::digest(&request).into();
         let resolution = match player.rules.mode {
             ResolutionMode::Narrative => None,
@@ -1815,6 +1952,7 @@ impl NarrativeCommandHandler {
             action,
             resolution,
             expected_turn_number,
+            expected_source_chapter,
         };
         let (mut claim, attempt) = match self
             .world_turn_repo
@@ -1866,15 +2004,20 @@ impl NarrativeCommandHandler {
                 ))
             }
         };
-        if session.turn_number != claim.expected_turn_number {
+        if session.turn_number != claim.expected_turn_number
+            || claim
+                .expected_source_chapter
+                .map_or(session.source_context.is_some(), |chapter| {
+                    chapter != session.context().unlocked_through_chapter
+                })
+        {
             self.fail_world_turn(&claim, attempt, "state_snapshot_stale")
                 .await;
             return Err(NarrativeError::Conflict(
                 "World state advanced; reload before submitting this action".into(),
             ));
         }
-        if let Err(error) = world_state.validate_world_action(&claim.action, &session.entry_context)
-        {
+        if let Err(error) = world_state.validate_world_action(&claim.action, session.context()) {
             self.fail_world_turn(&claim, attempt, "validation_error")
                 .await;
             return Err(match error {
@@ -2041,7 +2184,7 @@ impl NarrativeCommandHandler {
         let transition = match parse_world_turn_transition_with_check(
             &raw,
             &claim.action,
-            &session.entry_context,
+            session.context(),
             &session,
             claim.resolution.as_ref(),
         ) {
@@ -2070,7 +2213,7 @@ impl NarrativeCommandHandler {
                 &claim,
                 attempt,
                 &transition,
-                &session.entry_context,
+                session.context(),
             ))
             .await
         {
@@ -3085,6 +3228,7 @@ mod timeline_tests {
     fn journal_entry(turn_number: i64, target_character_id: Uuid) -> WorldTurnJournalEntry {
         let now = Utc::now();
         WorldTurnJournalEntry {
+            expected_source_chapter: None,
             turn_id: Uuid::new_v4(),
             turn_number,
             memory_projection_status: MemoryProjectionStatus::Saved,

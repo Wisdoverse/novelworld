@@ -1,4 +1,4 @@
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::{prelude::FromRow, PgPool};
@@ -15,12 +15,6 @@ use crate::domain::{
 
 use super::ensure_choice_projection_consistent;
 
-const ACTIVE_TURN_INDEX: &str = "idx_world_turns_one_in_progress";
-
-fn is_active_turn_conflict(error: &sqlx::Error) -> bool {
-    matches!(error, sqlx::Error::Database(database) if database.constraint() == Some(ACTIVE_TURN_INDEX))
-}
-
 #[derive(Debug, FromRow)]
 struct WorldTurnRow {
     id: Uuid,
@@ -30,6 +24,7 @@ struct WorldTurnRow {
     action: serde_json::Value,
     resolution: Option<serde_json::Value>,
     expected_turn_number: i64,
+    expected_source_chapter: Option<i32>,
     status: String,
     attempt: i64,
     failure_code: Option<String>,
@@ -49,7 +44,8 @@ impl WorldTurnRow {
             && self.novel_id == claim.novel_id
             && self.request_fingerprint == claim.request_fingerprint
             && self.action()? == claim.action
-            && self.expected_turn_number == claim.expected_turn_number)
+            && self.expected_turn_number == claim.expected_turn_number
+            && self.expected_source_chapter == claim.expected_source_chapter)
     }
 
     fn resolution(&self) -> Result<Option<crate::domain::entities::game_rules::ActionCheck>> {
@@ -68,6 +64,7 @@ impl WorldTurnRow {
             action: self.action()?,
             resolution: self.resolution()?,
             expected_turn_number: self.expected_turn_number,
+            expected_source_chapter: self.expected_source_chapter,
         };
         validate_claim(&claim)?;
         Ok(claim)
@@ -87,6 +84,7 @@ struct RecoverableTurnRow {
     turn_id: Uuid,
     action: serde_json::Value,
     expected_turn_number: i64,
+    expected_source_chapter: Option<i32>,
 }
 
 impl TryFrom<RecoverableTurnRow> for RecoverableWorldTurn {
@@ -99,6 +97,7 @@ impl TryFrom<RecoverableTurnRow> for RecoverableWorldTurn {
             action: serde_json::from_value(row.action)
                 .context("recoverable world action is invalid")?,
             expected_turn_number: row.expected_turn_number,
+            expected_source_chapter: row.expected_source_chapter,
         })
     }
 }
@@ -118,6 +117,7 @@ impl From<WorldStateRow> for WorldState {
 pub(super) struct JournalRow {
     id: Uuid,
     turn_number: i64,
+    expected_source_chapter: Option<i32>,
     memory_projection_status: String,
     action: serde_json::Value,
     resolution: Option<serde_json::Value>,
@@ -133,6 +133,7 @@ impl TryFrom<JournalRow> for WorldTurnJournalEntry {
         Ok(Self {
             turn_id: row.id,
             turn_number: row.turn_number,
+            expected_source_chapter: row.expected_source_chapter,
             memory_projection_status: MemoryProjectionStatus::from_str(
                 &row.memory_projection_status,
             )
@@ -153,60 +154,6 @@ pub struct PgWorldTurnRepository {
 impl PgWorldTurnRepository {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
-    }
-
-    async fn supersede_expired_turn(&self, claim: &WorldTurnClaim) -> Result<bool> {
-        let result = sqlx::query(
-            r#"
-            UPDATE world_turns
-            SET status = 'failed', lease_expires_at = NULL,
-                failure_code = 'superseded', updated_at = NOW()
-            WHERE user_id = $1 AND novel_id = $2
-              AND status = 'in_progress' AND lease_expires_at <= NOW()
-            "#,
-        )
-        .bind(claim.user_id)
-        .bind(claim.novel_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(result.rows_affected() == 1)
-    }
-
-    async fn active_retry_after(&self, claim: &WorldTurnClaim) -> Result<u64> {
-        let seconds: Option<i64> = sqlx::query_scalar(
-            r#"
-            SELECT GREATEST(
-                       1,
-                       CEIL(EXTRACT(EPOCH FROM lease_expires_at - NOW()))::BIGINT
-                   )
-            FROM world_turns
-            WHERE user_id = $1 AND novel_id = $2 AND status = 'in_progress'
-            LIMIT 1
-            "#,
-        )
-        .bind(claim.user_id)
-        .bind(claim.novel_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(seconds.unwrap_or(1).max(1) as u64)
-    }
-
-    async fn load_turn(&self, id: Uuid) -> Result<Option<WorldTurnRow>> {
-        sqlx::query_as::<_, WorldTurnRow>(
-            r#"
-            SELECT id, user_id, novel_id, request_fingerprint, action, resolution,
-                   expected_turn_number, status, attempt, failure_code,
-                   memory_projection_status,
-                   COALESCE(lease_expires_at <= NOW(), FALSE) AS lease_expired,
-                   result
-            FROM world_turns
-            WHERE id = $1
-            "#,
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(Into::into)
     }
 
     fn completed_result(row: &WorldTurnRow) -> Result<WorldTurnResult> {
@@ -236,134 +183,136 @@ impl PgWorldTurnRepository {
 #[async_trait]
 impl WorldTurnRepository for PgWorldTurnRepository {
     async fn begin_turn(&self, claim: &WorldTurnClaim) -> Result<BeginWorldTurn> {
+        // One bounded database attempt. An uncertain acknowledgement is replayed
+        // with the same logical key; this adapter never retries a write.
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
         validate_claim(claim)?;
-        ensure_choice_projection_consistent(&self.pool, claim.user_id, claim.novel_id).await?;
-        for _ in 0..2 {
-            let action = serde_json::to_value(&claim.action)?;
-            let resolution = claim
-                .resolution
-                .as_ref()
-                .map(serde_json::to_value)
-                .transpose()?;
-            let inserted = sqlx::query(
-                r#"
-                INSERT INTO world_turns (
-                    id, user_id, novel_id, request_fingerprint, action, resolution,
-                    expected_turn_number, status, attempt, lease_expires_at
-                )
-                SELECT $1, $2, $3, $4, $5, $6, $7, 'in_progress', 1,
-                       NOW() + INTERVAL '2 minutes'
-                FROM world_states
-                WHERE user_id = $2 AND novel_id = $3
-                  AND jsonb_typeof(state #> '{open_world,turn_number}') = 'number'
-                  AND (state #>> '{open_world,turn_number}')::BIGINT = $7
-                ON CONFLICT (id) DO NOTHING
-                "#,
-            )
-            .bind(claim.id)
-            .bind(claim.user_id)
-            .bind(claim.novel_id)
-            .bind(&claim.request_fingerprint)
-            .bind(action)
-            .bind(resolution)
-            .bind(claim.expected_turn_number)
-            .execute(&self.pool)
-            .await;
-
-            match inserted {
-                Ok(result) if result.rows_affected() == 1 => {
-                    return Ok(BeginWorldTurn::Acquired {
-                        claim: Box::new(claim.clone()),
-                        attempt: 1,
-                    });
-                }
-                Ok(_) => {}
-                Err(error) if is_active_turn_conflict(&error) => {
-                    if !self.supersede_expired_turn(claim).await? {
-                        return Ok(BeginWorldTurn::InProgress {
-                            retry_after_seconds: self.active_retry_after(claim).await?,
-                        });
-                    }
-                    continue;
-                }
-                Err(error) => return Err(error.into()),
-            }
-
-            let Some(row) = self.load_turn(claim.id).await? else {
-                return Ok(BeginWorldTurn::Stale);
-            };
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SET LOCAL statement_timeout = '5s'").execute(&mut *tx).await?;
+        sqlx::query("SET LOCAL lock_timeout = '3s'").execute(&mut *tx).await?;
+        // All scope writers lock authority before journal, including completion
+        // and source admission. Supersession is part of this same transaction.
+        let state = sqlx::query_as::<_, WorldStateRow>(
+            "SELECT user_id, novel_id, state, updated_at FROM world_states \
+             WHERE user_id=$1 AND novel_id=$2 FOR UPDATE",
+        )
+        .bind(claim.user_id)
+        .bind(claim.novel_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(state) = state else {
+            return Ok(BeginWorldTurn::Stale);
+        };
+        ensure_choice_projection_consistent(&mut *tx, claim.user_id, claim.novel_id).await?;
+        let row = sqlx::query_as::<_, WorldTurnRow>(
+            "SELECT id,user_id,novel_id,request_fingerprint,action,resolution, \
+             expected_turn_number,expected_source_chapter,status,attempt,failure_code, \
+             memory_projection_status,COALESCE(lease_expires_at <= NOW(),FALSE) AS lease_expired,result \
+             FROM world_turns WHERE id=$1 FOR UPDATE",
+        ).bind(claim.id).fetch_optional(&mut *tx).await?;
+        if let Some(row) = &row {
             if !row.matches(claim)? {
                 return Ok(BeginWorldTurn::Conflict);
             }
-            let persisted_claim = row.claim()?;
             if row.status == "completed" {
-                let memory_projection =
-                    MemoryProjectionStatus::from_str(&row.memory_projection_status)
-                        .context("completed world turn has invalid memory projection status")?;
                 return Ok(BeginWorldTurn::Completed {
-                    result: Box::new(Self::completed_result(&row)?),
-                    memory_projection,
+                    result: Box::new(Self::completed_result(row)?),
+                    memory_projection: MemoryProjectionStatus::from_str(
+                        &row.memory_projection_status,
+                    )
+                    .context("invalid completed memory projection")?,
                 });
             }
-            if row.status == "in_progress" && !row.lease_expired {
-                return Ok(BeginWorldTurn::InProgress {
-                    retry_after_seconds: self.active_retry_after(claim).await?,
-                });
-            }
-            if row.status == "failed" && row.failure_code.as_deref() == Some("superseded") {
+            if row.failure_code.as_deref() == Some("superseded") {
                 return Ok(BeginWorldTurn::Conflict);
             }
-            if row.status != "failed" && row.status != "in_progress" {
-                bail!("unknown world turn status");
-            }
-
-            let reclaimed: Option<(i64,)> = match sqlx::query_as(
-                r#"
-                UPDATE world_turns AS turn
-                SET status = 'in_progress', attempt = attempt + 1,
-                    lease_expires_at = NOW() + INTERVAL '2 minutes',
-                    failure_code = NULL, updated_at = NOW()
-                WHERE turn.id = $1 AND turn.attempt = $2
-                  AND ((turn.status = 'failed' AND turn.failure_code <> 'superseded')
-                       OR (turn.status = 'in_progress' AND turn.lease_expires_at <= NOW()))
-                  AND EXISTS (
-                      SELECT 1 FROM world_states state
-                      WHERE state.user_id = turn.user_id
-                        AND state.novel_id = turn.novel_id
-                        AND jsonb_typeof(state.state #> '{open_world,turn_number}') = 'number'
-                        AND (state.state #>> '{open_world,turn_number}')::BIGINT = turn.expected_turn_number
-                  )
-                RETURNING turn.attempt
-                "#,
-            )
-            .bind(claim.id)
-            .bind(row.attempt)
-            .fetch_optional(&self.pool)
-            .await
-            {
-                Ok(value) => value,
-                Err(error) if is_active_turn_conflict(&error) => {
-                    if self.supersede_expired_turn(claim).await? {
-                        continue;
-                    }
-                    return Ok(BeginWorldTurn::InProgress {
-                        retry_after_seconds: self.active_retry_after(claim).await?,
-                    });
-                }
-                Err(error) => return Err(error.into()),
-            };
-            if let Some((attempt,)) = reclaimed {
-                return Ok(BeginWorldTurn::Acquired {
-                    claim: Box::new(persisted_claim),
-                    attempt,
-                });
-            }
+        }
+        let state = WorldState::from(state);
+        let session = state
+            .open_world()?
+            .context("world session has not started")?;
+        if session.turn_number != claim.expected_turn_number
+            || claim
+                .expected_source_chapter
+                .map_or(session.source_context.is_some(), |chapter| {
+                    chapter != session.context().unlocked_through_chapter
+                })
+        {
             return Ok(BeginWorldTurn::Stale);
         }
-
-        Ok(BeginWorldTurn::InProgress {
-            retry_after_seconds: self.active_retry_after(claim).await?,
+        let busy: Option<(i64,)> = sqlx::query_as(
+            "SELECT GREATEST(1,CEIL(EXTRACT(EPOCH FROM lease_expires_at-NOW()))::BIGINT) \
+             FROM world_turns WHERE user_id=$1 AND novel_id=$2 \
+             AND status='in_progress' AND lease_expires_at > NOW() LIMIT 1 FOR UPDATE",
+        )
+        .bind(claim.user_id)
+        .bind(claim.novel_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some((seconds,)) = busy {
+            return Ok(BeginWorldTurn::InProgress {
+                retry_after_seconds: seconds as u64,
+            });
+        }
+        let pending: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM world_turns WHERE user_id=$1 AND novel_id=$2 \
+             AND status='completed' AND memory_projection_status='pending')",
+        )
+        .bind(claim.user_id)
+        .bind(claim.novel_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if pending {
+            return Ok(BeginWorldTurn::InProgress {
+                retry_after_seconds: 30,
+            });
+        }
+        sqlx::query(
+            "UPDATE world_turns SET status='failed',lease_expires_at=NULL, \
+             failure_code='superseded',updated_at=NOW() WHERE user_id=$1 AND novel_id=$2 \
+             AND id<>$3 AND status='in_progress' AND lease_expires_at<=NOW()",
+        )
+        .bind(claim.user_id)
+        .bind(claim.novel_id)
+        .bind(claim.id)
+        .execute(&mut *tx)
+        .await?;
+        let (stored, attempt) = if let Some(row) = row {
+            ensure!(
+                row.status == "failed" || row.status == "in_progress",
+                "unknown world turn status"
+            );
+            let attempt: i64 = sqlx::query_scalar(
+                "UPDATE world_turns SET status='in_progress',attempt=attempt+1, \
+                 lease_expires_at=NOW()+INTERVAL '2 minutes',failure_code=NULL,updated_at=NOW() \
+                 WHERE id=$1 RETURNING attempt",
+            )
+            .bind(claim.id)
+            .fetch_one(&mut *tx)
+            .await?;
+            (row.claim()?, attempt)
+        } else {
+            let inserted = sqlx::query(
+                "INSERT INTO world_turns(id,user_id,novel_id,request_fingerprint,action,resolution, \
+                 expected_turn_number,expected_source_chapter,status,attempt,lease_expires_at) \
+                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,'in_progress',1,NOW()+INTERVAL '2 minutes') ON CONFLICT(id) DO NOTHING",
+            ).bind(claim.id).bind(claim.user_id).bind(claim.novel_id).bind(&claim.request_fingerprint)
+             .bind(serde_json::to_value(&claim.action)?)
+             .bind(claim.resolution.as_ref().map(serde_json::to_value).transpose()?)
+             .bind(claim.expected_turn_number).bind(claim.expected_source_chapter)
+             .execute(&mut *tx).await?;
+            if inserted.rows_affected() != 1 {
+                return Ok(BeginWorldTurn::Conflict);
+            }
+            (claim.clone(), 1)
+        };
+        tx.commit().await?;
+        Ok(BeginWorldTurn::Acquired {
+            claim: Box::new(stored),
+            attempt,
         })
+
+        }).await.context("world authority transaction deadline")?
     }
 
     async fn settle_adjudication(
@@ -409,7 +358,7 @@ impl WorldTurnRepository for PgWorldTurnRepository {
     ) -> Result<Option<RecoverableWorldTurn>> {
         sqlx::query_as::<_, RecoverableTurnRow>(
             r#"
-            SELECT id AS turn_id, action, expected_turn_number
+            SELECT id AS turn_id, action, expected_turn_number, expected_source_chapter
             FROM world_turns
             WHERE user_id = $1 AND novel_id = $2 AND status = 'in_progress'
             "#,
@@ -446,12 +395,12 @@ impl WorldTurnRepository for PgWorldTurnRepository {
                 WHERE turn.id = candidates.id
                 RETURNING turn.id, turn.user_id, turn.novel_id,
                           turn.request_fingerprint, turn.action, turn.resolution,
-                          turn.expected_turn_number, turn.status, turn.attempt,
+                          turn.expected_turn_number, turn.expected_source_chapter, turn.status, turn.attempt,
                           turn.failure_code, turn.memory_projection_status,
                           turn.result, candidates.scan_position
             )
             SELECT id, user_id, novel_id, request_fingerprint, action, resolution,
-                   expected_turn_number, status, attempt, failure_code,
+                   expected_turn_number, expected_source_chapter, status, attempt, failure_code,
                    memory_projection_status, FALSE AS lease_expired, result
             FROM rotated
             ORDER BY scan_position ASC, id ASC
@@ -496,17 +445,38 @@ impl WorldTurnRepository for PgWorldTurnRepository {
         transition: &crate::domain::entities::world_session::WorldTurnTransition,
         context: &WorldEntryContext,
     ) -> Result<WorldTurnResult> {
-        validate_claim(claim)?;
-        if let Some(check) = &claim.resolution {
-            check.validate_resolved()?;
-        }
-        context.validate()?;
-        let mut transaction = self.pool.begin().await?;
+        // One bounded database attempt. An uncertain acknowledgement is replayed
+        // with the same logical key; this adapter never retries a write.
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            validate_claim(claim)?;
+            if let Some(check) = &claim.resolution {
+                check.validate_resolved()?;
+            }
+            context.validate_source()?;
+            let mut transaction = self.pool.begin().await?;
+            sqlx::query("SET LOCAL statement_timeout = '5s'")
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query("SET LOCAL lock_timeout = '3s'")
+                .execute(&mut *transaction)
+                .await?;
 
-        let turn = sqlx::query_as::<_, WorldTurnRow>(
-            r#"
+            let state_row = sqlx::query_as::<_, WorldStateRow>(
+                r#"
+            SELECT user_id, novel_id, state, updated_at
+            FROM world_states
+            WHERE user_id = $1 AND novel_id = $2
+            FOR UPDATE
+            "#,
+            )
+            .bind(claim.user_id)
+            .bind(claim.novel_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+            let turn = sqlx::query_as::<_, WorldTurnRow>(
+                r#"
             SELECT id, user_id, novel_id, request_fingerprint, action, resolution,
-                   expected_turn_number, status, attempt, failure_code,
+                   expected_turn_number, expected_source_chapter, status, attempt, failure_code,
                    memory_projection_status,
                    COALESCE(lease_expires_at <= NOW(), FALSE) AS lease_expired,
                    result
@@ -514,96 +484,91 @@ impl WorldTurnRepository for PgWorldTurnRepository {
             WHERE id = $1
             FOR UPDATE
             "#,
-        )
-        .bind(claim.id)
-        .fetch_one(&mut *transaction)
-        .await?;
-        ensure!(turn.matches(claim)?, "world turn claim conflicts");
-        ensure!(
-            turn.resolution()? == claim.resolution,
-            "action check is not the frozen resolution"
-        );
-        ensure!(turn.status == "in_progress" && turn.attempt == attempt && !turn.lease_expired);
-
-        let state_row = sqlx::query_as::<_, WorldStateRow>(
-            r#"
-            SELECT user_id, novel_id, state, updated_at
-            FROM world_states
-            WHERE user_id = $1 AND novel_id = $2
-            FOR UPDATE
-            "#,
-        )
-        .bind(claim.user_id)
-        .bind(claim.novel_id)
-        .fetch_one(&mut *transaction)
-        .await?;
-        let mut world_state = WorldState::from(state_row);
-        ensure_choice_projection_consistent(&mut *transaction, claim.user_id, claim.novel_id)
+            )
+            .bind(claim.id)
+            .fetch_one(&mut *transaction)
             .await?;
-        let session = world_state
-            .open_world()?
-            .context("world session has not started")?;
-        ensure!(
-            session.turn_number == claim.expected_turn_number,
-            "stale world turn"
-        );
-        ensure!(
-            session.entry_context == *context,
-            "world entry context changed"
-        );
-        world_state.apply_world_turn_with_check(
-            claim.id,
-            &claim.action,
-            transition,
-            context,
-            claim.resolution.as_ref(),
-        )?;
+            ensure!(turn.matches(claim)?, "world turn claim conflicts");
+            ensure!(
+                turn.resolution()? == claim.resolution,
+                "action check is not the frozen resolution"
+            );
+            ensure!(turn.status == "in_progress" && turn.attempt == attempt && !turn.lease_expired);
 
-        world_state.updated_at = sqlx::query_scalar(
-            r#"
+            let mut world_state = WorldState::from(state_row);
+            ensure_choice_projection_consistent(&mut *transaction, claim.user_id, claim.novel_id)
+                .await?;
+            let session = world_state
+                .open_world()?
+                .context("world session has not started")?;
+            ensure!(
+                session.turn_number == claim.expected_turn_number,
+                "stale world turn"
+            );
+            ensure!(
+                claim
+                    .expected_source_chapter
+                    .map_or(session.source_context.is_none(), |chapter| chapter
+                        == session.context().unlocked_through_chapter),
+                "stale world source"
+            );
+            ensure!(session.context() == context, "world entry context changed");
+            world_state.apply_world_turn_with_check(
+                claim.id,
+                &claim.action,
+                transition,
+                context,
+                claim.resolution.as_ref(),
+            )?;
+
+            world_state.updated_at = sqlx::query_scalar(
+                r#"
             UPDATE world_states
             SET state = $3, updated_at = $4
             WHERE user_id = $1 AND novel_id = $2
             RETURNING updated_at
             "#,
-        )
-        .bind(claim.user_id)
-        .bind(claim.novel_id)
-        .bind(&world_state.state)
-        .bind(world_state.updated_at)
-        .fetch_one(&mut *transaction)
-        .await?;
-        let result = WorldTurnResult {
-            turn_id: claim.id,
-            action: claim.action.clone(),
-            resolution: claim.resolution.clone(),
-            transition: transition.clone(),
-            world_state,
-        };
-        let transition_json = serde_json::to_value(transition)?;
-        let result_json = serde_json::to_value(&result)?;
+            )
+            .bind(claim.user_id)
+            .bind(claim.novel_id)
+            .bind(&world_state.state)
+            .bind(world_state.updated_at)
+            .fetch_one(&mut *transaction)
+            .await?;
+            let result = WorldTurnResult {
+                turn_id: claim.id,
+                action: claim.action.clone(),
+                resolution: claim.resolution.clone(),
+                transition: transition.clone(),
+                world_state,
+            };
+            let transition_json = serde_json::to_value(transition)?;
+            let result_json = serde_json::to_value(&result)?;
 
-        let completed = sqlx::query(
-            r#"
+            let completed = sqlx::query(
+                r#"
             UPDATE world_turns
             SET status = 'completed', lease_expires_at = NULL,
                 transition = $3, result = $4, failure_code = NULL,
                 completed_at = NOW(), updated_at = NOW()
             WHERE id = $1 AND attempt = $2 AND status = 'in_progress'
             "#,
-        )
-        .bind(claim.id)
-        .bind(attempt)
-        .bind(transition_json)
-        .bind(result_json)
-        .execute(&mut *transaction)
-        .await?;
-        ensure!(
-            completed.rows_affected() == 1,
-            "world turn claim was fenced"
-        );
-        transaction.commit().await?;
-        Ok(result)
+            )
+            .bind(claim.id)
+            .bind(attempt)
+            .bind(transition_json)
+            .bind(result_json)
+            .execute(&mut *transaction)
+            .await?;
+            ensure!(
+                completed.rows_affected() == 1,
+                "world turn claim was fenced"
+            );
+            transaction.commit().await?;
+            Ok(result)
+        })
+        .await
+        .context("world authority transaction deadline")?
     }
 
     async fn fail_turn(&self, turn_id: Uuid, attempt: i64, failure_code: &str) -> Result<bool> {
@@ -675,10 +640,10 @@ impl WorldTurnRepository for PgWorldTurnRepository {
         ensure!((1..=100).contains(&limit), "journal limit must be 1-100");
         let rows = sqlx::query_as::<_, JournalRow>(
             r#"
-            SELECT id, turn_number, memory_projection_status,
+            SELECT id, turn_number, expected_source_chapter, memory_projection_status,
                    action, resolution, transition, created_at, completed_at
             FROM (
-                SELECT id, expected_turn_number + 1 AS turn_number, action, resolution,
+                SELECT id, expected_turn_number + 1 AS turn_number, expected_source_chapter, action, resolution,
                        transition, memory_projection_status, created_at, completed_at
                 FROM world_turns
                 WHERE user_id = $1 AND novel_id = $2 AND status = 'completed'
@@ -700,6 +665,9 @@ impl WorldTurnRepository for PgWorldTurnRepository {
 fn validate_claim(claim: &WorldTurnClaim) -> Result<()> {
     ensure!(!claim.id.is_nil() && !claim.user_id.is_nil() && !claim.novel_id.is_nil());
     ensure!(claim.request_fingerprint.len() == 32);
+    ensure!(claim
+        .expected_source_chapter
+        .is_none_or(|chapter| chapter >= 1));
     ensure!(claim.expected_turn_number >= 0);
     if let Some(resolution) = &claim.resolution {
         resolution.validate()?;

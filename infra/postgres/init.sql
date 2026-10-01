@@ -638,6 +638,7 @@ CREATE TABLE world_turns (
     action               JSONB NOT NULL,
     resolution           JSONB,
     expected_turn_number BIGINT NOT NULL,
+    expected_source_chapter INTEGER,
     status               VARCHAR(16) NOT NULL,
     attempt              BIGINT NOT NULL DEFAULT 1,
     lease_expires_at     TIMESTAMPTZ,
@@ -658,6 +659,7 @@ CREATE TABLE world_turns (
     CONSTRAINT world_turns_resolution_check
         CHECK (resolution IS NULL OR jsonb_typeof(resolution) = 'object'),
     CONSTRAINT world_turns_expected_turn_check CHECK (expected_turn_number >= 0),
+    CONSTRAINT world_turns_expected_source_check CHECK (expected_source_chapter IS NULL OR expected_source_chapter >= 1),
     CONSTRAINT world_turns_status_check
         CHECK (status IN ('in_progress', 'completed', 'failed')),
     CONSTRAINT world_turns_attempt_check CHECK (attempt >= 1),
@@ -1136,3 +1138,18 @@ CREATE TABLE IF NOT EXISTS public.world_series_contributions (
 );
 CREATE INDEX IF NOT EXISTS user_novel_world_series_pair_lookup
     ON public.user_novel_world_series (novel_id, user_id, series_id);
+-- Narrative source admission preserves sealed origins and serializes with turns.
+CREATE TABLE IF NOT EXISTS public.world_source_operations (
+    id UUID PRIMARY KEY,
+    user_id UUID NOT NULL,
+    novel_id UUID NOT NULL,
+    request_fingerprint BYTEA NOT NULL CHECK (pg_catalog.octet_length(request_fingerprint) = 32),
+    expected_turn_number BIGINT NOT NULL CHECK (expected_turn_number >= 0),
+    previous_source_chapter INTEGER NOT NULL CHECK (previous_source_chapter >= 1),
+    source_chapter INTEGER NOT NULL CHECK (source_chapter = previous_source_chapter + 1),
+    source_context JSONB NOT NULL CHECK (pg_catalog.jsonb_typeof(source_context) = 'object'),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.now(),
+    CONSTRAINT world_source_operations_world_state_fkey FOREIGN KEY (user_id, novel_id)
+        REFERENCES public.world_states(user_id, novel_id) ON DELETE CASCADE,
+    UNIQUE (user_id, novel_id, source_chapter)
+);
