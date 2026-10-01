@@ -148,6 +148,22 @@ RustFS 数据卷，管理员须单独安排对象存储备份与恢复，见
 
 ---
 
+## 同一世界剧情来源迁移 0036
+
+0036 新增 Narrative 所有的来源操作记录和可空的回合来源坐标，不重写旧世界
+JSON。首次明确进入下一幕后，session 使用 schema v2 和独立 active source context；
+原始 entry、角色、规则和旧回合保留。使用现有 managed release 流程停止旧
+Narrative，再发布客户端，停止并 drain Novel/Agent，执行 migration 后启动匹配版本。
+新 UI 只能配合支持来源扩展的 Novel/Narrative 使用。
+
+release 的五个 barriers 必须齐全。即使 0036 SQL 是 additive，也不能在世界扩展后
+恢复旧 Narrative reader；rollback/marked restore 拒绝跨过 0036。保留数据库与操作
+key，通过兼容版本向前恢复，不能删除 source_context、重置角色或手写 JSON 回退。
+读取进度后退时只隐藏后续派生内容，不能删除已接入来源。
+参见 [ADR 0013](docs/adr/0013-same-world-source-progression.md)。
+
+---
+
 ## Jenkins 服务端部署（可选）
 
 仓库根目录的 [`Jenkinsfile`](./Jenkinsfile) 用于 Linux 私有单节点服务器的镜像构建
@@ -157,16 +173,19 @@ Jenkins 前，应确认选用的受信任分支或提交已通过 CI。Jenkins �
 构建镜像，不启动、停止或迁移应用。只有管理员明确启用后，才会运行现有 `start.sh`
 并执行 `infra/ops/health-checks.sh`，以确认部署 readiness 和部署后健康状态。
 
-1. 在目标服务器配置独立的 Jenkins agent，标签为 `novelworld-server`。安装 Git、
-   Bash、OpenSSL、curl，以及带 BuildKit 的 Docker 和 Compose v2。agent 用户必须能访问
-   Docker daemon。Jenkins 主机无需安装 Rust、Node.js、pnpm 或 Python；镜像所需的
-   Rust、Node.js 与 pnpm 工具链由 Dockerfiles 在容器内提供。
+1. 在目标 Linux 部署服务器安装 Git、Bash、OpenSSL、curl，以及带 BuildKit 的
+   Docker 和 Compose v2。Jenkins agent 用户必须能访问该服务器的 Docker daemon。
+   Jenkins 主机无需安装 Rust、Node.js、pnpm 或 Python；镜像所需的 Rust、Node.js
+   与 pnpm 工具链由 Dockerfiles 在容器内提供。
 2. 创建 **Pipeline script from SCM** 作业，选择本仓库的受信任分支，Script Path 为
-   `Jenkinsfile`；需要 Jenkins Pipeline、Git 和 Timestamper 插件。该 agent 只运行
-   此安装的受信任作业，不运行外部 PR。部署前应确认所选受信任分支或提交已通过
-   GitHub Actions CI；Jenkins 只负责镜像构建和部署。
+   `Jenkinsfile`；需要 Jenkins Pipeline、Git 和 Timestamper 插件。此作业必须专用于
+   受信任分支，不运行外部 PR。由于流水线使用 `agent any`，所有符合条件的 executor
+   都必须位于同一 Linux 部署服务器、使用同一 Docker daemon，并能访问同一个持久目录。
+   部署前应确认所选受信任分支或提交已通过 GitHub Actions CI；Jenkins 只负责镜像
+   构建和部署。
 3. 设置 `SERVER_WORKSPACE` 为固定的持久化绝对路径，默认 `/srv/novelworld`，
-   并由 agent 用户持有。首次运行保持 `DEPLOY_SERVER=false`，只检出源码并构建镜像；
+   并由部署服务器上的 agent 用户持有；checkout、镜像构建和部署都在此目录内执行。
+   首次运行保持 `DEPLOY_SERVER=false`，只检出源码并构建镜像；
    此模式不启动、停止或迁移应用。不要启用 SCM 清理未跟踪文件，也不要
    在构建后清空该目录；`.env` 中的数据库密码和启动根必须跨构建保留。
 4. 在该目录私下配置 `.env`：可复制 `.env.example`，填写有效的
@@ -193,7 +212,7 @@ project。路径和 project 不随构建号改变；同一服务器安装只配�
 
 0030 改变 Novel Service 的模板写入契约，旧 Novel writer 与新 schema 不兼容。
 升级时先关闭入口写入并停止、排空 Novel 和 Narrative 两个服务；不能只停
-Narrative。候选 release 必须包含完整的 0021、0024、0025、0030 四个 required
+Narrative。候选 release 必须包含完整的 0021、0024、0025、0030、0036 五个 required
 schema barriers；应用完整候选 release 后再启动兼容版本，避免旧 writer 在迁移后写入。现有 v1 profiles 和 sessions 保留原绑定，继续按 v1 读取；
 不要重写为 v2。数据库只前向迁移，旧版 rollback 不受支持，故障恢复使用兼容
 release 前向修复。此要求是 rollout 契约，不代表该迁移已在生产执行。

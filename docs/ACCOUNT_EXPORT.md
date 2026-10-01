@@ -36,7 +36,7 @@ never create additional records.
 | user | `profile` |
 | novel | `novel`, `chapter`, `character`, `character_relationship`, `canon_story_model`, `reading_progress`, `world_series`, `novel_world_series`, `world_series_contribution` |
 | agent | `chat_message`, `character_memory` |
-| narrative | `narrative_node`, `user_choice`, `world_state`, `player_chapter`, `world_turn` |
+| narrative | `narrative_node`, `user_choice`, `world_state`, `player_chapter`, `world_turn`, `world_source_operation` |
 
 Profile fields include identity, email, display/avatar metadata, role,
 verification state, and account timestamps. Novel and character records retain
@@ -54,6 +54,10 @@ identity. Export does not turn those records into shared player state.
 rows (`series_id`, `enabled: true`, `created_at`). Missing rows mean disabled;
 withdrawal removes them. It contains no donor identities, support counts or
 cached community recommendations.
+
+`world_source_operation` exports the acting reader's exact operation identity,
+observed turn/source, admitted chapter and terminal metadata. It does not grant
+another reader access or replace the current world with a replay snapshot.
 
 Every narrative record's data carries a uniform source label so clients can
 programmatically separate canonical history, reader-created history, and

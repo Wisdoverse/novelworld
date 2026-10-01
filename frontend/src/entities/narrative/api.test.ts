@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { apiClient } from '@/shared/api/client';
 import {
+  advanceWorldSource,
   isNarrativeChoiceConflict,
   isWorldTurnOutcomeUnknown,
   narrativeKeys,
@@ -70,6 +71,15 @@ describe('narrative error recovery', () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     queryClient.clear();
+  });
+
+  it('sends the exact source command with the original idempotency key', async () => {
+    const command = { expected_turn_number: 19, expected_source_chapter: 1, target_chapter: 2 };
+    const post = vi.spyOn(apiClient, 'post').mockResolvedValue({ data: { source_chapter: 2 } });
+    await advanceWorldSource('novel', command, worldTurnRequest.idempotencyKey);
+    expect(post).toHaveBeenCalledWith('/narrative/novel/world/source', command, {
+      headers: { 'Idempotency-Key': worldTurnRequest.idempotencyKey }, timeout: 30_000,
+    });
   });
 
   it('recognizes the typed choice conflict envelope', () => {

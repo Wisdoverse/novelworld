@@ -1,3 +1,5 @@
+import { worldSourceStoragePrefix } from './worldSourceStorage';
+
 export const worldTurnPendingStoragePrefix = 'novelworld:pending-world-turn:';
 
 export function worldTurnPendingStorageKey(userId: string, novelId: string) {
@@ -16,15 +18,13 @@ export function removeWorldTurnPendingRequest(userId: string, novelId: string) {
 export function clearWorldTurnPendingRequests(keepUserId?: string) {
   if (typeof window === 'undefined') return;
   try {
-    const keepPrefix = keepUserId
-      ? `${worldTurnPendingStoragePrefix}${keepUserId}:`
-      : undefined;
+    const prefixes = [worldTurnPendingStoragePrefix, worldSourceStoragePrefix];
     const keys = Array.from(
       { length: window.sessionStorage.length },
       (_, index) => window.sessionStorage.key(index),
     ).filter((key): key is string => Boolean(
-      key?.startsWith(worldTurnPendingStoragePrefix)
-        && (!keepPrefix || !key.startsWith(keepPrefix)),
+      key && prefixes.some(prefix => key.startsWith(prefix)
+        && (!keepUserId || !key.startsWith(`${prefix}${keepUserId}:`))),
     ));
     keys.forEach(key => window.sessionStorage.removeItem(key));
   } catch {

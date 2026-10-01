@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react';
 import { suggestWorldAction } from '@/entities/narrative';
+import { effectiveWorldContext } from '@/shared/lib/worldSourceContext';
 import { localWorldCharacterIds } from '@/shared/lib/localWorldCharacters';
 import type { OpenWorldView, WorldAction, WorldActionKind } from '@/shared/types';
 
@@ -32,7 +33,7 @@ const availableActions: WorldActionKind[] = [
 ];
 
 function targets(view: OpenWorldView, kind: WorldActionKind) {
-  const { entry_context: context } = view.session;
+  const context = effectiveWorldContext(view.session);
   if (kind === 'travel') return context.locations;
   if (kind === 'converse' || kind === 'ally' || kind === 'oppose') {
     const local = localWorldCharacterIds(view);

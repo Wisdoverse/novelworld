@@ -37,7 +37,10 @@ use crate::domain::repositories::{
     SourceFileDeletionRepository, IMPORT_BUDGET_EXHAUSTED_MESSAGE, MAX_IMPORT_ATTEMPTS,
 };
 use crate::domain::services::{
-    canon_story_context::{build_character_canon_grounding, CharacterCanonGrounding},
+    canon_story_context::{
+        build_character_canon_grounding, build_world_source_delta, CharacterCanonGrounding,
+        WorldSourceDelta,
+    },
     canon_story_extractor, chapter_boundary_detector, game_rule_generator, node_detector,
 };
 use crate::domain::services::{
@@ -3558,6 +3561,122 @@ impl ReadingProgressHandler {
             .map_err(ReadingProgressError::Internal)
     }
 
+    pub async fn advance_chapter(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        chapter: i32,
+    ) -> std::result::Result<ReadingProgressRecord, ReadingProgressError> {
+        let novel = self.owned_novel(user_id, novel_id).await?;
+        self.get(user_id, novel_id).await?;
+        validate_chapter_number(chapter, novel.total_chapters)?;
+        if self
+            .chapter_repo
+            .find_by_number(novel_id, chapter)
+            .await
+            .map_err(ReadingProgressError::Internal)?
+            .is_none()
+        {
+            return Err(ReadingProgressError::Validation(
+                "chapter does not exist".into(),
+            ));
+        }
+        self.progress_repo
+            .advance_chapter(user_id, novel_id, chapter)
+            .await
+            .map_err(ReadingProgressError::Internal)?;
+        self.get(user_id, novel_id).await
+    }
+
+    pub async fn world_source_delta(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        checkpoint: i32,
+        model_version: i32,
+        from: i32,
+        target: i32,
+    ) -> std::result::Result<Option<WorldSourceDelta>, ReadingProgressError> {
+        let novel = self.owned_novel(user_id, novel_id).await?;
+        let before = self.get(user_id, novel_id).await?;
+        if model_version < 1
+            || checkpoint < 1
+            || from < checkpoint
+            || from.checked_add(1) != Some(target)
+        {
+            return Err(ReadingProgressError::Validation(
+                "invalid source range".into(),
+            ));
+        }
+        validate_chapter_number(target, novel.total_chapters)?;
+        if target > before.current_chapter {
+            return Err(ReadingProgressError::Validation(
+                "source chapter is not unlocked".into(),
+            ));
+        }
+        if self
+            .chapter_repo
+            .find_by_number(novel_id, target)
+            .await
+            .map_err(ReadingProgressError::Internal)?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        let Some(model) = self
+            .canon_repo
+            .find_version(novel_id, model_version)
+            .await
+            .map_err(ReadingProgressError::Internal)?
+        else {
+            return Ok(None);
+        };
+        let characters = self
+            .character_repo
+            .find_by_novel(novel_id)
+            .await
+            .map_err(ReadingProgressError::Internal)?;
+        let chapters = self
+            .source_chapters_for(
+                novel_id,
+                characters
+                    .iter()
+                    .filter_map(|character| character.first_appearance_chapter)
+                    .filter(|chapter| (1..=target).contains(chapter))
+                    .collect(),
+            )
+            .await?;
+        let known_names = known_character_names(&characters);
+        let proven = characters
+            .iter()
+            .filter(|character| {
+                character.novel_id == novel_id
+                    && character_name_is_canonical(&character.name)
+                    && canonical_name_is_source_proven(character, &known_names, &chapters)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let delta = build_world_source_delta(&model, &proven, checkpoint, from, target)
+            .map_err(|error| ReadingProgressError::Validation(error.to_string()))?;
+        if self
+            .chapter_repo
+            .find_by_number(novel_id, target)
+            .await
+            .map_err(ReadingProgressError::Internal)?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        // Final owner read follows all Canon, lexical-source and chapter-existence I/O.
+        let after = self.get(user_id, novel_id).await?;
+        if after.current_chapter < target {
+            return Err(ReadingProgressError::Validation(
+                "source chapter is no longer unlocked".into(),
+            ));
+        }
+        Ok(Some(delta))
+    }
+
     pub async fn search_lore(
         &self,
         user_id: Uuid,
@@ -4401,6 +4520,15 @@ mod reading_progress_handler_tests {
             unreachable!("unused test repository method")
         }
 
+        async fn advance_chapter(
+            &self,
+            _user_id: Uuid,
+            _novel_id: Uuid,
+            _chapter: i32,
+        ) -> Result<()> {
+            unreachable!("unused test repository method")
+        }
+
         async fn set_identity(
             &self,
             _user_id: Uuid,
@@ -4569,6 +4697,45 @@ mod reading_progress_handler_tests {
             },
             created_at: Utc::now(),
         }
+    }
+
+    #[tokio::test]
+    async fn world_source_projection_rechecks_progress_after_canon_and_lexical_source_io() {
+        let novel_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let character = persona_character(novel_id);
+        let (handler, _, _, progress_repo, canon_repo) = handler(
+            ready_novel(novel_id, 2),
+            &[user_id],
+            vec![character.clone()],
+            vec![
+                Chapter::new(novel_id, 1, None, "沈知微在庭院里。".into()),
+                Chapter::new(novel_id, 2, None, "后续剧情。".into()),
+            ],
+            vec![progress(user_id, novel_id, 2, None)],
+        );
+        *canon_repo.model.lock().unwrap() =
+            Some(canon_model(novel_id, character.id, Uuid::new_v4()));
+        let delta = handler
+            .world_source_delta(user_id, novel_id, 1, 1, 1, 2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(delta.characters[0].definition.id, character.id);
+        assert_eq!(delta.character_goals[0].definition.id, "goal");
+        progress_repo.set_script(
+            user_id,
+            vec![
+                progress(user_id, novel_id, 2, None),
+                progress(user_id, novel_id, 2, None),
+                progress(user_id, novel_id, 1, None),
+                progress(user_id, novel_id, 1, None),
+            ],
+        );
+        assert!(
+            matches!(handler.world_source_delta(user_id, novel_id, 1, 1, 1, 2).await,
+            Err(ReadingProgressError::Validation(message)) if message.contains("no longer unlocked"))
+        );
     }
 
     #[tokio::test]

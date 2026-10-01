@@ -223,7 +223,7 @@ the input bound. Choose narrative mode or wait for corrected canonical source.
 For v2, claim admission uses one five-second PostgreSQL transaction attempt;
 never retry an uncertain commit or dispatch provider work after unknown outcome.
 An ambiguous durable claim may remain and is not budget-refilled. Before applying
-0030, the release target must contain all four required barriers (0021/0024/0025/0030);
+0030, the release target must contain all five required barriers (0021/0024/0025/0030/0036);
 old Novel and Narrative writers must both be stopped and drained, then restarted
 as compatible versions. Template generation failure and dependency failures are
 separate cases. Migration 0031 adds series tables through the normal managed
@@ -316,3 +316,28 @@ Novel service. Shelf/account deletion and safe export include this owner state.
 See [ADR 0011](./adr/0011-confirmed-series-worlds.md) and
 [arbitrary-title matching #440](https://github.com/Wisdoverse/novelworld/issues/440) for
 source, test, CI, deployment and semantic-quality evidence limits.
+
+### Existing world cannot reach later source scenes
+
+Inspect the effective source chapter separately from the immutable entry
+checkpoint and current turn number. Successful ordinary actions do not unlock
+later source. The reader explicitly uses `进入下一幕`; admission is provider-free
+and then ordinary actions can consume newly eligible events. An empty safe
+Canon delta is not proof of newly plotted events.
+
+`world_source_busy` means a turn or its pending memory projection retains
+authority; finish exact turn recovery first. `world_source_changed` requires a
+fresh world view and a new deliberate action after resolving the old operation.
+`world_source_order_conflict` means new pinned extraction order would precede an
+already advanced event; do not reorder committed history.
+`world_source_unavailable` requires the exact pinned chapter/model or bounded
+safe definitions; do not substitute latest Canon or crop provenance.
+`world_source_outcome_unknown` retains the original key and command until
+progress is restored and exact replay returns current guarded truth. A Novel
+advance followed by Narrative failure is a partial two-owner outcome; never
+rewind progress or reset the world to hide it.
+
+Apply 0036 before enabling matching Novel/Narrative/frontend source admission.
+The managed release drain/marker sequence remains mandatory. Older Narrative
+cannot read extended schema-v2 worlds; recover by forward deployment. Source
+journal rows are included in export and cascade with their owning world.

@@ -155,8 +155,8 @@ impl WorldState {
         }
         if let Some(session) = self.open_world()? {
             high_water = Some(
-                high_water.map_or(session.entry_context.unlocked_through_chapter, |chapter| {
-                    chapter.max(session.entry_context.unlocked_through_chapter)
+                high_water.map_or(session.context().unlocked_through_chapter, |chapter| {
+                    chapter.max(session.context().unlocked_through_chapter)
                 }),
             );
         }
@@ -747,12 +747,12 @@ impl WorldState {
         let session = self.open_world()?.ok_or_else(|| {
             WorldStateError::InvalidWorldSession("world session has not started".into())
         })?;
-        if session.entry_context != *context {
+        if session.context() != context {
             return Err(WorldStateError::InvalidWorldSession(
                 "world entry context does not match the current session".into(),
             ));
         }
-        self.validate_world_entry_checkpoint(session.entry_context.checkpoint_chapter)?;
+        self.validate_world_entry_checkpoint(session.context().checkpoint_chapter)?;
         session
             .validate_action(action)
             .map_err(|error| WorldStateError::InvalidWorldSession(error.to_string()))?;
@@ -787,9 +787,9 @@ impl WorldState {
         let Some(session) = self.open_world()? else {
             return Ok(None);
         };
-        self.validate_world_entry_checkpoint(session.entry_context.checkpoint_chapter)?;
+        self.validate_world_entry_checkpoint(session.context().checkpoint_chapter)?;
         if !session
-            .entry_context
+            .context()
             .characters
             .iter()
             .any(|character| character.id == character_id)
@@ -822,9 +822,9 @@ impl WorldState {
             novel_id: self.novel_id,
             character_id,
             character_alive: !session.dead_character_ids.contains(&character_id),
-            canon_model_version: session.entry_context.model_version,
-            checkpoint_chapter: session.entry_context.checkpoint_chapter,
-            source_chapter_high_water: session.entry_context.unlocked_through_chapter,
+            canon_model_version: session.context().model_version,
+            checkpoint_chapter: session.context().checkpoint_chapter,
+            source_chapter_high_water: session.context().unlocked_through_chapter,
             turn_number: session.turn_number,
             world_time: session.world_time,
             player_id: player.id,
@@ -840,7 +840,7 @@ impl WorldState {
                     value
                 }),
             goals: session
-                .entry_context
+                .context()
                 .character_goals
                 .iter()
                 .filter(|goal| goal.character_id == character_id)

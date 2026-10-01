@@ -74,6 +74,18 @@ describe('WorldDashboard', () => {
     vi.useRealTimers();
   });
 
+  it('permits only the exact authoritative turn retry in recovery-only mode', async () => {
+    mocks.submit.mockResolvedValue(undefined);
+    const recovery = { turn_id: 'ed3f5292-9492-4537-afcf-468657f1d8c7', action: { kind: 'travel' as const, target_id: 'gate', intent: '恢复原旅程' }, expected_turn_number: 1, expected_source_chapter: 2 };
+    render(<WorldDashboard novelId="novel" view={{ ...view, recoverable_turn: recovery }} recoveryOnly />);
+    expect((screen.getByLabelText('行动') as HTMLSelectElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: '执行行动' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: '继续确认结果' }));
+    await waitFor(() => expect(mocks.submit).toHaveBeenCalledOnce());
+    expect(mocks.submit).toHaveBeenCalledWith({ action: recovery.action, idempotencyKey: recovery.turn_id, expectedTurnNumber: 1, expectedSourceChapter: 2 });
+    expect((screen.getByLabelText('行动') as HTMLSelectElement).disabled).toBe(true);
+  });
+
   it('links the current narrative to the next action without submitting automatically', () => {
     render(<WorldDashboard novelId="novel" view={view} />);
     expect(screen.getByRole('link', { name: '去选择行动' }).getAttribute('href')).toBe('#world-action-form');
@@ -478,6 +490,7 @@ describe('WorldDashboard', () => {
             ...view.journal[0],
             turn_id: originalRequest.idempotencyKey,
             turn_number: originalRequest.expectedTurnNumber + 1,
+            expected_source_chapter: originalRequest.expectedSourceChapter,
             memory_projection_status: 'pending',
             action: originalRequest.action,
           }],

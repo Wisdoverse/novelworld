@@ -356,6 +356,11 @@ remote_pre_game_rules=$(git -C "$fetch_seed" rev-parse HEAD)
 printf '%s\n' '-- remote-only versioned basic game-rule contract' \
   >"$fetch_seed/infra/postgres/migrations/0030_versioned_game_rule_templates.sql"
 git -C "$fetch_seed" add infra/postgres/migrations/0030_versioned_game_rule_templates.sql
+git -C "$fetch_seed" commit -m pre-world-source >/dev/null
+remote_pre_world_source=$(git -C "$fetch_seed" rev-parse HEAD)
+printf '%s\n' '-- remote-only same-world source contract' \
+  >"$fetch_seed/infra/postgres/migrations/0036_world_source_progression.sql"
+git -C "$fetch_seed" add infra/postgres/migrations/0036_world_source_progression.sql
 git -C "$fetch_seed" commit -m candidate >/dev/null
 remote_candidate=$(git -C "$fetch_seed" rev-parse HEAD)
 git -C "$fetch_seed" push origin main >/dev/null
@@ -397,6 +402,14 @@ expect_fail 'adopt requires migration 0030 after existing barriers' \
   'adopt target predates the versioned basic game-rule contract' \
   bash -c 'cd "$1"; RELEASE_STATE_DIR="$2" "$3" adopt "$4"' \
   _ "$fetch_client" "$pre_game_rules_state" "$release" "$pre_game_rules_manifest"
+
+pre_world_source_manifest=$(mktemp "$work/pre-world-source.XXXXXX")
+write_manifest "$pre_world_source_manifest" "$remote_pre_world_source"
+pre_world_source_state=$(new_state)
+expect_fail 'adopt requires migration 0036 after existing barriers' \
+  'adopt target predates the same-world source progression contract' \
+  bash -c 'cd "$1"; RELEASE_STATE_DIR="$2" "$3" adopt "$4"' \
+  _ "$fetch_client" "$pre_world_source_state" "$release" "$pre_world_source_manifest"
 
 pre_chat_world_manifest=$(mktemp "$work/pre-chat-world.XXXXXX")
 write_manifest "$pre_chat_world_manifest" "$remote_pre_chat_world"
@@ -493,7 +506,10 @@ printf '%s\n' '-- initial chat-world revision contract' \
   >"$roll_repo/infra/postgres/migrations/0025_chat_world_revision.sql"
 printf '%s\n' '-- initial versioned basic game-rule contract' \
   >"$roll_repo/infra/postgres/migrations/0030_versioned_game_rule_templates.sql"
+printf '%s\n' '-- initial same-world source contract' \
+  >"$roll_repo/infra/postgres/migrations/0036_world_source_progression.sql"
 git -C "$roll_repo" add \
+  infra/postgres/migrations/0036_world_source_progression.sql \
   infra/postgres/migrations/0021_world_turn_memory_projection.sql \
   infra/postgres/migrations/0024_persona_provenance.sql \
   infra/postgres/migrations/0025_chat_world_revision.sql \
@@ -1060,6 +1076,7 @@ infra/postgres/migrations/0021_world_turn_memory_projection.sql|0021|world-memor
 infra/postgres/migrations/0024_persona_provenance.sql|0024|persona-provenance
 infra/postgres/migrations/0025_chat_world_revision.sql|0025|chat-world revision
 infra/postgres/migrations/0030_versioned_game_rule_templates.sql|0030|versioned basic game-rule
+infra/postgres/migrations/0036_world_source_progression.sql|0036|same-world source progression
 EOF
 
 if git cat-file -e "HEAD:infra/postgres/migrations/0021_world_turn_memory_projection.sql" 2>/dev/null; then

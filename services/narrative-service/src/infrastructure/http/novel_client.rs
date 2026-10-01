@@ -17,6 +17,7 @@ use reqwest::Client;
 use std::time::Duration;
 use uuid::Uuid;
 
+use crate::domain::entities::world_source::WorldSourceDelta;
 use crate::domain::ports::ReadinessProbe;
 pub struct NovelServiceClient {
     client: Client,
@@ -357,6 +358,55 @@ impl ChapterReadRepository for NovelServiceClient {
         Ok(Some(context))
     }
 
+    async fn get_world_source_delta(
+        &self,
+        novel_id: Uuid,
+        checkpoint_chapter: i32,
+        user_id: Uuid,
+        model_version: i32,
+        from_source_chapter: i32,
+        target_chapter: i32,
+    ) -> Result<Option<WorldSourceDelta>> {
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/internal/novels/{}/world-entry/{}",
+            self.base_url, novel_id, checkpoint_chapter,
+        ))?;
+        url.query_pairs_mut().extend_pairs([
+            ("source_extension", "true".to_string()),
+            ("model_version", model_version.to_string()),
+            ("from_source_chapter", from_source_chapter.to_string()),
+            ("target_chapter", target_chapter.to_string()),
+        ]);
+        let response = self
+            .client
+            .get(url)
+            .header("X-User-Id", user_id.to_string())
+            .header("X-Internal-Service-Token", &self.internal_service_token)
+            .send()
+            .await?;
+        if matches!(
+            response.status(),
+            reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::UNPROCESSABLE_ENTITY
+        ) {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "Novel returned {} for world source",
+                response.status()
+            ));
+        }
+        let delta = response.json::<WorldSourceDelta>().await?;
+        if delta.model_version != model_version
+            || delta.checkpoint_chapter != checkpoint_chapter
+            || delta.from_source_chapter != from_source_chapter
+            || delta.target_chapter != target_chapter
+        {
+            return Err(anyhow!("Novel returned wrong world source scope"));
+        }
+        Ok(Some(delta))
+    }
+
     async fn request_game_rule_template(
         &self,
         novel_id: Uuid,
@@ -537,6 +587,70 @@ mod tests {
         collections::HashMap,
         sync::{Arc, Mutex},
     };
+
+    #[tokio::test]
+    async fn source_extension_read_pins_exact_bounds_scope_and_never_retries_failed_http() {
+        use axum::{extract::Query, http::StatusCode, routing::get, Json, Router};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let router = Router::new().route(
+            "/internal/novels/{id}/world-entry/{checkpoint}",
+            get(move |Query(query): Query<HashMap<String, String>>| {
+                let nth = observed.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    assert_eq!(
+                        query.get("source_extension").map(String::as_str),
+                        Some("true")
+                    );
+                    assert_eq!(query.get("model_version").map(String::as_str), Some("7"));
+                    assert_eq!(
+                        query.get("from_source_chapter").map(String::as_str),
+                        Some("2")
+                    );
+                    assert_eq!(query.get("target_chapter").map(String::as_str), Some("3"));
+                    let payload = serde_json::json!({"model_version":if nth==1 {8}else{7},
+                        "checkpoint_chapter":1,"from_source_chapter":2,"target_chapter":3,
+                        "characters":[],"locations":[],"factions":[],"hard_rules":[],
+                        "threads":[],"scheduled_events":[],"character_goals":[]});
+                    (
+                        if nth == 2 {
+                            StatusCode::SERVICE_UNAVAILABLE
+                        } else {
+                            StatusCode::OK
+                        },
+                        Json(payload),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = NovelServiceClient::new(
+            format!("http://{address}"),
+            "synthetic-internal-token".into(),
+        );
+        assert_eq!(
+            client
+                .get_world_source_delta(NOVEL_ID, 1, USER_ID, 7, 2, 3)
+                .await
+                .unwrap()
+                .unwrap()
+                .target_chapter,
+            3
+        );
+        assert!(client
+            .get_world_source_delta(NOVEL_ID, 1, USER_ID, 7, 2, 3)
+            .await
+            .is_err());
+        assert!(client
+            .get_world_source_delta(NOVEL_ID, 1, USER_ID, 7, 2, 3)
+            .await
+            .is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        server.abort();
+    }
 
     const USER_ID: Uuid = Uuid::from_u128(1);
     const NOVEL_ID: Uuid = Uuid::from_u128(2);

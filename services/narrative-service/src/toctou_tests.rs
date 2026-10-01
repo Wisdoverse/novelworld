@@ -18,6 +18,9 @@ use crate::domain::entities::game_rules::{
     GameAttribute, GameRuleTemplate, PlayerRuleProfile, ResolutionMode, BASIC_ACTION_DESCRIPTION,
     BASIC_GAME_RULE_PROMPT_VERSION, GAME_RULE_PROMPT_VERSION,
 };
+use crate::domain::entities::world_source::{
+    WorldSourceCommand, WorldSourceDelta, WorldSourceOperation,
+};
 use crate::domain::entities::{
     narrative_node::{NarrativeChoice, NarrativeNode, WorldState},
     player_entity::PlayerEntity,
@@ -620,6 +623,7 @@ async fn legacy_claims_are_not_reclassified_and_pending_cannot_enter_prompt_or_t
         .store(false, Ordering::SeqCst);
     *fixture.acquired_world_turn.lock().unwrap() = Some((
         WorldTurnClaim {
+            expected_source_chapter: None,
             id,
             user_id: fixture.user_id,
             novel_id: fixture.novel_id,
@@ -781,6 +785,7 @@ async fn prose_failure_replays_frozen_judgment_and_crashed_pending_falls_back_wi
             .with_pending_adjudication();
             *fixture.acquired_world_turn.lock().unwrap() = Some((
                 WorldTurnClaim {
+                    expected_source_chapter: None,
                     id,
                     user_id: fixture.user_id,
                     novel_id: fixture.novel_id,
@@ -969,6 +974,9 @@ struct ToctouFixture {
     character_list_entered: Notify,
     character_list_release: Notify,
     characters: Mutex<Vec<CharacterBrief>>,
+    source_operations: Mutex<Vec<WorldSourceOperation>>,
+    rewind_after_source_read: AtomicBool,
+    rewind_after_source_commit: AtomicBool,
     world_state: Mutex<WorldState>,
     other_world_state: Mutex<WorldState>,
     world_state_read_sequence: Mutex<VecDeque<WorldState>>,
@@ -1099,6 +1107,9 @@ impl ToctouFixture {
             character_list_entered: Notify::new(),
             character_list_release: Notify::new(),
             characters: Mutex::new(vec![]),
+            source_operations: Mutex::new(vec![]),
+            rewind_after_source_read: AtomicBool::new(false),
+            rewind_after_source_commit: AtomicBool::new(false),
             world_state: Mutex::new(world_state),
             other_world_state: Mutex::new(other_world_state),
             world_state_read_sequence: Mutex::new(VecDeque::new()),
@@ -1341,6 +1352,7 @@ impl ToctouFixture {
     fn journal_entry(turn_number: i64) -> WorldTurnJournalEntry {
         let now = Utc::now();
         WorldTurnJournalEntry {
+            expected_source_chapter: None,
             turn_id: Uuid::new_v4(),
             turn_number,
             memory_projection_status: MemoryProjectionStatus::Saved,
@@ -1518,6 +1530,43 @@ impl UserChoiceRepository for ToctouFixture {
 
 #[async_trait]
 impl WorldStateRepository for ToctouFixture {
+    async fn find_source_operation(&self, id: Uuid) -> Result<Option<WorldSourceOperation>> {
+        Ok(self
+            .source_operations
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|op| op.operation_id == id)
+            .cloned())
+    }
+    async fn extend_world_source(
+        &self,
+        id: Uuid,
+        user: Uuid,
+        novel: Uuid,
+        command: &WorldSourceCommand,
+        delta: &WorldSourceDelta,
+    ) -> Result<WorldSourceOperation> {
+        ensure!(user == self.user_id && novel == self.novel_id);
+        let mut state = self.world_state.lock().unwrap();
+        state.extend_world_source(command, delta)?;
+        let op = WorldSourceOperation {
+            operation_id: id,
+            user_id: user,
+            novel_id: novel,
+            command: command.clone(),
+            source_context: state.open_world()?.unwrap().context().clone(),
+        };
+        self.source_operations.lock().unwrap().push(op.clone());
+        if self
+            .rewind_after_source_commit
+            .swap(false, Ordering::SeqCst)
+        {
+            self.current_chapter
+                .store(self.source_chapter, Ordering::SeqCst);
+        }
+        Ok(op)
+    }
     async fn get_or_create(&self, user_id: Uuid, novel_id: Uuid) -> Result<WorldState> {
         ensure!(novel_id == self.novel_id);
         if user_id == self.user_id {
@@ -1652,6 +1701,36 @@ impl PlayerChapterRepository for ToctouFixture {
 
 #[async_trait]
 impl ChapterReadRepository for ToctouFixture {
+    async fn get_world_source_delta(
+        &self,
+        novel: Uuid,
+        checkpoint: i32,
+        user: Uuid,
+        version: i32,
+        from: i32,
+        target: i32,
+    ) -> Result<Option<WorldSourceDelta>> {
+        ensure!(
+            novel == self.novel_id && user == self.user_id && checkpoint == self.source_chapter
+        );
+        if self.rewind_after_source_read.swap(false, Ordering::SeqCst) {
+            self.current_chapter
+                .store(self.source_chapter, Ordering::SeqCst);
+        }
+        Ok(Some(WorldSourceDelta {
+            model_version: version,
+            checkpoint_chapter: checkpoint,
+            from_source_chapter: from,
+            target_chapter: target,
+            characters: vec![],
+            locations: vec![],
+            factions: vec![],
+            hard_rules: vec![],
+            threads: vec![],
+            scheduled_events: vec![],
+            character_goals: vec![],
+        }))
+    }
     async fn get_chapter(
         &self,
         novel_id: Uuid,
@@ -2761,6 +2840,7 @@ async fn character_context_v4_revision_changes_after_a_world_turn() {
         .unwrap();
     let now = Utc::now();
     fixture.journal.lock().unwrap().push(WorldTurnJournalEntry {
+        expected_source_chapter: None,
         turn_id: completed.turn_id,
         turn_number: 1,
         memory_projection_status: MemoryProjectionStatus::Saved,
@@ -3513,6 +3593,7 @@ async fn open_world_view_recovers_a_context_valid_active_turn_only() {
         .unwrap();
     let turn_id = Uuid::new_v4();
     let valid = RecoverableWorldTurn {
+        expected_source_chapter: None,
         turn_id,
         action: WorldAction {
             kind: WorldActionKind::PursueGoal,
@@ -3537,6 +3618,7 @@ async fn open_world_view_recovers_a_context_valid_active_turn_only() {
     assert!(recovery.contains_key("expected_turn_number"));
 
     *fixture.recoverable_turn.lock().unwrap() = Some(RecoverableWorldTurn {
+        expected_source_chapter: None,
         turn_id,
         action: WorldAction {
             kind: WorldActionKind::Travel,
@@ -4441,5 +4523,185 @@ async fn spawned_projection_recovery_runs_an_immediate_pass() {
     assert_eq!(fixture.agent_memory_calls.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.finish_projection_calls.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.complete_turn_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn source_progress_rewind_before_commit_changes_no_authority_and_makes_no_provider_call() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    let context = fixture.entry_context(2, None);
+    fixture
+        .world_state
+        .lock()
+        .unwrap()
+        .start_open_world(&context)
+        .unwrap();
+    let before = fixture.world_state.lock().unwrap().clone();
+    fixture.current_chapter.store(3, Ordering::SeqCst);
+    fixture
+        .rewind_after_source_read
+        .store(true, Ordering::SeqCst);
+    let error = fixture
+        .handler()
+        .advance_world_source(
+            Uuid::new_v4(),
+            fixture.user_id,
+            fixture.novel_id,
+            WorldSourceCommand {
+                expected_turn_number: 0,
+                expected_source_chapter: 2,
+                target_chapter: 3,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, NarrativeError::ReadingProgressBehindWorld));
+    assert_eq!(*fixture.world_state.lock().unwrap(), before);
+    assert!(fixture.source_operations.lock().unwrap().is_empty());
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn extended_source_chapter_skips_automatic_continuation_but_replays_stored_chapters() {
+    let fixture = Arc::new(ToctouFixture::at_chapter(true, 1));
+    fixture.available_chapters.lock().unwrap().push(2);
+    let node = fixture.nodes.lock().unwrap()[0].clone();
+    let consequence = "玩家在第一章作出了选择。";
+    let choice = UserChoiceRecord {
+        id: Uuid::new_v4(),
+        user_id: fixture.user_id,
+        novel_id: fixture.novel_id,
+        node_id: node.id,
+        chapter_number: 1,
+        choice_index: 0,
+        choice_text: node.choices[0].text.clone(),
+        consequence: consequence.into(),
+        transition: NarrativeTransition {
+            schema_version: 1,
+            prompt_version: "narrative-transition-v1".into(),
+            canon_model_version: 1,
+            canonical_checkpoint_chapter: 1,
+            rendered_narrative: consequence.into(),
+            events: vec![],
+            relationship_changes: vec![],
+            location_changes: vec![],
+            thread_changes: vec![],
+        },
+        created_at: Utc::now(),
+    };
+    *fixture.choice.lock().unwrap() = Some(choice.clone());
+    let entry = fixture.entry_context(1, None);
+    {
+        let mut state = fixture.world_state.lock().unwrap();
+        state
+            .record_choice(node.id, 1, 0, &choice.choice_text, consequence)
+            .unwrap();
+        state.start_open_world(&entry).unwrap();
+    }
+    fixture.current_chapter.store(2, Ordering::SeqCst);
+    let handler = fixture.handler();
+    let operation = handler
+        .advance_world_source(
+            Uuid::new_v4(),
+            fixture.user_id,
+            fixture.novel_id,
+            WorldSourceCommand {
+                expected_turn_number: 0,
+                expected_source_chapter: 1,
+                target_chapter: 2,
+            },
+        )
+        .await
+        .unwrap();
+    let before = fixture.world_state.lock().unwrap().clone();
+    let chapter = handler
+        .get_effective_chapter(fixture.user_id, fixture.novel_id, 2)
+        .await
+        .unwrap();
+    assert!(!chapter.generated);
+    assert_eq!(chapter.content, ToctouFixture::chapter().content);
+    assert!(fixture.player_chapter.lock().unwrap().is_none());
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(*fixture.world_state.lock().unwrap(), before);
+    assert_eq!(before.open_world().unwrap().unwrap().entry_context, entry);
+    assert_eq!(fixture.source_operations.lock().unwrap().len(), 1);
+    assert_eq!(
+        fixture.source_operations.lock().unwrap()[0].operation_id,
+        operation.operation_id
+    );
+    assert_eq!(
+        fixture.choice.lock().unwrap().as_ref().unwrap().id,
+        choice.id
+    );
+
+    let stored_content = "先前已保存的第二章分支内容。";
+    *fixture.player_chapter.lock().unwrap() = Some(PlayerChapter {
+        user_id: fixture.user_id,
+        novel_id: fixture.novel_id,
+        chapter_number: 2,
+        content: stored_content.into(),
+        origin: PlayerChapterOrigin::Continuation,
+        created_at: Utc::now(),
+    });
+    let replay = handler
+        .get_effective_chapter(fixture.user_id, fixture.novel_id, 2)
+        .await
+        .unwrap();
+    assert!(replay.generated);
+    assert_eq!(replay.content, stored_content);
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(*fixture.world_state.lock().unwrap(), before);
+    assert_eq!(fixture.source_operations.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn source_progress_postcommit_rewind_keeps_exact_key_and_replay_returns_guarded_current_view()
+{
+    let fixture = Arc::new(ToctouFixture::new(false));
+    let context = fixture.entry_context(2, None);
+    fixture
+        .world_state
+        .lock()
+        .unwrap()
+        .start_open_world(&context)
+        .unwrap();
+    fixture.current_chapter.store(3, Ordering::SeqCst);
+    fixture
+        .rewind_after_source_commit
+        .store(true, Ordering::SeqCst);
+    let key = Uuid::new_v4();
+    let command = WorldSourceCommand {
+        expected_turn_number: 0,
+        expected_source_chapter: 2,
+        target_chapter: 3,
+    };
+    let handler = fixture.handler();
+    assert!(matches!(
+        handler
+            .advance_world_source(key, fixture.user_id, fixture.novel_id, command.clone())
+            .await,
+        Err(NarrativeError::WorldSourceOutcomeUnknown)
+    ));
+    assert_eq!(fixture.source_operations.lock().unwrap().len(), 1);
+    fixture.current_chapter.store(3, Ordering::SeqCst);
+    let replay = handler
+        .advance_world_source(key, fixture.user_id, fixture.novel_id, command.clone())
+        .await
+        .unwrap();
+    assert_eq!(replay.operation_id, key);
+    assert_eq!(replay.source_chapter, 3);
+    assert_eq!(replay.view.session.entry_context, context);
+    assert_eq!(replay.view.session.context().unlocked_through_chapter, 3);
+    assert_eq!(fixture.source_operations.lock().unwrap().len(), 1);
+    let wrong = WorldSourceCommand {
+        expected_turn_number: 1,
+        ..command
+    };
+    assert!(matches!(
+        handler
+            .advance_world_source(key, fixture.user_id, fixture.novel_id, wrong)
+            .await,
+        Err(NarrativeError::Conflict(_))
+    ));
     assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
 }

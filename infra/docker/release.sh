@@ -29,6 +29,7 @@ schema_barrier_migrations=(
   infra/postgres/migrations/0024_persona_provenance.sql
   infra/postgres/migrations/0025_chat_world_revision.sql
   infra/postgres/migrations/0030_versioned_game_rule_templates.sql
+  infra/postgres/migrations/0036_world_source_progression.sql
 )
 minimal_bootstrap_adr=docs/adr/0002-minimal-bootstrap-and-deferred-runtime-configuration.md
 
@@ -377,6 +378,7 @@ require_schema_safe_rollback() {
         *0024_persona_provenance.sql) contract='persona-provenance' ;;
         *0025_chat_world_revision.sql) contract='chat-world revision' ;;
         *0030_versioned_game_rule_templates.sql) contract='versioned basic game-rule' ;;
+        *0036_world_source_progression.sql) contract='same-world source progression' ;;
       esac
       die "rollback target predates the $contract contract; use the separately approved database compatibility procedure"
     fi
@@ -392,6 +394,7 @@ require_schema_barriers_present() {
         *0024_persona_provenance.sql) contract='persona-provenance' ;;
         *0025_chat_world_revision.sql) contract='chat-world revision' ;;
         *0030_versioned_game_rule_templates.sql) contract='versioned basic game-rule' ;;
+        *0036_world_source_progression.sql) contract='same-world source progression' ;;
       esac
       die "$context predates the $contract contract"
     fi
@@ -668,7 +671,8 @@ deploy_manifest() {
   # The world-turn producer is already stopped. Stop the old public persona
   # reader and drain Agent before the 0021/0024/0025 semantic migrations. The 0030
   # game-rule key change also requires both old Novel and Narrative writers
-  # stopped; only matching versioned readers/writers may run after it. Once
+  # stopped; 0036 also requires matching source-context readers and action
+  # clients because extended sessions use schema v2. Once
   # all stops return, no old process can serve unprovenanced persona data or
   # create a chat claim without the exact world revision while these barriers
   # are crossed.

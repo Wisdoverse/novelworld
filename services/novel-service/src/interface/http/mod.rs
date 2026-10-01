@@ -152,6 +152,7 @@ fn routes() -> Router<AppState> {
         .route("/novels/{id}/status", get(get_parse_status))
         .route("/progress/{novel_id}", get(get_progress))
         .route("/progress/{novel_id}", put(update_progress))
+        .route("/progress/{novel_id}/advance", post(advance_progress))
         .route("/progress/{novel_id}/identity", put(set_identity))
         .route("/health", get(health))
         .route("/ready", get(ready))
@@ -698,10 +699,20 @@ async fn get_player_entry_context(
         .into_response()
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorldEntryQuery {
+    source_extension: Option<bool>,
+    model_version: Option<i32>,
+    from_source_chapter: Option<i32>,
+    target_chapter: Option<i32>,
+}
+
 async fn get_world_entry_context(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((novel_id, checkpoint)): Path<(Uuid, i32)>,
+    Query(query): Query<WorldEntryQuery>,
 ) -> Response {
     if !internal_request_authorized(&state, &headers) {
         return api_error(
@@ -713,6 +724,63 @@ async fn get_world_entry_context(
         Some(id) => id,
         None => return api_error(StatusCode::UNAUTHORIZED, "Missing user ID"),
     };
+    if query.source_extension.is_some()
+        || query.model_version.is_some()
+        || query.from_source_chapter.is_some()
+        || query.target_chapter.is_some()
+    {
+        let (Some(true), Some(version), Some(from), Some(target)) = (
+            query.source_extension,
+            query.model_version,
+            query.from_source_chapter,
+            query.target_chapter,
+        ) else {
+            return coded_api_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "Source extension fields must be supplied together",
+            );
+        };
+        if version < 1 || checkpoint < 1 || from < checkpoint || from.checked_add(1) != Some(target)
+        {
+            return coded_api_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "Invalid source extension range",
+            );
+        }
+        // One bounded read, without retries, matching the existing internal client deadline.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            state
+                .progress_handler
+                .world_source_delta(user_id, novel_id, checkpoint, version, from, target),
+        )
+        .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(_) => {
+                return api_error(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "World source read deadline exceeded",
+                )
+            }
+        };
+        return match result {
+            Ok(Some(delta)) => world_series::private((StatusCode::OK, Json(delta)).into_response()),
+            Ok(None) => coded_api_error(
+                StatusCode::NOT_FOUND,
+                "world_source_unavailable",
+                "Pinned Canon or source chapter not found",
+            ),
+            Err(ReadingProgressError::Validation(message)) => coded_api_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "world_source_unavailable",
+                message,
+            ),
+            Err(error) => progress_error_response(error),
+        };
+    }
     let progress = match state.progress_handler.get(user_id, novel_id).await {
         Ok(progress) => progress,
         Err(error) => return progress_error_response(error),
@@ -1933,6 +2001,38 @@ async fn update_progress(
         .await
     {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => progress_error_response(error),
+    }
+}
+
+async fn advance_progress(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(novel_id): Path<Uuid>,
+    Json(req): Json<UpdateProgressRequest>,
+) -> Response {
+    let Some(user_id) = extract_user_id(&headers) else {
+        return api_error(StatusCode::UNAUTHORIZED, "Missing user ID");
+    };
+    // No retries: an uncertain outcome is recovered by another monotonic desired-boundary call.
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        state
+            .progress_handler
+            .advance_chapter(user_id, novel_id, req.current_chapter),
+    )
+    .await;
+    let result = match result {
+        Ok(result) => result,
+        Err(_) => {
+            return api_error(
+                StatusCode::GATEWAY_TIMEOUT,
+                "Reading progress advance deadline exceeded",
+            )
+        }
+    };
+    match result {
+        Ok(progress) => world_series::private((StatusCode::OK, Json(progress)).into_response()),
         Err(error) => progress_error_response(error),
     }
 }

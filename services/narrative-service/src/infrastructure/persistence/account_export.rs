@@ -100,6 +100,7 @@ WITH relevant_nodes AS (
            jsonb_build_object(
                'id', t.id, 'user_id', t.user_id, 'novel_id', t.novel_id,
                'action', t.action, 'expected_turn_number', t.expected_turn_number,
+               'expected_source_chapter', t.expected_source_chapter,
                'resolution', t.resolution,
                'status', t.status, 'transition', t.transition, 'result', t.result,
                'memory_projection_status', t.memory_projection_status,
@@ -110,6 +111,15 @@ WITH relevant_nodes AS (
            )
     FROM world_turns t
     WHERE t.user_id = $1
+
+    UNION ALL
+    SELECT 60, o.novel_id::text, o.source_chapter::bigint, o.id::text, 'world_source_operation',
+           jsonb_build_object('id',o.id,'user_id',o.user_id,'novel_id',o.novel_id,
+               'expected_turn_number',o.expected_turn_number,
+               'previous_source_chapter',o.previous_source_chapter,'source_chapter',o.source_chapter,
+               'source_context',o.source_context,'created_at',o.created_at,'source','mixed')
+    FROM world_source_operations o
+    WHERE o.user_id = $1
 )
 SELECT kind, data
 FROM export_records

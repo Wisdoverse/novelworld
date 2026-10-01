@@ -5534,6 +5534,7 @@ async fn production_repositories_match_fresh_schema() {
         intent: "追查塔中的隐秘道路".into(),
     };
     let claim = WorldTurnClaim {
+        expected_source_chapter: None,
         id: Uuid::new_v4(),
         user_id,
         novel_id,
@@ -6625,6 +6626,7 @@ fn world_turn_claim(user_id: Uuid, novel_id: Uuid) -> WorldTurnClaim {
 
 fn world_turn_claim_at(user_id: Uuid, novel_id: Uuid, expected_turn_number: i64) -> WorldTurnClaim {
     WorldTurnClaim {
+        expected_source_chapter: None,
         id: Uuid::new_v4(),
         user_id,
         novel_id,
@@ -7190,6 +7192,7 @@ async fn world_turn_persists_and_exactly_replays_the_server_action_check() {
         adjudication: None,
     };
     let claim = WorldTurnClaim {
+        expected_source_chapter: None,
         resolution: Some(resolution.clone()),
         ..world_turn_claim(user_id, novel_id)
     };
@@ -7259,6 +7262,7 @@ async fn world_turn_adjudication_cas_freezes_exact_resolution_before_commit_and_
     let repo = PgWorldTurnRepository::new(pool.clone());
     let pending = pending_world_turn_check();
     let claim = WorldTurnClaim {
+        expected_source_chapter: None,
         resolution: Some(pending.clone()),
         ..world_turn_claim(user_id, novel_id)
     };
@@ -7367,6 +7371,7 @@ async fn world_turn_adjudication_reclaim_fences_old_attempt_and_preserves_frozen
     let repo = PgWorldTurnRepository::new(pool.clone());
     let pending = pending_world_turn_check();
     let claim = WorldTurnClaim {
+        expected_source_chapter: None,
         resolution: Some(pending.clone()),
         ..world_turn_claim(user_id, novel_id)
     };
@@ -7822,6 +7827,7 @@ async fn world_turn_multi_turn_journal_rebuilds_equivalent_state() {
 
     // Turn 2: travel to the harbor, learn its secret.
     let claim2 = WorldTurnClaim {
+        expected_source_chapter: None,
         id: Uuid::new_v4(),
         user_id,
         novel_id,
@@ -8727,6 +8733,572 @@ async fn community_series_consensus_preserves_consent_privacy_and_erasure() {
         .is_empty());
     for user in donors.into_iter().chain(std::iter::once(recipient)) {
         sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+}
+
+fn source_delta_at(
+    from: i32,
+) -> narrative_service::domain::entities::world_source::WorldSourceDelta {
+    use narrative_service::domain::entities::world_source::{SourceDefinition, WorldSourceDelta};
+    WorldSourceDelta {
+        model_version: 1,
+        checkpoint_chapter: 1,
+        from_source_chapter: from,
+        target_chapter: from + 1,
+        characters: vec![],
+        locations: vec![],
+        factions: vec![],
+        hard_rules: vec![],
+        threads: vec![],
+        character_goals: vec![],
+        scheduled_events: vec![SourceDefinition {
+            definition: ScheduledCanonEvent {
+                id: format!("new-source-event-{}", from + 1),
+                sequence: from,
+                summary: "援军抵达城外".into(),
+                character_ids: vec![],
+                location_ids: vec!["north-tower".into()],
+                faction_ids: vec![],
+                death_character_ids: vec![],
+                source_chapters: vec![from + 1],
+            },
+            source_chapters: vec![from + 1],
+        }],
+    }
+}
+
+#[tokio::test]
+async fn world_source_exact_replay_keeps_history_new_turn_uses_new_source_and_erasure_cascades() {
+    use narrative_service::domain::entities::world_source::{WorldSourceCommand, WorldSourceError};
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (user, novel, context) = seed_world_turn(&pool).await;
+    let states = PgWorldStateRepository::new(pool.clone());
+    let turns = PgWorldTurnRepository::new(pool.clone());
+    let old_claim = world_turn_claim(user, novel);
+    let attempt = world_turn_acquire(&turns, &old_claim).await;
+    let old_result = turns
+        .complete_turn(&old_claim, attempt, &world_turn_transition(), &context)
+        .await
+        .unwrap();
+    let command = WorldSourceCommand {
+        expected_turn_number: 1,
+        expected_source_chapter: 2,
+        target_chapter: 3,
+    };
+    let key = Uuid::new_v4();
+    let blocked = states
+        .extend_world_source(key, user, novel, &command, &source_delta_at(2))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        blocked.downcast_ref::<WorldSourceError>(),
+        Some(WorldSourceError::Busy)
+    ));
+    turns
+        .finish_memory_projection(old_claim.id, user, novel, MemoryProjectionStatus::Saved)
+        .await
+        .unwrap();
+    let before = states.get_or_create(user, novel).await.unwrap();
+    let op = states
+        .extend_world_source(key, user, novel, &command, &source_delta_at(2))
+        .await
+        .unwrap();
+    let current = states.get_or_create(user, novel).await.unwrap();
+    let session = current.open_world().unwrap().unwrap();
+    assert_eq!(session.entry_context, context);
+    assert_eq!(session.turn_number, 1);
+    assert_eq!(session.world_time, 1);
+    assert_eq!(session.context().unlocked_through_chapter, 3);
+    assert_eq!(
+        session.canonical_events[0],
+        before.open_world().unwrap().unwrap().canonical_events[0]
+    );
+    assert_eq!(
+        current.player_entity().unwrap(),
+        before.player_entity().unwrap()
+    );
+    assert!(matches!(
+        turns
+            .begin_turn(&world_turn_claim_at(user, novel, 1))
+            .await
+            .unwrap(),
+        BeginWorldTurn::Stale
+    ));
+    let mut modern = world_turn_claim_at(user, novel, 1);
+    modern.expected_source_chapter = Some(3);
+    let attempt = world_turn_acquire(&turns, &modern).await;
+    turns
+        .complete_turn(
+            &modern,
+            attempt,
+            &world_turn_transition(),
+            session.context(),
+        )
+        .await
+        .unwrap();
+    turns
+        .finish_memory_projection(modern.id, user, novel, MemoryProjectionStatus::Saved)
+        .await
+        .unwrap();
+    let after = states.get_or_create(user, novel).await.unwrap();
+    assert_eq!(
+        after.open_world().unwrap().unwrap().canonical_events[1].status,
+        CanonicalEventStatus::Occurred
+    );
+    let replay = states
+        .extend_world_source(key, user, novel, &command, &source_delta_at(2))
+        .await
+        .unwrap();
+    assert_eq!(replay, op);
+    assert_eq!(states.get_or_create(user, novel).await.unwrap(), after);
+    match turns.begin_turn(&old_claim).await.unwrap() {
+        BeginWorldTurn::Completed { result, .. } => assert_eq!(*result, old_result),
+        result => panic!("old completed claim lost replay: {result:?}"),
+    }
+    assert_eq!(
+        turns.journal(user, novel, 10).await.unwrap()[1].expected_source_chapter,
+        Some(3)
+    );
+    let wrong = WorldSourceCommand {
+        expected_turn_number: 2,
+        ..command
+    };
+    assert!(matches!(
+        states
+            .extend_world_source(key, user, novel, &wrong, &source_delta_at(2))
+            .await
+            .unwrap_err()
+            .downcast_ref::<WorldSourceError>(),
+        Some(WorldSourceError::KeyConflict)
+    ));
+    use futures::TryStreamExt;
+    use narrative_service::domain::ports::AccountExportPort;
+    let exported =
+        narrative_service::infrastructure::persistence::account_export::PgAccountExport::new(
+            pool.clone(),
+        )
+        .export_user(user)
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert!(exported
+        .iter()
+        .any(|record| record.kind == "world_source_operation"
+            && record.data["id"] == key.to_string()));
+    sqlx::query("DELETE FROM world_states WHERE user_id=$1 AND novel_id=$2")
+        .bind(user)
+        .bind(novel)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM world_source_operations WHERE id=$1")
+        .bind(key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    sqlx::query("DELETE FROM users WHERE id=$1")
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn world_source_and_fresh_reservation_serialize_without_deadlock_or_stale_provider_authority()
+{
+    use narrative_service::domain::entities::world_source::{WorldSourceCommand, WorldSourceError};
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    for source_first in [false, true] {
+        let (user, novel, _) = seed_world_turn(&pool).await;
+        let mut guard = pool.begin().await.unwrap();
+        sqlx::query("SELECT 1 FROM world_states WHERE user_id=$1 AND novel_id=$2 FOR UPDATE")
+            .bind(user)
+            .bind(novel)
+            .execute(&mut *guard)
+            .await
+            .unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let p = pool.clone();
+        let gate = barrier.clone();
+        let source = tokio::spawn(async move {
+            gate.wait().await;
+            if !source_first {
+                tokio::task::yield_now().await;
+            }
+            PgWorldStateRepository::new(p)
+                .extend_world_source(
+                    Uuid::new_v4(),
+                    user,
+                    novel,
+                    &WorldSourceCommand {
+                        expected_turn_number: 0,
+                        expected_source_chapter: 2,
+                        target_chapter: 3,
+                    },
+                    &source_delta_at(2),
+                )
+                .await
+        });
+        let p = pool.clone();
+        let gate = barrier.clone();
+        let turn = tokio::spawn(async move {
+            gate.wait().await;
+            if source_first {
+                tokio::task::yield_now().await;
+            }
+            PgWorldTurnRepository::new(p)
+                .begin_turn(&world_turn_claim(user, novel))
+                .await
+        });
+        barrier.wait().await;
+        guard.commit().await.unwrap();
+        let (source, turn) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            (source.await.unwrap(), turn.await.unwrap().unwrap())
+        })
+        .await
+        .expect("authority race must finish without deadlock/retry");
+        match source {
+            Ok(_) => assert!(matches!(turn, BeginWorldTurn::Stale)),
+            Err(error) => {
+                assert!(
+                    matches!(
+                        error.downcast_ref::<WorldSourceError>(),
+                        Some(WorldSourceError::Busy)
+                    ),
+                    "{error:?}"
+                );
+                assert!(matches!(turn, BeginWorldTurn::Acquired { .. }));
+            }
+        }
+        sqlx::query("DELETE FROM users WHERE id=$1")
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn world_source_completion_reclaim_and_supersession_share_world_first_lock_order() {
+    use narrative_service::domain::entities::world_source::{WorldSourceCommand, WorldSourceError};
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    for mode in ["complete", "reclaim", "supersede"] {
+        let (user, novel, context) = seed_world_turn(&pool).await;
+        let turns = PgWorldTurnRepository::new(pool.clone());
+        let claim = world_turn_claim(user, novel);
+        let attempt = world_turn_acquire(&turns, &claim).await;
+        if mode != "complete" {
+            sqlx::query(
+                "UPDATE world_turns SET lease_expires_at=NOW()-INTERVAL '1 second' WHERE id=$1",
+            )
+            .bind(claim.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let mut guard = pool.begin().await.unwrap();
+        sqlx::query("SELECT 1 FROM world_states WHERE user_id=$1 AND novel_id=$2 FOR UPDATE")
+            .bind(user)
+            .bind(novel)
+            .execute(&mut *guard)
+            .await
+            .unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let gate = barrier.clone();
+        let p = pool.clone();
+        let source = tokio::spawn(async move {
+            gate.wait().await;
+            PgWorldStateRepository::new(p)
+                .extend_world_source(
+                    Uuid::new_v4(),
+                    user,
+                    novel,
+                    &WorldSourceCommand {
+                        expected_turn_number: 0,
+                        expected_source_chapter: 2,
+                        target_chapter: 3,
+                    },
+                    &source_delta_at(2),
+                )
+                .await
+        });
+        let gate = barrier.clone();
+        let p = pool.clone();
+        let old_id = claim.id;
+        let writer = tokio::spawn(async move {
+            gate.wait().await;
+            let turns = PgWorldTurnRepository::new(p);
+            if mode == "complete" {
+                turns
+                    .complete_turn(&claim, attempt, &world_turn_transition(), &context)
+                    .await
+                    .unwrap();
+            } else {
+                let candidate = if mode == "reclaim" {
+                    claim
+                } else {
+                    world_turn_claim(user, novel)
+                };
+                assert!(matches!(
+                    turns.begin_turn(&candidate).await.unwrap(),
+                    BeginWorldTurn::Acquired { .. }
+                ));
+            }
+        });
+        barrier.wait().await;
+        guard.commit().await.unwrap();
+        let rejected = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            writer.await.unwrap();
+            source.await.unwrap().unwrap_err()
+        })
+        .await
+        .expect("mixed authority writers must not deadlock");
+        assert!(matches!(
+            rejected.downcast_ref::<WorldSourceError>(),
+            Some(WorldSourceError::Busy)
+        ));
+        if mode == "supersede" {
+            let failure: Option<String> =
+                sqlx::query_scalar("SELECT failure_code FROM world_turns WHERE id=$1")
+                    .bind(old_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(failure.as_deref(), Some("superseded"));
+        }
+        sqlx::query("DELETE FROM users WHERE id=$1")
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+}
+
+async fn source_race_pool(name: &str) -> PgPool {
+    PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(
+            db_url()
+                .parse::<sqlx::postgres::PgConnectOptions>()
+                .unwrap()
+                .application_name(name),
+        )
+        .await
+        .unwrap()
+}
+
+async fn source_wait_for_database_lock(observer: &PgPool, name: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let waiting:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name=$1 AND wait_event_type='Lock')")
+                .bind(name).fetch_one(observer).await.unwrap();
+            if waiting {break;}
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.expect("first writer must actually be waiting on the held world authority");
+}
+
+#[tokio::test]
+async fn world_source_deterministic_database_queue_proves_both_admission_reservation_orders() {
+    use narrative_service::domain::entities::world_source::{WorldSourceCommand, WorldSourceError};
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    for source_first in [true, false] {
+        let (user, novel, _) = seed_world_turn(&pool).await;
+        let source_name = format!("nw467-source-{}", Uuid::new_v4());
+        let turn_name = format!("nw467-turn-{}", Uuid::new_v4());
+        let source_pool = source_race_pool(&source_name).await;
+        let turn_pool = source_race_pool(&turn_name).await;
+        let mut guard = pool.begin().await.unwrap();
+        sqlx::query("SELECT 1 FROM world_states WHERE user_id=$1 AND novel_id=$2 FOR UPDATE")
+            .bind(user)
+            .bind(novel)
+            .execute(&mut *guard)
+            .await
+            .unwrap();
+        let source_gate = Arc::new(tokio::sync::Semaphore::new(usize::from(source_first)));
+        let turn_gate = Arc::new(tokio::sync::Semaphore::new(usize::from(!source_first)));
+        let gate = source_gate.clone();
+        let source = tokio::spawn(async move {
+            gate.acquire().await.unwrap().forget();
+            PgWorldStateRepository::new(source_pool)
+                .extend_world_source(
+                    Uuid::new_v4(),
+                    user,
+                    novel,
+                    &WorldSourceCommand {
+                        expected_turn_number: 0,
+                        expected_source_chapter: 2,
+                        target_chapter: 3,
+                    },
+                    &source_delta_at(2),
+                )
+                .await
+        });
+        let gate = turn_gate.clone();
+        let turn = tokio::spawn(async move {
+            gate.acquire().await.unwrap().forget();
+            PgWorldTurnRepository::new(turn_pool)
+                .begin_turn(&world_turn_claim(user, novel))
+                .await
+        });
+        source_wait_for_database_lock(
+            &pool,
+            if source_first {
+                &source_name
+            } else {
+                &turn_name
+            },
+        )
+        .await;
+        if source_first {
+            turn_gate.add_permits(1);
+        } else {
+            source_gate.add_permits(1);
+        }
+        source_wait_for_database_lock(
+            &pool,
+            if source_first {
+                &turn_name
+            } else {
+                &source_name
+            },
+        )
+        .await;
+        guard.commit().await.unwrap();
+        let (source, turn) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            (source.await.unwrap(), turn.await.unwrap().unwrap())
+        })
+        .await
+        .expect("both exact database queue orders must finish");
+        if source_first {
+            source.unwrap();
+            assert!(matches!(turn, BeginWorldTurn::Stale));
+        } else {
+            assert!(matches!(
+                source.unwrap_err().downcast_ref::<WorldSourceError>(),
+                Some(WorldSourceError::Busy)
+            ));
+            assert!(matches!(turn, BeginWorldTurn::Acquired { .. }));
+        }
+        sqlx::query("DELETE FROM users WHERE id=$1")
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn world_source_complete_and_expired_reclaim_database_queue_has_no_reverse_order_deadlock() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    for reclaim_first in [true, false] {
+        let (user, novel, context) = seed_world_turn(&pool).await;
+        let claim = world_turn_claim(user, novel);
+        let turns = PgWorldTurnRepository::new(pool.clone());
+        let attempt = world_turn_acquire(&turns, &claim).await;
+        sqlx::query(
+            "UPDATE world_turns SET lease_expires_at=NOW()-INTERVAL '1 second' WHERE id=$1",
+        )
+        .bind(claim.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let reclaim_name = format!("nw467-reclaim-{}", Uuid::new_v4());
+        let complete_name = format!("nw467-complete-{}", Uuid::new_v4());
+        let reclaim_pool = source_race_pool(&reclaim_name).await;
+        let complete_pool = source_race_pool(&complete_name).await;
+        let mut guard = pool.begin().await.unwrap();
+        sqlx::query("SELECT 1 FROM world_states WHERE user_id=$1 AND novel_id=$2 FOR UPDATE")
+            .bind(user)
+            .bind(novel)
+            .execute(&mut *guard)
+            .await
+            .unwrap();
+        let reclaim_gate = Arc::new(tokio::sync::Semaphore::new(usize::from(reclaim_first)));
+        let complete_gate = Arc::new(tokio::sync::Semaphore::new(usize::from(!reclaim_first)));
+        let gate = reclaim_gate.clone();
+        let old = claim.clone();
+        let reclaim = tokio::spawn(async move {
+            gate.acquire().await.unwrap().forget();
+            PgWorldTurnRepository::new(reclaim_pool)
+                .begin_turn(&old)
+                .await
+        });
+        let gate = complete_gate.clone();
+        let complete = tokio::spawn(async move {
+            gate.acquire().await.unwrap().forget();
+            PgWorldTurnRepository::new(complete_pool)
+                .complete_turn(&claim, attempt, &world_turn_transition(), &context)
+                .await
+        });
+        source_wait_for_database_lock(
+            &pool,
+            if reclaim_first {
+                &reclaim_name
+            } else {
+                &complete_name
+            },
+        )
+        .await;
+        if reclaim_first {
+            complete_gate.add_permits(1);
+        } else {
+            reclaim_gate.add_permits(1);
+        }
+        source_wait_for_database_lock(
+            &pool,
+            if reclaim_first {
+                &complete_name
+            } else {
+                &reclaim_name
+            },
+        )
+        .await;
+        guard.commit().await.unwrap();
+        let (reclaim, complete) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            (reclaim.await.unwrap().unwrap(), complete.await.unwrap())
+        })
+        .await
+        .expect("world-first completion/reclaim must not deadlock");
+        assert!(matches!(
+            reclaim,
+            BeginWorldTurn::Acquired { attempt: 2, .. }
+        ));
+        let error = complete.unwrap_err();
+        if let Some(sqlx::Error::Database(database)) = error.downcast_ref::<sqlx::Error>() {
+            assert_ne!(database.code().as_deref(), Some("40P01"));
+        }
+        assert!(
+            error.to_string().contains("turn.status ==")
+                || error.to_string().contains("turn.attempt =="),
+            "{error:?}"
+        );
+        sqlx::query("DELETE FROM users WHERE id=$1")
             .bind(user)
             .execute(&pool)
             .await
