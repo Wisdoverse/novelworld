@@ -289,8 +289,7 @@ impl WorldStateRepository for PgWorldStateRepository {
             "invalid source operation key"
         );
         let mut tx = self.pool.begin().await?;
-        sqlx::query("SET LOCAL statement_timeout = '5s'").execute(&mut *tx).await?;
-        sqlx::query("SET LOCAL lock_timeout = '3s'").execute(&mut *tx).await?;
+        sqlx::query("SELECT pg_catalog.set_config('statement_timeout', '5s', true), pg_catalog.set_config('lock_timeout', '3s', true)").execute(&mut *tx).await?;
         let row = sqlx::query_as::<_, WorldStateRow>(
             "SELECT user_id,novel_id,state,updated_at FROM world_states \
              WHERE user_id=$1 AND novel_id=$2 FOR UPDATE",

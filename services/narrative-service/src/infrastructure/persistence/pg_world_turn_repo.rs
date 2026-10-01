@@ -188,8 +188,7 @@ impl WorldTurnRepository for PgWorldTurnRepository {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
         validate_claim(claim)?;
         let mut tx = self.pool.begin().await?;
-        sqlx::query("SET LOCAL statement_timeout = '5s'").execute(&mut *tx).await?;
-        sqlx::query("SET LOCAL lock_timeout = '3s'").execute(&mut *tx).await?;
+        sqlx::query("SELECT pg_catalog.set_config('statement_timeout', '5s', true), pg_catalog.set_config('lock_timeout', '3s', true)").execute(&mut *tx).await?;
         // All scope writers lock authority before journal, including completion
         // and source admission. Supersession is part of this same transaction.
         let state = sqlx::query_as::<_, WorldStateRow>(
@@ -454,10 +453,7 @@ impl WorldTurnRepository for PgWorldTurnRepository {
             }
             context.validate_source()?;
             let mut transaction = self.pool.begin().await?;
-            sqlx::query("SET LOCAL statement_timeout = '5s'")
-                .execute(&mut *transaction)
-                .await?;
-            sqlx::query("SET LOCAL lock_timeout = '3s'")
+            sqlx::query("SELECT pg_catalog.set_config('statement_timeout', '5s', true), pg_catalog.set_config('lock_timeout', '3s', true)")
                 .execute(&mut *transaction)
                 .await?;
 
