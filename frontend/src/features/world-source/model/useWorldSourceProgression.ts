@@ -87,6 +87,18 @@ export function useWorldSourceProgression({ novelId, progress, routeChapter, nav
       if (code === 'world_source_changed' || code === 'world_source_order_conflict'
         || code === 'world_source_unavailable' || code === 'invalid_request'
         || code === 'idempotency_conflict') remember({ ...confirmed, terminal: true });
+      if (code === 'world_source_busy') {
+        // The unresolved turn can belong to a closed tab. Keep this source key,
+        // but recover the server's exact turn instead of waiting forever.
+        try {
+          const view = await fetchOpenWorld(novelId);
+          if (!mounted.current || currentScope.current !== scope) return;
+          queryClient.setQueryData(narrativeKeys.openWorld(novelId), view);
+          queryClient.setQueryData(narrativeKeys.worldState(novelId), view.world_state);
+        } catch {
+          // A failed guarded read keeps both mutations locked; retry can refetch.
+        }
+      }
       setError(code === 'world_source_busy'
         ? '上一行动还在确认，下一幕暂时不能接入。请稍后重试原请求。'
         : code === 'world_source_changed'

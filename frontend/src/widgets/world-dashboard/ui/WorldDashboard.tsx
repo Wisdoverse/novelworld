@@ -15,6 +15,7 @@ interface WorldDashboardProps {
   novelId: string;
   view: OpenWorldView;
   actionsDisabled?: boolean;
+  recoveryOnly?: boolean;
   actionsDisabledReason?: string;
   onRefresh?: () => void;
   onActionLockChange?: (locked: boolean) => void;
@@ -148,6 +149,7 @@ export function WorldDashboard({
   novelId,
   view,
   actionsDisabled = false,
+  recoveryOnly = false,
   actionsDisabledReason = '最新世界状态尚未恢复，暂时不能执行行动。请重新加载世界后再试。',
   onRefresh,
   onActionLockChange,
@@ -365,6 +367,7 @@ export function WorldDashboard({
             {onRefresh ? <button type="button" className="ml-2 underline" onClick={onRefresh}>重试</button> : null}
           </div>
         ) : null}
+        {recoveryOnly ? <p role="status" className="mb-3 text-sm text-[#59645f]">下一幕接入尚未确认，只能继续确认已经提交的原行动；新的行动仍已暂停。</p> : null}
         <p role="status" aria-label="世界行动状态" className="text-sm text-[#59645f]">
           {turn.isPending ? '正在确认世界行动，完成后才会开放下一回合；请等待本次结果。' : ''}
         </p>
@@ -383,7 +386,7 @@ export function WorldDashboard({
         <WorldActionForm
           view={view}
           isPending={turn.isPending}
-          isLocked={actionsDisabled || Boolean(pendingRequest)}
+          isLocked={recoveryOnly || actionsDisabled || Boolean(pendingRequest)}
           onSubmit={submit}
         />
       </div>

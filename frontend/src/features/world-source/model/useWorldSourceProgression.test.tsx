@@ -49,6 +49,20 @@ describe('world source authority recovery', () => {
     expect(api.source.mock.calls[1]).toEqual(api.source.mock.calls[0]);
     expect(navigate).toHaveBeenCalledWith('/reader/novel/3#latest-world-narrative');
   });
+  it('refreshes authoritative turn recovery after busy without discarding the source request', async () => {
+    api.source.mockRejectedValue({ isAxiosError: true, response: { status: 409, data: { error: { code: 'world_source_busy' } } } });
+    const recovery = { ...view, recoverable_turn: { turn_id: 'original', action: { kind: 'travel', target_id: 'tower', intent: 'continue original' }, expected_turn_number: 19, expected_source_chapter: 1 } };
+    api.world.mockResolvedValue(recovery);
+    const hook = renderHook(() => useWorldSourceProgression({ novelId: 'novel', progress, routeChapter: 1, navigate: vi.fn() }), { wrapper });
+    act(() => hook.result.current.start(view));
+    await waitFor(() => expect(hook.result.current.isPending).toBe(false));
+    expect(api.world).toHaveBeenCalledOnce();
+    expect(client.getQueryData(['narrative', 'novel', 'open-world'])).toEqual(recovery);
+    expect(hook.result.current.locked).toBe(true);
+    expect(readPendingWorldSource('user', 'novel')?.request).toEqual({ expected_turn_number: 19, expected_source_chapter: 1, target_chapter: 2 });
+    expect(readPendingWorldSource('user', 'novel')?.terminal).not.toBe(true);
+  });
+
   it('does not send the old principal source command after its mount disappears', async () => {
     const unlock = deferred(); api.advance.mockReturnValue(unlock.promise);
     const hook = renderHook(() => useWorldSourceProgression({ novelId: 'novel', progress, routeChapter: 1, navigate: vi.fn() }), { wrapper });

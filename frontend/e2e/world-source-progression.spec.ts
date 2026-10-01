@@ -1,9 +1,10 @@
 import { test, expect, type Page } from '@playwright/test';
+import type { WorldTurnJournalEntry } from '../src/shared/types';
 import { installStubs } from './stubs';
 import { OPEN_WORLD, PROGRESS, JOURNAL_ENTRY } from './fixtures';
 import { expectNoA11yViolations, settleAnimations } from './helpers';
 
-async function sourceWorld(page: Page, options: { loseResponse?: boolean; busy?: boolean; progressAfter?: number; failProgress?: boolean; stale?: boolean; end?: boolean; empty?: boolean; currentSourceAfter?: number; rewindAfter?: number } = {}) {
+async function sourceWorld(page: Page, options: { loseResponse?: boolean; busy?: boolean; progressAfter?: number; failProgress?: boolean; stale?: boolean; end?: boolean; empty?: boolean; currentSourceAfter?: number; rewindAfter?: number; busyRace?: 'in_progress' | 'pending_projection' } = {}) {
   await installStubs(page, { openWorld: true });
   let progress = options.end ? 5 : 1;
   let source = options.end ? 5 : 1;
@@ -13,11 +14,18 @@ async function sourceWorld(page: Page, options: { loseResponse?: boolean; busy?:
   const sourceCommands: Array<{ key: string | undefined; body: unknown }> = [];
   const absoluteWrites: number[] = [];
   const actions: Array<Record<string, unknown>> = [];
+  const actionKeys: Array<string | undefined> = [];
+  const sourceOperations = new Set<string>();
+  const recoveryKey = 'a733c562-44d3-4ae0-83b8-33a28c7be35a';
+  const recoveryAction = { kind: 'travel' as const, target_id: 'loc-2', intent: '确认上一窗口已经提交的旅程' };
+  let recoverable: { turn_id: string; action: typeof recoveryAction; expected_turn_number: number; expected_source_chapter: number } | undefined;
+  let pendingProjection = false;
+  let providerCalls = 0;
   const nextEvent = {
     id: 'next-scene-event', sequence: 2, summary: '第二幕的商船靠岸', character_ids: [],
     location_ids: ['loc-2'], faction_ids: [], death_character_ids: [], source_chapters: [2],
   };
-  let journal = structuredClone(OPEN_WORLD.journal);
+  let journal = structuredClone(OPEN_WORLD.journal) as WorldTurnJournalEntry[];
   const view = () => ({
     ...OPEN_WORLD,
     session: {
@@ -30,6 +38,7 @@ async function sourceWorld(page: Page, options: { loseResponse?: boolean; busy?:
       } } : {}),
     },
     journal,
+    recoverable_turn: recoverable,
   });
   await page.route('**/api/**', async route => {
     const req = route.request();
@@ -49,7 +58,17 @@ async function sourceWorld(page: Page, options: { loseResponse?: boolean; busy?:
       sourceRequests++;
       sourceCommands.push({ key: req.headers()['idempotency-key'], body: req.postDataJSON() });
       if (options.stale) { source = 2; return json({ error: { code: 'world_source_changed', message: 'stale' } }, 409); }
-      if (options.busy && sourceRequests === 1) return json({ error: { code: 'world_source_busy', message: 'busy' } }, 409);
+      if ((options.busy || options.busyRace) && sourceRequests === 1) {
+        if (options.busyRace === 'in_progress') recoverable = { turn_id: recoveryKey, action: recoveryAction, expected_turn_number: turn, expected_source_chapter: source };
+        if (options.busyRace === 'pending_projection') {
+          pendingProjection = true;
+          journal = [{ ...journal[0], turn_id: recoveryKey, action: recoveryAction, expected_source_chapter: source, memory_projection_status: 'pending' }] as typeof journal;
+        }
+        return json({ error: { code: 'world_source_busy', message: 'busy' } }, 409);
+      }
+      const key = req.headers()['idempotency-key'];
+      if (!sourceOperations.has(key) && req.postDataJSON().expected_turn_number !== turn) return json({ error: { code: 'world_source_changed', message: 'stale' } }, 409);
+      sourceOperations.add(key);
       source = options.currentSourceAfter ?? 2;
       if (options.rewindAfter && sourceRequests === 1) progress = options.rewindAfter;
       if (options.progressAfter) progress = options.progressAfter;
@@ -59,7 +78,15 @@ async function sourceWorld(page: Page, options: { loseResponse?: boolean; busy?:
     if (path === '/narrative/novel-1/world') return json(view());
     if (path === '/narrative/novel-1/world-state') return json(view().world_state);
     if (path === '/narrative/novel-1/world/turns') {
-      const command = req.postDataJSON(); actions.push(command);
+      const command = req.postDataJSON(); actions.push(command); actionKeys.push(req.headers()['idempotency-key']);
+      if (options.busyRace && req.headers()['idempotency-key'] !== recoveryKey) return json({ error: { code: 'turn_conflict', message: 'must replay the original turn' } }, 409);
+      if (pendingProjection) {
+        pendingProjection = false;
+        journal = journal.map(entry => ({ ...entry, memory_projection_status: 'saved' }));
+        return json({ ...journal[0], memory_projection_status: 'saved', world_state: view().world_state });
+      }
+      recoverable = undefined;
+      providerCalls++;
       if (command.expected_source_chapter !== source) return json({ error: { code: 'world_source_changed', message: 'stale' } }, 409);
       turn++;
       const entry = { ...JOURNAL_ENTRY, turn_id: req.headers()['idempotency-key'], turn_number: turn,
@@ -76,7 +103,8 @@ async function sourceWorld(page: Page, options: { loseResponse?: boolean; busy?:
     return route.fallback();
   });
   return {
-    sourceCommands, absoluteWrites, actions,
+    sourceCommands, absoluteWrites, actions, actionKeys, recoveryKey, recoveryAction,
+    get providerCalls() { return providerCalls; },
     get source() { return source; }, get progressReads() { return progressReads; },
     rewind() { progress = 1; }, staleAdvance() { source = 2; },
     allowProgress() { options.failProgress = false; },
@@ -93,6 +121,8 @@ test('same world admits chapter 2, routes to it and executes an event-backed ord
   await expect(page.getByText(/世界入场坐标 · 原著第 1 章/)).toBeVisible();
   await expect(page.getByText('长行动投影起点', { exact: false })).toBeVisible();
   expect(server.absoluteWrites).toEqual([]);
+  expect(server.actions).toEqual([]);
+  expect(server.providerCalls).toBe(0);
   expect(server.sourceCommands[0].body).toEqual({ expected_turn_number: 1, expected_source_chapter: 1, target_chapter: 2 });
   await page.getByRole('combobox', { name: '行动', exact: true }).selectOption('investigate');
   await page.getByRole('combobox', { name: '目标', exact: true }).selectOption('next-scene-event');
@@ -202,12 +232,58 @@ test('unknown source replay survives a later source and rewind by explicit origi
   await expect(page.getByRole('button', { name: '继续确认下一幕' })).toBeEnabled();
   await page.getByRole('button', { name: '继续阅读原文下一章' }).click();
   await expect(page).toHaveURL(/\/reader\/novel-1\/2$/);
-  await expect(page.locator('#latest-world-narrative')).toHaveCount(0);
+  await expect(page.getByRole('combobox', { name: '行动', exact: true }).and(page.locator(':enabled'))).toHaveCount(0);
   await page.getByRole('button', { name: '继续阅读原文下一章' }).click();
   await expect(page).toHaveURL(/\/reader\/novel-1\/3$/);
   await page.getByRole('button', { name: '继续确认下一幕' }).click();
   await expect(page).toHaveURL(/\/reader\/novel-1\/3#latest-world-narrative$/);
   await expect(page.getByRole('combobox', { name: '行动', exact: true })).toBeEnabled();
   expect(server.sourceCommands[1]).toEqual(server.sourceCommands[0]);
+  expect(server.absoluteWrites).toEqual([]);
+});
+
+
+test('busy source restores the exact pending memory turn while keeping new actions locked', async ({ page }) => {
+  const server = await sourceWorld(page, { busyRace: 'pending_projection' });
+  await page.goto('/reader/novel-1/1');
+  await page.getByRole('button', { name: '进入下一幕', exact: true }).click();
+  await expect(page.getByRole('button', { name: '继续确认结果', exact: true })).toBeEnabled();
+  await expect(page.getByRole('combobox', { name: '行动', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '执行行动', exact: true })).toBeDisabled();
+  await page.reload();
+  // Persisted progress is now 2 while the route/source remain 1. Only the
+  // authoritative original turn may recover through this deliberate mismatch.
+  await page.getByRole('button', { name: '继续确认结果', exact: true }).click();
+  await expect(page.getByRole('button', { name: '继续确认结果', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('combobox', { name: '行动', exact: true })).toBeDisabled();
+  await page.getByRole('button', { name: '继续确认下一幕' }).click();
+  await expect(page).toHaveURL(/\/reader\/novel-1\/2#latest-world-narrative$/);
+  expect(server.actions).toEqual([{ ...server.recoveryAction, expected_turn_number: 0, expected_source_chapter: 1 }]);
+  expect(server.actionKeys).toEqual([server.recoveryKey]);
+  expect(server.sourceCommands[1]).toEqual(server.sourceCommands[0]);
+  expect(server.providerCalls).toBe(0);
+  expect(server.absoluteWrites).toEqual([]);
+});
+
+test('in-progress original turn recovery preserves the source fence and requires a new deliberate admission', async ({ page }) => {
+  const server = await sourceWorld(page, { busyRace: 'in_progress' });
+  await page.goto('/reader/novel-1/1');
+  await page.getByRole('button', { name: '进入下一幕', exact: true }).click();
+  await expect(page.getByRole('button', { name: '继续确认结果', exact: true })).toBeEnabled();
+  await page.reload();
+  await page.getByRole('button', { name: '继续确认结果', exact: true }).click();
+  await expect(page.getByRole('button', { name: '继续确认结果', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '执行行动', exact: true })).toBeDisabled();
+  await page.getByRole('button', { name: '继续确认下一幕' }).click();
+  await expect(page.getByRole('button', { name: '恢复最新世界', exact: true })).toBeEnabled();
+  expect(server.sourceCommands[1]).toEqual(server.sourceCommands[0]);
+  await page.getByRole('button', { name: '恢复最新世界', exact: true }).click();
+  await page.getByRole('button', { name: '进入下一幕', exact: true }).click();
+  await expect(page.locator('li').filter({ hasText: '第二幕的商船靠岸' })).toBeVisible();
+  expect(server.actions).toEqual([{ ...server.recoveryAction, expected_turn_number: 1, expected_source_chapter: 1 }]);
+  expect(server.actionKeys).toEqual([server.recoveryKey]);
+  expect(server.sourceCommands[2].key).not.toBe(server.sourceCommands[0].key);
+  expect(server.sourceCommands[2].body).toEqual({ expected_turn_number: 2, expected_source_chapter: 1, target_chapter: 2 });
+  expect(server.providerCalls).toBe(1);
   expect(server.absoluteWrites).toEqual([]);
 });

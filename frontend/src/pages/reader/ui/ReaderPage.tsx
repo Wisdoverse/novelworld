@@ -183,6 +183,10 @@ export function ReaderPage() {
       ? { chapter_number: currentChapter, content: chapter.content, generated: false }
       : undefined;
   const openWorld = isSelfMode && derivedTimelineVisible ? cachedOpenWorld : null;
+  const sourceRecoveryWorld = isSelfMode && sourceProgression.locked
+    && worldSourceVisible && !isProgressSaving && !isProgressError
+    ? cachedOpenWorld : null;
+  const dashboardWorld = openWorld ?? sourceRecoveryWorld;
   const [worldActionLocked, setWorldActionLocked] = useState(false);
   const startOpenWorld = useStartOpenWorld(novelId || '');
   const entryLocation = playerEntry?.locations.find(
@@ -614,11 +618,12 @@ export function ReaderPage() {
             {sourceProgression.error ? <p id="world-source-error" tabIndex={-1} role="alert" className="mt-3 text-sm text-[#b3261e]">{sourceProgression.error}</p> : null}
           </section>
         ) : null}
-        {openWorld ? (
+        {dashboardWorld ? (
           <WorldDashboard
             novelId={novelId || ''}
-            view={openWorld}
-            actionsDisabled={isOpenWorldError || timelineMutationLocked}
+            view={dashboardWorld}
+            recoveryOnly={Boolean(sourceRecoveryWorld)}
+            actionsDisabled={isOpenWorldError || sourceProgression.isPending || (!sourceRecoveryWorld && timelineMutationLocked)}
             actionsDisabledReason={isOpenWorldError
               ? '开放世界加载失败。上方显示的是上次保存的经过；为避免基于旧状态行动，已暂停新的行动。请重试。'
               : '阅读进度尚未保存，暂时不能执行行动。请等待进度保存后再试。'}
