@@ -2945,6 +2945,26 @@ impl NarrativeCommandHandler {
             });
         }
 
+        let world_state = self
+            .world_state_repo
+            .get_or_create(user_id, novel_id)
+            .await
+            .map_err(NarrativeError::Internal)?;
+        if world_state
+            .open_world()
+            .map_err(|error| NarrativeError::Internal(error.into()))?
+            .is_some_and(|session| session.source_context.is_some())
+        {
+            // Source admission opens canonical chapters without generating a
+            // branch continuation. Already committed chapters replay above.
+            return Ok(ResolvedChapter {
+                content: canonical.content.clone(),
+                canonical,
+                generated: false,
+                origin: None,
+            });
+        }
+
         let committed_choices = self
             .choice_repo
             .find_by_novel(user_id, novel_id)

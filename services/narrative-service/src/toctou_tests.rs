@@ -4562,6 +4562,99 @@ async fn source_progress_rewind_before_commit_changes_no_authority_and_makes_no_
 }
 
 #[tokio::test]
+async fn extended_source_chapter_skips_automatic_continuation_but_replays_stored_chapters() {
+    let fixture = Arc::new(ToctouFixture::at_chapter(true, 1));
+    fixture.available_chapters.lock().unwrap().push(2);
+    let node = fixture.nodes.lock().unwrap()[0].clone();
+    let consequence = "玩家在第一章作出了选择。";
+    let choice = UserChoiceRecord {
+        id: Uuid::new_v4(),
+        user_id: fixture.user_id,
+        novel_id: fixture.novel_id,
+        node_id: node.id,
+        chapter_number: 1,
+        choice_index: 0,
+        choice_text: node.choices[0].text.clone(),
+        consequence: consequence.into(),
+        transition: NarrativeTransition {
+            schema_version: 1,
+            prompt_version: "narrative-transition-v1".into(),
+            canon_model_version: 1,
+            canonical_checkpoint_chapter: 1,
+            rendered_narrative: consequence.into(),
+            events: vec![],
+            relationship_changes: vec![],
+            location_changes: vec![],
+            thread_changes: vec![],
+        },
+        created_at: Utc::now(),
+    };
+    *fixture.choice.lock().unwrap() = Some(choice.clone());
+    let entry = fixture.entry_context(1, None);
+    {
+        let mut state = fixture.world_state.lock().unwrap();
+        state
+            .record_choice(node.id, 1, 0, &choice.choice_text, consequence)
+            .unwrap();
+        state.start_open_world(&entry).unwrap();
+    }
+    fixture.current_chapter.store(2, Ordering::SeqCst);
+    let handler = fixture.handler();
+    let operation = handler
+        .advance_world_source(
+            Uuid::new_v4(),
+            fixture.user_id,
+            fixture.novel_id,
+            WorldSourceCommand {
+                expected_turn_number: 0,
+                expected_source_chapter: 1,
+                target_chapter: 2,
+            },
+        )
+        .await
+        .unwrap();
+    let before = fixture.world_state.lock().unwrap().clone();
+    let chapter = handler
+        .get_effective_chapter(fixture.user_id, fixture.novel_id, 2)
+        .await
+        .unwrap();
+    assert!(!chapter.generated);
+    assert_eq!(chapter.content, ToctouFixture::chapter().content);
+    assert!(fixture.player_chapter.lock().unwrap().is_none());
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(*fixture.world_state.lock().unwrap(), before);
+    assert_eq!(before.open_world().unwrap().unwrap().entry_context, entry);
+    assert_eq!(fixture.source_operations.lock().unwrap().len(), 1);
+    assert_eq!(
+        fixture.source_operations.lock().unwrap()[0].operation_id,
+        operation.operation_id
+    );
+    assert_eq!(
+        fixture.choice.lock().unwrap().as_ref().unwrap().id,
+        choice.id
+    );
+
+    let stored_content = "先前已保存的第二章分支内容。";
+    *fixture.player_chapter.lock().unwrap() = Some(PlayerChapter {
+        user_id: fixture.user_id,
+        novel_id: fixture.novel_id,
+        chapter_number: 2,
+        content: stored_content.into(),
+        origin: PlayerChapterOrigin::Continuation,
+        created_at: Utc::now(),
+    });
+    let replay = handler
+        .get_effective_chapter(fixture.user_id, fixture.novel_id, 2)
+        .await
+        .unwrap();
+    assert!(replay.generated);
+    assert_eq!(replay.content, stored_content);
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(*fixture.world_state.lock().unwrap(), before);
+    assert_eq!(fixture.source_operations.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn source_progress_postcommit_rewind_keeps_exact_key_and_replay_returns_guarded_current_view()
 {
     let fixture = Arc::new(ToctouFixture::new(false));
