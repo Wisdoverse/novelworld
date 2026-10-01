@@ -234,18 +234,22 @@ chapter_hash=$(printf '%s' "$chapter_two" | sha256sum | cut -d' ' -f1)
 pause
 "${curl_cmd[@]}" --output /dev/null "${auth[@]}" -X PUT \
   -H 'Content-Type: application/json' --data '{"current_chapter":1}' "$api/progress/$novel_id"
+pause
 source_origin=$("${curl_cmd[@]}" "${auth[@]}" -X POST "$api/narrative/$novel_id/world")
 python3 -c 'import json,sys; v=json.load(sys.stdin); assert v["session"]["entry_context"]["unlocked_through_chapter"]==1; assert "source_context" not in v["session"]; assert v["session"]["canonical_events"]==[]; assert v["session"]["turn_number"]==0' <<<"$source_origin"
 source_calls_before=$("${curl_cmd[@]}" "$stub/__control__/stats" | json_get "value['calls'].get('world_turn', 0)")
+pause
 "${curl_cmd[@]}" --output /dev/null "${auth[@]}" -H 'Content-Type: application/json' \
   --data '{"current_chapter":2}' "$api/progress/$novel_id/advance"
 source_operation_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
 source_command='{"expected_turn_number":0,"expected_source_chapter":1,"target_chapter":2}'
+pause
 source_admitted=$("${curl_cmd[@]}" "${auth[@]}" -H 'Content-Type: application/json' \
   -H "Idempotency-Key: $source_operation_id" --data "$source_command" "$api/narrative/$novel_id/world/source")
 python3 -c 'import json,sys; r=json.load(sys.stdin); v=r["view"]; assert r["previous_source_chapter"]==1 and r["source_chapter"]==2; assert v["session"]["schema_version"]==2; assert v["session"]["entry_context"]["unlocked_through_chapter"]==1; assert v["session"]["source_context"]["unlocked_through_chapter"]==2; assert v["session"]["turn_number"]==0 and v["session"]["world_time"]==0; assert v["journal"]==[]; print(json.dumps(v))' <<<"$source_admitted" >"$account_export_file"
 open_world=$(cat "$account_export_file")
 [ "$("${curl_cmd[@]}" "$stub/__control__/stats" | json_get "value['calls'].get('world_turn', 0)")" = "$source_calls_before" ]
+pause
 source_replayed=$("${curl_cmd[@]}" "${auth[@]}" -H 'Content-Type: application/json' \
   -H "Idempotency-Key: $source_operation_id" --data "$source_command" "$api/narrative/$novel_id/world/source")
 [ "$(json_get 'value["operation_id"]' <<<"$source_replayed")" = "$source_operation_id" ]
@@ -509,6 +513,7 @@ resumed_player_snapshot=$(docker exec ${container_prefix}-postgres psql \
   -c "SELECT md5((state -> 'player_entity')::text) FROM world_states WHERE user_id = (SELECT id FROM users WHERE email = '$email') AND novel_id = '$novel_id'")
 [ "$resumed_player_snapshot" = "$player_snapshot" ]
 
+pause
 resumed_source=$("${curl_cmd[@]}" "${auth[@]}" -H 'Content-Type: application/json' \
   -H "Idempotency-Key: $source_operation_id" --data "$source_command" "$api/narrative/$novel_id/world/source")
 python3 -c 'import json,sys; r=json.load(sys.stdin); v=r["view"]; assert r["previous_source_chapter"]==1 and r["source_chapter"]==2; assert v["session"]["turn_number"]==2; assert v["session"]["entry_context"]["unlocked_through_chapter"]==1; assert v["session"]["source_context"]["unlocked_through_chapter"]==2; assert [t["turn_number"] for t in v["journal"]]==[1,2]; assert v["session"]["canonical_events"][0]["status"]=="obstructed"' <<<"$resumed_source"
