@@ -369,7 +369,9 @@ set `CACHE_MODE=redis`, a strong URL-safe `REDIS_PASSWORD`, and the matching
 together and are the supported path. The independent integration Compose file
 above always starts its isolated unauthenticated test Redis.
 
-The extended Compose core journey stops Agent during a world turn and checks
+The required Compose core journey admits source chapter 2 into an existing
+source-1 world without provider work, commits a subsequent event outcome,
+checks exact source replay after service restart, and stops Agent during a world turn and checks
 durable pending state, the no-overtake barrier, scanner recovery before replay,
 and exact replay without another model call. Changes to its script trigger
 these drills on PRs. This fixture-based check does not prove live model quality

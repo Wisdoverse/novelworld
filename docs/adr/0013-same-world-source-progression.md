@@ -97,3 +97,15 @@ source, domain/HTTP, real PostgreSQL race, reader/browser, release barrier, CI,
 merge and local Docker evidence. Reviewed contracts are implementation inputs;
 this ADR does not itself prove those gates. Provider quality, historical
 Diagnostics and formal H4 qualification remain separate.
+
+Implementation checks: Narrative source-domain/TOCTOU tests, Novel
+`world_source_http` against disposable PostgreSQL, integration
+`repository_contracts` source/turn lock tests, frontend
+`world-source-progression.spec.ts`, and `release_state_drill.sh`.
+`core_reader_loop.sh` exercises real service HTTP source 1 → 2, a subsequent
+source event outcome, exact operation replay after restart, export and erasure
+using the existing synthetic provider. `E2E_CONTAINER_PREFIX` scopes its Docker
+operations for an isolated local fixture; the default CI topology remains
+`novel`. Never run it against user data. The
+[synthetic reader screenshot](../evidence/reader-source-progression.png) shows
+the source-entry control; it is not live-world acceptance evidence.

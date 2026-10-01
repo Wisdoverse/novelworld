@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+container_prefix=${E2E_CONTAINER_PREFIX:-novel}
+[[ "$container_prefix" =~ ^[a-z][a-z0-9-]{0,62}$ ]] || exit 2
+
 api=${E2E_API_URL:-http://127.0.0.1/api}
 public_url=${E2E_PUBLIC_URL:-http://127.0.0.1}
 stub=${E2E_STUB_URL:-http://127.0.0.1:18080}
@@ -74,7 +77,7 @@ for _ in $(seq 1 45); do
   [ "$state" = ready ] && break
   if [ "$state" = error ]; then
     [ "$retried" = false ] || { printf 'novel retry failed: %s\n' "$status" >&2; exit 1; }
-    count=$(docker exec novel-postgres psql \
+    count=$(docker exec ${container_prefix}-postgres psql \
       -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
       -c "SELECT COUNT(*) FROM canon_story_models WHERE novel_id = '$novel_id'")
     [ "$count" = 0 ]
@@ -87,7 +90,7 @@ done
 [ "$retried" = false ]
 [ "$("${curl_cmd[@]}" "$stub/__control__/stats" | json_get "value['failures_remaining']['canon']")" = 0 ]
 
-canon_snapshot=$(docker exec novel-postgres psql \
+canon_snapshot=$(docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT model_version || ':' || schema_version || ':' || prompt_version || ':' || md5(content::text) FROM canon_story_models WHERE novel_id = '$novel_id'")
 [[ "$canon_snapshot" == 1:1:canon-chunk-v10+event-grouping-v5:* ]]
@@ -144,7 +147,7 @@ conflict_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error 
   --data "{\"checkpoint_chapter\":1,\"name\":\"另一名玩家\",\"background\":\"来自另一条时间线。\",\"capabilities\":[\"观察\"],\"location_id\":\"$location_id\",\"inventory\":[]}" \
   "$api/narrative/$novel_id/player-entry")
 [ "$conflict_status" = 409 ]
-player_snapshot=$(docker exec novel-postgres psql \
+player_snapshot=$(docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT md5((state -> 'player_entity')::text) FROM world_states WHERE user_id = (SELECT id FROM users WHERE email = '$email') AND novel_id = '$novel_id'")
 [[ "$player_snapshot" =~ ^[0-9a-f]{32}$ ]]
@@ -184,7 +187,7 @@ failed_choice_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-e
   "$api/narrative/choose")
 [ "$failed_choice_status" = 502 ]
 [ "$(json_get "value['error']['code']" <"$failed_choice_file")" = llm_error ]
-failed_writes=$(docker exec novel-postgres psql \
+failed_writes=$(docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT (SELECT COUNT(*) FROM user_choices WHERE user_id = (SELECT id FROM users WHERE email = '$email') AND node_id = '$node_id') || ':' || (SELECT COUNT(*) FROM player_chapters WHERE user_id = (SELECT id FROM users WHERE email = '$email') AND novel_id = '$novel_id' AND chapter_number = 1) || ':' || (SELECT jsonb_array_length(state -> 'choices') FROM world_states WHERE user_id = (SELECT id FROM users WHERE email = '$email') AND novel_id = '$novel_id')")
 [ "$failed_writes" = 0:0:0 ]
@@ -195,11 +198,11 @@ choice=$("${curl_cmd[@]}" "${auth[@]}" \
   --data "{\"novel_id\":\"$novel_id\",\"node_id\":\"$node_id\",\"choice_index\":0}" \
   "$api/narrative/choose")
 python3 -c "import json,sys; value=json.load(sys.stdin); transition=value['transition']; state=value['world_state']['state']; assert value['chapter_number']==1; assert transition['schema_version']==1; assert transition['canon_model_version']==1; assert transition['canonical_checkpoint_chapter']==1; assert value['consequence']==transition['rendered_narrative']; assert len(state['choices'])==1; assert len(state['world_events'])==1; assert 'relationships' not in state; assert len(state['player_entity']['relationships'])==1; assert len(state['locations'])==1; assert len(state['threads'])==1" <<<"$choice"
-player_snapshot=$(docker exec novel-postgres psql \
+player_snapshot=$(docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT md5((state -> 'player_entity')::text) FROM world_states WHERE user_id = (SELECT id FROM users WHERE email = '$email') AND novel_id = '$novel_id'")
 
-transition_snapshot=$(docker exec novel-postgres psql \
+transition_snapshot=$(docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT md5(transition::text) || ':' || md5((SELECT state::text FROM world_states WHERE user_id = user_choices.user_id AND novel_id = user_choices.novel_id)) FROM user_choices WHERE node_id = '$node_id'")
 
@@ -217,7 +220,7 @@ python3 -c "import json,sys; value=json.load(sys.stdin); assert value['error']['
 transition_calls_after=$(curl --silent "$stub/__control__/stats" |
   json_get "value['calls'].get('narrative_transition', 0)")
 [ "$transition_calls_after" = "$transition_calls_before" ]
-conflict_transition_snapshot=$(docker exec novel-postgres psql \
+conflict_transition_snapshot=$(docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT md5(transition::text) || ':' || md5((SELECT state::text FROM world_states WHERE user_id = user_choices.user_id AND novel_id = user_choices.novel_id)) FROM user_choices WHERE node_id = '$node_id'")
 [ "$conflict_transition_snapshot" = "$transition_snapshot" ]
@@ -228,16 +231,32 @@ python3 -c "import json,sys; value=json.load(sys.stdin); assert value['generated
 chapter_hash=$(printf '%s' "$chapter_two" | sha256sum | cut -d' ' -f1)
 
 pause
-open_world=$("${curl_cmd[@]}" "${auth[@]}" -X POST "$api/narrative/$novel_id/world")
+"${curl_cmd[@]}" --output /dev/null "${auth[@]}" -X PUT \
+  -H 'Content-Type: application/json' --data '{"current_chapter":1}' "$api/progress/$novel_id"
+source_origin=$("${curl_cmd[@]}" "${auth[@]}" -X POST "$api/narrative/$novel_id/world")
+python3 -c 'import json,sys; v=json.load(sys.stdin); assert v["session"]["entry_context"]["unlocked_through_chapter"]==1; assert "source_context" not in v["session"]; assert v["session"]["canonical_events"]==[]; assert v["session"]["turn_number"]==0' <<<"$source_origin"
+source_calls_before=$("${curl_cmd[@]}" "$stub/__control__/stats" | json_get "value['calls'].get('world_turn', 0)")
+"${curl_cmd[@]}" --output /dev/null "${auth[@]}" -H 'Content-Type: application/json' \
+  --data '{"current_chapter":2}' "$api/progress/$novel_id/advance"
+source_operation_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
+source_command='{"expected_turn_number":0,"expected_source_chapter":1,"target_chapter":2}'
+source_admitted=$("${curl_cmd[@]}" "${auth[@]}" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $source_operation_id" --data "$source_command" "$api/narrative/$novel_id/world/source")
+python3 -c 'import json,sys; r=json.load(sys.stdin); v=r["view"]; assert r["previous_source_chapter"]==1 and r["source_chapter"]==2; assert v["session"]["schema_version"]==2; assert v["session"]["entry_context"]["unlocked_through_chapter"]==1; assert v["session"]["source_context"]["unlocked_through_chapter"]==2; assert v["session"]["turn_number"]==0 and v["session"]["world_time"]==0; assert v["journal"]==[]; print(json.dumps(v))' <<<"$source_admitted" >"$account_export_file"
+open_world=$(cat "$account_export_file")
+[ "$("${curl_cmd[@]}" "$stub/__control__/stats" | json_get "value['calls'].get('world_turn', 0)")" = "$source_calls_before" ]
+source_replayed=$("${curl_cmd[@]}" "${auth[@]}" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $source_operation_id" --data "$source_command" "$api/narrative/$novel_id/world/source")
+[ "$(json_get 'value["operation_id"]' <<<"$source_replayed")" = "$source_operation_id" ]
 canon_event_id=$(json_get "value['session']['canonical_events'][0]['id']" <<<"$open_world")
-python3 -c "import json,sys; value=json.load(sys.stdin); session=value['session']; assert value['player']['id']=='$player_id'; assert session['entry_context']['checkpoint_chapter']==1; assert session['entry_context']['unlocked_through_chapter']==2; assert len(session['canonical_events'])==1; assert session['canonical_events'][0]['source_chapters']==[2]; assert session['canonical_events'][0]['status']=='scheduled'; assert session['turn_number']==0" <<<"$open_world"
+python3 -c "import json,sys; value=json.load(sys.stdin); session=value['session']; assert value['player']['id']=='$player_id'; assert session['entry_context']['checkpoint_chapter']==1; assert session['entry_context']['unlocked_through_chapter']==1; assert session['source_context']['unlocked_through_chapter']==2; assert len(session['canonical_events'])==1; assert session['canonical_events'][0]['source_chapters']==[2]; assert session['canonical_events'][0]['status']=='scheduled'; assert session['turn_number']==0" <<<"$open_world"
 
 pause
 same_open_world=$("${curl_cmd[@]}" "${auth[@]}" -X POST "$api/narrative/$novel_id/world")
 [ "$(printf '%s' "$same_open_world" | sha256sum | cut -d' ' -f1)" = "$(printf '%s' "$open_world" | sha256sum | cut -d' ' -f1)" ]
 
 world_turn_one_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
-world_action_one="{\"expected_turn_number\":0,\"kind\":\"investigate\",\"target_id\":\"$canon_event_id\",\"intent\":\"查清北塔换防并阻止伏击\"}"
+world_action_one="{\"expected_turn_number\":0,\"expected_source_chapter\":2,\"kind\":\"investigate\",\"target_id\":\"$canon_event_id\",\"intent\":\"查清北塔换防并阻止伏击\"}"
 pause
 world_turn_one=$("${curl_cmd[@]}" "${auth[@]}" \
   -H 'Content-Type: application/json' -H "Idempotency-Key: $world_turn_one_id" \
@@ -245,7 +264,7 @@ world_turn_one=$("${curl_cmd[@]}" "${auth[@]}" \
 world_turn_one_hash=$(printf '%s' "$world_turn_one" | sha256sum | cut -d' ' -f1)
 python3 -c "import json,sys; value=json.load(sys.stdin); transition=value['transition']; session=value['world_state']['state']['open_world']; assert value['turn_id']=='$world_turn_one_id'; assert value['memory_projection_status']=='saved'; assert transition['canonical_event_change']['event_id']=='$canon_event_id'; assert transition['canonical_event_change']['status']=='obstructed'; assert transition['events'][0]['actor_character_ids']==['$character_id']; assert session['turn_number']==1; assert session['canonical_events'][0]['status']=='obstructed'" <<<"$world_turn_one"
 journey_memory_one_id=$(journey_memory_id "$world_turn_one_id")
-journey_memory_one=$(docker exec novel-postgres psql \
+journey_memory_one=$(docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT jsonb_build_object('id', id, 'character_id', character_id, 'user_id', user_id, 'novel_id', novel_id, 'layer', layer, 'importance', importance, 'chapter_number', chapter_number, 'fact', content::jsonb)::text FROM character_memories WHERE id = '$journey_memory_one_id'")
 python3 -c "import json,sys; value=json.load(sys.stdin); fact=value['fact']; assert value['id']=='$journey_memory_one_id'; assert value['character_id']=='$character_id'; assert value['user_id']=='$user_id'; assert value['novel_id']=='$novel_id'; assert value['layer']=='permanent'; assert value['importance']==7; assert value['chapter_number']==2; assert fact['schema_version']==2; assert fact['source']=='committed_world_turn'; assert fact['authority']=='explicit_character_witness_facts'; assert fact['source_turn_id']=='$world_turn_one_id'; assert fact['witness_character_id']=='$character_id'; assert fact['turn_number']==1; assert fact['world_time']==1; assert fact['change_counts']=={'events':1,'relationships':1,'reader_action':0}" <<<"$journey_memory_one"
@@ -260,14 +279,14 @@ pause
 test "$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   --output /dev/null --write-out '%{http_code}' "${auth[@]}" \
   -H 'Content-Type: application/json' -H "Idempotency-Key: $world_turn_one_id" \
-  --data "{\"expected_turn_number\":0,\"kind\":\"investigate\",\"target_id\":\"$canon_event_id\",\"intent\":\"提交冲突的另一项行动\"}" \
+  --data "{\"expected_turn_number\":0,\"expected_source_chapter\":2,\"kind\":\"investigate\",\"target_id\":\"$canon_event_id\",\"intent\":\"提交冲突的另一项行动\"}" \
   "$api/narrative/$novel_id/world/turns")" = 409
 
 world_turn_two_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
-world_action_two='{"expected_turn_number":1,"kind":"pursue_goal","target_id":null,"intent":"绘制地下回廊并寻找守门人的踪迹"}'
+world_action_two='{"expected_turn_number":1,"expected_source_chapter":2,"kind":"pursue_goal","target_id":null,"intent":"绘制地下回廊并寻找守门人的踪迹"}'
 journey_memory_two_id=$(journey_memory_id "$world_turn_two_id")
 world_calls_before=$("${curl_cmd[@]}" "$stub/__control__/stats" | json_get "value['calls'].get('world_turn', 0)")
-docker stop --time 30 novel-agent-service >/dev/null
+docker stop --time 30 ${container_prefix}-agent-service >/dev/null
 pause
 pending_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   --output "$failed_choice_file" --write-out '%{http_code}' "${auth[@]}" \
@@ -275,11 +294,11 @@ pending_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   --data "$world_action_two" "$api/narrative/$novel_id/world/turns")
 [ "$pending_status" = 409 ]
 [ "$(json_get "value['error']['code']" <"$failed_choice_file")" = turn_outcome_unknown ]
-pending_snapshot=$(docker exec novel-postgres psql \
+pending_snapshot=$(docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At -v ON_ERROR_STOP=1 \
   -c "SELECT status || ':' || memory_projection_status || ':' || (SELECT COUNT(*) FROM character_memories WHERE id = '$journey_memory_two_id') FROM world_turns WHERE id = '$world_turn_two_id'")
 [ "$pending_snapshot" = completed:pending:0 ]
-committed_result=$(docker exec novel-postgres psql \
+committed_result=$(docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At -v ON_ERROR_STOP=1 \
   -c "SELECT result::text FROM world_turns WHERE id = '$world_turn_two_id'")
 world_calls_committed=$("${curl_cmd[@]}" "$stub/__control__/stats" | json_get "value['calls'].get('world_turn', 0)")
@@ -290,26 +309,26 @@ pause
 overtaking_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   --dump-header "$account_export_headers" --output "$failed_choice_file" --write-out '%{http_code}' "${auth[@]}" \
   -H 'Content-Type: application/json' -H "Idempotency-Key: $overtaking_id" \
-  --data '{"expected_turn_number":2,"kind":"pursue_goal","target_id":null,"intent":"等待上一回合记忆补齐"}' \
+  --data '{"expected_turn_number":2,"expected_source_chapter":2,"kind":"pursue_goal","target_id":null,"intent":"等待上一回合记忆补齐"}' \
   "$api/narrative/$novel_id/world/turns")
 [ "$overtaking_status" = 409 ]
 [ "$(json_get "value['error']['code']" <"$failed_choice_file")" = turn_in_progress ]
 grep -Eiq '^retry-after: [1-9][0-9]*[[:space:]]*$' "$account_export_headers"
-[ "$(docker exec novel-postgres psql \
+[ "$(docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At -v ON_ERROR_STOP=1 \
   -c "SELECT COUNT(*) FROM world_turns WHERE id = '$overtaking_id'")" = 0 ]
 [ "$("${curl_cmd[@]}" "$stub/__control__/stats" | json_get "value['calls'].get('world_turn', 0)")" = "$world_calls_committed" ]
 
-docker start novel-agent-service >/dev/null
+docker start ${container_prefix}-agent-service >/dev/null
 for _ in $(seq 1 60); do
-  [ "$(docker inspect --format '{{.State.Health.Status}}' novel-agent-service)" = healthy ] && break
+  [ "$(docker inspect --format '{{.State.Health.Status}}' ${container_prefix}-agent-service)" = healthy ] && break
   sleep 1
 done
-[ "$(docker inspect --format '{{.State.Health.Status}}' novel-agent-service)" = healthy ]
+[ "$(docker inspect --format '{{.State.Health.Status}}' ${container_prefix}-agent-service)" = healthy ]
 # Observe only: replay here would hide a broken autonomous recovery scanner.
 recovery_deadline=$((SECONDS + 90))
 while [ "$SECONDS" -lt "$recovery_deadline" ]; do
-  projection_status=$(docker exec novel-postgres psql \
+  projection_status=$(docker exec ${container_prefix}-postgres psql \
     -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At -v ON_ERROR_STOP=1 \
     -c "SELECT memory_projection_status FROM world_turns WHERE id = '$world_turn_two_id'")
   [ "$projection_status" = pending ] || break
@@ -328,7 +347,7 @@ replayed_world_turn_two=$("${curl_cmd[@]}" "${auth[@]}" \
   --data "$world_action_two" "$api/narrative/$novel_id/world/turns")
 [ "$replayed_world_turn_two" = "$world_turn_two" ]
 [ "$("${curl_cmd[@]}" "$stub/__control__/stats" | json_get "value['calls'].get('world_turn', 0)")" = "$world_calls_committed" ]
-[ "$(docker exec novel-postgres psql \
+[ "$(docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At -v ON_ERROR_STOP=1 \
   -c "SELECT COUNT(*) FROM character_memories WHERE id = '$journey_memory_two_id' AND user_id = '$user_id' AND novel_id = '$novel_id' AND character_id = '$character_id' AND layer = 'permanent' AND content::jsonb ->> 'source_turn_id' = '$world_turn_two_id'")" = 1 ]
 
@@ -337,10 +356,10 @@ world_view=$("${curl_cmd[@]}" "${auth[@]}" "$api/narrative/$novel_id/world")
 python3 -c "import json,sys; value=json.load(sys.stdin); state=value['world_state']['state']; assert value['session']['turn_number']==2; assert value['session']['canonical_events'][0]['status']=='obstructed'; assert [entry['turn_number'] for entry in value['journal']]==[1,2]; assert len([event for event in state['world_events'] if isinstance(event,dict) and event.get('origin')=='player'])==2" <<<"$world_view"
 world_view_hash=$(printf '%s' "$world_view" | sha256sum | cut -d' ' -f1)
 player_entity_hash=$(python3 -c 'import hashlib,json,sys; value=json.load(sys.stdin); print(hashlib.sha256(json.dumps(value["player"],ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()).hexdigest())' <<<"$world_view")
-player_snapshot=$(docker exec novel-postgres psql \
+player_snapshot=$(docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT md5((state -> 'player_entity')::text) FROM world_states WHERE user_id = (SELECT id FROM users WHERE email = '$email') AND novel_id = '$novel_id'")
-transition_snapshot=$(docker exec novel-postgres psql \
+transition_snapshot=$(docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT md5(transition::text) || ':' || md5((SELECT state::text FROM world_states WHERE user_id = user_choices.user_id AND novel_id = user_choices.novel_id)) FROM user_choices WHERE node_id = '$node_id'")
 
@@ -397,7 +416,7 @@ rewind_replay_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-e
 python3 -c "import json,sys; value=json.load(sys.stdin); assert value['error']['code']=='reading_progress_behind_world'; assert not ({'turn_id','transition','world_state'} & value.keys())" \
   <"$rewind_response_file"
 
-rewind_turn_count_before=$(docker exec novel-postgres psql \
+rewind_turn_count_before=$(docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT COUNT(*) FROM world_turns WHERE user_id = '$user_id' AND novel_id = '$novel_id'")
 rewind_llm_calls_before=$(curl --silent "$stub/__control__/stats" |
@@ -407,12 +426,12 @@ pause
 rewind_new_status=$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   --output "$rewind_response_file" --write-out '%{http_code}' "${auth[@]}" \
   -H 'Content-Type: application/json' -H "Idempotency-Key: $rewind_new_turn_id" \
-  --data '{"expected_turn_number":2,"kind":"pursue_goal","target_id":null,"intent":"回退后不应执行的行动"}' \
+  --data '{"expected_turn_number":2,"expected_source_chapter":2,"kind":"pursue_goal","target_id":null,"intent":"回退后不应执行的行动"}' \
   "$api/narrative/$novel_id/world/turns")
 [ "$rewind_new_status" = 409 ]
 python3 -c "import json,sys; value=json.load(sys.stdin); assert value['error']['code']=='reading_progress_behind_world'" \
   <"$rewind_response_file"
-rewind_turn_count_after=$(docker exec novel-postgres psql \
+rewind_turn_count_after=$(docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT COUNT(*) FROM world_turns WHERE user_id = '$user_id' AND novel_id = '$novel_id'")
 rewind_llm_calls_after=$(curl --silent "$stub/__control__/stats" |
@@ -452,10 +471,10 @@ grep -Fq '林岚知道你已经改变了两回合的世界，也会依照自己�
 grep -Fq 'event: done' <<<"$world_chat"
 
 for target in \
-  'novel-user-service:8001' \
-  'novel-novel-service:8002' \
-  'novel-agent-service:8003' \
-  'novel-narrative-service:8004'; do
+  "${container_prefix}-user-service:8001" \
+  "${container_prefix}-novel-service:8002" \
+  "${container_prefix}-agent-service:8003" \
+  "${container_prefix}-narrative-service:8004"; do
   container=${target%%:*}
   port=${target##*:}
   docker exec "$container" curl --fail --silent "http://127.0.0.1:$port/metrics" >>"$metrics_file"
@@ -468,25 +487,29 @@ python3 tools/llm-budget/verify.py \
   --commit "$(git rev-parse HEAD)"
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' "$public_url/metrics")" = 404
 
-docker restart novel-user-service novel-novel-service novel-agent-service novel-narrative-service novel-gateway >/dev/null
+docker restart ${container_prefix}-user-service ${container_prefix}-novel-service ${container_prefix}-agent-service ${container_prefix}-narrative-service ${container_prefix}-gateway >/dev/null
 for _ in $(seq 1 60); do
-  [ "$(docker inspect --format '{{.State.Health.Status}}' novel-gateway 2>/dev/null)" = healthy ] && break
+  [ "$(docker inspect --format '{{.State.Health.Status}}' ${container_prefix}-gateway 2>/dev/null)" = healthy ] && break
   sleep 2
 done
-[ "$(docker inspect --format '{{.State.Health.Status}}' novel-gateway)" = healthy ]
+[ "$(docker inspect --format '{{.State.Health.Status}}' ${container_prefix}-gateway)" = healthy ]
 
-resumed_canon_snapshot=$(docker exec novel-postgres psql \
+resumed_canon_snapshot=$(docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT model_version || ':' || schema_version || ':' || prompt_version || ':' || md5(content::text) FROM canon_story_models WHERE novel_id = '$novel_id'")
 [ "$resumed_canon_snapshot" = "$canon_snapshot" ]
-resumed_transition_snapshot=$(docker exec novel-postgres psql \
+resumed_transition_snapshot=$(docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT md5(transition::text) || ':' || md5((SELECT state::text FROM world_states WHERE user_id = user_choices.user_id AND novel_id = user_choices.novel_id)) FROM user_choices WHERE node_id = '$node_id'")
 [ "$resumed_transition_snapshot" = "$transition_snapshot" ]
-resumed_player_snapshot=$(docker exec novel-postgres psql \
+resumed_player_snapshot=$(docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT md5((state -> 'player_entity')::text) FROM world_states WHERE user_id = (SELECT id FROM users WHERE email = '$email') AND novel_id = '$novel_id'")
 [ "$resumed_player_snapshot" = "$player_snapshot" ]
+
+resumed_source=$("${curl_cmd[@]}" "${auth[@]}" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $source_operation_id" --data "$source_command" "$api/narrative/$novel_id/world/source")
+python3 -c 'import json,sys; r=json.load(sys.stdin); v=r["view"]; assert r["previous_source_chapter"]==1 and r["source_chapter"]==2; assert v["session"]["turn_number"]==2; assert v["session"]["entry_context"]["unlocked_through_chapter"]==1; assert v["session"]["source_context"]["unlocked_through_chapter"]==2; assert [t["turn_number"] for t in v["journal"]]==[1,2]; assert v["session"]["canonical_events"][0]["status"]=="obstructed"' <<<"$resumed_source"
 
 pause
 resumed_world=$("${curl_cmd[@]}" "${auth[@]}" "$api/narrative/$novel_id/world")
@@ -538,15 +561,15 @@ replayed_choice=$("${curl_cmd[@]}" "${auth[@]}" \
 python3 -c "import json,sys; value=json.load(sys.stdin); state=value['world_state']['state']; assert len(state['choices'])==1; assert len(state['world_events'])==3; assert len([event for event in state['world_events'] if event.get('origin')=='player'])==2; assert 'relationships' not in state; assert next(iter(state['player_entity']['relationships'].values()))['score']==57; assert state['open_world']['turn_number']==2" <<<"$replayed_choice"
 
 privacy_turn_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
-docker exec novel-postgres psql \
+docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -v ON_ERROR_STOP=1 \
   -c "UPDATE novels SET original_file_key = 'SENTINEL_E2E_OBJECT_KEY' WHERE id = '$novel_id'; INSERT INTO character_relationships (novel_id, from_character_id, to_character_id, relationship_type, description) VALUES ('$novel_id', '$character_id', '$character_id', 'self', 'Portable E2E relationship'); INSERT INTO character_memories (character_id, user_id, novel_id, layer, content, importance, chapter_number) VALUES ('$character_id', '$user_id', '$novel_id', 'long', 'Portable E2E memory', 8, 1); INSERT INTO chat_turns (id, user_id, character_id, novel_id, request_fingerprint, chapter_context, reader_identity_type, deviation_mode, status, failure_code) VALUES ('$privacy_turn_id', '$user_id', '$character_id', '$novel_id', decode(repeat('5a', 32), 'hex'), 1, 'self', 'canon', 'failed', 'SENTINEL_E2E_CHAT_FAILURE');" >/dev/null
 
 for target in \
-  'novel-user-service:8001' \
-  'novel-novel-service:8002' \
-  'novel-agent-service:8003' \
-  'novel-narrative-service:8004'; do
+  "${container_prefix}-user-service:8001" \
+  "${container_prefix}-novel-service:8002" \
+  "${container_prefix}-agent-service:8003" \
+  "${container_prefix}-narrative-service:8004"; do
   container=${target%%:*}
   port=${target##*:}
   test "$(docker exec "$container" curl --silent --output /dev/null --write-out '%{http_code}' \
@@ -616,7 +639,7 @@ assert completed == expected_services
 assert {
     "profile", "novel", "chapter", "character", "character_relationship",
     "canon_story_model", "reading_progress", "chat_message", "character_memory",
-    "narrative_node", "user_choice", "world_state", "player_chapter", "world_turn",
+    "narrative_node", "user_choice", "world_state", "player_chapter", "world_turn", "world_source_operation",
 } <= kinds
 assert "Portable E2E relationship" in raw
 assert "Portable E2E memory" in raw
@@ -647,7 +670,7 @@ test "$(curl --path-as-is --silent --output /dev/null --write-out '%{http_code}'
 delete_novel_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
 delete_character_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
 delete_message_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
-docker exec novel-postgres psql \
+docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -v ON_ERROR_STOP=1 \
   -c "INSERT INTO novels (id, user_id, title, status) VALUES ('$delete_novel_id', '$user_id', 'Deletion contract', 'ready'); INSERT INTO user_novels (user_id, novel_id) VALUES ('$user_id', '$delete_novel_id'); INSERT INTO characters (id, novel_id, name) VALUES ('$delete_character_id', '$delete_novel_id', 'Deletion witness');" >/dev/null
 delete_cache_message=$(python3 -c "import json; print(json.dumps({'id':'$delete_message_id','turn_id':None,'user_id':'$user_id','character_id':'$delete_character_id','novel_id':'$delete_novel_id','role':'user','content':'delete this projection','reader_identity':None,'chapter_context':1,'created_at':'2026-01-01T00:00:00Z'}, separators=(',',':')))")
@@ -659,7 +682,7 @@ test "$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   -X DELETE "$api/novels/$delete_novel_id")" = 204
 test "$(docker exec novel-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD:-runtime-redis-only}" EXISTS "chat:$delete_character_id:$user_id")" = 0
 test "$(docker exec novel-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD:-runtime-redis-only}" EXISTS "chat:$character_id:$user_id")" = 1
-test "$(docker exec novel-postgres psql \
+test "$(docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT (SELECT COUNT(*) FROM novels WHERE id = '$delete_novel_id') || ':' || (SELECT COUNT(*) FROM characters WHERE id = '$delete_character_id') || ':' || (SELECT COUNT(*) FROM user_novels WHERE user_id = '$user_id' AND novel_id = '$delete_novel_id')")" = 1:1:0
 pause
@@ -668,7 +691,7 @@ test "$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   -X DELETE "$api/novels/$delete_novel_id")" = 404
 
 test "$(docker exec novel-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD:-runtime-redis-only}" EXISTS "chat:$character_id:$user_id")" = 1
-test "$(docker exec novel-agent-service curl --silent --output /dev/null --write-out '%{http_code}' \
+test "$(docker exec ${container_prefix}-agent-service curl --silent --output /dev/null --write-out '%{http_code}' \
   -X DELETE -H 'X-Internal-Service-Token: wrong-token' \
   "http://127.0.0.1:8003/internal/privacy/users/$user_id")" = 401
 pause
@@ -688,18 +711,18 @@ test "$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   -X DELETE "$api/auth/me")" = 204
 test "$(docker exec novel-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD:-runtime-redis-only}" EXISTS "chat:$character_id:$user_id")" = 0
 
-erased_private_counts=$(docker exec novel-postgres psql \
+erased_private_counts=$(docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT (SELECT COUNT(*) FROM users WHERE id = '$user_id') || ':' || (SELECT COUNT(*) FROM user_novels WHERE user_id = '$user_id') || ':' || (SELECT COUNT(*) FROM character_memories WHERE user_id = '$user_id') || ':' || (SELECT COUNT(*) FROM chat_turns WHERE user_id = '$user_id') || ':' || (SELECT COUNT(*) FROM chat_messages WHERE user_id = '$user_id') || ':' || (SELECT COUNT(*) FROM narrative_nodes WHERE user_id = '$user_id') || ':' || (SELECT COUNT(*) FROM user_choices WHERE user_id = '$user_id') || ':' || (SELECT COUNT(*) FROM world_states WHERE user_id = '$user_id') || ':' || (SELECT COUNT(*) FROM world_turns WHERE user_id = '$user_id') || ':' || (SELECT COUNT(*) FROM player_chapters WHERE user_id = '$user_id') || ':' || (SELECT COUNT(*) FROM reading_progress WHERE user_id = '$user_id') || ':' || (SELECT COUNT(*) FROM refresh_tokens WHERE user_id = '$user_id') || ':' || (SELECT COUNT(*) FROM user_llm_configs WHERE user_id = '$user_id')")
 [ "$erased_private_counts" = 0:0:0:0:0:0:0:0:0:0:0:0:0 ]
-test "$(docker exec novel-postgres psql \
+test "$(docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT COUNT(*) FROM runtime_llm_config")" = 0
-retained_canonical_counts=$(docker exec novel-postgres psql \
+retained_canonical_counts=$(docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT (SELECT COUNT(*) FROM novels WHERE id IN ('$novel_id', '$delete_novel_id')) || ':' || (SELECT COUNT(*) FROM novel_import_jobs WHERE novel_id = '$novel_id') || ':' || (SELECT COUNT(*) FROM chapters WHERE novel_id = '$novel_id') || ':' || (SELECT COUNT(*) FROM chapter_chunks AS chunk JOIN chapters AS chapter ON chapter.id = chunk.chapter_id WHERE chapter.novel_id = '$novel_id') || ':' || (SELECT COUNT(*) FROM characters WHERE novel_id IN ('$novel_id', '$delete_novel_id')) || ':' || (SELECT COUNT(*) FROM character_relationships WHERE novel_id = '$novel_id') || ':' || (SELECT COUNT(*) FROM canon_story_models WHERE novel_id = '$novel_id')")
 [ "$retained_canonical_counts" = 2:1:2:2:2:1:1 ]
-erasure_counts=$(docker exec novel-postgres psql \
+erasure_counts=$(docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT (SELECT COUNT(*) FROM erasure_records WHERE subject_type = 'user' AND subject_id = '$user_id') || ':' || (SELECT COUNT(*) FROM erasure_records WHERE subject_type = 'novel' AND subject_id IN ('$novel_id', '$delete_novel_id'))")
 [ "$erasure_counts" = 1:0 ]
