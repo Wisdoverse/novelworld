@@ -69,10 +69,21 @@ test.describe('critical journey — full axe rule set', () => {
     await installStubs(page, { openWorld: true, actionSuggestions: true });
     await page.goto('/reader/novel-1/1');
     await expect(page.getByText(/的开放世界/).first()).toBeVisible();
+    const suggestions = page.getByRole('group', { name: '场景建议' });
+    await expect(suggestions.getByRole('button')).toHaveCount(3);
+    for (const number of [1, 2, 3]) await expect(suggestions.getByRole('button', { name: new RegExp(`^${number}\\.`) })).toBeVisible();
+    await expect(page.getByRole('button', { name: '自由输入', exact: true })).toBeVisible();
+    const suggestion = suggestions.getByRole('button').first();
+    await suggestion.click();
+    await expect(suggestion).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByRole('button', { name: '执行行动', exact: true })).toBeEnabled();
+    await expectNoA11yViolations(page);
+
+    await page.locator('summary').filter({ hasText: '调整行动方式与目标' }).click();
     await page.getByLabel('你的意图').fill('查看脚印');
     await page.getByRole('button', { name: '建议行动类型' }).click();
     await expect(page.getByRole('button', { name: '调查线索' })).toBeVisible();
-    await page.locator('form').screenshot({ path: testInfo.outputPath('laya-action-suggestion.png') });
+    await suggestions.locator('xpath=ancestor::form').screenshot({ path: testInfo.outputPath('laya-action-suggestion.png') });
     await page.getByRole('button', { name: '调查线索' }).click();
     await expect(page.getByLabel(/^目标/)).toHaveValue('');
     await expect(page.getByRole('button', { name: '执行行动' })).toBeDisabled();
@@ -178,6 +189,7 @@ test('branch and world outcomes have named committed logs and pending status', a
     await route.fallback();
   });
   await page.reload();
+  await page.locator('summary').filter({ hasText: '调整行动方式与目标' }).click();
   await page.getByRole('combobox', { name: '行动', exact: true }).selectOption('travel');
   await page.getByRole('combobox', { name: '目标', exact: true }).selectOption('loc-2');
   await page.getByRole('textbox', { name: '你的意图' }).fill('沿山路下行');
