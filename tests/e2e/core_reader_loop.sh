@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+trap 'printf "core reader journey failed at line %s\n" "$LINENO" >&2' ERR
 
 container_prefix=${E2E_CONTAINER_PREFIX:-novel}
 [[ "$container_prefix" =~ ^[a-z][a-z0-9-]{0,62}$ ]] || exit 2
@@ -253,7 +254,8 @@ python3 -c "import json,sys; value=json.load(sys.stdin); session=value['session'
 
 pause
 same_open_world=$("${curl_cmd[@]}" "${auth[@]}" -X POST "$api/narrative/$novel_id/world")
-[ "$(printf '%s' "$same_open_world" | sha256sum | cut -d' ' -f1)" = "$(printf '%s' "$open_world" | sha256sum | cut -d' ' -f1)" ]
+printf '%s\n%s\n' "$same_open_world" "$open_world" |
+  python3 -c 'import json,sys; assert json.loads(sys.stdin.readline()) == json.loads(sys.stdin.readline())'
 
 world_turn_one_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
 world_action_one="{\"expected_turn_number\":0,\"expected_source_chapter\":2,\"kind\":\"investigate\",\"target_id\":\"$canon_event_id\",\"intent\":\"查清北塔换防并阻止伏击\"}"
