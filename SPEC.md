@@ -1146,7 +1146,7 @@ The first successfully committed start MUST seal its `WorldSession.entry_context
 A later valid start request is a resume hint and MUST return that persisted
 winner without replacing it with a freshly derived candidate context.
 
-An existing world MAY explicitly admit its next source chapter through
+An existing world admits its next source chapter through
 `POST /narrative/{novel_id}/world/source`. This operation MUST preserve the
 original entry, Player checkpoint and rules, attributes, existing event/thread
 states and committed turns. It MUST NOT call a model, roll dice or increment
@@ -1155,6 +1155,26 @@ checkpoint and pinned Canon version; absent fields preserve schema-v1 canonical
 serialization, while expanded sessions use schema v2. Every current source
 consumer MUST use the effective context; historical memory projections MUST use
 the source context of their immutable committed result.
+
+The reader runtime MUST automatically admit the next chapter after its current
+committed turn reaches terminal memory projection and no scheduled or delayed
+canonical event remains in the effective scene. Empty event extraction also
+permits this transition; it MUST NOT trap the world at its entry chapter. The
+current turn's observed source chapter (or the immutable entry source for legacy
+turns) MUST match the effective source. Each turn therefore permits at most one
+admission, including across reloads. A later committed turn can admit the next
+chapter. Reaching the book's end stops source extension but not world actions.
+This rule is per user and novel; the shared Canon graph MUST remain immutable.
+Fresh self identity, Player, progress, route and successful world reads MUST
+agree before automatic work. Source orchestration MUST read current progress
+before advancing it. Automatic initial work MUST reject an observed rewind,
+and every source attempt MUST supply
+`expected_current_chapter` to Novel's advance command. Novel MUST atomically
+require that exact chapter and self identity before writing; a mismatch returns
+`reading_progress_changed` without a progress write or source dispatch.
+Pending turns, projections, source operations,
+rewinds and unknown outcomes MUST retain their existing recovery fences. The
+reader MUST NOT need a separate next-scene click during normal progression.
 
 The strict source command carries `expected_turn_number`,
 `expected_source_chapter` and `target_chapter`, where target is exactly the

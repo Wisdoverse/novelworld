@@ -18,7 +18,7 @@ missing world transition.
 
 Keep `entry_context`, creation checkpoint and rules immutable. Add optional
 `source_context` with omitted-null serialization so unextended schema-v1 states
-retain canonical bytes. The first explicit extension creates schema v2; all
+retain canonical bytes. The first extension creates schema v2; all
 current action, visibility and context consumers use one effective-context
 accessor. Historical memory recovery uses the committed result snapshot.
 
@@ -45,6 +45,25 @@ connection. In-progress actions and completed/pending memory projections block
 source admission. Modern action claims also fence their observed source before
 provider I/O and at completion. Legacy completed keys retain their original
 fingerprints and exact-result replay.
+
+The reader automatically schedules one source admission from its latest terminal
+committed turn when no scheduled or delayed event remains in the active scene.
+The turn's observed source chapter must equal the current source; legacy null
+coordinates use the immutable entry source. Admission changes that equality,
+which prevents the same turn advancing twice across reloads without another
+marker or table. Only the current user's fresh self/Player/progress/route world
+view is eligible. Unresolved turns, projections, stored requests and source
+operations retain their existing locks. No next-scene click is required during
+normal progression; ambiguous outcomes retain explicit recovery.
+
+Source orchestration reads fresh progress before every progress advance,
+including exact-key retries, and pauses an observed automatic rewind. It sends
+the optional `expected_current_chapter` snapshot to Novel. The owner atomically
+requires that exact chapter, self identity and no character identity reference;
+a mismatch returns `reading_progress_changed` with no update, and the frontend
+does not dispatch source admission. Unguarded deliberate original-reading calls
+remain compatible. No new schema is needed. Deploy Novel before the automatic
+frontend; an older owner rejects the new field without writing.
 
 Frontend orchestration remains above independent entity APIs under FSD. It
 persists the bounded exact source operation before either write and establishes
@@ -109,5 +128,6 @@ source event outcome, exact operation replay after restart, export and erasure
 using the existing synthetic provider. `E2E_CONTAINER_PREFIX` scopes its Docker
 operations for an isolated local fixture; the default CI topology remains
 `novel`. Never run it against user data. The
-[synthetic reader screenshot](../evidence/reader-source-progression.png) shows
-the source-entry control; it is not live-world acceptance evidence.
+[synthetic reader screenshot](../evidence/world-source-auto-progression.png) shows
+automatic source progress without a scene button; it is not live-world acceptance
+evidence.

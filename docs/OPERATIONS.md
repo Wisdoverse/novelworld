@@ -320,10 +320,20 @@ source, test, CI, deployment and semantic-quality evidence limits.
 ### Existing world cannot reach later source scenes
 
 Inspect the effective source chapter separately from the immutable entry
-checkpoint and current turn number. Successful ordinary actions do not unlock
-later source. The reader explicitly uses `进入下一幕`; admission is provider-free
-and then ordinary actions can consume newly eligible events. An empty safe
+checkpoint and current turn number. After the current turn reaches terminal memory projection and no
+scheduled/delayed event remains, the reader automatically admits one next source
+chapter. Its turn source must match the current effective source, so reloads
+cannot advance the same turn twice. Admission is provider-free; subsequent
+ordinary actions consume newly eligible events. Inspect user/novel identity,
+progress/route agreement and pending recovery if automatic admission is absent. An empty safe
 Canon delta is not proof of newly plotted events.
+
+`reading_progress_changed` means the exact progress snapshot or self identity
+changed before the guarded owner update. No progress write or source dispatch
+occurred from that attempt. Recover the latest state; restore a rewound original
+reading boundary only through the deliberate original-reading recovery. Update
+Novel before the automatic frontend: older Novel versions refuse the new guard
+field without admitting source.
 
 `world_source_busy` means a turn or its pending memory projection retains
 authority; finish exact turn recovery first. `world_source_changed` requires a

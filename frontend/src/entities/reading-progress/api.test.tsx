@@ -44,6 +44,15 @@ describe('reading progress mutations', () => {
     expect(api.put).not.toHaveBeenCalled();
   });
 
+  it('serializes the optional expected chapter guard', async () => {
+    api.post.mockResolvedValue({ data: oldProgress });
+    await advanceReadingProgress('novel', 3, 5);
+    expect(api.post).toHaveBeenCalledWith('/progress/novel/advance', {
+      current_chapter: 3,
+      expected_current_chapter: 5,
+    });
+  });
+
   it('refetches the complete canonical context after a chapter update', async () => {
     api.get
       .mockResolvedValueOnce({ data: oldProgress })
