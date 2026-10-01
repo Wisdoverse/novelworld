@@ -204,6 +204,20 @@ test.describe('critical journey — keyboard operability', () => {
     await installStubs(page, { openWorld: true });
     await page.goto('/reader/novel-1/1');
     await expect(page.getByText(/的开放世界/).first()).toBeVisible();
+    await page.getByRole('button', { name: '自由输入', exact: true }).focus();
+    await page.keyboard.press('Enter');
+    await page.getByRole('textbox', { name: '你的意图' }).fill('沿山路下行');
+    const submit = page.getByRole('button', { name: '执行行动', exact: true });
+    await tabTo(page, submit);
+    await page.keyboard.press('Space');
+    await expect(page.getByRole('log', { name: '旅程时间线' })).toContainText('回合 2');
+  });
+
+  test('world action advanced controls submit from the keyboard', async ({ page }) => {
+    await installStubs(page, { openWorld: true });
+    await page.goto('/reader/novel-1/1');
+    await expect(page.getByText(/的开放世界/).first()).toBeVisible();
+    await page.locator('summary').filter({ hasText: '调整行动方式与目标' }).click();
     await page.getByRole('combobox', { name: '行动', exact: true }).selectOption('travel');
     await page.getByRole('combobox', { name: '目标', exact: true }).selectOption('loc-2');
     await page.getByRole('textbox', { name: '你的意图' }).fill('沿山路下行');

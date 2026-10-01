@@ -89,7 +89,21 @@ describe('WorldDashboard', () => {
   it('links the current narrative to the next action without submitting automatically', () => {
     render(<WorldDashboard novelId="novel" view={view} />);
     expect(screen.getByRole('link', { name: '去选择行动' }).getAttribute('href')).toBe('#world-action-form');
-    expect(screen.getByText(/故事会在你执行下一次行动后推进/)).toBeTruthy();
+    expect(screen.getByText(/确认意图后点击“执行行动”，故事会继续推进/)).toBeTruthy();
+    expect(mocks.submit).not.toHaveBeenCalled();
+  });
+
+  it.each(['user_id', 'novel_id', 'id'] as const)('clears action drafts when player %s changes', field => {
+    const page = render(<WorldDashboard novelId="novel" view={view} />);
+    chooseTravel();
+    fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '留在旧世界的私有草稿' } });
+
+    const next = { ...view, player: { ...view.player, [field]: `other-${field}` } };
+    page.rerender(<WorldDashboard novelId={next.player.novel_id} view={next} />);
+
+    expect((screen.getByLabelText('你的意图') as HTMLTextAreaElement).value).toBe('');
+    expect((screen.getByLabelText('行动') as HTMLSelectElement).value).toBe('pursue_goal');
+    expect(screen.getByRole('button', { name: '执行行动' }).hasAttribute('disabled')).toBe(true);
     expect(mocks.submit).not.toHaveBeenCalled();
   });
 
