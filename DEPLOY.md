@@ -157,16 +157,19 @@ Jenkins 前，应确认选用的受信任分支或提交已通过 CI。Jenkins �
 构建镜像，不启动、停止或迁移应用。只有管理员明确启用后，才会运行现有 `start.sh`
 并执行 `infra/ops/health-checks.sh`，以确认部署 readiness 和部署后健康状态。
 
-1. 在目标服务器配置独立的 Jenkins agent，标签为 `novelworld-server`。安装 Git、
-   Bash、OpenSSL、curl，以及带 BuildKit 的 Docker 和 Compose v2。agent 用户必须能访问
-   Docker daemon。Jenkins 主机无需安装 Rust、Node.js、pnpm 或 Python；镜像所需的
-   Rust、Node.js 与 pnpm 工具链由 Dockerfiles 在容器内提供。
+1. 在目标 Linux 部署服务器安装 Git、Bash、OpenSSL、curl，以及带 BuildKit 的
+   Docker 和 Compose v2。Jenkins agent 用户必须能访问该服务器的 Docker daemon。
+   Jenkins 主机无需安装 Rust、Node.js、pnpm 或 Python；镜像所需的 Rust、Node.js
+   与 pnpm 工具链由 Dockerfiles 在容器内提供。
 2. 创建 **Pipeline script from SCM** 作业，选择本仓库的受信任分支，Script Path 为
-   `Jenkinsfile`；需要 Jenkins Pipeline、Git 和 Timestamper 插件。该 agent 只运行
-   此安装的受信任作业，不运行外部 PR。部署前应确认所选受信任分支或提交已通过
-   GitHub Actions CI；Jenkins 只负责镜像构建和部署。
+   `Jenkinsfile`；需要 Jenkins Pipeline、Git 和 Timestamper 插件。此作业必须专用于
+   受信任分支，不运行外部 PR。由于流水线使用 `agent any`，所有符合条件的 executor
+   都必须位于同一 Linux 部署服务器、使用同一 Docker daemon，并能访问同一个持久目录。
+   部署前应确认所选受信任分支或提交已通过 GitHub Actions CI；Jenkins 只负责镜像
+   构建和部署。
 3. 设置 `SERVER_WORKSPACE` 为固定的持久化绝对路径，默认 `/srv/novelworld`，
-   并由 agent 用户持有。首次运行保持 `DEPLOY_SERVER=false`，只检出源码并构建镜像；
+   并由部署服务器上的 agent 用户持有；checkout、镜像构建和部署都在此目录内执行。
+   首次运行保持 `DEPLOY_SERVER=false`，只检出源码并构建镜像；
    此模式不启动、停止或迁移应用。不要启用 SCM 清理未跟踪文件，也不要
    在构建后清空该目录；`.env` 中的数据库密码和启动根必须跨构建保留。
 4. 在该目录私下配置 `.env`：可复制 `.env.example`，填写有效的
