@@ -407,6 +407,7 @@ pub trait ReadingProgressRepository: Send + Sync {
         deviation_mode: &str,
     ) -> Result<ReadingProgressRecord>;
     async fn update_chapter(&self, user_id: Uuid, novel_id: Uuid, chapter: i32) -> Result<()>;
+    async fn advance_chapter(&self, user_id: Uuid, novel_id: Uuid, chapter: i32) -> Result<()>;
     async fn set_identity(
         &self,
         user_id: Uuid,
