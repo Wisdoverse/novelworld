@@ -326,8 +326,13 @@ vi.mock('@/widgets/branch-choice', () => ({
   ),
 }));
 vi.mock('@/widgets/world-dashboard', () => ({
-  WorldDashboard: ({ actionsDisabled }: { actionsDisabled?: boolean }) => (
-    <button id="world-action-journal" disabled={actionsDisabled}>模拟世界行动</button>
+  WorldDashboard: ({ actionsDisabled, actionsDisabledReason, onRefresh }: {
+    actionsDisabled?: boolean; actionsDisabledReason?: string; onRefresh?: () => void;
+  }) => (
+    <div id="world-action-journal">
+      <button id="world-action-form" disabled={actionsDisabled}>模拟世界行动</button>
+      {actionsDisabled ? <div role="alert">{actionsDisabledReason}<button onClick={onRefresh}>重试</button></div> : null}
+    </div>
   ),
 }));
 
@@ -936,7 +941,7 @@ describe('ReaderPage progress gate', () => {
 
     expect(screen.queryByTestId('branch-choice')).toBeNull();
     expect(mocks.branchEnabled).toBe(false);
-    expect(screen.getByRole('button', { name: '继续旅程' }).hasAttribute('disabled')).toBe(false);
+    expect(screen.getByRole('button', { name: '选择下一步行动' }).hasAttribute('disabled')).toBe(false);
   });
 
   it('does not load or require a future branch after the Player checkpoint', () => {
@@ -978,6 +983,7 @@ describe('ReaderPage progress gate', () => {
     const page = render(<ReaderPage />);
 
     expect(screen.getByRole('button', { name: '模拟世界行动' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByRole('alert').textContent).toContain('上方显示的是上次保存的经过');
     fireEvent.click(screen.getByRole('button', { name: '重试' }));
     await waitFor(() => expect(mocks.refetchOpenWorld).toHaveBeenCalledOnce());
     page.rerender(<ReaderPage />);
@@ -1245,7 +1251,7 @@ describe('splitChapterAtAnchor', () => {
     expect(screen.getByText('原著坐标 · 第 2 章《Two》')).toBeTruthy();
     expect(screen.getByRole('heading', { name: '云舟的故事' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '回看行动日志' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: '继续旅程' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '选择下一步行动' })).toBeTruthy();
   });
 
   it('keeps the immutable source available without mixing it into player history', () => {

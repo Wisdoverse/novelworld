@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react';
 import { suggestWorldAction } from '@/entities/narrative';
 import { localWorldCharacterIds } from '@/shared/lib/localWorldCharacters';
 import type { OpenWorldView, WorldAction, WorldActionKind } from '@/shared/types';
@@ -111,6 +111,13 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
   };
   const selectedTarget = targetId && targetOptions.some(option => option.id === targetId)
     ? targetId : '';
+  const guidanceId = useId();
+  const blockingReason = controlsDisabled ? undefined
+    : !kind ? '请选择行动方式，再填写你想做什么。'
+      : targetRequired && targetOptions.length === 0
+        ? '当前没有可供此行动选择的目标。可以改选“追求自己的目标”，写下你的下一步行动。'
+        : targetRequired && !selectedTarget ? '请先选择这次行动的目标。'
+          : !intent.trim() ? '请在“你的意图”中写下你想做什么。' : undefined;
   const actionRule = view.session.game_rules?.action_rules.find(rule => rule.kind === kind);
   const actionAttribute = view.session.game_rules?.attributes.find(
     attribute => attribute.key === actionRule?.attribute_key,
@@ -122,7 +129,7 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (controlsDisabled || !kind || (targetRequired && !selectedTarget)) return;
+    if (controlsDisabled || blockingReason || !kind) return;
     clearSuggestion();
     try {
       await onSubmit({
@@ -187,11 +194,6 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
           ))}
         </select>
       </label>
-      {targetRequired && targetOptions.length === 0 ? (
-        <p role="alert" className="text-sm text-[#b3261e]">
-          当前没有已确认同场、可供此行动选择的角色或目标。
-        </p>
-      ) : null}
       <label className="block text-sm font-medium text-[#3c4043]">
         你的意图
         <textarea
@@ -245,11 +247,15 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
       ) : null}
       <button
         type="submit"
-        disabled={controlsDisabled || !kind || !intent.trim() || (targetRequired && !selectedTarget)}
+        disabled={controlsDisabled || Boolean(blockingReason)}
+        aria-describedby={blockingReason ? guidanceId : undefined}
         className="primary-action"
       >
         {isPending ? '世界正在回应…' : '执行行动'}
       </button>
+      {blockingReason ? (
+        <p id={guidanceId} className="text-sm text-[#5f6368]">{blockingReason}</p>
+      ) : null}
     </form>
   );
 }

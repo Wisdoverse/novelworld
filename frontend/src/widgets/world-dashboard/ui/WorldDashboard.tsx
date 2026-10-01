@@ -14,6 +14,7 @@ interface WorldDashboardProps {
   novelId: string;
   view: OpenWorldView;
   actionsDisabled?: boolean;
+  actionsDisabledReason?: string;
   onRefresh?: () => void;
 }
 
@@ -140,6 +141,7 @@ export function WorldDashboard({
   novelId,
   view,
   actionsDisabled = false,
+  actionsDisabledReason = '最新世界状态尚未恢复，暂时不能执行行动。请重新加载世界后再试。',
   onRefresh,
 }: WorldDashboardProps) {
   const turn = useSubmitWorldTurn(novelId);
@@ -156,6 +158,14 @@ export function WorldDashboard({
   // The server owns the unresolved authority slot. A stale request from
   // another tab can never overtake its active or committed pending turn.
   const pendingRequest = serverPendingRequest ?? restoredPendingRequest;
+  const pendingEntry = view.journal.find(entry => (
+    entry.turn_id === pendingRequest?.idempotencyKey && entry.memory_projection_status === 'pending'
+  ));
+  const pendingReason = pendingEntry
+    ? `第 ${pendingEntry.turn_number} 回合的经过已保存，但角色记忆尚未同步完成，因此暂时不能发起下一回合。请点击“继续确认结果”。`
+    : serverPendingRequest
+      ? '上一行动尚未完成，因此暂时不能发起下一回合。请点击“继续确认结果”恢复原行动。'
+      : '尚未确认这次行动的最终结果，因此暂时不能发起下一回合。请点击“继续确认结果”，避免重复行动。';
   const serverPendingAction = serverPendingRequest?.action;
   const serverPendingKey = serverPendingRequest?.idempotencyKey;
   const serverPendingRevision = serverPendingRequest?.expectedTurnNumber;
@@ -171,6 +181,7 @@ export function WorldDashboard({
   const lastEntry = view.journal[view.journal.length - 1];
   const latestTurn = lastEntry?.turn_number === view.session.turn_number ? lastEntry : undefined;
   const latestNarrative = latestTurn?.transition.rendered_narrative;
+  const latestCheck = latestTurn?.resolution;
   const localCharacterIds = localWorldCharacterIds(view);
   const localCharacters = context.characters.filter(character => localCharacterIds.has(character.id));
   const localCharacterEvents = latestTurn?.transition.events.filter(event => (
@@ -239,7 +250,8 @@ export function WorldDashboard({
     } catch (requestError) {
       const outcomeUnknown = isWorldTurnOutcomeUnknown(requestError);
       if (!outcomeUnknown) clearPendingRequest();
-      setError(getApiErrorMessage(requestError, '世界行动提交失败'));
+      setError(getApiErrorMessage(requestError, outcomeUnknown && requestError instanceof Error
+        ? requestError.message : '世界行动提交失败'));
       throw requestError;
     }
   };
@@ -268,10 +280,31 @@ export function WorldDashboard({
         <p className="mt-3 text-sm text-[#d5e1d7]">
           {location?.name ?? view.player.location_id ?? '地点未确认'} · 世界时间 {view.session.world_time} · 每次已提交回合推进 1 步
         </p>
+        <p className="mt-2 text-sm text-[#d5e1d7]">
+          世界入场坐标 · 原著第 {context.checkpoint_chapter} 章。后续按回合推进，不自动翻到原著下一章。
+        </p>
         <div className="mt-7 border-t border-white/20 pt-6">
+          {latestCheck ? (
+            <div role="status" aria-label="本回合行动结果" className="mb-5 rounded-xl border border-white/25 p-4 text-sm leading-6">
+              <p className="font-semibold">{actionCheckSummary(latestCheck)}</p>
+              <p className="mt-1 text-[#d5e1d7]">
+                {latestCheck.adjudication?.decision === 'impossible'
+                  ? '该行动不可行，未进行骰子检定；请改选行动方式或目标。'
+                  : latestCheck.adjudication?.decision === 'pending'
+                    ? '行动判断尚未完成，请查看下方行动区的确认状态。'
+                    : latestCheck.adjudication?.decision !== 'automatic_success' && !latestCheck.succeeded
+                      ? '本次检定失败，未产生玩家行动效果；回合已结束，你仍可选择下一步行动。'
+                      : '本回合已完成，你可以选择下一步行动。'}
+              </p>
+            </div>
+          ) : null}
           <p id="latest-world-narrative" role="status" aria-live="polite" tabIndex={-1} className="mt-3 max-w-3xl whitespace-pre-wrap text-base leading-8 text-[#f6f1e6] [overflow-wrap:anywhere] sm:text-lg">
             {latestNarrative ?? '世界已经就绪。选定行动与目标，故事中的人物会按各自的处境作出回应。'}
           </p>
+          <div className="mt-5 text-sm leading-6 text-[#d5e1d7]">
+            <p>故事会在你执行下一次行动后推进；选择行动、确认目标并填写意图，再点击“执行行动”。</p>
+            <a href="#world-action-form" className="mt-2 inline-block font-semibold text-[#f6f1e6] underline underline-offset-4">去选择行动</a>
+          </div>
         </div>
       </div>
 
@@ -310,19 +343,19 @@ export function WorldDashboard({
       <div className="rounded-2xl border border-[#d8c8a9] bg-white p-5 sm:p-6">
         <h3 id="world-action-form" tabIndex={-1} className="scroll-mt-24 text-lg font-semibold text-[#203a35]">你接下来做什么？</h3>
         <p className="mb-5 mt-1 text-sm text-[#59645f]">先选择行动方式，再选择目标；只有已确认同场的角色会成为人物目标。</p>
-        <WorldActionForm
-          view={view}
-          isPending={turn.isPending}
-          isLocked={actionsDisabled || Boolean(pendingRequest)}
-          onSubmit={submit}
-        />
-        <p role="status" aria-label="世界行动状态" className="sr-only">
-          {turn.isPending ? '正在确认世界行动，请等待已保存的结果。' : ''}
+        {actionsDisabled ? (
+          <div role="alert" className="mb-4 text-sm text-[#b3261e]">
+            {actionsDisabledReason}
+            {onRefresh ? <button type="button" className="ml-2 underline" onClick={onRefresh}>重试</button> : null}
+          </div>
+        ) : null}
+        <p role="status" aria-label="世界行动状态" className="text-sm text-[#59645f]">
+          {turn.isPending ? '正在确认世界行动，完成后才会开放下一回合；请等待本次结果。' : ''}
         </p>
         {!turn.isPending && (error || pendingRequest) ? (
           <div role="alert" className="mt-4 text-sm text-[#b3261e]">
             {error ? `${error} ` : ''}{pendingRequest
-              ? '尚未确认这次行动的最终结果；请使用原请求继续确认，避免重复行动。'
+              ? pendingReason
               : '请求已被明确拒绝；请根据最新世界状态修改行动后重试。'}
             {pendingRequest ? (
               <button className="ml-2 underline" disabled={turn.isPending || actionsDisabled} onClick={() => void run(pendingRequest).catch(() => undefined)}>
@@ -331,6 +364,12 @@ export function WorldDashboard({
             ) : null}
           </div>
         ) : null}
+        <WorldActionForm
+          view={view}
+          isPending={turn.isPending}
+          isLocked={actionsDisabled || Boolean(pendingRequest)}
+          onSubmit={submit}
+        />
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">

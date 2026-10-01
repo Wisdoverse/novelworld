@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { installStubs } from './stubs';
+import { OPEN_WORLD } from './fixtures';
 import { expectNoHorizontalOverflow, settleAnimations, tabTo } from './helpers';
 
 // WCAG 1.4.10 reflow proxy at the 320px minimum target width. The assertion
@@ -48,6 +49,77 @@ test.describe('320px reflow — no horizontal overflow', () => {
       await expectNoHorizontalOverflow(page);
     });
   }
+});
+
+test('the latest narrative leads to an actionable next step with missing-input guidance', async ({ page }) => {
+  await installStubs(page, { openWorld: true });
+  await page.route('**/api/narrative/*/world', route => route.fulfill({ json: {
+    ...OPEN_WORLD,
+    session: { ...OPEN_WORLD.session, turn_number: 13, world_time: 13 },
+    journal: [{
+      ...OPEN_WORLD.journal[0], turn_number: 13,
+      resolution: {
+        schema_version: 1, canon_model_version: 1, template_prompt_version: 'basic-rules-v1',
+        attribute_key: 'insight', attribute_label: '洞察', score: 12, modifier: 1,
+        roll: 6, total: 7, difficulty_class: 12, succeeded: false,
+        adjudication: { schema_version: 1, template_difficulty_class: 12, decision: 'template_fallback' },
+      },
+    }],
+  } }));
+  let submissions = 0;
+  page.on('request', request => {
+    if (request.method() === 'POST' && request.url().endsWith('/world/turns')) submissions += 1;
+  });
+  await page.setViewportSize({ width: 320, height: 720 });
+  await page.goto('/reader/novel-1/1#latest-world-narrative');
+  const outcome = page.getByRole('status', { name: '本回合行动结果' });
+  await expect(outcome).toContainText('D20 6 + 1 = 7 / 难度 12 · 失败');
+  await expect(outcome).toContainText('本次检定失败，未产生玩家行动效果；回合已结束，你仍可选择下一步行动。');
+  await expect(page.getByText('世界入场坐标 · 原著第 1 章。后续按回合推进，不自动翻到原著下一章。')).toBeVisible();
+  await page.getByRole('link', { name: '去选择行动' }).click();
+  await expect(page.locator('#world-action-form')).toBeFocused();
+  await page.getByRole('button', { name: '选择下一步行动' }).click();
+  await expect(page.locator('#world-action-form')).toBeFocused();
+  expect(submissions).toBe(0);
+
+  const submit = page.getByRole('button', { name: '执行行动', exact: true });
+  await expect(submit).toBeDisabled();
+  await expect(submit).toHaveAccessibleDescription('请选择行动方式，再填写你想做什么。');
+  await page.getByRole('combobox', { name: '行动', exact: true }).selectOption('travel');
+  await expect(submit).toHaveAccessibleDescription('请先选择这次行动的目标。');
+  await page.getByRole('combobox', { name: '目标', exact: true }).selectOption('loc-2');
+  await expect(submit).toHaveAccessibleDescription('请在“你的意图”中写下你想做什么。');
+  await page.getByLabel('你的意图').fill('沿山路下行');
+  await expect(submit).toBeEnabled();
+  await expectNoHorizontalOverflow(page);
+});
+
+test('a committed turn awaiting memory explains the lock and replays the original request', async ({ page }) => {
+  await installStubs(page, { openWorld: true });
+  const turnId = 'e3744cac-e557-4d78-9d91-9ba060e81c5f';
+  const entry = {
+    ...OPEN_WORLD.journal[0], turn_id: turnId, memory_projection_status: 'pending',
+    action: { kind: 'travel', target_id: 'loc-2', intent: '沿山路下行' },
+  };
+  let recovered = false;
+  await page.route('**/api/narrative/*/world', route => route.fulfill({
+    json: { ...OPEN_WORLD, journal: [{ ...entry, memory_projection_status: recovered ? 'saved' : 'pending' }] },
+  }));
+  await page.route('**/api/narrative/*/world/turns', async route => {
+    expect(route.request().headers()['idempotency-key']).toBe(turnId);
+    expect(route.request().postDataJSON()).toEqual({
+      ...entry.action, expected_turn_number: entry.turn_number - 1,
+    });
+    recovered = true;
+    await route.fulfill({ json: { ...entry, memory_projection_status: 'saved' } });
+  });
+  await page.goto('/reader/novel-1/1#latest-world-narrative');
+  await page.getByRole('link', { name: '去选择行动' }).click();
+  await expect(page.getByRole('alert')).toContainText('经过已保存，但角色记忆尚未同步完成');
+  await expect(page.getByRole('button', { name: '执行行动', exact: true })).toBeDisabled();
+  await page.getByRole('button', { name: '继续确认结果' }).click();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByRole('combobox', { name: '行动', exact: true })).toBeEnabled();
 });
 
 for (const viewport of [{ width: 320, height: 720 }, { width: 568, height: 320 }, { width: 320, height: 256 }]) {
