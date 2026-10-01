@@ -317,10 +317,10 @@ export function WorldDashboard({
             </div>
           ) : null}
           <p id="latest-world-narrative" role="status" aria-live="polite" tabIndex={-1} className="mt-3 max-w-3xl whitespace-pre-wrap text-base leading-8 text-[#f6f1e6] [overflow-wrap:anywhere] sm:text-lg">
-            {latestNarrative ?? '世界已经就绪。选定行动与目标，故事中的人物会按各自的处境作出回应。'}
+            {latestNarrative ?? '世界已经就绪。选择一条场景建议，或自由输入你的行动，故事中的人物会按各自的处境作出回应。'}
           </p>
           <div className="mt-5 text-sm leading-6 text-[#d5e1d7]">
-            <p>故事会在你执行下一次行动后推进；选择行动、确认目标并填写意图，再点击“执行行动”。</p>
+            <p>选择一条场景建议，或自由输入你的行动；确认意图后点击“执行行动”，故事会继续推进。</p>
             <a href="#world-action-form" className="mt-2 inline-block font-semibold text-[#f6f1e6] underline underline-offset-4">去选择行动</a>
           </div>
         </div>
@@ -360,7 +360,7 @@ export function WorldDashboard({
 
       <div className="rounded-2xl border border-[#d8c8a9] bg-white p-5 sm:p-6">
         <h3 id="world-action-form" tabIndex={-1} className="scroll-mt-24 text-lg font-semibold text-[#203a35]">你接下来做什么？</h3>
-        <p className="mb-5 mt-1 text-sm text-[#59645f]">先选择行动方式，再选择目标；只有已确认同场的角色会成为人物目标。</p>
+        <p className="mb-5 mt-1 text-sm text-[#59645f]">选择一条场景建议，或自由输入。建议只会填入草稿，确认后再执行；人物建议仅来自已确认同场的角色。</p>
         {actionsDisabled ? (
           <div role="alert" className="mb-4 text-sm text-[#b3261e]">
             {actionsDisabledReason}
@@ -384,6 +384,7 @@ export function WorldDashboard({
           </div>
         ) : null}
         <WorldActionForm
+          key={`${view.player.user_id}:${view.player.novel_id}:${view.player.id}`}
           view={view}
           isPending={turn.isPending}
           isLocked={recoveryOnly || actionsDisabled || Boolean(pendingRequest)}

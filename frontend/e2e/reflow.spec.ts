@@ -84,12 +84,17 @@ test('the latest narrative leads to an actionable next step with missing-input g
 
   const submit = page.getByRole('button', { name: '执行行动', exact: true });
   await expect(submit).toBeDisabled();
-  await expect(submit).toHaveAccessibleDescription('请选择行动方式，再填写你想做什么。');
+  await expect(submit).toHaveAccessibleDescription('请在“你的意图”中写下你想做什么。');
+  await page.getByRole('button', { name: '自由输入', exact: true }).click();
+  await expect(submit).toBeDisabled();
+  await page.getByRole('textbox', { name: '你的意图' }).fill('沿山路下行');
+  await expect(submit).toBeEnabled();
+  await expectNoHorizontalOverflow(page);
+
+  await page.locator('summary').filter({ hasText: '调整行动方式与目标' }).click();
   await page.getByRole('combobox', { name: '行动', exact: true }).selectOption('travel');
   await expect(submit).toHaveAccessibleDescription('请先选择这次行动的目标。');
   await page.getByRole('combobox', { name: '目标', exact: true }).selectOption('loc-2');
-  await expect(submit).toHaveAccessibleDescription('请在“你的意图”中写下你想做什么。');
-  await page.getByLabel('你的意图').fill('沿山路下行');
   await expect(submit).toBeEnabled();
   await expectNoHorizontalOverflow(page);
 });
@@ -119,6 +124,7 @@ test('a committed turn awaiting memory explains the lock and replays the origina
   await expect(page.getByRole('button', { name: '执行行动', exact: true })).toBeDisabled();
   await page.getByRole('button', { name: '继续确认结果' }).click();
   await expect(page.getByRole('alert')).toHaveCount(0);
+  await page.locator('summary').filter({ hasText: '调整行动方式与目标' }).click();
   await expect(page.getByRole('combobox', { name: '行动', exact: true })).toBeEnabled();
 });
 
