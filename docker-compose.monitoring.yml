@@ -22,7 +22,7 @@ services:
       retries: 10
 
   grafana:
-    image: grafana/grafana:13.2.0-ubuntu@sha256:2f6f8ae789c142f0ee00d355cbd9a00bf3149ae255876c3caa8b08ee74fc8791
+    image: grafana/grafana:13.2.2-ubuntu@sha256:9a68a82ec38931e1baacee5d471cf74aa42565eb49554caa5290663529de6941
     container_name: ${CONTAINER_PREFIX:-novel}-grafana
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set for the monitoring profile}
