@@ -37,6 +37,7 @@
     { "name": "world_states", "kind": "table", "owner": "narrative-service" },
     { "name": "player_chapters", "kind": "table", "owner": "narrative-service" },
     { "name": "world_turns", "kind": "table", "owner": "narrative-service" },
+    { "name": "world_source_operations", "kind": "table", "owner": "narrative-service" },
 
     { "name": "erasure_records", "kind": "table", "owner": "platform" },
     { "name": "database_lineage", "kind": "table", "owner": "platform" },

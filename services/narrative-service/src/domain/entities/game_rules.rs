@@ -580,7 +580,7 @@ pub fn build_action_adjudication_context(
     action: &WorldAction,
     check: &ActionCheck,
 ) -> Option<ActionAdjudicationContext> {
-    let context = &session.entry_context;
+    let context = session.context();
     let target = match action.target_id.as_deref() {
         None if action.kind == WorldActionKind::PursueGoal => None,
         Some(target) => Some(match action.kind {
@@ -1052,6 +1052,115 @@ mod tests {
         assert_eq!(check.modifier, 1);
         assert_eq!(check.total, 11);
         assert!(check.succeeded);
+    }
+
+    #[test]
+    fn adjudication_uses_extended_targets_locations_and_rules_without_changing_origin() {
+        use crate::domain::entities::narrative_node::WorldState;
+        use crate::domain::entities::world_session::{
+            WorldCharacterRef, WorldEntityRef, WorldEntryContext, WorldRuleRef,
+        };
+        use crate::domain::entities::world_source::{
+            SourceDefinition, WorldSourceCommand, WorldSourceDelta,
+        };
+
+        let novel = Uuid::new_v4();
+        let actor = Uuid::new_v4();
+        let template = series_template(novel);
+        let mut player = PlayerEntity::new_with_rules(
+            Uuid::new_v4(),
+            novel,
+            1,
+            "云舟".into(),
+            "远行者".into(),
+            vec!["观察".into()],
+            None,
+            vec![],
+            series_profile(&template),
+        )
+        .unwrap();
+        let entry = WorldEntryContext {
+            series_setting: template.series_setting(),
+            model_version: 2,
+            checkpoint_chapter: 1,
+            unlocked_through_chapter: 1,
+            characters: vec![],
+            locations: vec![],
+            factions: vec![],
+            hard_rules: vec![],
+            dead_character_ids: vec![],
+            threads: vec![],
+            scheduled_events: vec![],
+            character_goals: vec![],
+        };
+        let mut state = WorldState::new(player.user_id, novel);
+        state.state["player_entity"] = serde_json::to_value(&player).unwrap();
+        state
+            .start_open_world_with_rules(&entry, Some(&template))
+            .unwrap();
+        state
+            .extend_world_source(
+                &WorldSourceCommand {
+                    expected_turn_number: 0,
+                    expected_source_chapter: 1,
+                    target_chapter: 2,
+                },
+                &WorldSourceDelta {
+                    model_version: 2,
+                    checkpoint_chapter: 1,
+                    from_source_chapter: 1,
+                    target_chapter: 2,
+                    characters: vec![SourceDefinition {
+                        definition: WorldCharacterRef {
+                            id: actor,
+                            name: "守夜人".into(),
+                        },
+                        source_chapters: vec![2],
+                    }],
+                    locations: vec![SourceDefinition {
+                        definition: WorldEntityRef {
+                            id: "market".into(),
+                            name: "夜市".into(),
+                        },
+                        source_chapters: vec![2],
+                    }],
+                    hard_rules: vec![SourceDefinition {
+                        definition: WorldRuleRef {
+                            id: "night-silence".into(),
+                            description: "夜市禁止高声说话。".into(),
+                        },
+                        source_chapters: vec![2],
+                    }],
+                    factions: vec![],
+                    threads: vec![],
+                    scheduled_events: vec![],
+                    character_goals: vec![],
+                },
+            )
+            .unwrap();
+        let session = state.open_world().unwrap().unwrap();
+        player.location_id = Some("market".into());
+        for (kind, target_id, target_name) in [
+            (WorldActionKind::Converse, actor.to_string(), "守夜人"),
+            (WorldActionKind::Travel, "market".into(), "夜市"),
+        ] {
+            let action = WorldAction {
+                kind,
+                target_id: Some(target_id),
+                intent: "谨慎行动".into(),
+            };
+            let check = resolve_action_check(&template, &player.rules, kind, 10)
+                .unwrap()
+                .with_pending_adjudication();
+            let context = build_action_adjudication_context(&player, &session, &action, &check)
+                .expect("newly admitted targets must receive semantic adjudication");
+            assert_eq!(context.target.as_deref(), Some(target_name));
+            assert_eq!(context.location.as_deref(), Some("夜市"));
+            assert_eq!(context.hard_rules, vec!["夜市禁止高声说话。"]);
+        }
+        assert_eq!(session.entry_context, entry);
+        assert_eq!(session.game_rules.as_ref(), Some(&template));
+        assert_eq!(session.context().unlocked_through_chapter, 2);
     }
 
     #[test]

@@ -11,6 +11,8 @@ regexes = [
     "0123456789abcdef0123456789abcdef",
     # Fixed smoke-test encryption key; never accepted as a production secret.
     "0123456789abcdef(0123456789abcdef){3}",
+    # Fixed UUID idempotency key in the source-recovery browser fixture, not a credential.
+    "^a733c562-44d3-4ae0-83b8-33a28c7be35a$",
     # Provider model identifiers, not credentials.
     "^claude-haiku-4-5-20251001$",
     "^claude-3-5-haiku-20241022$",

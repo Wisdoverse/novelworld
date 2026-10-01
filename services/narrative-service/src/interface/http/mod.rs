@@ -22,6 +22,7 @@ use crate::domain::entities::world_session::{
     CharacterContextEnvelope, CharacterContextSnapshot, CharacterWorldContext, WorldAction,
     WorldActionKind,
 };
+use crate::domain::entities::world_source::WorldSourceCommand;
 use crate::domain::ports::{AccountExportPort, ActionSuggestionPort, ReadinessProbe};
 
 const WORLD_CONTEXT_VERSION_HEADER: &str = "X-World-Context-Version";
@@ -73,6 +74,10 @@ fn routes() -> Router<AppState> {
         .route(
             "/narrative/{novel_id}/world",
             get(get_open_world).post(start_open_world),
+        )
+        .route(
+            "/narrative/{novel_id}/world/source",
+            post(advance_world_source),
         )
         .route("/narrative/{novel_id}/world/turns", post(submit_world_turn))
         .route(
@@ -355,6 +360,37 @@ fn narrative_error_response(error: NarrativeError) -> axum::response::Response {
                 "Read through the world context source chapter before resuming this timeline",
             )
         }
+        NarrativeError::WorldSourceBusy => {
+            let mut response = error_response(
+                StatusCode::CONFLICT,
+                "world_source_busy",
+                "Finish the pending world action before admitting new source",
+            );
+            response
+                .headers_mut()
+                .insert(RETRY_AFTER, HeaderValue::from_static("30"));
+            return response;
+        }
+        NarrativeError::WorldSourceChanged => (
+            StatusCode::CONFLICT,
+            "world_source_changed",
+            "Reload the current world before admitting another chapter",
+        ),
+        NarrativeError::WorldSourceOrderConflict => (
+            StatusCode::CONFLICT,
+            "world_source_order_conflict",
+            "Source events cannot replace already advanced chronology",
+        ),
+        NarrativeError::WorldSourceUnavailable => (
+            StatusCode::NOT_FOUND,
+            "world_source_unavailable",
+            "The pinned canonical source is unavailable",
+        ),
+        NarrativeError::WorldSourceOutcomeUnknown => (
+            StatusCode::CONFLICT,
+            "world_source_outcome_unknown",
+            "Retry the same source operation key to establish the outcome",
+        ),
         NarrativeError::Unavailable(_error) => {
             tracing::warn!(
                 error_code = "dependency_unavailable",
@@ -682,6 +718,8 @@ async fn suggest_world_action(
 #[serde(deny_unknown_fields)]
 struct WorldTurnRequest {
     expected_turn_number: i64,
+    #[serde(default)]
+    expected_source_chapter: Option<i32>,
     kind: WorldActionKind,
     target_id: Option<String>,
     intent: String,
@@ -697,6 +735,33 @@ impl WorldTurnRequest {
                 intent: self.intent,
             },
         )
+    }
+}
+
+async fn advance_world_source(
+    State(state): State<AppState>,
+    Path(novel_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(command): Json<WorldSourceCommand>,
+) -> Response {
+    let Some(user_id) = extract_user_id(&headers) else {
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "Missing or invalid user identity",
+        );
+    };
+    let operation_id = match extract_idempotency_key(&headers) {
+        Ok(key) => key,
+        Err(message) => return error_response(StatusCode::BAD_REQUEST, "invalid_request", message),
+    };
+    match state
+        .handler
+        .advance_world_source(operation_id, user_id, novel_id, command)
+        .await
+    {
+        Ok(result) => (StatusCode::OK, Json(result)).into_response(),
+        Err(error) => narrative_error_response(error),
     }
 }
 
@@ -717,10 +782,18 @@ async fn submit_world_turn(
         Ok(turn_id) => turn_id,
         Err(message) => return error_response(StatusCode::BAD_REQUEST, "invalid_request", message),
     };
+    let expected_source_chapter = request.expected_source_chapter;
     let (expected_turn_number, action) = request.into_parts();
     match state
         .handler
-        .submit_world_turn(turn_id, user_id, novel_id, expected_turn_number, action)
+        .submit_world_turn_with_source(
+            turn_id,
+            user_id,
+            novel_id,
+            expected_turn_number,
+            expected_source_chapter,
+            action,
+        )
         .await
     {
         Ok(result) => (StatusCode::OK, Json(result)).into_response(),
@@ -1010,6 +1083,7 @@ mod principal_contract_tests {
             "intent": "继续追查"
         }))
         .unwrap();
+        assert_eq!(request.expected_source_chapter, None);
         let (expected_turn_number, action) = request.into_parts();
         assert_eq!(expected_turn_number, 3);
         assert_eq!(action.kind, WorldActionKind::PursueGoal);

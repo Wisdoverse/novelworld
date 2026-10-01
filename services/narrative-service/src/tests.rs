@@ -125,6 +125,17 @@ fn journey_result(
 
 #[async_trait]
 impl ChapterReadRepository for FixedChapterRepo {
+    async fn get_world_source_delta(
+        &self,
+        _novel: Uuid,
+        _checkpoint: i32,
+        _user: Uuid,
+        _version: i32,
+        _from: i32,
+        _target: i32,
+    ) -> Result<Option<crate::domain::entities::world_source::WorldSourceDelta>> {
+        Ok(None)
+    }
     async fn get_chapter(
         &self,
         _novel_id: Uuid,

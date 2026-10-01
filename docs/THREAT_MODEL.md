@@ -524,3 +524,18 @@ reportable findings.
 
 Repository: target_sha256_e02444a12e6cbb6554e4f496f3a4efb39fcb8a8216b52125fd26d3a2b1ff8f5e
 Version: codex-security-snapshot/v1:sha256:edabedabc8c9370dace521b6f8a749a9144d194177cef663ca4a8b1c9ea4b5e5
+
+### Same-world source admission
+
+Source admission retains the original player/entry authority and admits only
+complete pinned-model evidence through Novel-owned HTTP projection. Every
+new whole definition and link/death effect must fit the explicit chapter; no
+future citation is cropped to retain future text. Narrative owns its exact-key
+journal and world transaction. Observed source plus turn prevents old tabs from
+acting on a newly extended world before generation. World-row-first locking
+serializes all mixed authority writers and excludes unresolved memory work.
+Replay returns guarded current truth, never restores old private state. A
+cross-service rewind can hide an already committed source operation; exact-key
+recovery and content-free unknown outcomes preserve authority without claiming
+linearizable progress/world writes. Source-operation browser storage is bounded
+and principal/novel scoped under the existing private recovery lifecycle.

@@ -490,6 +490,12 @@ Primary SPEC focus: §4.1.4–§4.1.7 and §6.
 
 ## H4 — Causal, accessible world journey
 
+[Issue #467](https://github.com/Wisdoverse/novelworld/issues/467) tracks explicit
+next-source admission into an existing world: preserve immutable entry/history,
+admit complete pinned evidence, fence old actions and synchronize reader
+progress/recovery. It is separate from the fixed-source upgrade/memory
+Diagnostics in #378/#230 and does not close their live-evidence gates.
+
 ADR 0011 reader-confirmed series worlds are a structural preview within H4,
 not evidence that the horizon is complete. Novel stores immutable safe snapshots
 and private associations; Narrative keeps source and target canon separate and

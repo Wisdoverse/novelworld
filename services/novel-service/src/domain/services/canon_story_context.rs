@@ -118,6 +118,282 @@ pub struct WorldEntryContext {
     pub series_setting: Option<crate::domain::entities::world_series::SeriesSetting>,
 }
 
+/// Source authority accompanies the entire definition; later citations are never cropped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceDefinition<T> {
+    pub definition: T,
+    pub source_chapters: Vec<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorldSourceDelta {
+    pub model_version: i32,
+    pub checkpoint_chapter: i32,
+    pub from_source_chapter: i32,
+    pub target_chapter: i32,
+    pub characters: Vec<SourceDefinition<CanonCharacterRef>>,
+    pub locations: Vec<SourceDefinition<CanonEntityRef>>,
+    pub factions: Vec<SourceDefinition<CanonEntityRef>>,
+    pub hard_rules: Vec<SourceDefinition<CanonRuleRef>>,
+    pub threads: Vec<SourceDefinition<CanonEntityRef>>,
+    pub scheduled_events: Vec<SourceDefinition<CanonEventRef>>,
+    pub character_goals: Vec<SourceDefinition<CanonCharacterGoalRef>>,
+}
+
+/// `characters` must carry lexical first-appearance proof from the owning chapter repository.
+pub fn build_world_source_delta(
+    model: &CanonStoryModel,
+    characters: &[Character],
+    checkpoint: i32,
+    from: i32,
+    target: i32,
+) -> Result<WorldSourceDelta, CanonContextError> {
+    if model.model_version < 1
+        || checkpoint < 1
+        || from < checkpoint
+        || from.checked_add(1) != Some(target)
+    {
+        return Err(CanonContextError::InvalidWorldRange);
+    }
+    let referenced: HashSet<Uuid> = model
+        .content
+        .events
+        .iter()
+        .flat_map(|event| event.character_ids.iter().copied())
+        .chain(
+            model
+                .content
+                .character_goals
+                .iter()
+                .map(|goal| goal.character_id),
+        )
+        .chain(model.content.deaths.iter().map(|death| death.character_id))
+        .chain(
+            model
+                .content
+                .relationships
+                .iter()
+                .flat_map(|relation| [relation.from_character_id, relation.to_character_id]),
+        )
+        .chain(model.content.ending.character_states.keys().copied())
+        .collect();
+    let characters = characters
+        .iter()
+        .filter_map(|character| {
+            let chapter = character.first_appearance_chapter?;
+            (character.novel_id == model.novel_id
+                && (1..=target).contains(&chapter)
+                && referenced.contains(&character.id))
+            .then(|| SourceDefinition {
+                definition: CanonCharacterRef {
+                    id: character.id,
+                    name: character.name.clone(),
+                },
+                source_chapters: vec![chapter],
+            })
+        })
+        .collect::<Vec<_>>();
+    let locations = model
+        .content
+        .locations
+        .iter()
+        .filter_map(|location| {
+            bounded_authority(&location.evidence, target).map(|source_chapters| SourceDefinition {
+                definition: CanonEntityRef {
+                    id: location.id.clone(),
+                    name: location.name.clone(),
+                },
+                source_chapters,
+            })
+        })
+        .collect::<Vec<_>>();
+    let factions = model
+        .content
+        .factions
+        .iter()
+        .filter_map(|faction| {
+            bounded_authority(&faction.evidence, target).map(|source_chapters| SourceDefinition {
+                definition: CanonEntityRef {
+                    id: faction.id.clone(),
+                    name: faction.name.clone(),
+                },
+                source_chapters,
+            })
+        })
+        .collect::<Vec<_>>();
+    let hard_rules = model
+        .content
+        .world_rules
+        .iter()
+        .filter(|rule| rule.hard)
+        .filter_map(|rule| {
+            bounded_authority(&rule.evidence, target).map(|source_chapters| SourceDefinition {
+                definition: CanonRuleRef {
+                    id: rule.id.clone(),
+                    description: rule.description.clone(),
+                },
+                source_chapters,
+            })
+        })
+        .collect::<Vec<_>>();
+    let threads = model
+        .content
+        .unresolved_threads
+        .iter()
+        .filter_map(|thread| {
+            bounded_authority(&thread.evidence, target).map(|source_chapters| SourceDefinition {
+                definition: CanonEntityRef {
+                    id: thread.id.clone(),
+                    name: thread.description.clone(),
+                },
+                source_chapters,
+            })
+        })
+        .collect::<Vec<_>>();
+    let character_ids: HashSet<_> = characters.iter().map(|item| item.definition.id).collect();
+    let location_ids: HashSet<_> = locations
+        .iter()
+        .map(|item| item.definition.id.as_str())
+        .collect();
+    let faction_ids: HashSet<_> = factions
+        .iter()
+        .map(|item| item.definition.id.as_str())
+        .collect();
+    let character_goals = model
+        .content
+        .character_goals
+        .iter()
+        .filter_map(|goal| {
+            let source_chapters = bounded_authority(&goal.evidence, target)?;
+            character_ids
+                .contains(&goal.character_id)
+                .then(|| SourceDefinition {
+                    definition: CanonCharacterGoalRef {
+                        id: goal.id.clone(),
+                        character_id: goal.character_id,
+                        description: goal.description.clone(),
+                        source_chapters: source_chapters.clone(),
+                    },
+                    source_chapters,
+                })
+        })
+        .collect::<Vec<_>>();
+    for (name, count) in [
+        ("characters", characters.len()),
+        ("locations", locations.len()),
+        ("factions", factions.len()),
+        ("hard_rules", hard_rules.len()),
+        ("threads", threads.len()),
+        ("character_goals", character_goals.len()),
+    ] {
+        if count > MAX_CONTEXT_ITEMS {
+            return Err(CanonContextError::TooLarge(name));
+        }
+    }
+    // ponytail: joins scan at most 256 definitions per catalog; index IDs if that limit grows.
+    let mut scheduled_events = model
+        .content
+        .events
+        .iter()
+        .filter_map(|event| {
+            let event_sources = bounded_authority(&event.evidence, target)?;
+            if event_sources[0] <= checkpoint
+                || event
+                    .character_ids
+                    .iter()
+                    .any(|id| !character_ids.contains(id))
+                || event
+                    .location_ids
+                    .iter()
+                    .any(|id| !location_ids.contains(id.as_str()))
+                || event
+                    .faction_ids
+                    .iter()
+                    .any(|id| !faction_ids.contains(id.as_str()))
+            {
+                return None;
+            }
+            let mut authority = event_sources.clone();
+            // Linked definitions and attached deaths are part of the same whole-event authority.
+            for item in &characters {
+                if event.character_ids.contains(&item.definition.id) {
+                    authority.extend(&item.source_chapters);
+                }
+            }
+            for item in &locations {
+                if event.location_ids.contains(&item.definition.id) {
+                    authority.extend(&item.source_chapters);
+                }
+            }
+            for item in &factions {
+                if event.faction_ids.contains(&item.definition.id) {
+                    authority.extend(&item.source_chapters);
+                }
+            }
+            let mut death_character_ids = Vec::new();
+            for death in model
+                .content
+                .deaths
+                .iter()
+                .filter(|death| death.event_id == event.id)
+            {
+                authority.extend(bounded_authority(&death.evidence, target)?);
+                if !character_ids.contains(&death.character_id) {
+                    return None;
+                }
+                let character = characters
+                    .iter()
+                    .find(|item| item.definition.id == death.character_id)?;
+                authority.extend(&character.source_chapters);
+                death_character_ids.push(death.character_id);
+            }
+            authority.sort_unstable();
+            authority.dedup();
+            Some(SourceDefinition {
+                definition: CanonEventRef {
+                    id: event.id.clone(),
+                    sequence: event.sequence,
+                    summary: event.summary.clone(),
+                    character_ids: event.character_ids.clone(),
+                    location_ids: event.location_ids.clone(),
+                    faction_ids: event.faction_ids.clone(),
+                    death_character_ids,
+                    source_chapters: event_sources,
+                },
+                source_chapters: authority,
+            })
+        })
+        .collect::<Vec<_>>();
+    scheduled_events.sort_by_key(|item| item.definition.sequence);
+    if scheduled_events.len() > MAX_CONTEXT_ITEMS {
+        return Err(CanonContextError::TooLarge("scheduled_events"));
+    }
+    Ok(WorldSourceDelta {
+        model_version: model.model_version,
+        checkpoint_chapter: checkpoint,
+        from_source_chapter: from,
+        target_chapter: target,
+        characters,
+        locations,
+        factions,
+        hard_rules,
+        threads,
+        scheduled_events,
+        character_goals,
+    })
+}
+
+fn bounded_authority(evidence: &SourceEvidence, target: i32) -> Option<Vec<i32>> {
+    let chapters = source_chapters(evidence);
+    (!chapters.is_empty()
+        && chapters
+            .iter()
+            .all(|chapter| (1..=target).contains(chapter)))
+    .then_some(chapters)
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum CanonContextError {
     #[error("checkpoint chapter must be positive")]
@@ -485,11 +761,11 @@ mod tests {
 
         assert!(!original_player_name_available(
             " 林岚 ",
-            &[character.clone()]
+            std::slice::from_ref(&character)
         ));
         assert!(!original_player_name_available(
             "守门人",
-            &[character.clone()]
+            std::slice::from_ref(&character)
         ));
         assert!(original_player_name_available("云舟", &[character]));
     }
@@ -603,6 +879,105 @@ mod tests {
         character.id = character_id;
         character.first_appearance_chapter = Some(1);
 
+        let delta =
+            super::build_world_source_delta(&model, std::slice::from_ref(&character), 1, 1, 2)
+                .unwrap();
+        assert_eq!(delta.scheduled_events[0].definition.id, "next");
+        assert_eq!(delta.scheduled_events[0].source_chapters, vec![1, 2]);
+        assert_eq!(
+            delta.scheduled_events[0].definition.death_character_ids,
+            vec![character_id]
+        );
+        assert_eq!(
+            delta.scheduled_events[0].definition.source_chapters,
+            vec![2]
+        );
+        let mut mixed = model.clone();
+        mixed.content.events[1]
+            .evidence
+            .provenance
+            .push(evidence(10).provenance[0].clone());
+        mixed.content.unresolved_threads[0]
+            .evidence
+            .provenance
+            .push(evidence(10).provenance[0].clone());
+        mixed.content.character_goals[0]
+            .evidence
+            .provenance
+            .push(evidence(10).provenance[0].clone());
+        let early =
+            super::build_world_source_delta(&mixed, std::slice::from_ref(&character), 1, 1, 2)
+                .unwrap();
+        assert!(early.scheduled_events.is_empty());
+        assert!(early.threads.is_empty());
+        assert!(early.character_goals.is_empty());
+        let later =
+            super::build_world_source_delta(&mixed, std::slice::from_ref(&character), 1, 9, 10)
+                .unwrap();
+        assert_eq!(
+            later.scheduled_events[0].definition.source_chapters,
+            vec![2, 10]
+        );
+        assert_eq!(later.scheduled_events[0].source_chapters, vec![1, 2, 10]);
+        assert_eq!(later.threads[0].source_chapters, vec![1, 10]);
+        let mut unsafe_death = model.clone();
+        unsafe_death.content.deaths[0].evidence = evidence(10);
+        assert!(super::build_world_source_delta(
+            &unsafe_death,
+            std::slice::from_ref(&character),
+            1,
+            1,
+            2
+        )
+        .unwrap()
+        .scheduled_events
+        .is_empty());
+        let mut unsafe_link = model.clone();
+        unsafe_link.content.locations[0]
+            .evidence
+            .provenance
+            .push(evidence(10).provenance[0].clone());
+        assert!(super::build_world_source_delta(
+            &unsafe_link,
+            std::slice::from_ref(&character),
+            1,
+            1,
+            2
+        )
+        .unwrap()
+        .scheduled_events
+        .is_empty());
+        unsafe_link.content.locations[0].evidence.provenance.clear();
+        assert!(super::build_world_source_delta(
+            &unsafe_link,
+            std::slice::from_ref(&character),
+            1,
+            1,
+            2
+        )
+        .unwrap()
+        .locations
+        .is_empty());
+        assert!(super::build_world_source_delta(&model, &[], 1, 1, 2)
+            .unwrap()
+            .scheduled_events
+            .is_empty());
+        assert!(
+            super::build_world_source_delta(&model, std::slice::from_ref(&character), 1, 1, 3)
+                .is_err()
+        );
+        let mut oversized = model.clone();
+        oversized.content.unresolved_threads = (0..257)
+            .map(|index| UnresolvedThread {
+                id: format!("thread-{index}"),
+                description: "bounded thread".into(),
+                evidence: evidence(2),
+            })
+            .collect();
+        assert_eq!(
+            super::build_world_source_delta(&oversized, std::slice::from_ref(&character), 1, 1, 2),
+            Err(super::CanonContextError::TooLarge("threads"))
+        );
         let context = build_world_entry_context(&model, &[character], 1, 2).unwrap();
         let legacy_bytes = serde_json::to_vec(&context).unwrap();
         assert!(serde_json::to_value(&context)

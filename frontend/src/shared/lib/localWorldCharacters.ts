@@ -1,5 +1,7 @@
 import type { OpenWorldView } from '@/shared/types';
 
+import { effectiveWorldContext } from './worldSourceContext';
+
 // A latest-turn event at the player's current location is the only encounter
 // evidence this world contract provides. Older sightings are not current presence.
 export function localWorldCharacterIds(view: OpenWorldView): Set<string> {
@@ -9,7 +11,7 @@ export function localWorldCharacterIds(view: OpenWorldView): Set<string> {
     return new Set();
   }
 
-  const known = new Set(view.session.entry_context?.characters?.map(character => character.id) ?? []);
+  const known = new Set(effectiveWorldContext(view.session)?.characters?.map(character => character.id) ?? []);
   const dead = new Set(view.session.dead_character_ids);
   return new Set(latest.transition.events
     .filter(event => event.location_id === locationId)

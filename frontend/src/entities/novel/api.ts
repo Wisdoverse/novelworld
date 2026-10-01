@@ -1,6 +1,7 @@
 import { isAxiosError } from 'axios';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from '@/shared/api/client';
+import { storePendingWorldSource } from '@/shared/lib/worldSourceStorage';
 import { removeWorldTurnPendingRequest } from '@/shared/lib/worldTurnStorage';
 import type {
   Novel,
@@ -461,7 +462,10 @@ export function useDeleteNovel(userId?: string) {
   return useMutation({
     mutationFn: (id: string) => apiClient.delete(`/novels/${id}`),
     onSuccess: (_response, novelId) => {
-      if (userId) removeWorldTurnPendingRequest(userId, novelId);
+      if (userId) {
+        removeWorldTurnPendingRequest(userId, novelId);
+        storePendingWorldSource(userId, novelId, null);
+      }
       queryClient.invalidateQueries({ queryKey: novelKeys.list() });
       queryClient.invalidateQueries({ queryKey: novelKeys.catalog() });
     },

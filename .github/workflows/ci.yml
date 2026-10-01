@@ -347,6 +347,7 @@ jobs:
         run: |
           cargo test -p integration-tests --locked
           cargo test --locked -p novel-service --test community_series_http -- --ignored
+          cargo test --locked -p novel-service --test world_source_http -- --ignored
       - name: Stop test dependencies
         if: always()
         run: docker compose -f docker-compose.test.yml down -v
@@ -592,8 +593,7 @@ jobs:
       - name: Verify restart-safe ingestion recovery boundaries
         if: env.RUN_EXTENDED_DRILLS == 'true'
         run: tests/e2e/ingestion_recovery.sh
-      - name: Verify restart-safe core reader loop
-        if: env.RUN_EXTENDED_DRILLS == 'true'
+      - name: Verify restart-safe core reader loop and source admission
         run: tests/e2e/core_reader_loop.sh
       - name: Verify the provider-outage fail-closed drill
         if: env.RUN_EXTENDED_DRILLS == 'true'

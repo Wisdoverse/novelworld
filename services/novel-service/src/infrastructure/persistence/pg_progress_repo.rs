@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -88,6 +88,26 @@ impl ReadingProgressRepository for PgReadingProgressRepository {
         .await?;
         anyhow::ensure!(result.rows_affected() == 1, "reading progress not found");
         Ok(())
+    }
+
+    async fn advance_chapter(&self, user_id: Uuid, novel_id: Uuid, chapter: i32) -> Result<()> {
+        // No automatic retries. Repeating a desired boundary cannot reduce progress.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut tx = self.pool.begin().await?;
+            sqlx::query("SELECT pg_catalog.set_config('statement_timeout', '4s', true), pg_catalog.set_config('lock_timeout', '3s', true)")
+                .execute(&mut *tx).await?;
+            let result = sqlx::query(
+                "UPDATE reading_progress SET current_chapter = GREATEST(current_chapter, $3), last_read_at = NOW() WHERE user_id = $1 AND novel_id = $2",
+            )
+            .bind(user_id)
+            .bind(novel_id)
+            .bind(chapter)
+            .execute(&mut *tx)
+            .await?;
+            anyhow::ensure!(result.rows_affected() == 1, "reading progress not found");
+            tx.commit().await?;
+            Ok(())
+        }).await.context("reading progress advance deadline exceeded")?
     }
 
     async fn set_identity(

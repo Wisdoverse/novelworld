@@ -137,3 +137,5 @@ Accepted structural preview:
 
 - [ADR 0009: Bounded Laya (Jev) D20 adjudication](./adr/0009-bounded-laya-d20-adjudication.md)
 - [ADR 0010: Versioned basic game rules from canonical world rules](./adr/0010-versioned-basic-game-rules.md)
+
+- [ADR 0013: Same-world source progression](./adr/0013-same-world-source-progression.md)

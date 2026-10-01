@@ -151,6 +151,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0035_world_series_contributions.sql",
         include_str!("../../../infra/postgres/migrations/0035_world_series_contributions.sql"),
     ),
+    (
+        "0036_world_source_progression.sql",
+        include_str!("../../../infra/postgres/migrations/0036_world_source_progression.sql"),
+    ),
 ];
 
 #[derive(Serialize, Deserialize)]
@@ -503,7 +507,7 @@ mod tests {
         assert_eq!(MIGRATIONS.first().unwrap().0, "0001_runtime_contract.sql");
         assert_eq!(
             MIGRATIONS.last().unwrap().0,
-            "0035_world_series_contributions.sql"
+            "0036_world_source_progression.sql"
         );
         assert!(MIGRATIONS.windows(2).all(|pair| pair[0].0 < pair[1].0));
     }

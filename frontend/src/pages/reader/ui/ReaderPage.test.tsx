@@ -73,6 +73,10 @@ const mocks = vi.hoisted(() => ({
   refetchWorldState: vi.fn(),
 }));
 
+vi.mock('@/features/world-source', () => ({
+  useWorldSourceProgression: () => ({ locked: false, start: vi.fn(), recover: vi.fn() }),
+}));
+
 vi.mock('react-router-dom', () => ({
   useNavigate: () => mocks.navigate,
   useParams: () => ({ novelId: mocks.novelId, chapterNum: mocks.routeChapter }),

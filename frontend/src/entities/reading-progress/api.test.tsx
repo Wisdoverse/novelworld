@@ -3,12 +3,13 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  advanceReadingProgress,
   useReadingProgress,
   useResetReaderIdentity,
   useUpdateReadingProgress,
 } from './api';
 
-const api = vi.hoisted(() => ({ get: vi.fn(), put: vi.fn() }));
+const api = vi.hoisted(() => ({ get: vi.fn(), put: vi.fn(), post: vi.fn() }));
 
 vi.mock('@/shared/api/client', () => ({ apiClient: api }));
 
@@ -34,6 +35,13 @@ describe('reading progress mutations', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     queryClient.clear();
+  });
+
+  it('uses monotonic source unlock and preserves an already newer server progress', async () => {
+    api.post.mockResolvedValue({ data: oldProgress });
+    await expect(advanceReadingProgress('novel', 2)).resolves.toEqual(oldProgress);
+    expect(api.post).toHaveBeenCalledWith('/progress/novel/advance', { current_chapter: 2 });
+    expect(api.put).not.toHaveBeenCalled();
   });
 
   it('refetches the complete canonical context after a chapter update', async () => {

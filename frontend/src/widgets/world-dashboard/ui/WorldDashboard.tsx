@@ -3,6 +3,7 @@ import { BookOpen, Compass, Dices, GitBranch, History, Users } from 'lucide-reac
 import { isWorldTurnOutcomeUnknown, useSubmitWorldTurn } from '@/entities/narrative';
 import { WorldActionForm, actionLabels } from '@/features/world-action';
 import { getApiErrorMessage } from '@/shared/api/client';
+import { effectiveWorldContext } from '@/shared/lib/worldSourceContext';
 import { localWorldCharacterIds } from '@/shared/lib/localWorldCharacters';
 import {
   removeWorldTurnPendingRequest,
@@ -14,14 +15,17 @@ interface WorldDashboardProps {
   novelId: string;
   view: OpenWorldView;
   actionsDisabled?: boolean;
+  recoveryOnly?: boolean;
   actionsDisabledReason?: string;
   onRefresh?: () => void;
+  onActionLockChange?: (locked: boolean) => void;
 }
 
 interface PendingRequest {
   action: WorldAction;
   idempotencyKey: string;
   expectedTurnNumber: number;
+  expectedSourceChapter?: number;
 }
 
 const maxStoredRequestLength = 4_096;
@@ -40,13 +44,15 @@ const actionKinds: WorldAction['kind'][] = [
 function isPendingRequest(value: unknown): value is PendingRequest {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const request = value as Record<string, unknown>;
-  if (Object.keys(request).length !== 3
+  if ((Object.keys(request).length !== 3 && Object.keys(request).length !== 4)
     || typeof request.idempotencyKey !== 'string'
     || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
       .test(request.idempotencyKey)
     || typeof request.expectedTurnNumber !== 'number'
     || !Number.isSafeInteger(request.expectedTurnNumber)
     || request.expectedTurnNumber < 0
+    || (request.expectedSourceChapter !== undefined
+      && (!Number.isSafeInteger(request.expectedSourceChapter) || Number(request.expectedSourceChapter) < 1))
     || !request.action
     || typeof request.action !== 'object'
     || Array.isArray(request.action)) return false;
@@ -117,11 +123,13 @@ function pendingRequestFromView(view: OpenWorldView): PendingRequest | null {
       action: entry.action,
       idempotencyKey: entry.turn_id,
       expectedTurnNumber: entry.turn_number - 1,
+      ...(entry.expected_source_chapter == null ? {} : { expectedSourceChapter: entry.expected_source_chapter }),
     }
     : view.recoverable_turn && {
       action: view.recoverable_turn.action,
       idempotencyKey: view.recoverable_turn.turn_id,
       expectedTurnNumber: view.recoverable_turn.expected_turn_number,
+      ...(view.recoverable_turn.expected_source_chapter == null ? {} : { expectedSourceChapter: view.recoverable_turn.expected_source_chapter }),
     };
   return isPendingRequest(request) ? request : null;
 }
@@ -141,8 +149,10 @@ export function WorldDashboard({
   novelId,
   view,
   actionsDisabled = false,
+  recoveryOnly = false,
   actionsDisabledReason = '最新世界状态尚未恢复，暂时不能执行行动。请重新加载世界后再试。',
   onRefresh,
+  onActionLockChange,
 }: WorldDashboardProps) {
   const turn = useSubmitWorldTurn(novelId);
   const storageKey = worldTurnPendingStorageKey(view.player.user_id, novelId);
@@ -158,6 +168,10 @@ export function WorldDashboard({
   // The server owns the unresolved authority slot. A stale request from
   // another tab can never overtake its active or committed pending turn.
   const pendingRequest = serverPendingRequest ?? restoredPendingRequest;
+  useEffect(() => {
+    onActionLockChange?.(turn.isPending || Boolean(pendingRequest));
+    return () => onActionLockChange?.(false);
+  }, [onActionLockChange, pendingRequest, turn.isPending]);
   const pendingEntry = view.journal.find(entry => (
     entry.turn_id === pendingRequest?.idempotencyKey && entry.memory_projection_status === 'pending'
   ));
@@ -168,12 +182,13 @@ export function WorldDashboard({
       : '尚未确认这次行动的最终结果，因此暂时不能发起下一回合。请点击“继续确认结果”，避免重复行动。';
   const serverPendingAction = serverPendingRequest?.action;
   const serverPendingKey = serverPendingRequest?.idempotencyKey;
+  const serverPendingSource = serverPendingRequest?.expectedSourceChapter;
   const serverPendingRevision = serverPendingRequest?.expectedTurnNumber;
   const [errorState, setErrorState] = useState<{ novelId: string; message?: string }>(() => ({
     novelId,
   }));
   const error = errorState.novelId === novelId ? errorState.message : undefined;
-  const { entry_context: context } = view.session;
+  const context = effectiveWorldContext(view.session);
   const location = context.locations.find(item => item.id === view.player.location_id);
   const activeThreads = Object.entries(view.world_state.state.threads ?? {})
     .filter(([, thread]) => thread.status === 'open');
@@ -207,6 +222,7 @@ export function WorldDashboard({
       action: serverPendingAction,
       idempotencyKey: serverPendingKey,
       expectedTurnNumber: serverPendingRevision,
+      ...(serverPendingSource === undefined ? {} : { expectedSourceChapter: serverPendingSource }),
     };
     storePendingRequest(view.player.user_id, novelId, authoritative);
     setPendingState(current => (
@@ -219,6 +235,7 @@ export function WorldDashboard({
     serverPendingAction,
     serverPendingKey,
     serverPendingRevision,
+    serverPendingSource,
     novelId,
     storageKey,
     view.player.user_id,
@@ -260,6 +277,7 @@ export function WorldDashboard({
     action,
     idempotencyKey: crypto.randomUUID(),
     expectedTurnNumber: view.session.turn_number,
+    expectedSourceChapter: context.unlocked_through_chapter,
   });
 
   return (
@@ -281,7 +299,7 @@ export function WorldDashboard({
           {location?.name ?? view.player.location_id ?? '地点未确认'} · 世界时间 {view.session.world_time} · 每次已提交回合推进 1 步
         </p>
         <p className="mt-2 text-sm text-[#d5e1d7]">
-          世界入场坐标 · 原著第 {context.checkpoint_chapter} 章。后续按回合推进，不自动翻到原著下一章。
+          世界入场坐标 · 原著第 {view.session.entry_context.checkpoint_chapter} 章。当前世界已接入至第 {context.unlocked_through_chapter} 章。
         </p>
         <div className="mt-7 border-t border-white/20 pt-6">
           {latestCheck ? (
@@ -349,6 +367,7 @@ export function WorldDashboard({
             {onRefresh ? <button type="button" className="ml-2 underline" onClick={onRefresh}>重试</button> : null}
           </div>
         ) : null}
+        {recoveryOnly ? <p role="status" className="mb-3 text-sm text-[#59645f]">下一幕接入尚未确认，只能继续确认已经提交的原行动；新的行动仍已暂停。</p> : null}
         <p role="status" aria-label="世界行动状态" className="text-sm text-[#59645f]">
           {turn.isPending ? '正在确认世界行动，完成后才会开放下一回合；请等待本次结果。' : ''}
         </p>
@@ -367,7 +386,7 @@ export function WorldDashboard({
         <WorldActionForm
           view={view}
           isPending={turn.isPending}
-          isLocked={actionsDisabled || Boolean(pendingRequest)}
+          isLocked={recoveryOnly || actionsDisabled || Boolean(pendingRequest)}
           onSubmit={submit}
         />
       </div>
