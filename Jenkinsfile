@@ -1,5 +1,5 @@
 // Optional source-based deployment from a dedicated trusted job on its Linux server.
-// Every executor eligible for agent any must share that host, Docker daemon, and persistent directory.
+// Keep the Job's default workspace persistent on that host and Docker daemon.
 pipeline {
     agent any
 
@@ -12,8 +12,6 @@ pipeline {
     }
 
     parameters {
-        string(name: 'SERVER_WORKSPACE', defaultValue: '/srv/novelworld', trim: true,
-            description: 'Persistent absolute path on the Linux deployment host, shared by all eligible executors.')
         booleanParam(name: 'DEPLOY_SERVER', defaultValue: false,
             description: 'Deploy the built images and restart the private server. Requires a maintenance window and a preconfigured .env.')
     }
@@ -27,37 +25,30 @@ pipeline {
         stage('Checkout') {
             steps {
                 script {
-                    if (!params.SERVER_WORKSPACE?.startsWith('/')) {
-                        error('SERVER_WORKSPACE must be an absolute path.')
-                    }
                     if (env.CHANGE_ID) {
                         error('Use a trusted branch job on the server agent; pull requests belong in CI.')
                     }
                 }
-                dir(params.SERVER_WORKSPACE) {
-                    // Check before SCM can replace a managed release checkout.
-                    sh '''#!/usr/bin/env bash
+                // Check before SCM can replace a managed release checkout.
+                sh '''#!/usr/bin/env bash
 set -euo pipefail
 if [[ -e .release ]]; then
     printf 'Jenkins source deployment cannot replace managed release state; use the DEPLOY.md release procedure.\n' >&2
     exit 1
 fi
 '''
-                    checkout scm
-                }
+                checkout scm
             }
         }
 
         stage('Build server images') {
             steps {
-                dir(params.SERVER_WORKSPACE) {
-                    // The example file supplies Compose interpolation only; no containers start.
-                    sh '''#!/usr/bin/env bash
+                // The example file supplies Compose interpolation only; no containers start.
+                sh '''#!/usr/bin/env bash
 set -euo pipefail
 docker compose --env-file .env.example build \
     gateway user-service novel-service agent-service narrative-service frontend
 '''
-                }
             }
         }
 
@@ -66,8 +57,7 @@ docker compose --env-file .env.example build \
                 expression { params.DEPLOY_SERVER }
             }
             steps {
-                dir(params.SERVER_WORKSPACE) {
-                    sh '''#!/usr/bin/env bash
+                sh '''#!/usr/bin/env bash
 set -euo pipefail
 [[ ! -e .release ]] || {
     printf 'Managed release state appeared during the build; source deployment refused.\n' >&2
@@ -82,7 +72,6 @@ set -euo pipefail
 bash start.sh </dev/null
 bash infra/ops/health-checks.sh
 '''
-                }
             }
         }
     }
