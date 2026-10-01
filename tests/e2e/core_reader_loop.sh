@@ -674,14 +674,14 @@ docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -v ON_ERROR_STOP=1 \
   -c "INSERT INTO novels (id, user_id, title, status) VALUES ('$delete_novel_id', '$user_id', 'Deletion contract', 'ready'); INSERT INTO user_novels (user_id, novel_id) VALUES ('$user_id', '$delete_novel_id'); INSERT INTO characters (id, novel_id, name) VALUES ('$delete_character_id', '$delete_novel_id', 'Deletion witness');" >/dev/null
 delete_cache_message=$(python3 -c "import json; print(json.dumps({'id':'$delete_message_id','turn_id':None,'user_id':'$user_id','character_id':'$delete_character_id','novel_id':'$delete_novel_id','role':'user','content':'delete this projection','reader_identity':None,'chapter_context':1,'created_at':'2026-01-01T00:00:00Z'}, separators=(',',':')))")
-docker exec novel-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD:-runtime-redis-only}" \
+docker exec ${container_prefix}-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD:-runtime-redis-only}" \
   LPUSH "chat:$delete_character_id:$user_id" "$delete_cache_message" >/dev/null
 pause
 test "$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   --output /dev/null --write-out '%{http_code}' "${auth[@]}" \
   -X DELETE "$api/novels/$delete_novel_id")" = 204
-test "$(docker exec novel-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD:-runtime-redis-only}" EXISTS "chat:$delete_character_id:$user_id")" = 0
-test "$(docker exec novel-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD:-runtime-redis-only}" EXISTS "chat:$character_id:$user_id")" = 1
+test "$(docker exec ${container_prefix}-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD:-runtime-redis-only}" EXISTS "chat:$delete_character_id:$user_id")" = 0
+test "$(docker exec ${container_prefix}-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD:-runtime-redis-only}" EXISTS "chat:$character_id:$user_id")" = 1
 test "$(docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \
   -c "SELECT (SELECT COUNT(*) FROM novels WHERE id = '$delete_novel_id') || ':' || (SELECT COUNT(*) FROM characters WHERE id = '$delete_character_id') || ':' || (SELECT COUNT(*) FROM user_novels WHERE user_id = '$user_id' AND novel_id = '$delete_novel_id')")" = 1:1:0
@@ -690,7 +690,7 @@ test "$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   --output /dev/null --write-out '%{http_code}' "${auth[@]}" \
   -X DELETE "$api/novels/$delete_novel_id")" = 404
 
-test "$(docker exec novel-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD:-runtime-redis-only}" EXISTS "chat:$character_id:$user_id")" = 1
+test "$(docker exec ${container_prefix}-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD:-runtime-redis-only}" EXISTS "chat:$character_id:$user_id")" = 1
 test "$(docker exec ${container_prefix}-agent-service curl --silent --output /dev/null --write-out '%{http_code}' \
   -X DELETE -H 'X-Internal-Service-Token: wrong-token' \
   "http://127.0.0.1:8003/internal/privacy/users/$user_id")" = 401
@@ -709,7 +709,7 @@ pause
 test "$(curl --connect-timeout 5 --max-time 120 --silent --show-error \
   --output /dev/null --write-out '%{http_code}' "${auth[@]}" \
   -X DELETE "$api/auth/me")" = 204
-test "$(docker exec novel-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD:-runtime-redis-only}" EXISTS "chat:$character_id:$user_id")" = 0
+test "$(docker exec ${container_prefix}-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD:-runtime-redis-only}" EXISTS "chat:$character_id:$user_id")" = 0
 
 erased_private_counts=$(docker exec ${container_prefix}-postgres psql \
   -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" -At \

@@ -76,6 +76,8 @@ with the same key after progress restoration. Catalog bounds and unavailable
 pinned evidence fail explicitly. A safe empty delta does not imply new plotted
 events, and later action/model quality remains a separate acceptance question.
 Journal records participate in account export and cascade with their own world.
+Reading an admitted chapter does not implicitly generate a new legacy branch
+continuation in an extended world; stored chapter projections remain replayable.
 No new provider configuration, credential or paid Diagnostic is required.
 
 ## Rollout and rollback

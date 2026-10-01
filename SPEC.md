@@ -1190,7 +1190,9 @@ mutations until refetch; it MUST NOT decrease progress to match a stale route.
 A deliberate rewind MUST immediately hide later derived content and chat.
 Pending recovery MUST allow explicit original-chapter reading to restore
 progress without discarding an unknown source key or admitting another source
-operation. Source journal rows MUST participate in export and lifecycle erasure. Migration
+operation. Reading an admitted chapter in an extended world MUST NOT dispatch
+a new legacy branch continuation; previously committed chapter projections
+remain replayable. Source journal rows MUST participate in export and lifecycle erasure. Migration
 0036 is a semantic release barrier: old readers MUST NOT restart after expanded
 schema-v2 sessions; recovery is forward deployment.
 
