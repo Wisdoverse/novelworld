@@ -124,6 +124,7 @@ test('same world admits chapter 2, routes to it and executes an event-backed ord
   expect(server.actions).toEqual([]);
   expect(server.providerCalls).toBe(0);
   expect(server.sourceCommands[0].body).toEqual({ expected_turn_number: 1, expected_source_chapter: 1, target_chapter: 2 });
+  await page.locator('summary').filter({ hasText: '调整行动方式与目标' }).click();
   await page.getByRole('combobox', { name: '行动', exact: true }).selectOption('investigate');
   await page.getByRole('combobox', { name: '目标', exact: true }).selectOption('next-scene-event');
   await page.getByLabel('你的意图').fill('观察商船靠岸');
@@ -156,6 +157,7 @@ test('replay admits 2 but synchronizes a concurrent authoritative progress 3', a
   await page.reload();
   await page.getByRole('button', { name: '继续确认下一幕' }).click();
   await expect(page).toHaveURL(/\/reader\/novel-1\/3#latest-world-narrative$/);
+  await page.locator('summary').filter({ hasText: '调整行动方式与目标' }).click();
   await expect(page.getByRole('combobox', { name: '行动', exact: true })).toBeEnabled();
   expect(server.absoluteWrites).toEqual([]);
   expect(server.sourceCommands[1]).toEqual(server.sourceCommands[0]);
@@ -210,6 +212,7 @@ test('stale source operation restores current world without issuing a new comman
   await expect(page.getByRole('alert')).toContainText('另一窗口已经改变世界');
   await page.getByRole('button', { name: '恢复最新世界', exact: true }).click();
   await expect(page).toHaveURL(/\/reader\/novel-1\/2#latest-world-narrative$/);
+  await page.locator('summary').filter({ hasText: '调整行动方式与目标' }).click();
   await expect(page.getByRole('combobox', { name: '行动', exact: true })).toBeEnabled();
   expect(server.sourceCommands).toHaveLength(1);
   expect(server.absoluteWrites).toEqual([]);
@@ -221,6 +224,7 @@ test('source end and empty extraction explain the actual available progression',
   await expect(page.getByText('已接入原著最后一章。你仍可在当前世界行动。')).toBeVisible();
   await expect(page.getByRole('button', { name: '进入下一幕', exact: true })).toHaveCount(0);
   await expect(page.getByText('当前解锁范围内没有待运行的原著事件。')).toBeVisible();
+  await page.locator('summary').filter({ hasText: '调整行动方式与目标' }).click();
   await expect(page.getByRole('combobox', { name: '行动', exact: true })).toBeEnabled();
 });
 
@@ -233,10 +237,14 @@ test('unknown source replay survives a later source and rewind by explicit origi
   await page.getByRole('button', { name: '继续阅读原文下一章' }).click();
   await expect(page).toHaveURL(/\/reader\/novel-1\/2$/);
   await expect(page.getByRole('combobox', { name: '行动', exact: true }).and(page.locator(':enabled'))).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '自由输入', exact: true }).and(page.locator(':enabled'))).toHaveCount(0);
+  await expect(page.getByRole('group', { name: '场景建议' }).getByRole('button').and(page.locator(':enabled'))).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '执行行动', exact: true }).and(page.locator(':enabled'))).toHaveCount(0);
   await page.getByRole('button', { name: '继续阅读原文下一章' }).click();
   await expect(page).toHaveURL(/\/reader\/novel-1\/3$/);
   await page.getByRole('button', { name: '继续确认下一幕' }).click();
   await expect(page).toHaveURL(/\/reader\/novel-1\/3#latest-world-narrative$/);
+  await page.locator('summary').filter({ hasText: '调整行动方式与目标' }).click();
   await expect(page.getByRole('combobox', { name: '行动', exact: true })).toBeEnabled();
   expect(server.sourceCommands[1]).toEqual(server.sourceCommands[0]);
   expect(server.absoluteWrites).toEqual([]);
@@ -248,6 +256,7 @@ test('busy source restores the exact pending memory turn while keeping new actio
   await page.goto('/reader/novel-1/1');
   await page.getByRole('button', { name: '进入下一幕', exact: true }).click();
   await expect(page.getByRole('button', { name: '继续确认结果', exact: true })).toBeEnabled();
+  await page.locator('summary').filter({ hasText: '调整行动方式与目标' }).click();
   await expect(page.getByRole('combobox', { name: '行动', exact: true })).toBeDisabled();
   await expect(page.getByRole('button', { name: '执行行动', exact: true })).toBeDisabled();
   await page.reload();
@@ -255,6 +264,7 @@ test('busy source restores the exact pending memory turn while keeping new actio
   // authoritative original turn may recover through this deliberate mismatch.
   await page.getByRole('button', { name: '继续确认结果', exact: true }).click();
   await expect(page.getByRole('button', { name: '继续确认结果', exact: true })).toHaveCount(0);
+  await page.locator('summary').filter({ hasText: '调整行动方式与目标' }).click();
   await expect(page.getByRole('combobox', { name: '行动', exact: true })).toBeDisabled();
   await page.getByRole('button', { name: '继续确认下一幕' }).click();
   await expect(page).toHaveURL(/\/reader\/novel-1\/2#latest-world-narrative$/);
