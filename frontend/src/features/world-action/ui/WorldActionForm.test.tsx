@@ -27,6 +27,26 @@ const view = {
 
 describe('WorldActionForm', () => {
   beforeEach(() => vi.clearAllMocks());
+  it('explains each missing input next to the disabled submit button', async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const { container } = render(<WorldActionForm view={view} isPending={false} onSubmit={onSubmit} />);
+    const button = screen.getByRole('button', { name: '执行行动' });
+    const guidance = () => document.getElementById(button.getAttribute('aria-describedby')!);
+
+    expect(guidance()?.textContent).toContain('请选择行动方式');
+    fireEvent.change(screen.getByLabelText('行动'), { target: { value: 'travel' } });
+    expect(guidance()?.textContent).toContain('请先选择这次行动的目标');
+    fireEvent.change(screen.getByLabelText('目标'), { target: { value: 'gate' } });
+    expect(guidance()?.textContent).toContain('请在“你的意图”中写下');
+    fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '   ' } });
+    fireEvent.submit(container.querySelector('form')!);
+    expect(onSubmit).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '前往城门' } });
+    expect(button.hasAttribute('disabled')).toBe(false);
+    expect(button.hasAttribute('aria-describedby')).toBe(false);
+    fireEvent.click(button);
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+  });
   it('offers a suggestion only after a click and applies it only when chosen', async () => {
     const onSubmit = vi.fn();
     vi.mocked(suggestWorldAction).mockResolvedValueOnce('investigate');
@@ -148,16 +168,23 @@ describe('WorldActionForm', () => {
     }));
   });
 
-  it('does not offer characters killed after the entry checkpoint', () => {
+  it('offers a personal goal when the selected action has no eligible character', async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
     render(<WorldActionForm
       view={{ ...view, session: { ...view.session, dead_character_ids: ['character'] } }}
       isPending={false}
-      onSubmit={vi.fn()}
+      onSubmit={onSubmit}
     />);
 
     fireEvent.change(screen.getByLabelText('行动'), { target: { value: 'converse' } });
 
-    expect(screen.getByText('当前没有已确认同场、可供此行动选择的角色或目标。')).toBeTruthy();
+    expect(screen.getByText(/当前没有可供此行动选择的目标。可以改选“追求自己的目标”/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('行动'), { target: { value: 'pursue_goal' } });
+    fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '独自寻找安全入口' } });
+    fireEvent.click(screen.getByRole('button', { name: '执行行动' }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith({
+      kind: 'pursue_goal', target_id: null, intent: '独自寻找安全入口',
+    }));
   });
 
   it('offers only characters recorded at the player’s current location', () => {
