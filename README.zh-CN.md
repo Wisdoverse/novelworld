@@ -53,6 +53,10 @@ cd novelworld
 
 也可以双击项目目录中的 `start.cmd`。
 
+Linux 服务器可选择根目录的 [`Jenkinsfile`](./Jenkinsfile) 执行构建与部署，配置见
+[Jenkins 服务端部署](./DEPLOY.md#jenkins-服务端部署可选)。本地启动、桌面版及其他部署方式仍由用户自行选择。
+代码检查由 GitHub Actions 执行；Jenkins 负责构建和部署服务器镜像。
+
 启动器会引导初始数据库配置、生成必要密钥，自动重启一次后构建应用。服务就绪后，打开 **http://localhost**。
 
 1. 创建第一个管理员账号，此步骤不需要模型 API 密钥。
