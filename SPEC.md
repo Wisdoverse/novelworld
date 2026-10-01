@@ -765,7 +765,8 @@ The memory pyramid has four layers. Each layer has distinct characteristics:
   embedding exists, optionally via cosine similarity. Directly included IDs
   MUST NOT be duplicated by semantic retrieval.
 - A world-turn fact's chapter coordinate MUST be the committed session's
-  `entry_context.unlocked_through_chapter`, not merely its player checkpoint,
+  effective source context (`source_context` when present, otherwise
+  `entry_context`).unlocked_through_chapter, not merely its player checkpoint,
   because any validated mutation may have been influenced by canon up to that
   source high-water mark. A later reading-progress rewind MUST therefore
   exclude that fact until the boundary is unlocked again.
@@ -1144,6 +1145,54 @@ changes with the other model-proposed player mutations.
 The first successfully committed start MUST seal its `WorldSession.entry_context`.
 A later valid start request is a resume hint and MUST return that persisted
 winner without replacing it with a freshly derived candidate context.
+
+An existing world MAY explicitly admit its next source chapter through
+`POST /narrative/{novel_id}/world/source`. This operation MUST preserve the
+original entry, Player checkpoint and rules, attributes, existing event/thread
+states and committed turns. It MUST NOT call a model, roll dice or increment
+world time. The optional active `source_context` MUST retain the original
+checkpoint and pinned Canon version; absent fields preserve schema-v1 canonical
+serialization, while expanded sessions use schema v2. Every current source
+consumer MUST use the effective context; historical memory projections MUST use
+the source context of their immutable committed result.
+
+The strict source command carries `expected_turn_number`,
+`expected_source_chapter` and `target_chapter`, where target is exactly the
+observed source plus one, with a UUID-v4 `Idempotency-Key`. Novel owns the
+monotonic `POST /progress/{novel_id}/advance` and pinned-model source-delta read;
+the existing progress PUT retains explicit rewind semantics. Every new whole
+catalog item, link and death effect MUST have complete nonempty evidence at or
+below the admitted chapter. Future citations MUST NOT be cropped to retain
+future text. Existing definitions MUST remain unchanged; new threads MUST NOT
+replace modified/resolved threads, and new events MUST NOT precede an already
+advanced event in canonical order. Missing pinned source, bounded-catalog
+overflow or incompatible ordering MUST fail explicitly.
+
+Narrative MUST commit source authority and its owner-local operation journal
+atomically. Every mixed world/turn/source-operation writer MUST lock the world
+row before its journal row, including reclaim, completion and supersession;
+supersession MUST use that same transaction. In-progress actions and completed
+turns awaiting memory projection MUST exclude source admission. Modern world
+actions MUST carry the observed effective source chapter and reject a stale
+coordinate before generation and at commit. Legacy completed keys MUST retain
+their original fingerprint and exact-result replay. Source-operation replay
+MUST retain original metadata and return a freshly guarded current view, never
+restore a historical world. A postcommit progress rewind MUST return a
+content-free unknown outcome and retain the original retry key.
+
+The browser MUST persist a bounded user/novel-scoped source command and key
+before either owner's write. It MUST suppress automatic absolute progress
+writes while preparing, pending, recovering or resolving a partial outcome.
+Successful admission and exact replay MUST refresh persisted progress and
+navigate to the maximum of current effective source, operation source and
+persisted reading progress. Unknown progress MUST retain the key and block
+mutations until refetch; it MUST NOT decrease progress to match a stale route.
+A deliberate rewind MUST immediately hide later derived content and chat.
+Pending recovery MUST allow explicit original-chapter reading to restore
+progress without discarding an unknown source key or admitting another source
+operation. Source journal rows MUST participate in export and lifecycle erasure. Migration
+0036 is a semantic release barrier: old readers MUST NOT restart after expanded
+schema-v2 sessions; recovery is forward deployment.
 
 For one reader and novel, committed world turns form a single total order. A
 new request MUST carry the `expected_turn_number` of the world view from which

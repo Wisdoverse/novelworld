@@ -347,6 +347,7 @@ jobs:
         run: |
           cargo test -p integration-tests --locked
           cargo test --locked -p novel-service --test community_series_http -- --ignored
+          cargo test --locked -p novel-service --test world_source_http -- --ignored
       - name: Stop test dependencies
         if: always()
         run: docker compose -f docker-compose.test.yml down -v

@@ -276,7 +276,7 @@ state in two places.
   refresh-token-only events are ignored.
 - The exact schema-transition manifest, rather than a downloaded candidate,
   determines post-migration recovery. Every marked transition rolls that exact
-  target forward; the 0021/0024/0025/0030 barrier set cannot restore an older writer or
+  target forward; the 0021/0024/0025/0030/0036 barrier set cannot restore an older writer or
   reader. The marker
   is synced before migration, the installed target tempfile and former current
   renamed as previous are synced before current replacement, promotion is
@@ -284,7 +284,7 @@ state in two places.
   missing candidate and preserves the former
   current as previous. Initial adoption rejects a previous release, and both
   paths reject a different candidate or an initial marker missing any of the
-  three semantic barriers. Promotion
+  five semantic barriers. Promotion
   occurs only after the idempotent migration and health gate succeed. Normal
   restore and healthy rollback first discard any unmarked candidate, write the
   exact schema marker, and clear it only after durable finalization; rollback
@@ -332,6 +332,17 @@ state in two places.
   the retained object (format resolved from validated-bytes magic). Without
   retention, chapter splitting is request-local and an interrupted import
   requires re-upload.
+
+- Same-world source admission retains immutable origin and optional schema-v2
+  active context, pinned-model complete evidence, one-chapter fencing and an
+  owner-local exact-key journal. Monotonic Novel progress and reader recovery
+  synchronize routing without stale automatic rewinds. World/turn/source writes
+  share world-row-first locking; historical memory source coordinates remain
+  attached to committed snapshots. Migration 0036 is a release barrier.
+  [Issue #467](https://github.com/Wisdoverse/novelworld/issues/467) owns current
+  implementation and acceptance evidence; [ADR 0013](./adr/0013-same-world-source-progression.md)
+  defines the changed contract. Local/CI proof and deployment do not substitute
+  for live provider quality, recovery qualification or user semantic acceptance.
 
 ## Change and approval process
 

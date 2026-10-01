@@ -145,11 +145,25 @@ RustFS 数据卷，管理员须单独安排对象存储备份与恢复，见
 
 ---
 
+## 同一世界剧情来源迁移 0036
+
+0036 新增 Narrative 所有的来源操作记录和可空的回合来源坐标，不重写旧世界
+JSON。首次明确进入下一幕后，session 使用 schema v2 和独立 active source context；
+原始 entry、角色、规则和旧回合保留。使用现有 managed release 流程停止旧
+Narrative，再发布客户端，停止并 drain Novel/Agent，执行 migration 后启动匹配版本。
+新 UI 只能配合支持来源扩展的 Novel/Narrative 使用。
+
+release 的五个 barriers 必须齐全。即使 0036 SQL 是 additive，也不能在世界扩展后
+恢复旧 Narrative reader；rollback/marked restore 拒绝跨过 0036。保留数据库与操作
+key，通过兼容版本向前恢复，不能删除 source_context、重置角色或手写 JSON 回退。
+读取进度后退时只隐藏后续派生内容，不能删除已接入来源。
+参见 [ADR 0013](docs/adr/0013-same-world-source-progression.md)。
+
 ## D20 基础规则迁移 0030
 
 0030 改变 Novel Service 的模板写入契约，旧 Novel writer 与新 schema 不兼容。
 升级时先关闭入口写入并停止、排空 Novel 和 Narrative 两个服务；不能只停
-Narrative。候选 release 必须包含完整的 0021、0024、0025、0030 四个 required
+Narrative。候选 release 必须包含完整的 0021、0024、0025、0030、0036 五个 required
 schema barriers；应用完整候选 release 后再启动兼容版本，避免旧 writer 在迁移后写入。现有 v1 profiles 和 sessions 保留原绑定，继续按 v1 读取；
 不要重写为 v2。数据库只前向迁移，旧版 rollback 不受支持，故障恢复使用兼容
 release 前向修复。此要求是 rollout 契约，不代表该迁移已在生产执行。

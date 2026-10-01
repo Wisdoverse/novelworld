@@ -357,6 +357,8 @@ docker compose -f docker-compose.test.yml run --rm test-migrate
 cargo test -p integration-tests
 TEST_DATABASE_URL=postgres://test:test@localhost:25432/novelworld_test \
   cargo test --locked -p novel-service --test community_series_http -- --ignored
+TEST_DATABASE_URL=postgres://test:test@localhost:25432/novelworld_test \
+  cargo test --locked -p novel-service --test world_source_http -- --ignored
 docker compose -f docker-compose.test.yml down -v
 ```
 
