@@ -189,6 +189,195 @@ async fn next_source_routes_pin_canon_and_never_rewind_progress_or_expose_future
     .await;
     assert_eq!(first.0, StatusCode::OK);
     assert_eq!(first.1["current_chapter"], 3);
+    let baseline_last_read_at: String = sqlx::query_scalar(
+        "SELECT last_read_at::text FROM reading_progress WHERE user_id=$1 AND novel_id=$2",
+    )
+    .bind(reader)
+    .bind(novel)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let progress_repo = PgReadingProgressRepository::new(pool.clone());
+    assert!(progress_repo
+        .advance_chapter(reader, novel, 4, Some(3))
+        .await
+        .unwrap());
+    let advanced: i32 = sqlx::query_scalar(
+        "SELECT current_chapter FROM reading_progress WHERE user_id=$1 AND novel_id=$2",
+    )
+    .bind(reader)
+    .bind(novel)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(advanced, 4);
+    assert!(!progress_repo
+        .advance_chapter(reader, novel, 5, Some(3))
+        .await
+        .unwrap());
+    let stale_snapshot: i32 = sqlx::query_scalar(
+        "SELECT current_chapter FROM reading_progress WHERE user_id=$1 AND novel_id=$2",
+    )
+    .bind(reader)
+    .bind(novel)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stale_snapshot, 4);
+    let before_rejection = request(
+        &app,
+        "GET",
+        &format!("/progress/{novel}"),
+        Some(reader),
+        false,
+        None,
+    )
+    .await
+    .1;
+    let guarded_rejection = request(
+        &app,
+        "POST",
+        &advance,
+        Some(reader),
+        false,
+        Some(json!({"current_chapter":5,"expected_current_chapter":3})),
+    )
+    .await;
+    assert_eq!(guarded_rejection.0, StatusCode::CONFLICT);
+    assert_eq!(
+        guarded_rejection.1["error"]["code"],
+        "reading_progress_changed"
+    );
+    assert_eq!(
+        request(
+            &app,
+            "GET",
+            &format!("/progress/{novel}"),
+            Some(reader),
+            false,
+            None
+        )
+        .await
+        .1,
+        before_rejection
+    );
+
+    sqlx::query("UPDATE reading_progress SET reader_identity='守门人', reader_identity_type='character'::identity_type, reader_character_id=$3 WHERE user_id=$1 AND novel_id=$2")
+        .bind(reader)
+        .bind(novel)
+        .bind(character)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(!progress_repo
+        .advance_chapter(reader, novel, 5, Some(4))
+        .await
+        .unwrap());
+    let identity_guard: (i32, String) = sqlx::query_as(
+        "SELECT current_chapter, reader_identity_type::text FROM reading_progress WHERE user_id=$1 AND novel_id=$2",
+    )
+    .bind(reader)
+    .bind(novel)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(identity_guard, (4, "character".into()));
+    let character_before = request(
+        &app,
+        "GET",
+        &format!("/progress/{novel}"),
+        Some(reader),
+        false,
+        None,
+    )
+    .await
+    .1;
+    let character_rejection = request(
+        &app,
+        "POST",
+        &advance,
+        Some(reader),
+        false,
+        Some(json!({"current_chapter":5,"expected_current_chapter":4})),
+    )
+    .await;
+    assert_eq!(character_rejection.0, StatusCode::CONFLICT);
+    assert_eq!(
+        character_rejection.1["error"]["code"],
+        "reading_progress_changed"
+    );
+    assert_eq!(
+        request(
+            &app,
+            "GET",
+            &format!("/progress/{novel}"),
+            Some(reader),
+            false,
+            None
+        )
+        .await
+        .1,
+        character_before
+    );
+    sqlx::query("UPDATE reading_progress SET reader_identity=NULL, reader_identity_type='self'::identity_type, reader_character_id=NULL WHERE user_id=$1 AND novel_id=$2")
+        .bind(reader)
+        .bind(novel)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut race = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM reading_progress WHERE user_id=$1 AND novel_id=$2 FOR UPDATE")
+        .bind(reader)
+        .bind(novel)
+        .fetch_one(&mut *race)
+        .await
+        .unwrap();
+    let racing_repo = PgReadingProgressRepository::new(pool.clone());
+    let admission =
+        tokio::spawn(async move { racing_repo.advance_chapter(reader, novel, 5, Some(4)).await });
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE 'UPDATE reading_progress SET current_chapter%')",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("guarded progress update should wait on the locked row");
+    sqlx::query("UPDATE reading_progress SET current_chapter=2 WHERE user_id=$1 AND novel_id=$2")
+        .bind(reader)
+        .bind(novel)
+        .execute(&mut *race)
+        .await
+        .unwrap();
+    race.commit().await.unwrap();
+    assert!(!admission.await.unwrap().unwrap());
+    let raced_rewind: i32 = sqlx::query_scalar(
+        "SELECT current_chapter FROM reading_progress WHERE user_id=$1 AND novel_id=$2",
+    )
+    .bind(reader)
+    .bind(novel)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(raced_rewind, 2);
+    sqlx::query("UPDATE reading_progress SET current_chapter=3, last_read_at=$3::timestamptz, reader_identity=NULL, reader_identity_type='self'::identity_type, reader_character_id=NULL WHERE user_id=$1 AND novel_id=$2")
+        .bind(reader)
+        .bind(novel)
+        .bind(baseline_last_read_at)
+        .execute(&pool)
+        .await
+        .unwrap();
+
     sqlx::query("UPDATE reading_progress SET reader_identity='自选名字', deviation_mode='remix' WHERE user_id=$1 AND novel_id=$2").bind(reader).bind(novel).execute(&pool).await.unwrap();
     let identity = request(
         &app,
@@ -230,7 +419,7 @@ async fn next_source_routes_pin_canon_and_never_rewind_progress_or_expose_future
         .unwrap();
     let started = std::time::Instant::now();
     let blocked = PgReadingProgressRepository::new(pool.clone())
-        .advance_chapter(reader, novel, 6)
+        .advance_chapter(reader, novel, 6, None)
         .await;
     let error = blocked.unwrap_err();
     assert!(error

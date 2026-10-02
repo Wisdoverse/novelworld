@@ -166,12 +166,11 @@ key，通过兼容版本向前恢复，不能删除 source_context、重置角�
 
 ## Jenkins 服务端部署（可选）
 
-仓库根目录的 [`Jenkinsfile`](./Jenkinsfile) 用于 Linux 私有单节点服务器的镜像构建
-和可选部署。代码、架构、测试和秘密扫描检查由现有 GitHub Actions CI 负责；触发
-Jenkins 前，应确认选用的受信任分支或提交已通过 CI。Jenkins 只检出源码并构建六个
-应用镜像，不重复执行代码检查。`DEPLOY_SERVER` 默认关闭；此时作业只检出源码并
-构建镜像，不启动、停止或迁移应用。只有管理员明确启用后，才会运行现有 `start.sh`
-并执行 `infra/ops/health-checks.sh`，以确认部署 readiness 和部署后健康状态。
+仓库根目录的 [`Jenkinsfile`](./Jenkinsfile) 在 Linux 私有单节点服务器上构建并自动
+部署六个应用镜像。代码、架构、测试和秘密扫描检查由现有 GitHub Actions CI 负责；触发
+Jenkins 前，应确认选用的受信任分支或提交已通过 CI。每次成功构建都会运行现有
+`start.sh`，随后执行 `infra/ops/health-checks.sh`，确认部署 readiness 和部署后健康状态。
+部署依赖 Job 默认 workspace 中预先配置且跨构建保留的 `.env`；缺少时作业失败关闭。
 
 1. 在目标 Linux 部署服务器安装 Git、Bash、OpenSSL、curl，以及带 BuildKit 的
    Docker 和 Compose v2。Jenkins agent 用户必须能访问该服务器的 Docker daemon。
@@ -180,27 +179,25 @@ Jenkins 前，应确认选用的受信任分支或提交已通过 CI。Jenkins �
 2. 创建 **Pipeline script from SCM** 作业，选择本仓库的受信任分支，Script Path 为
    `Jenkinsfile`；需要 Jenkins Pipeline、Git 和 Timestamper 插件。此作业必须专用于
    受信任分支，不运行外部 PR。由于流水线使用 `agent any`，所有符合条件的 executor
-   都必须位于同一 Linux 部署服务器、使用同一 Docker daemon，并能访问同一个持久目录。
+   都必须位于同一 Linux 部署服务器并使用同一 Docker daemon。Pipeline 使用 Jenkins
+   分配给该 Job 的默认 workspace；确保它在该服务器上跨构建保持不变。
    部署前应确认所选受信任分支或提交已通过 GitHub Actions CI；Jenkins 只负责镜像
    构建和部署。
-3. 设置 `SERVER_WORKSPACE` 为固定的持久化绝对路径，默认 `/srv/novelworld`，
-   并由部署服务器上的 agent 用户持有；checkout、镜像构建和部署都在此目录内执行。
-   首次运行保持 `DEPLOY_SERVER=false`，只检出源码并构建镜像；
-   此模式不启动、停止或迁移应用。不要启用 SCM 清理未跟踪文件，也不要
-   在构建后清空该目录；`.env` 中的数据库密码和启动根必须跨构建保留。
-4. 在该目录私下配置 `.env`：可复制 `.env.example`，填写有效的
+3. 在首次构建前，于 Job 的默认 workspace 内私下配置 `.env`：可复制 `.env.example`，填写有效的
    `POSTGRES_USER`、`POSTGRES_DB` 和满足启动器要求的强 `POSTGRES_PASSWORD`，
    设置 `BOOTSTRAP_L0_COMPLETE=true`，权限设为 `600`。启动器会生成缺少的 L1 根；
    之后应保留这些值，LLM 可稍后在设置页配置。Redis 仍由 `CACHE_MODE` 决定。
-   不把 `.env` 放入 Git、Jenkins 参数、日志或构建归档。
-5. 准备维护窗口和已验证的数据库备份后，用 **Build with Parameters** 显式勾选
-   `DEPLOY_SERVER`。Jenkins 调用 `start.sh` 停止旧 writer、构建启动完整栈并重放
-   迁移，Compose 等待 readiness 后再通过入口与容器健康检查。整个过程会停机；
-   配置不完整、构建失败或健康检查失败都会使作业失败。
+   不要启用 SCM 清理未跟踪文件，也不要清理 Job 的默认 workspace；`.env` 中的数据库
+   密码和启动根必须跨构建保留。不要把 `.env` 放入 Git、Jenkins 参数、日志或构建归档。
+4. 确认已通过 GitHub Actions CI，准备维护窗口和已验证的数据库备份后，运行 Job。
+   Jenkins 调用 `start.sh` 停止旧 writer、构建启动完整栈并重放迁移，Compose 等待
+   readiness 后再通过入口与容器健康检查。每次部署会造成停机；配置不完整、构建失败
+   或健康检查失败都会使作业失败。
 
 Compose project 固定为 `novelworld`，已有源码安装接入前须确认其数据卷属于同一
-project。路径和 project 不随构建号改变；同一服务器安装只配置一个作业，流水线
-禁止该作业并发运行。服务端仍默认仅在 localhost 访问，远程访问使用既有加密边界。
+project。Job 的默认 workspace 和 Compose project 在构建间保持稳定；同一服务器安装
+只配置一个作业，流水线禁止该作业并发运行。服务端仍默认仅在 localhost 访问，远程
+访问使用既有加密边界。
 
 此入口沿用直接启动器的源码安装流程，没有自动回滚。遇到失败先排查迁移和健康
 状态，不自动重跑或删除数据卷。存在 `.release` 的受管安装在检出前会被拒绝，仍按

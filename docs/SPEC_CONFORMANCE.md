@@ -336,10 +336,20 @@ state in two places.
 - Same-world source admission retains immutable origin and optional schema-v2
   active context, pinned-model complete evidence, one-chapter fencing and an
   owner-local exact-key journal. Monotonic Novel progress and reader recovery
-  synchronize routing without stale automatic rewinds. World/turn/source writes
+  synchronize routing without stale automatic rewinds. The reader automatically
+  admits one next chapter after a terminal current turn exhausts the scene's
+  scheduled/delayed events. Turn/source equality prevents repeat admission after
+  reload; fresh same-user identity/Player/progress and all recovery fences remain
+  required. Empty scenes advance on subsequent turns, and the book end stops
+  admission. Browser and hook tests cover this control without a scene click.
+  Fresh progress reads plus Novel's atomic exact-chapter/self guard reject
+  another tab's rewind or identity change before any automatic progress write;
+  owner PostgreSQL tests cover the read-to-write race.
+  World/turn/source writes
   share world-row-first locking; historical memory source coordinates remain
   attached to committed snapshots. Migration 0036 is a release barrier.
-  [Issue #467](https://github.com/Wisdoverse/novelworld/issues/467) owns current
+  [Issue #467](https://github.com/Wisdoverse/novelworld/issues/467) owns source admission;
+  [Issue #478](https://github.com/Wisdoverse/novelworld/issues/478) owns automatic
   implementation and acceptance evidence; [ADR 0013](./adr/0013-same-world-source-progression.md)
   defines the changed contract. Local/CI proof and deployment do not substitute
   for live provider quality, recovery qualification or user semantic acceptance.
