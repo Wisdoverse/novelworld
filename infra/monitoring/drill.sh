@@ -20,7 +20,7 @@ alerts_query='ALERTS%7Balertstate%3D%22firing%22%2Calertname%3D%22InstanceDown%2
 
 # 1. The alert rules must be valid PromQL and provably fire.
 docker run --rm --entrypoint promtool -v "$PWD/infra/monitoring:/rules:ro" \
-  prom/prometheus:v3.14.0@sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0 \
+  prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e \
   test rules /rules/alert-tests.yml 2>&1 | tail -2
 printf 'drill: ok   all alert rules are valid and fire on synthetic input\n'
 
