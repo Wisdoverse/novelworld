@@ -213,6 +213,101 @@ if [[ "$CHECK_MODE" == true ]]; then
     printf 'Unix launcher must commit L0 and automatically restart itself.\n' >&2
     exit 1
   }
+
+  check_startup_order() {
+    local mode=$1 fail_build=$2 label case_directory fake_bin docker_log output status compose_prefix expected
+    label="startup-${mode}-${fail_build}"
+    case_directory="$temporary_directory/$label"
+    fake_bin="$case_directory/bin"
+    docker_log="$case_directory/docker-calls"
+    output="$case_directory/output"
+    mkdir -p "$fake_bin"
+    cp start.sh "$case_directory/start.sh"
+    cp .env.example "$case_directory/.env"
+    set_env_value "$case_directory/.env" COMPOSE_PROJECT_NAME startup-test-project
+    set_env_value "$case_directory/.env" POSTGRES_USER startup_test_user
+    set_env_value "$case_directory/.env" POSTGRES_DB startup_test_db
+    set_env_value "$case_directory/.env" POSTGRES_PASSWORD SyntheticPostgres-0123456789
+    set_env_value "$case_directory/.env" BOOTSTRAP_L0_COMPLETE true
+    set_env_value "$case_directory/.env" CACHE_MODE "$mode"
+    compose_prefix=compose
+    [[ "$mode" != redis ]] || compose_prefix='compose|--profile|redis'
+    set_env_value "$case_directory/.env" REDIS_PASSWORD SyntheticRedis-0123456789
+    set_env_value "$case_directory/.env" JWT_SECRET 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    set_env_value "$case_directory/.env" RUNTIME_CONFIG_KEY abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
+    set_env_value "$case_directory/.env" INTERNAL_SERVICE_TOKEN SyntheticInternal-0123456789
+    cat >"$fake_bin/docker" <<'FAKE_DOCKER'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == compose ]] || exit 97
+args=("$@")
+operation=
+for argument in "${args[@]:1}"; do
+  case "$argument" in
+    version|build|down|up) operation=$argument; break ;;
+  esac
+done
+[[ -n "$operation" ]] || exit 98
+{
+  printf '%s' "$operation"
+  printf '|%s' "${args[@]}"
+  printf '\n'
+} >>"$DOCKER_CALL_LOG"
+if [[ "${FAKE_DOCKER_BUILD_FAIL:-0}" == 1 ]]; then
+  if [[ "$operation" == build ]] || { [[ "$operation" == up ]] && [[ " ${args[*]} " == *' --build '* ]]; }; then
+    exit 41
+  fi
+fi
+if [[ "$operation" == version ]]; then
+  printf 'Docker Compose version v2.39.0\n'
+fi
+FAKE_DOCKER
+    cat >"$fake_bin/xdg-open" <<'FAKE_OPEN'
+#!/usr/bin/env bash
+exit 0
+FAKE_OPEN
+    chmod +x "$fake_bin/docker" "$fake_bin/xdg-open"
+
+    if (cd "$case_directory" && PATH="$fake_bin:$PATH" DOCKER_CALL_LOG="$docker_log" \
+      FAKE_DOCKER_BUILD_FAIL="$fail_build" bash ./start.sh) >"$output" 2>&1; then
+      status=0
+    else
+      status=$?
+    fi
+    for expected in \
+      'COMPOSE_PROJECT_NAME=startup-test-project' \
+      'POSTGRES_USER=startup_test_user' \
+      'POSTGRES_DB=startup_test_db' \
+      'POSTGRES_PASSWORD=SyntheticPostgres-0123456789'; do
+      grep -Fxq "$expected" "$case_directory/.env" || {
+        printf 'Launcher changed seeded Compose or PostgreSQL identity (%s).\n' "$label" >&2
+        return 1
+      }
+    done
+    mapfile -t operations < <(cut -d'|' -f1 "$docker_log")
+    if [[ "$fail_build" == 1 ]]; then
+      [[ "$status" -ne 0 && "${operations[*]}" == 'version build' ]] || {
+        printf 'Launcher must stop after a failed image build without stopping the old stack (%s).\n' "$label" >&2
+        return 1
+      }
+    else
+      [[ "$status" -eq 0 && "${operations[*]}" == 'version build down up' ]] || {
+        printf 'Launcher must build before down, then start without rebuilding (%s).\n' "$label" >&2
+        return 1
+      }
+      grep -Fxq "build|${compose_prefix}|build" "$docker_log" &&
+        grep -Fxq 'down|compose|--profile|redis|down' "$docker_log" &&
+        grep -Fxq "up|${compose_prefix}|up|-d|--no-build|--wait|--wait-timeout|180" "$docker_log" || {
+        printf 'Launcher must preserve selected build, all-profile shutdown, and bounded no-build startup (%s).\n' "$label" >&2
+        return 1
+      }
+    fi
+  }
+
+  for mode in postgres redis; do
+    check_startup_order "$mode" 1
+    check_startup_order "$mode" 0
+  done
   printf '%b\n' "${GREEN}Unix launcher self-check passed.${NC}"
   exit 0
 fi
@@ -263,10 +358,12 @@ else
   export REDIS_URL=memory://
 fi
 
+printf '%b\n' "${CYAN}Building images before stopping old writers...${NC}"
+"${compose_args[@]}" build
 printf '%b\n' "${CYAN}Stopping old writers before migrations...${NC}"
 docker compose --profile redis down
 printf '%b\n' "${CYAN}Starting NovelWorld (cache: ${CACHE_MODE_VALUE})...${NC}"
-"${compose_args[@]}" up -d --build --wait --wait-timeout 180
+"${compose_args[@]}" up -d --no-build --wait --wait-timeout 180
 
 printf '%b\n' "${GREEN}NovelWorld is ready at http://localhost${NC}"
 printf '%s\n' 'Stop: docker compose --profile redis down' 'Logs: docker compose logs -f'
