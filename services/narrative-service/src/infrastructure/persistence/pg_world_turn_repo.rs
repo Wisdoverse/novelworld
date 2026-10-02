@@ -9,7 +9,8 @@ use crate::domain::{
     entities::{narrative_node::WorldState, world_session::WorldEntryContext},
     repositories::{
         BeginWorldTurn, MemoryProjectionStatus, RecoverableWorldTurn, WorldTurnClaim,
-        WorldTurnJournalEntry, WorldTurnRepository, WorldTurnResult,
+        WorldTurnConfirmation, WorldTurnJournalEntry, WorldTurnRepository, WorldTurnResult,
+        WorldTurnStatus,
     },
 };
 
@@ -182,6 +183,60 @@ impl PgWorldTurnRepository {
 
 #[async_trait]
 impl WorldTurnRepository for PgWorldTurnRepository {
+    async fn confirm_turn(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        turn_id: Uuid,
+    ) -> Result<Option<WorldTurnConfirmation>> {
+        // A missing row or failed read is not evidence of a failed action.
+        // This SELECT never renews/reclaims a lease or retries a side effect.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let row: Option<(Uuid, String, String, serde_json::Value, DateTime<Utc>)> =
+                sqlx::query_as(
+                    "SELECT t.id,t.status,t.memory_projection_status,w.state,w.updated_at \
+                     FROM world_turns t JOIN world_states w \
+                     ON w.user_id=t.user_id AND w.novel_id=t.novel_id \
+                     WHERE t.id=$1 AND t.user_id=$2 AND t.novel_id=$3",
+                )
+                .bind(turn_id)
+                .bind(user_id)
+                .bind(novel_id)
+                .fetch_optional(&self.pool)
+                .await?;
+            row.map(|(id, status, projection, state, updated_at)| {
+                let status = match status.as_str() {
+                    "in_progress" => WorldTurnStatus::InProgress,
+                    "completed" => WorldTurnStatus::Completed,
+                    "failed" => WorldTurnStatus::Failed,
+                    _ => anyhow::bail!("invalid world turn confirmation status"),
+                };
+                let state = WorldState {
+                    user_id,
+                    novel_id,
+                    state,
+                    updated_at,
+                };
+                Ok(WorldTurnConfirmation {
+                    turn_id: id,
+                    status,
+                    memory_projection_status: if status == WorldTurnStatus::Completed {
+                        Some(
+                            MemoryProjectionStatus::from_str(&projection)
+                                .context("invalid completed memory projection")?,
+                        )
+                    } else {
+                        None
+                    },
+                    source_chapter_high_water: state.source_chapter_high_water()?,
+                })
+            })
+            .transpose()
+        })
+        .await
+        .context("world turn confirmation deadline")?
+    }
+
     async fn begin_turn(&self, claim: &WorldTurnClaim) -> Result<BeginWorldTurn> {
         // One bounded database attempt. An uncertain acknowledgement is replayed
         // with the same logical key; this adapter never retries a write.
