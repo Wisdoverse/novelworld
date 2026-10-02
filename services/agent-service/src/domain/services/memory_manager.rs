@@ -427,7 +427,7 @@ fn build_summary_input(messages: &[ChatMessage]) -> String {
     lines.join("\n")
 }
 
-/// 4层记忆金字塔管理器（借鉴 project-lunar Crystal Memory）
+/// Four-layer memory pyramid manager, based on project-lunar's Crystal Memory.
 pub struct MemoryManager {
     pub memory_repo: Arc<dyn MemoryRepository>,
     pub chat_repo: Arc<dyn ChatRepository>,
@@ -462,10 +462,10 @@ impl MemoryManager {
         let mut selected = MemorySelectionCounts::default();
         let allow_unscoped_memory = reader_character_id.is_none();
 
-        // 1. 系统提示词（角色人格）
+        // 1. System prompt (character persona).
         messages.push(("system".into(), system_prompt.to_string()));
 
-        // 2. 永久记忆注入（角色关系、重大选择）
+        // 2. Inject permanent memories (relationships and major choices).
         let permanent = if allow_unscoped_memory {
             self.memory_repo
                 .find_permanent_candidates(
@@ -496,7 +496,7 @@ impl MemoryManager {
             ));
         }
 
-        // 3. 中期记忆（对话摘要）
+        // 3. Mid-term memories (conversation summaries).
         let mid = if allow_unscoped_memory {
             self.memory_repo
                 .find_by_layer(
@@ -589,7 +589,7 @@ impl MemoryManager {
             }
         }
 
-        // 4. 防剧透：注入当前章节之前的故事背景
+        // 4. Prevent spoilers by injecting story context only through the current chapter.
         messages.push(("system".into(), format!(
             "## 当前故事进度\n读者目前读到第{}章。你只知道第{}章及之前发生的事情，不要提及后续剧情。",
             current_chapter, current_chapter
@@ -714,7 +714,7 @@ impl MemoryManager {
         Ok(Some(promoted))
     }
 
-    /// 保存永久记忆（重大选择、关系变化）。
+    /// Save a permanent memory (major choice or relationship change).
     ///
     /// The committed fact is authoritative and immediately readable through
     /// the direct permanent-memory path. The memory id must be the private

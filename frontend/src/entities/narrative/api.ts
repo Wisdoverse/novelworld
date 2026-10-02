@@ -1,3 +1,4 @@
+import { UiMessageError, type MessageKey } from '@/shared/lib/i18n';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import axios from 'axios';
 import { apiClient, getApiErrorCode } from '@/shared/api/client';
@@ -53,9 +54,9 @@ export function isNarrativeChoiceConflict(error: unknown) {
   return getApiErrorCode(error) === 'choice_conflict';
 }
 
-class WorldTurnConfirmationUnknownError extends Error {
-  constructor(message: string) {
-    super(message);
+class WorldTurnConfirmationUnknownError extends UiMessageError {
+  constructor(key: MessageKey) {
+    super({ key });
     this.name = 'WorldTurnConfirmationUnknownError';
   }
 }
@@ -329,7 +330,7 @@ export function useSubmitWorldTurn(novelId: string) {
       } catch {
         // The POST already committed. A rejected confirmation GET must never
         // be reclassified as a terminal rejection that unlocks a new action.
-        throw new WorldTurnConfirmationUnknownError('已提交行动尚无法从最新世界状态确认');
+        throw new WorldTurnConfirmationUnknownError("The committed action cannot yet be confirmed from the latest world state");
       }
       await queryClient.invalidateQueries({
         queryKey: narrativeKeys.worldState(novelId),
@@ -342,11 +343,11 @@ export function useSubmitWorldTurn(novelId: string) {
       const view = queryClient.getQueryData<OpenWorldView | null>(openWorldKey);
       const journalEntry = view?.journal.find(entry => entry.turn_id === result.turn_id);
       if (!journalEntry) {
-        throw new WorldTurnConfirmationUnknownError('已提交行动尚未出现在最新世界状态中');
+        throw new WorldTurnConfirmationUnknownError("The committed action is not yet present in the latest world state");
       }
       if (journalEntry.memory_projection_status !== 'saved'
         && journalEntry.memory_projection_status !== 'skipped') {
-        throw new WorldTurnConfirmationUnknownError('已提交行动的记忆投影尚未确认');
+        throw new WorldTurnConfirmationUnknownError("The committed action's memory projection is not yet confirmed");
       }
     },
     onError: async error => {

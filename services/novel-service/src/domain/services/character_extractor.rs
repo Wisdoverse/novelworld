@@ -697,8 +697,8 @@ pub(crate) fn text_contains_name(text: &str, name: &str, known_names: &HashSet<&
     }
     let ascii = name.is_ascii();
     // A single non-ASCII scalar has no reliable lexical boundary. Treating it
-    // as a source mention would, for example, expose a character named `安`
-    // from the ordinary word `平安`. Keep the pre-completion proof fail-closed;
+    // as a source mention could expose a character named `安` from the ordinary
+    // word `平安`. Keep the pre-completion proof fail-closed;
     // the complete-novel projection can still publish the canonical record.
     if !ascii && name.chars().count() < 2 {
         return false;

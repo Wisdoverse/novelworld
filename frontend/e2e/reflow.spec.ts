@@ -212,3 +212,8 @@ test(`reduced motion (${initialPreference} at load) skips runtime animation and 
   expect(calls.some(call => call.endsWith(':smooth'))).toBe(false);
 });
 }
+
+// These established journeys intentionally exercise the Chinese UI.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('novelworld.ui.locale', 'zh-CN'));
+});

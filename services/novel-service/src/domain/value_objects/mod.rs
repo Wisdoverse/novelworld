@@ -20,15 +20,15 @@ pub enum ImportStage {
     Completed,
 }
 
-/// 故事偏离度（借鉴 KathaaVerse）
+/// Story deviation mode, based on KathaaVerse.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviationMode {
-    /// 忠实原著
+    /// Stay faithful to the source.
     Canon,
-    /// 创意扩展
+    /// Expand creatively.
     Creative,
-    /// 自由改写
+    /// Rewrite freely.
     Remix,
 }
 
@@ -136,12 +136,12 @@ impl DeviationMode {
     }
 }
 
-/// 读者身份类型
+/// Reader identity type.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ReaderIdentityType {
-    /// 以自己身份进入
+    /// Enter as oneself.
     Self_,
-    /// 扮演某个角色
+    /// Play as a character.
     Character,
 }
 

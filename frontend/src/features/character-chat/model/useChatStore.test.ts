@@ -1,3 +1,5 @@
+import { beforeEach as beforeLocaleTest } from 'vitest';
+import { setLocale } from '@/shared/lib/i18n';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ChatStreamOptions } from '@/shared/api/client';
@@ -147,3 +149,6 @@ describe('chat turn isolation', () => {
       .toEqual(['self-only']);
   });
 });
+
+// This suite retains the Simplified Chinese journey; locale tests cover the English default.
+beforeLocaleTest(() => setLocale('zh-CN'));

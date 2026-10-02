@@ -5,8 +5,8 @@ use uuid::Uuid;
 use crate::domain::events::NovelEvent;
 use crate::domain::value_objects::{DeviationMode, NovelStatus};
 
-/// 小说聚合根
-/// DDD: 聚合根负责维护不变量，所有状态变更通过方法进行
+/// Novel aggregate root.
+/// DDD: the aggregate root maintains invariants, and all state changes go through its methods.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Novel {
     pub id: Uuid,
@@ -72,7 +72,7 @@ fn serialize_public_parse_error<S: serde::Serializer>(
 }
 
 impl Novel {
-    /// 工厂方法：创建新小说（pending 状态）
+    /// Factory method that creates a novel in the pending state.
     pub fn create(user_id: Uuid, title: String, author: Option<String>) -> Self {
         let now = Utc::now();
         let mut novel = Self {
@@ -100,14 +100,14 @@ impl Novel {
         novel
     }
 
-    /// 开始解析
+    /// Start parsing.
     pub fn start_parsing(&mut self) {
         self.status = NovelStatus::Parsing;
         self.parse_error = None;
         self.updated_at = Utc::now();
     }
 
-    /// 解析完成
+    /// Mark parsing as complete.
     pub fn mark_ready(&mut self, total_chapters: i32, world_summary: String, genre: String) {
         self.status = NovelStatus::Ready;
         self.total_chapters = total_chapters;
@@ -128,7 +128,7 @@ impl Novel {
         self.updated_at = Utc::now();
     }
 
-    /// 解析失败
+    /// Mark parsing as failed.
     pub fn mark_error(&mut self, error: String) {
         self.status = NovelStatus::Error;
         self.parse_error = Some(error.clone());
@@ -139,7 +139,7 @@ impl Novel {
         });
     }
 
-    /// 设置故事偏离度
+    /// Set the story deviation mode.
     pub fn set_deviation_mode(&mut self, mode: DeviationMode) {
         self.deviation_mode = mode;
         self.updated_at = Utc::now();
@@ -150,7 +150,7 @@ impl Novel {
         self.updated_at = Utc::now();
     }
 
-    /// 取出并清空领域事件
+    /// Take and clear domain events.
     pub fn take_events(&mut self) -> Vec<NovelEvent> {
         std::mem::take(&mut self.domain_events)
     }

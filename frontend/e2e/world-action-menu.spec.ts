@@ -100,3 +100,8 @@ test('free input submits pursue_goal with a null target only after explicit exec
   });
   expect(requests[0].key).toMatch(/^[0-9a-f-]{36}$/i);
 });
+
+// Exercise the retained Chinese UI without changing the application's English default.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('novelworld.ui.locale', 'zh-CN'));
+});

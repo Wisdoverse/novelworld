@@ -1,3 +1,8 @@
+import { beforeEach as beforeLocaleTest } from 'vitest';
+import { setLocale } from '@/shared/lib/i18n';
+
+// Preserve the Chinese sample journeys; English defaults have separate coverage.
+beforeLocaleTest(() => setLocale('zh-CN'));
 import React, { type PropsWithChildren } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, renderHook, waitFor } from '@testing-library/react';

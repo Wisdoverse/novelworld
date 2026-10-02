@@ -1,3 +1,5 @@
+import { beforeEach as beforeLocaleTest } from 'vitest';
+import { setLocale } from '@/shared/lib/i18n';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -214,4 +216,25 @@ describe('LlmUsageCard', () => {
     expect(screen.getByText(/套餐用量不按 API token 单价折算/)).toBeTruthy();
     expect(screen.queryByText(/¥0\.00|CN¥0\.00/)).toBeNull();
   });
+});
+
+// This suite retains the Simplified Chinese journey; locale tests cover the English default.
+beforeLocaleTest(() => setLocale('zh-CN'));
+
+it('reacts to a selected locale without refetching usage or changing amounts', async () => {
+  setLocale('en');
+  getLlmUsage.mockReset().mockResolvedValue({
+    contract: 1, scope: 'user', window_days: 30,
+    tokens: { input: '3000', cached_input: '1000', uncached_input: '2000', output: '500', total: '3500' },
+    costs: { usd_micros: '450000', cny_micros: '3240000' }, unpriced_tokens: '0',
+  });
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={queryClient}><LlmUsageCard principalId="reader" scope="user" /></QueryClientProvider>);
+  expect(await screen.findByText('$0.45')).toBeTruthy();
+  expect(screen.getByRole('heading', { name: 'My key usage' })).toBeTruthy();
+  const { act } = await import('@testing-library/react');
+  act(() => setLocale('zh-CN'));
+  expect(await screen.findByText(/CN¥3\.24|¥3\.24/)).toBeTruthy();
+  expect(screen.getByRole('heading', { name: '我的 Key 消耗' })).toBeTruthy();
+  expect(getLlmUsage).toHaveBeenCalledTimes(1);
 });

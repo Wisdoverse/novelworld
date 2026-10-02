@@ -192,3 +192,8 @@ test('recognize a second book, require confirmation, then share the confirmed ba
   await expect(page.getByText('此系列的 D20 基础规则尚未生成。纯叙事模式可先使用共享背景。')).toBeVisible();
   expect(generationCalls).toBe(0);
 });
+
+// Exercise the retained Chinese UI without changing the application's English default.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('novelworld.ui.locale', 'zh-CN'));
+});

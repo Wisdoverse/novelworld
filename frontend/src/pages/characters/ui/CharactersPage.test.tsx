@@ -1,3 +1,5 @@
+import { beforeEach as beforeLocaleTest } from 'vitest';
+import { setLocale } from '@/shared/lib/i18n';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CharactersPage } from './CharactersPage';
@@ -175,3 +177,6 @@ describe('CharactersPage progress gate', () => {
     expect(screen.getByTestId('chat-panel').textContent).toBe('Same|角色|no-avatar');
   });
 });
+
+// This suite retains the Simplified Chinese journey; locale tests cover the English default.
+beforeLocaleTest(() => setLocale('zh-CN'));

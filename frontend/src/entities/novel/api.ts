@@ -1,3 +1,4 @@
+import { translate as t } from '@/shared/lib/i18n';
 import { isAxiosError } from 'axios';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from '@/shared/api/client';
@@ -352,19 +353,19 @@ export function novelTitleFromFile(file: File) {
 export function validateNovelFile(file: File): string | null {
   const extension = file.name.split('.').pop()?.toLowerCase();
   if (!extension || !['txt', 'epub', 'pdf'].includes(extension)) {
-    return '请选择 TXT、EPUB 或 PDF 文件';
+    return t("Choose a TXT, EPUB or PDF file");
   }
   const limit = extension === 'txt' ? 10 * 1024 * 1024 : 20 * 1024 * 1024;
   if (file.size > limit) {
-    return `${extension.toUpperCase()} 文件不能超过 ${limit / 1024 / 1024} MiB`;
+    return t("{p0} files cannot exceed {p1} MiB", { p0: extension.toUpperCase(), p1: limit / 1024 / 1024 });
   }
   return null;
 }
 
 export function validateNovelBatchFiles(files: File[]): string | null {
-  if (!files.length) return '请至少选择一本小说';
+  if (!files.length) return t("Choose at least one novel");
   if (files.length > MAX_NOVEL_UPLOAD_FILES) {
-    return `每次最多导入 ${MAX_NOVEL_UPLOAD_FILES} 本小说`;
+    return t("Import at most {p0} novels at a time", { p0: MAX_NOVEL_UPLOAD_FILES });
   }
   for (const file of files) {
     const error = validateNovelFile(file);

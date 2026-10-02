@@ -1,3 +1,4 @@
+import { translate as t, useLocale } from '@/shared/lib/i18n';
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useCharacters } from '@/entities/novel';
@@ -10,6 +11,7 @@ import { getReaderIdentityScope } from '@/shared/lib/readerIdentityScope';
 import { AlertCircle, ArrowLeft, Users } from 'lucide-react';
 
 export function CharactersPage() {
+  useLocale();
   const { novelId } = useParams<{ novelId: string }>();
   const navigate = useNavigate();
   const { user } = useAuthStore();
@@ -55,38 +57,38 @@ export function CharactersPage() {
           <button
             onClick={() => navigate(-1)}
             className="flex h-10 w-10 items-center justify-center rounded-full text-[#0b57d0] transition-colors hover:bg-[#e8f0fe]"
-            aria-label="返回"
+            aria-label={t("Back")}
           >
             <ArrowLeft size={20} />
           </button>
           <div>
-            <p className="text-sm font-medium text-[#0b57d0]">人物关系</p>
-            <h1 className="mt-1 text-3xl font-medium tracking-[-0.02em] text-[#1f1f1f]">角色列表</h1>
+            <p className="text-sm font-medium text-[#0b57d0]">{t("Character relationships")}</p>
+            <h1 className="mt-1 text-3xl font-medium tracking-[-0.02em] text-[#1f1f1f]">{t("Character list")}</h1>
           </div>
         </div>
 
         {isLoading || isProgressLoading ? (
           <div className="surface-card flex items-center justify-center gap-3 py-20 text-sm text-[#5f6368]">
             <div className="h-5 w-5 animate-spin rounded-full border-2 border-[#0b57d0] border-t-transparent" />
-            正在加载角色…
+            {t("Loading characters…")}
           </div>
         ) : isProgressError && !readingProgress ? (
           <div className="surface-card px-6 py-16 text-center" role="alert">
             <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-[#fce8e6] text-[#b3261e]">
               <AlertCircle size={24} aria-hidden="true" />
             </span>
-            <h2 className="mt-5 text-xl font-semibold text-[#1f1f1f]">暂时无法加载角色</h2>
-            <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-[#5f6368]">阅读上下文没有成功恢复。你的数据不会丢失，可以稍后重试。</p>
+            <h2 className="mt-5 text-xl font-semibold text-[#1f1f1f]">{t("Cannot load characters right now")}</h2>
+            <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-[#5f6368]">{t("Reading context could not be restored. Your data remains safe; try again later.")}</p>
             {readerIdentityUnavailable ? (
               <button
                 className="primary-action mt-6"
                 disabled={resetReaderIdentity.isPending}
                 onClick={() => resetReaderIdentity.mutate()}
               >
-                以本人身份继续
+                {t("Continue as yourself")}
               </button>
             ) : (
-              <button className="primary-action mt-6" onClick={() => refetchProgress()}>重试</button>
+              <button className="primary-action mt-6" onClick={() => refetchProgress()}>{t("Retry")}</button>
             )}
           </div>
         ) : isCharactersError && !characters ? (
@@ -94,15 +96,15 @@ export function CharactersPage() {
             <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-[#fce8e6] text-[#b3261e]">
               <AlertCircle size={24} aria-hidden="true" />
             </span>
-            <h2 className="mt-5 text-xl font-semibold text-[#1f1f1f]">暂时无法加载角色</h2>
-            <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-[#5f6368]">角色数据加载失败，请重新加载。</p>
-            <button className="primary-action mt-6" onClick={() => refetchCharacters()}>重试</button>
+            <h2 className="mt-5 text-xl font-semibold text-[#1f1f1f]">{t("Cannot load characters right now")}</h2>
+            <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-[#5f6368]">{t("Character data failed to load. Reload it.")}</p>
+            <button className="primary-action mt-6" onClick={() => refetchCharacters()}>{t("Retry")}</button>
           </div>
         ) : !characters?.length ? (
           <div className="surface-card px-6 py-16 text-center">
             <Users size={40} className="mx-auto text-[#7b8db7]" aria-hidden="true" />
-            <h2 className="mt-4 text-lg font-semibold text-[#1f1f1f]">暂时还没有角色</h2>
-            <p className="mt-2 text-sm text-[#5f6368]">小说解析完成后，角色会显示在这里。</p>
+            <h2 className="mt-4 text-lg font-semibold text-[#1f1f1f]">{t("No characters yet")}</h2>
+            <p className="mt-2 text-sm text-[#5f6368]">{t("Characters will appear when novel parsing completes.")}</p>
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">

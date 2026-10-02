@@ -991,7 +991,7 @@ impl AgentCommandHandler {
         }
     }
 
-    /// 流式对话（SSE）
+    /// Streamed chat (SSE).
     #[tracing::instrument(skip(self, user_message), fields(turn_id = %turn_id, character_id = %character_id, user_id = %user_id))]
     pub async fn chat_stream(
         &self,
@@ -1240,7 +1240,7 @@ impl AgentCommandHandler {
         ))
     }
 
-    /// 普通对话（非流式）
+    /// Standard chat (non-streaming).
     #[tracing::instrument(skip(self, user_message), fields(turn_id = %turn_id, character_id = %character_id, user_id = %user_id))]
     pub async fn chat(
         &self,

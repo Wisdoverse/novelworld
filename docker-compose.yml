@@ -1,8 +1,8 @@
-# ─── NovelWorld 微服务编排 ────────────────────────────────────────────────────
-# 服务拓扑：
+# ─── NovelWorld microservice stack ───────────────────────────────────────────
+# Service topology:
 #   nginx (80) → gateway (8080) → [novel-service, agent-service,
 #                                       narrative-service, user-service]
-#   基础配置使用 postgres18；Redis 投影是显式 redis profile
+#   The default stack uses PostgreSQL 18; the Redis projection uses the explicit redis profile.
 
 x-logging: &bounded-logs
   driver: local
@@ -18,7 +18,7 @@ volumes:
 
 services:
 
-  # ─── 基础设施 ──────────────────────────────────────────────────────────────
+  # ─── Infrastructure ────────────────────────────────────────────────────────
 
   postgres:
     image: ${POSTGRES_IMAGE:-pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a}
@@ -145,7 +145,7 @@ services:
     mem_limit: 12g
     cpus: 4.0
 
-  # ─── 微服务 ────────────────────────────────────────────────────────────────
+  # ─── Services ──────────────────────────────────────────────────────────────
 
   user-service:
     image: ${USER_SERVICE_IMAGE:-novel-world-user-service:local}
@@ -358,7 +358,7 @@ services:
       timeout: 5s
       retries: 3
 
-  # ─── 前端 ──────────────────────────────────────────────────────────────────
+  # ─── Frontend ──────────────────────────────────────────────────────────────
 
   frontend:
     image: ${FRONTEND_IMAGE:-novel-world-frontend:local}
@@ -373,7 +373,7 @@ services:
     networks:
       - novel-net
 
-  # ─── Nginx 反向代理 ────────────────────────────────────────────────────────
+  # ─── Nginx reverse proxy ───────────────────────────────────────────────────
 
   nginx:
     image: ${NGINX_IMAGE:-nginx:alpine@sha256:db35bfc6b2951e7f8a72db5db120288c127ffaeeb4a6d4b95a26fead017d5913}
