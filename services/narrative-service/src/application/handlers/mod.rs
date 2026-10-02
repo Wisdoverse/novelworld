@@ -33,8 +33,8 @@ use crate::domain::repositories::{
     CharacterContextSnapshotRepository, ChoiceCommit, GameRuleTemplateRequestError,
     MemoryProjectionStatus, NarrativeNodeRepository, NovelInfo, PlayerChapter, PlayerChapterOrigin,
     PlayerChapterRepository, RecoverableWorldTurn, UserChoiceRecord, UserChoiceRepository,
-    WorldStateRepository, WorldTurnClaim, WorldTurnJournalEntry, WorldTurnRepository,
-    WorldTurnResult,
+    WorldStateRepository, WorldTurnClaim, WorldTurnConfirmation, WorldTurnJournalEntry,
+    WorldTurnRepository, WorldTurnResult,
 };
 use crate::domain::services::narrative_engine::{
     build_branch_prompt, build_player_chapter_prompt, is_chinese_narrative, parse_generated_branch,
@@ -1384,6 +1384,45 @@ impl NarrativeCommandHandler {
         self.open_world_view(user_id, novel_id, state).await
     }
 
+    pub async fn confirm_world_turn(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        turn_id: Uuid,
+    ) -> NarrativeResult<WorldTurnConfirmation> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            self.owned_novel(novel_id, user_id).await?;
+            self.require_self_reader_identity(user_id, novel_id).await?;
+            let confirmation = self
+                .world_turn_repo
+                .confirm_turn(user_id, novel_id, turn_id)
+                .await
+                .map_err(NarrativeError::Internal)?
+                .ok_or(NarrativeError::NotFound)?;
+            let progress = self
+                .chapter_repo
+                .get_reading_progress(novel_id, user_id)
+                .await
+                .map_err(NarrativeError::Unavailable)?;
+            if !progress.reader_identity_is_self {
+                return Err(NarrativeError::Conflict(
+                    "Player and open-world access require the self reader identity".into(),
+                ));
+            }
+            if confirmation
+                .source_chapter_high_water
+                .is_some_and(|chapter| progress.current_chapter < chapter)
+            {
+                return Err(NarrativeError::ReadingProgressBehindWorld);
+            }
+            Ok(confirmation)
+        })
+        .await
+        .map_err(|_| {
+            NarrativeError::Internal(anyhow::anyhow!("world turn confirmation deadline"))
+        })?
+    }
+
     pub async fn suggest_world_action(
         &self,
         user_id: Uuid,
@@ -2190,6 +2229,15 @@ impl NarrativeCommandHandler {
         ) {
             Ok(transition) => transition,
             Err(error) => {
+                tracing::warn!(
+                    failure_code = "invalid_transition",
+                    rejection_class = if error.0.starts_with("world transition JSON is invalid:") {
+                        "json"
+                    } else {
+                        "semantic"
+                    },
+                    "generated world transition rejected"
+                );
                 self.fail_world_turn(&claim, attempt, "invalid_transition")
                     .await;
                 return Err(NarrativeError::Llm(anyhow::anyhow!(error)));
