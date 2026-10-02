@@ -60,7 +60,7 @@ set -euo pipefail
 }
 unset COMPOSE_PROJECT_NAME
 # Keep stdin closed so incomplete database setup fails instead of prompting.
-# The launcher drains old writers, builds, migrates, and waits for readiness.
+# The launcher builds images first, then drains old writers, migrates, and waits for readiness.
 bash start.sh </dev/null
 nginx_url="$(sed -n 's/^NGINX_URL=//p' .env | tail -n 1)"
 bash infra/ops/health-checks.sh "${nginx_url:-http://127.0.0.1:80}"

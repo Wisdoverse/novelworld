@@ -384,8 +384,10 @@ pass. If the error persists, collect only aggregate counts grouped by novel
 status, advertised chapter count, actual chapter shape, and progress validity;
 keep book, reader, and chapter content out of logs and review artifacts.
 
-The one-click `start.sh` runs `docker compose down` and brings the full stack
-back up, including migration replay. It is not an ingress-only recovery command.
+The one-click `start.sh` builds images before `docker compose down`, so a build
+failure leaves existing containers running. After a successful build it stops
+old writers, then starts the full stack with `up --no-build`, including migration
+replay. It is not an ingress-only recovery command.
 For an existing stopped edge container, follow the single-container Nginx
 restart procedure in [DEPLOY.md](../DEPLOY.md); do not start dependent services
 as a side effect.

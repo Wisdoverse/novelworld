@@ -2,6 +2,7 @@ import importlib.util
 import ipaddress
 import os
 import contextlib
+import copy
 import io
 from pathlib import Path
 import subprocess
@@ -461,6 +462,12 @@ class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
             "settings_snapshot_present", "restart_snapshot_present",
             "terminal_snapshot_present", "payers_stopped", "metrics_reconciled",
             "existing_stack_unchanged",
+            "diagnostic_stop_timeout_present", "diagnostic_stop_inventory_invalid_present",
+            "diagnostic_payers_still_running_present", "diagnostic_payer_inventory_unproven_present",
+            "diagnostic_payer_stop_unproven_present", "diagnostic_stop_unproven_present",
+            "diagnostic_command_bounds_invalid_present", "diagnostic_command_timeout_present",
+            "diagnostic_command_output_oversized_present", "diagnostic_command_failed_present",
+            "diagnostic_command_stop_unproven_present", "diagnostic_terminal_unproven_present",
         }
         for case in ("zero", "nonzero"):
             with self.subTest(case=case):
@@ -513,6 +520,62 @@ class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
 
         with mock.patch("builtins.print", side_effect=BrokenPipeError):
             LIFECYCLE.report_cold_adoption_status(journey(), False)
+
+    def test_cold_adoption_failure_flags_match_exact_codes_without_exposing_private_data(self):
+        codes = (
+            "diagnostic_stop_timeout", "diagnostic_stop_inventory_invalid",
+            "diagnostic_payers_still_running", "diagnostic_payer_inventory_unproven",
+            "diagnostic_payer_stop_unproven", "diagnostic_stop_unproven",
+            "diagnostic_command_bounds_invalid", "diagnostic_command_timeout",
+            "diagnostic_command_output_oversized", "diagnostic_command_failed",
+            "diagnostic_command_stop_unproven", "diagnostic_terminal_unproven",
+        )
+        expected_keys = {
+            "case", "base_images_recorded", "initial_snapshot_present",
+            "settings_snapshot_present", "restart_snapshot_present",
+            "terminal_snapshot_present", "payers_stopped", "metrics_reconciled",
+            "existing_stack_unchanged", *(code + "_present" for code in codes),
+        }
+
+        def summary(failures):
+            journey = SimpleNamespace(private_report={}, report={}, diagnostic_failures=failures)
+            original = copy.deepcopy(vars(journey))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                LIFECYCLE.report_cold_adoption_status(journey, False)
+            self.assertEqual(vars(journey), original)
+            encoded = output.getvalue()
+            result = json.loads(encoded)
+            self.assertEqual(set(result), expected_keys)
+            self.assertEqual(result["case"], "nonzero")
+            self.assertTrue(all(type(value) is bool for key, value in result.items() if key != "case"))
+            return result, encoded
+
+        for code in codes:
+            with self.subTest(code=code):
+                result, _ = summary([code])
+                self.assertEqual({name for name in codes if result[name + "_present"]}, {code})
+
+        selected = {codes[0], codes[5], codes[9]}
+        private_values = (
+            "unknown-secret-key-value", "/private/report-path", "private-model-id",
+            "diagnostic_command_failed:secret-provider-response",
+        )
+        failures = [*selected, codes[0], *private_values, None, {"private-id": "private-value"},
+                    *(code + "_suffix" for code in codes), *("prefix_" + code for code in codes)]
+        result, encoded = summary(failures)
+        self.assertEqual({name for name in codes if result[name + "_present"]}, selected)
+        for private_value in (*private_values, "private-id", "private-value"):
+            self.assertNotIn(private_value, encoded)
+
+        for malformed in (None, codes[0], {codes[0]: True}, tuple(codes), set(codes), 1):
+            with self.subTest(malformed=malformed):
+                result, _ = summary(malformed)
+                self.assertFalse(any(result[name + "_present"] for name in codes))
+
+        with mock.patch("builtins.print", side_effect=BrokenPipeError):
+            LIFECYCLE.report_cold_adoption_status(
+                SimpleNamespace(private_report={}, report={}, diagnostic_failures=list(codes)), False)
 
     def test_cold_release_status_is_allowlisted_and_bounded(self):
         phases = ("pull", "database_start", "migration", "application_deployment", "readiness")
