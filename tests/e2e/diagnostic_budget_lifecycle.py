@@ -56,13 +56,25 @@ def require(condition, code):
 
 def report_cold_adoption_status(journey, zero):
     """Best-effort stage presence only; never publish private diagnostic data."""
+    failure_codes = (
+        "diagnostic_stop_timeout", "diagnostic_stop_inventory_invalid",
+        "diagnostic_payers_still_running", "diagnostic_payer_inventory_unproven",
+        "diagnostic_payer_stop_unproven", "diagnostic_stop_unproven",
+        "diagnostic_command_bounds_invalid", "diagnostic_command_timeout",
+        "diagnostic_command_output_oversized", "diagnostic_command_failed",
+        "diagnostic_command_stop_unproven", "diagnostic_terminal_unproven",
+    )
     status = {"case": "zero" if zero else "nonzero",
               "base_images_recorded": False,
               **{name + "_snapshot_present": False
                  for name in ("initial", "settings", "restart", "terminal")},
               "payers_stopped": False, "metrics_reconciled": False,
-              "existing_stack_unchanged": False}
+              "existing_stack_unchanged": False,
+              **{code + "_present": False for code in failure_codes}}
     try:
+        failures = getattr(journey, "diagnostic_failures", None)
+        if isinstance(failures, list):
+            status.update({code + "_present": code in failures for code in failure_codes})
         private = journey.private_report
         images = private.get("release_images", {})
         snapshots = private.get("diagnostic_budget_snapshots", {})
