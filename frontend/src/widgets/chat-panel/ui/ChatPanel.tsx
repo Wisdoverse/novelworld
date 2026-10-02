@@ -1,3 +1,4 @@
+import { displayMessage, translate as t, useLocale } from '@/shared/lib/i18n';
 import React, { useState, useRef, useEffect, useLayoutEffect, useId } from 'react';
 import { motion } from 'framer-motion';
 import { Send, X, Minimize2, Maximize2, Brain } from 'lucide-react';
@@ -16,6 +17,7 @@ const SAFE_MARKDOWN_COMPONENTS: Components = {
 };
 
 export function ChatMarkdown({ children }: { children: string }) {
+  useLocale();
   return <ReactMarkdown components={SAFE_MARKDOWN_COMPONENTS}>{children}</ReactMarkdown>;
 }
 
@@ -57,6 +59,7 @@ export function ChatPanel({
   returnFocusRef,
   onClose,
 }: ChatPanelProps) {
+  useLocale();
   const [input, setInput] = useState('');
   const [isMinimized, setIsMinimized] = useState(false);
   const messagesRef = useRef<HTMLDivElement>(null);
@@ -194,7 +197,7 @@ export function ChatPanel({
             <div
               className="flex shrink-0 items-center gap-3 border-b border-[#e1e3e8] p-4"
             >
-              {/* 角色头像 */}
+              {/* Character avatar */}
               <div className="relative flex-shrink-0">
                 {character.avatar_url ? (
                   <img
@@ -215,7 +218,7 @@ export function ChatPanel({
                     {character.name[0]}
                   </div>
                 )}
-                {/* 在线指示器 */}
+                {/* Online indicator */}
                 <div
                   className="absolute -bottom-0.5 -right-0.5 h-3 w-3 animate-pulse rounded-full"
                   style={{ background: '#1e8e3e' }}
@@ -224,13 +227,13 @@ export function ChatPanel({
 
               <div className="flex-1 min-w-0">
                 <h2 id={titleId} className="truncate text-sm font-semibold text-[#1f1f1f]">
-                  <span className="sr-only">与 </span>{character.name}<span className="sr-only"> 对话</span>
+                  {t('Chat with {p0}', { p0: character.name })}
                 </h2>
                 <div className="truncate text-xs text-[#5f6368]">
                   {isCurrentlyStreaming ? (
-                    <span className="text-[#0b57d0]" style={{ fontSize: '11px' }}>正在思考...</span>
+                    <span className="text-[#0b57d0]" style={{ fontSize: '11px' }}>{t("Thinking…")}</span>
                   ) : (
-                    <span>{character.role === 'protagonist' ? '主角' : '角色'}</span>
+                    <span>{character.role === 'protagonist' ? t("Protagonist") : t("Characters")}</span>
                   )}
                 </div>
               </div>
@@ -238,7 +241,7 @@ export function ChatPanel({
               <div className="flex items-center gap-1">
                 <button
                   onClick={(e) => { e.stopPropagation(); setIsMinimized(!isMinimized); }}
-                  aria-label={isMinimized ? '展开聊天窗口' : '收起聊天窗口'}
+                  aria-label={isMinimized ? t("Expand chat window") : t("Collapse chat window")}
                   aria-expanded={!isMinimized}
                   className="min-h-8 min-w-8 rounded-full p-1.5 text-[#5f6368] transition-colors hover:bg-[#f1f3f4]"
                 >
@@ -247,15 +250,15 @@ export function ChatPanel({
                 <button
                   ref={closeRef}
                   onClick={(e) => { e.stopPropagation(); handleClose(); }}
-                  aria-label="关闭聊天"
+                  aria-label={t("Close chat")}
                   className="min-h-8 min-w-8 rounded-full p-1.5 text-[#5f6368] transition-colors hover:bg-[#f1f3f4]"
                 >
                   <X size={14} />
                 </button>
               </div>
             </div>
-            <p role="status" aria-label="对话状态" className="sr-only">
-              {isCurrentlyStreaming ? '正在生成回复，尚未确认保存。' : ''}
+            <p role="status" aria-label={t("Chat status")} className="sr-only">
+              {isCurrentlyStreaming ? t("Generating a reply. Saving is not yet confirmed.") : ''}
             </p>
 
             {/* Messages */}
@@ -268,14 +271,14 @@ export function ChatPanel({
                 >
                   {history.isLoading ? (
                     <p role="status" className="py-8 text-center text-sm text-[#5f6368]">
-                      正在恢复对话记录…
+                      {t("Restoring chat history…")}
                     </p>
                   ) : null}
                   {history.isError ? (
                     <div role="alert" className="py-8 text-center text-sm text-[#b3261e]">
-                      <p>对话记录加载失败，暂时不能继续发送。</p>
+                      <p>{t("Chat history failed to load. Sending is paused.")}</p>
                       <button type="button" className="mt-2 underline" onClick={() => void history.refetch()}>
-                        重试加载
+                        {t("Retry loading")}
                       </button>
                     </div>
                   ) : null}
@@ -283,15 +286,15 @@ export function ChatPanel({
                     <div className="text-center py-8">
                       <Brain size={32} className="mx-auto mb-3 text-[#0b57d0] opacity-40" />
                       <p className="text-sm text-[#5f6368]">
-                        与 {character.name} 开始对话
+                        {t('Start a conversation with {p0}', { p0: character.name })}
                       </p>
                       <p className="mt-1 text-xs text-[#5f6368]">
-                        会参考已提交的对话与可用记忆
+                        {t("Uses committed chat history and available memories")}
                       </p>
                     </div>
                   )}
 
-                  <div role="log" aria-label="已保存的对话" aria-relevant="additions" className="space-y-4">
+                  <div role="log" aria-label={t("Saved conversations")} aria-relevant="additions" className="space-y-4">
                   {charMessages.filter(message => !uncommittedTurnId || message.turn_id !== uncommittedTurnId).map((msg) => (
                     <div
                       key={msg.id}
@@ -318,13 +321,13 @@ export function ChatPanel({
                   {pendingUserMessage && (
                     <div className="flex justify-end">
                       <div className="chat-bubble-user min-w-0 max-w-[80%] [overflow-wrap:anywhere] [&_pre]:overflow-x-auto text-sm">
-                        <span className="sr-only">尚未确认保存：</span>
+                        <span className="sr-only">{t("Saving unconfirmed:")}</span>
                         <ChatMarkdown>{pendingUserMessage.content}</ChatMarkdown>
                       </div>
                     </div>
                   )}
 
-                  {/* 流式输出 */}
+                  {/* Streamed reply */}
                   {isCurrentlyStreaming && currentStreamText && (
                     <div className="flex justify-start gap-2">
                       <div
@@ -346,7 +349,7 @@ export function ChatPanel({
                 <div className="shrink-0 border-t border-[#e1e3e8] p-3">
                   {readerIdentity && (
                     <div className="mb-2 rounded bg-[#e8f0fe] px-2 py-1 text-xs text-[#0b57d0]">
-                      以「{readerIdentity}」身份对话
+                      {t('Chatting as “{p0}”', { p0: readerIdentity })}
                     </div>
                   )}
                   {visibleFailedTurn && !isCurrentlyStreaming && (
@@ -354,14 +357,14 @@ export function ChatPanel({
                       className="mb-2 flex items-center justify-between gap-2 rounded bg-[#fce8e6] px-2 py-1.5 text-xs text-[#b3261e]"
                       role="alert"
                     >
-                      <span>{visibleFailedTurn.error.message}</span>
+                      <span>{displayMessage(visibleFailedTurn.error.uiMessage ?? visibleFailedTurn.error.message)}</span>
                       <button
                         type="button"
                         className="shrink-0 underline disabled:opacity-50"
                         disabled={!canChat || !historyReady}
                         onClick={() => retryMessage(sessionKey)}
                       >
-                        重试
+                        {t("Retry")}
                       </button>
                     </div>
                   )}
@@ -370,7 +373,7 @@ export function ChatPanel({
                       className="mb-2 rounded bg-[#fce8e6] px-2 py-1.5 text-xs text-[#b3261e]"
                       role="alert"
                     >
-                      第 {failedTurn.payload.current_chapter} 章有一条未完成消息；请返回该章重试后再发送新消息。
+                      {t('Chapter {p0} has an unfinished message. Return to that chapter and retry before sending another.', { p0: failedTurn.payload.current_chapter })}
                     </div>
                   )}
                   <div className="flex gap-2 items-end">
@@ -379,8 +382,8 @@ export function ChatPanel({
                       value={input}
                       onChange={(e) => setInput(e.target.value)}
                       onKeyDown={handleKeyDown}
-                      placeholder={`对 ${character.name} 说...`}
-                      aria-label={`对 ${character.name} 说...`}
+                      placeholder={t("Say to {p0}…", { p0: character.name })}
+                      aria-label={t("Say to {p0}…", { p0: character.name })}
                       rows={2}
                       maxLength={4000}
                       className="field-control min-w-0 flex-1 resize-none text-sm"
@@ -393,13 +396,13 @@ export function ChatPanel({
                         onClick={() => cancelMessage(sessionKey)}
                         className="flex-shrink-0 rounded-full bg-[#fce8e6] px-3 py-2.5 text-xs font-semibold text-[#b3261e] transition-colors hover:bg-[#f9dedc]"
                       >
-                        停止
+                        {t("Stop")}
                       </button>
                     )}
                     <button
                       type="button"
                       onClick={handleSend}
-                      aria-label="发送消息"
+                      aria-label={t("Send message")}
                       disabled={!canChat || !historyReady || !input.trim() || isCurrentlyStreaming || hasUnresolvedTurn}
                       className="flex-shrink-0 rounded-full bg-[#0b57d0] p-2.5 text-white hover:bg-[#0842a0] disabled:cursor-not-allowed disabled:bg-[#c4c7c5] disabled:text-[#747775]"
                     >

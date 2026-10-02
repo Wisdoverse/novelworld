@@ -1,3 +1,4 @@
+import { translate as t, useLocale } from '@/shared/lib/i18n';
 import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import * as Dialog from '@radix-ui/react-dialog';
@@ -32,68 +33,69 @@ interface WorldSeriesDialogProps {
 function seriesErrorMessage(error: unknown) {
   switch (getApiErrorCode(error)) {
     case 'series_rule_source_unavailable':
-      return '来源书状态已变化，请刷新书架后重试。';
+      return t("The source book changed. Refresh your shelf and try again.");
     case 'source_already_in_series':
-      return '来源书已经属于其他系列。请选择已有系列，将当前书加入其中。';
+      return t("The source book already belongs to another series. Select that series to add the current book.");
     default:
-      return '操作失败，请稍后重试。';
+      return t("The operation failed. Try again later.");
   }
 }
 
 function ruleGenerationErrorMessage(error: unknown) {
   switch (getApiErrorCode(error)) {
     case 'game_rule_sources_unavailable':
-      return '来源书的世界规则不足以生成 D20 基础规则；系列背景仍可使用。';
+      return t("The source book lacks enough world rules to generate basic D20 rules. The series background remains available.");
     case 'game_rules_unavailable_at_progress':
-      return '请先阅读来源书的第一章，再生成 D20 基础规则。';
+      return t("Read the source book's first chapter before generating basic D20 rules.");
     case 'game_rule_generation_exhausted':
-      return '来源书的规则生成次数已用尽；系列背景仍可使用。';
+      return t("The source book's rule-generation limit was reached. The series background remains available.");
     default:
-      return 'D20 规则暂未生成，系列背景仍可使用。请稍后查看状态。';
+      return t("D20 rules are not ready. The series background remains available; check the status later.");
   }
 }
 
 function suggestionMessage(result: WorldSeriesSuggestion | undefined) {
   if (result?.method === 'community') {
     return result.status === 'suggested'
-      ? '多个读者确认过这些作品的关联。这里只建议分组，不证明共享世界背景相同；请核对后确认。'
+      ? t("Several readers linked these works. This suggests a grouping, not a shared world background. Review before confirming.")
       : result.status === 'unavailable'
-        ? '读者关联建议暂不可用，仍可手动选择或识别系列。'
-        : '暂无明确的读者关联建议，仍可手动选择或识别系列。';
+        ? t("Reader suggestions are unavailable. You can still select or identify a series manually.")
+        : t("No clear reader suggestions. You can still select or identify a series manually.");
   }
   if (result?.reason === 'local_evidence') {
-    return '服务器依据小说原文证据给出候选；这不是 Laya 结论。请核对后手动确认关联。';
+    return t("Candidates are based on source evidence from the novels, not a Laya conclusion. Review and confirm the association yourself.");
   }
   if (result?.reason === 'too_many_books') {
-    return '可参与识别的已就绪书籍数量超过上限。请手动选择已有系列或创建系列。';
+    return t("Too many ready books for identification. Select an existing series or create one manually.");
   }
   if (result?.method === 'deepseek') {
     switch (result.reason) {
       case 'not_configured':
-        return '请先在模型设置中配置 DeepSeek API 后再补判。';
+        return t("Configure the DeepSeek API in model settings before requesting a second opinion.");
       case 'unsupported_provider':
-        return '当前配置不支持系列补判。请在模型设置中配置 DeepSeek API 后再试。';
+        return t("This configuration cannot request a series second opinion. Configure the DeepSeek API in model settings and try again.");
       case 'unknown_outcome':
-        return '这次补判结果未确认，系统不会再次发起模型请求，请手动关联。';
+        return t("This second opinion was not confirmed. No model request will be repeated; associate the books manually.");
     }
   }
   switch (result?.status) {
     case 'suggested':
-      return '系统找到可能的同系列小说。请核对建议并明确确认后再关联。';
+      return t("Possible books in the same series were found. Review and explicitly confirm before associating them.");
     case 'unconfigured':
-      return '管理员尚未启用系列识别。你可以手动选择已有系列或创建系列。';
+      return t("The administrator has not enabled series identification. Select an existing series or create one manually.");
     case 'uncertain':
-      return '系统无法确定系列关系。请手动选择已有系列或创建系列。';
+      return t("The series relationship could not be determined. Select or create a series manually.");
     case 'unavailable':
-      return '系列识别暂不可用。你仍可手动选择已有系列或创建系列。';
+      return t("Series identification is unavailable. You can still select or create a series manually.");
     case 'in_progress':
-      return 'DeepSeek 补判正在处理中。你可以手动查询结果。';
+      return t("The DeepSeek second opinion is processing. You can check its result manually.");
     default:
       return undefined;
   }
 }
 
 export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, readyNovels, onClose }: WorldSeriesDialogProps) {
+  useLocale();
   const navigate = useNavigate();
   const seriesList = useWorldSeriesList(principalId);
   const currentSeries = useNovelWorldSeries(principalId, novel.id);
@@ -151,7 +153,7 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
       await setContribution.mutateAsync({ seriesId: currentSeries.data.id, enabled });
     } catch {
       if (ensurePrincipal()) {
-        toast.error('贡献设置未确认，请重新读取后核对。');
+        toast.error(t("Contribution settings are unconfirmed. Reload and review them."));
         void contribution.refetch();
       }
     }
@@ -225,7 +227,7 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
       if (!ensurePrincipal()) return;
       setSuggestion(result);
       if (result.status === 'suggested' && result.suggestion) {
-        toast.success('已生成系列建议，请核对后确认');
+        toast.success(t("Series suggestions ready. Review before confirming."));
       }
     } catch {
       if (ensurePrincipal()) {
@@ -241,7 +243,7 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
       if (!ensurePrincipal()) return;
       setSuggestion(result);
       if (result.status === 'suggested' && result.suggestion) {
-        toast.success('已生成 DeepSeek 系列建议，请核对后确认');
+        toast.success(t("DeepSeek series suggestions ready. Review before confirming."));
       }
     } catch {
       // The paid supplement is only run again after another explicit click.
@@ -254,7 +256,7 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
     try {
       await associate.mutateAsync(seriesId);
       if (!ensurePrincipal()) return;
-      toast.success(seriesId ? `已将《${novel.title}》关联到共享系列` : `已解除《${novel.title}》的系列关联`);
+      toast.success(seriesId ? t("Associated “{p0}” with the shared series", { p0: novel.title }) : t("Removed the series association for “{p0}”", { p0: novel.title }));
       onClose();
     } catch (error) {
       if (ensurePrincipal()) toast.error(seriesErrorMessage(error));
@@ -288,7 +290,7 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
         await associate.mutateAsync(series.id);
       }
       if (!ensurePrincipal()) return;
-      toast.success(`已创建系列并关联《${novel.title}》`);
+      toast.success(t("Created a series and associated “{p0}”", { p0: novel.title }));
       onClose();
     } catch (error) {
       if (ensurePrincipal()) toast.error(seriesErrorMessage(error));
@@ -302,14 +304,14 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
     try {
       await confirmBackground.mutateAsync({ seriesId: backgroundPending.id, background: backgroundDraft.trim() });
       if (!ensurePrincipal()) return;
-      toast.success('共享世界背景已确认');
+      toast.success(t("Shared world background confirmed"));
     } catch (error) {
       if (!ensurePrincipal()) return;
       if (getApiErrorCode(error) === 'series_background_conflict') {
         await Promise.all([currentSeries.refetch(), seriesList.refetch()]);
-        toast.error('共享背景已在其他页面确认，确认后不能修改。');
+        toast.error(t("The shared background was confirmed elsewhere and can no longer be changed."));
       } else {
-        toast.error('背景确认失败，请稍后重试。');
+        toast.error(t("Background confirmation failed. Try again later."));
       }
     }
   };
@@ -322,9 +324,9 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
       await Promise.all([seriesList.refetch(), currentSeries.refetch()]);
       if (!ensurePrincipal()) return;
       if (template.series?.binding.series_id === pendingSeries.id) {
-        toast.success('来源书的 D20 基础规则已生成并固定到系列');
+        toast.success(t("D20 rules generated from the source book and fixed to the series"));
       } else {
-        toast.error('来源规则已生成，但系列关联可能已变化；请刷新后核对。');
+        toast.error(t("Source rules were generated, but the series association may have changed. Refresh and review it."));
       }
     } catch (error) {
       if (ensurePrincipal()) toast.error(ruleGenerationErrorMessage(error));
@@ -342,31 +344,31 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
           <div className="flex items-start justify-between gap-4">
             <div>
               <Dialog.Title className="text-xl font-semibold text-[#1f1f1f]">
-                {currentSeries.data ? '系列管理' : '关联系列 / 共享世界背景'}
+                {currentSeries.data ? t("Series management") : t("Series association / shared world background")}
               </Dialog.Title>
               <Dialog.Description id="world-series-description" className="mt-2 text-sm leading-6 text-[#5f6368]">
                 {currentSeries.data
-                  ? `《${novel.title}》已关联“${currentSeries.data.name}”系列。共享世界背景${currentSeries.data.background === null ? '尚未确认' : '已确认'}；角色和阅读进度保持独立。`
-                  : `为《${novel.title}》选择系列。系统只提供建议；关联、共享背景和规则来源都由你确认。`}
+                  ? t("“{p0}” belongs to “{p1}”. Shared world background: {p2}. Characters and reading progress stay independent.", { p0: novel.title, p1: currentSeries.data.name, p2: currentSeries.data.background === null ? t("Not yet confirmed") : t("Confirmed") })
+                  : t("Select a series for “{p0}”. Suggestions are optional; you confirm the association, background and rule source.", { p0: novel.title })}
               </Dialog.Description>
             </div>
             <Dialog.Close asChild>
-              <button type="button" aria-label="关闭" className="rounded-full p-2 text-[#5f6368] hover:bg-[#f1f3f4]"><X size={18} /></button>
+              <button type="button" aria-label={t("Close")} className="rounded-full p-2 text-[#5f6368] hover:bg-[#f1f3f4]"><X size={18} /></button>
             </Dialog.Close>
           </div>
 
           <p className="mt-4 rounded-lg bg-[#f8fafd] p-3 text-xs leading-5 text-[#5f6368]">
-            系列可先关联小说，稍后确认共享背景；D20 基础规则可在背景确认后从来源书生成。属性点、装备、阅读进度和个人世界状态保持独立。
+            {t("Associate books first and confirm a shared background later. Once confirmed, basic D20 rules can be generated from the source book. Attribute points, equipment, reading progress and personal worlds remain independent.")}
           </p>
 
-          <section className="mt-5 space-y-3" aria-label="系列识别建议">
+          <section className="mt-5 space-y-3" aria-label={t("Series identification suggestions")}>
             {!currentSeries.data ? (
               <>
                 <button type="button" className="tonal-action w-full justify-center" disabled={isPending || currentSeries.isLoading || currentSeries.isError} onClick={() => void runCommunitySuggestion()}>
                   {community.isPending ? <Loader2 size={15} className="animate-spin" /> : null}
-                  参考读者关联
+                  {t("Check reader associations")}
                 </button>
-                <p className="text-xs leading-5 text-[#5f6368]">只比较书架中来自共享书库的相同作品，不调用模型；分别上传的副本暂不合并。</p>
+                <p className="text-xs leading-5 text-[#5f6368]">{t("Compares matching works from the shared library on your shelf without calling a model. Separately uploaded copies are not combined.")}</p>
               </>
             ) : null}
             <button
@@ -376,13 +378,13 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
               onClick={() => void runSuggestion()}
             >
               {suggest.isPending ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
-              识别同系列
+              {t("Identify related series")}
             </button>
-            {suggest.isError ? <p role="alert" className="text-sm text-[#b3261e]">识别服务暂不可用，可手动选择或创建系列。</p> : null}
+            {suggest.isError ? <p role="alert" className="text-sm text-[#b3261e]">{t("Identification is unavailable. Select or create a series manually.")}</p> : null}
             {canUseDeepSeek ? (
               <div className="space-y-2 rounded-lg border border-[#dadce0] p-3">
                 <p className="text-xs leading-5 text-[#5f6368]">
-                  DeepSeek 补判是可选操作，可能产生模型费用；相同证据和模型配置会复用结果，失败不会自动重试。
+                  {t("A DeepSeek second opinion is optional and may incur model charges. Identical evidence and model settings reuse the result; failures are not automatically retried.")}
                 </p>
                 <button
                   type="button"
@@ -394,18 +396,18 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
                 >
                   {suggestDeepSeek.isPending ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
                   {suggestDeepSeek.isPending
-                    ? '正在请求 DeepSeek 补判'
+                    ? t("Requesting a DeepSeek second opinion")
                     : suggestDeepSeek.isError
-                      ? '查询 DeepSeek 补判结果'
+                      ? t("Check DeepSeek second opinion")
                       : suggestion?.method === 'deepseek'
-                        ? '查询 DeepSeek 补判结果'
-                        : '使用 DeepSeek 补判'}
+                        ? t("Check DeepSeek second opinion")
+                        : t("Request DeepSeek second opinion")}
                 </button>
               </div>
             ) : null}
             {suggestDeepSeek.isError ? (
               <p role="alert" className="text-sm text-[#b3261e]">
-                补判结果可能尚未确认。查询结果不会重新发起模型请求；也可以手动选择系列。
+                {t("The second opinion may be unconfirmed. Checking does not start another model request. You can also choose a series manually.")}
               </p>
             ) : null}
             {suggestion ? (
@@ -419,16 +421,16 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
                       className="mt-2 text-sm text-[#0b57d0] underline"
                       onClick={() => navigate('/settings')}
                     >
-                      打开模型设置
+                      {t("Open model settings")}
                     </button>
                   ) : null}
                 {suggestion.method === 'deepseek' && suggestion.cached === true ? (
-                  <p className="mt-1 text-xs text-[#5f6368]">已复用相同证据和模型配置的补判结果。</p>
+                  <p className="mt-1 text-xs text-[#5f6368]">{t("Reused a second opinion with identical evidence and model settings.")}</p>
                 ) : null}
                 {suggestion.status === 'suggested' && suggestion.suggestion ? (
                   <div className="mt-2 flex flex-wrap items-center justify-between gap-3 text-sm">
                     <span>
-                      建议来源：《{suggestion.suggestion.book.title}》
+                      {t('Suggestion source: “{p0}”', { p0: suggestion.suggestion.book.title })}
                       {suggestion.suggestion.book.author ? ` · ${suggestion.suggestion.book.author}` : ''}
                       {suggestion.suggestion.book.genre ? ` · ${suggestion.suggestion.book.genre}` : ''}
                     </span>
@@ -437,7 +439,7 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
                       className="text-[#0b57d0] underline"
                       onClick={() => applySuggestion(suggestion.suggestion!)}
                     >
-                      {suggestion.suggestion.series_id ? '选择此系列建议' : '用此建议创建系列'}
+                      {suggestion.suggestion.series_id ? t("Select this series suggestion") : t("Create a series from this suggestion")}
                     </button>
                   </div>
                 ) : null}
@@ -446,35 +448,35 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
           </section>
 
           {currentSeries.data ? (
-            <section className="mt-5 space-y-2 rounded-lg border border-[#dadce0] p-3" aria-label="读者关联贡献">
+            <section className="mt-5 space-y-2 rounded-lg border border-[#dadce0] p-3" aria-label={t("Reader association contributions")}>
               <label className="flex items-start gap-2 text-sm text-[#3c4043]">
                 <input type="checkbox" className="mt-1" checked={contribution.data?.enabled ?? false} disabled={isPending || contribution.isFetching || contribution.isError || !contribution.data} onChange={event => void changeContribution(event.target.checked)} />
-                允许将本系列的作品关联用于读者推荐
+                {t("Use this series' book associations for reader recommendations")}
               </label>
-              <p className="text-xs leading-5 text-[#5f6368]">默认关闭。开启后，本系列当前及之后加入的作品关联会参与汇总；系列名称、背景和个人世界不会分享。关闭即可撤回，解除关联、移出书架或删除账号也会移除对应贡献。</p>
+              <p className="text-xs leading-5 text-[#5f6368]">{t("Off by default. When enabled, current and future book associations in this series join the aggregate. Series names, backgrounds and personal worlds are not shared. Disable to withdraw; unlinking, removing a book or deleting the account also removes the relevant contributions.")}</p>
               {contribution.isError ? (
-                <p role="alert" className="text-xs text-[#b3261e]">贡献设置加载失败，暂不能修改。<button type="button" className="ml-2 underline" disabled={contribution.isFetching} onClick={() => void contribution.refetch()}>重新读取贡献设置</button></p>
+                <p role="alert" className="text-xs text-[#b3261e]">{t("Contribution settings failed to load and cannot be changed yet.")}<button type="button" className="ml-2 underline" disabled={contribution.isFetching} onClick={() => void contribution.refetch()}>{t("Reload contribution settings")}</button></p>
               ) : null}
             </section>
           ) : null}
 
-          <section className="mt-6 space-y-3" aria-label="手动关联系列">
+          <section className="mt-6 space-y-3" aria-label={t("Associate a series manually")}>
             <label className="block text-sm font-medium text-[#3c4043]">
-              选择已有系列
+              {t("Choose an existing series")}
               <select
                 className="field-control mt-1"
                 value={selection}
                 disabled={isPending || Boolean(createdSeriesId) || seriesList.isLoading || !seriesList.data?.length}
                 onChange={event => setSelectedSeriesId(event.target.value)}
               >
-                <option value="">暂不关联</option>
+                <option value="">{t("Leave unassociated")}</option>
                 {(seriesList.data ?? []).map(series => (
-                  <option key={series.id} value={series.id}>{series.name}{series.background === null ? '（背景待确认）' : series.source_template ? '' : '（D20 待生成）'}</option>
+                  <option key={series.id} value={series.id}>{series.name}{series.background === null ? t("(background pending)") : series.source_template ? '' : t("(D20 rules pending)")}</option>
                 ))}
               </select>
             </label>
             {seriesList.isError || currentSeries.isError ? (
-              <p role="alert" className="text-sm text-[#b3261e]">系列状态加载失败，请重试后再确认操作。</p>
+              <p role="alert" className="text-sm text-[#b3261e]">{t("Series status failed to load. Retry before confirming.")}</p>
             ) : null}
             <div className="flex flex-wrap gap-2">
               <button
@@ -483,7 +485,7 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
                 disabled={isPending || Boolean(createdSeriesId) || !selection || selection === currentSeries.data?.id}
                 onClick={() => void confirmAssociation(selection)}
               >
-                确认关联当前书
+                {t("Confirm association of this book")}
               </button>
               {currentSeries.data ? (
                 <button
@@ -492,34 +494,34 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
                   disabled={isPending}
                   onClick={() => void confirmAssociation(null)}
                 >
-                  解除当前关联
+                  {t("Remove current association")}
                 </button>
               ) : null}
               <button type="button" className="tonal-action" disabled={isPending} onClick={() => setCreating(value => !value)}>
-                {creating ? '取消创建' : '创建系列'}
+                {creating ? t("Cancel creation") : t("Create series")}
               </button>
             </div>
           </section>
 
           {creating ? (
-            <section className="mt-5 space-y-3 rounded-xl border border-[#dadce0] p-4" aria-label="创建共享系列">
-              <h3 className="text-sm font-semibold text-[#1f1f1f]">创建系列并确认关联</h3>
+            <section className="mt-5 space-y-3 rounded-xl border border-[#dadce0] p-4" aria-label={t("Create shared series")}>
+              <h3 className="text-sm font-semibold text-[#1f1f1f]">{t("Create series and confirm association")}</h3>
               <p className="text-xs leading-5 text-[#5f6368]">
-                来源书和当前书将加入同一系列。背景留空时只建立分组；确认共享背景后才会共享背景或显示 D20 状态。D20 基础规则可稍后从来源书生成。
+                {t("The source and current book will join one series. A blank background creates only a grouping. Background sharing and D20 status require confirmation. Generate basic D20 rules from the source book later.")}
               </p>
               <label className="block text-sm font-medium text-[#3c4043]">
-                系列名称
+                {t("Series name")}
                 <input className="field-control mt-1" maxLength={80} value={seriesName} disabled={Boolean(createdSeriesId)} onChange={event => setSeriesName(event.target.value)} />
               </label>
               <label className="block text-sm font-medium text-[#3c4043]">
-                共享世界背景（最多 2000 字）
+                {t("Shared world background (up to 2000 characters)")}
                 <textarea className="field-control mt-1 min-h-28" maxLength={2000} value={seriesBackground} disabled={Boolean(createdSeriesId)} onChange={event => setSeriesBackground(event.target.value)} />
               </label>
-              <p className="text-xs text-[#5f6368]">可直接填写全系列共同背景，或留空并先关联其它书；确认前可编辑，保存后固定。各书独有的角色和设定仍以该书为准。</p>
+              <p className="text-xs text-[#5f6368]">{t("Enter a common background or leave it blank and associate other books first. Editable until confirmed; fixed afterward. Each book retains its own characters and settings.")}</p>
               <label className="block text-sm font-medium text-[#3c4043]">
-                系列来源书（未来 D20 规则来源）
+                {t("Series source book (future D20 rule source)")}
                 <select className="field-control mt-1" value={sourceNovelId} disabled={Boolean(createdSeriesId)} onChange={event => changeSourceNovel(event.target.value)}>
-                  <option value="">选择一本已就绪的书</option>
+                  <option value="">{t("Choose a ready book")}</option>
                   {readyNovels.map(book => (
                     <option key={book.id} value={book.id}>{book.title}</option>
                   ))}
@@ -527,19 +529,19 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
               </label>
               {sourceNovelId ? (
                 <button type="button" className="tonal-action" disabled={isPending} onClick={() => void fillSourceBackground()}>
-                  填入来源书背景初稿（可能含后文）
+                  {t("Fill a draft from the source book (may contain spoilers)")}
                 </button>
               ) : null}
-              {sourceNovelId && suggestionPending ? <p className="text-xs text-[#5f6368]">正在读取来源书的背景素材…</p> : null}
-              {sourceNovelId && suggestionError ? <p className="text-xs text-[#5f6368]">来源书暂无可用的背景建议，可手动填写或稍后确认。</p> : null}
+              {sourceNovelId && suggestionPending ? <p className="text-xs text-[#5f6368]">{t("Loading the source book's background material…")}</p> : null}
+              {sourceNovelId && suggestionError ? <p className="text-xs text-[#5f6368]">{t("No usable background suggestion from the source book. Write it manually or confirm later.")}</p> : null}
               {sourceNovelId && backgroundSuggestion.data && backgroundSuggestion.data.source_novel_id !== sourceNovelId && seriesBackground.trim() ? (
-                <p role="status" className="text-xs text-[#5f6368]">已更换来源书；请核对当前填写的背景是否仍适用。</p>
+                <p role="status" className="text-xs text-[#5f6368]">{t("Source book changed. Review whether the current background still applies.")}</p>
               ) : null}
               {suggestedBackground ? (
-                <p role="status" className="text-xs text-[#5f6368]">{seriesBackground === suggestedBackground.background ? '已填入来源书初稿。' : '来源书初稿已读取，当前背景已由你编辑。'}它只参考一本书；要参考全系列，请先创建空背景并关联其它书，再回来填入。请删去不宜跨书共享的后文内容。</p>
+                <p role="status" className="text-xs text-[#5f6368]">{seriesBackground === suggestedBackground.background ? t("Source book draft filled.") : t("Source book draft loaded. You have already edited the background.")}{' '}{t("This uses one book only. To include the series, create an empty background, associate other books, then return. Remove later content that should not be shared across books.")}</p>
               ) : null}
               {createdSeriesId ? (
-                <p role="status" className="text-xs text-[#5f6368]">系列已创建；确认按钮会重试关联，不会重复创建。</p>
+                <p role="status" className="text-xs text-[#5f6368]">{t("Series created. Confirm retries the association without creating another series.")}</p>
               ) : null}
               <button
                 type="button"
@@ -548,56 +550,56 @@ export function WorldSeriesDialog({ principalId, isPrincipalCurrent, novel, read
                 onClick={() => void createAndAssociate()}
               >
                 {create.isPending || associate.isPending || saving ? <Loader2 size={15} className="animate-spin" /> : null}
-                {createdSeriesId ? '确认关联当前书' : '创建系列并关联来源书与当前书'}
+                {createdSeriesId ? t("Confirm association of this book") : t("Create series and associate both books")}
               </button>
             </section>
           ) : null}
 
           {backgroundPending ? (
-            <section className="mt-4 space-y-2 rounded-lg border border-[#dadce0] p-4" aria-label="确认共享背景">
-              <p className="text-sm font-medium text-[#3c4043]">当前系列仅用于分组；共享世界背景尚未确认，D20 状态也暂不显示。</p>
+            <section className="mt-4 space-y-2 rounded-lg border border-[#dadce0] p-4" aria-label={t("Confirm shared background")}>
+              <p className="text-sm font-medium text-[#3c4043]">{t("This series currently groups books only. Shared background is unconfirmed and D20 status is not shown.")}</p>
               <button type="button" className="tonal-action" disabled={isPending} onClick={() => void fillSeriesBackground()}>
-                汇总已关联小说并填入背景初稿（可能含后文）
+                {t("Combine associated novels into a background draft (may contain spoilers)")}
               </button>
-              {aggregatePending ? <p className="text-xs text-[#5f6368]">正在读取已关联小说的背景素材…</p> : null}
-              {aggregateError ? <p className="text-xs text-[#5f6368]">有成员缺少可用解析或成员过多，仍可手动填写。</p> : null}
+              {aggregatePending ? <p className="text-xs text-[#5f6368]">{t("Loading background material from associated novels…")}</p> : null}
+              {aggregateError ? <p className="text-xs text-[#5f6368]">{t("Some members lack usable parsing, or there are too many members. You can still enter the background manually.")}</p> : null}
               {aggregateSuggestion ? (
                 <div className="text-xs leading-5 text-[#5f6368]" role="status">
-                  <p>{backgroundDraft === aggregateSuggestion.background ? '已填入' : '已读取'} {aggregateSuggestion.member_novel_ids.length} 本已关联小说的素材；请归并共同设定，并删去各部独有的后文情节。</p>
+                  <p>{backgroundDraft === aggregateSuggestion.background ? t("Filled") : t("Loaded")} {aggregateSuggestion.member_novel_ids.length} {t("associated novels. Combine common settings and remove each book's later plot details.")}</p>
                   <ol className="list-inside list-decimal">
-                    {aggregateSuggestion.member_novel_ids.map(id => <li key={id}>{readyNovels.find(book => book.id === id)?.title ?? '当前书架中的成员书'}</li>)}
+                    {aggregateSuggestion.member_novel_ids.map(id => <li key={id}>{readyNovels.find(book => book.id === id)?.title ?? t("Member books on this shelf")}</li>)}
                   </ol>
                 </div>
               ) : null}
               <label className="block text-sm font-medium text-[#3c4043]">
-                共享世界背景（最多 2000 字）
+                {t("Shared world background (up to 2000 characters)")}
                 <textarea className="field-control mt-1 min-h-28" maxLength={2000} value={backgroundDraft} onChange={event => setBackgroundDraft(event.target.value)} />
               </label>
-              <p className="text-xs text-[#5f6368]">确认后不能修改；仅之后进入的故事使用共享背景，已有故事保持原有设定。</p>
+              <p className="text-xs text-[#5f6368]">{t("Once confirmed, this cannot change. Only future stories use the shared background; existing stories keep their settings.")}</p>
               <button type="button" className="primary-action" disabled={isPending || !backgroundDraft.trim()} onClick={() => void confirmSharedBackground()}>
                 {confirmBackground.isPending ? <Loader2 size={15} className="animate-spin" /> : null}
-                确认共享背景
+                {t("Confirm shared background")}
               </button>
             </section>
           ) : null}
 
           {currentSeries.data && !backgroundPending ? (
             <div className="mt-4 space-y-2 text-xs text-[#5f6368]" role="status">
-              <p>当前系列：{currentSeries.data.name}（背景共享；角色和进度独立）。</p>
+              <p>{t("Current series:")}{currentSeries.data.name}{t("(shared background; independent characters and progress).")}</p>
               {pendingSeries ? (
                 <>
-                  <p>此系列的 D20 基础规则尚未生成。纯叙事模式可先使用共享背景。</p>
-                  <p>{pendingSource ? `规则来源：《${pendingSource.title}》。` : '规则来源书不在当前已就绪书架，暂不能生成。'}</p>
-                  <p>点击生成可能产生模型费用；成功后会将来源书的规则固定到系列。</p>
+                  <p>{t("Basic D20 rules are not yet generated for this series. Narrative mode can use the shared background first.")}</p>
+                  <p>{pendingSource ? t("Rule source: “{p0}”.", { p0: pendingSource.title }) : t("The rule source book is not ready on your shelf. Rules cannot be generated yet.")}</p>
+                  <p>{t("Generating rules may incur model charges. Successful source rules are fixed to this series.")}</p>
                   <button type="button" className="tonal-action" disabled={isPending || !pendingSource} onClick={() => void generateSourceRules()}>
-                    {generateRules.isPending ? '正在生成来源书 D20 规则…' : '生成来源书 D20 基础规则'}
+                    {generateRules.isPending ? t("Generating source book D20 rules…") : t("Generate basic D20 rules from source book")}
                   </button>
                 </>
-              ) : <p>D20 基础规则已从来源书固定到系列。</p>}
+              ) : <p>{t("Basic D20 rules are fixed to the series from its source book.")}</p>}
             </div>
           ) : null}
           <div className="mt-6 flex justify-end">
-            <Dialog.Close asChild><button type="button" className="tonal-action">完成</button></Dialog.Close>
+            <Dialog.Close asChild><button type="button" className="tonal-action">{t("Done")}</button></Dialog.Close>
           </div>
         </Dialog.Content>
       </Dialog.Portal>

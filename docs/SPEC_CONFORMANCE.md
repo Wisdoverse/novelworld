@@ -67,7 +67,7 @@ state in two places.
 | SPEC clause and exact scope | State | Owner | Evidence or decision |
 |---|---|---|---|
 | Normative Language — document every implementation-defined selection | Verified | H0 | E0 and the selections below |
-| Language slices (H4 issue #173) — ingestion, generated narrative, UI locale | Verified | H4 | Declared slices with evidence: SC chapter splitting (novel-service test_chapter_split fixtures), EN chapter splitting (test_chapter_split_english_headers), SC + EN lore retrieval fixtures, generated narrative requires Chinese with English rejected fail-closed (node_detector `validate_detection(&english)` is_err; `validate_player_chapter("English only")` is_err), UI locale zh-CN (`lang=zh-CN` in index.html, asserted by the browser gate's html-has-lang check; Chinese UI copy with residual non-normative English artifacts recorded in PRODUCT_CONTRACT). Evidence is structural/automated only — representative live-provider language quality remains the recorded H2/H3 gap (QUALIFICATION_POLICY) |
+| Language slices (H4 issue #173) — ingestion, generated narrative, UI locale | Verified | H4 | Declared slices with evidence: SC chapter splitting (novel-service test_chapter_split fixtures), EN chapter splitting (test_chapter_split_english_headers), SC + EN lore retrieval fixtures, generated narrative requires Chinese with English rejected fail-closed (node_detector `validate_detection(&english)` is_err; `validate_player_chapter("English only")` is_err), UI defaults to English (`lang=en` in index.html) with complete English/zh-CN catalogs, a persistent accessible selector, reactive document metadata and local formatting, and safe fallback for invalid or blocked browser storage (i18n unit tests and built-browser localization checks); UI locale does not change novel content or generation language. Evidence is structural/automated only — representative live-provider language quality remains the recorded H2/H3 gap (QUALIFICATION_POLICY) |
 | §4.1.1 — bcrypt cost at least 12 | Verified | H2 | E5 |
 | §4.1.5 — required long-term and optional permanent search embeddings | Intended gap | H3 | E0, E3; long-term promotion writes only correctly dimensioned embeddings. Journey-fact ingress intentionally makes zero embedding calls and remains directly retrievable without a vector; durable optional permanent enrichment, live semantic/provider quality, and retrieval relevance remain gaps |
 | §4.1.6 — chat-turn status, lease, failure, and completion fields agree | Verified | H3, H5 | E1, E3 |
@@ -336,10 +336,20 @@ state in two places.
 - Same-world source admission retains immutable origin and optional schema-v2
   active context, pinned-model complete evidence, one-chapter fencing and an
   owner-local exact-key journal. Monotonic Novel progress and reader recovery
-  synchronize routing without stale automatic rewinds. World/turn/source writes
+  synchronize routing without stale automatic rewinds. The reader automatically
+  admits one next chapter after a terminal current turn exhausts the scene's
+  scheduled/delayed events. Turn/source equality prevents repeat admission after
+  reload; fresh same-user identity/Player/progress and all recovery fences remain
+  required. Empty scenes advance on subsequent turns, and the book end stops
+  admission. Browser and hook tests cover this control without a scene click.
+  Fresh progress reads plus Novel's atomic exact-chapter/self guard reject
+  another tab's rewind or identity change before any automatic progress write;
+  owner PostgreSQL tests cover the read-to-write race.
+  World/turn/source writes
   share world-row-first locking; historical memory source coordinates remain
   attached to committed snapshots. Migration 0036 is a release barrier.
-  [Issue #467](https://github.com/Wisdoverse/novelworld/issues/467) owns current
+  [Issue #467](https://github.com/Wisdoverse/novelworld/issues/467) owns source admission;
+  [Issue #478](https://github.com/Wisdoverse/novelworld/issues/478) owns automatic
   implementation and acceptance evidence; [ADR 0013](./adr/0013-same-world-source-progression.md)
   defines the changed contract. Local/CI proof and deployment do not substitute
   for live provider quality, recovery qualification or user semantic acceptance.

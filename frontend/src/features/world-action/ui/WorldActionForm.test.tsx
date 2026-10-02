@@ -1,3 +1,5 @@
+import { beforeEach as beforeLocaleTest } from 'vitest';
+import { setLocale } from '@/shared/lib/i18n';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { suggestWorldAction } from '@/entities/narrative';
@@ -369,4 +371,21 @@ describe('WorldActionForm', () => {
     fireEvent.click(screen.getByRole('button', { name: /^3\./ }));
     expect(Array.from((screen.getByLabelText('你的意图') as HTMLTextAreaElement).value)).toHaveLength(500);
   });
+});
+
+// This suite retains the Simplified Chinese journey; locale tests cover the English default.
+beforeLocaleTest(() => setLocale('zh-CN'));
+
+it('changes UI language without invalidating or replacing an action draft', async () => {
+  setLocale('en');
+  const onSubmit = vi.fn().mockResolvedValue(undefined);
+  render(<WorldActionForm view={view} isPending={false} onSubmit={onSubmit} />);
+  fireEvent.click(screen.getByRole('button', { name: '2. Check on 围城仍在继续' }));
+  const intent = (screen.getByLabelText('Your intent') as HTMLTextAreaElement).value;
+  act(() => setLocale('zh-CN'));
+  expect(screen.getByLabelText('你的意图')).toHaveProperty('value', intent);
+  expect(screen.queryByText('场景已变化，请重新选择建议或确认这份草稿。')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: '执行行动' }));
+  await waitFor(() => expect(onSubmit).toHaveBeenCalledWith({ kind: 'investigate', target_id: 'siege', intent }));
+  expect(suggestWorldAction).not.toHaveBeenCalled();
 });

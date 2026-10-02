@@ -19,7 +19,7 @@ const MAX_STATE_SECTION_BYTES: usize = 8_000;
 const MAX_WORLD_SUMMARY_BYTES: usize = 4_000;
 const MAX_MODE_BYTES: usize = 32;
 
-/// LLM 返回的分支生成结果
+/// Branch-generation result returned by the LLM.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GeneratedBranch {
     pub anchor_quote: String,
@@ -85,7 +85,7 @@ pub fn is_chinese_narrative(value: &str) -> bool {
     contains_cjk(value)
 }
 
-/// 构建分支节点生成提示词
+/// Build the branch-node generation prompt.
 pub fn build_branch_prompt(
     novel_title: &str,
     chapter_content: &str,

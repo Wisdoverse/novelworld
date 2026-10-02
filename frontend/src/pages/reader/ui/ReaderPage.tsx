@@ -1,3 +1,4 @@
+import { displayMessage, translate as t, useLocale, type UiMessage } from '@/shared/lib/i18n';
 import { useState, useEffect, useMemo, useRef } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { useParams, useNavigate } from 'react-router-dom';
@@ -27,7 +28,6 @@ import { ChatPanel } from '@/widgets/chat-panel';
 import { BranchChoice } from '@/widgets/branch-choice';
 import { useWorldSourceProgression } from '@/features/world-source';
 import { effectiveWorldContext } from '@/shared/lib/worldSourceContext';
-import { worldTurnPendingStorageKey } from '@/shared/lib/worldTurnStorage';
 import { WorldDashboard } from '@/widgets/world-dashboard';
 import { PlayerEntryForm } from '@/features/player-entry';
 import {
@@ -63,6 +63,7 @@ function focusSection(id: string) {
 }
 
 export function ReaderPage() {
+  const locale = useLocale();
   const { novelId, chapterNum } = useParams<{ novelId: string; chapterNum: string }>();
   const navigate = useNavigate();
   const {
@@ -151,6 +152,7 @@ export function ReaderPage() {
   const {
     data: cachedOpenWorld,
     isLoading: isOpenWorldLoading,
+    isFetching: isOpenWorldFetching,
     isError: isOpenWorldError,
     refetch: refetchOpenWorld,
   } = useOpenWorld(novelId || '', openWorldEnabled);
@@ -188,6 +190,16 @@ export function ReaderPage() {
     ? cachedOpenWorld : null;
   const dashboardWorld = openWorld ?? sourceRecoveryWorld;
   const [worldActionLocked, setWorldActionLocked] = useState(false);
+  useEffect(() => {
+    if (openWorld && novel && !isNovelError && !isProgressError && !isProgressSaveError
+      && !isOpenWorldLoading && !isOpenWorldFetching && !isOpenWorldError
+      && !timelineMutationLocked && !worldActionLocked
+      && openWorld.player?.id === playerEntry?.player?.id) {
+      sourceProgression.advanceIfReady(openWorld, novel.total_chapters);
+    }
+  }, [openWorld, novel, isNovelError, isProgressError, isProgressSaveError,
+    isOpenWorldLoading, isOpenWorldFetching, isOpenWorldError, timelineMutationLocked,
+    worldActionLocked, playerEntry?.player?.id, sourceProgression.advanceIfReady]);
   const startOpenWorld = useStartOpenWorld(novelId || '');
   const entryLocation = playerEntry?.locations.find(
     location => location.id === playerEntry.player?.location_id,
@@ -198,7 +210,7 @@ export function ReaderPage() {
   const [showCharacterList, setShowCharacterList] = useState(false);
   const characterTriggerRef = useRef<HTMLButtonElement>(null);
   const pendingChatCharacterId = useRef<string | null>(null);
-  const [choiceError, setChoiceError] = useState<string | undefined>();
+  const [choiceError, setChoiceError] = useState<UiMessage | undefined>();
   const [choiceRecoveryLocked, setChoiceRecoveryLocked] = useState(false);
   const [chapterView, setChapterView] = useState<'timeline' | 'canon'>('timeline');
   const [translationEnabled, setTranslationEnabled] = useState(false);
@@ -249,8 +261,8 @@ export function ReaderPage() {
     refetchWorldState,
   ]);
   useEffect(() => {
-    if (sourceProgression.error) focusSection('world-source-error');
-  }, [sourceProgression.error]);
+    if (sourceProgression.errorNotice) focusSection('world-source-error');
+  }, [sourceProgression.errorNotice]);
   const submitChoice = useSubmitNarrativeChoice(novelId || '');
 
   useEffect(() => {
@@ -360,7 +372,7 @@ export function ReaderPage() {
   const translationSupported = isChapterTranslationSupported(sourceContent);
   const canTranslate = canOfferTranslation && translationSupported;
   const translationUnavailableReason = canOfferTranslation && !translationSupported
-    ? `当前正文为 ${translationByteLength.toLocaleString('zh-CN')} 字节，超过 ${MAX_CHAPTER_TRANSLATION_BYTES.toLocaleString('zh-CN')} 字节翻译上限，请阅读原文。`
+    ? t("This chapter is {p0} bytes, exceeding the {p1}-byte translation limit. Read the original.", { p0: translationByteLength.toLocaleString(locale), p1: MAX_CHAPTER_TRANSLATION_BYTES.toLocaleString(locale) })
     : undefined;
   const translation = useChapterTranslation(
     novelId || '',
@@ -381,7 +393,7 @@ export function ReaderPage() {
   const recoverCommittedChoice = async () => {
     if (!activeBranchNode) return;
     setChoiceRecoveryLocked(true);
-    setChoiceError('正在重新加载已提交的时间线…');
+    setChoiceError({ key: "Reloading the committed timeline…" });
     const result = await refetchWorldState();
     const committed = result.data?.state.choices.find(
       choice => choice.node_id === activeBranchNode.id,
@@ -392,7 +404,7 @@ export function ReaderPage() {
       void refetchEffectiveChapter();
       return;
     }
-    setChoiceError('已提交结果暂时无法加载；为避免覆盖另一窗口的选择，本节点仍已锁定。');
+    setChoiceError({ key: "The committed result cannot load yet. This node remains locked to avoid overwriting another window's choice." });
   };
 
   const handleChoose = async (choice: NarrativeChoice) => {
@@ -408,8 +420,8 @@ export function ReaderPage() {
       const choiceConflict = isNarrativeChoiceConflict(error);
       setChoiceRecoveryLocked(choiceConflict);
       setChoiceError(choiceConflict
-        ? '另一窗口已经提交了这个命运节点。当前选项已锁定，正在恢复已提交的结果。'
-        : getApiErrorMessage(error, '命运改写失败，请重试'));
+        ? { key: "Another window committed this fate node. Choices are locked while the committed result is restored." }
+        : getApiErrorMessage(error, '') || { key: "Story rewrite failed. Try again." });
       throw error;
     }
   };
@@ -447,20 +459,20 @@ export function ReaderPage() {
           <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-[#fce8e6] text-[#b3261e]">
             <AlertCircle size={24} aria-hidden="true" />
           </span>
-          <h1 className="mt-5 text-2xl font-medium text-[#1f1f1f]">暂时无法打开本章</h1>
-          <p className="mt-3 text-sm leading-6 text-[#5f6368]" role="alert">阅读进度没有成功恢复。你的阅读记录不会丢失，可以重新加载或返回书架。</p>
+          <h1 className="mt-5 text-2xl font-medium text-[#1f1f1f]">{t("Cannot open this chapter right now")}</h1>
+          <p className="mt-3 text-sm leading-6 text-[#5f6368]" role="alert">{t("Reading progress could not be restored. Your records remain safe. Reload or return to your shelf.")}</p>
           <div className="mt-7 flex flex-col-reverse justify-center gap-3 sm:flex-row">
-            <button className="tonal-action" onClick={() => navigate('/shelf')}>返回书架</button>
+            <button className="tonal-action" onClick={() => navigate('/shelf')}>{t("Back to shelf")}</button>
             {readerIdentityUnavailable ? (
               <button
                 className="primary-action"
                 disabled={resetReaderIdentity.isPending}
                 onClick={() => resetReaderIdentity.mutate()}
               >
-                以本人身份继续
+                {t("Continue as yourself")}
               </button>
             ) : (
-              <button className="primary-action" onClick={() => refetchProgress()}>重试</button>
+              <button className="primary-action" onClick={() => refetchProgress()}>{t("Retry")}</button>
             )}
           </div>
         </div>
@@ -471,7 +483,7 @@ export function ReaderPage() {
   if (routeChapter === undefined || currentChapter < 1 || isProgressLoading) {
     return (
       <div className="app-surface flex min-h-screen items-center justify-center">
-        <div className="h-8 w-8 animate-spin rounded-full border-2 border-[#0b57d0] border-t-transparent" aria-label="正在恢复阅读进度" />
+        <div className="h-8 w-8 animate-spin rounded-full border-2 border-[#0b57d0] border-t-transparent" aria-label={t("Restoring reading progress")} />
       </div>
     );
   }
@@ -483,10 +495,10 @@ export function ReaderPage() {
           <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-[#fce8e6] text-[#b3261e]">
             <AlertCircle size={24} aria-hidden="true" />
           </span>
-          <h1 className="mt-5 text-2xl font-medium text-[#1f1f1f]">暂时无法加载章节</h1>
-          <p className="mt-3 text-sm leading-6 text-[#5f6368]">小说或章节正文加载失败。你的阅读记录不会丢失，可以重新加载。</p>
+          <h1 className="mt-5 text-2xl font-medium text-[#1f1f1f]">{t("Cannot load this chapter right now")}</h1>
+          <p className="mt-3 text-sm leading-6 text-[#5f6368]">{t("The novel or chapter failed to load. Your reading records remain safe. Reload to try again.")}</p>
           <div className="mt-7 flex flex-col-reverse justify-center gap-3 sm:flex-row">
-            <button className="tonal-action" onClick={() => navigate('/shelf')}>返回书架</button>
+            <button className="tonal-action" onClick={() => navigate('/shelf')}>{t("Back to shelf")}</button>
             <button
               className="primary-action"
               onClick={() => {
@@ -494,7 +506,7 @@ export function ReaderPage() {
                 if (isChapterError) void refetchChapter();
               }}
             >
-              重试
+              {t("Retry")}
             </button>
           </div>
         </div>
@@ -508,11 +520,11 @@ export function ReaderPage() {
       setShowCharacterList(open);
     }}>
     <div className="app-surface min-h-screen">
-      {/* 顶部导航栏 */}
+      {/* Top navigation */}
       <motion.header
         initial={{ y: -60 }}
         animate={{ y: 0 }}
-        className="fixed top-0 left-0 right-0 z-40 flex items-center justify-between gap-3 border-b border-[#e1e3e8] bg-white/95 px-3 py-3 shadow-[0_1px_3px_rgba(60,64,67,0.08)] backdrop-blur-xl sm:px-6"
+        className="sticky top-0 z-40 flex items-center justify-between gap-3 border-b border-[#e1e3e8] bg-white/95 px-3 py-3 shadow-[0_1px_3px_rgba(60,64,67,0.08)] backdrop-blur-xl sm:px-6"
         style={{
           backdropFilter: 'blur(20px)',
         }}
@@ -523,7 +535,7 @@ export function ReaderPage() {
             className="flex shrink-0 items-center gap-1 text-sm font-medium text-[#0b57d0] transition-colors hover:text-[#0842a0] sm:gap-2"
           >
             <ChevronLeft size={16} />
-            书架
+            {t("Shelf")}
           </button>
           <div className="h-4 w-px shrink-0 bg-[#e1e3e8]" />
           <div className="min-w-0">
@@ -531,19 +543,19 @@ export function ReaderPage() {
               {novel?.title}
             </div>
             <div className="truncate text-xs text-[#5f6368]">
-              {openWorld ? `开放世界 · ${openWorld.player?.name ?? playerEntry?.player?.name ?? '你的角色'}` : chapter?.title || `第 ${currentChapter} 章`}
+              {openWorld ? t("Open world · {p0}", { p0: openWorld.player?.name ?? playerEntry?.player?.name ?? t("Your character") }) : chapter?.title || t("Chapter {p0}", { p0: currentChapter })}
             </div>
           </div>
         </div>
 
         <div className="flex items-center gap-2">
-          {/* 进度 */}
+          {/* Progress */}
           <div className="hidden items-center gap-2 text-xs text-[#5f6368] md:flex">
             <BookOpen size={12} />
             {currentChapter} / {novel?.total_chapters || '?'}
           </div>
 
-          {/* 角色列表按钮 */}
+          {/* Character list button */}
           <Dialog.Trigger asChild>
           <button
             ref={characterTriggerRef}
@@ -551,27 +563,27 @@ export function ReaderPage() {
             className={`flex shrink-0 items-center gap-1.5 rounded-full px-3 py-2 text-xs font-semibold transition-colors ${showCharacterList ? 'bg-[#d2e3fc] text-[#0842a0]' : 'bg-[#e8f0fe] text-[#0b57d0] hover:bg-[#d2e3fc]'}`}
           >
             <Users size={12} />
-            角色
+            {t("Characters")}
           </button>
           </Dialog.Trigger>
         </div>
       </motion.header>
 
-      {/* 主内容区 */}
-      <main className="mx-auto max-w-4xl px-4 pb-28 pt-16 md:px-8">
+      {/* Main content */}
+      <main className="mx-auto max-w-4xl px-4 pb-28 pt-1 md:px-8">
         {isProgressSaveError && (
           <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-[#f2b8b5] bg-[#fce8e6] p-3 text-[#b3261e]" role="alert">
-            <span className="text-sm">阅读进度保存失败，聊天已暂停。</span>
-            <button className="text-sm underline" onClick={retryProgressUpdate}>重试</button>
+            <span className="text-sm">{t("Reading progress failed to save. Chat is paused.")}</span>
+            <button className="text-sm underline" onClick={retryProgressUpdate}>{t("Retry")}</button>
           </div>
         )}
         {isSelfMode && isPlayerEntryLoading ? (
-          <p className="mt-8 text-sm text-[#5f6368]">正在恢复你的原创角色…</p>
+          <p className="mt-8 text-sm text-[#5f6368]">{t("Restoring your original character…")}</p>
         ) : null}
         {isSelfMode && isPlayerEntryError ? (
           <div className="mt-8 flex items-center justify-between gap-4 rounded-xl border border-[#f2b8b5] bg-[#fce8e6] p-4 text-[#b3261e]" role="alert">
-            <span className="text-sm">原创角色加载失败，命运分支已暂停。</span>
-            <button className="text-sm underline" onClick={() => refetchPlayerEntry()}>重试</button>
+            <span className="text-sm">{t("Original character failed to load. Fate branches are paused.")}</span>
+            <button className="text-sm underline" onClick={() => refetchPlayerEntry()}>{t("Retry")}</button>
           </div>
         ) : null}
         {isSelfMode && playerEntry && !playerEntry.player ? (
@@ -584,37 +596,31 @@ export function ReaderPage() {
             isPending={createPlayerEntity.isPending}
             isTimelineLocked={timelineMutationLocked}
             error={createPlayerEntity.isError
-              ? getApiErrorMessage(createPlayerEntity.error, '原创角色创建失败')
+              ? getApiErrorMessage(createPlayerEntity.error, t("Original character creation failed"))
               : undefined}
             onCheckpointChange={setEntryCheckpoint}
             onSubmit={createPlayerEntity.mutateAsync}
           />
         ) : null}
         {isSelfMode && ((openWorld && cachedOpenWorld?.session.entry_context) || sourceProgression.locked) ? (
-          <section aria-label="世界来源进度" className="mt-6 rounded-2xl border border-[#d8c8a9] bg-[#faf7ef] p-5">
+          <section aria-label={t("World source progress")} className="mt-6 rounded-2xl border border-[#d8c8a9] bg-[#faf7ef] p-5">
             <p className="text-sm text-[#203a35]">
-              当前世界接入至原著第 {cachedOpenWorld ? effectiveWorldContext(cachedOpenWorld.session).unlocked_through_chapter : sourceProgression.pending?.request.expected_source_chapter} 章。
-              进入下一幕会将下一章来源接入同一个世界，保留你的角色与完整旅程；接入后再执行行动推进事件。
+              {t("World source admitted through chapter")} {cachedOpenWorld ? effectiveWorldContext(cachedOpenWorld.session).unlocked_through_chapter : sourceProgression.pending?.request.expected_source_chapter} {t(". When this scene's events finish, the world automatically continues to the next scene, preserving your character and journey.")}
             </p>
             {sourceProgression.locked ? (
               <div role="status" className="mt-3 text-sm text-[#59645f]">
-                {sourceProgression.isPending ? '正在接入下一幕…' : '来源接入尚未确认，已暂停其他行动与翻页。'}
+                {sourceProgression.isPending ? t("Admitting the next scene…") : t("Source admission is unconfirmed. Other actions and paging are paused.")}
                 <button type="button" className="tonal-action mt-3" disabled={sourceProgression.isPending} onClick={() => void sourceProgression.recover()}>
-                  {sourceProgression.pending?.terminal ? '恢复最新世界' : '继续确认下一幕'}
+                  {sourceProgression.pending?.terminal ? t("Restore latest world") : t("Continue confirming the next scene")}
                 </button>
                 {novel && currentChapter < novel.total_chapters ? <button type="button" className="tonal-action ml-3 mt-3" disabled={sourceProgression.isPending} onClick={() => void sourceProgression.continueOriginalReading(novel.total_chapters)}>
-                  继续阅读原文下一章
+                  {t("Read the next original chapter")}
                 </button> : null}
               </div>
             ) : cachedOpenWorld && novel && effectiveWorldContext(cachedOpenWorld.session).unlocked_through_chapter < novel.total_chapters ? (
-              <button type="button" className="primary-action mt-3" disabled={!cachedOpenWorld.player?.user_id || isOpenWorldError || timelineMutationLocked || worldActionLocked || Boolean(cachedOpenWorld.recoverable_turn) || cachedOpenWorld.journal?.some(entry => entry.memory_projection_status === 'pending')} onClick={() => {
-                try { if (window.sessionStorage.getItem(worldTurnPendingStorageKey(cachedOpenWorld.player.user_id, novelId || ''))) return; } catch { /* The current dashboard lock still protects this mount. */ }
-                sourceProgression.start(cachedOpenWorld);
-              }}>
-                进入下一幕
-              </button>
-            ) : <p className="mt-3 text-sm text-[#59645f]">已接入原著最后一章。你仍可在当前世界行动。</p>}
-            {worldActionLocked && !sourceProgression.locked ? <p className="mt-3 text-sm text-[#59645f]">上一行动尚未确认，确认完成后才能进入下一幕。</p> : null}
+              <p className="mt-3 text-sm text-[#59645f]">{t("Keep playing this scene. Later chapters are admitted as the world progresses.")}</p>
+            ) : <p className="mt-3 text-sm text-[#59645f]">{t("The original's last chapter is admitted. You can still act in this world.")}</p>}
+            {worldActionLocked && !sourceProgression.locked ? <p className="mt-3 text-sm text-[#59645f]">{t("The previous action is unconfirmed. Confirm it before the next scene.")}</p> : null}
             {sourceProgression.error ? <p id="world-source-error" tabIndex={-1} role="alert" className="mt-3 text-sm text-[#b3261e]">{sourceProgression.error}</p> : null}
           </section>
         ) : null}
@@ -625,8 +631,8 @@ export function ReaderPage() {
             recoveryOnly={Boolean(sourceRecoveryWorld)}
             actionsDisabled={isOpenWorldError || sourceProgression.isPending || (!sourceRecoveryWorld && timelineMutationLocked)}
             actionsDisabledReason={isOpenWorldError
-              ? '开放世界加载失败。上方显示的是上次保存的经过；为避免基于旧状态行动，已暂停新的行动。请重试。'
-              : '阅读进度尚未保存，暂时不能执行行动。请等待进度保存后再试。'}
+              ? t("Open world failed to load. The last saved journey is shown above. New actions are paused to avoid using stale state. Retry to continue.")
+              : t("Reading progress is not saved yet. Wait for it to save before acting.")}
             onRefresh={refetchOpenWorld}
             onActionLockChange={setWorldActionLocked}
           />
@@ -640,15 +646,15 @@ export function ReaderPage() {
             role="alert"
             className="mt-16 flex items-center justify-between gap-4 rounded-xl border border-[#f2b8b5] bg-[#fce8e6] p-5 text-[#b3261e]"
           >
-            <span className="text-sm">玩家时间线生成失败。为避免回退到已经失效的原著因果，本章暂不显示。</span>
-            <button className="text-sm underline" onClick={() => refetchEffectiveChapter()}>重新生成</button>
+            <span className="text-sm">{t("Player timeline generation failed. This chapter is hidden to avoid falling back to obsolete source events.")}</span>
+            <button className="text-sm underline" onClick={() => refetchEffectiveChapter()}>{t("Regenerate")}</button>
           </div>
         ) : chapter && visibleEffectiveChapter ? (
           <details key={openWorld ? 'world-reference' : 'reader-chapter'} open={!openWorld} className={openWorld ? 'mt-8' : ''}>
             <summary className={openWorld
               ? 'cursor-pointer rounded-2xl border border-[#ded4bf] bg-white px-5 py-4 text-sm font-semibold text-[#203a35] hover:bg-[#faf7ef]'
               : 'hidden'}>
-              阅读章节与原著参考 · 第 {currentChapter} 章
+              {t('Reading chapters and original reference · Chapter {p0}', { p0: currentChapter })}
             </summary>
           <motion.div
             key={currentChapter}
@@ -657,14 +663,14 @@ export function ReaderPage() {
             transition={{ duration: 0.4 }}
             className="surface-card mt-6 px-6 py-8 sm:px-10 md:px-14"
           >
-            {/* 章节标题 */}
+            {/* Chapter title */}
             <div className="text-center mb-12 pt-8">
               <div className="mb-2 text-xs font-semibold uppercase tracking-widest text-[#0b57d0]">
-                {isCanonReference ? '原著参考' : isPlayerChapter ? '我的时间线' : `第 ${currentChapter} 章`}
+                {isCanonReference ? t("Original reference") : isPlayerChapter ? t("My timeline") : t("Chapter {p0}", { p0: currentChapter })}
               </div>
               {isPlayerTimeline && (
                 <div className="mb-3 text-xs font-medium text-[#5f6368]">
-                  原著坐标 · 第 {currentChapter} 章{chapter.title ? `《${chapter.title}》` : ''}
+                  {t('Original position · Chapter {p0}', { p0: currentChapter })}{chapter.title ? `《${chapter.title}》` : ''}
                 </div>
               )}
               {(chapter.title || (isPlayerChapter && !showCanonReference)) && (
@@ -674,21 +680,21 @@ export function ReaderPage() {
                 >
                   {isPlayerChapter && !showCanonReference
                     ? isSelfMode
-                      ? `${playerEntry?.player?.name ?? '你'}的故事`
-                      : '角色时间线'
+                      ? t("{p0}'s story", { p0: playerEntry?.player?.name ?? t("You") })
+                      : t("Character timeline")
                     : chapter.title}
                 </h1>
               )}
               <div className="mx-auto mt-4 h-px w-16 bg-[#0b57d0]" />
               {visibleEffectiveChapter.generated ? (
-                <div className="mx-auto mt-6 inline-flex flex-wrap justify-center rounded-full bg-[#eef3fe] p-1" role="group" aria-label="阅读版本">
+                <div className="mx-auto mt-6 inline-flex flex-wrap justify-center rounded-full bg-[#eef3fe] p-1" role="group" aria-label={t("Reading version")}>
                   <button
                     type="button"
                     aria-pressed={!showCanonReference}
                     className={`rounded-full px-4 py-2 text-sm font-medium transition-colors ${!showCanonReference ? 'bg-white text-[#0b57d0] shadow-sm' : 'text-[#5f6368]'}`}
                     onClick={() => setChapterView('timeline')}
                   >
-                    我的时间线
+                    {t("My timeline")}
                   </button>
                   <button
                     type="button"
@@ -696,13 +702,13 @@ export function ReaderPage() {
                     className={`rounded-full px-4 py-2 text-sm font-medium transition-colors ${showCanonReference ? 'bg-white text-[#0b57d0] shadow-sm' : 'text-[#5f6368]'}`}
                     onClick={() => setChapterView('canon')}
                   >
-                    原著参考
+                    {t("Original reference")}
                   </button>
                 </div>
               ) : null}
               {isCanonReference ? (
                 <p className="mx-auto mt-4 max-w-lg text-sm leading-6 text-[#5f6368]">
-                  这是原著内容，仅用于回看世界设定，不属于你当前时间线已经发生的历史。
+                  {t("This is source text for reviewing the world setting, not history committed in your current timeline.")}
                 </p>
               ) : null}
               {canOfferTranslation ? (
@@ -723,15 +729,15 @@ export function ReaderPage() {
               ) : null}
             </div>
 
-            {/* 正文中的分支节点：原文在锚点处暂停，选择后由生成内容接续。 */}
+            {/* Inline branch: source text pauses at the anchor; generated content follows the choice. */}
             {branchEnabled && isBranchLoading && (
               <div className="my-16 flex items-center justify-center gap-2 p-5 text-sm text-[#0b57d0]">
                 <div className="h-4 w-4 animate-spin rounded-full border-2 border-[#0b57d0] border-t-transparent" />
-                正在定位章节中的命运交叉点...
+                {t("Locating this chapter's fate crossroads…")}
               </div>
             )}
             {(!branchEnabled || !isBranchLoading) && (
-              <div className="reader-content">
+              <div className="reader-content" lang={isShowingTranslation || sourceIsChinese ? 'zh-CN' : undefined}>
                 {readerContent.split('\n\n').map((paragraph, i) => (
                   <p key={i}>{paragraph}</p>
                 ))}
@@ -742,8 +748,8 @@ export function ReaderPage() {
                 role="alert"
                 className="my-8 flex items-center justify-between gap-4 rounded-xl border border-[#f2b8b5] bg-[#fce8e6] p-4 text-[#b3261e]"
               >
-                <span className="text-sm">命运交叉点加载失败。</span>
-                <button className="text-sm underline" onClick={() => refetchBranch()}>重试</button>
+                <span className="text-sm">{t("Fate crossroads failed to load.")}</span>
+                <button className="text-sm underline" onClick={() => refetchBranch()}>{t("Retry")}</button>
               </div>
             )}
             {!showCanonReference && activeBranchNode && (!openWorld || selectedChoiceIndex !== undefined) && (
@@ -753,18 +759,18 @@ export function ReaderPage() {
                 isLoading={submitChoice.isPending}
                 selectedChoiceIndex={selectedChoiceIndex}
                 consequence={consequence}
-                error={choiceError}
+                error={displayMessage(choiceError)}
                 isRecoveryLocked={choiceRecoveryLocked}
                 onRetryRecovery={recoverCommittedChoice}
               />
             )}
 
-            {/* 章节摘要 */}
+            {/* Chapter summary */}
             {chapter.summary && !hasBranch && (!visibleEffectiveChapter.generated || showCanonReference) && (
               <div className="mt-12 rounded-xl border border-[#d2e3fc] bg-[#f8faff] p-4">
                 <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-[#0b57d0]">
                   <Sparkles size={12} />
-                  章节摘要
+                  {t("Chapter summary")}
                 </div>
                 <p className="text-sm leading-relaxed text-[#5f6368]">
                   {chapter.summary}
@@ -775,17 +781,17 @@ export function ReaderPage() {
           </details>
         ) : null}
         {openWorldEnabled && isOpenWorldLoading ? (
-          <p className="mt-12 text-sm text-[#5f6368]">正在恢复开放世界…</p>
+          <p className="mt-12 text-sm text-[#5f6368]">{t("Restoring open world…")}</p>
         ) : null}
         {openWorldEnabled && !worldSourceVisible ? (
           <div className="mt-12 rounded-xl border border-[#d2e3fc] bg-[#f8faff] p-4 text-[#3c4043]" role="status">
-            当前阅读位置早于这条世界线的来源。阅读到第 {worldSourceHighWater} 章后，行动与日志会自动恢复。
+            {t("Your reading position is behind this world's source. Read through chapter {p0} to restore actions and the journal automatically.", { p0: worldSourceHighWater })}
           </div>
         ) : null}
         {openWorldEnabled && isOpenWorldError && worldSourceVisible && !openWorld ? (
           <div className="mt-12 flex items-center justify-between gap-4 rounded-xl border border-[#f2b8b5] bg-[#fce8e6] p-4 text-[#b3261e]" role="alert">
-            <span className="text-sm">开放世界加载失败，已暂停新的行动。</span>
-            <button className="text-sm underline" onClick={() => refetchOpenWorld()}>重试</button>
+            <span className="text-sm">{t("Open world failed to load. New actions are paused.")}</span>
+            <button className="text-sm underline" onClick={() => refetchOpenWorld()}>{t("Retry")}</button>
           </div>
         ) : null}
         {openWorldEnabled
@@ -799,21 +805,21 @@ export function ReaderPage() {
           >
             <div className="relative">
               <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.24em] text-[#0b57d0]">
-                <Sparkles size={14} aria-hidden="true" /> 新的故事线
+                <Sparkles size={14} aria-hidden="true" /> {t("A new storyline")}
               </div>
               <h2
                 id="enter-world-title"
                 className="mt-4 max-w-xl text-2xl font-semibold leading-tight md:text-3xl"
                 style={{ color: '#1f1f1f' }}
               >
-                以 {playerEntry?.player?.name} 之名，踏入这个世界
+                {t('Enter this world as {p0}', { p0: playerEntry?.player?.name ?? t('You') })}
               </h2>
               <p className="mt-4 max-w-xl text-sm leading-7 text-[#5f6368]">
-                从这一刻起，原著不再是唯一答案。故事角色仍会追逐各自的目标，而你的每次行动，都将写进这条只属于你的时间线。
+                {t("The original is one possible path. Story characters pursue their own goals, while every action you take joins a timeline of your own.")}
               </p>
               <div className="mt-6 flex flex-wrap gap-2 text-xs text-[#3c4043]">
                 <span className="rounded-full border border-[#d2e3fc] bg-[#e8f0fe] px-3 py-1.5">
-                  入场 · 第 {playerEntry?.player?.canonical_checkpoint_chapter} 章
+                  {t('Entry · Chapter {p0}', { p0: playerEntry?.player?.canonical_checkpoint_chapter ?? currentChapter })}
                 </span>
                 {entryLocation ? (
                   <span className="flex items-center gap-1.5 rounded-full border border-[#d2e3fc] bg-white px-3 py-1.5">
@@ -823,7 +829,7 @@ export function ReaderPage() {
               </div>
               {startOpenWorld.isError ? (
                 <p role="alert" className="mt-4 text-sm text-[#b3261e]">
-                  {getApiErrorMessage(startOpenWorld.error, '进入开放世界失败')}
+                  {getApiErrorMessage(startOpenWorld.error, t("Entering the open world failed"))}
                 </p>
               ) : null}
               <button
@@ -833,7 +839,7 @@ export function ReaderPage() {
                   if (!timelineMutationLocked) startOpenWorld.mutate();
                 }}
               >
-                {startOpenWorld.isPending ? '正在创建时间线…' : '进入开放世界'}
+                {startOpenWorld.isPending ? t("Creating your timeline…") : t("Enter open world")}
                 {!startOpenWorld.isPending ? <ChevronRight size={16} aria-hidden="true" /> : null}
               </button>
             </div>
@@ -841,21 +847,21 @@ export function ReaderPage() {
         ) : null}
       </main>
 
-      {/* 底部翻页导航 */}
-      <nav aria-label="阅读导航" className="fixed bottom-0 left-0 right-0 z-20 flex items-center justify-between gap-2 border-t border-[#e1e3e8] bg-white/95 px-3 py-3 shadow-[0_-1px_3px_rgba(60,64,67,0.08)] backdrop-blur-xl sm:px-6 sm:py-4">
+      {/* Bottom paging navigation */}
+      <nav aria-label={t("Reading navigation")} className="fixed bottom-0 left-0 right-0 z-20 flex items-center justify-between gap-2 border-t border-[#e1e3e8] bg-white/95 px-3 py-3 shadow-[0_-1px_3px_rgba(60,64,67,0.08)] backdrop-blur-xl sm:px-6 sm:py-4">
         <button
           onClick={goBack}
           disabled={sourceProgression.locked || isProgressSaving || (!openWorld && currentChapter <= 1)}
           className="tonal-action shrink-0 px-3 text-sm sm:px-5"
         >
           <ChevronLeft size={14} />
-          {openWorld ? '回看行动日志' : '上一章'}
+          {openWorld ? t("Review action journal") : t("Previous chapter")}
         </button>
 
-        {/* 进度条 */}
+        {/* Progress bar */}
         <div className="mx-4 hidden flex-1 sm:block">
           <div className="mb-1 text-center text-[11px] text-[#5f6368]">
-            {isPlayerTimeline ? '原著坐标 · ' : ''}{currentChapter} / {novel?.total_chapters || '?'}
+            {isPlayerTimeline ? t("Original position ·") : ''}{currentChapter} / {novel?.total_chapters || '?'}
           </div>
           <div className="reader-progress">
             <div
@@ -871,17 +877,17 @@ export function ReaderPage() {
           className="tonal-action min-w-0 px-3 text-sm sm:px-5"
         >
           {branchChoiceRequired
-              ? '请先选择'
+              ? t("Choose first")
               : openWorld
-                ? '选择下一步行动'
+                ? t("Choose your next action")
                 : isPlayerTimeline
-                ? '继续旅程'
-                : '下一章'}
+                ? t("Continue the journey")
+                : t("Next chapter")}
           <ChevronRight size={14} />
         </button>
       </nav>
 
-      {/* 角色列表侧边栏 */}
+      {/* Character sidebar */}
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-50 bg-black/20" />
         <Dialog.Content
@@ -899,9 +905,9 @@ export function ReaderPage() {
         >
           <div className="mb-4 flex items-center justify-between gap-2">
             <Dialog.Title className="text-xs font-semibold uppercase tracking-widest text-[#0b57d0]">
-              故事角色
+              {t("Story characters")}
             </Dialog.Title>
-            <Dialog.Close className="tonal-action p-2" aria-label="关闭角色列表">
+            <Dialog.Close className="tonal-action p-2" aria-label={t("Close character list")}>
               <X size={16} />
             </Dialog.Close>
           </div>
@@ -933,14 +939,14 @@ export function ReaderPage() {
                     <div className="truncate text-sm font-medium text-[#1f1f1f]">{char.name}</div>
                     <div className="truncate text-xs text-[#5f6368]">
                       {isDead
-                        ? '当前时间线已死亡'
+                        ? t("Dead in this timeline")
                         : char.role === 'protagonist'
-                          ? '主角'
+                          ? t("Protagonist")
                           : char.role === 'antagonist'
-                            ? '反派'
+                            ? t("Antagonist")
                             : char.role
-                              ? '配角'
-                              : '角色'}
+                              ? t("Supporting character")
+                              : t("Characters")}
                     </div>
                   </div>
                   <MessageCircle size={14} className="ml-auto flex-shrink-0 text-[#0b57d0]" />
@@ -948,13 +954,13 @@ export function ReaderPage() {
               );
             }) : <p className="text-sm leading-6 text-[#5f6368]">
               {openWorldEnabled
-                ? '当前没有已确认同场的角色。行动后会根据已提交的现场事件更新。'
-                : '当前章节没有可见角色。'}
+                ? t("No characters are confirmed in this scene yet. Committed scene events update their presence after actions.")
+                : t("No characters are visible in this chapter.")}
             </p>}
         </Dialog.Content>
       </Dialog.Portal>
 
-      {/* 角色对话面板 */}
+      {/* Character chat panel */}
       {activeChatCharacter && activeCharacterIsAvailable && !timelineMutationLocked && (
         <ChatPanel
           key={`${novelId}:${activeChatCharacter.id}:${readerIdentityScope}:${currentChapter}`}

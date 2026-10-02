@@ -1,3 +1,5 @@
+import { beforeEach as beforeLocaleTest } from 'vitest';
+import { setLocale } from '@/shared/lib/i18n';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AxiosError, type AxiosResponse } from 'axios';
@@ -193,3 +195,6 @@ describe('ShelfPage contracts', () => {
     expect(toast.error).toHaveBeenLastCalledWith('重试失败，请稍后再试。');
   });
 });
+
+// This suite retains the Simplified Chinese journey; locale tests cover the English default.
+beforeLocaleTest(() => setLocale('zh-CN'));

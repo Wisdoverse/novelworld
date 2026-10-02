@@ -15,10 +15,12 @@ export {
   useSubmitNarrativeChoice,
   useSubmitWorldTurn,
   useWorldState,
+  useWorldTurnConfirmation,
 } from './api';
 export type {
   ChoiceResult,
   CreatePlayerEntityInput,
   EffectiveChapter,
   NarrativeTransition,
+  WorldTurnConfirmation,
 } from './api';

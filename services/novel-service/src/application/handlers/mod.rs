@@ -1306,6 +1306,8 @@ impl ImportLlmDispatchBudget {
         }
     }
 
+    // Keep this atomic operation compatible with the pinned Rust 1.98 release images.
+    #[allow(deprecated)]
     fn spend(&self) -> std::result::Result<(), ImportBudgetExceeded> {
         self.remaining
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
@@ -2296,7 +2298,7 @@ impl NovelCommandHandler {
         let total_chapters = chapters.len() as i32;
         let title = novel.title.clone();
 
-        // 提取角色和世界观（代表性样本 + 分块全文扫描）
+        // Extract characters and world details from representative samples and a chunked full-text scan.
         info!("Extracting characters for novel {}", novel_id);
         let mut base_extraction = extract_character_summary(
             self.llm.as_ref(),
@@ -2346,7 +2348,7 @@ impl NovelCommandHandler {
         let extraction = merge_extractions(base_extraction, chunk_extractions);
         validate_extraction(&extraction)?;
 
-        // 保存角色
+        // Save characters.
         let characters: Vec<Character> = extraction
             .characters
             .iter()
@@ -3117,6 +3119,8 @@ pub enum ReadingProgressError {
     CharacterNotFound,
     #[error("Reader identity is unavailable at current progress")]
     IdentityUnavailable,
+    #[error("Reading progress or identity changed")]
+    Changed,
     #[error("{0}")]
     Validation(String),
     #[error("Reading progress operation failed")]
@@ -3444,6 +3448,15 @@ impl ReadingProgressHandler {
         user_id: Uuid,
         novel_id: Uuid,
     ) -> std::result::Result<ReadingProgressRecord, ReadingProgressError> {
+        self.validated_progress(user_id, novel_id, false).await
+    }
+
+    async fn validated_progress(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        allow_self_advance: bool,
+    ) -> std::result::Result<ReadingProgressRecord, ReadingProgressError> {
         let novel = self.owned_novel(user_id, novel_id).await?;
         let initial_progress = self.progress_for_novel(user_id, &novel).await?;
         let identity_source = if let Some(character_id) = initial_progress.reader_character_id {
@@ -3472,7 +3485,12 @@ impl ReadingProgressHandler {
         // This is deliberately the final await. The response is projected only
         // from this persisted snapshot and the source evidence loaded above.
         let progress = self.persisted_progress_for_novel(user_id, &novel).await?;
-        if progress.current_chapter != initial_progress.current_chapter
+        // Concurrent monotonic advances need no character source evidence in
+        // self mode. Ordinary reads, rewinds and identity changes stay strict.
+        if (progress.current_chapter != initial_progress.current_chapter
+            && !(allow_self_advance
+                && initial_progress.reader_identity_type == "self"
+                && progress.current_chapter > initial_progress.current_chapter))
             || progress.reader_identity != initial_progress.reader_identity
             || progress.reader_identity_type != initial_progress.reader_identity_type
             || progress.reader_character_id != initial_progress.reader_character_id
@@ -3566,10 +3584,14 @@ impl ReadingProgressHandler {
         user_id: Uuid,
         novel_id: Uuid,
         chapter: i32,
+        expected_current_chapter: Option<i32>,
     ) -> std::result::Result<ReadingProgressRecord, ReadingProgressError> {
         let novel = self.owned_novel(user_id, novel_id).await?;
-        self.get(user_id, novel_id).await?;
+        self.validated_progress(user_id, novel_id, true).await?;
         validate_chapter_number(chapter, novel.total_chapters)?;
+        if let Some(expected) = expected_current_chapter {
+            validate_chapter_number(expected, novel.total_chapters)?;
+        }
         if self
             .chapter_repo
             .find_by_number(novel_id, chapter)
@@ -3581,11 +3603,15 @@ impl ReadingProgressHandler {
                 "chapter does not exist".into(),
             ));
         }
-        self.progress_repo
-            .advance_chapter(user_id, novel_id, chapter)
+        let advanced = self
+            .progress_repo
+            .advance_chapter(user_id, novel_id, chapter, expected_current_chapter)
             .await
             .map_err(ReadingProgressError::Internal)?;
-        self.get(user_id, novel_id).await
+        if !advanced {
+            return Err(ReadingProgressError::Changed);
+        }
+        self.validated_progress(user_id, novel_id, true).await
     }
 
     pub async fn world_source_delta(
@@ -4525,7 +4551,8 @@ mod reading_progress_handler_tests {
             _user_id: Uuid,
             _novel_id: Uuid,
             _chapter: i32,
-        ) -> Result<()> {
+            _expected_current_chapter: Option<i32>,
+        ) -> Result<bool> {
             unreachable!("unused test repository method")
         }
 
@@ -4696,6 +4723,46 @@ mod reading_progress_handler_tests {
                 },
             },
             created_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn advance_validation_accepts_only_self_forward_progress_with_unchanged_identity() {
+        let novel_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let character = persona_character(novel_id);
+        let (handler, _, _, repo, _) = handler(
+            ready_novel(novel_id, 2),
+            &[user_id],
+            vec![character.clone()],
+            vec![Chapter::new(novel_id, 1, None, "沈知微在庭院里。".into())],
+            vec![progress(user_id, novel_id, 1, None)],
+        );
+        let before = progress(user_id, novel_id, 1, None);
+        let after = progress(user_id, novel_id, 2, None);
+        repo.set_script(user_id, vec![before.clone(), after.clone()]);
+        assert_eq!(
+            handler
+                .validated_progress(user_id, novel_id, true)
+                .await
+                .unwrap()
+                .current_chapter,
+            2
+        );
+        repo.set_script(user_id, vec![before.clone(), after.clone()]);
+        assert!(handler.get(user_id, novel_id).await.is_err());
+        let mut renamed = after.clone();
+        renamed.reader_identity = Some("新名字".into());
+        for (initial, final_progress) in [
+            (after.clone(), before.clone()),
+            (before.clone(), renamed),
+            (before, progress(user_id, novel_id, 2, Some(&character))),
+        ] {
+            repo.set_script(user_id, vec![initial, final_progress]);
+            assert!(handler
+                .validated_progress(user_id, novel_id, true)
+                .await
+                .is_err());
         }
     }
 

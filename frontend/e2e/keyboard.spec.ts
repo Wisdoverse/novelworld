@@ -273,3 +273,8 @@ test.describe('critical journey — keyboard operability', () => {
     await expect(page.getByText('开始你的旅程').first()).toBeVisible();
   });
 });
+
+// Exercise the retained Chinese UI without changing the application's English default.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('novelworld.ui.locale', 'zh-CN'));
+});

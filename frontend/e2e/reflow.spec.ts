@@ -100,6 +100,13 @@ test('the latest narrative leads to an actionable next step with missing-input g
 });
 
 test('a committed turn awaiting memory explains the lock and replays the original request', async ({ page }) => {
+  let confirmationReads = 0;
+  let actionPosts = 0;
+  page.on('request', request => {
+    const path = new URL(request.url()).pathname.replace(/^\/api/, '');
+    if (request.method() === 'GET' && /^\/narrative\/[^/]+\/world\/turns\/[^/]+$/.test(path)) confirmationReads++;
+    if (request.method() === 'POST' && path === '/narrative/novel-1/world/turns') actionPosts++;
+  });
   await installStubs(page, { openWorld: true });
   const turnId = 'e3744cac-e557-4d78-9d91-9ba060e81c5f';
   const entry = {
@@ -122,8 +129,13 @@ test('a committed turn awaiting memory explains the lock and replays the origina
   await page.getByRole('link', { name: '去选择行动' }).click();
   await expect(page.getByRole('alert')).toContainText('经过已保存，但角色记忆尚未同步完成');
   await expect(page.getByRole('button', { name: '执行行动', exact: true })).toBeDisabled();
-  await page.getByRole('button', { name: '继续确认结果' }).click();
+  const readsBeforeConfirmation = confirmationReads;
+  await page.getByRole('button', { name: '继续确认结果', exact: true }).click();
+  await expect.poll(() => confirmationReads).toBeGreaterThan(readsBeforeConfirmation);
+  expect(actionPosts).toBe(0);
+  await page.getByRole('button', { name: '恢复原行动', exact: true }).click();
   await expect(page.getByRole('alert')).toHaveCount(0);
+  expect(actionPosts).toBe(1);
   await page.locator('summary').filter({ hasText: '调整行动方式与目标' }).click();
   await expect(page.getByRole('combobox', { name: '行动', exact: true })).toBeEnabled();
 });
@@ -200,3 +212,8 @@ test(`reduced motion (${initialPreference} at load) skips runtime animation and 
   expect(calls.some(call => call.endsWith(':smooth'))).toBe(false);
 });
 }
+
+// These established journeys intentionally exercise the Chinese UI.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('novelworld.ui.locale', 'zh-CN'));
+});

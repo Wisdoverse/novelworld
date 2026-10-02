@@ -1,4 +1,6 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { beforeEach as beforeLocaleTest } from 'vitest';
+import { setLocale } from '@/shared/lib/i18n';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NarrativeNode, OpenWorldView } from '@/shared/types';
 import { ReaderPage, splitChapterAtAnchor } from './ReaderPage';
@@ -39,8 +41,10 @@ const mocks = vi.hoisted(() => ({
   createPlayer: vi.fn(),
   submitChoice: vi.fn(),
   startWorld: vi.fn(),
+  autoAdvance: vi.fn(),
   openWorld: null as OpenWorldView | null,
   openWorldError: false,
+  openWorldFetching: false,
   refetchOpenWorld: vi.fn(),
   characters: [] as Array<Record<string, unknown>>,
   charactersChapter: 0,
@@ -74,7 +78,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('@/features/world-source', () => ({
-  useWorldSourceProgression: () => ({ locked: false, start: vi.fn(), recover: vi.fn() }),
+  useWorldSourceProgression: () => ({ locked: false, start: vi.fn(), advanceIfReady: mocks.autoAdvance, recover: vi.fn() }),
 }));
 
 vi.mock('react-router-dom', () => ({
@@ -266,6 +270,7 @@ vi.mock('@/entities/narrative', () => ({
     data: mocks.openWorld,
     isLoading: false,
     isError: mocks.openWorldError,
+    isFetching: mocks.openWorldFetching,
     refetch: mocks.refetchOpenWorld,
   }),
   useStartOpenWorld: () => ({
@@ -370,6 +375,7 @@ describe('ReaderPage progress gate', () => {
     mocks.branchNode = undefined;
     mocks.openWorld = null;
     mocks.openWorldError = false;
+    mocks.openWorldFetching = false;
     mocks.characters = [];
     mocks.charactersChapter = 0;
     mocks.charactersEnabled = false;
@@ -455,6 +461,23 @@ describe('ReaderPage progress gate', () => {
 
     expect(mocks.reset).toHaveBeenCalledOnce();
     expect(mocks.mutate).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['ready', 'fetching', 'world error', 'progress saving', 'progress error', 'other player'])('gates automatic progression on a fresh current-player view: %s', gate => {
+    mocks.routeChapter = '1';
+    mocks.progressChapter = 1;
+    mocks.progressError = gate === 'progress error';
+    mocks.progressSaving = gate === 'progress saving';
+    mocks.openWorldFetching = gate === 'fetching';
+    mocks.openWorldError = gate === 'world error';
+    mocks.openWorld = {
+      player: { id: gate === 'other player' ? 'other-player' : 'player' },
+      session: { turn_number: 1, dead_character_ids: [], entry_context: { unlocked_through_chapter: 1 } },
+      journal: [],
+    } as unknown as OpenWorldView;
+    render(<ReaderPage />);
+    if (gate === 'ready') expect(mocks.autoAdvance).toHaveBeenCalledWith(mocks.openWorld, mocks.totalChapters);
+    else expect(mocks.autoAdvance).not.toHaveBeenCalled();
   });
 
   it('serializes normal chapter navigation while progress is pending', () => {
@@ -1191,6 +1214,10 @@ describe('ReaderPage progress gate', () => {
     fireEvent.click(screen.getByRole('button', { name: '选择第二项' }));
     await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('另一窗口已经提交'));
     expect(screen.getByRole('button', { name: '选择第二项' }).hasAttribute('disabled')).toBe(true);
+    act(() => setLocale('en'));
+    expect(screen.getByRole('alert').textContent).toContain('Another window committed this fate node');
+    expect(screen.getByRole('button', { name: '选择第二项' }).hasAttribute('disabled')).toBe(true);
+    expect(mocks.submitChoice).toHaveBeenCalledOnce();
 
     mocks.worldChoices = [{ node_id: 'node', choice_index: 0, consequence: '权威结果' }];
     fireEvent.click(screen.getByRole('button', { name: '重新加载已提交结果' }));
@@ -1280,3 +1307,6 @@ describe('splitChapterAtAnchor', () => {
     });
   });
 });
+
+// This suite retains the Simplified Chinese journey; locale tests cover the English default.
+beforeLocaleTest(() => setLocale('zh-CN'));

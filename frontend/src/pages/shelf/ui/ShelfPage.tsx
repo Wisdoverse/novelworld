@@ -1,3 +1,4 @@
+import { translate as t, useLocale } from '@/shared/lib/i18n';
 import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import * as Dialog from '@radix-ui/react-dialog';
@@ -18,26 +19,26 @@ import { getApiErrorMessage } from '@/shared/api/client';
 import { toast } from 'sonner';
 
 const importFailureGuidance: Record<string, { message: string; action: 'retry' | 'import' }> = {
-  'The retained source file is missing; re-upload the source': { message: '原始文件已不可用，请重新导入小说。', action: 'import' },
-  'No parsed chapters are available; re-upload the source': { message: '没有可用的章节内容，请重新导入原始文件。', action: 'import' },
-  'The retained source file cannot be parsed; re-upload the source': { message: '原始文件无法解析，请检查文件后重新导入。', action: 'import' },
-  'Import provider budget exhausted; re-upload the source': { message: '重试次数已用尽，请重新导入原始文件。', action: 'import' },
-  'Import exceeded the processing budget; re-upload a shorter source': { message: '本次解析已达到处理上限，请重新导入较短的文件。', action: 'import' },
-  'AI response reached its output limit; import a shorter source': { message: '模型回复达到长度上限，请缩短或拆分原文后重新导入。', action: 'import' },
-  'AI provider balance is unavailable; contact the site administrator before retrying': { message: '模型服务余额不足，请联系站点管理员处理后重试。', action: 'retry' },
-  'AI provider balance is unavailable; contact the site administrator, then re-upload the source': { message: '模型服务余额不足且重试次数已用尽，请联系站点管理员处理后重新导入原始文件。', action: 'import' },
-  'AI provider rejected the request; contact the site administrator before retrying': { message: '模型服务拒绝了请求，请联系站点管理员处理后重试。', action: 'retry' },
-  'AI provider rejected the request; contact the site administrator, then re-upload the source': { message: '模型服务拒绝了请求且重试次数已用尽，请联系站点管理员处理后重新导入原始文件。', action: 'import' },
-  'Source storage is unavailable; retry the import': { message: '文件存储暂时不可用，请稍后重试解析。', action: 'retry' },
-  'Import processing failed; retry the import': { message: '具体原因未记录，可以重试解析。', action: 'retry' },
-  'Previous import failed; retry or re-upload the source': { message: '具体原因未记录，可以重试解析；若仍失败，请重新导入原始文件。', action: 'retry' },
-  'Chapter boundary analysis did not finish; retry the import': { message: '章节边界分析未完成，可以重试解析。', action: 'retry' },
-  'Character analysis did not finish; retry the import': { message: '角色分析未完成，可以重试解析。', action: 'retry' },
-  'Story model analysis did not finish; retry the import': { message: '故事模型分析未完成，可以重试解析。', action: 'retry' },
-  'AI request for story model analysis failed; retry the import': { message: '故事模型分析请求失败，可以重试解析。', action: 'retry' },
-  'AI story model response could not be validated; retry the import': { message: '故事模型分析结果无法验证，可以重试解析。', action: 'retry' },
-  'AI story model response could not be validated; re-upload the source': { message: '故事模型分析结果无法验证，重试次数已用尽，请重新导入原始文件。', action: 'import' },
-  'Story model checkpoint could not be saved; retry the import': { message: '故事模型分析进度未能保存，可以重试解析。', action: 'retry' },
+  'The retained source file is missing; re-upload the source': { get message() { return t("The original file is unavailable. Import the novel again."); }, action: 'import' },
+  'No parsed chapters are available; re-upload the source': { get message() { return t("No chapter content is available. Import the original file again."); }, action: 'import' },
+  'The retained source file cannot be parsed; re-upload the source': { get message() { return t("The original file could not be parsed. Check the file and import it again."); }, action: 'import' },
+  'Import provider budget exhausted; re-upload the source': { get message() { return t("Retry limit reached. Import the original file again."); }, action: 'import' },
+  'Import exceeded the processing budget; re-upload a shorter source': { get message() { return t("This parsing run reached its processing limit. Import a shorter file."); }, action: 'import' },
+  'AI response reached its output limit; import a shorter source': { get message() { return t("The model response reached its length limit. Shorten or split the source text and import it again."); }, action: 'import' },
+  'AI provider balance is unavailable; contact the site administrator before retrying': { get message() { return t("The model service has insufficient funds. Ask the site administrator to resolve it, then retry."); }, action: 'retry' },
+  'AI provider balance is unavailable; contact the site administrator, then re-upload the source': { get message() { return t("The model service has insufficient funds and the retry limit was reached. Ask the site administrator to resolve it, then import again."); }, action: 'import' },
+  'AI provider rejected the request; contact the site administrator before retrying': { get message() { return t("The model service rejected the request. Ask the site administrator to resolve it, then retry."); }, action: 'retry' },
+  'AI provider rejected the request; contact the site administrator, then re-upload the source': { get message() { return t("The model service rejected the request and the retry limit was reached. Ask the site administrator to resolve it, then import again."); }, action: 'import' },
+  'Source storage is unavailable; retry the import': { get message() { return t("File storage is unavailable. Retry parsing later."); }, action: 'retry' },
+  'Import processing failed; retry the import': { get message() { return t("No specific reason was recorded. You can retry parsing."); }, action: 'retry' },
+  'Previous import failed; retry or re-upload the source': { get message() { return t("No specific reason was recorded. Retry parsing; if it fails again, import the original file again."); }, action: 'retry' },
+  'Chapter boundary analysis did not finish; retry the import': { get message() { return t("Chapter boundary analysis is incomplete. You can retry parsing."); }, action: 'retry' },
+  'Character analysis did not finish; retry the import': { get message() { return t("Character analysis is incomplete. You can retry parsing."); }, action: 'retry' },
+  'Story model analysis did not finish; retry the import': { get message() { return t("Story model analysis is incomplete. You can retry parsing."); }, action: 'retry' },
+  'AI request for story model analysis failed; retry the import': { get message() { return t("Story model analysis request failed. You can retry parsing."); }, action: 'retry' },
+  'AI story model response could not be validated; retry the import': { get message() { return t("Story model analysis could not be validated. You can retry parsing."); }, action: 'retry' },
+  'AI story model response could not be validated; re-upload the source': { get message() { return t("Story model analysis could not be validated and the retry limit was reached. Import the original file again."); }, action: 'import' },
+  'Story model checkpoint could not be saved; retry the import': { get message() { return t("Story model analysis progress could not be saved. You can retry parsing."); }, action: 'retry' },
 };
 
 function getFailureGuidance(parseError?: string) {
@@ -52,16 +53,16 @@ function getRetryErrorMessage(error: unknown) {
   if (guidance) return guidance.message;
   switch (message) {
     case 'Novel import capacity is busy; retry the request':
-      return '解析任务繁忙，请稍后重试。';
+      return t("Parsing is busy. Try again later.");
     case 'Novel exceeds the supported processing budget':
-      return '内容超出处理上限，请导入较短的文件。';
+      return t("Content exceeds the processing limit. Import a shorter file.");
     case 'Only failed imports can be retried':
-      return '这本小说当前不需要重试解析。';
+      return t("This novel does not currently need parsing retried.");
     case 'Novel cannot be retried':
     case 'Import cannot be retried':
-      return '无法继续重试，请刷新书架；若仍失败，请重新导入原始文件。';
+      return t("Cannot retry further. Refresh the shelf; if it still fails, import the original file again.");
     default:
-      return '重试失败，请稍后再试。';
+      return t("Retry failed. Try again later.");
   }
 }
 
@@ -74,17 +75,18 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, onImport, onManageWorldSe
   onManageWorldSeries: () => void;
   retrying: boolean;
 }) {
+  const locale = useLocale();
   const failureGuidance = getFailureGuidance(novel.parse_error);
   const statusConfig = {
-    pending: { icon: Loader2, color: '#5f6368', label: '等待解析', spin: true },
-    parsing: { icon: Loader2, color: '#0b57d0', label: '解析中…', spin: true },
-    ready: { icon: CheckCircle, color: '#188038', label: '已就绪', spin: false },
-    error: { icon: AlertCircle, color: '#b3261e', label: '解析失败', spin: false },
+    pending: { icon: Loader2, color: '#5f6368', label: t("Awaiting parsing"), spin: true },
+    parsing: { icon: Loader2, color: '#0b57d0', label: t("Parsing…"), spin: true },
+    ready: { icon: CheckCircle, color: '#188038', label: t("Ready"), spin: false },
+    error: { icon: AlertCircle, color: '#b3261e', label: t("Parsing failed"), spin: false },
   };
   const status = statusConfig[novel.status] ?? {
     icon: AlertCircle,
     color: '#f59e0b',
-    label: '状态未知',
+    label: t("Unknown status"),
     spin: false,
   };
 
@@ -99,13 +101,13 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, onImport, onManageWorldSe
       className="surface-card group cursor-pointer overflow-hidden"
       onClick={novel.status === 'ready' ? onOpen : undefined}
     >
-      {/* 封面区域 */}
+      {/* Cover */}
       <div
         className="relative flex h-44 items-center justify-center bg-[#eef3ff]"
       >
         <BookOpen size={42} style={{ color: '#7b8db7' }} />
 
-        {/* 状态徽章 */}
+        {/* Status badge */}
         <div
           className="absolute top-3 right-3 flex items-center gap-1.5 px-2 py-1 rounded-full text-xs"
           style={{
@@ -118,19 +120,19 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, onImport, onManageWorldSe
           {status.label}
         </div>
 
-        {/* 删除按钮 */}
+        {/* Remove button */}
         <button
           onClick={(e) => { e.stopPropagation(); onDelete(); }}
-          aria-label={`将 ${novel.title} 移出书架`}
+          aria-label={t("Remove {p0} from the shelf", { p0: novel.title })}
           className="absolute top-3 left-3 rounded-lg p-1.5 opacity-80 transition-opacity hover:opacity-100 focus-visible:opacity-100"
-          title="移出书架（个人世界会保留）"
+          title={t("Remove from shelf (personal world retained)")}
           style={{ background: '#f1f3f4', color: '#5f6368' }}
         >
           <BookMinus size={12} />
         </button>
       </div>
 
-      {/* 信息区域 */}
+      {/* Novel details */}
       <div className="p-4">
         {novel.status === 'ready' ? (
           <button
@@ -152,14 +154,14 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, onImport, onManageWorldSe
           </p>
         )}
         <div className="flex items-center justify-between text-xs" style={{ color: '#5f6368' }}>
-          <span>{novel.total_chapters > 0 ? `${novel.total_chapters} 章` : '—'}</span>
+          <span>{novel.total_chapters > 0 ? t("{p0} chapters", { p0: novel.total_chapters }) : '—'}</span>
           <span className="flex items-center gap-1">
             <Clock size={10} />
-            {new Date(novel.updated_at).toLocaleDateString('zh-CN')}
+            {new Date(novel.updated_at).toLocaleDateString(locale)}
           </span>
         </div>
 
-        {/* 类型标签 */}
+        {/* Genre label */}
         {novel.genre && (
           <div
             className="mt-2 inline-block px-2 py-0.5 rounded text-xs"
@@ -175,7 +177,7 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, onImport, onManageWorldSe
             onClick={event => { event.stopPropagation(); onManageWorldSeries(); }}
           >
             <Sparkles size={13} />
-            系列管理
+            {t("Series management")}
           </button>
         ) : null}
         {novel.status === 'error' && (
@@ -185,7 +187,7 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, onImport, onManageWorldSe
               role="alert"
               style={{ color: '#b3261e' }}
             >
-              解析失败：{failureGuidance?.message ?? '具体原因未记录，可以尝试重试解析；若重试次数已用尽，请重新导入原始文件。'}
+              {t("Parsing failed:")}{failureGuidance?.message ?? t("No specific reason was recorded. Try parsing again; if retries are exhausted, import the original file again.")}
             </p>
             <button
               type="button"
@@ -204,7 +206,7 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, onImport, onManageWorldSe
               }}
             >
               {retrying ? <Loader2 size={12} className="animate-spin" /> : failureGuidance?.action === 'import' ? <Plus size={12} /> : <RotateCcw size={12} />}
-              {retrying ? '正在重试...' : failureGuidance?.action === 'import' ? '重新导入文件' : '重试解析'}
+              {retrying ? t("Retrying…") : failureGuidance?.action === 'import' ? t("Import the file again") : t("Retry parsing")}
             </button>
           </>
         )}
@@ -214,6 +216,7 @@ function NovelCard({ novel, onOpen, onDelete, onRetry, onImport, onManageWorldSe
 }
 
 function SharedLibraryModal({ onClose, shelfNovels }: { onClose: () => void; shelfNovels?: Novel[] }) {
+  useLocale();
   const returnFocusRef = useRef<HTMLElement | null>(
     typeof document !== 'undefined' && document.activeElement instanceof HTMLElement
       ? document.activeElement
@@ -227,9 +230,9 @@ function SharedLibraryModal({ onClose, shelfNovels }: { onClose: () => void; she
   const attach = async (novelId: string) => {
     try {
       await attachNovel.mutateAsync({ novelId, deviationMode });
-      toast.success('已加入我的书架');
+      toast.success(t("Added to my shelf"));
     } catch (error) {
-      toast.error(getApiErrorMessage(error, '加入书架失败'));
+      toast.error(getApiErrorMessage(error, t("Could not add to shelf")));
     }
   };
 
@@ -249,13 +252,13 @@ function SharedLibraryModal({ onClose, shelfNovels }: { onClose: () => void; she
           }}
         >
         <div className="border-b border-[#e8eaed] px-6 py-5 sm:px-8">
-          <Dialog.Title className="text-2xl font-medium text-[#1f1f1f]">共享书库</Dialog.Title>
-          <Dialog.Description className="mt-2 text-sm text-[#5f6368]">直接加入已解析的小说；你的进度、身份和世界线独立保存。</Dialog.Description>
-          <div className="mt-4 flex flex-wrap gap-2" role="group" aria-label="故事偏离度">
+          <Dialog.Title className="text-2xl font-medium text-[#1f1f1f]">{t("Shared library")}</Dialog.Title>
+          <Dialog.Description className="mt-2 text-sm text-[#5f6368]">{t("Add parsed novels directly. Your progress, identity and world are saved independently.")}</Dialog.Description>
+          <div className="mt-4 flex flex-wrap gap-2" role="group" aria-label={t("Story deviation")}>
             {[
-              { value: 'canon', label: '忠实原著' },
-              { value: 'creative', label: '创意扩展' },
-              { value: 'remix', label: '自由改写' },
+              { value: 'canon', label: t("Follow the original") },
+              { value: 'creative', label: t("Creative expansion") },
+              { value: 'remix', label: t("Free rewriting") },
             ].map(option => (
               <button
                 key={option.value}
@@ -276,11 +279,11 @@ function SharedLibraryModal({ onClose, shelfNovels }: { onClose: () => void; she
         </div>
         <div className="min-h-40 space-y-3 overflow-y-auto px-6 py-5 sm:px-8">
           {isLoading ? (
-            <div className="flex h-32 items-center justify-center" role="status" aria-label="正在加载共享书库"><Loader2 className="animate-spin text-[#0b57d0]" /></div>
+            <div className="flex h-32 items-center justify-center" role="status" aria-label={t("Loading shared library")}><Loader2 className="animate-spin text-[#0b57d0]" /></div>
           ) : isError && !novels ? (
             <div className="py-12 text-center text-sm text-[#5f6368]" role="alert">
-              <p>共享书库加载失败。</p>
-              <button type="button" onClick={() => refetch()} className="tonal-action mt-3 text-xs">重试</button>
+              <p>{t("Shared library failed to load.")}</p>
+              <button type="button" onClick={() => refetch()} className="tonal-action mt-3 text-xs">{t("Retry")}</button>
             </div>
           ) : novels?.length ? novels.map(novel => {
             const attaching = attachNovel.isPending && attachNovel.variables?.novelId === novel.id;
@@ -291,27 +294,27 @@ function SharedLibraryModal({ onClose, shelfNovels }: { onClose: () => void; she
                 <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-[#eef3ff] text-[#174ea6]"><BookOpen size={19} /></div>
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-semibold text-[#1f1f1f]">{novel.title}</p>
-                  <p className="mt-1 truncate text-xs text-[#5f6368]">{novel.author || '作者未知'} · {novel.total_chapters} 章</p>
+                  <p className="mt-1 truncate text-xs text-[#5f6368]">{novel.author || t("Unknown author")} · {t("{p0} chapters", { p0: novel.total_chapters })}</p>
                 </div>
                 <button
                   type="button"
-                  aria-label={onShelf ? `《${novel.title}》已在书架` : shelfUnavailable ? `书架暂不可用，无法加入《${novel.title}》` : `将《${novel.title}》加入书架`}
+                  aria-label={onShelf ? t("“{p0}” is already on your shelf", { p0: novel.title }) : shelfUnavailable ? t("Shelf unavailable. Cannot add “{p0}”", { p0: novel.title }) : t("Add “{p0}” to your shelf", { p0: novel.title })}
                   disabled={onShelf || shelfUnavailable || attachNovel.isPending}
                   onClick={() => attach(novel.id)}
                   className="primary-action shrink-0 text-xs"
                 >
                   {onShelf ? <CheckCircle size={13} /> : attaching ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
-                  {onShelf ? '已在书架' : shelfUnavailable ? '书架暂不可用' : '加入书架'}
+                  {onShelf ? t("Already on shelf") : shelfUnavailable ? t("Shelf unavailable") : t("Add to shelf")}
                 </button>
               </div>
             );
           }) : (
-            <div className="py-12 text-center text-sm text-[#5f6368]">暂无已解析完成的小说，可以上传一本新小说。</div>
+            <div className="py-12 text-center text-sm text-[#5f6368]">{t("No parsed novels yet. Upload a new novel.")}</div>
           )}
         </div>
         <div className="flex justify-end border-t border-[#e8eaed] px-6 py-4 sm:px-8">
           <Dialog.Close asChild>
-            <button type="button" className="tonal-action text-sm">完成</button>
+            <button type="button" className="tonal-action text-sm">{t("Done")}</button>
           </Dialog.Close>
         </div>
         </Dialog.Content>
@@ -321,6 +324,7 @@ function SharedLibraryModal({ onClose, shelfNovels }: { onClose: () => void; she
 }
 
 export function ShelfPage() {
+  useLocale();
   const navigate = useNavigate();
   const user = useAuthStore(state => state.user);
   const {
@@ -340,7 +344,7 @@ export function ShelfPage() {
 
   return (
     <div className="app-surface min-h-screen">
-      {/* 导航 */}
+      {/* Navigation */}
       <header
         className="sticky top-0 z-40 flex items-center justify-between border-b border-[#e1e3e8] bg-white/95 px-4 py-3 backdrop-blur-xl sm:px-6"
         style={{
@@ -357,35 +361,35 @@ export function ShelfPage() {
         </div>
 
         <div className="flex items-center gap-2">
-          <button type="button" aria-label="设置" onClick={() => navigate('/settings')} className="flex h-10 w-10 items-center justify-center rounded-full text-[#0b57d0] transition-colors hover:bg-[#e8f0fe]">
+          <button type="button" aria-label={t("Settings")} onClick={() => navigate('/settings')} className="flex h-10 w-10 items-center justify-center rounded-full text-[#0b57d0] transition-colors hover:bg-[#e8f0fe]">
             <Settings size={16} />
           </button>
           <button
             type="button"
-            aria-label="打开共享书库"
+            aria-label={t("Open shared library")}
             onClick={() => setShowSharedLibrary(true)}
             className="tonal-action px-3 text-sm sm:px-4"
           >
             <Library size={14} />
-            <span className="hidden sm:inline">共享书库</span>
+            <span className="hidden sm:inline">{t("Shared library")}</span>
           </button>
           <button
             type="button"
-            aria-label="导入小说"
+            aria-label={t("Import novels")}
             onClick={() => setShowImport(true)}
             className="primary-action px-3 text-sm sm:px-5"
           >
             <Plus size={14} />
-            <span className="hidden sm:inline">导入小说</span>
+            <span className="hidden sm:inline">{t("Import novels")}</span>
           </button>
         </div>
       </header>
 
       <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
         <div className="mb-7">
-          <p className="text-sm font-medium text-[#0b57d0]">个人书库</p>
-          <h1 className="mt-2 text-3xl font-medium tracking-[-0.02em] text-[#1f1f1f]">我的书架</h1>
-          <p className="mt-2 text-sm text-[#5f6368]">管理已导入的小说，并从上次的位置继续探索。</p>
+          <p className="text-sm font-medium text-[#0b57d0]">{t("Personal library")}</p>
+          <h1 className="mt-2 text-3xl font-medium tracking-[-0.02em] text-[#1f1f1f]">{t("My shelf")}</h1>
+          <p className="mt-2 text-sm text-[#5f6368]">{t("Manage imported novels and continue exploring from where you left off.")}</p>
         </div>
         {processingCount > 0 && (
           <div
@@ -398,7 +402,7 @@ export function ShelfPage() {
             }}
           >
             <Loader2 size={16} className="animate-spin" />
-            正在解析 {processingCount} 本小说，状态会自动更新
+            {t("Parsing")} {processingCount} {t("novels. Status updates automatically.")}
           </div>
         )}
         {isLoading ? (
@@ -410,20 +414,20 @@ export function ShelfPage() {
             <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-[#fce8e6] text-[#b3261e]">
               <AlertCircle size={24} aria-hidden="true" />
             </span>
-            <h2 className="mt-5 text-xl font-semibold text-[#1f1f1f]">暂时无法加载书架</h2>
-            <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-[#5f6368]">书架加载失败，已导入的小说不会丢失。</p>
-            <button className="primary-action mt-6" onClick={() => refetch()}>重试</button>
+            <h2 className="mt-5 text-xl font-semibold text-[#1f1f1f]">{t("Cannot load the shelf right now")}</h2>
+            <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-[#5f6368]">{t("Shelf failed to load. Your imported novels remain safe.")}</p>
+            <button className="primary-action mt-6" onClick={() => refetch()}>{t("Retry")}</button>
           </div>
         ) : novels?.length === 0 ? (
           <div className="surface-card py-20 text-center">
             <BookOpen size={48} className="mx-auto mb-4" style={{ color: '#7b8db7' }} />
-            <h3 className="text-lg font-semibold mb-2" style={{ color: '#1f1f1f' }}>书架还是空的</h3>
-            <p className="text-sm mb-6" style={{ color: '#5f6368' }}>导入你的第一本小说，开始沉浸式体验</p>
+            <h3 className="text-lg font-semibold mb-2" style={{ color: '#1f1f1f' }}>{t("Your shelf is empty")}</h3>
+            <p className="text-sm mb-6" style={{ color: '#5f6368' }}>{t("Import your first novel and start exploring")}</p>
             <button
               onClick={() => setShowImport(true)}
               className="primary-action text-sm"
             >
-              导入小说
+              {t("Import novels")}
             </button>
           </div>
         ) : (
@@ -435,11 +439,11 @@ export function ShelfPage() {
                   novel={novel}
                   onOpen={() => navigate(`/reader/${novel.id}`)}
                   onDelete={() => deleteNovel.mutate(novel.id, {
-                    onSuccess: () => toast.success('已移出书架，重新加入后可继续原来的世界'),
-                    onError: (error) => toast.error(getApiErrorMessage(error, '移出书架失败')),
+                    onSuccess: () => toast.success(t("Removed from shelf. Add it again to continue your original world.")),
+                    onError: (error) => toast.error(getApiErrorMessage(error, t("Could not remove from shelf"))),
                   })}
                   onRetry={() => retryNovel.mutate(novel.id, {
-                    onSuccess: () => toast.success('已重新开始解析'),
+                    onSuccess: () => toast.success(t("Parsing restarted")),
                     onError: (error) => toast.error(getRetryErrorMessage(error)),
                   })}
                   onImport={() => setShowImport(true)}
