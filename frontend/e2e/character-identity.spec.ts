@@ -44,3 +44,8 @@ test.describe('character-identity boundary (SPEC §8.2)', () => {
     await expect(page.getByText(/的开放世界/)).toHaveCount(0);
   });
 });
+
+// Exercise the retained Chinese UI without changing the application's English default.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('novelworld.ui.locale', 'zh-CN'));
+});

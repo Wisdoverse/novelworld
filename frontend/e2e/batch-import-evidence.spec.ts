@@ -62,3 +62,8 @@ test('submits 50 books as bounded sequential uploads', async ({ page }) => {
   expect(requests).toBe(10);
   expect(maxActive).toBe(1);
 });
+
+// Exercise the retained Chinese UI without changing the application's English default.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('novelworld.ui.locale', 'zh-CN'));
+});

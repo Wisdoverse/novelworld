@@ -1,3 +1,4 @@
+import { translate as t, useLocale } from '@/shared/lib/i18n';
 import type { Character } from '@/shared/types';
 import { MessageCircle, User } from 'lucide-react';
 
@@ -14,13 +15,14 @@ const roleBadgeColors: Record<string, string> = {
 };
 
 const roleLabels: Record<string, string> = {
-  protagonist: '主角',
-  antagonist: '反派',
-  supporting: '配角',
-  minor: '路人',
+  get protagonist() { return t("Protagonist"); },
+  get antagonist() { return t("Antagonist"); },
+  get supporting() { return t("Supporting character"); },
+  get minor() { return t("Bystander"); },
 };
 
 export function CharacterCard({ character, onTalk }: Props) {
+  useLocale();
   const role = character.role;
 
   return (
@@ -55,11 +57,11 @@ export function CharacterCard({ character, onTalk }: Props) {
         </h3>
         {character.aliases?.length ? (
           <p className="text-xs mb-2 text-[#5f6368]">
-            别名：{character.aliases.join('、')}
+            {t("Aliases:")}{character.aliases.join('、')}
           </p>
         ) : null}
         <p className="text-sm line-clamp-2 mb-3 text-[#5f6368]">
-          {character.description || '暂无描述'}
+          {character.description || t("No description yet")}
         </p>
 
         <button
@@ -67,7 +69,7 @@ export function CharacterCard({ character, onTalk }: Props) {
           className="tonal-action w-full text-sm"
         >
           <MessageCircle size={16} />
-          对话
+          {t("Chat")}
         </button>
       </div>
     </div>

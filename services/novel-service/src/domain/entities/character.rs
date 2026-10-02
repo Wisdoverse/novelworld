@@ -20,7 +20,7 @@ fn optional_profile(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
 }
 
-/// 角色实体
+/// Character entity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Character {
     pub id: Uuid,
@@ -35,7 +35,7 @@ pub struct Character {
     pub appearance: Option<String>,
     pub avatar_url: Option<String>,
     pub avatar_status: AvatarStatus,
-    /// Agent 系统提示词（由 AI 根据角色信息自动生成）
+    /// Agent system prompt, generated from character details.
     pub system_prompt: Option<String>,
     pub first_appearance_chapter: Option<i32>,
     pub created_at: DateTime<Utc>,
@@ -65,7 +65,7 @@ impl Character {
         }
     }
 
-    /// 构建 Agent 系统提示词
+    /// Build the Agent system prompt.
     pub fn build_system_prompt(&mut self, novel_title: &str, world_summary: &str) {
         let personality = self.personality.as_deref().unwrap_or("未知");
         let background = self.background.as_deref().unwrap_or("未知");

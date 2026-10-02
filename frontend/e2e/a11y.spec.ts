@@ -200,3 +200,8 @@ test('branch and world outcomes have named committed logs and pending status', a
   await expect(page.getByRole('status', { name: '世界行动状态' })).toBeEmpty();
   await expectNoA11yViolations(page);
 });
+
+// Exercise the retained Chinese UI without changing the application's English default.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('novelworld.ui.locale', 'zh-CN'));
+});

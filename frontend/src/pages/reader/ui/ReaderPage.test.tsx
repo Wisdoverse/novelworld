@@ -1,4 +1,6 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { beforeEach as beforeLocaleTest } from 'vitest';
+import { setLocale } from '@/shared/lib/i18n';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NarrativeNode, OpenWorldView } from '@/shared/types';
 import { ReaderPage, splitChapterAtAnchor } from './ReaderPage';
@@ -1212,6 +1214,10 @@ describe('ReaderPage progress gate', () => {
     fireEvent.click(screen.getByRole('button', { name: '选择第二项' }));
     await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('另一窗口已经提交'));
     expect(screen.getByRole('button', { name: '选择第二项' }).hasAttribute('disabled')).toBe(true);
+    act(() => setLocale('en'));
+    expect(screen.getByRole('alert').textContent).toContain('Another window committed this fate node');
+    expect(screen.getByRole('button', { name: '选择第二项' }).hasAttribute('disabled')).toBe(true);
+    expect(mocks.submitChoice).toHaveBeenCalledOnce();
 
     mocks.worldChoices = [{ node_id: 'node', choice_index: 0, consequence: '权威结果' }];
     fireEvent.click(screen.getByRole('button', { name: '重新加载已提交结果' }));
@@ -1301,3 +1307,6 @@ describe('splitChapterAtAnchor', () => {
     });
   });
 });
+
+// This suite retains the Simplified Chinese journey; locale tests cover the English default.
+beforeLocaleTest(() => setLocale('zh-CN'));

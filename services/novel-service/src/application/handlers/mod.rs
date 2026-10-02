@@ -2298,7 +2298,7 @@ impl NovelCommandHandler {
         let total_chapters = chapters.len() as i32;
         let title = novel.title.clone();
 
-        // 提取角色和世界观（代表性样本 + 分块全文扫描）
+        // Extract characters and world details from representative samples and a chunked full-text scan.
         info!("Extracting characters for novel {}", novel_id);
         let mut base_extraction = extract_character_summary(
             self.llm.as_ref(),
@@ -2348,7 +2348,7 @@ impl NovelCommandHandler {
         let extraction = merge_extractions(base_extraction, chunk_extractions);
         validate_extraction(&extraction)?;
 
-        // 保存角色
+        // Save characters.
         let characters: Vec<Character> = extraction
             .characters
             .iter()

@@ -1,3 +1,4 @@
+import type { UiMessage } from '@/shared/lib/i18n';
 import { create } from 'zustand';
 
 import {
@@ -15,7 +16,7 @@ interface ChatTurn {
 }
 
 interface FailedChatTurn extends ChatTurn {
-  error: ChatStreamError;
+  error: ChatStreamError & { uiMessage?: UiMessage };
 }
 
 interface ChatState {
@@ -252,7 +253,8 @@ export const useChatStore = create<ChatState>((set, get) => {
           ...current.failedTurn,
           [sessionKey]: turn ? {
             ...turn,
-            error: { code: 'cancelled', message: '已停止接收，可重试此消息。' },
+            error: { code: 'cancelled', message: 'Receiving stopped. You can retry this message.',
+              uiMessage: { key: 'Receiving stopped. You can retry this message.' } },
           } : current.failedTurn[sessionKey],
         },
       }));

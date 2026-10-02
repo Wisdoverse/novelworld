@@ -2,16 +2,16 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// 记忆层级（借鉴 project-lunar 的 Crystal Memory 4层金字塔）
+/// Memory layers, based on project-lunar's four-layer Crystal Memory pyramid.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MemoryLayer {
-    /// 短期记忆：PostgreSQL 中最近 N 条已提交对话；Redis 仅作可选投影
+    /// Short-term memory: the latest N committed conversations in PostgreSQL; Redis is only an optional projection.
     Short,
-    /// 中期记忆：每 20 条对话自动摘要，存于 PostgreSQL
+    /// Mid-term memory: automatically summarized every 20 conversations and stored in PostgreSQL.
     Mid,
-    /// 长期记忆：对话摘要向量化，存于 PostgreSQL 并通过 pgvector 语义检索
+    /// Long-term memory: conversation summaries are embedded, stored in PostgreSQL, and queried with pgvector.
     Long,
-    /// 永久记忆：角色关系状态、读者身份、重大选择，永不过期
+    /// Permanent memory: character relationships, reader identity, and major choices; never expires.
     Permanent,
 }
 
@@ -23,14 +23,14 @@ pub struct Memory {
     pub novel_id: Uuid,
     pub layer: MemoryLayer,
     pub content: String,
-    /// 重要程度 1-10，影响检索优先级
+    /// Importance from 1 to 10; affects retrieval priority.
     pub importance: i32,
     pub chapter_number: Option<i32>,
     /// Highest persona source chapter represented by a derived Mid/Long row.
     /// Legacy rows are unmarked and must stay out of online prompt paths.
     #[serde(default, skip_serializing)]
     pub persona_source_chapter_high_water: Option<i32>,
-    /// 长期记忆的向量嵌入（固定 1536 维）
+    /// Long-term memory embedding (fixed at 1,536 dimensions).
     pub embedding: Option<Vec<f32>>,
     pub created_at: DateTime<Utc>,
 }
@@ -82,7 +82,7 @@ impl Memory {
     }
 }
 
-/// 对话消息
+/// Chat message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub id: Uuid,

@@ -1,4 +1,6 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { beforeEach as beforeLocaleTest } from 'vitest';
+import { setLocale } from '@/shared/lib/i18n';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   chatSessionKey,
@@ -147,6 +149,38 @@ describe('ChatPanel history', () => {
     expect(screen.getByRole('button', { name: '重试' })).toBeTruthy();
     expect(screen.getByRole('textbox').hasAttribute('disabled')).toBe(true);
     expect(screen.getByRole('button', { name: '发送消息' }).hasAttribute('disabled')).toBe(true);
+    const failed = useChatStore.getState().failedTurn[selfSession];
+    act(() => setLocale('en'));
+    expect(screen.getByRole('alert').textContent).toContain('生成失败，请重试');
+    expect(useChatStore.getState().failedTurn[selfSession]).toBe(failed);
+    expect(screen.getByRole('button', { name: 'Send message' }).hasAttribute('disabled')).toBe(true);
+  });
+
+  it('updates a cancelled notice without replacing its retry identity or sending a message', () => {
+    const cancel = vi.fn();
+    const turn = {
+      turnId: 'cancelled-turn', sessionKey: selfSession, characterId: character.id,
+      payload: { novel_id: 'novel', message: '原始问题', current_chapter: 1 },
+    };
+    useChatStore.setState({
+      activeTurn: { [selfSession]: turn },
+      activeTurnId: { [selfSession]: turn.turnId },
+      isStreaming: { [selfSession]: true },
+      cancelStream: { [selfSession]: cancel },
+    });
+    useChatStore.getState().cancelMessage(selfSession);
+    const failed = useChatStore.getState().failedTurn[selfSession];
+    render(<ChatPanel character={character} novelId="novel" currentChapter={1}
+      readerIdentityScope="self" canChat isOpen onClose={() => undefined} />);
+    expect(screen.getByRole('alert').textContent).toContain('已停止接收，可重试此消息');
+    act(() => setLocale('en'));
+    expect(screen.getByRole('alert').textContent).toContain('Receiving stopped. You can retry this message.');
+    expect(screen.getByRole('button', { name: 'Send message' }).hasAttribute('disabled')).toBe(true);
+    expect(useChatStore.getState().failedTurn[selfSession]).toBe(failed);
+    expect(failed?.turnId).toBe(turn.turnId);
+    expect(failed?.payload).toEqual(turn.payload);
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(mocks.history.refetch).not.toHaveBeenCalled();
   });
 
   it('waits for committed reading progress before loading history', () => {
@@ -392,3 +426,6 @@ describe('ChatPanel history', () => {
     expect(screen.queryByText('character-a marker')).toBeNull();
   });
 });
+
+// This suite retains the Simplified Chinese journey; locale tests cover the English default.
+beforeLocaleTest(() => setLocale('zh-CN'));

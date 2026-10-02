@@ -1,3 +1,8 @@
+import { beforeEach as beforeLocaleTest } from 'vitest';
+import { setLocale } from '@/shared/lib/i18n';
+
+// Preserve the Chinese sample journeys; English defaults have separate coverage.
+beforeLocaleTest(() => setLocale('zh-CN'));
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { WorldTurnConfirmation } from '@/entities/narrative';
@@ -84,6 +89,19 @@ describe('WorldDashboard', () => {
     vi.useRealTimers();
   });
 
+  it('updates dashboard labels and timestamps without translating story content or submitting an action', () => {
+    setLocale('en');
+    const { container } = render(<WorldDashboard novelId="novel" view={view} />);
+    expect(screen.getByRole('heading', { name: "云舟's open world" })).toBeTruthy();
+    expect(screen.getByText('云舟发现守军换防。')).toBeTruthy();
+    expect(container.querySelector('time')?.textContent).toBe(new Date(view.world_state.state.choices[0].timestamp).toLocaleString('en'));
+    act(() => setLocale('zh-CN'));
+    expect(screen.getByRole('heading', { name: '云舟 的开放世界' })).toBeTruthy();
+    expect(screen.getByText('云舟发现守军换防。')).toBeTruthy();
+    expect(container.querySelector('time')?.textContent).toBe(new Date(view.world_state.state.choices[0].timestamp).toLocaleString('zh-CN'));
+    expect(mocks.submit).not.toHaveBeenCalled();
+  });
+
   it('permits only the exact authoritative turn retry in recovery-only mode', async () => {
     mocks.submit.mockResolvedValue(undefined);
     const recovery = { turn_id: 'ed3f5292-9492-4537-afcf-468657f1d8c7', action: { kind: 'travel' as const, target_id: 'gate', intent: '恢复原旅程' }, expected_turn_number: 1, expected_source_chapter: 2 };
@@ -114,6 +132,8 @@ describe('WorldDashboard', () => {
     render(<WorldDashboard novelId="novel" view={view} />);
     await waitFor(() => expect(window.sessionStorage.getItem('novelworld:pending-world-turn:user:novel')).toBeNull());
     expect(screen.queryByRole('button', { name: '继续确认结果' })).toBeNull();
+    expect(screen.getByText(/行动未能完成，世界没有因此改变/)).toBeTruthy();
+    act(() => setLocale('en'));
     expect(screen.getByText(/failed before it changed your world/)).toBeTruthy();
     expect(mocks.submit).not.toHaveBeenCalled();
   });
@@ -259,7 +279,7 @@ describe('WorldDashboard', () => {
     expect(screen.getByText(/调查线索：探查城门/)).toBeTruthy();
     expect(screen.getAllByText(/生成投影/)).toHaveLength(1);
     expect(screen.getAllByText(/云舟发现守军换防。/)).toHaveLength(1);
-    expect(screen.getByText(/2026-08-13T00:00:01Z/)).toBeTruthy();
+    expect(document.querySelector('time[datetime="2026-08-13T00:00:01Z"]')).toBeTruthy();
     expect(branchChoice.compareDocumentPosition(screen.getByText(/回合 1/))
       & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
 

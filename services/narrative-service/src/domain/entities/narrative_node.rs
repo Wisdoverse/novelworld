@@ -15,7 +15,7 @@ use crate::domain::entities::world_session::{
 };
 use crate::domain::services::narrative_transition::NarrativeTransition;
 
-/// 叙事节点（关键分支点）
+/// Narrative node (a key branch point).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NarrativeNode {
     pub id: Uuid,
@@ -24,23 +24,23 @@ pub struct NarrativeNode {
     pub user_id: Option<Uuid>,
     pub novel_id: Uuid,
     pub chapter_number: i32,
-    /// 节点描述（触发分支的情境）
+    /// Node description (the situation that triggers a branch).
     pub description: String,
     /// Exact source excerpt after which the choice is rendered inline.
     pub anchor_quote: Option<String>,
-    /// 可选择的分支选项
+    /// Available branch choices.
     pub choices: Vec<NarrativeChoice>,
     pub created_at: DateTime<Utc>,
 }
 
-/// 分支选项
+/// Branch choice.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NarrativeChoice {
     pub index: i32,
     pub text: String,
-    /// 选择后的简短预告（不剧透）
+    /// Short, spoiler-free preview after a choice.
     pub hint: String,
-    /// 选择后 AI 生成的后续剧情（按需生成）
+    /// AI-generated continuation after a choice (generated on demand).
     pub generated_consequence: Option<String>,
 }
 
@@ -74,12 +74,12 @@ impl NarrativeNode {
     }
 }
 
-/// 世界状态（parallel-ai-engine 思路：持久化世界状态）
+/// Persistent world state, following the parallel-ai-engine approach.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorldState {
     pub user_id: Uuid,
     pub novel_id: Uuid,
-    /// JSONB 存储：所有选择、关系变化、世界事件
+    /// JSONB storage for all choices, relationship changes, and world events.
     pub state: serde_json::Value,
     pub updated_at: DateTime<Utc>,
 }
@@ -864,7 +864,7 @@ impl WorldState {
         Ok(Some(fit_character_world_context(context)))
     }
 
-    /// 更新角色关系
+    /// Update a character relationship.
     pub fn update_relationship(
         &mut self,
         character_name: &str,
@@ -890,7 +890,7 @@ impl WorldState {
         Ok(())
     }
 
-    /// 获取与某角色的关系分数（0-100）
+    /// Get the relationship score for a character (0-100).
     pub fn get_relationship_score(&self, character_name: &str) -> i32 {
         self.state
             .get("player_entity")

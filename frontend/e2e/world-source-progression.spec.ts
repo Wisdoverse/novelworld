@@ -332,3 +332,8 @@ test('in-progress original turn recovery preserves the source fence and automati
   expect(server.providerCalls).toBe(1);
   expect(server.absoluteWrites).toEqual([]);
 });
+
+// These established journeys intentionally exercise the Chinese UI.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('novelworld.ui.locale', 'zh-CN'));
+});

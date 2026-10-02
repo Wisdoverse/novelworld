@@ -43,10 +43,94 @@ private single-node profile:
 - **Operability:** structured logs, health/readiness probes, Prometheus metrics,
   release manifests, and recovery drills are the supported diagnostic surface.
 
-The measured objectives and topology decision live in [`SLOS.md`](./SLOS.md).
+The measured objectives and topology decision are specified in the
+[`single-node-v1 capacity contract`](./OPERATIONS.md#single-node-v1-slo-and-capacity-contract).
 These attributes do not imply multi-region availability, zero data loss, or
 public-service qualification.
 
+## Deployment profile decisions
+
+Version: **`deployment-profile-v1`**. The supported deployment profile is the
+private self-hosted preview defined in [`PRODUCT_CONTRACT.md`](./PRODUCT_CONTRACT.md)
+(deployment envelope and responsibility boundary); PRODUCT_CONTRACT remains the
+authority for what is supported now. This document records the H2 boundary
+decisions for that profile and approves nothing beyond it.
+
+### Profile statement
+
+- **Supported:** operator-run, single-node, private self-hosted deployment
+  with users operator-admitted via network isolation (no application invite
+  gate) and operator-terminated TLS.
+- **Not supported:** internet-hosted/public operation. The public edge is
+  treated as defensive analysis only ([`THREAT_MODEL.md`](./THREAT_MODEL.md)),
+  and the ROADMAP gates any internet-hosted claim.
+
+### Boundary decisions
+
+0. **L0 bootstrap — launcher duty.** Before any Compose process starts, a fresh
+   interactive launcher guides the bundled PostgreSQL role and database names,
+   generates the database password, commits the local completion marker last,
+   and restarts itself once. Existing valid or automation-preseeded values
+   migrate without a prompt; unconfigured non-interactive execution fails
+   closed. This is not a browser endpoint and does not expose Docker control.
+1. **TLS — operator duty.** The deployment terminates TLS at an
+   operator-provided edge in front of the compose stack (PRODUCT_CONTRACT
+   responsibility boundary). The shipped nginx profile serves plain HTTP
+   with baseline security headers; it is not a TLS substitute.
+2. **Registration verification / invites — not applicable, deliberately not
+   built.** Users exist because the operator creates them (first-run admin
+   setup) or because an operator-admitted person registers against the
+   operator's own deployment; admission is the private network boundary,
+   not an application gate. No email verification, invite tokens, or
+   public signup (the schema carries an always-false `email_verified`
+   field that no flow ever sets). Reopens only for a public profile.
+3. **Content-safety boundary — not built, not applicable.** There is no
+   public submission or generation surface; every user is operator-invited.
+   Moderation, complaints/takedown, and reporting machinery do not exist and
+   must not be assumed (PRODUCT_CONTRACT responsibility boundary). Reopens
+   only for a public profile.
+4. **Provider boundary — operator-configured.** Any OpenAI-compatible
+   provider URL/model/key may be configured by the operator after the
+   administrator-only first run. The protected settings flow offers preset
+   providers; an environment override remains read-only. Per-principal quotas, global spend
+   ceilings, and kill switches are deferred to a public profile and are not
+   built for the private one.
+5. **Privacy, consent, retention — operator duty with implemented
+   boundaries.** What leaves the deployment (novel excerpts, prompts, chat
+   content, provider calls) is disclosed in [`DATA_RETENTION.md`](./DATA_RETENTION.md)
+   and [`SECURITY.md`](../SECURITY.md) (LLM Security); export and erasure obligations are
+   implemented and drilled (ACCOUNT_EXPORT.md, DATA_RETENTION.md). Provider
+   contract review and user consent are operator duties, not implemented
+   features. Data minimization has no separate implemented control beyond
+   the retention and erasure paths and must not be claimed.
+6. **Software supply chain — implemented boundaries.** Backend and shipped
+   frontend dependency vulnerability gates (cargo-audit and production-only
+   pnpm audit), committed-secret scanning (gitleaks),
+   license/source policy (cargo-deny), container image scanning (trivy), and
+   digest-pinned release manifests with a rollback state machine
+   (release.sh). See [`SECURITY.md`](../SECURITY.md) 'Dependency Policy' and 'Release Rollback'.
+   CycloneDX SBOMs are generated per release (docker.yml) and locally via
+   `infra/security/generate-sboms.sh`, digest-bound; deploy-time SBOM
+   admission and platform-native signing remain open H2 work. The release-file
+   provenance workflow and documentation are implemented under [Issue #274](https://github.com/Wisdoverse/novelworld/issues/274),
+   which owns the exact source, run, and native acceptance evidence.
+7. **Incident response — existing procedures.** The operator runbook is
+   [`OPERATIONS.md`](./OPERATIONS.md) (health checks, playbook index, ownership).
+   Secret rotation
+   ([`SECURITY.md`](../SECURITY.md) and its e2e drill), the bad-release edge drill, the release/rollback
+   state-machine drill, and the provider-outage drill (fail-closed import,
+   bounded source-free errors, settings non-disclosure, recovery retry) are
+   implemented and verified locally. Provider credential rotation against a
+   live provider and the remaining incident scenarios stay open H2 work.
+
+### Reopening criteria
+
+Selecting a public or internet-hosted profile reopens: registration
+verification/invites, per-principal and per-operation quotas, global spend
+ceilings and kill switches, moderation/complaints/takedown, an enforceable
+public content-safety boundary, and provider qualification per
+[`QUALIFICATION_POLICY.md`](./QUALIFICATION_POLICY.md) — the ROADMAP H2 scope
+owns those decisions.
 ## Ownership
 
 - **Gateway** authenticates external requests, injects `X-User-Id` and
@@ -68,7 +152,9 @@ PostgreSQL instance is a deployment choice, not shared business ownership.
 External databases, Redis, object storage, model providers, password hashing,
 and HTTP services are reached through domain ports and infrastructure adapters.
 
-For the opt-in [D20 preview](./ADVANCED_RULES_PLAN.md), Novel Service owns shared,
+For the opt-in D20 preview, [ADR 0001](./adr/0001-source-bound-advanced-game-rules.md),
+[ADR 0009](./adr/0009-bounded-laya-d20-adjudication.md), and [ADR 0010](./adr/0010-versioned-basic-game-rules.md)
+define the accepted rules. Novel Service owns shared,
 immutable source-bound attribute/DC templates. Narrative Service owns private
 player allocations, hard validation, dice resolution, and durable check replay.
 When configured, Laya (Jev) may classify a new advanced action from a size-limited
@@ -87,6 +173,13 @@ provenance only; narrative data and existing progress/hard-rule guards remain
 protected. Migration 0030 requires coordinated Novel and Narrative writer
 shutdown. The rest of [ADR 0001](./adr/0001-source-bound-advanced-game-rules.md)
 remains in force.
+
+Implementation entrypoints are [Novel template validation](../services/novel-service/src/domain/entities/game_rule_template.rs),
+[Narrative check resolution](../services/narrative-service/src/domain/entities/game_rules.rs),
+[server dice](../services/narrative-service/src/infrastructure/dice.rs),
+[world-turn orchestration](../services/narrative-service/src/application/handlers/mod.rs),
+and [world-turn persistence](../services/narrative-service/src/infrastructure/persistence/pg_world_turn_repo.rs).
+The ADRs own the rule, adjudication, and template-version decisions.
 
 ADR 0011 adds Novel-owned `user_world_series` definitions and
 `user_novel_world_series` shelf links. Novel records the source book and

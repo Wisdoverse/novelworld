@@ -1,3 +1,5 @@
+import { beforeEach as beforeLocaleTest } from 'vitest';
+import { setLocale } from '@/shared/lib/i18n';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useEffect, type PropsWithChildren } from 'react';
@@ -85,6 +87,35 @@ describe('world source authority recovery', () => {
     expect(api.source).not.toHaveBeenCalled();
     expect(readPendingWorldSource('user', 'novel')?.terminal).toBe(true);
     expect(hook.result.current.error).toContain('自动接续已暂停');
+  });
+
+  it('switches a saved local source error without repeating the operation or changing its key', async () => {
+    api.progress.mockResolvedValue({ ...progress, current_chapter: 1 });
+    const hook = renderHook(() => useWorldSourceProgression({ novelId: 'novel', progress: { ...progress, current_chapter: 2 }, routeChapter: 2, navigate: vi.fn() }), { wrapper });
+    act(() => hook.result.current.advanceIfReady(terminalTurn, 5));
+    await waitFor(() => expect(hook.result.current.isPending).toBe(false));
+    const saved = readPendingWorldSource('user', 'novel');
+    expect(hook.result.current.error).toContain('自动接续已暂停');
+    act(() => setLocale('en'));
+    expect(hook.result.current.error).toContain('Automatic continuation paused');
+    expect(readPendingWorldSource('user', 'novel')).toEqual(saved);
+    expect(hook.result.current.locked).toBe(true);
+    expect(api.progress).toHaveBeenCalledOnce();
+    expect(api.advance).not.toHaveBeenCalled();
+    expect(api.source).not.toHaveBeenCalled();
+  });
+
+  it('preserves an opaque server error while switching the interface language', async () => {
+    const message = '服务端原样消息 {p0} $&';
+    api.source.mockRejectedValue({ isAxiosError: true, response: { status: 500, data: { error: { code: 'server_error', message } } } });
+    const hook = renderHook(() => useWorldSourceProgression({ novelId: 'novel', progress, routeChapter: 1, navigate: vi.fn() }), { wrapper });
+    act(() => hook.result.current.start(view));
+    await waitFor(() => expect(hook.result.current.isPending).toBe(false));
+    const key = hook.result.current.pending?.idempotencyKey;
+    act(() => setLocale('en'));
+    expect(hook.result.current.error).toBe(message);
+    expect(hook.result.current.pending?.idempotencyKey).toBe(key);
+    expect(api.source).toHaveBeenCalledOnce();
   });
 
   it('stops before source admission when fresh progress has switched to a character identity', async () => {
@@ -332,3 +363,6 @@ describe('automatic world source progression', () => {
     expect(api.source).toHaveBeenCalledOnce();
   });
 });
+
+// Retain Chinese journey assertions; English defaults have separate coverage.
+beforeLocaleTest(() => setLocale('zh-CN'));
