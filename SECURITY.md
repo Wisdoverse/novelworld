@@ -329,7 +329,7 @@ healthy, a baseline import is untouched, and a retry succeeds once the
 provider returns. The settings API never returns key material (only the
 `api_key_configured` boolean). Rotating a provider credential against a
 live provider remains gated on a real provider and is recorded as such in
-DEPLOYMENT_PROFILE.md.
+the [deployment profile decisions](./docs/ARCHITECTURE.md#deployment-profile-decisions).
 
 ### LLM Security
 - User input passed to LLM prompts includes behavioral constraints

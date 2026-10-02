@@ -57,10 +57,10 @@ dedup, or paging exists yet.
 - **Backup / restore** — [`BACKUP_RESTORE.md`](./BACKUP_RESTORE.md) drills A/B/C; RTO ≤ 30 minutes.
 - **Overload** — the landed admission controls: nginx per-client rate limit
   plus gateway `RATE_LIMIT_RPS` ([`SECURITY.md`](../SECURITY.md)); capacity contract and
-  503 assertions in [`SLOS.md`](./SLOS.md).
+  503 assertions in [single-node-v1 capacity contract](#single-node-v1-slo-and-capacity-contract).
 - **Log contract** — [`log_contract.py`](../tests/e2e/log_contract.py) checks the §14.1 shape and
   trace propagation and request outcome fields.
-- **Capacity profile** — [`SLOS.md`](./SLOS.md) Run locally section; the recorded CI run is
+- **Capacity profile** — [single-node-v1 capacity contract](#single-node-v1-slo-and-capacity-contract) Run locally section; the recorded CI run is
   the qualification gate.
 
 ## Log levels and incident lookup
@@ -137,12 +137,25 @@ The deterministic browser reproduction is
 `pnpm exec playwright test e2e/advanced-rules.spec.ts` from `frontend` after a
 frontend build; it uses fixtures and makes no provider calls.
 
+### Advanced rules rollback and recovery
+
+Unsetting either Laya setting stops new classifier calls and selects template
+fallback for new advanced turns; frozen decisions are unchanged. Before rolling
+back application code, disable new advanced-template requests. Template storage
+and world-turn resolution columns are additive, but older binaries do not
+understand advanced metadata and cannot safely read v4 timeline transitions.
+New advanced profiles also require a compatible reader. Once a v4 turn commits,
+narrative and advanced timelines may contain canon event timestamps, and
+advanced scores may have evolved. Do not strip fields, rewrite scores, or
+relabel transitions. Restore service by forward-deploying a compatible release;
+there is no down migration, and the immutable template format does not change.
+
 ## Ownership and escalation
 
-The private self-hosted profile has a single operator (the deployment
-owner, [`DEPLOYMENT_PROFILE.md`](./DEPLOYMENT_PROFILE.md)): the operator owns
-detection and response. There is no on-call rotation and no paging. The
-vulnerability-reporting channel in [`SECURITY.md`](../SECURITY.md) is for
+The private self-hosted profile has a single operator (the deployment owner,
+as recorded in the [deployment profile decisions](./ARCHITECTURE.md#deployment-profile-decisions)).
+The operator owns detection and response. There is no on-call rotation or paging.
+The vulnerability-reporting channel in [`SECURITY.md`](../SECURITY.md) is for
 security reports, not operational escalation; incidents are the operator's
 to triage against this runbook.
 
@@ -157,7 +170,7 @@ Grafana serves the provisioned NovelWorld Overview dashboard on
 - **InstanceDown** (critical) — a service stopped being scraped;
   restart it, then run the health checks.
 - **GatewayRateLimitRejections** (warning) — the gateway's own 429s above
-  5%; check `RATE_LIMIT_RPS` and SLOS.md. **Known gap:** the nginx edge's
+  5%; check `RATE_LIMIT_RPS` and single-node-v1 capacity contract. **Known gap:** the nginx edge's
   per-client 429s never reach the gateway, so they are not visible here.
 - **HighErrorRatio** (warning) — gateway 5xx above 2%; go to the
   bad-release or provider-outage playbook.
@@ -167,6 +180,96 @@ provably fire (promtool unit tests), every target scrapes, the
 instance-down alert fires and resolves against a live service stop/start,
 and Grafana serves the dashboard.
 
+## Single-node-v1 SLO and capacity contract
+
+This contract decides whether NovelWorld's current single-node production
+topology is sufficient. It does not predict internet-scale traffic and does not
+authorize infrastructure merely because a test is green.
+
+### Applicability
+
+`single-node-v1` explicitly selects `cache_mode=redis` and runs one production
+Compose instance of Gateway, each Rust service, PostgreSQL, Redis, Nginx, and the
+deterministic test-only LLM provider. It is not evidence for the minimum
+`CACHE_MODE=postgres` profile.
+The capacity load enters through Gateway's loopback port so Nginx's intentional
+20 requests/second per-client abuse limit is not mistaken for application
+capacity. Existing production smoke checks continue to verify Nginx itself.
+
+The CI report records host/cgroup CPU and memory limits, platform, commit,
+policy version, every raw latency sample, provider call/active/peak counts, and
+each pass/fail predicate. It must contain no bearer token, password, provider
+key, database password, or Redis password.
+
+### Workload and objectives
+
+| Surface | Versioned workload | Objective |
+|---|---|---|
+| Import | Three distinct users release >=16 KiB TXT uploads together | Each receives either 202 within 1 s or typed `429 upload_capacity_busy` within 1 s. At least one is accepted; every accepted novel becomes ready within 120 s. Any observed 429 owns no persisted novel and adds no provider work. Fixture retries use a bounded local one-second backoff; upload 429 does not require the parser-overload 503 header. The runner records whether overload was observed and does not infer parser concurrency from completed upload responses. |
+| Agent stream | Nine distinct users release one SSE chat turn together; the provider holds stream setup for 1 s | Eight commit; p95 first event <=2.5 s; one receives retryable 503 within 1 s; provider stream peak is eight. |
+| World turn | Eight independent first turns release together; the provider holds generation for 1 s | All eight commit exactly once; p95 completion <=3 s; every timeline advances 0 -> 1; provider world-turn peak is eight. |
+| Failure/replay | The provider returns one invalid world transition | No state advances; retrying the same UUIDv4 idempotency key commits once; a completed replay is byte-identical and adds no provider call. |
+| Database-backed read | One timeline contains 100 committed world turns; eight closed batches issue 128 reads at concurrency 16 | 100% return the 100-turn state and journal; p95 <=750 ms. |
+| Redis projection | One character has 60 committed chat turns | PostgreSQL contains all 120 messages; after projection settles Redis contains exactly the newest 50 messages and `MEMORY USAGE` is <=256 KiB. |
+
+The profile uses nine authenticated users and nine independent novels so
+per-user admission cannot make shared-capacity results look better than they
+are. Fixture creation and warm-up are excluded from latency samples.
+
+### Measurement rules
+
+- Concurrent work uses a barrier and starts timing at the shared release.
+- Read load is eight closed batches of 16, preventing a client-side queue from
+  hiding latency through coordinated omission.
+- p95 is nearest-rank: sorted sample `ceil(0.95 * n) - 1`.
+- Expected 503 overload responses are asserted separately and never counted as
+  successful in-profile requests.
+- Provider delay is test-only and exactly 1,000 ms for stream/world phases; the
+  report preserves raw end-to-end latency instead of subtracting that delay.
+- HTTP success is insufficient: the runner checks committed turn numbers,
+  journal size, exact replay, provider call deltas, PostgreSQL rows, and Redis
+  length/memory.
+- Every run starts with empty PostgreSQL and Redis volumes and unique fixture
+  identifiers. CI always tears the stack down.
+
+### Decision rule
+
+A passing report keeps the current architecture. It does not justify a durable
+queue, physical database split, replicas, partitioning, CDN/object storage, or
+orchestration.
+
+Likewise, a passing static architecture check prevents known source-boundary
+regressions; it does not qualify database isolation, graceful drain, timeout
+coverage, monitoring/alerting, replicas, or horizontal scaling. Those outcomes
+need separate runtime or migration evidence.
+
+A failure must name the failed predicate and retain the report. Open a narrow
+follow-up only after reproducing it. Prefer tuning or removing work inside the
+current component first. Any infrastructure proposal must state the measured
+bottleneck, expected improvement, migration cost, and rollback. Do not weaken a
+threshold merely to restore green CI; change the policy version when a product
+requirement genuinely changes. Compare reports only on comparable recorded
+hardware; a faster machine is not evidence that a slower deployment meets the
+same contract.
+
+### Run locally
+
+From an empty test topology:
+
+```bash
+export CACHE_MODE=redis
+export REDIS_PASSWORD="Aa0._~-Z$(openssl rand -hex 16)"
+export REDIS_URL="redis://:${REDIS_PASSWORD}@redis:6379"
+RATE_LIMIT_RPS=500 docker compose -f docker-compose.yml -f docker-compose.e2e.yml \
+  --profile redis up -d --build --wait
+python3 tools/capacity/run.py \
+  --policy tools/capacity/policy-v1.json \
+  --report /tmp/novelworld-capacity-report.json
+```
+
+The runner uses only the Python standard library. `python3
+tools/capacity/run.py --self-test` verifies policy validation and nearest-rank
+calculation without starting services.
 ## Deferred to H5
 
 Journey SLIs, the initial SLO/error budget, alert notification
@@ -246,7 +349,7 @@ substitutes, reset a terminal generation claim, or treat the 409 as an outage.
 Upgrade Novel, Narrative,
 and frontend together; after series-bound state exists, rollback to an
 application that cannot read it is unsupported. The [D20 responsibility and
-evaluation plan](./ADVANCED_RULES_PLAN.md) explains the optional Laya (Jev) classification preview and its fallback. A
+evaluation plan](./adr/0009-bounded-laya-d20-adjudication.md) explains the optional Laya (Jev) classification preview and its fallback. A
 missing or failing classifier is not this 422 and falls back to the template
 check for a new advanced turn; frozen decisions replay without another call.
 Both names refer to the same decision capability; configuration still uses

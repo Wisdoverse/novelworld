@@ -8,7 +8,7 @@ use crate::domain::entities::{
 };
 use crate::domain::value_objects::{DeviationMode, ImportStage};
 
-/// `import-provider-budget-v1` (docs/IMPORT_BUDGET.md): a job must not be
+/// `import-provider-budget-v1` (docs/LLM_PROVIDERS.md#import-provider-budget): a job must not be
 /// claimed more than three times. Enforced by the persistence adapter at the
 /// claim boundary.
 pub const MAX_IMPORT_ATTEMPTS: i64 = 3;

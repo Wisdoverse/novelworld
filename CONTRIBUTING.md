@@ -412,10 +412,19 @@ required CI is green.
 
 ## Documentation
 
-Follow the [documentation standard](./docs/README.md#documentation-standard).
-Use repository-relative links and concrete commands. Code, migrations, and
-tests prove behavior; prose must not promote a target or roadmap item to current
-support without its required evidence.
+Use the [documentation index](./docs/README.md) to find the owner. Update the
+existing contract or procedure that owns a behavior instead of copying it into a
+new guide. State each material document’s audience, owned decision, profile,
+evidence, and failure boundary; update behavioral documentation in the same PR.
+Keep normative targets, current support, and evidence distinct; link to code,
+tests, migrations, and versioned records rather than repeating them. Use
+repository-relative links and concrete commands. Do not promote a target or
+roadmap item to current support without its required evidence.
+
+Use an [ADR](./docs/adr/0000-template.md) only for durable service-boundary,
+ownership, trust, public-contract, consistency, availability, or dependency
+decisions. Land an accepted ADR with its implementation; routine choices stay
+in the PR.
 
 ## Commit messages
 
