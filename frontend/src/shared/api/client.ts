@@ -167,7 +167,7 @@ export function getApiErrorMessage(error: unknown, fallback: string): string {
   return typeof detail === 'string' ? detail : detail?.message || fallback;
 }
 
-// 请求拦截器：注入 JWT
+// Request interceptor: attach JWT
 apiClient.interceptors.request.use((config) => {
   const token = localStorage.getItem('auth_token');
   if (token && !config.headers.has('Authorization')) {
@@ -176,7 +176,7 @@ apiClient.interceptors.request.use((config) => {
   return config;
 });
 
-// 响应拦截器：统一错误处理
+// Response interceptor: handle errors consistently
 apiClient.interceptors.response.use(
   (response) => response,
   async (error) => {

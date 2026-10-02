@@ -13,6 +13,12 @@ and [agent instructions](./AGENTS.md) before changing behavior.
   [SECURITY.md](./SECURITY.md), never a public issue.
 - Keep one independently mergeable outcome per pull request.
 
+Use English for identifiers, comments, configuration, contributor documentation,
+and default interface copy. Keep the English and Simplified Chinese UI catalogs
+complete, including accessible labels and local errors. Preserve Chinese documentation, literary
+and parser fixtures, and immutable versioned provider registrations. Interface
+language does not change source text or generation language.
+
 ## Development setup
 
 Prerequisites are current stable Rust (the locked dependency graph currently
@@ -412,10 +418,19 @@ required CI is green.
 
 ## Documentation
 
-Follow the [documentation standard](./docs/README.md#documentation-standard).
-Use repository-relative links and concrete commands. Code, migrations, and
-tests prove behavior; prose must not promote a target or roadmap item to current
-support without its required evidence.
+Use the [documentation index](./docs/README.md) to find the owner. Update the
+existing contract or procedure that owns a behavior instead of copying it into a
+new guide. State each material document’s audience, owned decision, profile,
+evidence, and failure boundary; update behavioral documentation in the same PR.
+Keep normative targets, current support, and evidence distinct; link to code,
+tests, migrations, and versioned records rather than repeating them. Use
+repository-relative links and concrete commands. Do not promote a target or
+roadmap item to current support without its required evidence.
+
+Use an [ADR](./docs/adr/0000-template.md) only for durable service-boundary,
+ownership, trust, public-contract, consistency, availability, or dependency
+decisions. Land an accepted ADR with its implementation; routine choices stay
+in the PR.
 
 ## Commit messages
 

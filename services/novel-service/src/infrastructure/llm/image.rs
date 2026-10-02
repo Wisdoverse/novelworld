@@ -26,7 +26,7 @@ struct ImageData {
     url: String,
 }
 
-/// 图像生成客户端（OpenAI DALL-E 兼容 API）
+/// Image-generation client (OpenAI DALL-E-compatible API).
 pub struct ImageClient {
     client: Client,
     api_url: String,

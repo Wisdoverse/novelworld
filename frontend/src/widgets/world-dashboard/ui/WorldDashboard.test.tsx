@@ -1,14 +1,25 @@
+import { beforeEach as beforeLocaleTest } from 'vitest';
+import { setLocale } from '@/shared/lib/i18n';
+
+// Preserve the Chinese sample journeys; English defaults have separate coverage.
+beforeLocaleTest(() => setLocale('zh-CN'));
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { WorldTurnConfirmation } from '@/entities/narrative';
 import type { OpenWorldView } from '@/shared/types';
 import { WorldDashboard } from './WorldDashboard';
 
 const mocks = vi.hoisted(() => ({
   submit: vi.fn(),
+  confirmation: {
+    data: undefined as { confirmation: WorldTurnConfirmation; refreshedWorld?: OpenWorldView } | undefined,
+    isFetching: false, isError: false, refetch: vi.fn(),
+  },
 }));
 
 vi.mock('@/entities/narrative', () => ({
   useSubmitWorldTurn: () => ({ mutateAsync: mocks.submit, isPending: false }),
+  useWorldTurnConfirmation: () => mocks.confirmation,
   isWorldTurnOutcomeUnknown: (error: { outcomeUnknown?: boolean }) => error.outcomeUnknown === true,
 }));
 
@@ -67,11 +78,28 @@ function chooseTravel() {
 describe('WorldDashboard', () => {
   beforeEach(() => {
     mocks.submit.mockReset();
+    mocks.confirmation.data = undefined;
+    mocks.confirmation.isFetching = false;
+    mocks.confirmation.isError = false;
+    mocks.confirmation.refetch.mockReset();
     window.sessionStorage.clear();
   });
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it('updates dashboard labels and timestamps without translating story content or submitting an action', () => {
+    setLocale('en');
+    const { container } = render(<WorldDashboard novelId="novel" view={view} />);
+    expect(screen.getByRole('heading', { name: "云舟's open world" })).toBeTruthy();
+    expect(screen.getByText('云舟发现守军换防。')).toBeTruthy();
+    expect(container.querySelector('time')?.textContent).toBe(new Date(view.world_state.state.choices[0].timestamp).toLocaleString('en'));
+    act(() => setLocale('zh-CN'));
+    expect(screen.getByRole('heading', { name: '云舟 的开放世界' })).toBeTruthy();
+    expect(screen.getByText('云舟发现守军换防。')).toBeTruthy();
+    expect(container.querySelector('time')?.textContent).toBe(new Date(view.world_state.state.choices[0].timestamp).toLocaleString('zh-CN'));
+    expect(mocks.submit).not.toHaveBeenCalled();
   });
 
   it('permits only the exact authoritative turn retry in recovery-only mode', async () => {
@@ -80,10 +108,80 @@ describe('WorldDashboard', () => {
     render(<WorldDashboard novelId="novel" view={{ ...view, recoverable_turn: recovery }} recoveryOnly />);
     expect((screen.getByLabelText('行动') as HTMLSelectElement).disabled).toBe(true);
     expect((screen.getByRole('button', { name: '执行行动' }) as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.click(screen.getByRole('button', { name: '继续确认结果' }));
+    fireEvent.click(screen.getByRole('button', { name: '恢复原行动' }));
     await waitFor(() => expect(mocks.submit).toHaveBeenCalledOnce());
     expect(mocks.submit).toHaveBeenCalledWith({ action: recovery.action, idempotencyKey: recovery.turn_id, expectedTurnNumber: 1, expectedSourceChapter: 2 });
     expect((screen.getByLabelText('行动') as HTMLSelectElement).disabled).toBe(true);
+  });
+
+  it('reads confirmation without retrying the action, including under a mutation lock', () => {
+    const request = { action: { kind: 'travel', target_id: 'gate', intent: '前往城门' }, idempotencyKey: '80470e95-87cf-4c50-a05c-f7743c43c079', expectedTurnNumber: 1 };
+    window.sessionStorage.setItem('novelworld:pending-world-turn:user:novel', JSON.stringify(request));
+    render(<WorldDashboard novelId="novel" view={view} actionsDisabled />);
+    fireEvent.click(screen.getByRole('button', { name: '继续确认结果' }));
+    expect(mocks.confirmation.refetch).toHaveBeenCalledOnce();
+    expect(mocks.submit).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: '恢复原行动' }).hasAttribute('disabled')).toBe(true);
+    expect(JSON.parse(window.sessionStorage.getItem('novelworld:pending-world-turn:user:novel') ?? '{}')).toEqual(request);
+  });
+
+  it('automatically releases a durably failed stored action after its fresh world is visible', async () => {
+    const turnId = '80470e95-87cf-4c50-a05c-f7743c43c079';
+    window.sessionStorage.setItem('novelworld:pending-world-turn:user:novel', JSON.stringify({ action: { kind: 'travel', target_id: 'gate', intent: '前往城门' }, idempotencyKey: turnId, expectedTurnNumber: 1 }));
+    mocks.confirmation.data = { confirmation: { turn_id: turnId, status: 'failed' }, refreshedWorld: view };
+    render(<WorldDashboard novelId="novel" view={view} />);
+    await waitFor(() => expect(window.sessionStorage.getItem('novelworld:pending-world-turn:user:novel')).toBeNull());
+    expect(screen.queryByRole('button', { name: '继续确认结果' })).toBeNull();
+    expect(screen.getByText(/行动未能完成，世界没有因此改变/)).toBeTruthy();
+    act(() => setLocale('en'));
+    expect(screen.getByText(/failed before it changed your world/)).toBeTruthy();
+    expect(mocks.submit).not.toHaveBeenCalled();
+  });
+
+  it.each(['isFetching', 'isError'] as const)('does not unlock from cached failure during %s', state => {
+    const turnId = '80470e95-87cf-4c50-a05c-f7743c43c079';
+    window.sessionStorage.setItem('novelworld:pending-world-turn:user:novel', JSON.stringify({ action: { kind: 'travel', target_id: 'gate', intent: '前往城门' }, idempotencyKey: turnId, expectedTurnNumber: 1 }));
+    mocks.confirmation.data = { confirmation: { turn_id: turnId, status: 'failed' }, refreshedWorld: view };
+    mocks.confirmation[state] = true;
+    render(<WorldDashboard novelId="novel" view={view} />);
+    expect(window.sessionStorage.getItem('novelworld:pending-world-turn:user:novel')).not.toBeNull();
+    expect(screen.getByRole('button', { name: '执行行动' }).hasAttribute('disabled')).toBe(true);
+    expect(mocks.submit).not.toHaveBeenCalled();
+  });
+
+  it('keeps a confirmed failure locked when the current world cannot refresh', () => {
+    const turnId = '80470e95-87cf-4c50-a05c-f7743c43c079';
+    window.sessionStorage.setItem('novelworld:pending-world-turn:user:novel', JSON.stringify({ action: { kind: 'travel', target_id: 'gate', intent: '前往城门' }, idempotencyKey: turnId, expectedTurnNumber: 1 }));
+    mocks.confirmation.data = { confirmation: { turn_id: turnId, status: 'failed' } };
+    render(<WorldDashboard novelId="novel" view={view} />);
+    expect(screen.getByRole('button', { name: '继续确认结果' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '恢复原行动' })).toBeNull();
+    expect(window.sessionStorage.getItem('novelworld:pending-world-turn:user:novel')).not.toBeNull();
+    expect(mocks.submit).not.toHaveBeenCalled();
+  });
+
+  it('waits for a completed confirmation to advance the visible world before unlocking', async () => {
+    const turnId = '80470e95-87cf-4c50-a05c-f7743c43c079';
+    const request = { action: { kind: 'travel', target_id: 'gate', intent: '前往城门' }, idempotencyKey: turnId, expectedTurnNumber: 1 };
+    window.sessionStorage.setItem('novelworld:pending-world-turn:user:novel', JSON.stringify(request));
+    const fresh = { ...view, session: { ...view.session, turn_number: 2 }, world_state: { ...view.world_state, updated_at: '2026-08-13T00:00:02Z' } };
+    mocks.confirmation.data = { confirmation: { turn_id: turnId, status: 'completed', memory_projection_status: 'saved' }, refreshedWorld: fresh };
+    const page = render(<WorldDashboard novelId="novel" view={view} />);
+    expect(window.sessionStorage.getItem('novelworld:pending-world-turn:user:novel')).not.toBeNull();
+    page.rerender(<WorldDashboard novelId="novel" view={fresh} />);
+    await waitFor(() => expect(window.sessionStorage.getItem('novelworld:pending-world-turn:user:novel')).toBeNull());
+    expect(mocks.submit).not.toHaveBeenCalled();
+  });
+
+  it('cannot clear a replacement server turn with a late failed confirmation', () => {
+    const oldId = '80470e95-87cf-4c50-a05c-f7743c43c079';
+    const active = { turn_id: 'ed3f5292-9492-4537-afcf-468657f1d8c7', action: { kind: 'travel' as const, target_id: 'gate', intent: '恢复原旅程' }, expected_turn_number: 1 };
+    const fresh = { ...view, recoverable_turn: active };
+    mocks.confirmation.data = { confirmation: { turn_id: oldId, status: 'failed' }, refreshedWorld: view };
+    render(<WorldDashboard novelId="novel" view={fresh} />);
+    expect(JSON.parse(window.sessionStorage.getItem('novelworld:pending-world-turn:user:novel') ?? '{}').idempotencyKey).toBe(active.turn_id);
+    expect(screen.getByRole('button', { name: '执行行动' }).hasAttribute('disabled')).toBe(true);
+    expect(mocks.submit).not.toHaveBeenCalled();
   });
 
   it('links the current narrative to the next action without submitting automatically', () => {
@@ -181,7 +279,7 @@ describe('WorldDashboard', () => {
     expect(screen.getByText(/调查线索：探查城门/)).toBeTruthy();
     expect(screen.getAllByText(/生成投影/)).toHaveLength(1);
     expect(screen.getAllByText(/云舟发现守军换防。/)).toHaveLength(1);
-    expect(screen.getByText(/2026-08-13T00:00:01Z/)).toBeTruthy();
+    expect(document.querySelector('time[datetime="2026-08-13T00:00:01Z"]')).toBeTruthy();
     expect(branchChoice.compareDocumentPosition(screen.getByText(/回合 1/))
       & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
 
@@ -199,7 +297,7 @@ describe('WorldDashboard', () => {
         view={{ ...view, session: { ...view.session, turn_number: 2 } }}
       />,
     );
-    fireEvent.click(await screen.findByRole('button', { name: '继续确认结果' }));
+    fireEvent.click(await screen.findByRole('button', { name: '恢复原行动' }));
     await waitFor(() => expect(mocks.submit).toHaveBeenCalledTimes(2));
 
     expect(mocks.submit.mock.calls[1][0].idempotencyKey)
@@ -428,7 +526,7 @@ describe('WorldDashboard', () => {
 
       expect(screen.getByRole('button', { name: '执行行动' }).hasAttribute('disabled')).toBe(true);
       expect(screen.getByRole('alert').textContent).toContain('第 2 回合的经过已保存，但角色记忆尚未同步完成');
-      fireEvent.click(screen.getByRole('button', { name: '继续确认结果' }));
+      fireEvent.click(screen.getByRole('button', { name: '恢复原行动' }));
       await waitFor(() => expect(mocks.submit).toHaveBeenCalledOnce());
       expect(mocks.submit.mock.calls[0][0]).toEqual({
         action: pendingEntry.action,
@@ -470,7 +568,7 @@ describe('WorldDashboard', () => {
       expect(mocks.submit).not.toHaveBeenCalled();
       expect(screen.getByRole('button', { name: '执行行动' }).hasAttribute('disabled')).toBe(true);
       expect(screen.getByRole('alert').textContent).toContain('上一行动尚未完成');
-      fireEvent.click(screen.getByRole('button', { name: '继续确认结果' }));
+      fireEvent.click(screen.getByRole('button', { name: '恢复原行动' }));
       await waitFor(() => expect(mocks.submit).toHaveBeenCalledOnce());
       expect(mocks.submit.mock.calls[0][0]).toEqual({
         action,
@@ -511,7 +609,7 @@ describe('WorldDashboard', () => {
         }}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: '继续确认结果' }));
+    fireEvent.click(screen.getByRole('button', { name: '恢复原行动' }));
 
     await waitFor(() => expect(mocks.submit).toHaveBeenCalledOnce());
     expect(mocks.submit.mock.calls[0][0]).toEqual(originalRequest);
@@ -549,7 +647,7 @@ describe('WorldDashboard', () => {
     await waitFor(() => expect(JSON.parse(
       window.sessionStorage.getItem('novelworld:pending-world-turn:user:novel') ?? '{}',
     ).idempotencyKey).toBe(journalTurnId));
-    fireEvent.click(screen.getByRole('button', { name: '继续确认结果' }));
+    fireEvent.click(screen.getByRole('button', { name: '恢复原行动' }));
 
     await waitFor(() => expect(mocks.submit).toHaveBeenCalledOnce());
     expect(mocks.submit.mock.calls[0][0]).toEqual({
@@ -604,7 +702,7 @@ describe('WorldDashboard', () => {
     fireEvent.change(screen.getByLabelText('你的意图'), { target: { value: '另一次行动' } });
     expect(screen.getByRole('button', { name: '执行行动' }).hasAttribute('disabled')).toBe(true);
     expect(screen.getByRole('alert').textContent).toContain('尚未确认这次行动的最终结果');
-    fireEvent.click(screen.getByRole('button', { name: '继续确认结果' }));
+    fireEvent.click(screen.getByRole('button', { name: '恢复原行动' }));
 
     await waitFor(() => expect(mocks.submit).toHaveBeenCalledTimes(1));
     expect(mocks.submit.mock.calls[0][0]).toEqual(originalRequest);
@@ -651,7 +749,7 @@ describe('WorldDashboard', () => {
 
     mocks.submit.mockClear();
     page.rerender(<WorldDashboard novelId="novel" view={view} actionsDisabled />);
-    const retry = screen.getByRole('button', { name: '继续确认结果' });
+    const retry = screen.getByRole('button', { name: '恢复原行动' });
     expect(retry.hasAttribute('disabled')).toBe(true);
     fireEvent.click(retry);
 

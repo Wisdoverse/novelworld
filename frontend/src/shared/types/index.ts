@@ -1,4 +1,4 @@
-// ─── 小说相关 ─────────────────────────────────────────────────────────────────
+// ─── Novels ─────────────────────────────────────────────────────────────────
 
 export type NovelStatus = 'pending' | 'parsing' | 'ready' | 'error';
 export type DeviationMode = 'canon' | 'creative' | 'remix';
@@ -21,7 +21,7 @@ export interface Novel {
   updated_at: string;
 }
 
-// ─── 章节 ─────────────────────────────────────────────────────────────────────
+// ─── Chapters ─────────────────────────────────────────────────────────────────────
 
 export interface Chapter {
   id: string;
@@ -34,7 +34,7 @@ export interface Chapter {
   key_node_description?: string;
 }
 
-// ─── 角色 ─────────────────────────────────────────────────────────────────────
+// ─── Characters ─────────────────────────────────────────────────────────────────────
 
 export type CharacterRole = 'protagonist' | 'antagonist' | 'supporting' | 'minor';
 export type AvatarStatus = 'pending' | 'generating' | 'ready' | 'error';
@@ -56,7 +56,7 @@ export interface Character {
   persona_source_chapter_high_water?: number;
 }
 
-// ─── 对话 ─────────────────────────────────────────────────────────────────────
+// ─── Conversations ─────────────────────────────────────────────────────────────────────
 
 export interface ChatMessage {
   id: string;
@@ -68,7 +68,7 @@ export interface ChatMessage {
   created_at: string;
 }
 
-// ─── 叙事分支 ─────────────────────────────────────────────────────────────────
+// ─── Narrative branches ─────────────────────────────────────────────────────────────────
 
 export interface NarrativeChoice {
   index: number;
@@ -86,7 +86,7 @@ export interface NarrativeNode {
   choices: NarrativeChoice[];
 }
 
-// ─── 世界状态 ─────────────────────────────────────────────────────────────────
+// ─── World state ─────────────────────────────────────────────────────────────────
 
 export interface PlayerEntity {
   id: string;
@@ -424,7 +424,7 @@ export interface WorldTurnResult {
   world_state: WorldState;
 }
 
-// ─── 阅读进度 ─────────────────────────────────────────────────────────────────
+// ─── Reading progress ─────────────────────────────────────────────────────────────────
 
 export type IdentityType = 'self' | 'character';
 
@@ -440,7 +440,7 @@ export interface ReadingProgress {
   last_read_at: string;
 }
 
-// ─── 用户 ─────────────────────────────────────────────────────────────────────
+// ─── Users ─────────────────────────────────────────────────────────────────────
 
 export interface User {
   id: string;

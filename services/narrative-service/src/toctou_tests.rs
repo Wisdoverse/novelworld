@@ -38,7 +38,7 @@ use crate::domain::repositories::{
     NarrativeNodeRepository, NovelInfo, PlayerChapter, PlayerChapterOrigin,
     PlayerChapterRepository, PlayerEntryContext, ReadingProgressSnapshot, RecoverableWorldTurn,
     UserChoiceRecord, UserChoiceRepository, WorldStateRepository, WorldTurnClaim,
-    WorldTurnJournalEntry, WorldTurnRepository, WorldTurnResult,
+    WorldTurnJournalEntry, WorldTurnRepository, WorldTurnResult, WorldTurnStatus,
 };
 use crate::domain::services::narrative_transition::{
     CanonContext, CanonEntityRef, NarrativeTransition, TransitionEvent,
@@ -2027,6 +2027,59 @@ impl AgentMemoryPort for ToctouFixture {
 
 #[async_trait]
 impl WorldTurnRepository for ToctouFixture {
+    async fn confirm_turn(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        turn_id: Uuid,
+    ) -> Result<Option<crate::domain::repositories::WorldTurnConfirmation>> {
+        use crate::domain::repositories::{WorldTurnConfirmation, WorldTurnStatus};
+        if user_id != self.user_id || novel_id != self.novel_id {
+            return Ok(None);
+        }
+        let completed = self.completed_world_turn.lock().unwrap().clone();
+        let failure_attempt = self
+            .failed_turns
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|turn| turn.0 == turn_id)
+            .map(|turn| turn.1)
+            .max();
+        let active_attempt = self
+            .acquired_world_turn
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|(claim, _)| claim.id == turn_id)
+            .map(|(_, attempt)| *attempt);
+        let status = if completed
+            .as_ref()
+            .is_some_and(|turn| turn.turn_id == turn_id)
+        {
+            WorldTurnStatus::Completed
+        } else if active_attempt
+            .is_some_and(|attempt| failure_attempt.is_none_or(|failed| attempt > failed))
+        {
+            WorldTurnStatus::InProgress
+        } else if failure_attempt.is_some() {
+            WorldTurnStatus::Failed
+        } else {
+            return Ok(None);
+        };
+        Ok(Some(WorldTurnConfirmation {
+            turn_id,
+            status,
+            memory_projection_status: (status == WorldTurnStatus::Completed)
+                .then(|| *self.memory_projection_status.lock().unwrap()),
+            source_chapter_high_water: self
+                .world_state
+                .lock()
+                .unwrap()
+                .source_chapter_high_water()?,
+        }))
+    }
+
     async fn begin_turn(&self, claim: &WorldTurnClaim) -> Result<BeginWorldTurn> {
         self.begin_turn_calls.fetch_add(1, Ordering::SeqCst);
         self.last_expected_turn_number
@@ -3473,6 +3526,215 @@ async fn player_entry_rechecks_context_checkpoint_before_returning_locations() {
         .unwrap();
     assert_eq!(restored.checkpoint_chapter, 5);
     assert_eq!(restored.locations[0].id, "city-gate");
+}
+
+#[tokio::test]
+async fn world_turn_confirmation_reads_failed_and_reclaimed_status_without_side_effects() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    let context = fixture.entry_context(fixture.source_chapter, None);
+    fixture
+        .world_state
+        .lock()
+        .unwrap()
+        .start_open_world(&context)
+        .unwrap();
+    let claim = WorldTurnClaim {
+        id: Uuid::new_v4(),
+        user_id: fixture.user_id,
+        novel_id: fixture.novel_id,
+        request_fingerprint: vec![7; 32],
+        action: WorldAction {
+            kind: WorldActionKind::PursueGoal,
+            target_id: None,
+            intent: "寻找城门附近的线索".into(),
+        },
+        resolution: None,
+        expected_turn_number: 0,
+        expected_source_chapter: None,
+    };
+    fixture
+        .acquire_next_world_turn
+        .store(true, Ordering::SeqCst);
+    assert!(matches!(
+        fixture.begin_turn(&claim).await.unwrap(),
+        BeginWorldTurn::Acquired { attempt: 1, .. }
+    ));
+    assert!(fixture
+        .fail_turn(claim.id, 1, "invalid_transition")
+        .await
+        .unwrap());
+    let before = fixture.world_state.lock().unwrap().clone();
+    let acquired = fixture.acquired_world_turn.lock().unwrap().clone();
+    let failures = fixture.failed_turns.lock().unwrap().clone();
+    let handler = fixture.handler();
+
+    for _ in 0..2 {
+        let confirmation = handler
+            .confirm_world_turn(fixture.user_id, fixture.novel_id, claim.id)
+            .await
+            .unwrap();
+        assert_eq!(confirmation.status, WorldTurnStatus::Failed);
+        assert_eq!(confirmation.memory_projection_status, None);
+        assert_eq!(
+            serde_json::to_value(confirmation).unwrap(),
+            serde_json::json!({ "turn_id": claim.id, "status": "failed" })
+        );
+    }
+    assert_eq!(*fixture.world_state.lock().unwrap(), before);
+    assert_eq!(*fixture.acquired_world_turn.lock().unwrap(), acquired);
+    assert_eq!(*fixture.failed_turns.lock().unwrap(), failures);
+    assert_eq!(fixture.begin_turn_calls.load(Ordering::SeqCst), 1);
+
+    fixture
+        .reclaim_acquired_world_turn
+        .store(true, Ordering::SeqCst);
+    assert!(matches!(
+        fixture.begin_turn(&claim).await.unwrap(),
+        BeginWorldTurn::Acquired { attempt: 2, .. }
+    ));
+    let confirmation = handler
+        .confirm_world_turn(fixture.user_id, fixture.novel_id, claim.id)
+        .await
+        .unwrap();
+    assert_eq!(confirmation.status, WorldTurnStatus::InProgress);
+    assert_eq!(confirmation.memory_projection_status, None);
+    assert_eq!(fixture.begin_turn_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(*fixture.world_state.lock().unwrap(), before);
+    assert_eq!(fixture.complete_turn_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.finish_projection_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.agent_memory_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn world_turn_confirmation_is_scoped_and_missing_does_not_mean_failed() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    let turn_id = Uuid::new_v4();
+    fixture
+        .failed_turns
+        .lock()
+        .unwrap()
+        .push((turn_id, 1, "invalid_transition".into()));
+    let handler = fixture.handler();
+    let before = fixture.world_state.lock().unwrap().clone();
+
+    for (user_id, novel_id, requested_id) in [
+        (fixture.other_user_id, fixture.novel_id, turn_id),
+        (fixture.user_id, Uuid::new_v4(), turn_id),
+        (fixture.user_id, fixture.novel_id, Uuid::new_v4()),
+    ] {
+        assert!(matches!(
+            handler
+                .confirm_world_turn(user_id, novel_id, requested_id)
+                .await,
+            Err(NarrativeError::NotFound)
+        ));
+    }
+    fixture.self_identity.store(false, Ordering::SeqCst);
+    assert!(matches!(
+        handler
+            .confirm_world_turn(fixture.user_id, fixture.novel_id, turn_id)
+            .await,
+        Err(NarrativeError::Conflict(_))
+    ));
+    assert_eq!(*fixture.world_state.lock().unwrap(), before);
+    assert_eq!(fixture.begin_turn_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.complete_turn_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.finish_projection_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.agent_memory_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn world_turn_confirmation_reports_projection_status_without_compensation() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    let (turn_id, _) = fixture.prepare_pending_witnessed_turn();
+    let handler = fixture.handler();
+    let before = fixture.world_state.lock().unwrap().clone();
+    let completed = fixture.completed_world_turn.lock().unwrap().clone();
+
+    for projection in [
+        MemoryProjectionStatus::Pending,
+        MemoryProjectionStatus::Saved,
+        MemoryProjectionStatus::Skipped,
+    ] {
+        *fixture.memory_projection_status.lock().unwrap() = projection;
+        let confirmation = handler
+            .confirm_world_turn(fixture.user_id, fixture.novel_id, turn_id)
+            .await
+            .unwrap();
+        assert_eq!(confirmation.status, WorldTurnStatus::Completed);
+        assert_eq!(confirmation.memory_projection_status, Some(projection));
+        assert_eq!(
+            serde_json::to_value(confirmation).unwrap(),
+            serde_json::json!({
+                "turn_id": turn_id,
+                "status": "completed",
+                "memory_projection_status": projection,
+            })
+        );
+        assert_eq!(
+            *fixture.memory_projection_status.lock().unwrap(),
+            projection
+        );
+    }
+    assert_eq!(*fixture.world_state.lock().unwrap(), before);
+    assert_eq!(*fixture.completed_world_turn.lock().unwrap(), completed);
+    assert_eq!(fixture.begin_turn_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.complete_turn_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.finish_projection_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.agent_memory_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn world_turn_confirmation_rechecks_identity_and_progress_in_the_final_snapshot() {
+    for rewind in [false, true] {
+        let fixture = Arc::new(ToctouFixture::new(false));
+        let (turn_id, _) = fixture.prepare_pending_witnessed_turn();
+        *fixture.memory_projection_status.lock().unwrap() = MemoryProjectionStatus::Saved;
+        let before = fixture.world_state.lock().unwrap().clone();
+        fixture
+            .block_progress_snapshot_on_call
+            .store(1, Ordering::SeqCst);
+        let handler = fixture.handler();
+        let user_id = fixture.user_id;
+        let novel_id = fixture.novel_id;
+        let in_flight =
+            tokio::spawn(
+                async move { handler.confirm_world_turn(user_id, novel_id, turn_id).await },
+            );
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            fixture.progress_snapshot_entered.notified(),
+        )
+        .await
+        .expect("confirmation must fence its response with a fresh progress snapshot");
+        if rewind {
+            fixture.current_chapter.store(1, Ordering::SeqCst);
+        } else {
+            fixture.self_identity.store(false, Ordering::SeqCst);
+        }
+        fixture.progress_snapshot_release.notify_one();
+        let error = in_flight.await.unwrap().unwrap_err();
+        if rewind {
+            assert!(matches!(error, NarrativeError::ReadingProgressBehindWorld));
+        } else {
+            assert!(matches!(error, NarrativeError::Conflict(_)));
+        }
+        assert_eq!(fixture.progress_snapshot_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(*fixture.world_state.lock().unwrap(), before);
+        assert_eq!(
+            *fixture.memory_projection_status.lock().unwrap(),
+            MemoryProjectionStatus::Saved
+        );
+        assert_eq!(fixture.begin_turn_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.complete_turn_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.finish_projection_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.agent_memory_calls.load(Ordering::SeqCst), 0);
+    }
 }
 
 #[tokio::test]

@@ -1,3 +1,4 @@
+import { translate as t, useLocale } from '@/shared/lib/i18n';
 import { useRef, useState, type FormEvent } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Loader2, Upload, X } from 'lucide-react';
@@ -13,6 +14,7 @@ import {
 import { getApiErrorCode, getApiErrorMessage } from '@/shared/api/client';
 
 export function NovelImportModal({ onClose }: { onClose: () => void }) {
+  const locale = useLocale();
   const returnFocusRef = useRef<HTMLElement | null>(
     typeof document !== 'undefined' && document.activeElement instanceof HTMLElement
       ? document.activeElement
@@ -77,12 +79,12 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
           deviation_mode: deviationMode,
         });
       }
-      toast.success(isBatch ? `已接收 ${files.length} 本小说，等待解析` : '小说已接收，等待解析');
+      toast.success(isBatch ? t("{p0} novels accepted, awaiting parsing", { p0: files.length }) : t("Novel accepted, awaiting parsing"));
       onClose();
     } catch (error) {
       if (error instanceof NovelBatchUploadError) {
         if (error.reason === 'session_changed') {
-          toast.error('登录状态已变化，已停止后续上传。请核对原账号书架。');
+          toast.error(t("Your session changed. Remaining uploads stopped. Check the original account's shelf."));
           onClose();
           return;
         }
@@ -90,24 +92,24 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
         setTitle(error.remainingFiles.length === 1 ? novelTitleFromFile(error.remainingFiles[0]) : '');
         if (error.unknownFiles.length) {
           setUnknownFiles(error.unknownFiles.map(file => file.name));
-          toast.error(`已确认接收 ${error.accepted.length} 本；另有 ${error.unknownFiles.length} 本结果未知，请先核对书架，避免重复上传。`);
+          toast.error(t("{p0} novels confirmed accepted; {p1} outcomes are unknown. Check your shelf before uploading again.", { p0: error.accepted.length, p1: error.unknownFiles.length }));
           return;
         }
-        const prefix = error.accepted.length ? `已接收 ${error.accepted.length} 本；剩余文件未接收。` : '';
+        const prefix = error.accepted.length ? t("{p0} novels accepted; remaining files were not accepted.", { p0: error.accepted.length }) : '';
         toast.error(prefix + (getApiErrorCode(error.cause) === 'upload_capacity_busy'
-          ? '上传繁忙，请稍后重试。' : getApiErrorMessage(error.cause, '上传失败，请检查剩余文件后重试。')));
+          ? t("Uploads are busy. Try again later.") : getApiErrorMessage(error.cause, t("Upload failed. Check the remaining files and try again."))));
         return;
       }
       const code = getApiErrorCode(error);
       const message = code === 'upload_capacity_busy'
-        ? '上传繁忙，请稍后重试。'
+        ? t("Uploads are busy. Try again later.")
         : code === 'import_capacity_busy'
-        ? '解析任务繁忙，请稍后再导入。'
+        ? t("Parsing is busy. Import again later.")
         : code === 'source_storage_unavailable'
-          ? '文件存储暂时不可用，请稍后重试。'
+          ? t("File storage is temporarily unavailable. Try again later.")
           : code === 'service_unavailable' || code === 'bad_gateway'
-            ? '导入服务暂时不可用，请稍后重试。'
-            : getApiErrorMessage(error, isBatch ? '批量导入失败' : '小说导入失败');
+            ? t("The import service is temporarily unavailable. Try again later.")
+            : getApiErrorMessage(error, isBatch ? t("Batch import failed") : t("Novel import failed"));
       toast.error(message);
     } finally {
       setSubmitting(false);
@@ -132,8 +134,8 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
           }}
         >
         <div className="shrink-0 px-6 pt-6 sm:px-8 sm:pt-8">
-          <Dialog.Title className="mb-2 text-2xl font-medium text-[#1f1f1f]">导入小说</Dialog.Title>
-          <Dialog.Description className="text-sm text-[#5f6368]">可批量上传文件，或粘贴一本小说的正文。</Dialog.Description>
+          <Dialog.Title className="mb-2 text-2xl font-medium text-[#1f1f1f]">{t("Import novels")}</Dialog.Title>
+          <Dialog.Description className="text-sm text-[#5f6368]">{t("Upload multiple files or paste the text of one novel.")}</Dialog.Description>
         </div>
 
         <form onSubmit={handleSubmit}>
@@ -141,45 +143,45 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
             <div className="grid gap-4 sm:grid-cols-2">
               {isBatch ? (
                 <div>
-                  <p className="mb-1.5 text-sm font-medium text-[#3c4043]">书名</p>
+                  <p className="mb-1.5 text-sm font-medium text-[#3c4043]">{t("Title")}</p>
                   <div className="field-control flex items-center text-sm text-[#5f6368]">
-                    使用每个文件的文件名
+                    {t("Use each file's name")}
                   </div>
                 </div>
               ) : (
                 <div>
                   <label htmlFor="novel-import-title" className="mb-1.5 block text-sm font-medium text-[#3c4043]">
-                    书名 *
+                    {t("Title *")}
                   </label>
                   <input
                     id="novel-import-title"
                     value={title}
                     onChange={(event) => setTitle(event.target.value)}
-                    placeholder="输入小说名称"
+                    placeholder={t("Enter a novel title")}
                     required
                     className="field-control text-sm"
                   />
                 </div>
               )}
               <div>
-                <label htmlFor="novel-import-author" className="mb-1.5 block text-sm font-medium text-[#3c4043]">作者</label>
+                <label htmlFor="novel-import-author" className="mb-1.5 block text-sm font-medium text-[#3c4043]">{t("Author")}</label>
                 <input
                   id="novel-import-author"
                   value={author}
                   onChange={(event) => setAuthor(event.target.value)}
-                  placeholder={isBatch ? '可选，应用到全部文件' : '可选'}
+                  placeholder={isBatch ? t("Optional, applies to all files") : t("Optional")}
                   className="field-control text-sm"
                 />
               </div>
             </div>
 
             <div>
-              <p className="mb-2 text-sm font-medium text-[#3c4043]">故事偏离度</p>
-              <div className="grid gap-2 sm:grid-cols-3" role="group" aria-label="故事偏离度">
+              <p className="mb-2 text-sm font-medium text-[#3c4043]">{t("Story deviation")}</p>
+              <div className="grid gap-2 sm:grid-cols-3" role="group" aria-label={t("Story deviation")}>
                 {[
-                  { value: 'canon', label: '忠实原著', desc: '严格遵循原著' },
-                  { value: 'creative', label: '创意扩展', desc: '在原著基础上发挥' },
-                  { value: 'remix', label: '自由改写', desc: '大胆改变走向' },
+                  { value: 'canon', label: t("Follow the original"), desc: t("Strictly follow the original") },
+                  { value: 'creative', label: t("Creative expansion"), desc: t("Build on the original") },
+                  { value: 'remix', label: t("Free rewriting"), desc: t("Change the story freely") },
                 ].map((option) => (
                   <button
                     key={option.value}
@@ -200,7 +202,7 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
             </div>
 
             <div>
-              <p className="mb-2 text-sm font-medium text-[#3c4043]">小说文件</p>
+              <p className="mb-2 text-sm font-medium text-[#3c4043]">{t("Novel files")}</p>
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
@@ -212,7 +214,7 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
                 }}
               >
                 <Upload size={16} />
-                {files.length ? `已选择 ${files.length} 本小说` : '选择 TXT、EPUB 或 PDF 文件（可多选）'}
+                {files.length ? t("{p0} novels selected", { p0: files.length }) : t("Choose TXT, EPUB or PDF files (multiple files allowed)")}
               </button>
               <input
                 ref={fileInputRef}
@@ -226,7 +228,7 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
                 }}
               />
               {files.length > 0 && (
-                <ul aria-label="已选择的小说文件" className="mt-2 space-y-1.5">
+                <ul aria-label={t("Selected novel files")} className="mt-2 space-y-1.5">
                   {files.map((file, index) => (
                     <li
                       key={`${file.name}-${file.size}-${file.lastModified}-${index}`}
@@ -235,7 +237,7 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
                       <span className="min-w-0 truncate">{file.name}</span>
                       <button
                         type="button"
-                        aria-label={`移除 ${file.name}`}
+                        aria-label={t("Remove {p0}", { p0: file.name })}
                         onClick={() => removeFile(index)}
                         className="shrink-0 rounded-full p-1 text-[#5f6368] hover:bg-[#e8eaed]"
                       >
@@ -246,19 +248,19 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
                 </ul>
               )}
               <p className="mt-1.5 text-xs text-[#5f6368]">
-                每次可选 50 本，自动分批上传并排队解析；单个 TXT 最大 10 MiB，EPUB/PDF 最大 20 MiB
+                {t("Select up to 50 novels, uploaded in batches and queued for parsing. Each TXT can be up to 10 MiB; EPUB/PDF up to 20 MiB.")}
               </p>
             </div>
 
             <div className="flex items-center gap-3" aria-hidden="true">
               <div className="h-px flex-1 bg-[#dadce0]" />
-              <span className="text-xs text-[#5f6368]">或粘贴一本正文</span>
+              <span className="text-xs text-[#5f6368]">{t("Or paste one novel")}</span>
               <div className="h-px flex-1 bg-[#dadce0]" />
             </div>
 
             <div>
               <label htmlFor="novel-import-content" className="mb-1.5 block text-sm font-medium text-[#3c4043]">
-                小说内容 {!files.length && '*'}
+                {t("Novel text")} {!files.length && '*'}
               </label>
               <textarea
                 id="novel-import-content"
@@ -270,29 +272,28 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
                     setTitle('');
                   }
                 }}
-                placeholder="粘贴小说全文内容（支持中英文，建议至少粘贴前3章用于角色提取）"
+                placeholder={t("Paste the novel text (Chinese or English; at least the first 3 chapters are recommended for character extraction)")}
                 rows={6}
                 required={!files.length}
                 className="field-control max-h-[40dvh] resize-none text-sm"
                 style={{ fontFamily: 'var(--font-reading)', lineHeight: '1.8' }}
               />
-              <p className="mt-1 text-xs text-[#5f6368]">字数：{content.length.toLocaleString()} 字</p>
+              <p className="mt-1 text-xs text-[#5f6368]">{t("Length:")}{content.length.toLocaleString(locale)} {t("characters")}</p>
             </div>
 
             <p className="rounded-xl border border-[#a8c7fa] bg-[#eef3fe] px-3 py-2.5 text-xs leading-5 text-[#174ea6]">
-              提交并被系统接受的正文，以及启用原文件存储时的上传文件，包括仍在解析或随后解析失败的内容，都会随共享原著保留。解析成功后其他用户可从共享书库加入；你的阅读进度、身份、对话、记忆和时间线仍为私有。移出书架或删除账号不会删除这些共享内容。
+              {t("Accepted text and uploaded files when original-file storage is enabled remain with the shared original, including content still parsing or later failing. After parsing succeeds, other users can add it from the shared library. Your progress, identity, chats, memories and timeline remain private. Removing a book or deleting your account does not delete this shared content.")}
             </p>
             {unknownFiles.length > 0 && (
               <p role="alert" className="text-sm text-[#b3261e]">
-                以下文件的接收结果未知，请先核对书架再决定是否重新选择：{unknownFiles.join('、')}。
-                剩余列表仅包含尚未确认接收的文件。
+                {t("Acceptance is unknown for these files. Check your shelf before selecting them again:")}{unknownFiles.join('、')}{t("The remaining list contains only files whose acceptance has not been confirmed.")}
               </p>
             )}
           </fieldset>
 
           <div className="flex shrink-0 justify-end gap-3 border-t border-[#e8eaed] px-6 py-4 sm:px-8">
             <Dialog.Close asChild>
-              <button type="button" disabled={isPending} className="tonal-action text-sm">取消</button>
+              <button type="button" disabled={isPending} className="tonal-action text-sm">{t("Cancel")}</button>
             </Dialog.Close>
             <button
               type="submit"
@@ -300,9 +301,9 @@ export function NovelImportModal({ onClose }: { onClose: () => void }) {
               className="primary-action text-sm"
             >
               {isPending ? (
-                <><Loader2 size={14} className="animate-spin" /> 提交中...</>
+                <><Loader2 size={14} className="animate-spin" /> {t("Submitting…")}</>
               ) : (
-                <><Upload size={14} /> {isBatch ? `导入 ${files.length} 本` : '开始导入'}</>
+                <><Upload size={14} /> {isBatch ? t("Import {p0} novels", { p0: files.length }) : t("Start import")}</>
               )}
             </button>
           </div>

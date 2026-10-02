@@ -88,3 +88,8 @@ test('advanced rules: generate, allocate, preview, and submit the pinned profile
     },
   });
 });
+
+// Exercise the retained Chinese UI without changing the application's English default.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('novelworld.ui.locale', 'zh-CN'));
+});

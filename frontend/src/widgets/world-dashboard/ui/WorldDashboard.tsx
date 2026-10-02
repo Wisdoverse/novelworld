@@ -1,6 +1,7 @@
+import { displayMessage, translate as t, UiMessageError, useLocale, type UiMessage } from '@/shared/lib/i18n';
 import { useEffect, useState } from 'react';
 import { BookOpen, Compass, Dices, GitBranch, History, Users } from 'lucide-react';
-import { isWorldTurnOutcomeUnknown, useSubmitWorldTurn } from '@/entities/narrative';
+import { isWorldTurnOutcomeUnknown, useSubmitWorldTurn, useWorldTurnConfirmation } from '@/entities/narrative';
 import { WorldActionForm, actionLabels } from '@/features/world-action';
 import { getApiErrorMessage } from '@/shared/api/client';
 import { effectiveWorldContext } from '@/shared/lib/worldSourceContext';
@@ -104,16 +105,16 @@ function storePendingRequest(userId: string, novelId: string, request: PendingRe
 
 function actionCheckSummary(check: ActionCheck) {
   const decision = check.adjudication?.decision;
-  if (decision === 'impossible') return '行动不可行 · 未进行骰子检定';
-  if (decision === 'automatic_success') return '无需检定 · 行动成功';
-  if (decision === 'pending') return '判断未完成';
+  if (decision === 'impossible') return t("Action impossible · No dice check");
+  if (decision === 'automatic_success') return t("No check needed · Action succeeded");
+  if (decision === 'pending') return t("Decision pending");
 
-  const formula = `${check.attribute_label}检定：D20 ${check.roll} ${check.modifier >= 0 ? '+' : '−'} ${Math.abs(check.modifier)} = ${check.total} / 难度 ${check.difficulty_class}`;
+  const formula = t("{p0} check: D20 {p1} {p2} {p3} = {p4} / DC {p5}", { p0: check.attribute_label, p1: check.roll, p2: check.modifier >= 0 ? '+' : '−', p3: Math.abs(check.modifier), p4: check.total, p5: check.difficulty_class });
   if (decision === 'easy_check' || decision === 'standard_check' || decision === 'hard_check') {
-    const difficulty = decision === 'easy_check' ? '低' : decision === 'hard_check' ? '高' : '标准';
-    return `${formula} · ${check.succeeded ? '成功' : '失败'} · 语义难度：${difficulty}`;
+    const difficulty = decision === 'easy_check' ? t("Low") : decision === 'hard_check' ? t("High") : t("Standard");
+    return t("{p0} · {p1} · Assessed difficulty: {p2}", { p0: formula, p1: check.succeeded ? t("Success") : t("Failure"), p2: difficulty });
   }
-  return `${formula} · ${check.succeeded ? '成功' : '失败'}${decision === 'template_fallback' ? ' · 沿用模板检定' : ''}`;
+  return `${formula} · ${check.succeeded ? t("Success") : t("Failure")}${decision === 'template_fallback' ? t(" · Using the template check") : ''}`;
 }
 
 function pendingRequestFromView(view: OpenWorldView): PendingRequest | null {
@@ -135,14 +136,14 @@ function pendingRequestFromView(view: OpenWorldView): PendingRequest | null {
 }
 
 const eventStatus = {
-  scheduled: '等待发生',
-  occurred: '如原著发生',
-  witnessed: '玩家见证',
-  assisted: '玩家协助',
-  obstructed: '玩家阻碍',
-  delayed: '被延迟',
-  redirected: '被改道',
-  prevented: '被阻止',
+  get scheduled() { return t("Scheduled"); },
+  get occurred() { return t("Occurred as in the original"); },
+  get witnessed() { return t("Witnessed by the player"); },
+  get assisted() { return t("Assisted by the player"); },
+  get obstructed() { return t("Obstructed by the player"); },
+  get delayed() { return t("Delayed"); },
+  get redirected() { return t("Redirected"); },
+  get prevented() { return t("Prevented"); },
 };
 
 export function WorldDashboard({
@@ -150,10 +151,11 @@ export function WorldDashboard({
   view,
   actionsDisabled = false,
   recoveryOnly = false,
-  actionsDisabledReason = '最新世界状态尚未恢复，暂时不能执行行动。请重新加载世界后再试。',
+  actionsDisabledReason = t("The latest world state has not been restored. Reload the world before taking an action."),
   onRefresh,
   onActionLockChange,
 }: WorldDashboardProps) {
+  const locale = useLocale();
   const turn = useSubmitWorldTurn(novelId);
   const storageKey = worldTurnPendingStorageKey(view.player.user_id, novelId);
   const serverPendingRequest = pendingRequestFromView(view);
@@ -168,6 +170,9 @@ export function WorldDashboard({
   // The server owns the unresolved authority slot. A stale request from
   // another tab can never overtake its active or committed pending turn.
   const pendingRequest = serverPendingRequest ?? restoredPendingRequest;
+  const confirmation = useWorldTurnConfirmation(
+    novelId, view.player.user_id, pendingRequest?.idempotencyKey, !turn.isPending,
+  );
   useEffect(() => {
     onActionLockChange?.(turn.isPending || Boolean(pendingRequest));
     return () => onActionLockChange?.(false);
@@ -176,18 +181,18 @@ export function WorldDashboard({
     entry.turn_id === pendingRequest?.idempotencyKey && entry.memory_projection_status === 'pending'
   ));
   const pendingReason = pendingEntry
-    ? `第 ${pendingEntry.turn_number} 回合的经过已保存，但角色记忆尚未同步完成，因此暂时不能发起下一回合。请点击“继续确认结果”。`
+    ? t("Turn {p0} is saved, but character memories are still syncing. The next turn is paused while the saved status is checked automatically.", { p0: pendingEntry.turn_number })
     : serverPendingRequest
-      ? '上一行动尚未完成，因此暂时不能发起下一回合。请点击“继续确认结果”恢复原行动。'
-      : '尚未确认这次行动的最终结果，因此暂时不能发起下一回合。请点击“继续确认结果”，避免重复行动。';
+      ? t("The previous action is unfinished. The next turn is paused while its status is checked automatically. Choose “Restore original action” to resume processing.")
+      : t("This action's final result is unconfirmed. The next turn is paused while its saved status is checked automatically, preventing duplicate actions.");
   const serverPendingAction = serverPendingRequest?.action;
   const serverPendingKey = serverPendingRequest?.idempotencyKey;
   const serverPendingSource = serverPendingRequest?.expectedSourceChapter;
   const serverPendingRevision = serverPendingRequest?.expectedTurnNumber;
-  const [errorState, setErrorState] = useState<{ novelId: string; message?: string }>(() => ({
+  const [errorState, setErrorState] = useState<{ novelId: string; message?: UiMessage }>(() => ({
     novelId,
   }));
-  const error = errorState.novelId === novelId ? errorState.message : undefined;
+  const error = errorState.novelId === novelId ? displayMessage(errorState.message) : undefined;
   const context = effectiveWorldContext(view.session);
   const location = context.locations.find(item => item.id === view.player.location_id);
   const activeThreads = Object.entries(view.world_state.state.threads ?? {})
@@ -209,12 +214,17 @@ export function WorldDashboard({
     setPendingState({ storageKey, request });
   };
 
-  const clearPendingRequest = () => {
-    removeWorldTurnPendingRequest(view.player.user_id, novelId);
-    setPendingState({ storageKey, request: null });
+  const clearPendingRequest = (turnId: string | undefined = pendingRequest?.idempotencyKey) => {
+    const stored = readStoredPendingRequest(view.player.user_id, novelId);
+    if (!stored || stored.idempotencyKey === turnId) {
+      removeWorldTurnPendingRequest(view.player.user_id, novelId);
+    }
+    setPendingState(current => current.storageKey === storageKey
+      && current.request?.idempotencyKey === turnId
+      ? { storageKey, request: null } : current);
   };
 
-  const setError = (message?: string) => setErrorState({ novelId, message });
+  const setError = (message?: UiMessage) => setErrorState({ novelId, message });
 
   useEffect(() => {
     if (!serverPendingAction || !serverPendingKey || serverPendingRevision === undefined) return;
@@ -242,12 +252,37 @@ export function WorldDashboard({
   ]);
 
   useEffect(() => {
+    const data = confirmation.data;
+    if (turn.isPending || confirmation.isFetching || confirmation.isError
+      || !pendingRequest || !data?.refreshedWorld
+      || data.confirmation.turn_id !== pendingRequest.idempotencyKey) return;
+    const fresh = data.refreshedWorld;
+    if (fresh.player.user_id !== view.player.user_id || fresh.player.novel_id !== novelId) return;
+    // Wait until the parent renders the fresh authority snapshot before the
+    // form can accept an action against its turn number and source context.
+    if (view.world_state.updated_at !== fresh.world_state.updated_at
+      || view.session.turn_number !== fresh.session.turn_number) return;
+    const authoritative = pendingRequestFromView(fresh);
+    if (authoritative) {
+      if (authoritative.idempotencyKey !== pendingRequest.idempotencyKey) {
+        rememberPendingRequest(authoritative);
+      }
+      return;
+    }
+    if (data.confirmation.status === 'completed'
+      && fresh.session.turn_number < pendingRequest.expectedTurnNumber + 1) return;
+    clearPendingRequest(pendingRequest.idempotencyKey);
+    setError(data.confirmation.status === 'failed'
+      ? { key: 'The action failed before it changed your world. You can choose a new action.' } : undefined);
+  }, [confirmation.data, confirmation.isFetching, confirmation.isError, pendingRequest?.idempotencyKey, storageKey, view, turn.isPending]);
+
+  useEffect(() => {
     if (pendingRequest && view.journal.some(entry => (
       entry.turn_id === pendingRequest.idempotencyKey
       && (entry.memory_projection_status === 'saved'
         || entry.memory_projection_status === 'skipped')
     ))) {
-      clearPendingRequest();
+      clearPendingRequest(pendingRequest.idempotencyKey);
       setError(undefined);
     }
   }, [pendingRequest, view.journal]);
@@ -263,12 +298,14 @@ export function WorldDashboard({
     setError(undefined);
     try {
       await turn.mutateAsync(request);
-      clearPendingRequest();
+      clearPendingRequest(request.idempotencyKey);
     } catch (requestError) {
       const outcomeUnknown = isWorldTurnOutcomeUnknown(requestError);
-      if (!outcomeUnknown) clearPendingRequest();
-      setError(getApiErrorMessage(requestError, outcomeUnknown && requestError instanceof Error
-        ? requestError.message : '世界行动提交失败'));
+      if (!outcomeUnknown) clearPendingRequest(request.idempotencyKey);
+      setError(requestError instanceof UiMessageError ? requestError.uiMessage
+        : getApiErrorMessage(requestError, '')
+          || (outcomeUnknown && requestError instanceof Error ? requestError.message : undefined)
+          || { key: "World action submission failed" });
       throw requestError;
     }
   };
@@ -287,41 +324,41 @@ export function WorldDashboard({
     >
       <div className="rounded-[22px] bg-[#203a35] px-5 py-7 text-[#f6f1e6] sm:px-8 sm:py-9">
         <div className="flex flex-wrap items-center gap-2 text-xs font-semibold tracking-[0.18em] text-[#d4e4c6]">
-          <Compass size={14} aria-hidden="true" /> 正在发生的故事
+          <Compass size={14} aria-hidden="true" /> {t("The story unfolding")}
           <span className="ml-auto rounded-full border border-white/25 px-3 py-1 tracking-normal text-[#f6f1e6]">
-            第 {view.session.turn_number} 回合
+            {t('Turn number: {p0}', { p0: view.session.turn_number })}
           </span>
         </div>
         <h2 id="living-world-title" tabIndex={-1} className="mt-5 scroll-mt-24 text-2xl font-semibold leading-tight sm:text-3xl">
-          {view.player.name} 的开放世界
+          {t("{p0}'s open world", { p0: view.player.name })}
         </h2>
         <p className="mt-3 text-sm text-[#d5e1d7]">
-          {location?.name ?? view.player.location_id ?? '地点未确认'} · 世界时间 {view.session.world_time} · 每次已提交回合推进 1 步
+          {location?.name ?? view.player.location_id ?? t("Location unconfirmed")} · {t('World time {p0} · Each committed turn advances one step', { p0: view.session.world_time })}
         </p>
         <p className="mt-2 text-sm text-[#d5e1d7]">
-          世界入场坐标 · 原著第 {view.session.entry_context.checkpoint_chapter} 章。当前世界已接入至第 {context.unlocked_through_chapter} 章。
+          {t('World entry · Original chapter {p0}. Current source: chapter {p1}.', { p0: view.session.entry_context.checkpoint_chapter, p1: context.unlocked_through_chapter })}
         </p>
         <div className="mt-7 border-t border-white/20 pt-6">
           {latestCheck ? (
-            <div role="status" aria-label="本回合行动结果" className="mb-5 rounded-xl border border-white/25 p-4 text-sm leading-6">
+            <div role="status" aria-label={t("This turn's action result")} className="mb-5 rounded-xl border border-white/25 p-4 text-sm leading-6">
               <p className="font-semibold">{actionCheckSummary(latestCheck)}</p>
               <p className="mt-1 text-[#d5e1d7]">
                 {latestCheck.adjudication?.decision === 'impossible'
-                  ? '该行动不可行，未进行骰子检定；请改选行动方式或目标。'
+                  ? t("This action is impossible, so no dice check was made. Choose another action or target.")
                   : latestCheck.adjudication?.decision === 'pending'
-                    ? '行动判断尚未完成，请查看下方行动区的确认状态。'
+                    ? t("The action decision is still pending. Check the confirmation status in the action section below.")
                     : latestCheck.adjudication?.decision !== 'automatic_success' && !latestCheck.succeeded
-                      ? '本次检定失败，未产生玩家行动效果；回合已结束，你仍可选择下一步行动。'
-                      : '本回合已完成，你可以选择下一步行动。'}
+                      ? t("The check failed and your action had no effect. The turn is complete; you can choose your next action.")
+                      : t("This turn is complete. You can choose your next action.")}
               </p>
             </div>
           ) : null}
-          <p id="latest-world-narrative" role="status" aria-live="polite" tabIndex={-1} className="mt-3 max-w-3xl whitespace-pre-wrap text-base leading-8 text-[#f6f1e6] [overflow-wrap:anywhere] sm:text-lg">
-            {latestNarrative ?? '世界已经就绪。选择一条场景建议，或自由输入你的行动，故事中的人物会按各自的处境作出回应。'}
+          <p id="latest-world-narrative" lang={latestNarrative ? 'zh-CN' : undefined} role="status" aria-live="polite" tabIndex={-1} className="mt-3 max-w-3xl whitespace-pre-wrap text-base leading-8 text-[#f6f1e6] [overflow-wrap:anywhere] sm:text-lg">
+            {latestNarrative ?? t("The world is ready. Choose a scene suggestion or enter your action. Characters will respond according to their circumstances.")}
           </p>
           <div className="mt-5 text-sm leading-6 text-[#d5e1d7]">
-            <p>选择一条场景建议，或自由输入你的行动；确认意图后点击“执行行动”，故事会继续推进。</p>
-            <a href="#world-action-form" className="mt-2 inline-block font-semibold text-[#f6f1e6] underline underline-offset-4">去选择行动</a>
+            <p>{t("Choose a scene suggestion or enter your action. Review your intent, then select “Execute action” to continue the story.")}</p>
+            <a href="#world-action-form" className="mt-2 inline-block font-semibold text-[#f6f1e6] underline underline-offset-4">{t("Choose an action")}</a>
           </div>
         </div>
       </div>
@@ -329,7 +366,7 @@ export function WorldDashboard({
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(220px,0.75fr)]">
         <div className="rounded-2xl border border-[#ded4bf] bg-white p-5">
           <h3 className="flex items-center gap-2 text-sm font-semibold text-[#203a35]">
-            <Users size={16} aria-hidden="true" /> 此刻同场的角色
+            <Users size={16} aria-hidden="true" /> {t("Characters here now")}
           </h3>
           {localCharacters.length ? (
             <ul className="mt-4 flex flex-wrap gap-2">
@@ -339,10 +376,10 @@ export function WorldDashboard({
                 </li>
               ))}
             </ul>
-          ) : <p className="mt-3 text-sm leading-6 text-[#59645f]">还没有能由本回合现场事件确认的角色。</p>}
+          ) : <p className="mt-3 text-sm leading-6 text-[#59645f]">{t("No characters have been confirmed here by this turn's recorded events.")}</p>}
         </div>
         <div className="rounded-2xl border border-[#ded4bf] bg-white p-5">
-          <h3 className="text-sm font-semibold text-[#203a35]">角色正在做什么</h3>
+          <h3 className="text-sm font-semibold text-[#203a35]">{t("What characters are doing")}</h3>
           {localCharacterEvents.length ? (
             <ul className="mt-3 space-y-3 text-sm leading-6 text-[#3d4842]">
               {localCharacterEvents.map((event, index) => (
@@ -350,35 +387,43 @@ export function WorldDashboard({
                   <span className="font-semibold">{event.actor_character_ids
                     .filter(id => localCharacterIds.has(id))
                     .map(id => context.characters.find(character => character.id === id)?.name)
-                    .join('、')}：</span>{event.summary}
+                    .join(locale === 'zh-CN' ? '、' : ', ')}{locale === 'zh-CN' ? '：' : ': '}</span>{event.summary}
                 </li>
               ))}
             </ul>
-          ) : <p className="mt-3 text-sm leading-6 text-[#59645f]">本回合没有已记录的同场角色动作。</p>}
+          ) : <p className="mt-3 text-sm leading-6 text-[#59645f]">{t("No actions by nearby characters were recorded this turn.")}</p>}
         </div>
       </div>
 
       <div className="rounded-2xl border border-[#d8c8a9] bg-white p-5 sm:p-6">
-        <h3 id="world-action-form" tabIndex={-1} className="scroll-mt-24 text-lg font-semibold text-[#203a35]">你接下来做什么？</h3>
-        <p className="mb-5 mt-1 text-sm text-[#59645f]">选择一条场景建议，或自由输入。建议只会填入草稿，确认后再执行；人物建议仅来自已确认同场的角色。</p>
+        <h3 id="world-action-form" tabIndex={-1} className="scroll-mt-24 text-lg font-semibold text-[#203a35]">{t("What will you do next?")}</h3>
+        <p className="mb-5 mt-1 text-sm text-[#59645f]">{t("Choose a scene suggestion or write your own. Suggestions only fill your draft; review it before executing. Character suggestions use confirmed nearby characters.")}</p>
         {actionsDisabled ? (
           <div role="alert" className="mb-4 text-sm text-[#b3261e]">
             {actionsDisabledReason}
-            {onRefresh ? <button type="button" className="ml-2 underline" onClick={onRefresh}>重试</button> : null}
+            {onRefresh ? <button type="button" className="ml-2 underline" onClick={onRefresh}>{t("Retry")}</button> : null}
           </div>
         ) : null}
-        {recoveryOnly ? <p role="status" className="mb-3 text-sm text-[#59645f]">下一幕接入尚未确认，只能继续确认已经提交的原行动；新的行动仍已暂停。</p> : null}
-        <p role="status" aria-label="世界行动状态" className="text-sm text-[#59645f]">
-          {turn.isPending ? '正在确认世界行动，完成后才会开放下一回合；请等待本次结果。' : ''}
+        {recoveryOnly ? <p role="status" className="mb-3 text-sm text-[#59645f]">{t("The next scene is unconfirmed. Only the original submitted action can be recovered; new actions remain paused.")}</p> : null}
+        <p role="status" aria-label={t("World action status")} className="text-sm text-[#59645f]">
+          {turn.isPending ? t("Confirming the world action. The next turn will open when it finishes. Wait for this result.") : ''}
         </p>
         {!turn.isPending && (error || pendingRequest) ? (
           <div role="alert" className="mt-4 text-sm text-[#b3261e]">
             {error ? `${error} ` : ''}{pendingRequest
               ? pendingReason
-              : '请求已被明确拒绝；请根据最新世界状态修改行动后重试。'}
+              : t("The request was explicitly rejected. Update your action using the latest world state and try again.")}
             {pendingRequest ? (
-              <button className="ml-2 underline" disabled={turn.isPending || actionsDisabled} onClick={() => void run(pendingRequest).catch(() => undefined)}>
-                继续确认结果
+              <button className="ml-2 underline" disabled={confirmation.isFetching} onClick={() => void confirmation.refetch()}>
+                {t("Check result")}
+              </button>
+            ) : null}
+            {pendingRequest && confirmation.data?.confirmation.status !== 'failed'
+              && !(confirmation.data?.confirmation.status === 'completed'
+                && confirmation.data.confirmation.memory_projection_status !== 'pending') ? (
+              <button className="ml-2 underline" disabled={turn.isPending || actionsDisabled || confirmation.isFetching}
+                onClick={() => void run(pendingRequest).catch(() => undefined)}>
+                {t("Restore original action")}
               </button>
             ) : null}
           </div>
@@ -396,7 +441,7 @@ export function WorldDashboard({
         {view.session.game_rules && view.player.rules?.mode === 'advanced' ? (
           <div className="rounded-xl border border-[#d2e3fc] bg-[#f8faff] p-4 md:col-span-2">
             <h3 className="flex items-center gap-2 text-sm font-semibold text-[#0b57d0]">
-              <Dices size={14} /> 小说属性
+              <Dices size={14} /> {t("Novel attributes")}
             </h3>
             <dl className="mt-3 grid gap-2 sm:grid-cols-3">
               {view.session.game_rules.attributes.map(attribute => (
@@ -417,19 +462,19 @@ export function WorldDashboard({
         ) : null}
         <div className="rounded-xl border border-[#d2e3fc] bg-[#f8faff] p-4">
           <h3 className="flex items-center gap-2 text-sm font-semibold text-[#0b57d0]">
-            <GitBranch size={14} /> 活跃事件线
+            <GitBranch size={14} /> {t("Active threads")}
           </h3>
           {activeThreads.length ? (
             <ul className="mt-3 space-y-2 text-sm text-[#3c4043]">
               {activeThreads.map(([id, thread]) => (
-                <li key={id}>{thread.description} <span className="text-xs text-[#5f6368]">· {thread.origin === 'canon' ? '原著主线' : thread.origin === 'player' ? '玩家创造' : '来源未确认'}</span></li>
+                <li key={id}>{thread.description} <span className="text-xs text-[#5f6368]">· {thread.origin === 'canon' ? t("Original storyline") : thread.origin === 'player' ? t("Created by the player") : t("Source unconfirmed")}</span></li>
               ))}
             </ul>
-          ) : <p className="mt-3 text-sm text-[#5f6368]">暂无活跃事件线</p>}
+          ) : <p className="mt-3 text-sm text-[#5f6368]">{t("No active threads")}</p>}
         </div>
         <div className="rounded-xl border border-[#d2e3fc] bg-[#f8faff] p-4">
           <h3 className="flex items-center gap-2 text-sm font-semibold text-[#0b57d0]">
-            <Users size={14} /> 角色关系
+            <Users size={14} /> {t("Character relationships")}
           </h3>
           {Object.keys(view.player.relationships).length ? (
             <ul className="mt-3 space-y-2 text-sm text-[#3c4043]">
@@ -439,35 +484,35 @@ export function WorldDashboard({
                 </li>
               ))}
             </ul>
-          ) : <p className="mt-3 text-sm text-[#5f6368]">尚未建立关系</p>}
+          ) : <p className="mt-3 text-sm text-[#5f6368]">{t("No relationships yet")}</p>}
         </div>
       </div>
 
       <div>
         <h3 className="flex items-center gap-2 text-sm font-semibold text-[#1f1f1f]">
-          <BookOpen size={14} /> 原著事件时间线
+          <BookOpen size={14} /> {t("Original event timeline")}
         </h3>
         {view.session.canonical_events.length ? (
           <>
-            <p className="mt-2 text-xs text-[#5f6368]">事件由模型从原著中抽取，可能存在遗漏或误读，请结合来源章节核对。</p>
+            <p className="mt-2 text-xs text-[#5f6368]">{t("Events are extracted from the original by a model and may be incomplete or misread. Check their source chapters.")}</p>
             <ol className="mt-3 space-y-3">
               {view.session.canonical_events.map(event => (
                 <li key={event.id} className="rounded-lg border border-[#e1e3e8] bg-white p-3 text-sm text-[#3c4043]">
-                  <span className="mr-2 text-xs font-semibold text-[#0b57d0]">原著抽取</span>
+                  <span className="mr-2 text-xs font-semibold text-[#0b57d0]">{t("Extracted from the original")}</span>
                   {event.summary}
                   <div className="mt-1 text-xs text-[#5f6368]">
-                    {eventStatus[event.status]}{event.advanced_at_world_time != null ? ` · 世界时间 ${event.advanced_at_world_time}` : ''} · 来源章节 {event.source_chapters.join('、')}{event.reason ? ` · ${event.reason}` : ''}
+                    {eventStatus[event.status]}{event.advanced_at_world_time != null ? t(" · World time {p0}", { p0: event.advanced_at_world_time }) : ''}{t(' · Source chapters {p0}', { p0: event.source_chapters.join(locale === 'zh-CN' ? '、' : ', ') })}{event.reason ? ` · ${event.reason}` : ''}
                   </div>
                 </li>
               ))}
             </ol>
           </>
-        ) : <p className="mt-3 text-sm text-[#5f6368]">当前解锁范围内没有待运行的原著事件。</p>}
+        ) : <p className="mt-3 text-sm text-[#5f6368]">{t("No original events remain in the current unlocked range.")}</p>}
       </div>
 
       <div>
         <h3 id="world-action-journal" tabIndex={-1} className="flex scroll-mt-24 items-center gap-2 text-sm font-semibold text-[#1f1f1f]">
-          <History size={14} /> 旅程时间线
+          <History size={14} /> {t("Journey timeline")}
         </h3>
         <div role="log" aria-labelledby="world-action-journal" aria-relevant="additions">
         {choices.length || view.journal.length ? (
@@ -477,30 +522,30 @@ export function WorldDashboard({
                 key={choice.node_id ?? `choice-${choice.chapter}-${index}`}
                 className="rounded-lg border border-[#d2e3fc] bg-[#f8faff] p-3 text-sm text-[#3c4043]"
               >
-                <span className="mr-2 text-xs font-semibold text-[#0b57d0]">原著坐标 · 第 {choice.chapter} 章</span>
-                <span className="mr-2 text-xs font-semibold text-[#0d652d]">读者选择</span>
+                <span className="mr-2 text-xs font-semibold text-[#0b57d0]">{t('Original position · Chapter {p0}', { p0: choice.chapter })}</span>
+                <span className="mr-2 text-xs font-semibold text-[#0d652d]">{t("Reader choice")}</span>
                 <span className="whitespace-pre-wrap [overflow-wrap:anywhere]">{choice.choice}</span>
                 <div className="mt-1 text-xs text-[#5f6368]">
-                  <span className="mr-2 font-semibold text-[#0b57d0]">生成投影</span>
-                  <span className="whitespace-pre-wrap [overflow-wrap:anywhere]">{choice.consequence}</span>
+                  <span className="mr-2 font-semibold text-[#0b57d0]">{t("Generated projection")}</span>
+                  <span lang="zh-CN" className="whitespace-pre-wrap [overflow-wrap:anywhere]">{choice.consequence}</span>
                 </div>
                 {choice.timestamp ? (
                   <time dateTime={choice.timestamp} className="mt-1 block text-xs text-[#5f6368]">
-                    {choice.timestamp}
+                    {new Date(choice.timestamp).toLocaleString(locale)}
                   </time>
                 ) : null}
               </li>
             ))}
             {view.journal.map(entry => (
               <li key={entry.turn_id} className="rounded-lg border border-[#d2e3fc] bg-[#f8faff] p-3 text-sm text-[#3c4043]">
-                <span className="mr-2 text-xs font-semibold text-[#0b57d0]">回合 {entry.turn_number}</span>
-                <span className="mr-2 text-xs font-semibold text-[#0d652d]">读者行动</span>
+                <span className="mr-2 text-xs font-semibold text-[#0b57d0]">{t('Turn {p0}', { p0: entry.turn_number })}</span>
+                <span className="mr-2 text-xs font-semibold text-[#0d652d]">{t("Reader action")}</span>
                 <span className="whitespace-pre-wrap [overflow-wrap:anywhere]">
-                  {actionLabels[entry.action.kind]}：{entry.action.intent}
+                  {t('{p0}: {p1}', { p0: actionLabels[entry.action.kind], p1: entry.action.intent })}
                 </span>
                 {entry.turn_id === latestTurn?.turn_id ? (
                   <a href="#latest-world-narrative" className="ml-2 text-xs font-medium text-[#0b57d0] underline underline-offset-2">
-                    查看本回合完整叙事
+                    {t("Read this turn's full narrative")}
                   </a>
                 ) : null}
                 {entry.resolution ? (
@@ -528,18 +573,18 @@ export function WorldDashboard({
                   </ul>
                 ) : null}
                 {entry.turn_id !== latestTurn?.turn_id ? <div className="mt-1 text-xs text-[#5f6368]">
-                  <span className="mr-2 font-semibold text-[#0b57d0]">生成投影</span>
-                  <span className="whitespace-pre-wrap [overflow-wrap:anywhere]">
+                  <span className="mr-2 font-semibold text-[#0b57d0]">{t("Generated projection")}</span>
+                  <span lang="zh-CN" className="whitespace-pre-wrap [overflow-wrap:anywhere]">
                     {entry.transition.rendered_narrative}
                   </span>
                 </div> : null}
                 <time dateTime={entry.completed_at} className="mt-1 block text-xs text-[#5f6368]">
-                  {entry.completed_at}
+                  {new Date(entry.completed_at).toLocaleString(locale)}
                 </time>
               </li>
             ))}
           </ol>
-        ) : <p className="mt-3 text-sm text-[#5f6368]">你的第一个选择或行动将记录在这里。</p>}
+        ) : <p className="mt-3 text-sm text-[#5f6368]">{t("Your first choice or action will be recorded here.")}</p>}
         </div>
       </div>
 

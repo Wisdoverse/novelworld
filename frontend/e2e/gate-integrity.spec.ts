@@ -84,3 +84,8 @@ test('gate integrity: clipped left content and obscured focus are detected', asy
   await expect(tabTo(page, page.getByRole('button', { name: 'Target', exact: true })))
     .rejects.toThrow('focus outside viewport or obscured: Covered stop');
 });
+
+// Exercise the retained Chinese UI without changing the application's English default.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('novelworld.ui.locale', 'zh-CN'));
+});

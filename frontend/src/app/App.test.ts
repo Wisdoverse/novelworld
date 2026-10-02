@@ -1,3 +1,5 @@
+import { beforeEach as beforeLocaleTest } from 'vitest';
+import { setLocale } from '@/shared/lib/i18n';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -258,3 +260,6 @@ describe('setup status', () => {
     request.mockRestore();
   }, 15_000);
 });
+
+// Retain Chinese journey assertions; English defaults have separate coverage.
+beforeLocaleTest(() => setLocale('zh-CN'));

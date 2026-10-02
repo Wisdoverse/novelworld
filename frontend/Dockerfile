@@ -1,4 +1,4 @@
-# ─── 构建阶段 ─────────────────────────────────────────────────────────────
+# ─── Build stage ────────────────────────────────────────────────────────────
 FROM node:26-alpine@sha256:2d984a15c9b54fd0aeb608b8e0d0d83529eb34d2966db27a1fb4f1edc3d298a3 AS builder
 
 ARG VITE_API_URL=/api
@@ -11,7 +11,7 @@ RUN npm install -g pnpm@11.24.0 && pnpm install --frozen-lockfile
 COPY . .
 RUN pnpm build
 
-# ─── 运行阶段（Nginx 静态服务）────────────────────────────────────────────
+# ─── Runtime stage (Nginx static server) ────────────────────────────────────
 FROM nginx:alpine@sha256:db35bfc6b2951e7f8a72db5db120288c127ffaeeb4a6d4b95a26fead017d5913 AS runtime
 
 RUN apk add --no-cache --upgrade curl=8.22.0-r0 libcurl=8.22.0-r0 libcrypto3=3.5.9-r0 libssl3=3.5.9-r0 libuuid=2.42.3-r1 libexpat=2.8.5-r0
