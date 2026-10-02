@@ -198,9 +198,34 @@ pub struct RecoverableWorldTurn {
     pub expected_source_chapter: Option<i32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorldTurnStatus {
+    InProgress,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorldTurnConfirmation {
+    pub turn_id: Uuid,
+    pub status: WorldTurnStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_projection_status: Option<MemoryProjectionStatus>,
+    #[serde(skip)]
+    pub source_chapter_high_water: Option<i32>,
+}
+
 #[async_trait]
 pub trait WorldTurnRepository: Send + Sync {
     async fn begin_turn(&self, claim: &WorldTurnClaim) -> Result<BeginWorldTurn>;
+    /// Read exact owner-scoped authority without reclaiming or dispatching a turn.
+    async fn confirm_turn(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+        turn_id: Uuid,
+    ) -> Result<Option<WorldTurnConfirmation>>;
     /// Freeze a pending decision under the exact live attempt and old resolution.
     async fn settle_adjudication(
         &self,

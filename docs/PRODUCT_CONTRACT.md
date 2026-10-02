@@ -154,6 +154,17 @@ Advanced attributes may change by a bounded amount when linked to a player
 event, and later checks use the committed score. The reader shows the complete
 latest narrative once, with a journal link back to it.
 
+An ambiguous world-action response keeps the original user/novel-scoped key.
+The reader automatically confirms that exact key through the read-only
+`GET /narrative/{novel_id}/world/turns/{turn_id}` endpoint. It returns only owned
+status metadata with a five-second deadline and private, no-store caching.
+Durable failure releases the lock only after the fresh world is visible;
+completed turns also require a terminal memory projection and the committed
+revision. Missing records, read errors, active turns, and pending projections
+keep the key. Confirmation never reserves a turn or calls a provider. A separate
+explicit same-key resume preserves recovery for crashed or unreserved actions
+and remains subject to mutation/progress locks.
+
 For H4, server-authoritative checks are the ones the runtime can execute:
 identity/ownership, membership of supported targets, death,
 location/thread availability, source-progress bounds, state revision, turn

@@ -36,7 +36,7 @@ use narrative_service::domain::{
     repositories::{
         BeginWorldTurn, CharacterContextSnapshotRepository, ChoiceCommit, MemoryProjectionStatus,
         NarrativeNodeRepository, UserChoiceRepository, WorldStateRepository, WorldTurnClaim,
-        WorldTurnRepository,
+        WorldTurnRepository, WorldTurnStatus,
     },
     services::narrative_transition::{
         NarrativeTransition, RelationshipChange, TransitionEvent, TRANSITION_PROMPT_VERSION,
@@ -6741,6 +6741,159 @@ async fn chat_world_turn_commit_during_provider_generation_is_revision_fenced() 
         .execute(&pool)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn world_turn_confirmation_is_scoped_read_only_and_tracks_reclaims() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (user_id, novel_id, _) = seed_world_turn(&pool).await;
+    let (other_user_id, other_novel_id, _) = seed_world_turn(&pool).await;
+    let repo = PgWorldTurnRepository::new(pool.clone());
+    let claim = world_turn_claim(user_id, novel_id);
+    let attempt = world_turn_acquire(&repo, &claim).await;
+    let snapshot = || {
+        sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT jsonb_build_object('turn',to_jsonb(t),'world',to_jsonb(w)) \
+             FROM world_turns t JOIN world_states w \
+             ON w.user_id=t.user_id AND w.novel_id=t.novel_id WHERE t.id=$1",
+        )
+        .bind(claim.id)
+        .fetch_one(&pool)
+    };
+    let before = snapshot().await.unwrap();
+    let confirmation = repo
+        .confirm_turn(user_id, novel_id, claim.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(confirmation.status, WorldTurnStatus::InProgress);
+    assert_eq!(confirmation.memory_projection_status, None);
+    assert_eq!(confirmation.source_chapter_high_water, Some(2));
+    for (owner, novel, turn) in [
+        (other_user_id, novel_id, claim.id),
+        (user_id, other_novel_id, claim.id),
+        (other_user_id, other_novel_id, claim.id),
+        (user_id, novel_id, Uuid::new_v4()),
+    ] {
+        assert!(repo
+            .confirm_turn(owner, novel, turn)
+            .await
+            .unwrap()
+            .is_none());
+    }
+    assert_eq!(snapshot().await.unwrap(), before);
+
+    assert!(repo
+        .fail_turn(claim.id, attempt, "invalid_transition")
+        .await
+        .unwrap());
+    let failed = snapshot().await.unwrap();
+    for _ in 0..2 {
+        let confirmation = repo
+            .confirm_turn(user_id, novel_id, claim.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(confirmation.status, WorldTurnStatus::Failed);
+        assert_eq!(confirmation.memory_projection_status, None);
+        assert_eq!(
+            serde_json::to_value(confirmation).unwrap(),
+            serde_json::json!({ "turn_id": claim.id, "status": "failed" })
+        );
+    }
+    assert_eq!(snapshot().await.unwrap(), failed);
+    assert_eq!(world_turn_acquire(&repo, &claim).await, attempt + 1);
+    let reclaimed = snapshot().await.unwrap();
+    assert_eq!(
+        repo.confirm_turn(user_id, novel_id, claim.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        WorldTurnStatus::InProgress
+    );
+    assert_eq!(snapshot().await.unwrap(), reclaimed);
+
+    sqlx::query("DELETE FROM users WHERE id = ANY($1)")
+        .bind(vec![user_id, other_user_id])
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn world_turn_confirmation_reads_projection_states_without_returning_content() {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let scan_guard = pending_projection_scan_guard(&pool).await;
+    let repo = PgWorldTurnRepository::new(pool.clone());
+    for terminal in [
+        MemoryProjectionStatus::Saved,
+        MemoryProjectionStatus::Skipped,
+    ] {
+        let (user_id, novel_id, context) = seed_world_turn(&pool).await;
+        let claim = world_turn_claim(user_id, novel_id);
+        let attempt = world_turn_acquire(&repo, &claim).await;
+        repo.complete_turn(&claim, attempt, &world_turn_transition(), &context)
+            .await
+            .unwrap();
+        let snapshot = || {
+            sqlx::query_scalar::<_, serde_json::Value>(
+                "SELECT jsonb_build_object('turn',to_jsonb(t),'world',to_jsonb(w)) \
+                 FROM world_turns t JOIN world_states w \
+                 ON w.user_id=t.user_id AND w.novel_id=t.novel_id WHERE t.id=$1",
+            )
+            .bind(claim.id)
+            .fetch_one(&pool)
+        };
+        let before = snapshot().await.unwrap();
+        let pending = repo
+            .confirm_turn(user_id, novel_id, claim.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.status, WorldTurnStatus::Completed);
+        assert_eq!(
+            pending.memory_projection_status,
+            Some(MemoryProjectionStatus::Pending)
+        );
+        assert_eq!(snapshot().await.unwrap(), before);
+
+        assert!(repo
+            .finish_memory_projection(claim.id, user_id, novel_id, terminal)
+            .await
+            .unwrap());
+        let finished = snapshot().await.unwrap();
+        let confirmation = repo
+            .confirm_turn(user_id, novel_id, claim.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(confirmation.status, WorldTurnStatus::Completed);
+        assert_eq!(confirmation.memory_projection_status, Some(terminal));
+        assert_eq!(
+            serde_json::to_value(confirmation).unwrap(),
+            serde_json::json!({
+                "turn_id": claim.id,
+                "status": "completed",
+                "memory_projection_status": terminal,
+            })
+        );
+        assert_eq!(snapshot().await.unwrap(), finished);
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    scan_guard.rollback().await.unwrap();
 }
 
 #[tokio::test]
