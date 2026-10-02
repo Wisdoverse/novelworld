@@ -11,11 +11,6 @@ pipeline {
         buildDiscarder(logRotator(numToKeepStr: '20'))
     }
 
-    parameters {
-        booleanParam(name: 'DEPLOY_SERVER', defaultValue: false,
-            description: 'Deploy the built images and restart the private server. Requires a maintenance window and a preconfigured .env.')
-    }
-
     environment {
         // The same project must own the data volumes on every run.
         COMPOSE_PROJECT_NAME = 'novelworld'
@@ -53,9 +48,6 @@ docker compose --env-file .env.example build \
         }
 
         stage('Deploy server') {
-            when {
-                expression { params.DEPLOY_SERVER }
-            }
             steps {
                 sh '''#!/usr/bin/env bash
 set -euo pipefail
@@ -64,7 +56,7 @@ set -euo pipefail
     exit 1
 }
 [[ -f .env ]] || {
-    printf 'Preconfigure the persistent server .env as described in DEPLOY.md before enabling deployment.\n' >&2
+    printf 'Preconfigure the persistent server .env as described in DEPLOY.md before the first build.\n' >&2
     exit 1
 }
 # Keep stdin closed so incomplete database setup fails instead of prompting.
