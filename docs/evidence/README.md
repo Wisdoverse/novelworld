@@ -29,3 +29,8 @@ The independent local review and checks covered the v1/Laya implementation,
 not v2 templates or migration 0030. V2 requires its own runtime and required-CI
 evidence. No live-provider or deployment result is asserted by that review; the
 separate evidence owner is [issue #418](https://github.com/Wisdoverse/novelworld/issues/418).
+
+The [failed-action confirmation screenshot](./failed-action-confirmation.png)
+uses a synthetic rejected generation to show automatic status confirmation and
+unlocking without a second submission. It is browser presentation evidence,
+not live provider or deployment evidence.

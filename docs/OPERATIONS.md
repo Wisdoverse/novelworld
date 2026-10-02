@@ -150,6 +150,17 @@ advanced scores may have evolved. Do not strip fields, rewrite scores, or
 relabel transitions. Restore service by forward-deploying a compatible release;
 there is no down migration, and the immutable template format does not change.
 
+### Ambiguous world-action responses
+
+The reader polls the original turn key with a read-only confirmation request.
+A durably failed row unlocks only after the latest world refresh succeeds;
+unknown, active, and committed-pending outcomes retain the original key.
+Confirmation must not be retried as a generation request. Use the separate
+explicit resume only when the original action still needs processing.
+Narrative transition rejections log `failure_code=invalid_transition` with a
+static `rejection_class` (`json` or `semantic`). These categories do not record
+model text or establish the historical failure's exact cause.
+
 ## Ownership and escalation
 
 The private self-hosted profile has a single operator (the deployment owner,
