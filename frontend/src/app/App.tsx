@@ -1,3 +1,4 @@
+import { translate as t, useLocale } from '@/shared/lib/i18n';
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef } from 'react';
 import { BrowserRouter, HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClientProvider } from '@tanstack/react-query';
@@ -11,6 +12,7 @@ import { useChatStore } from '@/features/character-chat';
 import { clearPrivateQueryCache, queryClient } from '@/shared/api/queryClient';
 import { isDesktopClient } from '@/shared/config/runtime';
 import { useReducedMotionPreference } from '@/shared/lib/reducedMotion';
+import { LanguageSwitcher } from '@/shared/ui/LanguageSwitcher';
 
 const HomePage = lazy(() => import('@/pages/home'));
 const LoginPage = lazy(() => import('@/pages/login'));
@@ -21,12 +23,13 @@ const SetupPage = lazy(() => import('@/pages/setup'));
 const SettingsPage = lazy(() => import('@/pages/settings'));
 
 function AppLoadingScreen() {
+  useLocale();
   return (
     <div className="app-surface flex min-h-screen items-center justify-center">
       <div className="text-center">
         <div className="w-8 h-8 border-2 border-t-transparent rounded-full animate-spin mx-auto mb-4"
              style={{ borderColor: '#0b57d0', borderTopColor: 'transparent' }} />
-        <p className="text-sm text-[#5f6368]">正在加载…</p>
+        <p className="text-sm text-[#5f6368]">{t("Loading…")}</p>
       </div>
     </div>
   );
@@ -54,6 +57,7 @@ export function handleAuthTokenStorageChange(
 }
 
 function AppRouteContent() {
+  useLocale();
   const { user, fetchMe, logout, authStatus } = useAuthStore();
   const previousPrincipal = useRef<string | null>(null);
   const setupStatus = useSetupStatus();
@@ -83,14 +87,14 @@ function AppRouteContent() {
       <div className="app-surface flex min-h-screen items-center justify-center px-4">
         <div role="alert" className="surface-card max-w-md p-8 text-center text-[#5f6368]">
           <h1 className="mb-2 text-lg font-semibold text-[#1f1f1f]">
-            无法检查服务配置
+            {t("Cannot check service configuration")}
           </h1>
-          <p className="mb-5 text-sm leading-6">NovelWorld 暂时无法连接到配置服务，请检查服务状态后重试。</p>
+          <p className="mb-5 text-sm leading-6">{t("NovelWorld cannot reach the configuration service. Check the service status and try again.")}</p>
           <button
             onClick={() => { void setupStatus.refetch(); }}
             className="primary-action"
           >
-            重试
+            {t("Retry")}
           </button>
         </div>
       </div>
@@ -110,10 +114,10 @@ function AppRouteContent() {
       <div className="app-surface flex min-h-screen items-center justify-center px-4">
         <div role="alert" className="surface-card max-w-md p-8 text-center text-[#5f6368]">
           <h1 className="mb-2 text-lg font-semibold text-[#1f1f1f]">
-            暂时无法确认登录状态
+            {t("Cannot verify your session right now")}
           </h1>
           <p className="mb-5 text-sm leading-6">
-            会话信息已保留。请检查网络或服务状态后重试。
+            {t("Your session has been retained. Check your connection or service status and try again.")}
           </p>
           <div className="flex justify-center gap-3">
             <button
@@ -121,14 +125,14 @@ function AppRouteContent() {
               onClick={() => { void logout(); }}
               className="tonal-action"
             >
-              退出登录
+              {t("Sign out")}
             </button>
             <button
               type="button"
               onClick={() => { void fetchMe(); }}
               className="primary-action"
             >
-              重试
+              {t("Retry")}
             </button>
           </div>
         </div>
@@ -152,6 +156,7 @@ function AppRouteContent() {
 }
 
 export function AppRoutes() {
+  useLocale();
   return (
     <Suspense fallback={<AppLoadingScreen />}>
       <AppRouteContent />
@@ -160,8 +165,16 @@ export function AppRoutes() {
 }
 
 export function App() {
+  const locale = useLocale();
   const reducedMotion = useReducedMotionPreference();
   const Router = isDesktopClient ? HashRouter : BrowserRouter;
+  useLayoutEffect(() => {
+    document.documentElement.lang = locale;
+    document.title = t('NovelWorld — Enter a novel world');
+    document.querySelector('meta[name="description"]')?.setAttribute(
+      'content', t('Import novels, meet their characters and shape your own story.'),
+    );
+  }, [locale]);
   useEffect(() => {
     const handleStorage = (event: StorageEvent) => {
       handleAuthTokenStorageChange(event);
@@ -172,10 +185,14 @@ export function App() {
   return (
     <MotionConfig reducedMotion="user" skipAnimations={Boolean(reducedMotion)}>
     <QueryClientProvider client={queryClient}>
+      <div className="flex justify-end border-b border-[#e8eaed] bg-white px-4 py-2 sm:px-6">
+        <LanguageSwitcher />
+      </div>
       <Router>
         <AppRoutes />
       </Router>
       <Toaster
+        containerAriaLabel={t('Notifications')}
         position="bottom-right"
         toastOptions={{
           style: {

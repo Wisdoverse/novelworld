@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// 章节实体
+/// Chapter entity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Chapter {
     pub id: Uuid,
@@ -11,7 +11,7 @@ pub struct Chapter {
     pub title: Option<String>,
     pub content: String,
     pub summary: Option<String>,
-    /// 是否为关键分支节点（借鉴 CharMem 防剧透 RAG）
+    /// Whether this is a key branch node, following CharMem's spoiler-safe RAG approach.
     pub is_key_node: bool,
     pub key_node_description: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -46,7 +46,7 @@ impl Chapter {
         self.key_node_description = Some(description);
     }
 
-    /// 字数统计
+    /// Character count.
     pub fn word_count(&self) -> usize {
         self.content.chars().count()
     }

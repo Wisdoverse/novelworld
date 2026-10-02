@@ -1,3 +1,4 @@
+import { translate as t, useLocale } from '@/shared/lib/i18n';
 import { useMutation } from '@tanstack/react-query';
 import { type FormEvent, useState } from 'react';
 import { AlertCircle, BookOpen, Loader2, UserRound } from 'lucide-react';
@@ -12,6 +13,7 @@ type SetupResponse = {
 };
 
 export function SetupPage({ onComplete }: { onComplete: () => void }) {
+  useLocale();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
@@ -48,12 +50,12 @@ export function SetupPage({ onComplete }: { onComplete: () => void }) {
             </div>
 
             <div className="mt-8 lg:mt-16">
-              <p className="mb-3 text-sm font-medium text-[#0b57d0]">首次设置</p>
+              <p className="mb-3 text-sm font-medium text-[#0b57d0]">{t("First-time setup")}</p>
               <h1 className="max-w-md text-[2rem] font-medium leading-tight tracking-[-0.025em] text-[#1f1f1f] sm:text-[2.5rem]">
-                欢迎使用 NovelWorld
+                {t("Welcome to NovelWorld")}
               </h1>
               <p className="mt-3 max-w-sm text-base leading-7 text-[#5f6368] sm:mt-5">
-                先创建唯一的管理员账户。AI 模型可以登录后在设置中安全配置。
+                {t("Create the only administrator account first. Configure AI models securely in settings after signing in.")}
               </p>
             </div>
           </aside>
@@ -63,42 +65,42 @@ export function SetupPage({ onComplete }: { onComplete: () => void }) {
               <header>
                 <div className="flex items-center gap-2 text-sm font-medium text-[#0b57d0]">
                   <UserRound size={20} aria-hidden="true" />
-                  <span>管理员账户</span>
+                  <span>{t("Administrator account")}</span>
                 </div>
                 <h2 className="mt-4 text-2xl font-medium tracking-[-0.015em] text-[#1f1f1f] sm:text-[1.75rem]">
-                  创建管理员账户
+                  {t("Create administrator account")}
                 </h2>
                 <p className="mt-2 max-w-lg text-sm leading-6 text-[#5f6368]">
-                  这个账户用于管理书库、模型与服务设置。
+                  {t("This account manages the library, models and service settings.")}
                 </p>
               </header>
 
               <div className="mt-7 space-y-5">
                 <label className="block text-sm font-medium text-[#3c4043]">
-                  昵称（可选）
-                  <input value={name} onChange={event => setName(event.target.value)} maxLength={200} autoComplete="name" placeholder="如何称呼你" className={inputClassName} />
+                  {t("Display name (optional)")}
+                  <input value={name} onChange={event => setName(event.target.value)} maxLength={200} autoComplete="name" placeholder={t("What should we call you?")} className={inputClassName} />
                 </label>
                 <label className="block text-sm font-medium text-[#3c4043]">
-                  邮箱
+                  {t("Email")}
                   <input type="email" value={email} onChange={event => setEmail(event.target.value)} maxLength={320} autoComplete="email" required placeholder="name@example.com" className={inputClassName} />
                 </label>
                 <label className="block text-sm font-medium text-[#3c4043]">
-                  密码（至少 8 位）
-                  <input type="password" value={password} onChange={event => setPassword(event.target.value)} minLength={8} autoComplete="new-password" required placeholder="请输入密码" className={inputClassName} />
+                  {t("Password (at least 8 characters)")}
+                  <input type="password" value={password} onChange={event => setPassword(event.target.value)} minLength={8} autoComplete="new-password" required placeholder={t("Enter a password")} className={inputClassName} />
                 </label>
               </div>
 
               {setup.isError ? (
                 <div role="alert" className="mt-5 flex gap-2 rounded-xl bg-[#fce8e6] p-3.5 text-sm text-[#b3261e]">
                   <AlertCircle size={18} className="mt-0.5 shrink-0" aria-hidden="true" />
-                  <span>{getApiErrorMessage(setup.error, '设置失败，请检查后重试。')}</span>
+                  <span>{getApiErrorMessage(setup.error, t("Setup failed. Check your entries and try again."))}</span>
                 </div>
               ) : null}
 
               <div className="mt-8 flex justify-end">
                 <button type="submit" disabled={setup.isPending} className={primaryButtonClassName}>
                   {setup.isPending ? <Loader2 size={17} className="animate-spin" aria-hidden="true" /> : null}
-                  {setup.isPending ? '正在创建…' : '创建管理员并继续'}
+                  {setup.isPending ? t("Creating…") : t("Create administrator and continue")}
                 </button>
               </div>
             </form>

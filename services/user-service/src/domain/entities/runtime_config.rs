@@ -165,7 +165,7 @@ mod tests {
         let catalog = include_str!("../../../../../frontend/src/pages/settings/model/providers.ts");
         let mut count = 0;
         for line in catalog.lines() {
-            let Some((provider, details)) = line.trim().split_once(": { label: ") else {
+            let Some((provider, details)) = line.trim().split_once(": {") else {
                 continue;
             };
             let endpoint = details

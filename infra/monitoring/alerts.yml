@@ -19,7 +19,7 @@ groups:
           severity: warning
         annotations:
           summary: "Gateway rate-limit rejections above 5% over 5 minutes"
-          runbook: "docs/SLOS.md - overload admission; check RATE_LIMIT_RPS"
+          runbook: "docs/OPERATIONS.md#single-node-v1-slo-and-capacity-contract - overload admission; check RATE_LIMIT_RPS"
       - alert: HighErrorRatio
         expr: sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m])) > 0.02
         for: 5m

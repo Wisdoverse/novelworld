@@ -1,3 +1,4 @@
+import { translate as t, useLocale } from '@/shared/lib/i18n';
 import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { CheckCircle2, GitBranch, Sparkles, ChevronRight } from 'lucide-react';
@@ -24,6 +25,7 @@ export function BranchChoice({
   isRecoveryLocked = false,
   onRetryRecovery,
 }: BranchChoiceProps) {
+  useLocale();
   const [pendingIndex, setPendingIndex] = useState<number | null>(null);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const selectedIndex = selectedChoiceIndex ?? pendingIndex;
@@ -49,22 +51,22 @@ export function BranchChoice({
       transition={{ duration: 0.4, ease: [0.23, 1, 0.32, 1] }}
       className="my-8 mx-auto max-w-2xl"
     >
-      {/* 标题 */}
+      {/* Heading */}
       <div className="flex items-center gap-3 mb-6">
         <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#e8f0fe] text-[#0b57d0]">
           <GitBranch size={18} />
         </div>
         <div>
           <div className="mb-1 text-xs font-semibold uppercase tracking-widest text-[#0b57d0]">
-            命运交叉点
+            {t("Fate crossroads")}
           </div>
-          <p className="text-sm leading-relaxed text-[#5f6368]">
+          <p lang="zh-CN" className="text-sm leading-relaxed text-[#5f6368]">
             {node.description}
           </p>
         </div>
       </div>
 
-      {/* 选项列表 */}
+      {/* Choices */}
       <div className="space-y-3">
         {node.choices.map((choice, i) => (
           <motion.button
@@ -89,7 +91,7 @@ export function BranchChoice({
             }}
           >
             <div className="flex items-start gap-3">
-              {/* 选项序号 */}
+              {/* Choice number */}
               <div
                 className="flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold mt-0.5"
                 style={{
@@ -105,13 +107,13 @@ export function BranchChoice({
 
               <div className="flex-1 min-w-0">
                 <p className="text-sm leading-relaxed text-[#1f1f1f]">
-                  {choice.text}
-                  {selectedChoiceIndex === choice.index ? <span className="sr-only">（已选择）</span> : null}
+                  <span lang="zh-CN">{choice.text}</span>
+                  {selectedChoiceIndex === choice.index ? <span className="sr-only">{t("(selected)")}</span> : null}
                 </p>
                 {choice.hint && (
                   <p className="mt-1.5 flex items-center gap-1 text-xs text-[#0b57d0]">
                     <Sparkles size={10} />
-                    {choice.hint}
+                    <span lang="zh-CN">{choice.hint}</span>
                   </p>
                 )}
               </div>
@@ -129,10 +131,10 @@ export function BranchChoice({
         ))}
       </div>
 
-      <p role="status" aria-label="分支状态" className="sr-only">
-        {isLoading ? '正在根据你的行动重新生成后续内容，尚未确认保存。' : ''}
+      <p role="status" aria-label={t("Branch status")} className="sr-only">
+        {isLoading ? t("Regenerating later content from your action. Saving is not yet confirmed.") : ''}
       </p>
-      {/* 加载状态 */}
+      {/* Loading state */}
       <AnimatePresence>
         {isLoading && selectedIndex !== null && (
           <motion.div
@@ -143,7 +145,7 @@ export function BranchChoice({
           >
             <div className="flex items-center justify-center gap-2 text-sm text-[#0b57d0]">
               <div className="h-4 w-4 animate-spin rounded-full border-2 border-[#0b57d0] border-t-transparent" />
-              正在根据你的行动重新生成后续内容...
+              {t("Regenerating later content from your action…")}
             </div>
           </motion.div>
         )}
@@ -161,13 +163,13 @@ export function BranchChoice({
               className="ml-2 underline"
               onClick={() => void onRetryRecovery()}
             >
-              重新加载已提交结果
+              {t("Reload committed result")}
             </button>
           ) : null}
         </div>
       )}
 
-      <div role="log" aria-label="已保存的分支结果" aria-relevant="additions">
+      <div role="log" aria-label={t("Saved branch result")} aria-relevant="additions">
       {consequence && selectedChoiceIndex !== undefined && (
         <motion.div
           initial={{ opacity: 0, y: 12 }}
@@ -176,9 +178,9 @@ export function BranchChoice({
         >
           <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-[#0d652d]">
             <CheckCircle2 size={16} />
-            你的行动改变了后续故事
+            {t("Your action changed the story")}
           </div>
-          <p className="whitespace-pre-wrap text-sm leading-7 text-[#1f1f1f]">
+          <p lang="zh-CN" className="whitespace-pre-wrap text-sm leading-7 text-[#1f1f1f]">
             {consequence}
           </p>
         </motion.div>

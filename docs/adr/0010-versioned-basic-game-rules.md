@@ -3,7 +3,7 @@
 - Status: Accepted (structural private preview)
 - Date: 2026-09-26
 - Owners: Novel Service, Narrative Service, and release owners
-- Related: [ADR 0001](./0001-source-bound-advanced-game-rules.md), [ADR 0009](./0009-bounded-laya-d20-adjudication.md), [advanced rules plan](../ADVANCED_RULES_PLAN.md)
+- Related: [ADR 0001](./0001-source-bound-advanced-game-rules.md), [ADR 0009](./0009-bounded-laya-d20-adjudication.md), [current product boundary](../PRODUCT_CONTRACT.md)
 - Supersedes: ADR 0001 only for v2 template identity, source-selection, progress semantics, and shared generation-budget decisions. Immutable v1 bindings remain supported.
 
 ## Context

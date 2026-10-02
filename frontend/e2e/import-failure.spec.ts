@@ -26,3 +26,8 @@ test('failed imports show safe guidance and the matching next action', async ({ 
   await page.getByRole('button', { name: '重新导入文件' }).click();
   await expect(page.getByRole('dialog', { name: '导入小说' })).toBeVisible();
 });
+
+// Exercise the retained Chinese UI without changing the application's English default.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('novelworld.ui.locale', 'zh-CN'));
+});

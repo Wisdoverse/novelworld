@@ -5,7 +5,7 @@
 # succeeds) once the provider returns. Also pins the settings
 # non-disclosure surface: the settings API never returns key material.
 # Credential rotation itself stays provider-gated and is recorded as such
-# in SECURITY.md and DEPLOYMENT_PROFILE.md.
+# in SECURITY.md and the deployment profile in docs/ARCHITECTURE.md.
 #
 # Re-runnable on a first-run deployment or one whose admin is
 # admin@test.invalid (the CI-seeded account); the stub is reset first, and
