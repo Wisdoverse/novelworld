@@ -7,6 +7,7 @@ export interface PendingWorldSource {
   synchronizedChapter?: number;
   result?: { operation_id: string; previous_source_chapter: number; source_chapter: number };
   terminal?: boolean;
+  notDispatched?: boolean;
 }
 export function worldSourceStorageKey(userId: string, novelId: string) {
   return `${worldSourceStoragePrefix}${userId}:${novelId}`;

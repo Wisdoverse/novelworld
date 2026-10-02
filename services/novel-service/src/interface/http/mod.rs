@@ -1843,6 +1843,13 @@ struct UpdateProgressRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct AdvanceProgressRequest {
+    current_chapter: i32,
+    expected_current_chapter: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SetIdentityRequest {
     identity_type: String,
     identity_name: Option<String>,
@@ -1931,6 +1938,11 @@ fn progress_error_response(error: ReadingProgressError) -> Response {
             "reader_identity_unavailable",
             "Reader identity is unavailable at current progress".into(),
         ),
+        ReadingProgressError::Changed => (
+            StatusCode::CONFLICT,
+            "reading_progress_changed",
+            "Reading progress or identity changed".into(),
+        ),
         ReadingProgressError::Validation(message) => (
             StatusCode::UNPROCESSABLE_ENTITY,
             "validation_error",
@@ -2009,7 +2021,7 @@ async fn advance_progress(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(novel_id): Path<Uuid>,
-    Json(req): Json<UpdateProgressRequest>,
+    Json(req): Json<AdvanceProgressRequest>,
 ) -> Response {
     let Some(user_id) = extract_user_id(&headers) else {
         return api_error(StatusCode::UNAUTHORIZED, "Missing user ID");
@@ -2017,9 +2029,12 @@ async fn advance_progress(
     // No retries: an uncertain outcome is recovered by another monotonic desired-boundary call.
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        state
-            .progress_handler
-            .advance_chapter(user_id, novel_id, req.current_chapter),
+        state.progress_handler.advance_chapter(
+            user_id,
+            novel_id,
+            req.current_chapter,
+            req.expected_current_chapter,
+        ),
     )
     .await;
     let result = match result {

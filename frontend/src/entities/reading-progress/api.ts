@@ -45,8 +45,9 @@ export async function fetchReadingProgress(novelId: string) {
   return (await apiClient.get<ReadingProgress>(`/progress/${novelId}`)).data;
 }
 
-export async function advanceReadingProgress(novelId: string, currentChapter: number) {
+export async function advanceReadingProgress(novelId: string, currentChapter: number, expectedCurrentChapter?: number) {
   return (await apiClient.post<ReadingProgress>(`/progress/${novelId}/advance`, {
     current_chapter: currentChapter,
+    ...(expectedCurrentChapter !== undefined ? { expected_current_chapter: expectedCurrentChapter } : {}),
   })).data;
 }

@@ -63,7 +63,15 @@ operations.
 
 ### Same-world source admission
 
-A reader can explicitly enter the next source scene in an existing world.
+The reader automatically enters the next source scene after a terminal committed
+turn when the current scene has no scheduled or delayed canonical events. Each
+user's turn clock and event state are independent; the shared source graph stays
+immutable. Each completed turn can admit at most one chapter, so an empty extract
+can advance with the next turn without a reload jumping through the whole book.
+Normal progression requires no separate next-scene click.
+Automatic admission and exact-key source recovery use a fresh progress snapshot
+and an atomic self-identity/chapter guard. Another tab's rewind or identity
+switch cannot be overwritten between that read and the progress write.
 Novel advances reading progress monotonically and reads the exact pinned Canon;
 Narrative admits fully evidenced new definitions and events under the same
 world authority. The original entry, rules, character and committed history
