@@ -36,7 +36,7 @@ tests:
               severity: warning
             exp_annotations:
               summary: Gateway rate-limit rejections above 5% over 5 minutes
-              runbook: docs/SLOS.md - overload admission; check RATE_LIMIT_RPS
+              runbook: docs/OPERATIONS.md#single-node-v1-slo-and-capacity-contract - overload admission; check RATE_LIMIT_RPS
       - eval_time: 10m
         alertname: HighErrorRatio
         exp_alerts:

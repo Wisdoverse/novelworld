@@ -1,141 +1,52 @@
-# NovelWorld Documentation
+# NovelWorld documentation
 
-This page is the entry point for engineering, product, security, and operations
-documentation. It identifies the authoritative source for each decision so a
-reader does not have to reconcile several partially overlapping documents.
+Use this index to find the owner of a question. Runtime code, migrations, and
+tests establish current behavior; these guides define contracts, record decisions,
+or describe operational procedures. The GitHub Project owns live roadmap status.
 
-## Start here
+## Choose by task
 
-| Need | Authoritative document |
+| Task | Start here |
 |---|---|
-| Supported product and deployment envelope | [Product contract](./PRODUCT_CONTRACT.md) |
-| Candidate normative behavior | [Specification](../SPEC.md) |
-| Current clause-by-clause implementation evidence | [SPEC conformance ledger](./SPEC_CONFORMANCE.md) |
-| System boundaries and ownership | [Architecture](./ARCHITECTURE.md) |
-| Local or private-preview deployment | [Deployment guide](../DEPLOY.md) |
-| LLM APIs, regions, Coding/Token Plans and credential switching | [LLM provider configuration](./LLM_PROVIDERS.md) |
-| Official quote snapshots, token cost estimates and subscription pricing limits | [LLM pricing](./LLM_PRICING.md) |
-| Health, monitoring, and recovery entry points | [Operations runbook](./OPERATIONS.md) |
-| Security reporting and controls | [Security policy](../SECURITY.md) and [threat model](./THREAT_MODEL.md) |
-| Planned work and exit evidence | [Roadmap](./ROADMAP.md) |
-| Contribution and review requirements | [Contributing guide](../CONTRIBUTING.md) |
+| Understand supported features and limits | [Product contract](./PRODUCT_CONTRACT.md) |
+| Deploy, upgrade, or recover an installation | [Deployment guide](../DEPLOY.md), [operations runbook](./OPERATIONS.md), [backup and restore](./BACKUP_RESTORE.md) |
+| Change a service boundary, data owner, or dependency | [Architecture](./ARCHITECTURE.md), then the relevant [ADR](./adr/) |
+| Change an API or normative behavior | [Specification](../SPEC.md) and [conformance ledger](./SPEC_CONFORMANCE.md) |
+| Review provider configuration, dispatch budgets, or prices | [LLM provider configuration](./LLM_PROVIDERS.md), [pricing guide](./LLM_PRICING.md) |
+| Change privacy, retention, export, or security controls | [Security policy](../SECURITY.md), [threat model](./THREAT_MODEL.md), [data retention](./DATA_RETENTION.md), [account export](./ACCOUNT_EXPORT.md) |
+| Change import quality or qualification | [Qualification policy](./QUALIFICATION_POLICY.md) and the versioned [extraction-quality policies](#versioned-evidence) |
+| Contribute or run checks | [Contributing guide](../CONTRIBUTING.md) |
+| Find roadmap direction and exit criteria | [Roadmap](./ROADMAP.md); live status stays in the GitHub Project |
 
-## Source-of-truth model
+## Contract ownership
 
-These documents answer different questions and must not be treated as
-interchangeable:
+- `PRODUCT_CONTRACT.md` describes the currently supported envelope and claims.
+- `SPEC.md` is the candidate normative target; `SPEC_CONFORMANCE.md` tracks
+  implementation dispositions and evidence. The adjacent
+  `SPEC_CONFORMANCE.sha256` is checked by CI.
+- `ARCHITECTURE.md` owns service/data boundaries and the private deployment
+  profile. Accepted decisions remain in `adr/`; later decisions do not rewrite
+  earlier records.
+- `OPERATIONS.md` owns health, incident, recovery, and single-node capacity
+  procedures. `BACKUP_RESTORE.md` owns the separate backup/restore contract.
+- `SECURITY.md` owns reporting and security controls; `THREAT_MODEL.md` owns
+  assets, trust boundaries, and threat analysis.
 
-- Runtime code, migrations, and tests prove current behavior.
-- `PRODUCT_CONTRACT.md` defines what the current release supports and what it
-  does not claim.
-- `SPEC.md` defines the candidate target. A normative statement is not evidence
-  that the implementation conforms.
-- `SPEC_CONFORMANCE.md` records dispositions and evidence for specification
-  clauses.
-- `ROADMAP.md` defines direction and exit criteria. The GitHub Project owns live
-  execution state.
+## Versioned evidence
 
-When two sources conflict, do not silently pick the more optimistic statement.
-Correct the narrower document in the same change, and update conformance or
-roadmap status only when its required evidence exists.
+Extraction and H1 policies are versioned records. Preserve their identities,
+inputs, thresholds, reports, and failure evidence; do not edit an earlier
+version to describe a later decision.
 
-## Document catalog
+- [Extraction quality v1](./EXTRACTION_QUALITY.md)
+- [Structural correction v2](./EXTRACTION_QUALITY_V2.md)
+- [Event accounting v3](./EXTRACTION_QUALITY_V3.md)
+- [H1 measurement v4](./EXTRACTION_QUALITY_V4.md), with its [prospective examples](./H1_MEASUREMENT_DESIGN.md)
+- [Qualification policy and frozen registrations](./QUALIFICATION_POLICY.md)
+- [Historical H1 response review](./H1_RESPONSE_EVIDENCE_REVIEW.md)
+- [Historical H4 accessibility review](./H4_ACCESSIBILITY_REVIEW.md)
+- [Evidence index](./evidence/README.md)
 
-### Repository guides
-
-| Document | Purpose | Update when |
-|---|---|---|
-| [README](../README.md) | Product overview, quick start, and top-level navigation | The supported first-run journey or primary documentation entry points change |
-| [Deployment guide](../DEPLOY.md) | Private-preview setup, upgrade, rollback, and operator configuration | A deployment command, release contract, port, or configuration requirement changes |
-| [Contributing guide](../CONTRIBUTING.md) | Development workflow, verification, and review bar | CI, architecture rules, or review requirements change |
-| [Security policy](../SECURITY.md) | Vulnerability reporting and implemented controls | The reporting process or security posture changes |
-| [Code of conduct](../CODE_OF_CONDUCT.md) | Community behavior and enforcement | The community policy changes |
-
-### Product and engineering contracts
-
-| Document | Purpose | Update when |
-|---|---|---|
-| [Product contract](./PRODUCT_CONTRACT.md) | Supported envelope, claims, and responsibility boundaries | A user-visible claim, supported input, or deployment boundary changes |
-| [Advanced novel rules](./ADVANCED_RULES_PLAN.md) | D20 preview, bounded Laya (Jev) adjudication, model/dice responsibilities, and qualification limits | Template/check behavior, adjudication context or authority, fallback, or qualification evidence changes |
-| [Specification](../SPEC.md) | Candidate normative behavior | The intended cross-component contract changes |
-| [ADR 0011: Confirmed series worlds](./adr/0011-confirmed-series-worlds.md) | Reader-confirmed private series, immutable source snapshots, and rollout boundaries | Series ownership, binding, or lifecycle decisions change |
-| [ADR 0012: Opt-in community series](./adr/0012-opt-in-community-series.md) | Consented membership aggregation, private grouping hints and withdrawal | Contribution, identity or recommendation boundaries change |
-| [SPEC conformance ledger](./SPEC_CONFORMANCE.md) | Evidence and disposition for every normative clause | Implementation evidence or a clause disposition changes |
-| [Qualification policy](./QUALIFICATION_POLICY.md) | Release evidence classes and thresholds | A qualification slice, guardrail, or approval rule changes |
-| [Roadmap](./ROADMAP.md) | Ordered outcomes, invariants, and exit criteria | Product direction or evidence-gated sequencing changes |
-
-### Architecture and data
-
-| Document | Purpose | Update when |
-|---|---|---|
-| [Architecture](./ARCHITECTURE.md) | Service ownership, data authority, and dependency rules | A boundary, owner, dependency direction, or consistency model changes |
-| [Data retention](./DATA_RETENTION.md) | Retention, deletion, and external data boundaries | Stored data or deletion behavior changes |
-| [Account export](./ACCOUNT_EXPORT.md) | Export wire format and completeness contract | Exported fields, ordering, limits, or completion semantics change |
-| [Extraction quality](./EXTRACTION_QUALITY.md) | Supported slices and extraction thresholds | A parser slice, metric, judge rubric, or threshold changes |
-| [Extraction quality v2](./EXTRACTION_QUALITY_V2.md) | Implemented Structural oracle correction; not formally adopted for Qualification | The v2 corpus, policy identity, or separately reviewed adoption changes |
-| [Extraction quality v3](./EXTRACTION_QUALITY_V3.md) | Implemented single-source event accounting policy; not formally adopted | Judge response/accounting implementation, versioned inputs, or adoption changes |
-| [H1 measurement v4](./EXTRACTION_QUALITY_V4.md) | Gold alignment and judge-reported source support; measurement-only, not Qualification | Measurement schema, rubric, input bounds or separately reviewed adoption changes |
-| [Import budget](./IMPORT_BUDGET.md) | Provider work limits during import | Provider calls, retry behavior, or budget evidence changes |
-
-### Reliability, security, and operations
-
-| Document | Purpose | Update when |
-|---|---|---|
-| [Deployment profile](./DEPLOYMENT_PROFILE.md) | Explicit topology and responsibility decisions | The supported deployment profile changes |
-| [SLO and capacity contract](./SLOS.md) | Measured single-node workload and decision thresholds | Workload, objective, measurement, or topology changes |
-| [Operations runbook](./OPERATIONS.md) | Health checks, alerts, and incident playbook index | A probe, alert, dashboard, or recovery command changes |
-| [Backup and restore](./BACKUP_RESTORE.md) | Backup artifacts, RPO/RTO, restore, and drills | Persistence, retention, restore procedure, or recovery target changes |
-| [Security policy](../SECURITY.md) | Vulnerability reporting and landed security controls | A security control, dependency posture, or response process changes |
-| [Threat model](./THREAT_MODEL.md) | Assets, trust boundaries, threats, and mitigations | A data flow, trust boundary, attacker capability, or mitigation changes |
-
-## Documentation standard
-
-Every material document should make the following clear in its opening section
-or through this catalog:
-
-1. Audience and decision owned by the document.
-2. Scope, non-goals, and supported deployment profile.
-3. Authoritative implementation or evidence links.
-4. Failure behavior, rollback or recovery boundary, and known gaps where
-   relevant.
-5. The event that requires the document to be reviewed.
-
-Use concrete commands, versioned contracts, and stable repository-relative
-links. Label proposals, targets, and unqualified behavior explicitly. Avoid
-manual test counts, screenshots of text, duplicated configuration, and claims
-whose only evidence is another prose document.
-
-Documentation is part of the change, not a follow-up task. The pull request
-author owns updates while a change is under review; repository maintainers own
-the merged corpus. Review on behavioral change rather than a calendar date so
-the document and implementation land atomically.
-
-## Design decisions
-
-Use an architecture decision record only for a durable decision that changes a
-service boundary, data ownership, trust boundary, public contract, consistency
-model, availability target, or irreversible dependency. Routine implementation
-choices belong in the pull request.
-
-Copy [the ADR template](./adr/0000-template.md) to
-`docs/adr/NNNN-short-title.md`. An ADR must be accepted in the same change that
-introduces the decision. Later decisions supersede earlier records; they do not
-rewrite history.
-
-Accepted records:
-
-- [ADR 0001: Source-bound shared rules and server-owned D20 resolution](./adr/0001-source-bound-advanced-game-rules.md)
-- [ADR 0002: L0-L4 minimal bootstrap and deferred runtime configuration](./adr/0002-minimal-bootstrap-and-deferred-runtime-configuration.md)
-- [ADR 0003: H4 private-preview journey qualification](./adr/0003-h4-journey-qualification.md)
-- [ADR 0004: Durable diagnostic budget authority (implementation in progress)](./adr/0004-durable-diagnostic-budget.md)
-- [ADR 0005: Durable prospective chat summary windows](./adr/0005-durable-chat-summary-windows.md)
-- [ADR 0006: Optional local action hints](./adr/0006-optional-laya-action-hints.md)
-- [ADR 0007: Regional LLM presets](./adr/0007-regional-llm-presets.md)
-- [ADR 0008: Upload acceptance independent of parsing](./adr/0008-queued-upload-acceptance.md)
-
-Accepted structural preview:
-
-- [ADR 0009: Bounded Laya (Jev) D20 adjudication](./adr/0009-bounded-laya-d20-adjudication.md)
-- [ADR 0010: Versioned basic game rules from canonical world rules](./adr/0010-versioned-basic-game-rules.md)
-
-- [ADR 0013: Same-world source progression](./adr/0013-same-world-source-progression.md)
+Accepted architecture decisions and the ADR template are discoverable in the
+[ADR directory](./adr/). The Chinese-language README and pricing guide remain
+available at their existing paths.
