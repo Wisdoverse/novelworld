@@ -10,3 +10,13 @@ The [failed-action confirmation screenshot](./failed-action-confirmation.png)
 uses a synthetic rejected generation to show automatic status confirmation and
 unlocking without a second submission. It is browser presentation evidence,
 not live provider or deployment evidence.
+
+## Interface language
+
+The [English interface](./ui-language-english.png) shows the default locale and
+accessible language selector while preserving Chinese story samples. The
+[English](./failed-action-confirmation.png) and
+[Simplified Chinese](./failed-action-confirmation-zh-CN.png) failed-action views
+show the same automatic confirmation flow in both locales. These screenshots
+use synthetic browser fixtures, including deliberate long-text wrapping; they
+are presentation evidence, not live-provider or accessibility qualification.

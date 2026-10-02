@@ -121,6 +121,8 @@ and require Internet access and a key.
 | Reader-confirmed series worlds | Group your shelf books around a shared setting and immutable source-book basic rules. Laya may suggest a match, but association requires your confirmation; manual selection remains available. This structural preview does not share player state or qualify matching quality. |
 | Model settings | Configure the platform provider after setup; signed-in readers may optionally use their own encrypted provider key. Key usage shows [current-price token estimates](./docs/LLM_PRICING.md) in the quoted currency and separate subscription quotes; these are not account bills. |
 
+[Preview the default English interface](./docs/evidence/ui-language-english.png).
+
 <p align="center">
   <img src="./docs/evidence/h4-chat-landscape.png" width="568" alt="NovelWorld's Chinese reading interface with a character chat panel and message composer in a narrow landscape viewport." />
 </p>
