@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { BookOpen, Compass, Dices, GitBranch, History, Users } from 'lucide-react';
-import { isWorldTurnOutcomeUnknown, useSubmitWorldTurn } from '@/entities/narrative';
+import { isWorldTurnOutcomeUnknown, useSubmitWorldTurn, useWorldTurnConfirmation } from '@/entities/narrative';
 import { WorldActionForm, actionLabels } from '@/features/world-action';
 import { getApiErrorMessage } from '@/shared/api/client';
 import { effectiveWorldContext } from '@/shared/lib/worldSourceContext';
@@ -168,6 +168,9 @@ export function WorldDashboard({
   // The server owns the unresolved authority slot. A stale request from
   // another tab can never overtake its active or committed pending turn.
   const pendingRequest = serverPendingRequest ?? restoredPendingRequest;
+  const confirmation = useWorldTurnConfirmation(
+    novelId, view.player.user_id, pendingRequest?.idempotencyKey, !turn.isPending,
+  );
   useEffect(() => {
     onActionLockChange?.(turn.isPending || Boolean(pendingRequest));
     return () => onActionLockChange?.(false);
@@ -176,10 +179,10 @@ export function WorldDashboard({
     entry.turn_id === pendingRequest?.idempotencyKey && entry.memory_projection_status === 'pending'
   ));
   const pendingReason = pendingEntry
-    ? `第 ${pendingEntry.turn_number} 回合的经过已保存，但角色记忆尚未同步完成，因此暂时不能发起下一回合。请点击“继续确认结果”。`
+    ? `第 ${pendingEntry.turn_number} 回合的经过已保存，但角色记忆尚未同步完成，因此暂时不能发起下一回合。正在自动确认保存状态。`
     : serverPendingRequest
-      ? '上一行动尚未完成，因此暂时不能发起下一回合。请点击“继续确认结果”恢复原行动。'
-      : '尚未确认这次行动的最终结果，因此暂时不能发起下一回合。请点击“继续确认结果”，避免重复行动。';
+      ? '上一行动尚未完成，因此暂时不能发起下一回合。正在自动确认；如需恢复处理，请选择“恢复原行动”。'
+      : '尚未确认这次行动的最终结果，因此暂时不能发起下一回合。正在自动读取保存状态，避免重复行动。';
   const serverPendingAction = serverPendingRequest?.action;
   const serverPendingKey = serverPendingRequest?.idempotencyKey;
   const serverPendingSource = serverPendingRequest?.expectedSourceChapter;
@@ -209,9 +212,14 @@ export function WorldDashboard({
     setPendingState({ storageKey, request });
   };
 
-  const clearPendingRequest = () => {
-    removeWorldTurnPendingRequest(view.player.user_id, novelId);
-    setPendingState({ storageKey, request: null });
+  const clearPendingRequest = (turnId: string | undefined = pendingRequest?.idempotencyKey) => {
+    const stored = readStoredPendingRequest(view.player.user_id, novelId);
+    if (!stored || stored.idempotencyKey === turnId) {
+      removeWorldTurnPendingRequest(view.player.user_id, novelId);
+    }
+    setPendingState(current => current.storageKey === storageKey
+      && current.request?.idempotencyKey === turnId
+      ? { storageKey, request: null } : current);
   };
 
   const setError = (message?: string) => setErrorState({ novelId, message });
@@ -242,12 +250,36 @@ export function WorldDashboard({
   ]);
 
   useEffect(() => {
+    const data = confirmation.data;
+    if (turn.isPending || !pendingRequest || !data?.refreshedWorld
+      || data.confirmation.turn_id !== pendingRequest.idempotencyKey) return;
+    const fresh = data.refreshedWorld;
+    if (fresh.player.user_id !== view.player.user_id || fresh.player.novel_id !== novelId) return;
+    // Wait until the parent renders the fresh authority snapshot before the
+    // form can accept an action against its turn number and source context.
+    if (view.world_state.updated_at !== fresh.world_state.updated_at
+      || view.session.turn_number !== fresh.session.turn_number) return;
+    const authoritative = pendingRequestFromView(fresh);
+    if (authoritative) {
+      if (authoritative.idempotencyKey !== pendingRequest.idempotencyKey) {
+        rememberPendingRequest(authoritative);
+      }
+      return;
+    }
+    if (data.confirmation.status === 'completed'
+      && fresh.session.turn_number < pendingRequest.expectedTurnNumber + 1) return;
+    clearPendingRequest(pendingRequest.idempotencyKey);
+    setError(data.confirmation.status === 'failed'
+      ? 'The action failed before it changed your world. You can choose a new action.' : undefined);
+  }, [confirmation.data, pendingRequest?.idempotencyKey, storageKey, view, turn.isPending]);
+
+  useEffect(() => {
     if (pendingRequest && view.journal.some(entry => (
       entry.turn_id === pendingRequest.idempotencyKey
       && (entry.memory_projection_status === 'saved'
         || entry.memory_projection_status === 'skipped')
     ))) {
-      clearPendingRequest();
+      clearPendingRequest(pendingRequest.idempotencyKey);
       setError(undefined);
     }
   }, [pendingRequest, view.journal]);
@@ -263,10 +295,10 @@ export function WorldDashboard({
     setError(undefined);
     try {
       await turn.mutateAsync(request);
-      clearPendingRequest();
+      clearPendingRequest(request.idempotencyKey);
     } catch (requestError) {
       const outcomeUnknown = isWorldTurnOutcomeUnknown(requestError);
-      if (!outcomeUnknown) clearPendingRequest();
+      if (!outcomeUnknown) clearPendingRequest(request.idempotencyKey);
       setError(getApiErrorMessage(requestError, outcomeUnknown && requestError instanceof Error
         ? requestError.message : '世界行动提交失败'));
       throw requestError;
@@ -377,8 +409,16 @@ export function WorldDashboard({
               ? pendingReason
               : '请求已被明确拒绝；请根据最新世界状态修改行动后重试。'}
             {pendingRequest ? (
-              <button className="ml-2 underline" disabled={turn.isPending || actionsDisabled} onClick={() => void run(pendingRequest).catch(() => undefined)}>
+              <button className="ml-2 underline" disabled={confirmation.isFetching} onClick={() => void confirmation.refetch()}>
                 继续确认结果
+              </button>
+            ) : null}
+            {pendingRequest && confirmation.data?.confirmation.status !== 'failed'
+              && !(confirmation.data?.confirmation.status === 'completed'
+                && confirmation.data.confirmation.memory_projection_status !== 'pending') ? (
+              <button className="ml-2 underline" disabled={turn.isPending || actionsDisabled || confirmation.isFetching}
+                onClick={() => void run(pendingRequest).catch(() => undefined)}>
+                恢复原行动
               </button>
             ) : null}
           </div>

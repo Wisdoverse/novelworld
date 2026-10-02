@@ -17,6 +17,7 @@ import {
   useStartOpenWorld,
   useSubmitNarrativeChoice,
   useSubmitWorldTurn,
+  useWorldTurnConfirmation,
 } from './api';
 
 function deferred<T>() {
@@ -96,6 +97,70 @@ describe('narrative error recovery', () => {
     expect(isWorldTurnOutcomeUnknown(axiosError(502, 'llm_error'))).toBe(true);
     expect(isWorldTurnOutcomeUnknown(axiosError(422, 'validation_error'))).toBe(false);
     expect(isWorldTurnOutcomeUnknown(axiosError(409, 'conflict'))).toBe(false);
+  });
+
+  it('confirms a failed turn with reads and refreshes the owned world without generation', async () => {
+    const world = { player: { user_id: 'user', novel_id: 'novel' }, session: { turn_number: 1 }, world_state: worldTurnResult.world_state };
+    queryClient.setQueryData(narrativeKeys.openWorld('novel'), world);
+    const post = vi.spyOn(apiClient, 'post');
+    const get = vi.spyOn(apiClient, 'get')
+      .mockResolvedValueOnce({ data: { turn_id: worldTurnRequest.idempotencyKey, status: 'failed' } })
+      .mockResolvedValueOnce({ data: world });
+    const { result } = renderHook(() => useWorldTurnConfirmation('novel', 'user', worldTurnRequest.idempotencyKey, true), { wrapper });
+    await waitFor(() => expect(result.current.data?.refreshedWorld).toEqual(world));
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(get).toHaveBeenNthCalledWith(1, `/narrative/novel/world/turns/${worldTurnRequest.idempotencyKey}`, { signal: expect.any(AbortSignal), timeout: 5_000 });
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { status: 'in_progress' },
+    { status: 'completed', memory_projection_status: 'pending' },
+  ])('keeps $status confirmation read-only while unresolved', async status => {
+    const post = vi.spyOn(apiClient, 'post');
+    const get = vi.spyOn(apiClient, 'get').mockResolvedValue({ data: { turn_id: worldTurnRequest.idempotencyKey, ...status } });
+    const { result } = renderHook(() => useWorldTurnConfirmation('novel', 'user', worldTurnRequest.idempotencyKey, true), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.refreshedWorld).toBeUndefined();
+    expect(get).toHaveBeenCalledOnce();
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it('retains durable failure metadata when refreshing the world fails', async () => {
+    vi.spyOn(apiClient, 'get')
+      .mockResolvedValueOnce({ data: { turn_id: worldTurnRequest.idempotencyKey, status: 'failed' } })
+      .mockRejectedValueOnce(axiosError(503));
+    const post = vi.spyOn(apiClient, 'post');
+    const { result } = renderHook(() => useWorldTurnConfirmation('novel', 'user', worldTurnRequest.idempotencyKey, true), { wrapper });
+    await waitFor(() => expect(result.current.data?.confirmation.status).toBe('failed'));
+    expect(result.current.data?.refreshedWorld).toBeUndefined();
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it('does not replace a new principal cache with a late confirmation refresh', async () => {
+    const oldWorld = { player: { user_id: 'user', novel_id: 'novel' }, session: { turn_number: 1 }, world_state: worldTurnResult.world_state };
+    const newWorld = { ...oldWorld, player: { user_id: 'other', novel_id: 'novel' } };
+    queryClient.setQueryData(narrativeKeys.openWorld('novel'), oldWorld);
+    const refresh = deferred<{ data: typeof oldWorld }>();
+    const get = vi.spyOn(apiClient, 'get')
+      .mockResolvedValueOnce({ data: { turn_id: worldTurnRequest.idempotencyKey, status: 'failed' } })
+      .mockReturnValueOnce(refresh.promise);
+    const { result } = renderHook(() => useWorldTurnConfirmation('novel', 'user', worldTurnRequest.idempotencyKey, true), { wrapper });
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(2));
+    queryClient.setQueryData(narrativeKeys.openWorld('novel'), newWorld);
+    refresh.resolve({ data: oldWorld });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.refreshedWorld).toBeUndefined();
+    expect(queryClient.getQueryData(narrativeKeys.openWorld('novel'))).toEqual(newWorld);
+  });
+
+  it('keeps a missing turn ambiguous without posting its action', async () => {
+    vi.spyOn(apiClient, 'get').mockRejectedValue(axiosError(404));
+    const post = vi.spyOn(apiClient, 'post');
+    const { result } = renderHook(() => useWorldTurnConfirmation('novel', 'user', worldTurnRequest.idempotencyKey, true), { wrapper });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(result.current.data).toBeUndefined();
+    expect(post).not.toHaveBeenCalled();
   });
 
   it('does not reuse an effective chapter across reader identities', async () => {

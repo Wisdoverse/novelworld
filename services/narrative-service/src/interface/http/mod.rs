@@ -81,6 +81,10 @@ fn routes() -> Router<AppState> {
         )
         .route("/narrative/{novel_id}/world/turns", post(submit_world_turn))
         .route(
+            "/narrative/{novel_id}/world/turns/{turn_id}",
+            get(confirm_world_turn),
+        )
+        .route(
             "/narrative/{novel_id}/world/action-suggestion",
             post(suggest_world_action),
         )
@@ -675,6 +679,32 @@ async fn get_open_world(
 #[serde(deny_unknown_fields)]
 struct ActionSuggestionRequest {
     intent: String,
+}
+
+async fn confirm_world_turn(
+    State(state): State<AppState>,
+    Path((novel_id, turn_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Response {
+    let mut response = match extract_user_id(&headers) {
+        Some(user_id) => match state
+            .handler
+            .confirm_world_turn(user_id, novel_id, turn_id)
+            .await
+        {
+            Ok(confirmation) => Json(confirmation).into_response(),
+            Err(error) => narrative_error_response(error),
+        },
+        None => error_response(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "Missing or invalid user identity",
+        ),
+    };
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
+    response
 }
 
 async fn suggest_world_action(

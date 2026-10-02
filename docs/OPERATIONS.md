@@ -137,6 +137,17 @@ The deterministic browser reproduction is
 `pnpm exec playwright test e2e/advanced-rules.spec.ts` from `frontend` after a
 frontend build; it uses fixtures and makes no provider calls.
 
+### Ambiguous world-action responses
+
+The reader polls the original turn key with a read-only confirmation request.
+A durably failed row unlocks only after the latest world refresh succeeds;
+unknown, active, and committed-pending outcomes retain the original key.
+Confirmation must not be retried as a generation request. Use the separate
+explicit resume only when the original action still needs processing.
+Narrative transition rejections log `failure_code=invalid_transition` with a
+static `rejection_class` (`json` or `semantic`). These categories do not record
+model text or establish the historical failure's exact cause.
+
 ## Ownership and escalation
 
 The private self-hosted profile has a single operator (the deployment
