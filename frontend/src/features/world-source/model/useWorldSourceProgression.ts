@@ -1,3 +1,4 @@
+import { displayMessage, UiMessageError, useLocale, type MessageKey, type UiMessage } from '@/shared/lib/i18n';
 import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { advanceReadingProgress, fetchReadingProgress, readingProgressKeys } from '@/entities/reading-progress';
@@ -8,12 +9,18 @@ import { worldTurnPendingStorageKey } from '@/shared/lib/worldTurnStorage';
 import { readPendingWorldSource, storePendingWorldSource, type PendingWorldSource } from '@/shared/lib/worldSourceStorage';
 import type { OpenWorldView, ReadingProgress } from '@/shared/types';
 
+function sourceErrorMessage(failure: unknown, fallback: MessageKey): UiMessage {
+  return failure instanceof UiMessageError ? failure.uiMessage
+    : getApiErrorMessage(failure, '') || { key: fallback };
+}
+
 export function useWorldSourceProgression({ novelId, progress, routeChapter, navigate }: {
   novelId: string;
   progress?: ReadingProgress;
   routeChapter?: number;
   navigate: (path: string) => void;
 }) {
+  useLocale();
   const queryClient = useQueryClient();
   const scope = `${progress?.user_id}:${novelId}`;
   const [state, setState] = useState<{ scope: string; pending: PendingWorldSource | null }>(() => ({
@@ -22,13 +29,14 @@ export function useWorldSourceProgression({ novelId, progress, routeChapter, nav
   // Resolve storage synchronously before ReaderPage's absolute progress-save effect,
   // including the render where the authenticated progress first becomes available.
   const pending = state.scope === scope ? state.pending : readPendingWorldSource(progress?.user_id, novelId);
-  const [status, setStatus] = useState<{ scope: string; pending: boolean; error?: string }>({ scope, pending: false });
+  const [status, setStatus] = useState<{ scope: string; pending: boolean; error?: UiMessage }>({ scope, pending: false });
   const isPending = status.scope === scope && status.pending;
-  const error = status.scope === scope ? status.error : undefined;
+  const errorNotice = status.scope === scope ? status.error : undefined;
+  const error = displayMessage(errorNotice);
   const setIsPending = (value: boolean) => setStatus(current => ({
     ...(current.scope === scope ? current : { scope }), pending: value,
   }));
-  const setError = (message?: string) => setStatus(current => ({
+  const setError = (message?: UiMessage) => setStatus(current => ({
     ...(current.scope === scope ? current : { scope, pending: false }), error: message,
   }));
   const flight = useRef(false);
@@ -69,11 +77,11 @@ export function useWorldSourceProgression({ novelId, progress, routeChapter, nav
     if (!mounted.current || currentScope.current !== scope) return;
     const freshProgress = await fetchReadingProgress(novelId);
     if (!mounted.current || currentScope.current !== scope || freshProgress.user_id !== progress?.user_id
-      || freshProgress.reader_identity_type !== 'self') throw new Error('阅读身份已变化，请重新加载。');
+      || freshProgress.reader_identity_type !== 'self') throw new UiMessageError({ key: "Your reading identity changed. Reload the page." });
     const source = effectiveWorldContext(view.session).unlocked_through_chapter;
     // A rewind after commit hides source content. Keep the exact key until the
     // reader explicitly restores progress; do not silently undo the rewind.
-    if (freshProgress.current_chapter < source) throw new Error('阅读进度低于当前世界来源；请恢复进度后继续确认。');
+    if (freshProgress.current_chapter < source) throw new UiMessageError({ key: "Reading progress is behind the world's current source. Restore progress before confirming." });
     const chapter = Math.max(source, admittedChapter, freshProgress.current_chapter);
     remember({ ...operation, synchronizedChapter: chapter });
     queryClient.setQueryData(readingProgressKeys.detail(novelId), freshProgress);
@@ -100,7 +108,7 @@ export function useWorldSourceProgression({ novelId, progress, routeChapter, nav
         if (fresh.user_id === progress.user_id && fresh.novel_id === novelId) {
           queryClient.setQueryData(readingProgressKeys.detail(novelId), fresh);
         }
-        setError('阅读身份或进度已变化，自动接续已暂停。请恢复最新状态。');
+        setError({ key: "Your reading identity or progress changed. Automatic continuation paused. Restore the latest state." });
         return;
       }
       // A repeated monotonic unlock is safe after either owner's response is lost.
@@ -138,16 +146,16 @@ export function useWorldSourceProgression({ novelId, progress, routeChapter, nav
         }
       }
       setError(code === 'reading_progress_changed' || code === 'reader_identity_unavailable'
-        ? '阅读身份或进度已变化，自动接续已暂停。请恢复最新状态。'
+        ? { key: "Your reading identity or progress changed. Automatic continuation paused. Restore the latest state." }
         : code === 'world_source_busy'
-        ? '上一行动还在确认，下一幕暂时不能接入。请稍后重试原请求。'
+        ? { key: "The previous action is still being confirmed. The next scene cannot be admitted yet. Retry the original request later." }
         : code === 'world_source_changed'
-          ? '另一窗口已经改变世界。请恢复最新世界，再决定下一步。'
+          ? { key: "Another window changed the world. Restore the latest world before deciding your next move." }
           : code === 'world_source_order_conflict'
-            ? '新来源的事件顺序与已经发生的剧情冲突，暂时不能接入。'
+            ? { key: "New source events conflict with the existing story order and cannot be admitted yet." }
             : code === 'world_source_unavailable'
-              ? '下一章暂时没有可接入的完整来源，请恢复最新世界。'
-              : getApiErrorMessage(failure, '下一章可能已解锁，但世界接入结果尚未确认；请继续确认原请求。'));
+              ? { key: "The next chapter has no complete source available yet. Restore the latest world." }
+              : sourceErrorMessage(failure, "The next chapter may be unlocked, but world admission is unconfirmed. Continue confirming the original request."));
     } finally {
       finishFlight();
     }
@@ -189,7 +197,7 @@ export function useWorldSourceProgression({ novelId, progress, routeChapter, nav
       await synchronize(pending, view, effectiveWorldContext(view.session).unlocked_through_chapter);
       setError(undefined);
     } catch (failure) {
-      if (mounted.current && currentScope.current === scope) setError(getApiErrorMessage(failure, '最新世界尚未恢复，请稍后重试。'));
+      if (mounted.current && currentScope.current === scope) setError(sourceErrorMessage(failure, "The latest world is not yet restored. Try again later."));
     } finally { finishFlight(); }
   };
   const continueOriginalReading = async (totalChapters: number) => {
@@ -199,7 +207,7 @@ export function useWorldSourceProgression({ novelId, progress, routeChapter, nav
       const fresh = await fetchReadingProgress(novelId);
       if (!mounted.current || currentScope.current !== scope || fresh.user_id !== progress.user_id) return;
       const next = Math.max(routeChapter ?? fresh.current_chapter, fresh.current_chapter) + 1;
-      if (next > totalChapters) throw new Error('已经读到原著最后一章，请继续确认世界接入结果。');
+      if (next > totalChapters) throw new UiMessageError({ key: "You reached the original's last chapter. Continue confirming world admission." });
       const advanced = await advanceReadingProgress(novelId, next);
       if (!mounted.current || currentScope.current !== scope || advanced.user_id !== progress.user_id) return;
       queryClient.setQueryData(readingProgressKeys.detail(novelId), advanced);
@@ -207,10 +215,10 @@ export function useWorldSourceProgression({ novelId, progress, routeChapter, nav
       // Keep the unresolved source identity. Reading the original source never
       // fabricates another admission or abandons a possibly committed operation.
     } catch (failure) {
-      if (mounted.current && currentScope.current === scope) setError(getApiErrorMessage(failure, '原著阅读进度暂时无法恢复，请重试。'));
+      if (mounted.current && currentScope.current === scope) setError(sourceErrorMessage(failure, "Original reading progress could not be restored. Try again."));
     } finally {
       finishFlight();
     }
   };
-  return { continueOriginalReading, locked: Boolean(pending) || isPending, pending, isPending, error, start, advanceIfReady, recover };
+  return { continueOriginalReading, locked: Boolean(pending) || isPending, pending, isPending, error, errorNotice, start, advanceIfReady, recover };
 }

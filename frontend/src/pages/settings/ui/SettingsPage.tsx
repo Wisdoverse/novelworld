@@ -1,3 +1,4 @@
+import { translate as t, useLocale } from '@/shared/lib/i18n';
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { ArrowLeft, Brain, Download, Key, Loader2, LogOut, Save, Settings, Trash2 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
@@ -22,10 +23,10 @@ type LlmSettings = {
 
 const MODELS = {
   deepseek: [
-    { id: 'deepseek-flash', label: 'DeepSeek V4.1 Flash', hint: '文字与图像 · 速度与成本优先' },
+    { id: 'deepseek-flash', label: 'DeepSeek V4.1 Flash', get hint() { return t("Text and images · Speed and cost first"); } },
   ],
   openai: [
-    { id: 'gpt-4o-mini', label: 'GPT-4o mini', hint: '通用轻量模型' },
+    { id: 'gpt-4o-mini', label: 'GPT-4o mini', get hint() { return t("General lightweight model"); } },
   ],
 } as const;
 
@@ -36,6 +37,7 @@ const LEGACY_DEEPSEEK_MODELS = new Set([
 ]);
 
 export function SettingsPage() {
+  useLocale();
   const navigate = useNavigate();
   const user = useAuthStore(state => state.user);
   const deleteAccount = useAuthStore(state => state.deleteAccount);
@@ -93,7 +95,7 @@ export function SettingsPage() {
         return;
       }
       setSettingsError(true);
-      toast.error(getApiErrorMessage(error, '模型设置加载失败'));
+      toast.error(getApiErrorMessage(error, t("Model settings failed to load")));
     } finally {
       if (useAuthStore.getState().user?.id === principalId) setSettingsLoading(false);
     }
@@ -124,7 +126,7 @@ export function SettingsPage() {
     if (!settings || !principalId || settings.provider === 'environment') return;
     const trimmedApiKey = apiKey.trim();
     if (keyRequired && !trimmedApiKey) {
-      toast.error(`请输入${isAdmin ? '平台' : '个人'} API Key`);
+      toast.error(t("Enter a {p0} API key", { p0: isAdmin ? t("platform") : t("personal") }));
       return;
     }
     setSaving(true);
@@ -143,10 +145,10 @@ export function SettingsPage() {
         queryKey: llmUsageKeys.summary(principalId, response.data.scope),
         exact: true,
       });
-      toast.success(`${isAdmin ? '平台' : '个人'}模型设置已保存，后续请求自动生效`);
+      toast.success(t("{p0} model settings saved. Future requests use them automatically.", { p0: isAdmin ? t("platform") : t("personal") }));
     } catch (error) {
       if (useAuthStore.getState().user?.id === principalId) {
-        toast.error(getApiErrorMessage(error, '模型设置保存失败'));
+        toast.error(getApiErrorMessage(error, t("Model settings failed to save")));
       }
     } finally {
       setSaving(false);
@@ -160,14 +162,14 @@ export function SettingsPage() {
       : null;
 
   const eraseAccount = async () => {
-    if (!window.confirm('永久删除你的账号、书架关联、阅读进度、身份、对话、记忆和个人时间线？你提交并被系统接受的来源内容，包括仍在解析或随后解析失败的内容，会随共享原著继续保留；移出书架或删除账号不会删除它们。此操作无法撤销。')) return;
+    if (!window.confirm(t("Permanently delete your account, shelf associations, reading progress, identities, chats, memories and personal timelines? Accepted source content remains with the shared original, including content still parsing or later failing. Removing a book or deleting the account does not delete that content. This cannot be undone."))) return;
     setDeleting(true);
     try {
       if (!await deleteAccount()) return;
-      toast.success('账号和个人数据已删除');
+      toast.success(t("Account and personal data deleted"));
       navigate('/', { replace: true });
     } catch (error) {
-      toast.error(getApiErrorMessage(error, '账号删除失败，请稍后重试'));
+      toast.error(getApiErrorMessage(error, t("Account deletion failed. Try again later.")));
     } finally {
       setDeleting(false);
     }
@@ -206,9 +208,9 @@ export function SettingsPage() {
       link.click();
       link.remove();
       URL.revokeObjectURL(url);
-      toast.success('账号数据导出完成');
+      toast.success(t("Account data exported"));
     } catch (error) {
-      toast.error(getApiErrorMessage(error, '账号导出未完整完成，请重试'));
+      toast.error(getApiErrorMessage(error, t("Account export is incomplete. Try again.")));
     } finally {
       setExporting(false);
     }
@@ -218,24 +220,24 @@ export function SettingsPage() {
     <main className="app-surface min-h-screen px-4 py-8 sm:px-6 sm:py-10">
       <div className="mx-auto max-w-3xl">
         <button type="button" onClick={() => navigate('/shelf')} className="mb-6 flex items-center gap-2 text-sm font-medium text-[#0b57d0] hover:underline">
-          <ArrowLeft size={16} /> 返回书架
+          <ArrowLeft size={16} /> {t("Back to shelf")}
         </button>
 
         <header className="mb-8">
-          <p className="text-sm font-medium text-[#0b57d0]">偏好与账号</p>
-          <h1 className="mt-2 text-3xl font-medium tracking-[-0.02em] text-[#1f1f1f]">设置</h1>
-          <p className="mt-2 text-sm text-[#5f6368]">管理模型、API Key 与账号数据。</p>
+          <p className="text-sm font-medium text-[#0b57d0]">{t("Preferences and account")}</p>
+          <h1 className="mt-2 text-3xl font-medium tracking-[-0.02em] text-[#1f1f1f]">{t("Settings")}</h1>
+          <p className="mt-2 text-sm text-[#5f6368]">{t("Manage models, API keys and account data.")}</p>
         </header>
 
         {settingsLoading && <div className="surface-card flex items-center justify-center p-10">
-          <Loader2 className="animate-spin text-[#0b57d0]" aria-label="正在加载模型设置" />
+          <Loader2 className="animate-spin text-[#0b57d0]" aria-label={t("Loading model settings")} />
         </div>}
 
         {!settingsLoading && settingsError && <section className="surface-card p-6 sm:p-8" aria-labelledby="model-settings-heading">
-          <h2 id="model-settings-heading" className="text-xl font-semibold text-[#1f1f1f]">模型设置暂时不可用</h2>
-          <p className="mt-2 text-sm text-[#5f6368]">账号数据仍可正常管理，请稍后重试模型设置。</p>
+          <h2 id="model-settings-heading" className="text-xl font-semibold text-[#1f1f1f]">{t("Model settings are temporarily unavailable")}</h2>
+          <p className="mt-2 text-sm text-[#5f6368]">{t("Account data management remains available. Retry model settings later.")}</p>
           <button type="button" onClick={() => void loadSettings()} className="tonal-action mt-5">
-            重试
+            {t("Retry")}
           </button>
         </section>}
 
@@ -246,26 +248,26 @@ export function SettingsPage() {
             </div>
             <div>
               <h2 id="model-settings-heading" className="text-xl font-semibold text-[#1f1f1f]">
-                {isAdmin ? '平台模型设置' : '个人模型设置'}
+                {isAdmin ? t("Platform model settings") : t("Personal model settings")}
               </h2>
               <p className="text-sm text-[#5f6368]">
                 {isAdmin
-                  ? '供未配置个人 Key 的请求使用'
-                  : '仅你的请求使用，不会显示或修改平台 Key'}
+                  ? t("Used for requests without a personal key")
+                  : t("Used only for your requests. The platform key is neither shown nor changed.")}
               </p>
             </div>
           </div>
 
           {isEnvironmentManaged ? (
             <div className="rounded-2xl border border-[#a8c7fa] bg-[#eef4ff] p-4 text-sm text-[#3c4043]">
-              <p className="font-semibold text-[#1f1f1f]">平台模型由环境变量管理</p>
-              <p className="mt-1 leading-6">当前模型：{settings.model}。请在部署环境中更新平台配置。</p>
+              <p className="font-semibold text-[#1f1f1f]">{t("The platform model is managed through environment variables")}</p>
+              <p className="mt-1 leading-6">{t("Current model:")}{settings.model}{t(". Update platform configuration in the deployment environment.")}</p>
             </div>
           ) : <form onSubmit={submit} className="space-y-6">
             <label className="block text-sm font-medium text-[#3c4043]">
-              服务商 / 地区 / 套餐
+              {t("Provider / region / plan")}
               <select value={settings.provider} onChange={event => selectProvider(event.target.value as EditableProvider)} className="field-control mt-2">
-                <optgroup label="普通 API">
+                <optgroup label={t("Standard API")}>
                   {providerOptions.filter(([, provider]) => !provider.plan).map(([id, provider]) => <option key={id} value={id}>{provider.label}</option>)}
                 </optgroup>
                 <optgroup label="Coding Plan / Token Plan">
@@ -274,23 +276,23 @@ export function SettingsPage() {
               </select>
             </label>
             {preset && <div className="text-xs leading-5 text-[#5f6368]">
-              <p className="font-medium">当前选项：{preset.label}</p>
-              <p className="break-all">端点：{preset.endpoint}</p>
-              <p>API Key 须来自所选地区和套餐；切换后需要重新填写。</p>
-              {preset.plan && <p className="mt-2">套餐额度及支持模型以账号控制台为准。应用不会切换到普通 API；服务商额外用量计费以账号设置为准。</p>}
-              {preset.restricted && <p className="mt-2">此套餐官方限制用于指定编程工具，NovelWorld 应用后端不在已核实的支持范围内，个人套餐不可作为多人共享的平台 Key。请使用普通 API，或先取得服务商对本用途的授权。</p>}
+              <p className="font-medium">{t("Current selection:")}{preset.label}</p>
+              <p className="break-all">{t("Endpoint:")}{preset.endpoint}</p>
+              <p>{t("The API key must match the selected region and plan. Enter a new key after switching.")}</p>
+              {preset.plan && <p className="mt-2">{t("Consult your account console for quotas and supported models. The app will not switch to standard API; extra usage billing follows your account settings.")}</p>}
+              {preset.restricted && <p className="mt-2">{t("This plan officially supports specific coding tools. NovelWorld's backend is not verified as supported, and a personal plan cannot be shared as a platform key. Use standard API or obtain provider authorization for this use.")}</p>}
             </div>}
 
             <label className="block text-sm font-medium text-[#3c4043]">
-              模型
+              {t("Model")}
               {fixedModels ? <select value={settings.model} onChange={event => setSettings({ ...settings, model: event.target.value })} className="field-control mt-2">
                 {legacyDeepSeekModel && (
                   <option value={legacyDeepSeekModel} disabled>
-                    {legacyDeepSeekModel} — 旧标识；保存后改用 DeepSeek V4.1 Flash
+                    {legacyDeepSeekModel} {t("— Legacy ID; saving switches to DeepSeek V4.1 Flash")}
                   </option>
                 )}
                 {models.map(model => <option key={model.id} value={model.id}>{model.label} — {model.hint}</option>)}
-              </select> : <input value={settings.model} onChange={event => setSettings({ ...settings, model: event.target.value })} list="llm-model-suggestions" maxLength={200} required placeholder="填写账号可用的模型 ID 或推理接入点 ID" className="field-control mt-2" />}
+              </select> : <input value={settings.model} onChange={event => setSettings({ ...settings, model: event.target.value })} list="llm-model-suggestions" maxLength={200} required placeholder={t("Enter a model ID or inference endpoint ID available to your account")} className="field-control mt-2" />}
               <datalist id="llm-model-suggestions">
                 {preset?.models.map(model => <option key={model} value={model} />)}
               </datalist>
@@ -301,8 +303,8 @@ export function SettingsPage() {
                 <span className="flex gap-3">
                   <Brain size={20} className="shrink-0 text-[#0b57d0]" />
                   <span>
-                    <span className="block text-sm font-semibold text-[#1f1f1f]">角色对话启用思考模式</span>
-                    <span className="mt-1 block text-xs leading-5 text-[#5f6368]">通过 DeepSeek Responses API 处理推理与输出；小说结构化解析继续使用非思考模式。</span>
+                    <span className="block text-sm font-semibold text-[#1f1f1f]">{t("Enable thinking mode for character chat")}</span>
+                    <span className="mt-1 block text-xs leading-5 text-[#5f6368]">{t("Uses the DeepSeek Responses API for reasoning and output. Structured novel parsing continues without thinking mode.")}</span>
                   </span>
                 </span>
                 <input type="checkbox" checked={settings.thinking_enabled} onChange={event => setSettings({ ...settings, thinking_enabled: event.target.checked })} className="mt-1 h-5 w-5 accent-[#0b57d0]" />
@@ -315,11 +317,11 @@ export function SettingsPage() {
                   <Key size={15} />
                   {isAdmin
                     ? !keyRequired
-                      ? '平台 API Key（留空则保持现有 Key）'
-                      : '平台 API Key'
+                      ? t("Platform API key (leave blank to retain the existing key)")
+                      : t("Platform API key")
                     : !keyRequired
-                      ? '个人 API Key（留空则保持现有 Key）'
-                      : '个人 API Key'}
+                      ? t("Personal API key (leave blank to retain the existing key)")
+                      : t("Personal API key")}
                 </span>
               </label>
               <input
@@ -330,14 +332,14 @@ export function SettingsPage() {
                 autoComplete="off"
                 required={keyRequired}
                 aria-describedby={keyRequired ? 'llm-api-key-help' : undefined}
-                placeholder={keyRequired ? '请输入所选地区和套餐的 API Key' : '已配置'}
+                placeholder={keyRequired ? t("Enter the API key for the selected region and plan") : t("Configured")}
                 className="field-control mt-2"
               />
               {keyRequired && (
                 <p id="llm-api-key-help" className="mt-2 text-xs font-normal leading-5 text-[#5f6368]">
                   {isAdmin
-                    ? '此选项需要对应的 API Key；保存前会验证连接。'
-                    : '配置个人 Key 后，可查看该 Key 的消耗；配置前继续使用平台模型。'}
+                    ? t("This selection requires its matching API key. The connection is verified before saving.")
+                    : t("After configuring a personal key, you can view its usage. Until then, requests use the platform model.")}
                 </p>
               )}
             </div>
@@ -345,7 +347,7 @@ export function SettingsPage() {
             <div className="flex justify-end">
               <button type="submit" disabled={saving} className="primary-action">
                 {saving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
-                {saving ? '正在验证并保存…' : `保存${isAdmin ? '平台' : '个人'}设置`}
+                {saving ? t("Verifying and saving…") : t("Save {p0} settings", { p0: isAdmin ? t("platform") : t("personal") })}
               </button>
             </div>
           </form>}
@@ -361,25 +363,25 @@ export function SettingsPage() {
               <Trash2 size={20} />
             </div>
             <div>
-              <h2 id="account-settings-heading" className="text-xl font-semibold text-[#1f1f1f]">账号数据</h2>
+              <h2 id="account-settings-heading" className="text-xl font-semibold text-[#1f1f1f]">{t("Account data")}</h2>
               <p className="text-sm text-[#5f6368]">{user?.email}</p>
             </div>
           </div>
           <p className="mb-6 text-sm leading-6 text-[#5f6368]">
-            你可以先导出账号数据。删除账号会永久删除你的登录资料、书架关联、阅读进度、身份、对话、记忆和个人时间线；你提交并被系统接受的来源内容，包括仍在解析或随后解析失败的内容，会随共享原著继续保留。解析成功后其他用户仍可从共享书库加入，移出书架或删除账号不会删除这些共享内容。
+            {t("Export your account data first if needed. Deleting the account permanently removes login details, shelf associations, progress, identities, chats, memories and personal timelines. Accepted source content remains with the shared original, including content still parsing or later failing. After successful parsing, others can add it from the shared library. Removing a book or deleting your account does not delete this shared content.")}
           </p>
           <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
             <button type="button" disabled={exporting || deleting} onClick={() => { void logout(); }} className="tonal-action">
               <LogOut size={16} />
-              退出登录
+              {t("Sign out")}
             </button>
             <button type="button" disabled={exporting || deleting} onClick={exportAccount} className="tonal-action">
               {exporting ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
-              {exporting ? '正在导出…' : '导出账号数据'}
+              {exporting ? t("Exporting…") : t("Export account data")}
             </button>
             <button type="button" disabled={deleting || exporting} onClick={eraseAccount} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-full border border-[#b3261e] px-5 font-semibold text-[#b3261e] hover:bg-[#fce8e6] disabled:opacity-50">
               {deleting ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
-              {deleting ? '正在删除…' : '删除账号'}
+              {deleting ? t("Deleting…") : t("Delete account")}
             </button>
           </div>
         </section>

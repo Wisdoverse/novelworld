@@ -1,3 +1,4 @@
+import { translate as t, useLocale } from '@/shared/lib/i18n';
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react';
 import { suggestWorldAction } from '@/entities/narrative';
 import { effectiveWorldContext } from '@/shared/lib/worldSourceContext';
@@ -15,14 +16,14 @@ interface Target { id: string; name: string }
 interface SceneSuggestion extends WorldAction { label: string; key: string }
 
 export const actionLabels: Record<WorldActionKind, string> = {
-  travel: '前往地点',
-  investigate: '调查线索',
-  converse: '与角色交谈',
-  ally: '争取结盟',
-  oppose: '公开反对',
-  advance_thread: '推进事件线',
-  resolve_thread: '解决事件线（旧版）',
-  pursue_goal: '追求自己的目标',
+  get travel() { return t("Travel to a location"); },
+  get investigate() { return t("Investigate a clue"); },
+  get converse() { return t("Converse with a character"); },
+  get ally() { return t("Seek an alliance"); },
+  get oppose() { return t("Oppose openly"); },
+  get advance_thread() { return t("Advance a thread"); },
+  get resolve_thread() { return t("Resolve a thread (legacy)"); },
+  get pursue_goal() { return t("Pursue your own goal"); },
 };
 
 const availableActions: WorldActionKind[] = [
@@ -48,6 +49,7 @@ function targets(view: OpenWorldView, kind: WorldActionKind): Target[] {
   if (kind === 'advance_thread' || kind === 'resolve_thread') return threads;
 
   if (kind === 'investigate') {
+    // Keep internal target names stable when only the interface language changes.
     const admittedEvents = new Map(context.scheduled_events.map(event => [event.id, event]));
     const highWater = context.unlocked_through_chapter;
     const events = view.session.canonical_events
@@ -99,9 +101,9 @@ function sceneSuggestions(view: OpenWorldView): SceneSuggestion[] {
   const investigateSubject = investigateTarget?.name.replace(/^(事件线|主线事件)：/, '');
   const nextLocation = targets(view, 'travel').find(location => location.id !== currentLocation);
   const fallback = [
-    { label: '留意周围', intent: '留意当前周围，看看有什么值得关注。' },
-    { label: '整理线索', intent: '整理目前掌握的线索，想好下一步行动。' },
-    { label: '计划下一步', intent: '根据目前的情况，想好接下来要做什么。' },
+    { label: t("Look around"), intent: t("Look around and see what deserves your attention.") },
+    { label: t("Review clues"), intent: t("Review what you know and plan your next move.") },
+    { label: t("Plan your next move"), intent: t("Consider the situation and decide what to do next.") },
   ];
   const suggestions: SceneSuggestion[] = [];
   const add = (kind: WorldActionKind, target: Target | undefined, label: string, intent: string) => {
@@ -114,15 +116,16 @@ function sceneSuggestions(view: OpenWorldView): SceneSuggestion[] {
     });
   };
 
-  add('converse', localCharacter, `与${localCharacter?.name ?? ''}交谈`, `尝试与${localCharacter?.name ?? ''}交谈，了解当前局势。`);
-  add('investigate', investigateTarget, `留意${investigateSubject ?? ''}`, `看看${investigateSubject ?? '当前周围'}的情况，想好下一步。`);
-  add('travel', nextLocation, `前往${nextLocation?.name ?? ''}`, `前往${nextLocation?.name ?? '别处'}，看看那里的情况。`);
+  add('converse', localCharacter, t("Talk to {p0}", { p0: localCharacter?.name ?? '' }), t("Try talking to {p0} about the situation.", { p0: localCharacter?.name ?? '' }));
+  add('investigate', investigateTarget, t("Check on {p0}", { p0: investigateSubject ?? '' }), t("Check on {p0} and plan your next move.", { p0: investigateSubject ?? t("Current surroundings") }));
+  add('travel', nextLocation, t("Travel to {p0}", { p0: nextLocation?.name ?? '' }), t("Travel to {p0} and see what is happening there.", { p0: nextLocation?.name ?? t("Elsewhere") }));
   return suggestions;
 }
 
 export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }: WorldActionFormProps) {
+  const locale = useLocale();
   const fingerprint = useMemo(() => sceneFingerprint(view), [view]);
-  const suggestions = useMemo(() => sceneSuggestions(view), [view]);
+  const suggestions = useMemo(() => sceneSuggestions(view), [view, locale]);
   const [kind, setKind] = useState<WorldActionKind | ''>('pursue_goal');
   const [targetId, setTargetId] = useState<string | null>(null);
   const [intent, setIntent] = useState('');
@@ -202,12 +205,12 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
   };
 
   const blockingReason = controlsDisabled ? undefined
-    : sceneChanged ? '场景已变化，请重新选择建议，或确认这份草稿仍适合当前场景。'
-      : !kind ? '请选择场景建议、自由输入或调整行动方式。'
+    : sceneChanged ? t("The scene changed. Choose a new suggestion or confirm that this draft still fits the current scene.")
+      : !kind ? t("Choose a scene suggestion, write freely or adjust the action type.")
         : targetRequired && targetOptions.length === 0
-          ? '当前没有可供此行动选择的目标。可以选择自由输入，写下你的下一步行动。'
-          : targetRequired && !selectedTarget ? '请先选择这次行动的目标。'
-            : !intent.trim() ? '请在“你的意图”中写下你想做什么。' : undefined;
+          ? t("No target is available for this action. Write freely to describe your next move.")
+          : targetRequired && !selectedTarget ? t("Choose the target for this action first.")
+            : !intent.trim() ? t("Describe what you want to do in “Your intent”.") : undefined;
   const actionRule = view.session.game_rules?.action_rules.find(rule => rule.kind === kind);
   const actionAttribute = view.session.game_rules?.attributes.find(attribute => attribute.key === actionRule?.attribute_key);
   const actionScore = actionAttribute ? view.player.rules?.attributes[actionAttribute.key] : undefined;
@@ -252,10 +255,10 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
   return (
     <form className="space-y-4" onSubmit={submit}>
       <p className="text-sm text-[#5f6368]">
-        行动者始终是你创建的角色“{view.player.name}”；原著角色会依据自己的目标回应。
+        {t('You act as your original character “{p0}”; source characters respond according to their own goals.', { p0: view.player.name })}
       </p>
       <fieldset className="space-y-2">
-        <legend className="mb-2 text-sm font-medium text-[#3c4043]">场景建议</legend>
+        <legend className="mb-2 text-sm font-medium text-[#3c4043]">{t("Scene suggestions")}</legend>
         <div className="flex flex-wrap gap-2">
           {suggestions.map((choice, index) => (
             <button
@@ -279,10 +282,10 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
         className={`min-h-11 max-w-full break-words [overflow-wrap:anywhere] rounded-lg border px-3 py-2 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#315b45] focus-visible:ring-offset-2 disabled:opacity-50 ${kind === 'pursue_goal' && !selectedSuggestion && !sceneChanged ? 'border-[#315b45] bg-[#dce8d3] text-[#203a35] ring-1 ring-[#315b45]' : 'border-[#c8d8c0] bg-white text-[#203a35] hover:bg-[#f4f7ef]'}`}
         onClick={chooseFreeInput}
       >
-        自由输入
+        {t("Write freely")}
       </button>
       <label className="block text-sm font-medium text-[#3c4043]">
-        你的意图
+        {t("Your intent")}
         <textarea
           className="field-control mt-1"
           disabled={controlsDisabled}
@@ -298,17 +301,17 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
       </label>
       {sceneChanged && !controlsDisabled ? (
         <div role="status" className="text-sm text-[#8a4b08]">
-          场景已变化，请重新选择建议或确认这份草稿。
+          {t("The scene changed. Choose a new suggestion or confirm this draft.")}
           <button type="button" className="ml-2 min-h-11 rounded px-2 font-medium underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#315b45]" onClick={() => setDraftScene(fingerprint)}>
-            确认在当前场景继续
+            {t("Confirm for the current scene")}
           </button>
         </div>
       ) : null}
       <details className="rounded-lg border border-[#ded6c4] bg-white/70 p-3">
-        <summary className="cursor-pointer rounded text-sm font-medium text-[#315b45] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#315b45]">调整行动方式与目标</summary>
+        <summary className="cursor-pointer rounded text-sm font-medium text-[#315b45] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#315b45]">{t("Adjust action type and target")}</summary>
         <div className="mt-3 space-y-4">
           <label className="block text-sm font-medium text-[#3c4043]">
-            行动
+            {t("Action")}
             <select
               className="field-control mt-1"
               disabled={controlsDisabled}
@@ -321,21 +324,21 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
                 setSelectedSuggestion(null);
               }}
             >
-              <option value="" disabled>请选择行动方式</option>
+              <option value="" disabled>{t("Choose an action type")}</option>
               {availableActions.map(value => <option key={value} value={value}>{actionLabels[value]}</option>)}
             </select>
           </label>
           {actionRule && actionAttribute && actionScore !== undefined && actionModifier !== undefined ? (
             <div className="rounded-lg border border-[#d2e3fc] bg-[#f8faff] p-3 text-sm text-[#3c4043]">
-              <span className="font-semibold text-[#0b57d0]">检定预览</span>
-              <span className="ml-2">D20 + {actionAttribute.label} {actionModifier >= 0 ? `+${actionModifier}` : actionModifier}，模板基础难度 {actionRule.difficulty_class}</span>
+              <span className="font-semibold text-[#0b57d0]">{t("Check preview")}</span>
+              <span className="ml-2">D20 + {actionAttribute.label} {actionModifier >= 0 ? `+${actionModifier}` : actionModifier}{t(", template base difficulty")} {actionRule.difficulty_class}</span>
               <p className="mt-1 text-xs text-[#5f6368]">
-                {actionRule.description}；提交后服务端会进行语义判断，可能无需检定或调整难度；配置缺失时沿用模板检定。实际结果由服务端保存并可回放。
+                {actionRule.description}{t(". The server assesses intent after submission; a check may be unnecessary or its difficulty may change. If configuration is unavailable, it uses the template check. The actual result is saved and replayable.")}
               </p>
             </div>
           ) : null}
           <label className="block text-sm font-medium text-[#3c4043]">
-            目标{targetRequired ? '' : '（可选）'}
+            {t("Target")}{targetRequired ? '' : t("(optional)")}
             <select
               className="field-control mt-1"
               disabled={controlsDisabled}
@@ -348,27 +351,27 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
               }}
               required={targetRequired}
             >
-              {!targetRequired ? <option value="">自定目标</option> : null}
-              {targetRequired ? <option value="" disabled>请选择目标</option> : null}
-              {targetOptions.map(option => <option key={option.id} value={option.id}>{option.name}</option>)}
+              {!targetRequired ? <option value="">{t("Custom target")}</option> : null}
+              {targetRequired ? <option value="" disabled>{t("Choose a target")}</option> : null}
+              {targetOptions.map(option => <option key={option.id} value={option.id}>{option.name.startsWith('主线事件：') ? t('Main event: {p0}', { p0: option.name.slice(5) }) : option.name.startsWith('事件线：') ? t('Thread: {p0}', { p0: option.name.slice(4) }) : option.name}</option>)}
             </select>
           </label>
           {view.action_suggestions_available ? (
             <div className="text-sm text-[#3c4043]">
               <button type="button" className="min-h-11 underline disabled:opacity-50" disabled={controlsDisabled || suggesting || !intent.trim()} onClick={() => void requestSuggestion()}>
-                {suggesting ? '正在分析行动…' : '建议行动类型'}
+                {suggesting ? t("Analyzing action…") : t("Suggest an action type")}
               </button>
-              <p className="mt-1 text-xs text-[#5f6368]">点击后会将当前意图发送至部署方配置的 Laya 服务。</p>
+              <p className="mt-1 text-xs text-[#5f6368]">{t("Sends the current intent to the deployment's configured Laya service when clicked.")}</p>
               {classifier?.fingerprint === fingerprint && !controlsDisabled ? (
                 <div role="status" className="mt-1">
                   {classifier.kind ? (
-                    <>建议：<button type="button" className="min-h-11 underline" onClick={() => {
+                    <>{t("Suggestion:")}<button type="button" className="min-h-11 underline" onClick={() => {
                       setKind(classifier.kind!);
                       setTargetId('');
                       setDraftScene(fingerprint);
                       setSelectedSuggestion(null);
-                    }}>{actionLabels[classifier.kind]}</button>。点击可选用行动类型，再确认目标并提交。</>
-                  ) : '暂时没有可靠建议，请自行选择行动。'}
+                    }}>{actionLabels[classifier.kind]}</button>{t(". Select the action type, then confirm a target and submit.")}</>
+                  ) : t("No reliable suggestion is available. Choose the action yourself.")}
                 </div>
               ) : null}
             </div>
@@ -381,7 +384,7 @@ export function WorldActionForm({ view, isPending, isLocked = false, onSubmit }:
         aria-describedby={blockingReason ? guidanceId : undefined}
         className="primary-action"
       >
-        {isPending ? '世界正在回应…' : '执行行动'}
+        {isPending ? t("The world is responding…") : t("Execute action")}
       </button>
       {blockingReason ? <p id={guidanceId} className="text-sm text-[#5f6368]">{blockingReason}</p> : null}
     </form>

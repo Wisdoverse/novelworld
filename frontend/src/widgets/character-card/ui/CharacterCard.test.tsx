@@ -1,3 +1,5 @@
+import { beforeEach as beforeLocaleTest } from 'vitest';
+import { setLocale } from '@/shared/lib/i18n';
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { Character } from '@/shared/types';
@@ -39,3 +41,6 @@ describe('CharacterCard persona boundary', () => {
     expect(container.querySelector('img')?.getAttribute('src')).toBe(full.avatar_url);
   });
 });
+
+// This suite retains the Simplified Chinese journey; locale tests cover the English default.
+beforeLocaleTest(() => setLocale('zh-CN'));

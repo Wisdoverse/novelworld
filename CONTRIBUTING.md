@@ -13,6 +13,12 @@ and [agent instructions](./AGENTS.md) before changing behavior.
   [SECURITY.md](./SECURITY.md), never a public issue.
 - Keep one independently mergeable outcome per pull request.
 
+Use English for identifiers, comments, configuration, contributor documentation,
+and default interface copy. Keep the English and Simplified Chinese UI catalogs
+complete, including accessible labels and local errors. Preserve Chinese documentation, literary
+and parser fixtures, and immutable versioned provider registrations. Interface
+language does not change source text or generation language.
+
 ## Development setup
 
 Prerequisites are current stable Rust (the locked dependency graph currently

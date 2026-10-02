@@ -1,3 +1,4 @@
+import { UiMessageError, type MessageKey } from '@/shared/lib/i18n';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import axios from 'axios';
 import { apiClient, getApiErrorCode } from '@/shared/api/client';
@@ -53,9 +54,9 @@ export function isNarrativeChoiceConflict(error: unknown) {
   return getApiErrorCode(error) === 'choice_conflict';
 }
 
-class WorldTurnConfirmationUnknownError extends Error {
-  constructor(message: string) {
-    super(message);
+class WorldTurnConfirmationUnknownError extends UiMessageError {
+  constructor(key: MessageKey) {
+    super({ key });
     this.name = 'WorldTurnConfirmationUnknownError';
   }
 }
@@ -86,7 +87,70 @@ export const narrativeKeys = {
     'narrative', novelId, 'player-entry', checkpoint ?? 'current',
   ] as const,
   openWorld: (novelId: string) => ['narrative', novelId, 'open-world'] as const,
+  turnConfirmation: (novelId: string, userId: string, turnId?: string) => [
+    'narrative', novelId, 'turn-confirmation', userId, turnId,
+  ] as const,
 };
+
+export interface WorldTurnConfirmation {
+  turn_id: string;
+  status: 'in_progress' | 'completed' | 'failed';
+  memory_projection_status?: 'pending' | 'saved' | 'skipped';
+}
+
+export function useWorldTurnConfirmation(
+  novelId: string, userId: string, turnId: string | undefined, enabled: boolean,
+) {
+  const queryClient = useQueryClient();
+  return useQuery({
+    queryKey: narrativeKeys.turnConfirmation(novelId, userId, turnId),
+    queryFn: async ({ signal }) => {
+      const { data: confirmation } = await apiClient.get<WorldTurnConfirmation>(
+        `/narrative/${novelId}/world/turns/${turnId}`, { signal, timeout: 5_000 },
+      );
+      if (confirmation.turn_id !== turnId
+        || !['in_progress', 'completed', 'failed'].includes(confirmation.status)) {
+        throw new WorldTurnConfirmationUnknownError('The saved action could not be confirmed');
+      }
+      const terminal = confirmation.status === 'failed'
+        || (confirmation.status === 'completed'
+          && (confirmation.memory_projection_status === 'saved'
+            || confirmation.memory_projection_status === 'skipped'));
+      if (!terminal) return { confirmation };
+      try {
+        const { data: refreshedWorld } = await apiClient.get<OpenWorldView>(
+          `/narrative/${novelId}/world`, { signal, timeout: 5_000 },
+        );
+        signal.throwIfAborted();
+        if (refreshedWorld.player.user_id !== userId
+          || refreshedWorld.player.novel_id !== novelId) {
+          throw new WorldTurnConfirmationUnknownError('The latest world belongs to another reader');
+        }
+        // A cancelled query or cleared session must never repopulate another
+        // principal's world cache with a late confirmation response.
+        const key = narrativeKeys.openWorld(novelId);
+        const current = queryClient.getQueryData<OpenWorldView | null>(key);
+        if (current?.player.user_id !== userId
+          || current.player.novel_id !== novelId
+          || current.session.turn_number > refreshedWorld.session.turn_number
+          || Date.parse(current.world_state.updated_at) > Date.parse(refreshedWorld.world_state.updated_at)) {
+          return { confirmation };
+        }
+        queryClient.setQueryData(key, refreshedWorld);
+        return { confirmation, refreshedWorld };
+      } catch {
+        signal.throwIfAborted();
+        // Keep the durable status even if the fresh view fails. In particular,
+        // a confirmed failure must never offer generation as confirmation.
+        return { confirmation };
+      }
+    },
+    enabled: enabled && !!turnId,
+    retry: false,
+    staleTime: 0,
+    refetchInterval: 10_000,
+  });
+}
 
 export interface CreatePlayerEntityInput {
   checkpoint_chapter: number;
@@ -266,7 +330,7 @@ export function useSubmitWorldTurn(novelId: string) {
       } catch {
         // The POST already committed. A rejected confirmation GET must never
         // be reclassified as a terminal rejection that unlocks a new action.
-        throw new WorldTurnConfirmationUnknownError('已提交行动尚无法从最新世界状态确认');
+        throw new WorldTurnConfirmationUnknownError("The committed action cannot yet be confirmed from the latest world state");
       }
       await queryClient.invalidateQueries({
         queryKey: narrativeKeys.worldState(novelId),
@@ -279,11 +343,11 @@ export function useSubmitWorldTurn(novelId: string) {
       const view = queryClient.getQueryData<OpenWorldView | null>(openWorldKey);
       const journalEntry = view?.journal.find(entry => entry.turn_id === result.turn_id);
       if (!journalEntry) {
-        throw new WorldTurnConfirmationUnknownError('已提交行动尚未出现在最新世界状态中');
+        throw new WorldTurnConfirmationUnknownError("The committed action is not yet present in the latest world state");
       }
       if (journalEntry.memory_projection_status !== 'saved'
         && journalEntry.memory_projection_status !== 'skipped') {
-        throw new WorldTurnConfirmationUnknownError('已提交行动的记忆投影尚未确认');
+        throw new WorldTurnConfirmationUnknownError("The committed action's memory projection is not yet confirmed");
       }
     },
     onError: async error => {

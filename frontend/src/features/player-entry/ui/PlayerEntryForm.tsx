@@ -1,3 +1,4 @@
+import { translate as t, useLocale } from '@/shared/lib/i18n';
 import { useEffect, useState, type FormEvent } from 'react';
 import { useGenerateGameRules, type CreatePlayerEntityInput } from '@/entities/narrative';
 import { getApiErrorCode, getApiErrorMessage } from '@/shared/api/client';
@@ -32,6 +33,7 @@ export function PlayerEntryForm({
   onCheckpointChange,
   onSubmit,
 }: PlayerEntryFormProps) {
+  useLocale();
   const [name, setName] = useState('');
   const [background, setBackground] = useState('');
   const [capabilities, setCapabilities] = useState('');
@@ -97,15 +99,14 @@ export function PlayerEntryForm({
       aria-labelledby="player-entry-title"
     >
       <h2 id="player-entry-title" className="text-xl font-semibold text-[#1f1f1f]">
-        创建你的原创角色
+        {t("Create your original character")}
       </h2>
       <p className="mt-2 text-sm text-[#5f6368]">
-        你可以先继续阅读，再从已解锁章节选择入场点。创建后入场点及此前历史不可更改；
-        你仍可完成入场章的命运选择，之后的因果由你的开放世界行动推进。
+        {t("You can keep reading before choosing an unlocked entry chapter. Your entry point and earlier history become fixed. You can complete this chapter's fate choice; later events advance through your open-world actions.")}
       </p>
       <form className="mt-5 space-y-4" onSubmit={submit}>
         <label className="block text-sm font-medium text-[#3c4043]">
-          入场章节
+          {t("Entry chapter")}
           <select
             className="field-control mt-1"
             value={checkpointChapter}
@@ -113,12 +114,12 @@ export function PlayerEntryForm({
             onChange={event => onCheckpointChange(Number(event.target.value))}
           >
             {Array.from({ length: unlockedThroughChapter }, (_, index) => index + 1).map(chapter => (
-              <option key={chapter} value={chapter}>第 {chapter} 章</option>
+              <option key={chapter} value={chapter}>{t('Chapter {p0}', { p0: chapter })}</option>
             ))}
           </select>
         </label>
         <fieldset disabled={controlsLocked} className="rounded-xl border border-[#d2e3fc] bg-[#f8faff] p-4">
-          <legend className="px-1 text-sm font-semibold text-[#0b57d0]">行动判定（高级项）</legend>
+          <legend className="px-1 text-sm font-semibold text-[#0b57d0]">{t("Action checks (advanced)")}</legend>
           <label className="mt-2 flex items-start gap-2 text-sm text-[#3c4043]">
             <input
               type="checkbox"
@@ -126,8 +127,8 @@ export function PlayerEntryForm({
               onChange={event => setResolutionMode(event.target.checked ? 'advanced' : 'narrative')}
             />
             <span>
-              启用小说专属 D20 属性与检定
-              <span className="mt-1 block text-xs text-[#5f6368]">默认仍是纯叙事模式；规则模板由同一本小说的玩家共享。</span>
+              {t("Enable novel-specific D20 attributes and checks")}
+              <span className="mt-1 block text-xs text-[#5f6368]">{t("Narrative mode remains the default. Players of the same novel share the rule template.")}</span>
             </span>
           </label>
           {resolutionMode === 'advanced' ? (
@@ -148,22 +149,22 @@ export function PlayerEntryForm({
                     });
                   }}
                 >
-                  {generateRules.isPending ? '正在生成小说规则…' : '生成小说专属规则'}
+                  {generateRules.isPending ? t("Generating novel rules…") : t("Generate novel-specific rules")}
                 </button>
               ) : (
                 <>
                   {gameRules.series ? (
                     <div className="rounded-lg bg-[#f8fafd] p-3 text-xs leading-5 text-[#5f6368]">
-                      <p className="font-medium text-[#3c4043]">系列共享基础规则：{gameRules.series.name}</p>
+                      <p className="font-medium text-[#3c4043]">{t("Shared series rules:")}{gameRules.series.name}</p>
                       <p className="mt-1">{gameRules.series.background}</p>
                       <p className="mt-1">
-                        规则出处来自系列来源书。角色属性点、装备和阅读进度仍各自独立。
+                        {t("Rules come from the series source book. Attribute points, equipment and reading progress stay independent.")}
                       </p>
                     </div>
                   ) : null}
                   <div className="flex items-center justify-between text-xs text-[#5f6368]">
-                    <span>属性点 {assignedPoints} / {gameRules.point_budget}</span>
-                    <span>D20 · 服务器判定</span>
+                    <span>{t("Attribute points")} {assignedPoints} / {gameRules.point_budget}</span>
+                    <span>{t("D20 · Server checks")}</span>
                   </div>
                   {gameRules.attributes.map(attribute => (
                     <label key={attribute.key} className="grid grid-cols-[1fr_5rem] gap-3 text-sm text-[#3c4043]">
@@ -189,28 +190,28 @@ export function PlayerEntryForm({
               {generateRules.isError ? (
                 <p role="alert" className="text-sm text-[#b3261e]">
                   {getApiErrorCode(generateRules.error) === 'game_rule_sources_unavailable'
-                    ? '当前小说的世界规则不足以生成基础检定。可关闭高级项，以纯叙事模式进入故事。'
+                    ? t("This novel lacks enough world rules for basic checks. Turn off the advanced option to enter narrative mode.")
                     : getApiErrorCode(generateRules.error) === 'series_rule_source_unavailable'
-                      ? '系列来源书的 D20 规则尚未生成。可先以纯叙事模式进入故事，或在书架的系列管理中生成来源书规则。'
+                      ? t("The series source book's D20 rules are not generated. Use narrative mode first or generate source rules in shelf series management.")
                     : getApiErrorCode(generateRules.error) === 'series_background_pending'
-                      ? '请先在书架的系列管理中确认共享世界背景，再启用系列 D20 规则。也可关闭高级项，以纯叙事模式进入故事。'
+                      ? t("Confirm the shared background in shelf series management before enabling series D20 rules. You can also turn off the advanced option.")
                     : getApiErrorCode(generateRules.error) === 'canon_unavailable'
-                      ? '小说解析尚未完成，请等待解析成功后生成规则。'
+                      ? t("Parsing is incomplete. Wait for success before generating rules.")
                       : getApiErrorCode(generateRules.error) === 'game_rules_unavailable_at_progress'
-                        ? '小说专属规则引用了尚未解锁的章节。请继续阅读后重试，也可关闭高级项，以纯叙事模式进入故事。'
-                        : getApiErrorMessage(generateRules.error, '小说规则生成失败，请稍后重试')}
+                        ? t("Novel rules reference locked chapters. Keep reading and retry, or turn off the advanced option.")
+                        : getApiErrorMessage(generateRules.error, t("Novel rule generation failed. Try again later."))}
                 </p>
               ) : null}
               {gameRules && !advancedReady ? (
                 <p role="alert" className="text-sm text-[#b3261e]">
-                  属性必须为 {gameRules.minimum_score}–{gameRules.maximum_score} 的整数，且恰好分配 {gameRules.point_budget} 点。
+                  {t('Attributes must be integers from {p0} to {p1}, totaling {p2} points.', { p0: gameRules.minimum_score, p1: gameRules.maximum_score, p2: gameRules.point_budget })}
                 </p>
               ) : null}
             </div>
           ) : null}
         </fieldset>
         <label className="block text-sm font-medium text-[#3c4043]">
-          名字
+          {t("Name")}
           <input
             className="field-control mt-1"
             value={name}
@@ -221,7 +222,7 @@ export function PlayerEntryForm({
           />
         </label>
         <label className="block text-sm font-medium text-[#3c4043]">
-          背景
+          {t("Background")}
           <textarea
             className="field-control mt-1"
             value={background}
@@ -233,7 +234,7 @@ export function PlayerEntryForm({
           />
         </label>
         <label className="block text-sm font-medium text-[#3c4043]">
-          能力（用逗号分隔）
+          {t("Abilities (comma-separated)")}
           <input
             className="field-control mt-1"
             value={capabilities}
@@ -244,7 +245,7 @@ export function PlayerEntryForm({
           />
         </label>
         <label className="block text-sm font-medium text-[#3c4043]">
-          初始地点（可选）
+          {t("Starting location (optional)")}
           <select
             className="field-control mt-1"
             value={locationId ?? unspecifiedLocation}
@@ -253,17 +254,17 @@ export function PlayerEntryForm({
               event.target.value === unspecifiedLocation ? null : event.target.value,
             )}
           >
-            <option value={unspecifiedLocation}>暂不指定</option>
+            <option value={unspecifiedLocation}>{t("Leave unspecified")}</option>
             {locations.map(location => (
               <option key={location.id} value={location.id}>{location.name}</option>
             ))}
           </select>
           <span className="mt-1 block text-xs font-normal text-[#5f6368]">
-            可从入场章节已出现的地点中选择，也可以暂不指定。
+            {t("Choose a location already seen in the entry chapter, or leave it unspecified.")}
           </span>
         </label>
         <label className="block text-sm font-medium text-[#3c4043]">
-          随身物品（可选，用逗号分隔）
+          {t("Inventory (optional, comma-separated)")}
           <input
             className="field-control mt-1"
             value={inventory}
@@ -278,7 +279,7 @@ export function PlayerEntryForm({
           disabled={controlsLocked || !advancedReady}
           className="primary-action"
         >
-          {isPending ? '正在进入世界…' : '进入故事'}
+          {isPending ? t("Entering the world…") : t("Enter the story")}
         </button>
       </form>
     </section>

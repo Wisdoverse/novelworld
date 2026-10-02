@@ -375,7 +375,7 @@ class Handler(BaseHTTPRequestHandler):
                 ),
                 "events": [{
                     "summary": "云舟调查北塔换防" if first_turn else "云舟整理地下回廊线索",
-                    # 林岚在两段叙事中都有明确、独立的见证/行动；this
+                    # Lin Lan clearly and independently witnesses or acts in both passages; this
                     # explicit provenance permits the event summaries, not the
                     # player's private action intent, to enter her chat context.
                     "actor_character_ids": [context["characters"][0]["id"]],

@@ -1,3 +1,4 @@
+import { translate as t, useLocale } from '@/shared/lib/i18n';
 import { Languages } from 'lucide-react';
 
 interface TranslationControlsProps {
@@ -17,6 +18,7 @@ export function TranslationControls({
   onToggle,
   onRetry,
 }: TranslationControlsProps) {
+  useLocale();
   return (
     <div className="mt-5 flex flex-wrap items-center justify-center gap-3 text-sm">
       <button
@@ -28,23 +30,23 @@ export function TranslationControls({
       >
         <Languages size={15} aria-hidden="true" />
         {unavailableReason
-          ? '本章暂不支持翻译'
+          ? t("Translation is unavailable for this chapter")
           : isLoading
-            ? '翻译中…'
+            ? t("Translating…")
             : active
-              ? '显示原文'
+              ? t("Show original")
               : isError
-                ? '重新翻译'
-                : '翻译成中文'}
+                ? t("Translate again")
+                : t("Translate into Chinese")}
       </button>
       {unavailableReason ? (
         <span className="text-[#5f6368]">{unavailableReason}</span>
       ) : null}
-      {isLoading ? <span role="status" className="text-[#5f6368]">正在翻译正文…</span> : null}
+      {isLoading ? <span role="status" className="text-[#5f6368]">{t("Translating the chapter…")}</span> : null}
       {isError && !unavailableReason ? (
         <span role="alert" className="text-[#b3261e]">
-          翻译失败，当前显示原文。
-          <button type="button" className="ml-2 underline" onClick={onRetry}>重试</button>
+          {t("Translation failed. Showing the original text.")}
+          <button type="button" className="ml-2 underline" onClick={onRetry}>{t("Retry")}</button>
         </span>
       ) : null}
     </div>

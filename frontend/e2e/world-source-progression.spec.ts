@@ -4,6 +4,25 @@ import { installStubs } from './stubs';
 import { OPEN_WORLD, PROGRESS, JOURNAL_ENTRY } from './fixtures';
 import { expectNoA11yViolations, settleAnimations } from './helpers';
 
+function trackWorldTurnRecoveryRequests(page: Page) {
+  const counts = { confirmations: 0, actions: 0 };
+  page.on('request', request => {
+    const path = new URL(request.url()).pathname.replace(/^\/api/, '');
+    if (request.method() === 'GET' && /^\/narrative\/[^/]+\/world\/turns\/[^/]+$/.test(path)) counts.confirmations++;
+    if (request.method() === 'POST' && path === '/narrative/novel-1/world/turns') counts.actions++;
+  });
+  return counts;
+}
+
+async function confirmReadOnlyThenResume(page: Page, requests: { confirmations: number; actions: number }) {
+  const readsBefore = requests.confirmations;
+  await page.getByRole('button', { name: '继续确认结果', exact: true }).click();
+  await expect.poll(() => requests.confirmations).toBeGreaterThan(readsBefore);
+  expect(requests.actions).toBe(0);
+  await page.getByRole('button', { name: '恢复原行动', exact: true }).click();
+  await expect.poll(() => requests.actions).toBe(1);
+}
+
 async function sourceWorld(page: Page, options: { loseResponse?: boolean; busy?: boolean; progressAfter?: number; failProgress?: boolean; stale?: boolean; end?: boolean; empty?: boolean; currentSourceAfter?: number; rewindAfter?: number; freshCharacterChapter?: number; busyRace?: 'in_progress' | 'pending_projection' } = {}) {
   await installStubs(page, { openWorld: true });
   let progress = options.freshCharacterChapter ? 3 : options.end ? 5 : 1;
@@ -269,6 +288,7 @@ test('unknown source replay survives a later source and rewind by explicit origi
 
 
 test('busy source restores the exact pending memory turn while keeping new actions locked', async ({ page }) => {
+  const requests = trackWorldTurnRecoveryRequests(page);
   const server = await sourceWorld(page, { busyRace: 'pending_projection' });
   await page.goto('/reader/novel-1/1');
   await expect(page.getByRole('button', { name: '继续确认结果', exact: true })).toBeEnabled();
@@ -278,7 +298,7 @@ test('busy source restores the exact pending memory turn while keeping new actio
   await page.reload();
   // Persisted progress is now 2 while the route/source remain 1. Only the
   // authoritative original turn may recover through this deliberate mismatch.
-  await page.getByRole('button', { name: '继续确认结果', exact: true }).click();
+  await confirmReadOnlyThenResume(page, requests);
   await expect(page.getByRole('button', { name: '继续确认结果', exact: true })).toHaveCount(0);
   await page.locator('summary').filter({ hasText: '调整行动方式与目标' }).click();
   await expect(page.getByRole('combobox', { name: '行动', exact: true })).toBeDisabled();
@@ -292,11 +312,12 @@ test('busy source restores the exact pending memory turn while keeping new actio
 });
 
 test('in-progress original turn recovery preserves the source fence and automatically retries admission from the recovered clock', async ({ page }) => {
+  const requests = trackWorldTurnRecoveryRequests(page);
   const server = await sourceWorld(page, { busyRace: 'in_progress' });
   await page.goto('/reader/novel-1/1');
   await expect(page.getByRole('button', { name: '继续确认结果', exact: true })).toBeEnabled();
   await page.reload();
-  await page.getByRole('button', { name: '继续确认结果', exact: true }).click();
+  await confirmReadOnlyThenResume(page, requests);
   await expect(page.getByRole('button', { name: '继续确认结果', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: '执行行动', exact: true })).toBeDisabled();
   await page.getByRole('button', { name: '继续确认下一幕' }).click();
@@ -310,4 +331,9 @@ test('in-progress original turn recovery preserves the source fence and automati
   expect(server.sourceCommands[2].body).toEqual({ expected_turn_number: 2, expected_source_chapter: 1, target_chapter: 2 });
   expect(server.providerCalls).toBe(1);
   expect(server.absoluteWrites).toEqual([]);
+});
+
+// These established journeys intentionally exercise the Chinese UI.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('novelworld.ui.locale', 'zh-CN'));
 });

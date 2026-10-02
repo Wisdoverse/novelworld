@@ -1,3 +1,4 @@
+import { translate as t, useLocale } from '@/shared/lib/i18n';
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuthStore } from '@/features/auth';
@@ -6,6 +7,7 @@ import { toast } from 'sonner';
 import { ArrowRight, BookOpen } from 'lucide-react';
 
 export function LoginPage({ initialRegister = false }: { initialRegister?: boolean }) {
+  useLocale();
   const navigate = useNavigate();
   const { login, register, loading } = useAuthStore();
   const [isRegister, setIsRegister] = useState(initialRegister);
@@ -18,14 +20,14 @@ export function LoginPage({ initialRegister = false }: { initialRegister?: boole
     try {
       if (isRegister) {
         await register(email, password, name || undefined);
-        toast.success('注册成功');
+        toast.success(t("Account created"));
       } else {
         await login(email, password);
-        toast.success('登录成功');
+        toast.success(t("Signed in"));
       }
       navigate('/shelf');
     } catch (error: unknown) {
-      toast.error(getApiErrorMessage(error, '操作失败'));
+      toast.error(getApiErrorMessage(error, t("Operation failed")));
     }
   };
 
@@ -40,54 +42,54 @@ export function LoginPage({ initialRegister = false }: { initialRegister?: boole
             NovelWorld
           </Link>
           <div className="mt-12 lg:mt-auto lg:mb-auto">
-            <p className="text-sm font-medium text-[#0b57d0]">你的小说世界</p>
+            <p className="text-sm font-medium text-[#0b57d0]">{t("Your novel world")}</p>
             <h1 className="mt-4 text-3xl font-medium leading-tight tracking-[-0.025em] text-[#1f1f1f] sm:text-4xl">
-              回到故事继续发生的地方
+              {t("Return to a story that keeps unfolding")}
             </h1>
             <p className="mt-5 max-w-sm text-base leading-7 text-[#5f6368]">
-              阅读、探索、与角色相遇。你的每一次选择都会成为新的时间线。
+              {t("Read, explore and meet characters. Every choice becomes part of a new timeline.")}
             </p>
           </div>
         </aside>
 
         <section className="flex flex-col justify-center p-8 sm:p-12 lg:p-16">
           <div className="mx-auto w-full max-w-md">
-            <p className="text-sm font-medium text-[#0b57d0]">{isRegister ? '开始使用' : '欢迎回来'}</p>
+            <p className="text-sm font-medium text-[#0b57d0]">{isRegister ? t("Get started") : t("Welcome back")}</p>
             <h2 className="mt-3 text-3xl font-medium tracking-[-0.02em] text-[#1f1f1f]">
-              {isRegister ? '创建账号' : '登录 NovelWorld'}
+              {isRegister ? t("Create account") : t("Sign in to NovelWorld")}
             </h2>
             <p className="mt-2 text-sm leading-6 text-[#5f6368]">
-              {isRegister ? '创建账号后即可导入小说并开始探索。' : '使用你的账号继续阅读。'}
+              {isRegister ? t("Create an account to import novels and start exploring.") : t("Continue reading with your account.")}
             </p>
 
             <form onSubmit={handleSubmit} className="mt-8 space-y-5">
               {isRegister && (
                 <label className="block text-sm font-medium text-[#3c4043]">
-                  昵称（可选）
-                  <input type="text" value={name} onChange={(e) => setName(e.target.value)} className="field-control mt-2" placeholder="如何称呼你" autoComplete="name" />
+                  {t("Display name (optional)")}
+                  <input type="text" value={name} onChange={(e) => setName(e.target.value)} className="field-control mt-2" placeholder={t("What should we call you?")} autoComplete="name" />
                 </label>
               )}
 
               <label className="block text-sm font-medium text-[#3c4043]">
-                邮箱
+                {t("Email")}
                 <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required className="field-control mt-2" placeholder="name@example.com" autoComplete="email" />
               </label>
 
               <label className="block text-sm font-medium text-[#3c4043]">
-                密码
-                <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} className="field-control mt-2" placeholder="至少 8 位" autoComplete={isRegister ? 'new-password' : 'current-password'} />
+                {t("Password")}
+                <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} className="field-control mt-2" placeholder={t("At least 8 characters")} autoComplete={isRegister ? 'new-password' : 'current-password'} />
               </label>
 
               <button type="submit" disabled={loading} className="primary-action mt-2 w-full">
-                {loading ? '处理中…' : isRegister ? '创建账号' : '登录'}
+                {loading ? t("Working…") : isRegister ? t("Create account") : t("Sign in")}
                 {!loading ? <ArrowRight size={18} aria-hidden="true" /> : null}
               </button>
             </form>
 
             <p className="mt-7 text-center text-sm text-[#5f6368]">
-              {isRegister ? '已有账号？' : '还没有账号？'}
+              {isRegister ? t("Already have an account?") : t("Need an account?")}
               <button type="button" onClick={() => setIsRegister(!isRegister)} className="ml-1 font-semibold text-[#0b57d0] hover:underline">
-                {isRegister ? '直接登录' : '创建账号'}
+                {isRegister ? t("Sign in instead") : t("Create account")}
               </button>
             </p>
           </div>

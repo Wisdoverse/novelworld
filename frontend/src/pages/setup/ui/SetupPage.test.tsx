@@ -1,3 +1,5 @@
+import { beforeEach as beforeLocaleTest } from 'vitest';
+import { setLocale } from '@/shared/lib/i18n';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -97,3 +99,6 @@ describe('SetupPage', () => {
     expect(queryClient.getQueryData(['private'])).toBe('marker');
   });
 });
+
+// This suite retains the Simplified Chinese journey; locale tests cover the English default.
+beforeLocaleTest(() => setLocale('zh-CN'));

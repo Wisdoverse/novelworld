@@ -37,15 +37,15 @@ pub fn router(state: AppState) -> Router {
 
 fn routes() -> Router<AppState> {
     Router::new()
-        // 流式对话（SSE）
+        // Streamed chat (SSE).
         .route("/chat/{character_id}/stream", post(chat_stream))
-        // 普通对话
+        // Standard chat.
         .route("/chat/{character_id}", post(chat))
-        // 获取对话历史
+        // Get chat history.
         .route("/chat/{character_id}/history", get(get_history))
-        // 获取角色记忆
+        // Get character memories.
         .route("/memories/{character_id}", get(get_memories))
-        // 清除短期记忆
+        // Clear short-term memories.
         .route(
             "/memories/{character_id}/short",
             axum::routing::delete(clear_short_memory),
@@ -385,7 +385,7 @@ fn extract_turn_id(headers: &HeaderMap) -> Result<Option<Uuid>, String> {
     Ok(Some(turn_id))
 }
 
-/// 流式 SSE 对话接口
+/// Streamed SSE chat endpoint.
 async fn chat_stream(
     State(state): State<AppState>,
     Path(character_id): Path<Uuid>,
@@ -479,7 +479,7 @@ async fn chat_stream(
         .into_response()
 }
 
-/// 普通对话接口（非流式）
+/// Standard non-streaming chat endpoint.
 async fn chat(
     State(state): State<AppState>,
     Path(character_id): Path<Uuid>,

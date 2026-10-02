@@ -4,14 +4,14 @@ use regex::Regex;
 use crate::domain::entities::chapter::Chapter;
 use uuid::Uuid;
 
-/// 小说解析领域服务
-/// 职责：将原始文本拆分为章节列表
+/// Novel parsing domain service.
+/// Splits raw text into chapters.
 pub struct NovelParserService;
 
 impl NovelParserService {
-    /// 自动检测并拆分章节
+    /// Detect and split chapters automatically.
     pub fn parse_chapters(novel_id: Uuid, raw_text: &str) -> Result<Vec<Chapter>> {
-        // 尝试多种章节分隔模式
+        // Try several chapter-boundary patterns.
         let patterns = [
             r"(?m)^第[零一二三四五六七八九十百千\d]+[章节回部集卷篇][^\n]*$",
             r"(?im)^[ \t\u{3000}]*-?[ \t\u{3000}]*chapter[ \t\u{3000}]+(?:\d+(?:[ \t\u{3000}]+[^\r\n]{1,100})?|[a-z](?:[ \t\u{3000}]*[a-z]){1,24})(?:[ \t\u{3000}]*[-:][ \t\u{3000}]*[^\r\n]{0,100})?[ \t\u{3000}]*-?[ \t\u{3000}]*\r?$",
@@ -28,7 +28,7 @@ impl NovelParserService {
             }
         }
 
-        // 无法识别章节结构，按字数切分（每 3000 字一章）
+        // If no chapter structure is detected, split into 3,000-character chunks.
         Ok(Self::split_by_length(novel_id, raw_text, 3000))
     }
 
@@ -44,10 +44,10 @@ impl NovelParserService {
             let title = m.as_str().trim().to_string();
             let content = text[start..end].trim().to_string();
             if !content.is_empty() {
-                // 章节号按保留的章节顺序编号：跳过的目录页不能留下编号空洞，
-                // 否则整本书会因章节不连续而被导入拒绝。
+                // Number chapters in retained order. Skipped table-of-contents pages must not
+                // leave gaps, or the import will reject the novel as discontinuous.
                 let ch = Chapter::new(novel_id, (chapters.len() + 1) as i32, Some(title), content);
-                // 章节内容过短（< 100字）可能是目录，跳过
+                // Skip chapters shorter than 100 characters; they may be table-of-contents entries.
                 if ch.word_count() > 100 {
                     chapters.push(ch);
                 }

@@ -78,3 +78,8 @@ test('community suggestion requires confirmation; contribution is opt-in and rev
   await settleAnimations(page);
   await expectNoA11yViolations(page);
 });
+
+// Exercise the retained Chinese UI without changing the application's English default.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('novelworld.ui.locale', 'zh-CN'));
+});
