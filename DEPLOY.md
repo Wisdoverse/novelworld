@@ -170,7 +170,8 @@ key，通过兼容版本向前恢复，不能删除 source_context、重置角�
 部署六个应用镜像。代码、架构、测试和秘密扫描检查由现有 GitHub Actions CI 负责；触发
 Jenkins 前，应确认选用的受信任分支或提交已通过 CI。每次成功构建都会运行现有
 `start.sh`，随后执行 `infra/ops/health-checks.sh`，确认部署 readiness 和部署后健康状态。
-部署依赖 Job 默认 workspace 中预先配置且跨构建保留的 `.env`；缺少时作业失败关闭。
+部署依赖 Job 默认 workspace 中预先配置且跨构建保留的 `.env`；缺少时，镜像构建前
+即失败关闭。Compose 使用该 `.env` 构建和启动，不使用示例配置。
 
 1. 在目标 Linux 部署服务器安装 Git、Bash、OpenSSL、curl，以及带 BuildKit 的
    Docker 和 Compose v2。Jenkins agent 用户必须能访问该服务器的 Docker daemon。
@@ -194,10 +195,18 @@ Jenkins 前，应确认选用的受信任分支或提交已通过 CI。每次成
    readiness 后再通过入口与容器健康检查。每次部署会造成停机；配置不完整、构建失败
    或健康检查失败都会使作业失败。
 
-Compose project 固定为 `novelworld`，已有源码安装接入前须确认其数据卷属于同一
-project。Job 的默认 workspace 和 Compose project 在构建间保持稳定；同一服务器安装
-只配置一个作业，流水线禁止该作业并发运行。服务端仍默认仅在 localhost 访问，远程
-访问使用既有加密边界。
+已有源码安装接入前，先在私有 `.env` 中设置与该安装完全相同的
+`COMPOSE_PROJECT_NAME`（当前安装为 `novel-world`），并保留原有的
+`POSTGRES_USER`、`POSTGRES_DB`、`POSTGRES_PASSWORD`、`BOOTSTRAP_L0_COMPLETE`、
+`JWT_SECRET`、`RUNTIME_CONFIG_KEY` 和 `INTERNAL_SERVICE_TOKEN`。这样 PostgreSQL 数据卷
+仍由原 Compose project 管理，启动根也保持不变；不要执行数据卷迁移或重新初始化。
+新建安装可不设置 `COMPOSE_PROJECT_NAME`，Compose 会沿用 Job 默认 workspace 的名称，
+该 workspace 必须跨构建稳定。若 Jenkins agent 在容器中，确保 Docker daemon 可访问
+到相同 workspace 路径，使构建上下文和 Compose bind mounts 指向正确位置。
+健康检查默认访问 `http://127.0.0.1:80`；若该地址不能从 Jenkins agent 到达，可在私有
+`.env` 配置未加引号的 `NGINX_URL=http://...`，指向该 agent 可访问的部署入口。该 URL
+只用于 Jenkins 发起的部署后探测。每个服务器仍只配置一个作业，流水线禁止并发运行。
+服务端仍默认仅在 localhost 访问，远程访问使用既有加密边界。
 
 此入口沿用直接启动器的源码安装流程，没有自动回滚。遇到失败先排查迁移和健康
 状态，不自动重跑或删除数据卷。存在 `.release` 的受管安装在检出前会被拒绝，仍按
