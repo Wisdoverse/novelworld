@@ -378,7 +378,7 @@ Scope:
   profile that remains explicitly private self-hosted. The private-profile
   boundary decisions (TLS, registration verification, content safety, provider,
   privacy, supply chain, incident response) are recorded in
-  [`DEPLOYMENT_PROFILE.md`](./DEPLOYMENT_PROFILE.md); the public-hosting
+  [deployment profile decisions](./ARCHITECTURE.md#deployment-profile-decisions); the public-hosting
   decisions reopen only if a public profile is selected.
 - Implement the selected public content-safety boundary, including enforceable
   submission/generation handling, user notice, reporting, complaint/takedown or
@@ -518,9 +518,11 @@ representative match-quality qualification remains separate.
 accessible interface while canon, character agency, memory, choices, and the
 open world remain one coherent causal system.
 
-The [D20 preview and evaluation plan](./ADVANCED_RULES_PLAN.md) separates the
-implemented v1/v2 template, server dice, and replay path from optional Laya (Jev)
-type hints and bounded advanced-turn adjudication. V2 uses fixed basic
+The preview separates the implemented v1/v2 templates, server dice, and replay
+path from optional Laya (Jev) type hints and bounded advanced-turn adjudication.
+Its accepted decisions are in [ADR 0001](./adr/0001-source-bound-advanced-game-rules.md),
+[ADR 0009](./adr/0009-bounded-laya-d20-adjudication.md), and
+[ADR 0010](./adr/0010-versioned-basic-game-rules.md). V2 uses fixed basic
 capabilities selected from bounded whole-book rule metadata; chapter citations
 remain provenance and existing progress guards remain. Migration 0030 requires
 coordinated Novel/Narrative writer shutdown. Implementation verification and

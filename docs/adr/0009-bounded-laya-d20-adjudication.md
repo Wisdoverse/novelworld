@@ -3,7 +3,7 @@
 - Status: Accepted (bounded structural private preview)
 - Date: 2026-09-26
 - Owners: narrative-service and frontend owners
-- Related: [ADR 0001](./0001-source-bound-advanced-game-rules.md), [ADR 0006](./0006-optional-laya-action-hints.md), [advanced rules contract](../ADVANCED_RULES_PLAN.md), and [issue #418](https://github.com/Wisdoverse/novelworld/issues/418)
+- Related: [ADR 0001](./0001-source-bound-advanced-game-rules.md), [ADR 0006](./0006-optional-laya-action-hints.md), [base rules contract](../PRODUCT_CONTRACT.md), and [issue #418](https://github.com/Wisdoverse/novelworld/issues/418)
 - Supersedes: Only ADR 0001's exclusion of per-action model adjudication, and only for the bounded preview described here. All other ADR 0001 decisions remain in force.
 
 ## Context
