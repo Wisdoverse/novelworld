@@ -251,7 +251,8 @@ export function WorldDashboard({
 
   useEffect(() => {
     const data = confirmation.data;
-    if (turn.isPending || !pendingRequest || !data?.refreshedWorld
+    if (turn.isPending || confirmation.isFetching || confirmation.isError
+      || !pendingRequest || !data?.refreshedWorld
       || data.confirmation.turn_id !== pendingRequest.idempotencyKey) return;
     const fresh = data.refreshedWorld;
     if (fresh.player.user_id !== view.player.user_id || fresh.player.novel_id !== novelId) return;
@@ -271,7 +272,7 @@ export function WorldDashboard({
     clearPendingRequest(pendingRequest.idempotencyKey);
     setError(data.confirmation.status === 'failed'
       ? 'The action failed before it changed your world. You can choose a new action.' : undefined);
-  }, [confirmation.data, pendingRequest?.idempotencyKey, storageKey, view, turn.isPending]);
+  }, [confirmation.data, confirmation.isFetching, confirmation.isError, pendingRequest?.idempotencyKey, storageKey, view, turn.isPending]);
 
   useEffect(() => {
     if (pendingRequest && view.journal.some(entry => (

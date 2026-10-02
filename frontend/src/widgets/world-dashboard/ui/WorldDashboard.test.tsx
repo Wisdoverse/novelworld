@@ -8,7 +8,7 @@ const mocks = vi.hoisted(() => ({
   submit: vi.fn(),
   confirmation: {
     data: undefined as { confirmation: WorldTurnConfirmation; refreshedWorld?: OpenWorldView } | undefined,
-    isFetching: false, refetch: vi.fn(),
+    isFetching: false, isError: false, refetch: vi.fn(),
   },
 }));
 
@@ -75,6 +75,7 @@ describe('WorldDashboard', () => {
     mocks.submit.mockReset();
     mocks.confirmation.data = undefined;
     mocks.confirmation.isFetching = false;
+    mocks.confirmation.isError = false;
     mocks.confirmation.refetch.mockReset();
     window.sessionStorage.clear();
   });
@@ -114,6 +115,17 @@ describe('WorldDashboard', () => {
     await waitFor(() => expect(window.sessionStorage.getItem('novelworld:pending-world-turn:user:novel')).toBeNull());
     expect(screen.queryByRole('button', { name: '继续确认结果' })).toBeNull();
     expect(screen.getByText(/failed before it changed your world/)).toBeTruthy();
+    expect(mocks.submit).not.toHaveBeenCalled();
+  });
+
+  it.each(['isFetching', 'isError'] as const)('does not unlock from cached failure during %s', state => {
+    const turnId = '80470e95-87cf-4c50-a05c-f7743c43c079';
+    window.sessionStorage.setItem('novelworld:pending-world-turn:user:novel', JSON.stringify({ action: { kind: 'travel', target_id: 'gate', intent: '前往城门' }, idempotencyKey: turnId, expectedTurnNumber: 1 }));
+    mocks.confirmation.data = { confirmation: { turn_id: turnId, status: 'failed' }, refreshedWorld: view };
+    mocks.confirmation[state] = true;
+    render(<WorldDashboard novelId="novel" view={view} />);
+    expect(window.sessionStorage.getItem('novelworld:pending-world-turn:user:novel')).not.toBeNull();
+    expect(screen.getByRole('button', { name: '执行行动' }).hasAttribute('disabled')).toBe(true);
     expect(mocks.submit).not.toHaveBeenCalled();
   });
 
