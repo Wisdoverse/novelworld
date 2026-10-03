@@ -109,7 +109,7 @@ services:
 
   embedding:
     profiles: ["local-embedding"]
-    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.3@sha256:c26a226262ad4ff3330fb30b76653c1bb65da2fcf413b92284545a010e0a8a48
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4@sha256:2538ea1c9640d3763b15af668039d24172d063b42337b0c27796fc2be180c78d
     container_name: ${CONTAINER_PREFIX:-novel}-embedding
     restart: unless-stopped
     logging: *bounded-logs
