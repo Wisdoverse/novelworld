@@ -234,22 +234,21 @@ Docker `RUN` is not proof that changed source was compiled. Require build eviden
 that Cargo compiled the changed source. For a registered release pair, a genuine
 B runtime change must yield at least one affected application image with both a
 different image ID and at least one different filesystem layer. Docs/cache-only
-changes and unchanged runtime inputs need not change every image or binary. For
-the current Diagnostic path, the order is merged A (#428), cache-freshness C
-(#432), then remote-profile B (#429); only an actual merged C baseline and
-strict-descendant B candidate with the guard on both sides can be considered.
-For a fresh prospective v6 registration, the exact merged B descendant
-`e8835db5d5c9042011a66f52a6eb06d0ffd014f4` is also eligible against actual C
-`70eb066a7c529769a9fe5dc3d8259b8f85d16c7d`: it includes the #435/#437 prestart
-fixes while retaining B's application build inputs, profile, fixture, Compose
-and cache guard. The clean runner checkout must equal the registered candidate
-SHA. Build and review artifacts from that exact source; never relabel B's
-manifest or reuse a consumed registration. All artifact, scan, budget and
-mandatory prestart gates remain required. This is an exact prospective pair,
-not permission to use an arbitrary later descendant.
-Preserve the old A baseline and failed preview pair as failed evidence; both are
-ineligible. Existing C→B artifacts and Frozen records retain their original
-identities and results.
+changes and unchanged runtime inputs need not change every image or binary.
+The historical C→B Diagnostic path used merged A (#428),
+cache-freshness C (#432), and remote-profile B (#429); eligibility required an
+actual merged C baseline and strict-descendant B candidate with the guard on
+both sides.
+For the exact prospective V6 source pair and its artifact, prestart, scan,
+budget, and authorization gates, follow the owning
+[Qualification Policy](docs/QUALIFICATION_POLICY.md). Source eligibility is
+prospective only; it does not transfer historical evidence, renew a frozen or
+consumed registration, or claim live or formal qualification.
+
+A dependency-only frontend pair also requires different full maps of compiled
+and served assets, plus a changed corresponding frontend filesystem layer. The
+historical C→B artifacts and Frozen records retain their original identities
+and results.
 
 For Vision journey tooling changes, also run
 `python3 tests/e2e/live_deepseek_journey.py --self-test`. CI runs
