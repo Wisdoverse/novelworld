@@ -254,8 +254,8 @@ images still contain upstream-owned findings. They are not application-release
 images and are not reported as clean or silently ignored: each stays
 digest-pinned and role-bounded, `docker-compose` Dependabot tracks all of them,
 and every new artifact must be re-scanned before re-pinning. The shipped
-frontend runtime installs Alpine's fixed OpenSSL packages on the same Nginx
-base and passes the application-image gate.
+frontend runtime installs fixed OpenSSL and PCRE2 packages on the same Nginx
+base; each rebuilt application image must pass the shared gate.
 
 The current release pipeline (docker.yml) generates one CycloneDX 1.7 SBOM per
 application image with the pinned trivy release and ships them with the
