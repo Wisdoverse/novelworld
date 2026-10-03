@@ -33,4 +33,5 @@ CROSS JOIN LATERAL generate_series(
 ) AS piece(start_at)
 WHERE btrim(substring(chapter.content FROM piece.start_at FOR 1200)) <> ''
 ON CONFLICT (chapter_id, chunk_index) DO UPDATE SET
-    content = EXCLUDED.content;
+    content = EXCLUDED.content
+WHERE public.chapter_chunks.content IS DISTINCT FROM EXCLUDED.content;
