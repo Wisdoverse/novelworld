@@ -364,7 +364,14 @@ evaluation plan](./adr/0009-bounded-laya-d20-adjudication.md) explains the optio
 missing or failing classifier is not this 422 and falls back to the template
 check for a new advanced turn; frozen decisions replay without another call.
 Both names refer to the same decision capability; configuration still uses
-`LAYA_API_URL` and `LAYA_API_KEY`. No semantic-quality qualification is implied.
+`LAYA_API_URL` and `LAYA_API_KEY`, set together for a private endpoint reachable
+from both Novel and Narrative containers. Prefer reusing an existing configured
+private/shared Laya service; normal source and Jenkins startup do not provision
+one. A standalone instance requires explicitly applying `docker-compose.laya.yml`
+and starting it with `--profile laya` as documented in `DEPLOY.md`. If either
+setting is unset, new classifier calls stop and template fallback applies to new
+advanced turns; frozen decisions are unchanged. No semantic-quality qualification
+is implied.
 
 An original player may enter with no initial place. Deploy Narrative, Agent,
 and frontend together while ingress is quiesced. Once a `null` player location
