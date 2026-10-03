@@ -248,6 +248,131 @@ async fn diagnostic_budget_schema_signature(pool: &sqlx::PgPool) -> DiagnosticBu
 }
 
 #[tokio::test]
+async fn lore_migration_repairs_chunks_without_rewriting_unchanged_rows() {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    sqlx::query("DROP DATABASE IF EXISTS novelworld_lore_replay WITH (FORCE)")
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("CREATE DATABASE novelworld_lore_replay")
+        .execute(&admin)
+        .await
+        .unwrap();
+    let options = PgConnectOptions::from_str(&db_url())
+        .unwrap()
+        .database("novelworld_lore_replay");
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::raw_sql(FRESH_SCHEMA).execute(&pool).await.unwrap();
+
+    let user = uuid::Uuid::new_v4();
+    let novel = uuid::Uuid::new_v4();
+    let chapter = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO users (id, email, password_hash) VALUES ($1, 'lore-replay@test.invalid', 'test-hash')")
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO novels (id, user_id, title) VALUES ($1, $2, 'Lore replay')")
+        .bind(novel)
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO chapters (id, novel_id, chapter_number, content) VALUES ($1, $2, 1, $3)",
+    )
+    .bind(chapter)
+    .bind(novel)
+    .bind(format!(
+        " {}\nA final paragraph. ",
+        "风暴之塔。".repeat(500)
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(CHAPTER_LORE_MIGRATION)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let snapshot_sql = "SELECT id, chunk_index, content, ctid::TEXT \
+                        FROM chapter_chunks WHERE chapter_id = $1 ORDER BY chunk_index";
+    let initial = sqlx::query_as::<_, (uuid::Uuid, i32, String, String)>(snapshot_sql)
+        .bind(chapter)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert!(initial.len() >= 3);
+    sqlx::raw_sql(CHAPTER_LORE_MIGRATION)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let replayed = sqlx::query_as::<_, (uuid::Uuid, i32, String, String)>(snapshot_sql)
+        .bind(chapter)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(initial, replayed, "unchanged chunks must keep their tuples");
+
+    sqlx::query("DELETE FROM chapter_chunks WHERE chapter_id = $1 AND chunk_index = 1")
+        .bind(chapter)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE chapter_chunks SET content = 'stale chunk' WHERE chapter_id = $1 AND chunk_index = 0")
+        .bind(chapter)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(CHAPTER_LORE_MIGRATION)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let repaired = sqlx::query_as::<_, (uuid::Uuid, i32, String, String)>(snapshot_sql)
+        .bind(chapter)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        initial
+            .iter()
+            .map(|row| (row.1, &row.2))
+            .collect::<Vec<_>>(),
+        repaired
+            .iter()
+            .map(|row| (row.1, &row.2))
+            .collect::<Vec<_>>(),
+        "replay must restore every missing or stale chunk"
+    );
+    assert_eq!(
+        initial[0].0, repaired[0].0,
+        "repair must retain existing IDs"
+    );
+    sqlx::raw_sql(CHAPTER_LORE_MIGRATION)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let repeated = sqlx::query_as::<_, (uuid::Uuid, i32, String, String)>(snapshot_sql)
+        .bind(chapter)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(repaired, repeated, "repaired chunks must keep their tuples");
+    pool.close().await;
+    sqlx::query("DROP DATABASE novelworld_lore_replay")
+        .execute(&admin)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn full_migration_replay_preserves_incomplete_progress_and_terminal_imports() {
     let admin = PgPoolOptions::new()
         .max_connections(1)
