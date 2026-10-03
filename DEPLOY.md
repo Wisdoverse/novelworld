@@ -461,6 +461,9 @@ A: 两者共用可选的 Laya (Jev) decision 服务，但用途不同：行动�
 不含小说全文、历史、骰子或结果，仍可能包含玩家背景、能力、库存和目标显示名；
 服务商的数据保留由其策略决定。裁定错误、低置信度或上下文超限会回退到模板
 DC，服务器校验和骰子仍是权威，语义质量尚未认证。它不替代 DeepSeek 故事生成。
+优先复用现有且可从两个容器访问的私有/共享 Laya；正常源码启动和 Jenkins 部署
+不会提供或启动 Laya。只有明确需要独立实例时，才叠加 `docker-compose.laya.yml`
+并运行下方的 `--profile laya` 命令。
 让 Laya 服务与
 `novel-service`、`narrative-service` 处于同一条私有 Docker 网络，在 `.env` 中填写
 `LAYA_API_URL=http://<Laya容器名>:8000` 和 `LAYA_API_KEY`，然后重建并重启 Novel 与 Narrative，以启用 D20 裁定和系列匹配。地址必须分别从
@@ -474,9 +477,9 @@ Laya 失效时仍可手动选择系列或行动，高级检定回退到模板 DC
 来源书的就绪规则只会固定一次。来源规则未就绪时，系列成员不能用各自的规则
 代替。绑定状态产生后，旧版本回滚不受支持。
 
-**Q: 如何独立升级 NovelWorld 的 Laya？**
+**Q: 如何显式运行或升级 NovelWorld 独立 Laya？**
 
-A: 可叠加 `docker-compose.laya.yml`，使用包含 `laya==0.3.20` 和已审查的
+A: 仅在需要独立实例时，显式叠加 `docker-compose.laya.yml`，使用包含 `laya==0.3.20` 和已审查的
 multilingual checkpoint 的不可变镜像。在根 `.env` 设置 `LAYA_IMAGE` 为镜像
 digest（本机测试也可用精确 image ID）、`LAYA_MODEL_PATH` 为镜像内固定 revision
 的本地 checkpoint 路径、`LAYA_API_URL=http://laya:8000`，保持既有密钥。先验证
@@ -493,7 +496,7 @@ docker compose -f docker-compose.yml -f docker-compose.laya.yml --profile laya u
 Narrative 的 URL；保留原共享服务和其他消费者。回滚只恢复这两个消费者原来的
 URL 并重建，随后可停止本项目独立 Laya。不要删除共享模型缓存或其他项目容器。
 
-系列识别默认只调用本地 Laya。用户可主动点击 DeepSeek 补判，使用设置页当前
+系列识别只调用已配置的 Laya 服务。用户可主动点击 DeepSeek 补判，使用设置页当前
 配置的 DeepSeek API 与现有计费路径；其他 provider 或 Diagnostic 绑定会被拒绝。
 相同证据/候选/策略/模型复用 PostgreSQL 结果。每条 claim 最多一次实际请求，输出上限为 512 tokens（启用思考时包含思考 tokens），
 不做 HTTP 重试、JSON fallback 或修复重发；未知结果也不自动重试。“查询结果”使用只读的 `check_only=true` 模式；证据或
