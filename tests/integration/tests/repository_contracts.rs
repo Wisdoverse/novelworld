@@ -885,8 +885,21 @@ async fn batch_import_acceptance_is_atomic() {
     assert_eq!(rolled_back, 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn durable_import_claim_is_recoverable_and_attempt_fenced() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let metrics = recorder.handle();
+    let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+    let acknowledged = |operation: &str| -> u64 {
+        let key = format!(
+            "novelworld_durable_commit_acknowledgements_total{{operation=\"{operation}\"}} "
+        );
+        metrics
+            .render()
+            .lines()
+            .find_map(|line| line.strip_prefix(&key).map(|value| value.parse().unwrap()))
+            .unwrap_or(0)
+    };
     let pool = PgPoolOptions::new()
         .max_connections(2)
         .connect(&db_url())
@@ -1065,6 +1078,9 @@ async fn durable_import_claim_is_recoverable_and_attempt_fenced() {
     .execute(&pool)
     .await
     .unwrap();
+    assert!(!repo.complete_import(novel.id, first.attempt).await.unwrap());
+    assert_eq!(acknowledged("import"), 0);
+    let before_commit = acknowledged("import");
     assert!(repo
         .complete_import(novel.id, second.attempt)
         .await
@@ -1083,11 +1099,27 @@ async fn durable_import_claim_is_recoverable_and_attempt_fenced() {
         .unwrap();
     assert_eq!((status.as_str(), stage.as_str()), ("ready", "completed"));
     assert!(lease.is_none());
+    assert_eq!(acknowledged("import") - before_commit, 1);
+    let before_replay = acknowledged("import");
+    assert!(!repo
+        .complete_import(novel.id, second.attempt)
+        .await
+        .unwrap());
     assert!(repo
         .claim_import(novel.id, user_id)
         .await
         .unwrap()
         .is_none());
+    assert_eq!(acknowledged("import"), before_replay);
+    let rendered = metrics.render();
+    let samples = rendered
+        .lines()
+        .filter(|line| line.starts_with("novelworld_durable_commit_acknowledgements_total"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        samples,
+        ["novelworld_durable_commit_acknowledgements_total{operation=\"import\"} 1"]
+    );
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
         .execute(&pool)
@@ -2058,8 +2090,21 @@ async fn import_claims_are_capped_and_terminate_with_budget_exhausted() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn complete_import_rejects_gapped_chapters_with_matching_count() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let metrics = recorder.handle();
+    let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+    let acknowledged = |operation: &str| -> u64 {
+        let key = format!(
+            "novelworld_durable_commit_acknowledgements_total{{operation=\"{operation}\"}} "
+        );
+        metrics
+            .render()
+            .lines()
+            .find_map(|line| line.strip_prefix(&key).map(|value| value.parse().unwrap()))
+            .unwrap_or(0)
+    };
     let pool = PgPoolOptions::new()
         .max_connections(2)
         .connect(&db_url())
@@ -2125,7 +2170,26 @@ async fn complete_import_rejects_gapped_chapters_with_matching_count() {
     .execute(&pool)
     .await
     .unwrap();
+    assert_eq!(acknowledged("import"), 0);
     assert!(repo.complete_import(novel_id, 1).await.unwrap());
+    let (status, stage): (String, String) = sqlx::query_as(
+        "SELECT n.status::text, j.stage FROM novels n JOIN novel_import_jobs j ON j.novel_id = n.id WHERE n.id = $1",
+    )
+    .bind(novel_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((status.as_str(), stage.as_str()), ("ready", "completed"));
+    assert_eq!(acknowledged("import"), 1);
+    let rendered = metrics.render();
+    let samples = rendered
+        .lines()
+        .filter(|line| line.starts_with("novelworld_durable_commit_acknowledgements_total"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        samples,
+        ["novelworld_durable_commit_acknowledgements_total{operation=\"import\"} 1"]
+    );
 }
 
 #[tokio::test]
@@ -4077,8 +4141,21 @@ async fn chat_history_is_scoped_by_the_committed_reader_identity() {
         .unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn production_repositories_match_fresh_schema() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let metrics = recorder.handle();
+    let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+    let acknowledged = |operation: &str| -> u64 {
+        let key = format!(
+            "novelworld_durable_commit_acknowledgements_total{{operation=\"{operation}\"}} "
+        );
+        metrics
+            .render()
+            .lines()
+            .find_map(|line| line.strip_prefix(&key).map(|value| value.parse().unwrap()))
+            .unwrap_or(0)
+    };
     let pool = PgPoolOptions::new()
         .max_connections(4)
         .connect(&db_url())
@@ -4399,6 +4476,7 @@ async fn production_repositories_match_fresh_schema() {
         Some(1),
     )
     .with_turn_id(claim.id);
+    let before_fence = acknowledged("chat");
     let stale_revision_claim = ChatTurnClaim {
         world_revision: [2; 32],
         ..claim.clone()
@@ -4421,10 +4499,22 @@ async fn production_repositories_match_fresh_schema() {
     .unwrap();
     assert_eq!(pre_commit_status, "in_progress");
     assert_eq!(pre_commit_messages, 0);
+    assert_eq!(acknowledged("chat"), before_fence);
+    let before_commit = acknowledged("chat");
     chat_repo
         .complete_turn(&claim, attempt, &user_message, &character_message)
         .await
         .unwrap();
+
+    let (completed_chat, message_count): (String, i64) = sqlx::query_as(
+        "SELECT status, (SELECT COUNT(*) FROM chat_messages WHERE turn_id = $1) FROM chat_turns WHERE id = $1",
+    )
+    .bind(claim.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((completed_chat.as_str(), message_count), ("completed", 2));
+    assert_eq!(acknowledged("chat") - before_commit, 1);
 
     let missing_revision_error = sqlx::query(
         "INSERT INTO chat_turns (id, user_id, character_id, novel_id, request_fingerprint, chapter_context, persona_source_chapter_high_water, reader_identity_type, deviation_mode, status, lease_expires_at) VALUES ($1, $2, $3, $4, $5, 1, 1, 'self', 'canon', 'in_progress', NOW() + INTERVAL '2 minutes')",
@@ -4529,6 +4619,7 @@ async fn production_repositories_match_fresh_schema() {
         Some(3),
     )
     .with_turn_id(future_claim.id);
+    let before_future = acknowledged("chat");
     chat_repo
         .complete_turn(
             &future_claim,
@@ -4538,6 +4629,15 @@ async fn production_repositories_match_fresh_schema() {
         )
         .await
         .unwrap();
+    let (future_status, future_messages): (String, i64) = sqlx::query_as(
+        "SELECT status, (SELECT COUNT(*) FROM chat_messages WHERE turn_id = $1) FROM chat_turns WHERE id = $1",
+    )
+    .bind(future_claim.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((future_status.as_str(), future_messages), ("completed", 2));
+    assert_eq!(acknowledged("chat") - before_future, 1);
     let messages = chat_repo
         .find_recent(character_id, user_id, novel_id, None, 1, 10)
         .await
@@ -4553,6 +4653,7 @@ async fn production_repositories_match_fresh_schema() {
             .len(),
         2
     );
+    let before_replay = acknowledged("chat");
     let advanced_context = ChatTurnClaim {
         chapter_context: 2,
         deviation_mode: "creative".into(),
@@ -4577,6 +4678,7 @@ async fn production_repositories_match_fresh_schema() {
         BeginChatTurn::Conflict
     ));
 
+    assert_eq!(acknowledged("chat"), before_replay);
     let reclaim_claim = ChatTurnClaim {
         id: Uuid::new_v4(),
         request_fingerprint: vec![3; 32],
@@ -4640,6 +4742,7 @@ async fn production_repositories_match_fresh_schema() {
         Some(1),
     )
     .with_turn_id(reclaim_claim.id);
+    let before_reclaim = acknowledged("chat");
     assert!(chat_repo
         .complete_turn(&reclaim_claim, 1, &reclaimed_user, &reclaimed_character,)
         .await
@@ -4653,6 +4756,7 @@ async fn production_repositories_match_fresh_schema() {
         )
         .await
         .is_err());
+    assert_eq!(acknowledged("chat"), before_reclaim);
     chat_repo
         .complete_turn(
             &refreshed_reclaim_claim,
@@ -4669,6 +4773,7 @@ async fn production_repositories_match_fresh_schema() {
             .await
             .unwrap();
     assert_eq!(reclaimed_count, 2);
+    assert_eq!(acknowledged("chat") - before_reclaim, 1);
 
     let active_claim = ChatTurnClaim {
         id: Uuid::new_v4(),
@@ -4758,6 +4863,7 @@ async fn production_repositories_match_fresh_schema() {
         .await
         .unwrap());
 
+    let before_chat_rollback = acknowledged("chat");
     let rollback_claim = ChatTurnClaim {
         id: Uuid::new_v4(),
         request_fingerprint: vec![4; 32],
@@ -4806,6 +4912,7 @@ async fn production_repositories_match_fresh_schema() {
     .unwrap();
     assert_eq!(rollback_status, "in_progress");
     assert_eq!(rollback_messages, 0);
+    assert_eq!(acknowledged("chat"), before_chat_rollback);
 
     let world_state_repo = PgWorldStateRepository::new(pool.clone());
     let mut legacy_state = world_state_repo
@@ -5626,6 +5733,7 @@ async fn production_repositories_match_fresh_schema() {
         attribute_changes: vec![],
         canonical_event_change: None,
     };
+    let before_world_commit = acknowledged("world_turn");
     let completed = world_turn_repo
         .complete_turn(&claim, attempt, &world_transition, &world_context)
         .await
@@ -5660,6 +5768,8 @@ async fn production_repositories_match_fresh_schema() {
             .unwrap(),
         completed.world_state
     );
+    assert_eq!(acknowledged("world_turn") - before_world_commit, 1);
+    let before_world_replay = acknowledged("world_turn");
     match world_turn_repo.begin_turn(&claim).await.unwrap() {
         BeginWorldTurn::Completed {
             result: replayed,
@@ -5728,6 +5838,8 @@ async fn production_repositories_match_fresh_schema() {
         "你在塔中找到一条隐秘道路，守门人开始相信你的判断。"
     );
 
+    assert_eq!(acknowledged("world_turn"), before_world_replay);
+    let before_world_rollback = acknowledged("world_turn");
     let rollback_claim = WorldTurnClaim {
         id: Uuid::new_v4(),
         request_fingerprint: vec![9; 32],
@@ -5783,6 +5895,7 @@ async fn production_repositories_match_fresh_schema() {
     .unwrap();
     assert_eq!(persisted_turn, 1);
     assert_eq!(rollback_status, "in_progress");
+    assert_eq!(acknowledged("world_turn"), before_world_rollback);
     assert!(world_turn_repo
         .fail_turn(rollback_claim.id, rollback_attempt, "test_cleanup")
         .await
@@ -5793,6 +5906,19 @@ async fn production_repositories_match_fresh_schema() {
         .unwrap()
         .is_none());
 
+    let rendered = metrics.render();
+    let mut samples = rendered
+        .lines()
+        .filter(|line| line.starts_with("novelworld_durable_commit_acknowledgements_total"))
+        .collect::<Vec<_>>();
+    samples.sort_unstable();
+    assert_eq!(
+        samples,
+        [
+            "novelworld_durable_commit_acknowledgements_total{operation=\"chat\"} 3",
+            "novelworld_durable_commit_acknowledgements_total{operation=\"world_turn\"} 1",
+        ]
+    );
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
         .execute(&pool)
@@ -6942,8 +7068,21 @@ async fn world_turn_concurrent_same_key_acquires_exactly_once() {
         .unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn world_turn_completed_key_replays_and_cannot_commit_twice() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let metrics = recorder.handle();
+    let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+    let acknowledged = |operation: &str| -> u64 {
+        let key = format!(
+            "novelworld_durable_commit_acknowledgements_total{{operation=\"{operation}\"}} "
+        );
+        metrics
+            .render()
+            .lines()
+            .find_map(|line| line.strip_prefix(&key).map(|value| value.parse().unwrap()))
+            .unwrap_or(0)
+    };
     let pool = PgPoolOptions::new()
         .max_connections(4)
         .connect(&db_url())
@@ -6957,10 +7096,30 @@ async fn world_turn_completed_key_replays_and_cannot_commit_twice() {
         BeginWorldTurn::Acquired { attempt, .. } => attempt,
         result => panic!("unexpected reservation: {result:?}"),
     };
+    let before_commit = acknowledged("world_turn");
     let completed = repo
         .complete_turn(&claim, attempt, &transition, &context)
         .await
         .unwrap();
+    let (committed_status, committed_number, projection): (String, i64, String) = sqlx::query_as(
+        "SELECT status, (state #>> '{open_world,turn_number}')::BIGINT, memory_projection_status FROM world_turns w \
+         JOIN world_states s ON s.user_id = w.user_id AND s.novel_id = w.novel_id \
+         WHERE w.id = $1",
+    )
+    .bind(claim.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (
+            committed_status.as_str(),
+            committed_number,
+            projection.as_str()
+        ),
+        ("completed", 1, "pending")
+    );
+    assert_eq!(acknowledged("world_turn") - before_commit, 1);
+    let before_replay = acknowledged("world_turn");
     // Completed-key replay returns the stored result, entity-equal.
     let replayed = match repo.begin_turn(&claim).await.unwrap() {
         BeginWorldTurn::Completed {
@@ -6990,6 +7149,16 @@ async fn world_turn_completed_key_replays_and_cannot_commit_twice() {
     .unwrap();
     assert_eq!(status, "completed");
     assert_eq!(turn_number, 1, "the world state must advance exactly once");
+    assert_eq!(acknowledged("world_turn"), before_replay);
+    let rendered = metrics.render();
+    let samples = rendered
+        .lines()
+        .filter(|line| line.starts_with("novelworld_durable_commit_acknowledgements_total"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        samples,
+        ["novelworld_durable_commit_acknowledgements_total{operation=\"world_turn\"} 1"]
+    );
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
         .execute(&pool)

@@ -431,6 +431,8 @@ impl ChatRepository for PgChatRepository {
         }
 
         transaction.commit().await?;
+        metrics::counter!("novelworld_durable_commit_acknowledgements_total", "operation" => "chat")
+            .increment(1);
         Ok(())
     }
 

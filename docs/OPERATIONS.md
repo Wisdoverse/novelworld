@@ -283,9 +283,20 @@ tools/capacity/run.py --self-test` verifies policy validation and nearest-rank
 calculation without starting services.
 ## Deferred to H5
 
-Journey SLIs, the initial SLO/error budget, alert notification
-routing/dedup/paging (the rules fire; nothing pages yet), and postmortem
-tooling.
+The `novelworld_durable_commit_acknowledgements_total` counter records
+successful owner-database COMMIT acknowledgements with the fixed operation
+labels `import`, `chat`, and `world_turn`. Completed replay, fenced or stale
+work, invalid input, failed statements, and rolled-back transactions do not
+increment it. A world turn counts when its durable state and journal commit is
+acknowledged even if the separate memory projection is still pending. Process
+restarts reset the counter, and a crash or lost acknowledgement between database
+commit and metric emission can omit a sample; these counts are not authoritative
+lifetime facts or whole-journey success. Existing global labels, metric
+contracts, and frozen evidence remain unchanged.
+
+Journey denominators and latency, the initial SLO/error budget, alert
+notification routing/dedup/paging (the rules fire; nothing pages yet),
+postmortem tooling, and H5 Observation remain pending.
 
 ### Uploads while parsing is busy
 

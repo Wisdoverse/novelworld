@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import hashlib
 import json
 import tempfile
 import unittest
@@ -53,6 +54,54 @@ class BudgetVerifierTest(unittest.TestCase):
             'status="success"} 1\n'
         )
         self.assertTrue(self.run_verify(sample=sample)["passed"])
+
+    def test_non_llm_operation_labels_do_not_pollute_the_budget_contract(self):
+        baseline = self.run_verify()
+        self.assertTrue(baseline["passed"], baseline)
+
+        for service, operation in (
+            ("novel-service", "import"),
+            ("agent-service", "chat"),
+            ("narrative-service", "world_turn"),
+        ):
+            with self.subTest(service=service, operation=operation):
+                augmented = self.sample + (
+                    '\nnovelworld_durable_commit_acknowledgements_total{'
+                    'contract="llm-observability-v1",'
+                    f'service="{service}",operation="{operation}"'
+                    '} 1\n'
+                )
+                report = self.run_verify(sample=augmented)
+                self.assertTrue(report["passed"], report)
+                for key in (
+                    "schema_version",
+                    "policy_version",
+                    "metrics_contract",
+                    "commit",
+                    "operations",
+                    "policy_sha256",
+                    "failures",
+                ):
+                    self.assertEqual(report[key], baseline[key])
+                self.assertEqual(
+                    report["sample_sha256"],
+                    hashlib.sha256(augmented.encode("utf-8")).hexdigest(),
+                )
+                self.assertNotEqual(report["sample_sha256"], baseline["sample_sha256"])
+
+                llm_sample = augmented + (
+                    '\nnovelworld_llm_requests_started_total{'
+                    'contract="llm-observability-v1",'
+                    f'service="{service}",provider="environment",model="e2e",'
+                    f'operation="{operation}",mode="sync"'
+                    '} 1\n'
+                )
+                llm_report = self.run_verify(sample=llm_sample)
+                self.assertFalse(llm_report["passed"], llm_report)
+                self.assertIn(
+                    "unknown operation on novelworld_llm_requests_started_total",
+                    llm_report["failures"],
+                )
 
     def test_budget_contract_fails_closed(self):
         branch = 'operation="branch_generation"'

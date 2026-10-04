@@ -616,6 +616,8 @@ impl WorldTurnRepository for PgWorldTurnRepository {
                 "world turn claim was fenced"
             );
             transaction.commit().await?;
+            metrics::counter!("novelworld_durable_commit_acknowledgements_total", "operation" => "world_turn")
+                .increment(1);
             Ok(result)
         })
         .await

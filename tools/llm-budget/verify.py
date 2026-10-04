@@ -184,7 +184,7 @@ def verify_many(policy_path, sample_paths, commit):
             failures.append(f"wrong metrics contract on {name}")
         if name.startswith("novelworld_llm_") and tags.get("service") not in policy["required_services"]:
             failures.append(f"unknown service on {name}")
-        if tags.get("operation") not in (None, *operations):
+        if name.startswith("novelworld_llm_") and tags.get("operation") not in (None, *operations):
             failures.append(f"unknown operation on {name}")
 
     for operation, budget in operations.items():
