@@ -84,7 +84,7 @@ describe('SettingsPage', () => {
     await screen.findByRole('heading', { name: '平台模型设置' });
     expect(screen.getByText('platform usage for admin')).toBeTruthy();
     expect(Array.from((screen.getByLabelText('模型') as HTMLSelectElement).options)
-      .map(option => option.value)).toEqual(['deepseek-flash']);
+      .map(option => option.value)).toEqual(['deepseek-flash', 'deepseek-v4-pro']);
     fireEvent.click(screen.getByRole('checkbox'));
     fireEvent.click(screen.getByRole('button', { name: '保存平台设置' }));
 
@@ -153,6 +153,48 @@ describe('SettingsPage', () => {
     }));
   });
 
+  it.each([
+    ['google', 'https://generativelanguage.googleapis.com/v1beta/openai', 'gemini-3.8-flash', ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-pro-preview']],
+    ['anthropic', 'https://api.anthropic.com', 'claude-sonnet-5-5', ['claude-sonnet-5-5', 'claude-opus-5-5', 'claude-haiku-4-5-20251001', 'claude-fable-5-1']],
+  ])('saves editable %s model settings with its own key', async (provider, endpoint, defaultModel, suggestions) => {
+    mocks.put.mockResolvedValue({
+      data: { ...settingsForCurrentUser(), provider, model: 'account-model', api_key_configured: true },
+    });
+    render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+    await screen.findByRole('heading', { name: '平台模型设置' });
+    fireEvent.change(screen.getByLabelText('平台 API Key（留空则保持现有 Key）'), { target: { value: 'old-unsaved-key' } });
+    fireEvent.change(screen.getByLabelText('服务商 / 地区 / 套餐'), { target: { value: provider } });
+    const key = screen.getByLabelText('平台 API Key') as HTMLInputElement;
+    expect(key.value).toBe('');
+    expect(key.required).toBe(true);
+    expect(screen.getByText(`端点：${endpoint}`)).toBeTruthy();
+    const model = screen.getByLabelText('模型') as HTMLInputElement;
+    expect(model.value).toBe(defaultModel);
+    expect(Array.from(document.querySelectorAll<HTMLOptionElement>('#llm-model-suggestions option')).map(option => option.value))
+      .toEqual(suggestions);
+    fireEvent.change(model, { target: { value: 'account-model' } });
+    fireEvent.change(key, { target: { value: 'provider-key' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存平台设置' }));
+    await waitFor(() => expect(mocks.put).toHaveBeenCalledWith('/settings/llm', {
+      provider, model: 'account-model', thinking_enabled: false, api_key: 'provider-key',
+    }));
+  });
+
+  it('offers and saves DeepSeek V4 Pro as a distinct fixed model', async () => {
+    mocks.put.mockResolvedValue({
+      data: { ...settingsForCurrentUser(), provider: 'deepseek', model: 'deepseek-v4-pro' },
+    });
+    render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+    await screen.findByRole('heading', { name: '平台模型设置' });
+    fireEvent.change(screen.getByLabelText('模型'), { target: { value: 'deepseek-v4-pro' } });
+    expect((screen.getByLabelText('模型') as HTMLSelectElement).selectedOptions[0]?.textContent)
+      .toContain('DeepSeek V4 Pro');
+    fireEvent.click(screen.getByRole('button', { name: '保存平台设置' }));
+    await waitFor(() => expect(mocks.put).toHaveBeenCalledWith('/settings/llm', {
+      provider: 'deepseek', model: 'deepseek-v4-pro', thinking_enabled: false, api_key: undefined,
+    }));
+  });
+
   it('requires a fresh key when changing the region of a configured plan', async () => {
     mocks.get.mockResolvedValue({ data: { ...settingsForCurrentUser(), provider: 'minimax_coding_cn', model: 'MiniMax-M3' } });
     render(<MemoryRouter><SettingsPage /></MemoryRouter>);
@@ -166,7 +208,6 @@ describe('SettingsPage', () => {
   it.each([
     'deepseek-v4-flash',
     'deepseek-v4-flash-vision-exp',
-    'deepseek-v4-pro',
   ])('discloses legacy model %s and canonicalizes only an explicit save', async legacyModel => {
     mocks.get.mockResolvedValue({
       data: {

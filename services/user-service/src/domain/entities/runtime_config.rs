@@ -63,6 +63,8 @@ impl RuntimeLlmConfig {
         Some(match provider {
             "deepseek" => "https://api.deepseek.com",
             "openai" => "https://api.openai.com",
+            "google" => "https://generativelanguage.googleapis.com/v1beta/openai",
+            "anthropic" => "https://api.anthropic.com",
             "zhipu" => "https://open.bigmodel.cn/api/paas/v4",
             "zai" => "https://api.z.ai/api/paas/v4",
             "zhipu_coding" => "https://open.bigmodel.cn/api/coding/paas/v4",
@@ -182,7 +184,7 @@ mod tests {
             );
             count += 1;
         }
-        assert_eq!(count, 28);
+        assert_eq!(count, 30);
     }
 
     #[test]
@@ -215,15 +217,60 @@ mod tests {
 
     #[test]
     fn legacy_deepseek_models_keep_the_fixed_endpoint() {
-        for model in [
-            "deepseek-v4-flash",
-            "deepseek-v4-flash-vision-exp",
-            "deepseek-v4-pro",
-        ] {
+        for model in ["deepseek-v4-flash", "deepseek-v4-flash-vision-exp"] {
             let config =
                 RuntimeLlmConfig::for_settings("deepseek", model, "secret", false).unwrap();
             assert_eq!(config.api_url, "https://api.deepseek.com");
             assert_eq!(config.model, model);
+        }
+    }
+
+    #[test]
+    fn google_and_anthropic_keep_fixed_origins_and_separate_credentials() {
+        for (provider, model, origin) in [
+            (
+                "google",
+                "gemini-3.8-flash",
+                "https://generativelanguage.googleapis.com/v1beta/openai",
+            ),
+            (
+                "anthropic",
+                "claude-sonnet-5-5",
+                "https://api.anthropic.com",
+            ),
+        ] {
+            let config =
+                RuntimeLlmConfig::for_settings(provider, model, "synthetic-key", true).unwrap();
+            assert_eq!(config.api_url, origin);
+            assert_eq!(config.model, model);
+            assert!(!config.thinking_enabled);
+            assert_eq!(config.reusable_key_for(provider), Some("synthetic-key"));
+            for other in ["deepseek", "google", "anthropic"] {
+                if other != provider {
+                    assert!(config.reusable_key_for(other).is_none());
+                }
+            }
+            let mismatched = RuntimeLlmConfig {
+                api_url: "https://untrusted.example".into(),
+                ..config
+            };
+            assert!(mismatched.reusable_key_for(provider).is_none());
+            assert!(RuntimeLlmConfig::for_settings(
+                provider,
+                "account-specific-id",
+                "synthetic-key",
+                false
+            )
+            .is_ok());
+        }
+        for provider in [
+            "https://api.anthropic.com",
+            "google/../anthropic",
+            "https://127.0.0.1",
+        ] {
+            assert!(
+                RuntimeLlmConfig::for_settings(provider, "model", "synthetic-key", false).is_err()
+            );
         }
     }
 }

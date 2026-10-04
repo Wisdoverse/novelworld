@@ -3,8 +3,10 @@ type ProviderPreset = { label: string; endpoint: string; models: string[]; plan?
 
 // These are suggestions; account-specific model IDs remain editable.
 export const PROVIDERS = {
-  deepseek: { label: 'DeepSeek', endpoint: 'https://api.deepseek.com', models: ['deepseek-flash'] },
+  deepseek: { label: 'DeepSeek', endpoint: 'https://api.deepseek.com', models: ['deepseek-flash', 'deepseek-v4-pro'] },
   openai: { label: 'OpenAI', endpoint: 'https://api.openai.com', models: ['gpt-4o-mini'] },
+  google: { label: 'Google', endpoint: 'https://generativelanguage.googleapis.com/v1beta/openai', models: ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-pro-preview'] },
+  anthropic: { label: 'Anthropic', endpoint: 'https://api.anthropic.com', models: ['claude-sonnet-5-5', 'claude-opus-5-5', 'claude-haiku-4-5-20251001', 'claude-fable-5-1'] },
   zhipu: { get label() { return t("Zhipu GLM · China API"); }, endpoint: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-5.3', 'glm-5.3-flash'] },
   zai: { get label() { return t("Z.ai GLM · Global API"); }, endpoint: 'https://api.z.ai/api/paas/v4', models: ['glm-5.3', 'glm-5.3-flash'] },
   minimax_cn: { get label() { return t("MiniMax · China API"); }, endpoint: 'https://api.minimax.cn/v1', models: ['MiniMax-M3', 'MiniMax-M2.7', 'MiniMax-M2.7-highspeed'] },

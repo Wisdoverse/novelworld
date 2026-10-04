@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    json_response, json_response_with_evidence, response_error, response_error_with_evidence,
+    anthropic, json_response, json_response_with_evidence, response_error,
+    response_error_with_evidence,
     sse::{decode_stream, SseFrame},
 };
 use crate::types::*;
@@ -100,12 +101,21 @@ impl OpenAIProvider {
     }
 
     pub(crate) fn chat_wire_bytes(&self, request: &ChatRequest) -> Result<Vec<u8>> {
+        if self.is_anthropic() {
+            return Ok(serde_json::to_vec(&anthropic::request_body(
+                request,
+                request.stream,
+            )?)?);
+        }
         Ok(serde_json::to_vec(
             &self.chat_body(request, request.stream),
         )?)
     }
 
     pub(crate) fn embedding_wire_bytes(&self, request: &EmbeddingRequest) -> Result<Vec<u8>> {
+        if self.is_anthropic() {
+            return Err(anyhow!("Claude Messages does not provide an embeddings API; configure a separate embedding endpoint"));
+        }
         Ok(serde_json::to_vec(&serde_json::json!({
             "model": request.model,
             "input": request.input,
@@ -147,6 +157,27 @@ impl OpenAIProvider {
 
     fn is_minimax(&self) -> bool {
         self.host_is(&["api.minimax.cn", "api.minimax.io", "api.minimaxi.com"])
+    }
+
+    fn is_anthropic(&self) -> bool {
+        self.host_is(&["api.anthropic.com"])
+    }
+
+    fn anthropic_request(
+        &self,
+        client: &reqwest::Client,
+        api_key: &str,
+        request: &ChatRequest,
+        stream: bool,
+    ) -> Result<reqwest::RequestBuilder> {
+        Ok(client
+            .post(self.endpoint("/v1/messages"))
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(serde_json::to_vec(&anthropic::request_body(
+                request, stream,
+            )?)?))
     }
 
     fn is_qwen(&self) -> bool {
@@ -518,6 +549,21 @@ impl OpenAIProvider {
         api_key: &str,
         request: &ChatRequest,
     ) -> Result<ChatResponse> {
+        if self.is_anthropic() {
+            let response = self
+                .anthropic_request(client, api_key, request, false)?
+                .send()
+                .await?;
+            if !response.status().is_success() {
+                return Err(response_error_with_evidence(response, Some(request)).await);
+            }
+            return anthropic::response(
+                json_response_with_evidence(response, Some(request))
+                    .await
+                    .map_err(invalid_completion)?,
+            )
+            .map_err(invalid_completion);
+        }
         if self.is_deepseek() && request.thinking == Some(true) && !request.json_mode {
             let body = ResponsesRequest {
                 model: request.model.clone(),
@@ -645,6 +691,19 @@ impl OpenAIProvider {
         api_key: &str,
         request: &ChatRequest,
     ) -> Result<ChatStream> {
+        if self.is_anthropic() {
+            let response = self
+                .anthropic_request(client, api_key, request, true)?
+                .send()
+                .await?;
+            if !response.status().is_success() {
+                return Err(response_error_with_evidence(response, Some(request)).await);
+            }
+            return Ok(decode_stream(
+                response.bytes_stream(),
+                anthropic::stream_parser(),
+            ));
+        }
         if self.is_deepseek() && request.thinking == Some(true) {
             let body = ResponsesRequest {
                 model: request.model.clone(),
@@ -812,6 +871,10 @@ mod response_tests {
                 "https://api.minimax.cn/v1/chat/completions",
             ),
             (
+                "https://generativelanguage.googleapis.com/v1beta/openai/",
+                "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+            ),
+            (
                 "https://coding-intl.dashscope.aliyuncs.com/v1",
                 "https://coding-intl.dashscope.aliyuncs.com/v1/chat/completions",
             ),
@@ -833,6 +896,14 @@ mod response_tests {
                 );
             }
         }
+        assert_eq!(
+            OpenAIProvider::new(Some("https://api.anthropic.com")).endpoint("/v1/messages"),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert!(
+            !OpenAIProvider::new(Some("https://api.anthropic.com.untrusted.example"))
+                .is_anthropic()
+        );
     }
 
     #[test]

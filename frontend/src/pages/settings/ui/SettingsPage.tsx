@@ -24,6 +24,7 @@ type LlmSettings = {
 const MODELS = {
   deepseek: [
     { id: 'deepseek-flash', label: 'DeepSeek V4.1 Flash', get hint() { return t("Text and images · Speed and cost first"); } },
+    { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro', get hint() { return t("Reasoning and complex tasks"); } },
   ],
   openai: [
     { id: 'gpt-4o-mini', label: 'GPT-4o mini', get hint() { return t("General lightweight model"); } },
@@ -33,7 +34,6 @@ const MODELS = {
 const LEGACY_DEEPSEEK_MODELS = new Set([
   'deepseek-v4-flash',
   'deepseek-v4-flash-vision-exp',
-  'deepseek-v4-pro',
 ]);
 
 export function SettingsPage() {
