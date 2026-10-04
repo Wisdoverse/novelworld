@@ -26,6 +26,7 @@ futures.workspace = true
 bytes.workspace = true
 async-stream.workspace = true
 llm-client.workspace = true
+metrics.workspace = true
 aws-config.workspace = true
 aws-sdk-s3.workspace = true
 

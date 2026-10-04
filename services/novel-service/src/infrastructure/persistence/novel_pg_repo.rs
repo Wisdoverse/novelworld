@@ -494,6 +494,8 @@ impl NovelRepository for NovelPgRepository {
             "completed import job update failed"
         );
         transaction.commit().await?;
+        metrics::counter!("novelworld_durable_commit_acknowledgements_total", "operation" => "import")
+            .increment(1);
         Ok(true)
     }
 

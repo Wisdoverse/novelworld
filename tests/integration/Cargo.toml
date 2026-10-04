@@ -23,3 +23,7 @@ agent-service = { path = "../../services/agent-service" }
 novel-service = { path = "../../services/novel-service" }
 narrative-service = { path = "../../services/narrative-service" }
 user-service = { path = "../../services/user-service" }
+
+[dev-dependencies]
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
