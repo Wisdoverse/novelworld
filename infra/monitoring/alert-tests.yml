@@ -45,3 +45,125 @@ tests:
             exp_annotations:
               summary: Gateway 5xx ratio above 2% over 5 minutes
               runbook: docs/OPERATIONS.md - bad-release / provider outage playbooks
+
+  # Import-state expressions use instant vectors and never display stale values.
+  - interval: 15s
+    input_series:
+      - series: 'up{job="novel-service",instance="novel:8002"}'
+        values: '1'
+      - series: 'novelworld_import_jobs_observation_success{job="novel-service",instance="novel:8002"}'
+        values: '1'
+      - series: 'novelworld_import_jobs{job="novel-service",instance="novel:8002",status="pending"}'
+        values: '2'
+      - series: 'novelworld_import_jobs{job="novel-service",instance="novel:8002",status="in_progress"}'
+        values: '1'
+      - series: 'novelworld_import_jobs{job="novel-service",instance="novel:8002",status="failed"}'
+        values: '3'
+      - series: 'novelworld_import_jobs{job="novel-service",instance="novel:8002",status="completed"}'
+        values: '7'
+    promql_expr_test:
+      - expr: >-
+          novelworld_import_jobs{job="novel-service"} AND on(job,instance) novelworld_import_jobs_observation_success{job="novel-service"} == 1 AND on(job,instance) up{job="novel-service"} == 1
+        eval_time: 0s
+        exp_samples:
+          - labels: 'novelworld_import_jobs{instance="novel:8002",job="novel-service",status="pending"}'
+            value: 2
+          - labels: 'novelworld_import_jobs{instance="novel:8002",job="novel-service",status="in_progress"}'
+            value: 1
+          - labels: 'novelworld_import_jobs{instance="novel:8002",job="novel-service",status="failed"}'
+            value: 3
+          - labels: 'novelworld_import_jobs{instance="novel:8002",job="novel-service",status="completed"}'
+            value: 7
+      - expr: >-
+          novelworld_import_jobs_observation_success{job="novel-service"} AND on(job,instance) up{job="novel-service"} == 1
+        eval_time: 0s
+        exp_samples:
+          - labels: 'novelworld_import_jobs_observation_success{instance="novel:8002",job="novel-service"}'
+            value: 1
+  - interval: 15s
+    input_series:
+      - series: 'up{job="novel-service",instance="novel:8002"}'
+        values: '1'
+      - series: 'novelworld_import_jobs_observation_success{job="novel-service",instance="novel:8002"}'
+        values: '1'
+      - series: 'novelworld_import_jobs{job="novel-service",instance="novel:8002",status="pending"}'
+        values: '0'
+      - series: 'novelworld_import_jobs{job="novel-service",instance="novel:8002",status="in_progress"}'
+        values: '0'
+      - series: 'novelworld_import_jobs{job="novel-service",instance="novel:8002",status="failed"}'
+        values: '0'
+      - series: 'novelworld_import_jobs{job="novel-service",instance="novel:8002",status="completed"}'
+        values: '0'
+    promql_expr_test:
+      - expr: >-
+          novelworld_import_jobs{job="novel-service"} AND on(job,instance) novelworld_import_jobs_observation_success{job="novel-service"} == 1 AND on(job,instance) up{job="novel-service"} == 1
+        eval_time: 0s
+        exp_samples:
+          - labels: 'novelworld_import_jobs{instance="novel:8002",job="novel-service",status="pending"}'
+            value: 0
+          - labels: 'novelworld_import_jobs{instance="novel:8002",job="novel-service",status="in_progress"}'
+            value: 0
+          - labels: 'novelworld_import_jobs{instance="novel:8002",job="novel-service",status="failed"}'
+            value: 0
+          - labels: 'novelworld_import_jobs{instance="novel:8002",job="novel-service",status="completed"}'
+            value: 0
+      - expr: >-
+          novelworld_import_jobs_observation_success{job="novel-service"} AND on(job,instance) up{job="novel-service"} == 1
+        eval_time: 0s
+        exp_samples:
+          - labels: 'novelworld_import_jobs_observation_success{instance="novel:8002",job="novel-service"}'
+            value: 1
+  # Observation failure with old counts: no count samples, status remains Unknown.
+  - interval: 15s
+    input_series:
+      - series: 'up{job="novel-service",instance="novel:8002"}'
+        values: '1'
+      - series: 'novelworld_import_jobs_observation_success{job="novel-service",instance="novel:8002"}'
+        values: '0'
+      - series: 'novelworld_import_jobs{job="novel-service",instance="novel:8002",status="failed"}'
+        values: '3'
+    promql_expr_test:
+      - expr: >-
+          novelworld_import_jobs{job="novel-service"} AND on(job,instance) novelworld_import_jobs_observation_success{job="novel-service"} == 1 AND on(job,instance) up{job="novel-service"} == 1
+        eval_time: 0s
+        exp_samples: []
+      - expr: >-
+          novelworld_import_jobs_observation_success{job="novel-service"} AND on(job,instance) up{job="novel-service"} == 1
+        eval_time: 0s
+        exp_samples:
+          - labels: 'novelworld_import_jobs_observation_success{instance="novel:8002",job="novel-service"}'
+            value: 0
+  # Prior success/counts cannot survive a down target in either panel.
+  - interval: 15s
+    input_series:
+      - series: 'up{job="novel-service",instance="novel:8002"}'
+        values: '0'
+      - series: 'novelworld_import_jobs_observation_success{job="novel-service",instance="novel:8002"}'
+        values: '1'
+      - series: 'novelworld_import_jobs{job="novel-service",instance="novel:8002",status="completed"}'
+        values: '7'
+    promql_expr_test:
+      - expr: >-
+          novelworld_import_jobs{job="novel-service"} AND on(job,instance) novelworld_import_jobs_observation_success{job="novel-service"} == 1 AND on(job,instance) up{job="novel-service"} == 1
+        eval_time: 0s
+        exp_samples: []
+      - expr: >-
+          novelworld_import_jobs_observation_success{job="novel-service"} AND on(job,instance) up{job="novel-service"} == 1
+        eval_time: 0s
+        exp_samples: []
+  # Missing observation is not zero and must not reveal prior count inputs.
+  - interval: 15s
+    input_series:
+      - series: 'up{job="novel-service",instance="novel:8002"}'
+        values: '1'
+      - series: 'novelworld_import_jobs{job="novel-service",instance="novel:8002",status="completed"}'
+        values: '7'
+    promql_expr_test:
+      - expr: >-
+          novelworld_import_jobs{job="novel-service"} AND on(job,instance) novelworld_import_jobs_observation_success{job="novel-service"} == 1 AND on(job,instance) up{job="novel-service"} == 1
+        eval_time: 0s
+        exp_samples: []
+      - expr: >-
+          novelworld_import_jobs_observation_success{job="novel-service"} AND on(job,instance) up{job="novel-service"} == 1
+        eval_time: 0s
+        exp_samples: []

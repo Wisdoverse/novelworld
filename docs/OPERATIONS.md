@@ -191,6 +191,36 @@ provably fire (promtool unit tests), every target scrapes, the
 instance-down alert fires and resolves against a live service stop/start,
 and Grafana serves the dashboard.
 
+### Current retained import state
+
+Run `bash infra/monitoring/drill.sh --rules-only` to check the alert and
+import-state expression fixtures without a running monitoring profile. This
+check also runs in the required Production Compose Smoke job.
+
+The dashboard shows the current retained `novel_import_jobs` counts for
+`pending`, `in_progress`, `failed`, and `completed`; retries and reclaims remain
+one retained job. A successful empty-table observation is four valid zeros. The
+count panel appears only when the observation succeeded and the matching
+`novel-service` target is up. The status panel shows `Observed` for a successful
+observation, `Unknown` when collection failed on a healthy target, and `No data`
+when the observation is absent or the target is down. Neither panel carries a
+previous value forward or converts missing data to zero.
+
+Prometheus keeps its existing 15-second scrape interval. The observation uses a
+one-second PostgreSQL statement timeout, a two-second response-future deadline,
+and a five-second minimum start interval with one admitted future per process.
+The response-future deadline is not proof that PostgreSQL work or rollback has
+ended. Cancellation retains the start budget; the server timeout bounds each
+scan and the admission budget limits subsequent launches. These
+limits are per process, not fleet-wide. The metrics add only the fixed `status`
+label to the four count series; the observation flag has no custom label.
+Prometheus supplies `job` and `instance`. Do not add job IDs, users, titles,
+source keys, or failure text.
+
+These values describe current retained owner state, not a registered cohort,
+readiness latency, completion rate, or SLO. Use the existing
+[failed-import guidance](#log-levels-and-incident-lookup) for triage.
+
 ## Single-node-v1 SLO and capacity contract
 
 This contract decides whether NovelWorld's current single-node production
@@ -326,8 +356,8 @@ The existing process-local commit-acknowledgement counter cannot reconstruct
 this cohort across restarts, lost acknowledgements or unknown outcomes. The
 120-second import objective above belongs to its deterministic capacity
 workload; it is not a live-provider SLO. A live cutoff, target, sampling policy
-and observation window need separate reviewed registration. Collection,
-journey SLIs/SLOs, alerts and H5 Observation remain pending.
+and observation window need separate reviewed registration. Registered-cohort
+collection, journey SLIs/SLOs, alerts and H5 Observation remain pending.
 
 ### Uploads while parsing is busy
 

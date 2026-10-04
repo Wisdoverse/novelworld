@@ -131,6 +131,15 @@ pub struct RecoverableImport {
     pub user_id: Uuid,
 }
 
+/// Current retained jobs, not a registered journey cohort or completion rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportJobCounts {
+    pub pending: i64,
+    pub in_progress: i64,
+    pub failed: i64,
+    pub completed: i64,
+}
+
 #[async_trait]
 pub trait NovelRepository: Send + Sync {
     async fn create_import(&self, novel: &Novel, chapters: &[Chapter]) -> Result<()>;
@@ -144,6 +153,9 @@ pub trait NovelRepository: Send + Sync {
     async fn create_source_import(&self, novel: &Novel) -> Result<()>;
     async fn claim_import(&self, novel_id: Uuid, user_id: Uuid) -> Result<Option<ImportClaim>>;
     async fn recoverable_imports(&self, limit: i64) -> Result<Vec<RecoverableImport>>;
+    /// Bounded read-only observation; unavailable admission or data is an error,
+    /// never an empty snapshot. Cancellation does not restore admission.
+    async fn observe_import_jobs(&self) -> Result<ImportJobCounts>;
     async fn renew_import(&self, novel_id: Uuid, attempt: i64) -> Result<bool>;
     /// Atomically replace the novel's chapters before enrichment, fenced by
     /// `(novel_id, attempt)`. A `source` job advances to `chapters`; an

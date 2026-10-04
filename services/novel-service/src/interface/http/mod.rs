@@ -10,7 +10,7 @@ use axum::{
 };
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{fmt::Write, sync::Arc};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
@@ -492,12 +492,45 @@ async fn export_account(
 }
 
 async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
+    let observation = state.novel_repo.observe_import_jobs().await;
+    let mut body = state.metrics.render();
+    body.push_str(
+        "# HELP novelworld_import_jobs_observation_success Current import-state observation is available.\n\
+         # TYPE novelworld_import_jobs_observation_success gauge\n",
+    );
+    writeln!(
+        body,
+        "novelworld_import_jobs_observation_success {}",
+        u8::from(observation.is_ok())
+    )
+    .expect("writing to a String cannot fail");
+    if let Ok(counts) = observation {
+        body.push_str(
+            "# HELP novelworld_import_jobs Current retained import jobs by durable status.\n\
+             # TYPE novelworld_import_jobs gauge\n",
+        );
+        for (status, count) in [
+            ("pending", counts.pending),
+            ("in_progress", counts.in_progress),
+            ("failed", counts.failed),
+            ("completed", counts.completed),
+        ] {
+            writeln!(
+                body,
+                "novelworld_import_jobs{{status=\"{status}\"}} {count}"
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
     (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/plain; version=0.0.4",
-        )],
-        state.metrics.render(),
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; version=0.0.4",
+            ),
+            (CACHE_CONTROL, "no-store"),
+        ],
+        body,
     )
 }
 

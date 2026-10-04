@@ -1,6 +1,11 @@
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use sqlx::{PgPool, Postgres, Transaction};
+use std::{
+    sync::Mutex,
+    time::{Duration, Instant},
+};
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::domain::entities::{
@@ -8,8 +13,8 @@ use crate::domain::entities::{
     novel::Novel,
 };
 use crate::domain::repositories::{
-    ImportClaim, NovelRepository, RecoverableImport, IMPORT_BUDGET_EXHAUSTED_MESSAGE,
-    MAX_IMPORT_ATTEMPTS,
+    ImportClaim, ImportJobCounts, NovelRepository, RecoverableImport,
+    IMPORT_BUDGET_EXHAUSTED_MESSAGE, MAX_IMPORT_ATTEMPTS,
 };
 use crate::domain::value_objects::{DeviationMode, ImportStage, NovelStatus};
 use crate::infrastructure::persistence::chapter_pg_repo::save_batch_in_transaction;
@@ -17,11 +22,17 @@ use crate::infrastructure::persistence::SOURCE_UPLOAD_PENDING;
 
 pub struct NovelPgRepository {
     pool: PgPool,
+    import_observation_permits: Semaphore,
+    next_import_observation: Mutex<Instant>,
 }
 
 impl NovelPgRepository {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            import_observation_permits: Semaphore::new(1),
+            next_import_observation: Mutex::new(Instant::now()),
+        }
     }
 
     /// `import-provider-budget-v1`: a claimable job at the attempt ceiling is
@@ -288,6 +299,50 @@ impl NovelRepository for NovelPgRepository {
                 user_id: row.user_id,
             })
             .collect())
+    }
+
+    async fn observe_import_jobs(&self) -> Result<ImportJobCounts> {
+        let _permit = self
+            .import_observation_permits
+            .try_acquire()
+            .context("import job observation already active")?;
+        {
+            let mut next = self
+                .next_import_observation
+                .lock()
+                .map_err(|_| anyhow::anyhow!("import job observation admission unavailable"))?;
+            let now = Instant::now();
+            ensure!(now >= *next, "import job observation rate limited");
+            // Consume the start budget before awaiting; cancellation cannot refill it.
+            *next = now + Duration::from_secs(5);
+        }
+        // ponytail: O(retained jobs) scan; sample separately if the 1s budget is inadequate.
+        // No retries. The outer deadline bounds this future, not cancelled server cleanup.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut tx = self.pool.begin_with("BEGIN READ ONLY").await?;
+            sqlx::query("SELECT pg_catalog.set_config('statement_timeout', '1s', true)")
+                .execute(&mut *tx)
+                .await?;
+            let (pending, in_progress, failed, completed) =
+                sqlx::query_as::<_, (i64, i64, i64, i64)>(
+                    "SELECT COUNT(*) FILTER (WHERE status = 'pending'), \
+                 COUNT(*) FILTER (WHERE status = 'in_progress'), \
+                 COUNT(*) FILTER (WHERE status = 'failed'), \
+                 COUNT(*) FILTER (WHERE status = 'completed') \
+                 FROM novel_import_jobs",
+                )
+                .fetch_one(&mut *tx)
+                .await?;
+            tx.rollback().await?;
+            Ok::<_, anyhow::Error>(ImportJobCounts {
+                pending,
+                in_progress,
+                failed,
+                completed,
+            })
+        })
+        .await
+        .context("import job observation deadline exceeded")?
     }
 
     async fn renew_import(&self, novel_id: Uuid, attempt: i64) -> Result<bool> {
