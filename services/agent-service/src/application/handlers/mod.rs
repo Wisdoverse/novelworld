@@ -928,6 +928,14 @@ impl AgentCommandHandler {
                 &turn.user_message,
             )
             .await?;
+        // MemoryManager returns a trusted system prefix followed by committed
+        // history. Keep all server-owned context before that ordered history,
+        // so native Messages does not need to hoist or reinterpret late roles.
+        let history_start = context
+            .iter()
+            .position(|(role, _)| role != "system")
+            .unwrap_or(context.len());
+        let history = context.split_off(history_start);
         tracing::info!(
             memory_layer = "mid",
             selected_count = selected.mid,
@@ -970,6 +978,7 @@ impl AgentCommandHandler {
                 turn.claim.chapter_context,
             )?;
         }
+        context.extend(history);
         context.push(("user".into(), turn.user_message.clone()));
         Self::ensure_prompt_budget(&context)?;
         Ok(context)
@@ -1802,6 +1811,7 @@ mod tests {
 
     struct RecordingChatRepository {
         saved: Mutex<Vec<ChatMessage>>,
+        recent: Mutex<Vec<ChatMessage>>,
         failed: Mutex<Vec<String>>,
         begun_claims: Mutex<Vec<ChatTurnClaim>>,
         completed_claims: Mutex<Vec<ChatTurnClaim>>,
@@ -1822,6 +1832,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 saved: Mutex::new(Vec::new()),
+                recent: Mutex::new(Vec::new()),
                 failed: Mutex::new(Vec::new()),
                 begun_claims: Mutex::new(Vec::new()),
                 completed_claims: Mutex::new(Vec::new()),
@@ -1916,7 +1927,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(reader_character_id);
-            Ok(vec![])
+            Ok(self.recent.lock().unwrap().clone())
         }
 
         async fn count(
@@ -2182,6 +2193,76 @@ mod tests {
             world_summary: Some("风暴笼罩北境，古塔守护边城。".into()),
             first_appearance_chapter: Some(1),
         }
+    }
+
+    #[tokio::test]
+    async fn trusted_turn_context_precedes_committed_history_for_native_messages() {
+        let chat_repo = Arc::new(RecordingChatRepository::default());
+        let llm = Arc::new(RecordingLlm::default());
+        let (handler, _, _, user_id, novel_id, character_id) =
+            test_handler(chat_repo.clone(), llm.clone());
+        let turn_id = Uuid::new_v4();
+        let history = [
+            ("user", "Previous user turn"),
+            ("character", "Previous character turn"),
+        ]
+        .map(|(role, content)| {
+            let mut message = ChatMessage::new(
+                user_id,
+                character_id,
+                novel_id,
+                role.into(),
+                content.into(),
+                Some("Trusted Reader".into()),
+                Some(3),
+            );
+            message.turn_id = Some(turn_id);
+            message.persona_source_chapter_high_water = Some(3);
+            message
+        });
+        *chat_repo.recent.lock().unwrap() = history.into();
+        handler
+            .chat(
+                Uuid::new_v4(),
+                character_id,
+                user_id,
+                Some(novel_id),
+                "Current user turn".into(),
+            )
+            .await
+            .unwrap();
+        let prompts = llm.prompts.lock().unwrap();
+        let prompt = &prompts[0];
+        let first_conversation = prompt
+            .iter()
+            .position(|(role, _)| role != "system")
+            .unwrap();
+        assert!(prompt[..first_conversation]
+            .iter()
+            .all(|(role, _)| role == "system"));
+        assert!(
+            prompt[first_conversation..]
+                .iter()
+                .all(|(role, _)| role == "user" || role == "assistant"),
+            "trusted context must precede history for native Messages"
+        );
+        assert_eq!(
+            &prompt[first_conversation..],
+            &[
+                ("user".into(), "Previous user turn".into()),
+                ("assistant".into(), "Previous character turn".into()),
+                ("user".into(), "Current user turn".into()),
+            ]
+        );
+        let trusted_context = prompt[..first_conversation]
+            .iter()
+            .map(|(_, content)| content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(trusted_context.contains("Trusted Reader"));
+        assert!(trusted_context.contains("\"goals\":[]"));
+        assert!(trusted_context.contains("Trusted source fact"));
+        assert_eq!(chat_repo.saved.lock().unwrap().len(), 2);
     }
 
     #[test]

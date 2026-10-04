@@ -2,9 +2,19 @@
 
 In protected Settings, select the provider, region and API/plan variant, then enter
 the matching account's Key. Switching variants requires a newly entered Key;
-stored Keys and unsaved input are never forwarded to another variant. DeepSeek and
-OpenAI keep their existing model choices. Other IDs are editable with suggestions;
-the account catalog owns actual availability. Ark may require an inference endpoint ID.
+stored Keys and unsaved input are never forwarded to another variant. Provider
+Keys remain isolated by provider and variant. DeepSeek offers its two fixed choices,
+and OpenAI keeps its fixed choice. Google, Anthropic and other presets accept editable
+model IDs; account catalogs determine actual availability. Ark may require an inference endpoint ID.
+
+Suggested model IDs are DeepSeek `deepseek-flash` (V4.1 Flash) and
+`deepseek-v4-pro` (V4 Pro); Google Gemini `gemini-3.8-flash`,
+`gemini-3.5-flash-lite` and `gemini-3.1-pro-preview`; and Anthropic
+`claude-sonnet-5-5`, `claude-opus-5-5`, `claude-haiku-4-5-20251001` and
+`claude-fable-5-1`. Suggestions do not imply account availability or price
+coverage. A model without an exact entry in the price snapshot or an operator
+override remains unpriced. See Google's [model list](https://ai.google.dev/gemini-api/docs/models)
+and Anthropic's [model overview](https://platform.claude.com/docs/en/models/overview).
 
 ## Fixed official API bases
 
@@ -12,6 +22,8 @@ the account catalog owns actual availability. Ark may require an inference endpo
 |---|---|
 | `deepseek` | `https://api.deepseek.com` |
 | `openai` | `https://api.openai.com` |
+| `google` | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| `anthropic` | `https://api.anthropic.com` |
 | `zhipu` | `https://open.bigmodel.cn/api/paas/v4` |
 | `zai` | `https://api.z.ai/api/paas/v4` |
 | `minimax_cn` / `minimax_coding_cn` | `https://api.minimax.cn/v1` |
@@ -109,6 +121,18 @@ and embeddings, although a preset does not imply those APIs are available.
 Operator-only `LLM_API_URL` supports other compatible services and workspace domains.
 Configure the API base, not the full `/chat/completions` resource. Custom path prefixes
 that previously relied on an appended `/v1` must explicitly include that version now.
+
+Google Gemini uses its official OpenAI-compatible Chat Completions endpoint at the
+explicit `/v1beta/openai` base above ([compatibility guide](https://ai.google.dev/gemini-api/docs/openai)).
+Anthropic uses its native Messages API at `/v1/messages`; its OpenAI SDK compatibility
+layer is intended for evaluation and testing, not as the production integration
+([compatibility limitations](https://platform.claude.com/docs/en/cli-sdks-libraries/libraries/openai-sdk)).
+Claude chat streams expose visible text deltas only; separate thinking blocks are not
+emitted ([Messages streaming](https://platform.claude.com/docs/en/build-with-claude/streaming)).
+Messages usage can include cache-creation and cache-read token counts. Claude JSON mode
+uses instructions and consumer parsing/validation; it does not guarantee
+provider-enforced schema conformance. Current Claude models use their default
+temperature behavior without an explicit temperature override.
 
 MiniMax separates reasoning with `reasoning_split` and uses prompt-directed JSON
 instead of an undocumented `response_format`; M3 disables default thinking, while

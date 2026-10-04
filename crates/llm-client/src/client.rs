@@ -100,6 +100,8 @@ impl LlmClient {
             .map_err(|_| anyhow!("LLM request capacity is busy"))
     }
 
+    /// Configure the shared provider transport. The official Anthropic origin
+    /// selects native Messages; other origins use OpenAI-compatible resources.
     pub fn with_openai_compatible(
         mut self,
         name: impl Into<String>,

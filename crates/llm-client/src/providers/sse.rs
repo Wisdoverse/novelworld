@@ -123,8 +123,9 @@ impl SseDecoder {
     }
 }
 
-struct DecodeState<S> {
+struct DecodeState<S, P> {
     upstream: Pin<Box<S>>,
+    parse: P,
     decoder: SseDecoder,
     pending: VecDeque<Result<ChatStreamEvent>>,
     terminal: bool,
@@ -132,17 +133,13 @@ struct DecodeState<S> {
     eof: bool,
 }
 
-impl<S> DecodeState<S> {
-    fn queue_frames(
-        &mut self,
-        frames: Vec<SseFrame>,
-        parse: fn(SseFrame) -> Result<Vec<ChatStreamEvent>>,
-    ) -> Result<()> {
+impl<S, P: FnMut(SseFrame) -> Result<Vec<ChatStreamEvent>>> DecodeState<S, P> {
+    fn queue_frames(&mut self, frames: Vec<SseFrame>) -> Result<()> {
         for frame in frames {
             if self.terminal {
                 break;
             }
-            for event in parse(frame)? {
+            for event in (self.parse)(frame)? {
                 if self.terminal {
                     break;
                 }
@@ -161,16 +158,15 @@ impl<S> DecodeState<S> {
     }
 }
 
-pub(crate) fn decode_stream<S, E>(
-    upstream: S,
-    parse: fn(SseFrame) -> Result<Vec<ChatStreamEvent>>,
-) -> ChatStream
+pub(crate) fn decode_stream<S, E, P>(upstream: S, parse: P) -> ChatStream
 where
     S: Stream<Item = std::result::Result<Bytes, E>> + Send + 'static,
     E: Display + Send + 'static,
+    P: FnMut(SseFrame) -> Result<Vec<ChatStreamEvent>> + Send + 'static,
 {
     let state = DecodeState {
         upstream: Box::pin(upstream),
+        parse,
         decoder: SseDecoder::new(),
         pending: VecDeque::new(),
         terminal: false,
@@ -194,7 +190,7 @@ where
             match state.upstream.next().await {
                 Some(Ok(chunk)) => match state.decoder.push(&chunk) {
                     Ok(frames) => {
-                        if let Err(error) = state.queue_frames(frames, parse) {
+                        if let Err(error) = state.queue_frames(frames) {
                             state.fail(error);
                         }
                     }
@@ -207,7 +203,7 @@ where
                     state.eof = true;
                     match state.decoder.finish() {
                         Ok(frames) => {
-                            if let Err(error) = state.queue_frames(frames, parse) {
+                            if let Err(error) = state.queue_frames(frames) {
                                 state.fail(error);
                             }
                         }

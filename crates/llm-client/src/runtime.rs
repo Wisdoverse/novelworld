@@ -486,6 +486,8 @@ fn provider_for_url(api_url: &str) -> &'static str {
     {
         Some("api.deepseek.com") => "deepseek",
         Some("api.openai.com") => "openai",
+        Some("generativelanguage.googleapis.com") => "google",
+        Some("api.anthropic.com") => "anthropic",
         _ => "environment",
     }
 }
@@ -493,6 +495,32 @@ fn provider_for_url(api_url: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn official_generation_origins_infer_the_provider_for_environment_configs() {
+        for (url, provider) in [
+            (
+                "https://generativelanguage.googleapis.com/v1beta/openai",
+                "google",
+            ),
+            ("https://api.anthropic.com", "anthropic"),
+            ("https://api.deepseek.com", "deepseek"),
+            ("https://api.openai.com", "openai"),
+            ("https://api.anthropic.com.untrusted.example", "environment"),
+        ] {
+            assert_eq!(provider_for_url(url), provider);
+            let client = RuntimeLlmClient::static_config(
+                url.into(),
+                "account-model".into(),
+                "synthetic".into(),
+                false,
+            );
+            let ConfigSource::Static(config) = client.source else {
+                panic!("static configuration required")
+            };
+            assert_eq!(config.provider, provider);
+        }
+    }
 
     #[tokio::test]
     async fn series_preparation_pins_the_single_resolved_config_and_rejects_diagnostics() {
