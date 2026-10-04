@@ -3,12 +3,17 @@
 # are valid and fire, every scrape target is up, the instance-down alert
 # really fires and resolves, and Grafana serves the provisioned dashboard.
 # Requires the monitoring overlay on top of the running stack and
-# GRAFANA_ADMIN_PASSWORD exported.
+# GRAFANA_ADMIN_PASSWORD exported. --rules-only runs disposable rule/expression
+# fixtures without requiring or controlling a deployment.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
+if (( $# > 1 )) || [[ ${1:-} != '' && ${1:-} != '--rules-only' ]]; then
+  printf 'usage: %s [--rules-only]\n' "$0" >&2
+  exit 2
+fi
+
 grafana_url=${GRAFANA_URL:-http://127.0.0.1:13000}
-password=${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be exported}
 
 query_prometheus() {
   local encoded=$1
@@ -22,7 +27,11 @@ alerts_query='ALERTS%7Balertstate%3D%22firing%22%2Calertname%3D%22InstanceDown%2
 docker run --rm --entrypoint promtool -v "$PWD/infra/monitoring:/rules:ro" \
   prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e \
   test rules /rules/alert-tests.yml 2>&1 | tail -2
-printf 'drill: ok   all alert rules are valid and fire on synthetic input\n'
+printf 'drill: ok   alert rules and import-state expressions pass synthetic fixtures\n'
+if [[ ${1:-} == '--rules-only' ]]; then
+  exit 0
+fi
+password=${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be exported}
 
 # 2. Every scrape target up (retry while Prometheus settles).
 for _ in $(seq 1 20); do

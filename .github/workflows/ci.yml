@@ -348,6 +348,7 @@ jobs:
           cargo test -p integration-tests --locked
           cargo test --locked -p novel-service --test community_series_http -- --ignored
           cargo test --locked -p novel-service --test world_source_http -- --ignored
+          cargo test --locked -p novel-service --test import_metrics -- --ignored
       - name: Stop test dependencies
         if: always()
         run: docker compose -f docker-compose.test.yml down -v
@@ -367,6 +368,8 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 2
+      - name: Verify monitoring rules and import-state expressions
+        run: timeout --signal=TERM --kill-after=10s 180s bash infra/monitoring/drill.sh --rules-only
       - name: Include extended drills for backup and core journey changes
         if: github.event_name == 'pull_request'
         run: |

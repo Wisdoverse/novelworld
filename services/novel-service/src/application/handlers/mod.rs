@@ -4198,6 +4198,12 @@ mod reading_progress_handler_tests {
 
     #[async_trait::async_trait]
     impl NovelRepository for TestNovelRepository {
+        async fn observe_import_jobs(
+            &self,
+        ) -> Result<crate::domain::repositories::ImportJobCounts> {
+            unreachable!("unused test repository method")
+        }
+
         async fn create_import(&self, _novel: &Novel, _chapters: &[Chapter]) -> Result<()> {
             unreachable!("unused test repository method")
         }
