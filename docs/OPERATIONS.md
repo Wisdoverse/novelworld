@@ -298,6 +298,37 @@ Journey denominators and latency, the initial SLO/error budget, alert
 notification routing/dedup/paging (the rules fire; nothing pages yet),
 postmortem tooling, and H5 Observation remain pending.
 
+### Import readiness measurement boundary
+
+This pre-instrumentation contract defines one logical import, before an SLI,
+SLO or observation window is implemented. The operator decision is whether
+accepted imports become durably ready within a separately registered cutoff,
+and whether a miss needs queue/lease, provider, extraction or persistence
+investigation. Structural readiness does not establish extraction quality.
+
+| Boundary | Definition |
+|---|---|
+| Opportunity | One new runtime-created, committed `novel_import_jobs` row, identified privately by `novel_id`; a batch contributes one opportunity per job. Existing ready-catalog attachment, rejected admission and rolled-back creation add no new import opportunity. An ambiguous HTTP result does not remove a job that committed. |
+| Cohort and denominator | Register source scope, enrollment window, release/provider profile, cutoff `T`, sampling uncertainty and privacy rules before observation. Enroll every eligible committed job and preserve the original aggregate cohort size; do not count only surviving, successful or recently active rows. Final evaluation occurs after every registered cutoff. Before then, report open work without shrinking the cohort. |
+| Clock and retries | Use the enrolled job's immutable `created_at` as the declared database clock origin. Its `now()` default is transaction time, not an HTTP receipt or COMMIT acknowledgement. Queue time, every attempt, reclaim and explicit retry remain in the same opportunity and clock; `attempt` increments do not add opportunities. |
+| Good | A valid owner-state observation at or before the registered cutoff proves the job `completed` and its canonical novel `ready`, published by the existing completion transaction after its authoritative-data guards. A provider response, 202 or process counter alone is insufficient. |
+| Bad | Evidence rules out prior on-time readiness. A not-ready cutoff snapshot suffices only under a proven, registered monotone-readiness history without downgrade, restore or repair gaps. Pending, active and retryable failed work remain in the cohort; a failure before the cutoff may still recover. Automatic attempt-budget exhaustion belongs to the same opportunity. |
+| Unknown | Missing or unreadable state, interrupted observation, and unproved downgrade, restore, repair or history gaps stay unknown when prior on-time readiness cannot be established or ruled out. Seeing ready only after the cutoff does not prove on-time or late completion. An unavailable or removed row cannot silently leave the denominator; shelf detach/account deletion preserve canonical imports under current ownership rules. |
+| Latency | A private observed readiness time minus the enrolled clock origin is an upper bound including queue/retry and sampling delay. Report that uncertainty. `updated_at` changes during claims, renewal and progress and is written before completion COMMIT; the schema has no dedicated first-ready or COMMIT-ack timestamp. It cannot establish exact readiness latency. |
+| Report and decision | At final evaluation, reconcile the original cohort as good + bad + unknown and report coverage separately. An incomplete cohort or unresolved unknown cannot establish an SLO pass. Diagnose known misses with owner states and existing correlation; do not publish job/user identifiers, content or source keys as metric labels. |
+
+Apply final classes in order: retain valid on-time good proof; otherwise bad
+requires proof ruling out on-time readiness; otherwise the outcome is unknown.
+Later regression, deletion or an interrupted sample does not erase a proven
+on-time readiness event.
+
+The existing process-local commit-acknowledgement counter cannot reconstruct
+this cohort across restarts, lost acknowledgements or unknown outcomes. The
+120-second import objective above belongs to its deterministic capacity
+workload; it is not a live-provider SLO. A live cutoff, target, sampling policy
+and observation window need separate reviewed registration. Collection,
+journey SLIs/SLOs, alerts and H5 Observation remain pending.
+
 ### Uploads while parsing is busy
 
 Parsing capacity is independent of upload acceptance. New accepted books remain
