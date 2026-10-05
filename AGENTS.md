@@ -26,6 +26,7 @@ Use this file as a map. Do not load the full documentation set for every task.
 [`docs/README.md`](docs/README.md) is the complete documentation index. Runtime
 code, migrations, and tests own current behavior; prose describes contracts and
 evidence limits. Resolve conflicts conservatively and update the owning source.
+Use [CONTRIBUTING.md](CONTRIBUTING.md#english-technical-writing) for English technical-writing guidance.
 
 ## Non-negotiable boundaries
 

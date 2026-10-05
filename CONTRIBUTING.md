@@ -13,11 +13,12 @@ and [agent instructions](./AGENTS.md) before changing behavior.
   [SECURITY.md](./SECURITY.md), never a public issue.
 - Keep one independently mergeable outcome per pull request.
 
-Use English for identifiers, comments, configuration, contributor documentation,
-and default interface copy. Keep the English and Simplified Chinese UI catalogs
-complete, including accessible labels and local errors. Preserve Chinese documentation, literary
-and parser fixtures, and immutable versioned provider registrations. Interface
-language does not change source text or generation language.
+Write identifiers, comments, configuration, contributor documentation, and
+default interface copy in English. Keep the English and Simplified Chinese UI
+catalogs complete, including accessible labels and local errors. Preserve
+Chinese documentation, literary and parser fixtures, and immutable versioned
+provider registrations. Interface language does not change source text or the
+language of generated content.
 
 ## Development setup
 
@@ -432,6 +433,33 @@ Use an [ADR](./docs/adr/0000-template.md) only for durable service-boundary,
 ownership, trust, public-contract, consistency, availability, or dependency
 decisions. Land an accepted ADR with its implementation; routine choices stay
 in the PR.
+
+### English technical writing
+
+Use [ASD-STE100 Issue 9](https://www.asd-ste100.org/about_STE.html) as a writing
+reference. Read its [FAQ](https://www.asd-ste100.org/STE_faq.html). Use the
+[downloads page](https://www.asd-ste100.org/STE_downloads.html) to request the full
+standard and dictionary.
+
+Apply these project rules to English technical documents, comments, default interface
+instructions, and GitHub records. Preserve Chinese documentation, translations,
+literary and parser examples, and story-generation language.
+
+- Use at most 20 words per instruction sentence and 25 words per descriptive sentence.
+- Use short sentences and active voice. Give each sentence one purpose.
+- Write procedures as commands. State required conditions before actions. Give
+  each step one action.
+- Use fixed technical terms. Define each term when you first use it. Use an
+  approved word only with its approved meaning and part of speech.
+- Use American English. Include the articles and words that complete each sentence.
+- State what failed and what the reader should do next in each error message.
+- Keep API names, protocol values, and commands exact. Do not paraphrase them.
+- State what evidence proves and what it does not prove. Do not call skipped
+  evidence a pass.
+
+Before you claim full ASD-STE100 compliance, do a review against the full standard
+and dictionary. Review existing text before you claim that it obeys ASD-STE100.
+Keep all repository safety, architecture, approval, budget, test, and release rules.
 
 ## Commit messages
 
