@@ -1753,7 +1753,7 @@ class Journey:
 
     def preflight(self) -> None:
         self.validate_release_inputs()
-        if self.network_subnet is not None:
+        if (self.network_subnet is not None or self.local_embedding) and self.runtime_root is None:
             self.prepare_runtime()
         docker_engine = run(
             [
@@ -1794,6 +1794,7 @@ class Journey:
                 "-f",
                 str(self.root / "docker-compose.yml"),
                 *self.network_compose_args(),
+                *self.embedding_compose_args(),
                 "--env-file",
                 str(self.candidate_manifest_path),
                 "config",
@@ -1946,6 +1947,26 @@ class Journey:
         return ["-f", diagnostic.network.guard("overlay", self.network_subnet,
                     self.release_state, self.project, self.runtime_root)]
 
+    def embedding_compose_args(self) -> list[str]:
+        if not self.local_embedding:
+            return []
+        if self.release_tool is None or self.release_state is None or self.runtime_root is None:
+            raise QualificationFailure("release_environment_missing")
+        profile = (self.release_tool.parents[2]
+                   / diagnostic.profile_path(self.diagnostic_registration.value["schema"])).read_bytes()
+        if sha256_bytes(profile) != self.diagnostic_registration.binding["profile_sha256"]:
+            raise QualificationFailure("diagnostic_profile_digest_mismatch")
+        spec = importlib.util.spec_from_file_location(
+            "journey_embedding_budget", self.release_tool.parent / "diagnostic_budget.py")
+        adapter = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(adapter)
+        try:
+            path = adapter.embedding_overlay(profile, self.release_state, self.runtime_root)
+        except (adapter.Invalid, ValueError, TypeError, KeyError, OSError) as error:
+            raise QualificationFailure("diagnostic_embedding_overlay_invalid") from error
+        self.private_report["embedding_overlay_sha256"] = sha256_bytes(Path(path).read_bytes())
+        return ["-f", path]
+
     def compose(self, *args: str, capture: bool = True, check: bool = True) -> str:
         if not self.compose_env or self.runtime_root is None:
             raise QualificationFailure("compose_environment_missing")
@@ -1973,6 +1994,8 @@ class Journey:
                     "-f",
                     str(self.runtime_root / "docker-compose.yml"),
                     *self.network_compose_args(),
+                    *(self.embedding_compose_args() if not args or args[0] not in (
+                        "stop", "down", "rm", "ps", "logs") else []),
                     "--env-file",
                     str(self.runtime_root / ".env"),
                     "--env-file",
@@ -5920,6 +5943,8 @@ def self_test_h1_cohort_boundary(root: Path) -> None:
         temporary = Path(directory)
         journey = Journey.__new__(Journey)
         journey.root = root
+        journey.local_embedding = False
+        journey.runtime_root = None
         journey.git_sha = "b" * 40
         journey.project = journey.prefix = "nwq-0123456789"
         journey.port = 12345

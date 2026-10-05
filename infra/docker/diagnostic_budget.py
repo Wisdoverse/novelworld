@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import selectors
+import stat
 import subprocess
 import sys
 import time
@@ -122,6 +123,48 @@ def sync_directory(directory):
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def embedding_overlay(profile_bytes, state, root):
+    profile = strict_json(profile_bytes)
+    if profile["profile"] in ("vision-journey-diagnostic-v1", "four-layer-journey-diagnostic-v2"):
+        return None
+    require(profile["profile"] in ("four-layer-journey-diagnostic-v3", "four-layer-journey-diagnostic-v4"))
+    image = profile["embedding_runtime_image"]
+    require(isinstance(image, str) and re.fullmatch(
+        r"[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}", image))
+    encoded = json.dumps({"services": {"embedding": {"image": image}}},
+                         sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    require(len(encoded) <= MAX_OUTPUT)
+    state, root = Path(state), Path(root).resolve()
+    require(state.is_absolute() and state == state.resolve()
+            and state != root and root not in state.parents)
+    directory = os.open(state, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(directory)
+        require(info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700)
+        name = "diagnostic-embedding.compose.json"
+        try:
+            descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                 0o600, dir_fd=directory)
+        except FileExistsError:
+            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                                 dir_fd=directory)
+            with os.fdopen(descriptor, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+                        and stat.S_IMODE(info.st_mode) == 0o600 and info.st_size <= MAX_OUTPUT)
+                require(stream.read(MAX_OUTPUT + 1) == encoded)
+        else:
+            with os.fdopen(descriptor, "wb") as stream:
+                os.fchmod(stream.fileno(), 0o600)
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.fsync(directory)
+        return str(state / name)
+    finally:
+        os.close(directory)
 
 
 def read_marker(path):
@@ -357,7 +400,12 @@ def main():
     profile_bytes, action, state, project, *paths = sys.argv[1:]
     require(re.fullmatch(r"nwq-(?:[a-f0-9]{10}|[a-f0-9]{32})", project))
     registered = registration(profile_bytes.encode(), os.environ)
-    if action == "probe":
+    if action == "embedding-overlay":
+        require(len(paths) == 1)
+        overlay = embedding_overlay(profile_bytes.encode(), state, paths[0])
+        if overlay is not None:
+            print(overlay)
+    elif action == "probe":
         require(len(paths) == 1)
         manifest = {}
         for line in Path(paths[0]).read_text().splitlines():

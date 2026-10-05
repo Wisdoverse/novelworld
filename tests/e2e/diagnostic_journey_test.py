@@ -930,15 +930,16 @@ class DiagnosticJourneyTest(unittest.TestCase):
         self.assertEqual(aggregate["charged"]["attempts"], 0)
         self.assertIn(journey.project + "-postgres", calls[0])
 
-    def journey(self):
+    def journey(self, value=None):
         for path, marker in ((self.base, "b"), (self.candidate, "a")):
             manifest = {"RELEASE_VERSION": "test", "RELEASE_GIT_SHA": marker * 40,
                         **{key: "registry.invalid/service@sha256:" + marker * 64
                            for key in RUNNER.RELEASE_IMAGE_KEYS}}
             path.write_text("".join(f"{key}={item}\n" for key, item in manifest.items()))
-        self.value["base_manifest_sha256"] = CONTROL.digest(self.base.read_bytes())
-        self.value["candidate_manifest_sha256"] = CONTROL.digest(self.candidate.read_bytes())
-        registration = self.load()
+        value = self.value if value is None else value
+        value["base_manifest_sha256"] = CONTROL.digest(self.base.read_bytes())
+        value["candidate_manifest_sha256"] = CONTROL.digest(self.candidate.read_bytes())
+        registration = self.load(value)
         config = self.directory / "config.json"
         config.write_text(json.dumps({"provider": "deepseek", "model": registration.profile["model"],
                                       "thinking_enabled": False, "api_key": "test-only",
@@ -947,6 +948,145 @@ class DiagnosticJourneyTest(unittest.TestCase):
         return RUNNER.Journey(ROOT, config, self.output, "a" * 40, self.base,
                               self.candidate, None, None, "bash", "Diagnostic",
                               diagnostic_registration=registration)
+
+    def test_local_diagnostic_native_compose_uses_captured_profile_image(self):
+        selected = {}
+        expected = {}
+        for value in (self.v5_value(), self.v6_value()):
+            journey = self.journey(value)
+            # This checks native config only, with synthetic registration data.
+            journey.git_sha = RUNNER.git(ROOT, "rev-parse", "HEAD")
+            journey.prepare_runtime()
+            self.addCleanup(journey.runtime_temp.cleanup)
+            profile = journey.release_tool.parents[2] / CONTROL.profile_path(value["schema"])
+            image = json.loads(profile.read_bytes())["embedding_runtime_image"]
+            name = value["schema"]
+            selected[name + ":journey"] = json.loads(journey.compose(
+                "config", "--format", "json", "embedding"))["services"]["embedding"]["image"]
+            source = journey.release_tool.read_text()
+            diagnostic_function = source[source.index("diagnostic() {\n"):
+                                         source.index("\ndiagnostic_preflight()")]
+            compose_function = source[source.index("compose() (\n"):
+                                      source.index("\nrequire_empty_qualification_project()")]
+            script = """set -euo pipefail
+repo_root=$TEST_ROOT; secrets_file="$repo_root/.env"; active_manifest=$TEST_MANIFEST
+state_dir=$TEST_STATE; qualification_project=$TEST_PROJECT; qualification_subnet=
+cache_mode=postgres; cache_redis_password=; cache_redis_url=memory://
+diagnostic_enabled=true; diagnostic_id=$LLM_DIAGNOSTIC_BUDGET_ID
+diagnostic_limits=$LLM_DIAGNOSTIC_BUDGET_LIMITS; diagnostic_profile=$LLM_DIAGNOSTIC_PROFILE
+IFS= read -r -d '' diagnostic_helper_source < "$TEST_HELPER" || true
+IFS= read -r -d '' diagnostic_profile_source < "$TEST_PROFILE" || true
+qualification_scope=true; container_prefix=$TEST_PROJECT; http_bind=127.0.0.1; http_port=18080
+compose_project_args=(--project-name "$TEST_PROJECT")
+compose_deadline_args=(); compose_profile_args=(); network_overlay_args=()
+die() { return 1; }
+""" + diagnostic_function + "\n" + compose_function + "\ncompose config --format json embedding\n"
+            rendered = subprocess.run(["bash", "-c", script], capture_output=True, timeout=30,
+                env={**journey.compose_env, **journey.diagnostic_registration.environment(),
+                     "TEST_ROOT": str(journey.runtime_root), "TEST_STATE": str(journey.release_state),
+                     "TEST_MANIFEST": str(journey.compose_manifest()), "TEST_PROJECT": journey.project,
+                     "TEST_HELPER": str(journey.release_tool.parent / "diagnostic_budget.py"),
+                     "TEST_PROFILE": str(profile)})
+            self.assertEqual(rendered.returncode, 0, "native release config failed")
+            selected[name + ":release"] = json.loads(rendered.stdout)["services"]["embedding"]["image"]
+            expected.update({name + ":journey": image, name + ":release": image})
+            self.assertEqual(RUNNER.git(journey.runtime_root, "status", "--porcelain"), "")
+            overlay = journey.release_state / "diagnostic-embedding.compose.json"
+            self.assertEqual(journey.private_report["embedding_overlay_sha256"],
+                             CONTROL.digest(overlay.read_bytes()))
+            profile_bytes, overlay_bytes = profile.read_bytes(), overlay.read_bytes()
+            for changed in (profile, overlay):
+                changed.write_bytes(b"conflict")
+                with mock.patch.object(RUNNER, "run") as docker:
+                    with self.assertRaises(RUNNER.QualificationFailure): journey.compose("config", "--quiet")
+                    docker.assert_not_called()
+                    journey.compose("stop", "--timeout", "5", "embedding")
+                    self.assertNotIn(str(overlay), docker.call_args.args[0])
+                profile.write_bytes(profile_bytes)
+                overlay.write_bytes(overlay_bytes)
+        self.assertEqual(selected, expected)
+        for explicit in (False, True):
+            command = ["docker", "compose", "--project-directory", str(ROOT),
+                       "-f", str(ROOT / "docker-compose.yml"), "--env-file", str(ROOT / ".env.example")]
+            if explicit:
+                command.extend(["--profile", "local-embedding"])
+            services = json.loads(RUNNER.run([*command, "config", "--format", "json"],
+                env=RUNNER.qualification_environment(ROOT, dict(os.environ))))["services"]
+            self.assertEqual("embedding" in services, explicit)
+            if explicit:
+                self.assertIn(":cpu-1.9.4@sha256:", services["embedding"]["image"])
+
+    def test_embedding_overlay_is_private_pure_and_rejects_conflicts(self):
+        state = self.directory / "embedding-state"
+        state.mkdir(mode=0o700)
+        profile = (ROOT / CONTROL.PROFILE_PATH_V4).read_bytes()
+        path = Path(BUDGET.embedding_overlay(profile, state, ROOT))
+        self.assertEqual(json.loads(path.read_bytes()), {"services": {"embedding": {
+            "image": json.loads(profile)["embedding_runtime_image"]}}})
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        original = path.read_bytes()
+        inode = path.stat().st_ino
+        registered = self.load(self.v6_value())
+        completed = subprocess.run([sys.executable, "-c", (ROOT / "infra/docker/diagnostic_budget.py").read_text(),
+            profile.decode(), "embedding-overlay", str(state), "nwq-abcdef1234", str(ROOT)],
+            env={**os.environ, **registered.environment()}, capture_output=True, timeout=5)
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(completed.stdout.decode().strip(), str(path))
+        self.assertEqual(path.stat().st_ino, inode)
+        self.assertEqual(list(state.iterdir()), [path])
+        for mutation in ("bytes", "oversized", "mode", "symlink", "directory", "fifo"):
+            with self.subTest(mutation=mutation):
+                path.unlink()
+                if mutation == "symlink": path.symlink_to(self.base)
+                elif mutation == "directory": path.mkdir()
+                elif mutation == "fifo": os.mkfifo(path, 0o600)
+                else:
+                    path.write_bytes(b"conflict" if mutation == "bytes" else
+                                     b"x" * 4097 if mutation == "oversized" else original)
+                    path.chmod(0o604 if mutation == "mode" else 0o600)
+                with self.assertRaises((BUDGET.Invalid, OSError)):
+                    BUDGET.embedding_overlay(profile, state, ROOT)
+                if mutation == "directory": path.rmdir(); path.touch(mode=0o600)
+        path.unlink()
+        state.chmod(0o705)
+        with self.assertRaises(BUDGET.Invalid): BUDGET.embedding_overlay(profile, state, ROOT)
+        with self.assertRaises(BUDGET.Invalid): BUDGET.embedding_overlay(profile, ROOT, ROOT)
+        invalid = json.loads(profile)
+        invalid["embedding_runtime_image"] = "registry.invalid/mutable:latest"
+        with self.assertRaises(BUDGET.Invalid): BUDGET.embedding_overlay(CONTROL.canonical(invalid), state, ROOT)
+        for profile_path in (CONTROL.PROFILE_PATH, CONTROL.PROFILE_PATH_V2):
+            self.assertIsNone(BUDGET.embedding_overlay((ROOT / profile_path).read_bytes(),
+                                                     self.directory / "absent-state", ROOT))
+        self.assertEqual(self.journey().embedding_compose_args(), [])
+
+    def test_null_subnet_local_preflight_prepares_runtime_only_once(self):
+        journey = self.journey(self.v6_value())
+        journey.git_sha = RUNNER.git(ROOT, "rev-parse", "HEAD")
+        native_run = RUNNER.run
+        def command(argv, **kwargs):
+            if argv[0] == "git": return native_run(argv, **kwargs)
+            return "fixture|linux|amd64" if argv[:2] == ["docker", "version"] else ""
+        adapter = mock.Mock()
+        spec = mock.Mock()
+        with mock.patch.object(RUNNER, "run", side_effect=command) as run, \
+                mock.patch.object(RUNNER, "docker_inventory_snapshot", return_value={
+                    "containers": {}, "volumes": {}, "networks": {}}), \
+                mock.patch.object(journey, "validate_release_inputs"), \
+                mock.patch.object(journey, "embedding_compose_args", return_value=["-f", "/private/image.json"]), \
+                mock.patch.object(journey, "prepare_runtime", wraps=journey.prepare_runtime) as prepare, \
+                mock.patch.object(RUNNER.importlib.util, "spec_from_file_location", return_value=spec), \
+                mock.patch.object(RUNNER.importlib.util, "module_from_spec", return_value=adapter):
+            journey.preflight()
+            self.addCleanup(journey.runtime_temp.cleanup)
+            runtime = journey.runtime_root
+            journey.preflight()
+            self.assertEqual(prepare.call_count, 1)
+            self.assertEqual(journey.runtime_root, runtime)
+            rendered = [call.args[0] for call in run.call_args_list if "--quiet" in call.args[0]]
+            for argv in rendered:
+                self.assertEqual([argv[i + 1] for i, arg in enumerate(argv) if arg == "-f"],
+                                 [str(ROOT / "docker-compose.yml"), "/private/image.json"])
+        self.assertEqual(journey.network_compose_args(), [])
 
     def test_generated_environment_uses_registration_and_strips_ambient_overrides(self):
         journey = self.journey()
@@ -2581,15 +2721,16 @@ class DiagnosticJourneyTest(unittest.TestCase):
         docker = bin_dir / "docker"
         docker.write_text('#!/bin/sh\nprintf "mutation\\n" >> "$TRACE"\n')
         docker.chmod(0o700)
-        for failure in ("overlay", "before", "after"):
+        for failure in ("overlay", "before", "after", "embedding"):
             trace = self.directory / (failure + ".trace")
             script = """set -euo pipefail
 cache_mode=postgres; cache_redis_password=; cache_redis_url=memory://
-diagnostic_enabled=false; qualification_scope=true; qualification_subnet=10.2.3.0/28
+diagnostic_enabled=$DIAGNOSTIC_ENABLED; qualification_scope=true; qualification_subnet=10.2.3.0/28
 container_prefix=nwq-abcdef1234; http_bind=127.0.0.1; http_port=18080
 repo_root=/synthetic; secrets_file=/synthetic/env; active_manifest=/synthetic/manifest
 compose_project_args=(); compose_deadline_args=(); compose_profile_args=(); network_overlay_args=()
 die() { return 1; }
+diagnostic() { return 23; }
 network_guard() {
   if [[ "$1" == "$FAILURE" ]]; then return 23; fi
   if [[ "$1" == overlay ]]; then printf '%s\n' /private/qualification-network.yml; fi
@@ -2597,10 +2738,20 @@ network_guard() {
 """ + function + "\nif ! compose run --rm --no-deps user-service; then exit 0; else exit 9; fi\n"
             result = subprocess.run(["bash", "-c", script], capture_output=True, timeout=5,
                 env={**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
-                     "TRACE": str(trace), "FAILURE": failure})
+                     "TRACE": str(trace), "FAILURE": failure,
+                     "DIAGNOSTIC_ENABLED": "true" if failure == "embedding" else "false"})
             self.assertEqual(result.returncode, 0, failure)
             self.assertEqual(trace.exists(), failure == "after")
             if trace.exists(): self.assertEqual(trace.read_text().splitlines(), ["mutation"])
+            if failure == "embedding":
+                stopping = script[:script.index("\nif ! compose run")] + "\ncompose stop --timeout 5 embedding\n"
+                result = subprocess.run(["bash", "-c", stopping], capture_output=True, timeout=5,
+                    env={**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+                         "TRACE": str(trace), "FAILURE": failure, "DIAGNOSTIC_ENABLED": "true",
+                         "diagnostic_id": "synthetic", "diagnostic_limits": "synthetic",
+                         "diagnostic_profile": "synthetic"})
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(trace.read_text().splitlines(), ["mutation"])
 
     def test_v2_v3_fixture_selection_and_current_profile_identity(self):
         self.assertEqual(CONTROL.digest((ROOT / "tests/e2e/fixtures/h4-journey-v1.json").read_bytes()),

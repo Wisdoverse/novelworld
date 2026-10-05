@@ -138,6 +138,14 @@ keeps the same tool files outside its changing checkout and calls the shared
 `release.sh preflight MANIFEST` before direct startup/recreation; stop/cleanup
 remain available even when preflight fails.
 
+Local Diagnostic profiles v3/v4 select their frozen runtime image through a
+separate Compose overlay. Both Compose callers use the captured profile and
+adapter outside the changing checkout. The image-only overlay uses private
+release state, exclusive creation, and exact byte checks. Conflicts block
+startup. Stop and cleanup do not require the overlay. This action creates no
+budget or provisioning marker. Ordinary deployments keep local embedding
+disabled by default. An explicit ordinary local profile keeps its source image.
+
 Capability creation and attached execution share a ten-second deadline. The
 adapter requires the acknowledged container ID before starting the diagnostic
 process, then always removes the exact name and independently verifies absence.
