@@ -5,6 +5,7 @@ import { AlertCircle, BookOpen, Loader2, UserRound } from 'lucide-react';
 import { apiClient, getApiErrorMessage } from '@/shared/api/client';
 import { clearPrivateQueryCache } from '@/shared/api/queryClient';
 import { clearWorldTurnPendingRequests } from '@/shared/lib/worldTurnStorage';
+import { LanguageSwitcher } from '@/shared/ui/LanguageSwitcher';
 
 type SetupResponse = {
   user: { id: string };
@@ -50,7 +51,10 @@ export function SetupPage({ onComplete }: { onComplete: () => void }) {
             </div>
 
             <div className="mt-8 lg:mt-16">
-              <p className="mb-3 text-sm font-medium text-[#0b57d0]">{t("First-time setup")}</p>
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <p className="text-sm font-medium text-[#0b57d0]">{t("First-time setup")}</p>
+                <LanguageSwitcher />
+              </div>
               <h1 className="max-w-md text-[2rem] font-medium leading-tight tracking-[-0.025em] text-[#1f1f1f] sm:text-[2.5rem]">
                 {t("Welcome to NovelWorld")}
               </h1>

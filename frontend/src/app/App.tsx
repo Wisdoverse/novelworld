@@ -25,13 +25,16 @@ const SettingsPage = lazy(() => import('@/pages/settings'));
 function AppLoadingScreen() {
   useLocale();
   return (
-    <div className="app-surface flex min-h-screen items-center justify-center">
+    <main className="app-surface relative flex min-h-screen items-center justify-center">
+      <div className="absolute right-3 top-3">
+        <LanguageSwitcher />
+      </div>
       <div className="text-center">
         <div className="w-8 h-8 border-2 border-t-transparent rounded-full animate-spin mx-auto mb-4"
              style={{ borderColor: '#0b57d0', borderTopColor: 'transparent' }} />
         <p className="text-sm text-[#5f6368]">{t("Loading…")}</p>
       </div>
-    </div>
+    </main>
   );
 }
 
@@ -84,8 +87,9 @@ function AppRouteContent() {
 
   if (setupStatus.isError) {
     return (
-      <div className="app-surface flex min-h-screen items-center justify-center px-4">
+      <main className="app-surface flex min-h-screen items-center justify-center px-4">
         <div role="alert" className="surface-card max-w-md p-8 text-center text-[#5f6368]">
+          <div className="mb-3 flex justify-end"><LanguageSwitcher /></div>
           <h1 className="mb-2 text-lg font-semibold text-[#1f1f1f]">
             {t("Cannot check service configuration")}
           </h1>
@@ -97,7 +101,7 @@ function AppRouteContent() {
             {t("Retry")}
           </button>
         </div>
-      </div>
+      </main>
     );
   }
 
@@ -111,8 +115,9 @@ function AppRouteContent() {
 
   if (authStatus === 'error') {
     return (
-      <div className="app-surface flex min-h-screen items-center justify-center px-4">
+      <main className="app-surface flex min-h-screen items-center justify-center px-4">
         <div role="alert" className="surface-card max-w-md p-8 text-center text-[#5f6368]">
+          <div className="mb-3 flex justify-end"><LanguageSwitcher /></div>
           <h1 className="mb-2 text-lg font-semibold text-[#1f1f1f]">
             {t("Cannot verify your session right now")}
           </h1>
@@ -136,7 +141,7 @@ function AppRouteContent() {
             </button>
           </div>
         </div>
-      </div>
+      </main>
     );
   }
 
@@ -185,9 +190,6 @@ export function App() {
   return (
     <MotionConfig reducedMotion="user" skipAnimations={Boolean(reducedMotion)}>
     <QueryClientProvider client={queryClient}>
-      <div className="flex justify-end border-b border-[#e8eaed] bg-white px-4 py-2 sm:px-6">
-        <LanguageSwitcher />
-      </div>
       <Router>
         <AppRoutes />
       </Router>

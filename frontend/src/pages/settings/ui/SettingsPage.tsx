@@ -12,6 +12,7 @@ import { queryClient } from '@/shared/api/queryClient';
 import { useAuthStore } from '@/features/auth';
 import { LlmUsageCard } from '@/features/llm-usage';
 import { PROVIDERS, providerOptions, type EditableProvider } from '../model/providers';
+import { LanguageSwitcher } from '@/shared/ui/LanguageSwitcher';
 
 type LlmSettings = {
   scope: LlmUsageScope;
@@ -224,8 +225,13 @@ export function SettingsPage() {
         </button>
 
         <header className="mb-8">
-          <p className="text-sm font-medium text-[#0b57d0]">{t("Preferences and account")}</p>
-          <h1 className="mt-2 text-3xl font-medium tracking-[-0.02em] text-[#1f1f1f]">{t("Settings")}</h1>
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-medium text-[#0b57d0]">{t("Preferences and account")}</p>
+              <h1 className="mt-2 text-3xl font-medium tracking-[-0.02em] text-[#1f1f1f]">{t("Settings")}</h1>
+            </div>
+            <LanguageSwitcher />
+          </div>
           <p className="mt-2 text-sm text-[#5f6368]">{t("Manage models, API keys and account data.")}</p>
         </header>
 

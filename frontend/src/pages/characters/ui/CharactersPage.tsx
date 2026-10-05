@@ -8,6 +8,7 @@ import { ChatPanel } from '@/widgets/chat-panel';
 import { useAuthStore } from '@/features/auth';
 import { getApiErrorCode } from '@/shared/api/client';
 import { getReaderIdentityScope } from '@/shared/lib/readerIdentityScope';
+import { LanguageSwitcher } from '@/shared/ui/LanguageSwitcher';
 import { AlertCircle, ArrowLeft, Users } from 'lucide-react';
 
 export function CharactersPage() {
@@ -53,19 +54,22 @@ export function CharactersPage() {
   return (
     <main className="app-surface min-h-screen px-4 py-8 sm:px-6 sm:py-10">
       <div className="max-w-6xl mx-auto">
-        <div className="mb-8 flex items-center gap-4">
-          <button
-            onClick={() => navigate(-1)}
-            className="flex h-10 w-10 items-center justify-center rounded-full text-[#0b57d0] transition-colors hover:bg-[#e8f0fe]"
-            aria-label={t("Back")}
-          >
-            <ArrowLeft size={20} />
-          </button>
-          <div>
-            <p className="text-sm font-medium text-[#0b57d0]">{t("Character relationships")}</p>
-            <h1 className="mt-1 text-3xl font-medium tracking-[-0.02em] text-[#1f1f1f]">{t("Character list")}</h1>
+        <header className="mb-8 flex items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-3 sm:gap-4">
+            <button
+              onClick={() => navigate(-1)}
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-[#0b57d0] transition-colors hover:bg-[#e8f0fe]"
+              aria-label={t("Back")}
+            >
+              <ArrowLeft size={20} />
+            </button>
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-[#0b57d0]">{t("Character relationships")}</p>
+              <h1 className="mt-1 text-3xl font-medium tracking-[-0.02em] text-[#1f1f1f]">{t("Character list")}</h1>
+            </div>
           </div>
-        </div>
+          <LanguageSwitcher />
+        </header>
 
         {isLoading || isProgressLoading ? (
           <div className="surface-card flex items-center justify-center gap-3 py-20 text-sm text-[#5f6368]">

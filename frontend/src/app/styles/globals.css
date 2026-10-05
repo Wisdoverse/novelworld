@@ -26,6 +26,11 @@ html {
   scroll-padding-block: 5rem;
 }
 
+/* Keep focused controls visible during native focus movement. */
+html:has(:focus-visible) {
+  scroll-behavior: auto;
+}
+
 body {
   font-family: var(--font-body);
   background-color: #f7f8fc;
