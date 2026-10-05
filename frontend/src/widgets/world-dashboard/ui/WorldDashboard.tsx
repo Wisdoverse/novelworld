@@ -1,5 +1,5 @@
 import { displayMessage, translate as t, UiMessageError, useLocale, type UiMessage } from '@/shared/lib/i18n';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { BookOpen, Compass, Dices, GitBranch, History, Users } from 'lucide-react';
 import { isWorldTurnOutcomeUnknown, useSubmitWorldTurn, useWorldTurnConfirmation } from '@/entities/narrative';
 import { WorldActionForm, actionLabels } from '@/features/world-action';
@@ -20,6 +20,8 @@ interface WorldDashboardProps {
   actionsDisabledReason?: string;
   onRefresh?: () => void;
   onActionLockChange?: (locked: boolean) => void;
+  onReviewJournal?: () => void;
+  sourceProgressContent?: ReactNode;
 }
 
 interface PendingRequest {
@@ -154,6 +156,8 @@ export function WorldDashboard({
   actionsDisabledReason = t("The latest world state has not been restored. Reload the world before taking an action."),
   onRefresh,
   onActionLockChange,
+  onReviewJournal,
+  sourceProgressContent,
 }: WorldDashboardProps) {
   const locale = useLocale();
   const turn = useSubmitWorldTurn(novelId);
@@ -194,6 +198,9 @@ export function WorldDashboard({
   }));
   const error = errorState.novelId === novelId ? displayMessage(errorState.message) : undefined;
   const context = effectiveWorldContext(view.session);
+  const waitingEventCount = view.session.canonical_events.filter(event => (
+    event.status === 'scheduled' || event.status === 'delayed'
+  )).length;
   const location = context.locations.find(item => item.id === view.player.location_id);
   const activeThreads = Object.entries(view.world_state.state.threads ?? {})
     .filter(([, thread]) => thread.status === 'open');
@@ -319,84 +326,50 @@ export function WorldDashboard({
 
   return (
     <section
-      className="mt-6 space-y-7 rounded-[28px] border border-[#d8c8a9] bg-[#faf7ef] p-4 shadow-[0_18px_50px_rgba(53,49,35,0.08)] sm:p-6"
+      className="mt-6 overflow-hidden rounded-[28px] border border-[#d8c8a9] bg-[#faf7ef] shadow-[0_18px_50px_rgba(53,49,35,0.08)]"
       aria-labelledby="living-world-title"
     >
-      <div className="rounded-[22px] bg-[#203a35] px-5 py-7 text-[#f6f1e6] sm:px-8 sm:py-9">
-        <div className="flex flex-wrap items-center gap-2 text-xs font-semibold tracking-[0.18em] text-[#d4e4c6]">
+      <header className="border-b border-[#d8c8a9] bg-[#e8eee5] px-5 py-6 sm:px-8">
+        <div className="flex flex-wrap items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-[#466456]">
           <Compass size={14} aria-hidden="true" /> {t("The story unfolding")}
-          <span className="ml-auto rounded-full border border-white/25 px-3 py-1 tracking-normal text-[#f6f1e6]">
+          <span className="rounded-full border border-[#b9c9b7] bg-white/70 px-3 py-1 tracking-normal normal-case text-[#203a35]">
             {t('Turn number: {p0}', { p0: view.session.turn_number })}
           </span>
         </div>
-        <h2 id="living-world-title" tabIndex={-1} className="mt-5 scroll-mt-24 text-2xl font-semibold leading-tight sm:text-3xl">
+        <h2 id="living-world-title" tabIndex={-1} className="mt-4 scroll-mt-24 text-2xl font-semibold leading-tight text-[#203a35] sm:text-3xl">
           {t("{p0}'s open world", { p0: view.player.name })}
         </h2>
-        <p className="mt-3 text-sm text-[#d5e1d7]">
-          {location?.name ?? view.player.location_id ?? t("Location unconfirmed")} · {t('World time {p0} · Each committed turn advances one step', { p0: view.session.world_time })}
-        </p>
-        <p className="mt-2 text-sm text-[#d5e1d7]">
-          {t('World entry · Original chapter {p0}. Current source: chapter {p1}.', { p0: view.session.entry_context.checkpoint_chapter, p1: context.unlocked_through_chapter })}
-        </p>
-        <div className="mt-7 border-t border-white/20 pt-6">
-          {latestCheck ? (
-            <div role="status" aria-label={t("This turn's action result")} className="mb-5 rounded-xl border border-white/25 p-4 text-sm leading-6">
-              <p className="font-semibold">{actionCheckSummary(latestCheck)}</p>
-              <p className="mt-1 text-[#d5e1d7]">
-                {latestCheck.adjudication?.decision === 'impossible'
-                  ? t("This action is impossible, so no dice check was made. Choose another action or target.")
-                  : latestCheck.adjudication?.decision === 'pending'
-                    ? t("The action decision is still pending. Check the confirmation status in the action section below.")
-                    : latestCheck.adjudication?.decision !== 'automatic_success' && !latestCheck.succeeded
-                      ? t("The check failed and your action had no effect. The turn is complete; you can choose your next action.")
-                      : t("This turn is complete. You can choose your next action.")}
-              </p>
-            </div>
-          ) : null}
-          <p id="latest-world-narrative" lang={latestNarrative ? 'zh-CN' : undefined} role="status" aria-live="polite" tabIndex={-1} className="mt-3 max-w-3xl whitespace-pre-wrap text-base leading-8 text-[#f6f1e6] [overflow-wrap:anywhere] sm:text-lg">
-            {latestNarrative ?? t("The world is ready. Choose a scene suggestion or enter your action. Characters will respond according to their circumstances.")}
-          </p>
-          <div className="mt-5 text-sm leading-6 text-[#d5e1d7]">
-            <p>{t("Choose a scene suggestion or enter your action. Review your intent, then select “Execute action” to continue the story.")}</p>
-            <a href="#world-action-form" className="mt-2 inline-block font-semibold text-[#f6f1e6] underline underline-offset-4">{t("Choose an action")}</a>
+        <div className="mt-4 flex flex-wrap gap-2 text-xs text-[#34483d]">
+          <span className="rounded-full border border-[#c8d4c2] bg-white/75 px-3 py-1.5">{location?.name ?? view.player.location_id ?? t("Location unconfirmed")}</span>
+          <span className="rounded-full border border-[#c8d4c2] bg-white/75 px-3 py-1.5">{t('World time {p0}', { p0: view.session.world_time })}</span>
+          <span className="rounded-full border border-[#c8d4c2] bg-white/75 px-3 py-1.5">{t('Current source · Chapter {p0}', { p0: context.unlocked_through_chapter })}</span>
+          <span className="rounded-full border border-[#c8d4c2] bg-white/75 px-3 py-1.5">{t('Events still pending in this scene · {p0}', { p0: waitingEventCount })}</span>
+        </div>
+      </header>
+
+      <article className="bg-[#fffdf7] px-5 py-7 sm:px-8 sm:py-9">
+        {latestCheck ? (
+          <div role="status" aria-label={t("This turn's action result")} className="mb-6 rounded-xl border border-[#d8c8a9] bg-[#f5efe1] p-4 text-sm leading-6 text-[#34483d]">
+            <p className="font-semibold">{actionCheckSummary(latestCheck)}</p>
+            <p className="mt-1">
+              {latestCheck.adjudication?.decision === 'impossible'
+                ? t("This action is impossible, so no dice check was made. Choose another action or target.")
+                : latestCheck.adjudication?.decision === 'pending'
+                  ? t("The action decision is still pending. Check the confirmation status in the action section below.")
+                  : latestCheck.adjudication?.decision !== 'automatic_success' && !latestCheck.succeeded
+                    ? t("Your action failed, but the committed turn still advanced world time.")
+                    : t("This turn is complete. You can choose your next action.")}
+            </p>
           </div>
-        </div>
-      </div>
+        ) : null}
+        <p id="latest-world-narrative" lang={latestNarrative ? 'zh-CN' : undefined} role="status" aria-live="polite" tabIndex={-1} className="max-w-3xl whitespace-pre-wrap [font-family:var(--font-reading)] text-lg leading-[1.9] text-[#263c32] [overflow-wrap:anywhere] sm:text-xl">
+          {latestNarrative ?? t("The world is ready. Choose a scene suggestion or enter your action. Characters will respond according to their circumstances.")}
+        </p>
+      </article>
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(220px,0.75fr)]">
-        <div className="rounded-2xl border border-[#ded4bf] bg-white p-5">
-          <h3 className="flex items-center gap-2 text-sm font-semibold text-[#203a35]">
-            <Users size={16} aria-hidden="true" /> {t("Characters here now")}
-          </h3>
-          {localCharacters.length ? (
-            <ul className="mt-4 flex flex-wrap gap-2">
-              {localCharacters.map(character => (
-                <li key={character.id} className="rounded-full bg-[#e8efe5] px-3 py-1.5 text-sm font-medium text-[#203a35]">
-                  {character.name}
-                </li>
-              ))}
-            </ul>
-          ) : <p className="mt-3 text-sm leading-6 text-[#59645f]">{t("No characters have been confirmed here by this turn's recorded events.")}</p>}
-        </div>
-        <div className="rounded-2xl border border-[#ded4bf] bg-white p-5">
-          <h3 className="text-sm font-semibold text-[#203a35]">{t("What characters are doing")}</h3>
-          {localCharacterEvents.length ? (
-            <ul className="mt-3 space-y-3 text-sm leading-6 text-[#3d4842]">
-              {localCharacterEvents.map((event, index) => (
-                <li key={index} className="border-l-2 border-[#81a68d] pl-3">
-                  <span className="font-semibold">{event.actor_character_ids
-                    .filter(id => localCharacterIds.has(id))
-                    .map(id => context.characters.find(character => character.id === id)?.name)
-                    .join(locale === 'zh-CN' ? '、' : ', ')}{locale === 'zh-CN' ? '：' : ': '}</span>{event.summary}
-                </li>
-              ))}
-            </ul>
-          ) : <p className="mt-3 text-sm leading-6 text-[#59645f]">{t("No actions by nearby characters were recorded this turn.")}</p>}
-        </div>
-      </div>
-
-      <div className="rounded-2xl border border-[#d8c8a9] bg-white p-5 sm:p-6">
+      <div className="border-t border-[#d8c8a9] bg-white/70 px-5 py-6 sm:px-8">
         <h3 id="world-action-form" tabIndex={-1} className="scroll-mt-24 text-lg font-semibold text-[#203a35]">{t("What will you do next?")}</h3>
+        {sourceProgressContent ? <div className="my-4 border-l-2 border-[#789381] pl-4">{sourceProgressContent}</div> : null}
         <p className="mb-5 mt-1 text-sm text-[#59645f]">{t("Choose a scene suggestion or write your own. Suggestions only fill your draft; review it before executing. Character suggestions use confirmed nearby characters.")}</p>
         {actionsDisabled ? (
           <div role="alert" className="mb-4 text-sm text-[#b3261e]">
@@ -435,6 +408,44 @@ export function WorldDashboard({
           isLocked={recoveryOnly || actionsDisabled || Boolean(pendingRequest)}
           onSubmit={submit}
         />
+        {onReviewJournal ? (
+          <button type="button" onClick={onReviewJournal} className="mt-5 inline-flex min-h-11 items-center gap-2 text-sm font-medium text-[#315b45] underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#315b45] focus-visible:ring-offset-2">
+            <History size={16} aria-hidden="true" /> {t("Review action journal")}
+          </button>
+        ) : null}
+      </div>
+
+      <div className="space-y-7 border-t border-[#e5dcc9] px-5 py-6 sm:px-8">
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(220px,0.75fr)]">
+        <div className="rounded-xl border border-[#ded4bf] bg-white p-4">
+          <h3 className="flex items-center gap-2 text-sm font-semibold text-[#203a35]">
+            <Users size={16} aria-hidden="true" /> {t("Characters here now")}
+          </h3>
+          {localCharacters.length ? (
+            <ul className="mt-4 flex flex-wrap gap-2">
+              {localCharacters.map(character => (
+                <li key={character.id} className="rounded-full bg-[#e8efe5] px-3 py-1.5 text-sm font-medium text-[#203a35]">
+                  {character.name}
+                </li>
+              ))}
+            </ul>
+          ) : <p className="mt-3 text-sm leading-6 text-[#59645f]">{t("No characters have been confirmed here by this turn's recorded events.")}</p>}
+        </div>
+        <div className="rounded-xl border border-[#ded4bf] bg-white p-4">
+          <h3 className="text-sm font-semibold text-[#203a35]">{t("What characters are doing")}</h3>
+          {localCharacterEvents.length ? (
+            <ul className="mt-3 space-y-3 text-sm leading-6 text-[#3d4842]">
+              {localCharacterEvents.map((event, index) => (
+                <li key={index} className="border-l-2 border-[#81a68d] pl-3">
+                  <span className="font-semibold">{event.actor_character_ids
+                    .filter(id => localCharacterIds.has(id))
+                    .map(id => context.characters.find(character => character.id === id)?.name)
+                    .join(locale === 'zh-CN' ? '、' : ', ')}{locale === 'zh-CN' ? '：' : ': '}</span>{event.summary}
+                </li>
+              ))}
+            </ul>
+          ) : <p className="mt-3 text-sm leading-6 text-[#59645f]">{t("No actions by nearby characters were recorded this turn.")}</p>}
+        </div>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
@@ -586,6 +597,7 @@ export function WorldDashboard({
           </ol>
         ) : <p className="mt-3 text-sm text-[#5f6368]">{t("Your first choice or action will be recorded here.")}</p>}
         </div>
+      </div>
       </div>
 
     </section>

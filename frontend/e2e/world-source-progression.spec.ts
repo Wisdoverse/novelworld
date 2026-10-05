@@ -140,7 +140,7 @@ test('turn clock automatically admits chapters 2 and 3 without a scene click', a
   await expect(page.getByRole('button', { name: '进入下一幕', exact: true })).toHaveCount(0);
   await expect(page).toHaveURL(/\/reader\/novel-1\/2#latest-world-narrative$/);
   await expect(page.locator('li').filter({ hasText: '第二幕的商船靠岸' })).toBeVisible();
-  await expect(page.getByText(/世界入场坐标 · 原著第 1 章/)).toBeVisible();
+  await expect(page.getByText('当前原著进度 · 第 2 章')).toBeVisible();
   await expect(page.getByText('长行动投影起点', { exact: false })).toBeVisible();
   expect(server.absoluteWrites).toEqual([]);
   expect(server.actions).toEqual([]);

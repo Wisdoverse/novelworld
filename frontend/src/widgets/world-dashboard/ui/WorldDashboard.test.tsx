@@ -184,10 +184,15 @@ describe('WorldDashboard', () => {
     expect(mocks.submit).not.toHaveBeenCalled();
   });
 
-  it('links the current narrative to the next action without submitting automatically', () => {
+  it('puts the narrative before the action form and supporting context without submitting', () => {
+    setLocale('en');
     render(<WorldDashboard novelId="novel" view={view} />);
-    expect(screen.getByRole('link', { name: '去选择行动' }).getAttribute('href')).toBe('#world-action-form');
-    expect(screen.getByText(/确认意图后点击“执行行动”，故事会继续推进/)).toBeTruthy();
+    const narrative = document.getElementById('latest-world-narrative');
+    const action = document.getElementById('world-action-form');
+    const characters = screen.getByRole('heading', { name: 'Characters here now' });
+    expect(narrative?.compareDocumentPosition(action!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(action?.compareDocumentPosition(characters)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(screen.queryByRole('link', { name: 'Choose an action' })).toBeNull();
     expect(mocks.submit).not.toHaveBeenCalled();
   });
 
@@ -323,6 +328,7 @@ describe('WorldDashboard', () => {
     expect(rows.some(row => row.includes('围城开始') && row.includes('原著抽取') && row.includes('被延迟') && row.includes('来源章节 2') && row.includes('城门未开'))).toBe(true);
     expect(rows.some(row => row.includes('尚未发生的事件') && row.includes('原著抽取') && row.includes('等待发生') && row.includes('来源章节 5') && row.includes('尚未触发'))).toBe(true);
     expect(rows.some(row => row.includes('玩家影响的事件') && row.includes('原著抽取') && row.includes('玩家协助') && row.includes('世界时间 2') && row.includes('来源章节 3、4') && row.includes('读者守住城门'))).toBe(true);
+    expect(screen.getByText('当前场景尚待发生的事件 · 2')).toBeTruthy();
     expect(screen.getByText('事件由模型从原著中抽取，可能存在遗漏或误读，请结合来源章节核对。')).toBeTruthy();
   });
 
@@ -870,8 +876,8 @@ describe('WorldDashboard', () => {
   });
 
   it.each([
-    { decision: 'template_fallback', succeeded: false, explanation: '本次检定失败', summary: 'D20 6 + 1 = 7 / 难度 12 · 失败' },
-    { decision: 'standard_check', succeeded: false, explanation: '本次检定失败', summary: 'D20 6 + 1 = 7 / 难度 12 · 失败' },
+    { decision: 'template_fallback', succeeded: false, explanation: '行动未能成功，但本回合已提交，世界时间仍已推进', summary: 'D20 6 + 1 = 7 / 难度 12 · 失败' },
+    { decision: 'standard_check', succeeded: false, explanation: '行动未能成功，但本回合已提交，世界时间仍已推进', summary: 'D20 6 + 1 = 7 / 难度 12 · 失败' },
     { decision: 'standard_check', succeeded: true, explanation: '本回合已完成', summary: 'D20 14 + 1 = 15 / 难度 12 · 成功' },
     { decision: 'impossible', succeeded: true, explanation: '该行动不可行', summary: '未进行骰子检定' },
     { decision: 'pending', succeeded: true, explanation: '行动判断尚未完成', summary: '判断未完成' },
@@ -892,8 +898,8 @@ describe('WorldDashboard', () => {
     const result = screen.getByRole('status', { name: '本回合行动结果' });
     expect(result.textContent).toContain(explanation);
     expect(result.textContent).toContain(summary);
-    expect(result.parentElement?.querySelector('#latest-world-narrative')).toBeTruthy();
-    expect(screen.getByText(/世界入场坐标 · 原著第 1 章/)).toBeTruthy();
+    expect(document.getElementById('latest-world-narrative')).toBeTruthy();
+    expect(screen.getByText('当前原著进度 · 第 2 章')).toBeTruthy();
     expect(screen.getByLabelText('行动').hasAttribute('disabled')).toBe(false);
     expect(mocks.submit).not.toHaveBeenCalled();
   });
@@ -932,7 +938,7 @@ describe('WorldDashboard', () => {
 
     render(<WorldDashboard novelId="novel" view={advancedView} />);
 
-    expect(screen.getByText(/世界时间 1 · 每次已提交回合推进 1 步/)).toBeTruthy();
+    expect(screen.getByText('世界时间 1')).toBeTruthy();
     expect(screen.getAllByText(narrative)).toHaveLength(1);
     expect(screen.queryByText('展开完整经过')).toBeNull();
     const announcedNarrative = screen.getByText(narrative);

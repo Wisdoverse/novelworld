@@ -35,6 +35,9 @@ for (const locale of ['en', 'zh-CN'] as const) {
       await page.goto(url);
       await expect(page.getByText(text, { exact: true }).first()).toBeVisible();
       await expect(page.locator('html')).toHaveAttribute('lang', locale);
+      if (url === '/reader/novel-1/1') {
+        await expect(page.getByRole('navigation', { name: locale === 'en' ? 'Reading navigation' : '阅读导航' })).toHaveCount(1);
+      }
       const language = page.getByRole('combobox', { name: locale === 'en' ? 'Language' : '语言' });
       await expect(language).toHaveCount(1);
       await expect(language).toHaveValue(locale);
@@ -57,6 +60,16 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await expect(page.getByRole('heading', { name: locale === 'en' ? 'What will you do next?' : '你接下来做什么？' })).toBeVisible();
     await expect(page.getByRole('button', { name: locale === 'en' ? 'Execute action' : '执行行动', exact: true })).toBeVisible();
     await expect(page.locator('#latest-world-narrative')).toHaveAttribute('lang', 'zh-CN');
+    await expect(page.getByRole('navigation', { name: locale === 'en' ? 'Reading navigation' : '阅读导航' })).toHaveCount(0);
+    await expect(page.getByText(locale === 'en' ? 'Events still pending in this scene · 1' : '当前场景尚待发生的事件 · 1')).toBeVisible();
+    expect(await page.evaluate(() => {
+      const narrative = document.getElementById('latest-world-narrative');
+      const action = document.getElementById('world-action-form');
+      const characters = [...document.querySelectorAll('h3')].find(node => node.textContent?.trim() === '此刻同场的角色' || node.textContent?.trim() === 'Characters here now');
+      return Boolean(narrative && action && characters
+        && (narrative.compareDocumentPosition(action) & Node.DOCUMENT_POSITION_FOLLOWING)
+        && (action.compareDocumentPosition(characters) & Node.DOCUMENT_POSITION_FOLLOWING));
+    })).toBe(true);
     await expectNoA11yViolations(page);
     if (locale === 'en') await page.screenshot({ path: testInfo.outputPath('reader.png') });
 
@@ -110,8 +123,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
       await expectNoHorizontalOverflow(page);
       expect(writes).toEqual([]);
       if (label === 'reader') {
-        const navigation = page.getByRole('navigation', { name: locale === 'en' ? 'Reading navigation' : '阅读导航' });
-        expect((await navigation.boundingBox())?.height).toBeLessThanOrEqual(80);
+        await expect(page.getByRole('navigation', { name: locale === 'en' ? 'Reading navigation' : '阅读导航' })).toHaveCount(0);
       }
       if (label === 'home') {
         await expect(page.getByRole('button', { name: locale === 'en' ? 'Sign in' : '登录', exact: true })).toBeVisible();
