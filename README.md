@@ -73,6 +73,11 @@ Internet connection and a configured key. Source excerpts and conversations are
 sent to the configured provider. Review that provider's data and billing policies.
 Upload only works that you have the right or permission to process.
 
+The default configuration disables embeddings. Set `EMBEDDING_PROVIDER`,
+`EMBEDDING_API_URL`, and `EMBEDDING_MODEL` in `.env` for an external endpoint.
+Local embeddings also require the explicit `local-embedding` Compose profile.
+See [`.env.example`](./.env.example) for both configurations.
+
 ## Support and limits
 
 | Area | Current boundary |
