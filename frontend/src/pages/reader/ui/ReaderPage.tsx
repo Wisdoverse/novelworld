@@ -29,6 +29,7 @@ import { BranchChoice } from '@/widgets/branch-choice';
 import { useWorldSourceProgression } from '@/features/world-source';
 import { effectiveWorldContext } from '@/shared/lib/worldSourceContext';
 import { WorldDashboard } from '@/widgets/world-dashboard';
+import { LanguageSwitcher } from '@/shared/ui/LanguageSwitcher';
 import { PlayerEntryForm } from '@/features/player-entry';
 import {
   MAX_CHAPTER_TRANSLATION_BYTES,
@@ -456,6 +457,7 @@ export function ReaderPage() {
     return (
       <main className="app-surface flex min-h-screen items-center justify-center px-4 py-10">
         <div className="surface-card w-full max-w-lg px-7 py-12 text-center sm:px-10">
+          <div className="mb-4 flex justify-end"><LanguageSwitcher /></div>
           <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-[#fce8e6] text-[#b3261e]">
             <AlertCircle size={24} aria-hidden="true" />
           </span>
@@ -482,9 +484,12 @@ export function ReaderPage() {
 
   if (routeChapter === undefined || currentChapter < 1 || isProgressLoading) {
     return (
-      <div className="app-surface flex min-h-screen items-center justify-center">
-        <div className="h-8 w-8 animate-spin rounded-full border-2 border-[#0b57d0] border-t-transparent" aria-label={t("Restoring reading progress")} />
-      </div>
+      <main className="app-surface relative flex min-h-screen items-center justify-center">
+        <div className="absolute right-3 top-3">
+          <LanguageSwitcher />
+        </div>
+        <div role="status" className="h-8 w-8 animate-spin rounded-full border-2 border-[#0b57d0] border-t-transparent" aria-label={t("Restoring reading progress")} />
+      </main>
     );
   }
 
@@ -492,6 +497,7 @@ export function ReaderPage() {
     return (
       <main className="app-surface flex min-h-screen items-center justify-center px-4 py-10">
         <div className="surface-card w-full max-w-lg px-7 py-12 text-center sm:px-10" role="alert">
+          <div className="mb-4 flex justify-end"><LanguageSwitcher /></div>
           <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-[#fce8e6] text-[#b3261e]">
             <AlertCircle size={24} aria-hidden="true" />
           </span>
@@ -548,7 +554,7 @@ export function ReaderPage() {
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-1 sm:gap-2">
           {/* Progress */}
           <div className="hidden items-center gap-2 text-xs text-[#5f6368] md:flex">
             <BookOpen size={12} />
@@ -560,12 +566,14 @@ export function ReaderPage() {
           <button
             ref={characterTriggerRef}
             disabled={timelineMutationLocked}
-            className={`flex shrink-0 items-center gap-1.5 rounded-full px-3 py-2 text-xs font-semibold transition-colors ${showCharacterList ? 'bg-[#d2e3fc] text-[#0842a0]' : 'bg-[#e8f0fe] text-[#0b57d0] hover:bg-[#d2e3fc]'}`}
+            aria-label={t("Characters")}
+            className={`flex h-11 w-10 shrink-0 items-center justify-center gap-1.5 rounded-full text-xs font-semibold transition-colors sm:w-auto sm:px-3 ${showCharacterList ? 'bg-[#d2e3fc] text-[#0842a0]' : 'bg-[#e8f0fe] text-[#0b57d0] hover:bg-[#d2e3fc]'}`}
           >
-            <Users size={12} />
-            {t("Characters")}
+            <Users size={14} />
+            <span className="hidden sm:inline">{t("Characters")}</span>
           </button>
           </Dialog.Trigger>
+          <LanguageSwitcher />
         </div>
       </motion.header>
 
@@ -852,7 +860,7 @@ export function ReaderPage() {
         <button
           onClick={goBack}
           disabled={sourceProgression.locked || isProgressSaving || (!openWorld && currentChapter <= 1)}
-          className="tonal-action shrink-0 px-3 text-sm sm:px-5"
+          className="tonal-action min-w-0 flex-1 px-3! text-xs sm:flex-none sm:px-5! sm:text-sm"
         >
           <ChevronLeft size={14} />
           {openWorld ? t("Review action journal") : t("Previous chapter")}
@@ -874,7 +882,7 @@ export function ReaderPage() {
         <button
           onClick={continueJourney}
           disabled={sourceProgression.locked || isProgressSaving || branchChoiceRequired || !novel || (!openWorld && currentChapter >= novel.total_chapters)}
-          className="tonal-action min-w-0 px-3 text-sm sm:px-5"
+          className="tonal-action min-w-0 flex-1 px-3! text-xs sm:flex-none sm:px-5! sm:text-sm"
         >
           {branchChoiceRequired
               ? t("Choose first")

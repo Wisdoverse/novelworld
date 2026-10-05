@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '@/features/auth';
+import { LanguageSwitcher } from '@/shared/ui/LanguageSwitcher';
 
 const capabilities = [
   {
@@ -39,7 +40,7 @@ export function HomePage() {
   return (
     <main className="app-surface min-h-screen">
       <header className="border-b border-[#e8eaed] bg-white/90 backdrop-blur-xl">
-        <div className="mx-auto flex min-h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
+        <div className="mx-auto flex min-h-16 max-w-7xl items-center justify-between gap-2 px-3 sm:gap-3 sm:px-6 lg:px-8">
           <button
             type="button"
             onClick={() => navigate('/')}
@@ -49,23 +50,26 @@ export function HomePage() {
             <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#0b57d0] text-white">
               <BookOpen size={18} aria-hidden="true" />
             </span>
-            <span className="font-semibold tracking-[-0.01em] text-[#174ea6]">NovelWorld</span>
+            <span className="hidden font-semibold tracking-[-0.01em] text-[#174ea6] sm:inline">NovelWorld</span>
           </button>
 
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-1 sm:gap-2">
+            <LanguageSwitcher />
             {!user && (
               <button
                 type="button"
                 onClick={() => navigate('/login')}
-                className="flex min-h-11 items-center rounded-full px-4 text-sm font-semibold text-[#0b57d0] transition-colors hover:bg-[#f0f4ff]"
+                aria-label={t("Sign in")}
+                className="flex h-11 w-11 shrink-0 items-center justify-center gap-2 rounded-full text-sm font-semibold text-[#0b57d0] transition-colors hover:bg-[#f0f4ff] sm:w-auto sm:px-4"
               >
-                {t("Sign in")}
+                <UserRound size={16} aria-hidden="true" />
+                <span className="sr-only sm:not-sr-only">{t("Sign in")}</span>
               </button>
             )}
             <button
               type="button"
               onClick={() => navigate(startDestination)}
-              className="primary-action px-5 text-sm"
+              className="primary-action min-h-11 px-3! text-xs sm:px-5! sm:text-sm"
             >
               {user ? t("Go to shelf") : t("Start for free")}
             </button>

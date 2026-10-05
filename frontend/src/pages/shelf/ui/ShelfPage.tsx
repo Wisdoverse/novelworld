@@ -17,6 +17,7 @@ import { WorldSeriesDialog } from '@/features/novel-world-series';
 import type { Novel } from '@/shared/types';
 import { getApiErrorMessage } from '@/shared/api/client';
 import { toast } from 'sonner';
+import { LanguageSwitcher } from '@/shared/ui/LanguageSwitcher';
 
 const importFailureGuidance: Record<string, { message: string; action: 'retry' | 'import' }> = {
   'The retained source file is missing; re-upload the source': { get message() { return t("The original file is unavailable. Import the novel again."); }, action: 'import' },
@@ -360,7 +361,8 @@ export function ShelfPage() {
           </span>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-1 sm:gap-2">
+          <LanguageSwitcher />
           <button type="button" aria-label={t("Settings")} onClick={() => navigate('/settings')} className="flex h-10 w-10 items-center justify-center rounded-full text-[#0b57d0] transition-colors hover:bg-[#e8f0fe]">
             <Settings size={16} />
           </button>

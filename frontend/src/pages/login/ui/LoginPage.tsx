@@ -5,6 +5,7 @@ import { useAuthStore } from '@/features/auth';
 import { getApiErrorMessage } from '@/shared/api/client';
 import { toast } from 'sonner';
 import { ArrowRight, BookOpen } from 'lucide-react';
+import { LanguageSwitcher } from '@/shared/ui/LanguageSwitcher';
 
 export function LoginPage({ initialRegister = false }: { initialRegister?: boolean }) {
   useLocale();
@@ -54,7 +55,10 @@ export function LoginPage({ initialRegister = false }: { initialRegister?: boole
 
         <section className="flex flex-col justify-center p-8 sm:p-12 lg:p-16">
           <div className="mx-auto w-full max-w-md">
-            <p className="text-sm font-medium text-[#0b57d0]">{isRegister ? t("Get started") : t("Welcome back")}</p>
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm font-medium text-[#0b57d0]">{isRegister ? t("Get started") : t("Welcome back")}</p>
+              <LanguageSwitcher />
+            </div>
             <h2 className="mt-3 text-3xl font-medium tracking-[-0.02em] text-[#1f1f1f]">
               {isRegister ? t("Create account") : t("Sign in to NovelWorld")}
             </h2>
