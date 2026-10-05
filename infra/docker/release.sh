@@ -467,6 +467,14 @@ active_manifest=
 compose_deadline_args=()
 compose() (
   local network_creating=false compose_result=0 network_overlay
+  local embedding_overlay embedding_overlay_args=()
+  if [[ "$diagnostic_enabled" == true ]]; then
+    case "${1:-}" in
+      stop|down|rm|ps|logs) ;; # Cleanup does not require a valid image overlay.
+      *) embedding_overlay=$(diagnostic embedding-overlay "$repo_root") || return $?
+         if [[ -n "$embedding_overlay" ]]; then embedding_overlay_args=(-f "$embedding_overlay"); fi ;;
+    esac
+  fi
   if [[ -n "$qualification_subnet" ]]; then
     network_overlay=$(network_guard overlay) || return $?
     network_overlay_args=(-f "$network_overlay")
@@ -496,6 +504,7 @@ compose() (
     -u POSTGRES_IMAGE -u REDIS_IMAGE -u NGINX_IMAGE \
     "${compose_deadline_args[@]}" docker compose "${compose_project_args[@]}" \
       --project-directory "$repo_root" -f "$repo_root/docker-compose.yml" "${network_overlay_args[@]}" \
+      "${embedding_overlay_args[@]}" \
       --env-file "$secrets_file" --env-file "$active_manifest" \
       "${compose_profile_args[@]}" "$@"; then
     compose_result=0
