@@ -520,6 +520,30 @@ export function ReaderPage() {
     );
   }
 
+  const sourceProgressContent = isSelfMode
+    && ((openWorld && cachedOpenWorld?.session.entry_context) || sourceProgression.locked) ? (
+    <section aria-label={t("World source progress")} className="space-y-2 text-sm leading-6">
+      <p className="text-[#34483d]">
+        {t("World source admitted through chapter")} {cachedOpenWorld ? effectiveWorldContext(cachedOpenWorld.session).unlocked_through_chapter : sourceProgression.pending?.request.expected_source_chapter} {t(". When this scene's events finish, the world automatically continues to the next scene, preserving your character and journey.")}
+      </p>
+      {sourceProgression.locked ? (
+        <div role="status" className="mt-3 text-sm text-[#59645f]">
+          {sourceProgression.isPending ? t("Admitting the next scene…") : t("Source admission is unconfirmed. Other actions and paging are paused.")}
+          <button type="button" className="tonal-action mt-3" disabled={sourceProgression.isPending} onClick={() => void sourceProgression.recover()}>
+            {sourceProgression.pending?.terminal ? t("Restore latest world") : t("Continue confirming the next scene")}
+          </button>
+          {novel && currentChapter < novel.total_chapters ? <button type="button" className="tonal-action ml-3 mt-3" disabled={sourceProgression.isPending} onClick={() => void sourceProgression.continueOriginalReading(novel.total_chapters)}>
+            {t("Read the next original chapter")}
+          </button> : null}
+        </div>
+      ) : cachedOpenWorld && novel && effectiveWorldContext(cachedOpenWorld.session).unlocked_through_chapter < novel.total_chapters ? (
+        <p className="mt-3 text-sm text-[#59645f]">{t("Keep playing this scene. Later chapters are admitted as the world progresses.")}</p>
+      ) : <p className="mt-3 text-sm text-[#59645f]">{t("The original's last chapter is admitted. You can still act in this world.")}</p>}
+      {worldActionLocked && !sourceProgression.locked ? <p className="mt-3 text-sm text-[#59645f]">{t("The previous action is unconfirmed. Confirm it before the next scene.")}</p> : null}
+      {sourceProgression.error ? <p id="world-source-error" tabIndex={-1} role="alert" className="mt-3 text-sm text-[#b3261e]">{sourceProgression.error}</p> : null}
+    </section>
+  ) : null;
+
   return (
     <Dialog.Root open={showCharacterList && !timelineMutationLocked} onOpenChange={open => {
       if (open) setIsChatOpen(false);
@@ -578,7 +602,7 @@ export function ReaderPage() {
       </motion.header>
 
       {/* Main content */}
-      <main className="mx-auto max-w-4xl px-4 pb-28 pt-1 md:px-8">
+      <main className={`mx-auto max-w-4xl px-4 pt-1 md:px-8 ${openWorld ? 'pb-8' : 'pb-28'}`}>
         {isProgressSaveError && (
           <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-[#f2b8b5] bg-[#fce8e6] p-3 text-[#b3261e]" role="alert">
             <span className="text-sm">{t("Reading progress failed to save. Chat is paused.")}</span>
@@ -610,28 +634,7 @@ export function ReaderPage() {
             onSubmit={createPlayerEntity.mutateAsync}
           />
         ) : null}
-        {isSelfMode && ((openWorld && cachedOpenWorld?.session.entry_context) || sourceProgression.locked) ? (
-          <section aria-label={t("World source progress")} className="mt-6 rounded-2xl border border-[#d8c8a9] bg-[#faf7ef] p-5">
-            <p className="text-sm text-[#203a35]">
-              {t("World source admitted through chapter")} {cachedOpenWorld ? effectiveWorldContext(cachedOpenWorld.session).unlocked_through_chapter : sourceProgression.pending?.request.expected_source_chapter} {t(". When this scene's events finish, the world automatically continues to the next scene, preserving your character and journey.")}
-            </p>
-            {sourceProgression.locked ? (
-              <div role="status" className="mt-3 text-sm text-[#59645f]">
-                {sourceProgression.isPending ? t("Admitting the next scene…") : t("Source admission is unconfirmed. Other actions and paging are paused.")}
-                <button type="button" className="tonal-action mt-3" disabled={sourceProgression.isPending} onClick={() => void sourceProgression.recover()}>
-                  {sourceProgression.pending?.terminal ? t("Restore latest world") : t("Continue confirming the next scene")}
-                </button>
-                {novel && currentChapter < novel.total_chapters ? <button type="button" className="tonal-action ml-3 mt-3" disabled={sourceProgression.isPending} onClick={() => void sourceProgression.continueOriginalReading(novel.total_chapters)}>
-                  {t("Read the next original chapter")}
-                </button> : null}
-              </div>
-            ) : cachedOpenWorld && novel && effectiveWorldContext(cachedOpenWorld.session).unlocked_through_chapter < novel.total_chapters ? (
-              <p className="mt-3 text-sm text-[#59645f]">{t("Keep playing this scene. Later chapters are admitted as the world progresses.")}</p>
-            ) : <p className="mt-3 text-sm text-[#59645f]">{t("The original's last chapter is admitted. You can still act in this world.")}</p>}
-            {worldActionLocked && !sourceProgression.locked ? <p className="mt-3 text-sm text-[#59645f]">{t("The previous action is unconfirmed. Confirm it before the next scene.")}</p> : null}
-            {sourceProgression.error ? <p id="world-source-error" tabIndex={-1} role="alert" className="mt-3 text-sm text-[#b3261e]">{sourceProgression.error}</p> : null}
-          </section>
-        ) : null}
+        {!dashboardWorld ? sourceProgressContent : null}
         {dashboardWorld ? (
           <WorldDashboard
             novelId={novelId || ''}
@@ -643,6 +646,8 @@ export function ReaderPage() {
               : t("Reading progress is not saved yet. Wait for it to save before acting.")}
             onRefresh={refetchOpenWorld}
             onActionLockChange={setWorldActionLocked}
+            onReviewJournal={openWorld ? goBack : undefined}
+            sourceProgressContent={sourceProgressContent}
           />
         ) : null}
         {isLoading || (worldSourceVisible && isEffectiveChapterLoading) ? (
@@ -856,7 +861,7 @@ export function ReaderPage() {
       </main>
 
       {/* Bottom paging navigation */}
-      <nav aria-label={t("Reading navigation")} className="fixed bottom-0 left-0 right-0 z-20 flex items-center justify-between gap-2 border-t border-[#e1e3e8] bg-white/95 px-3 py-3 shadow-[0_-1px_3px_rgba(60,64,67,0.08)] backdrop-blur-xl sm:px-6 sm:py-4">
+      {!openWorld ? <nav aria-label={t("Reading navigation")} className="fixed bottom-0 left-0 right-0 z-20 flex items-center justify-between gap-2 border-t border-[#e1e3e8] bg-white/95 px-3 py-3 shadow-[0_-1px_3px_rgba(60,64,67,0.08)] backdrop-blur-xl sm:px-6 sm:py-4">
         <button
           onClick={goBack}
           disabled={sourceProgression.locked || isProgressSaving || (!openWorld && currentChapter <= 1)}
@@ -893,7 +898,7 @@ export function ReaderPage() {
                 : t("Next chapter")}
           <ChevronRight size={14} />
         </button>
-      </nav>
+      </nav> : null}
 
       {/* Character sidebar */}
       <Dialog.Portal>

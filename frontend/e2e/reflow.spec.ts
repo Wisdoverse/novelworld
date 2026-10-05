@@ -74,12 +74,10 @@ test('the latest narrative leads to an actionable next step with missing-input g
   await page.goto('/reader/novel-1/1#latest-world-narrative');
   const outcome = page.getByRole('status', { name: '本回合行动结果' });
   await expect(outcome).toContainText('D20 6 + 1 = 7 / 难度 12 · 失败');
-  await expect(outcome).toContainText('本次检定失败，未产生玩家行动效果；回合已结束，你仍可选择下一步行动。');
-  await expect(page.getByText('世界入场坐标 · 原著第 1 章。当前世界已接入至第 1 章。')).toBeVisible();
-  await page.getByRole('link', { name: '去选择行动' }).click();
-  await expect(page.locator('#world-action-form')).toBeFocused();
-  await page.getByRole('button', { name: '选择下一步行动' }).click();
-  await expect(page.locator('#world-action-form')).toBeFocused();
+  await expect(outcome).toContainText('行动未能成功，但本回合已提交，世界时间仍已推进。');
+  await expect(page.getByText('当前原著进度 · 第 1 章')).toBeVisible();
+  await expect(page.locator('#world-action-form')).toBeVisible();
+  await expect(page.getByRole('navigation', { name: '阅读导航' })).toHaveCount(0);
   expect(submissions).toBe(0);
 
   const submit = page.getByRole('button', { name: '执行行动', exact: true });
@@ -126,7 +124,7 @@ test('a committed turn awaiting memory explains the lock and replays the origina
     await route.fulfill({ json: { ...entry, memory_projection_status: 'saved' } });
   });
   await page.goto('/reader/novel-1/1#latest-world-narrative');
-  await page.getByRole('link', { name: '去选择行动' }).click();
+  await expect(page.locator('#world-action-form')).toBeVisible();
   await expect(page.getByRole('alert')).toContainText('经过已保存，但角色记忆尚未同步完成');
   await expect(page.getByRole('button', { name: '执行行动', exact: true })).toBeDisabled();
   const readsBeforeConfirmation = confirmationReads;

@@ -43,6 +43,11 @@ const mocks = vi.hoisted(() => ({
   startWorld: vi.fn(),
   autoAdvance: vi.fn(),
   openWorld: null as OpenWorldView | null,
+  sourceLocked: false,
+  sourcePendingTerminal: false,
+  sourceError: undefined as string | undefined,
+  recoverSource: vi.fn(),
+  continueOriginalReading: vi.fn(),
   openWorldError: false,
   openWorldFetching: false,
   refetchOpenWorld: vi.fn(),
@@ -78,7 +83,18 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('@/features/world-source', () => ({
-  useWorldSourceProgression: () => ({ locked: false, start: vi.fn(), advanceIfReady: mocks.autoAdvance, recover: vi.fn() }),
+  useWorldSourceProgression: () => ({
+    locked: mocks.sourceLocked,
+    pending: mocks.sourceLocked ? {
+      request: { expected_source_chapter: 2 },
+      terminal: mocks.sourcePendingTerminal,
+    } : null,
+    error: mocks.sourceError,
+    start: vi.fn(),
+    advanceIfReady: mocks.autoAdvance,
+    recover: mocks.recoverSource,
+    continueOriginalReading: mocks.continueOriginalReading,
+  }),
 }));
 
 vi.mock('react-router-dom', () => ({
@@ -335,11 +351,15 @@ vi.mock('@/widgets/branch-choice', () => ({
   ),
 }));
 vi.mock('@/widgets/world-dashboard', () => ({
-  WorldDashboard: ({ actionsDisabled, actionsDisabledReason, onRefresh }: {
+  WorldDashboard: ({ actionsDisabled, actionsDisabledReason, onRefresh, onReviewJournal, sourceProgressContent }: {
     actionsDisabled?: boolean; actionsDisabledReason?: string; onRefresh?: () => void;
+    onReviewJournal?: () => void;
+    sourceProgressContent?: import('react').ReactNode;
   }) => (
-    <div id="world-action-journal">
+    <div id="world-action-journal" tabIndex={-1}>
       <button id="world-action-form" disabled={actionsDisabled}>模拟世界行动</button>
+      {sourceProgressContent}
+      {onReviewJournal ? <button onClick={onReviewJournal}>回看行动日志</button> : null}
       {actionsDisabled ? <div role="alert">{actionsDisabledReason}<button onClick={onRefresh}>重试</button></div> : null}
     </div>
   ),
@@ -374,6 +394,11 @@ describe('ReaderPage progress gate', () => {
     mocks.branchEnabled = false;
     mocks.branchNode = undefined;
     mocks.openWorld = null;
+    mocks.sourceLocked = false;
+    mocks.sourcePendingTerminal = false;
+    mocks.sourceError = undefined;
+    mocks.recoverSource.mockReset();
+    mocks.continueOriginalReading.mockReset();
     mocks.openWorldError = false;
     mocks.openWorldFetching = false;
     mocks.characters = [];
@@ -968,7 +993,8 @@ describe('ReaderPage progress gate', () => {
 
     expect(screen.queryByTestId('branch-choice')).toBeNull();
     expect(mocks.branchEnabled).toBe(false);
-    expect(screen.getByRole('button', { name: '选择下一步行动' }).hasAttribute('disabled')).toBe(false);
+    expect(screen.queryByRole('navigation', { name: '阅读导航' })).toBeNull();
+    expect(screen.getByRole('button', { name: '模拟世界行动' }).hasAttribute('disabled')).toBe(false);
   });
 
   it('does not load or require a future branch after the Player checkpoint', () => {
@@ -1032,6 +1058,7 @@ describe('ReaderPage progress gate', () => {
     const page = render(<ReaderPage />);
 
     expect(screen.queryByRole('button', { name: '模拟世界行动' })).toBeNull();
+    expect(screen.getByRole('navigation', { name: '阅读导航' })).toBeTruthy();
     expect(screen.queryByText('回退后不可见的玩家时间线正文')).toBeNull();
     expect(screen.getByText('Chapter two')).toBeTruthy();
     expect(screen.getByText(/阅读到第 2 章后/)).toBeTruthy();
@@ -1228,32 +1255,58 @@ describe('ReaderPage progress gate', () => {
     await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
   });
 
-  it('reviews the world journal without changing the source chapter', () => {
+  it('keeps source recovery and original-reading controls with the pager when admission is locked', () => {
+    mocks.progressChapter = 2;
+    mocks.progressError = false;
+    mocks.sourceLocked = true;
+    mocks.sourceError = '原著进度确认失败';
+    render(<ReaderPage />);
+
+    expect(screen.queryByRole('button', { name: '模拟世界行动' })).toBeNull();
+    expect(screen.getByRole('navigation', { name: '阅读导航' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '继续确认下一幕' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '继续阅读原文下一章' })).toBeTruthy();
+    expect(screen.getByRole('alert').textContent).toContain('原著进度确认失败');
+
+    fireEvent.click(screen.getByRole('button', { name: '继续确认下一幕' }));
+    fireEvent.click(screen.getByRole('button', { name: '继续阅读原文下一章' }));
+    expect(mocks.recoverSource).toHaveBeenCalledOnce();
+    expect(mocks.continueOriginalReading).toHaveBeenCalledOnce();
+    expect(mocks.navigate).not.toHaveBeenCalled();
+  });
+
+  it('returns the journal shortcut focus and scroll without changing the source route', () => {
     mocks.progressChapter = 2;
     mocks.progressError = false;
     mocks.openWorld = {
       session: { dead_character_ids: [] },
     } as unknown as OpenWorldView;
-    const originalScrollIntoView = Element.prototype.scrollIntoView;
+    const originalScrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView');
     const scrollIntoView = vi.fn();
-    Object.defineProperty(Element.prototype, 'scrollIntoView', {
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
       configurable: true,
       value: scrollIntoView,
     });
+
     try {
       render(<ReaderPage />);
+      const journal = screen.getByRole('button', { name: '回看行动日志' }).parentElement;
+      expect(journal).not.toBeNull();
+      expect(screen.queryByRole('navigation', { name: '阅读导航' })).toBeNull();
+      expect(screen.getByRole('button', { name: '模拟世界行动' })).toBeTruthy();
+      expect(mocks.navigate).not.toHaveBeenCalled();
+
       fireEvent.click(screen.getByRole('button', { name: '回看行动日志' }));
 
       expect(scrollIntoView).toHaveBeenCalledOnce();
+      expect(scrollIntoView.mock.calls[0][0]).toMatchObject({ block: 'start' });
+      expect(document.activeElement).toBe(journal);
       expect(mocks.navigate).not.toHaveBeenCalled();
     } finally {
       if (originalScrollIntoView) {
-        Object.defineProperty(Element.prototype, 'scrollIntoView', {
-          configurable: true,
-          value: originalScrollIntoView,
-        });
+        Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', originalScrollIntoView);
       } else {
-        Reflect.deleteProperty(Element.prototype, 'scrollIntoView');
+        Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView');
       }
     }
   });
@@ -1271,6 +1324,7 @@ describe('splitChapterAtAnchor', () => {
   });
 
   it('renders the complete player timeline chapter after causality diverges', () => {
+    mocks.openWorld = null;
     mocks.progressChapter = 2;
     mocks.progressError = false;
     mocks.effectiveContent = '你推开旧城门，原著从未发生的战争由此开始。';
@@ -1281,8 +1335,9 @@ describe('splitChapterAtAnchor', () => {
     expect(screen.getByText('你推开旧城门，原著从未发生的战争由此开始。')).toBeTruthy();
     expect(screen.getByText('原著坐标 · 第 2 章《Two》')).toBeTruthy();
     expect(screen.getByRole('heading', { name: '云舟的故事' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: '回看行动日志' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: '选择下一步行动' })).toBeTruthy();
+    expect(screen.getByRole('navigation', { name: '阅读导航' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '上一章' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '继续旅程' })).toBeTruthy();
   });
 
   it('keeps the immutable source available without mixing it into player history', () => {
