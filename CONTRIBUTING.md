@@ -53,6 +53,57 @@ the resulting secrets or provider credentials.
 6. Run the relevant local gates, open a pull request, and respond to review with
    new evidence rather than unsupported claims.
 
+### Work authorization, stopping, and cleanup
+
+Inspect the implementation, callers, contract, and current issue or pull request before editing.
+Prefer the smallest root-cause change. Reuse existing code and checks.
+Proceed directly with routine scoped work.
+Within scope, routine work needs no step-by-step approval.
+Allowed work includes the following:
+
+- reading files and making reversible edits
+- creating branches and worktrees
+- running disposable local tests
+- formatting files and running affected checks
+- commits, pull requests, and review fixes
+- proven-safe post-merge branch and worktree cleanup
+
+For complex work, state the deliverable, evidence entrypoints, allowed actions, and stopping condition.
+A paid provider run requires explicit authorization for its exact reviewed registration.
+Public deployment, credential disclosure, account funding, and destructive or unrecoverable actions require explicit authority.
+A frozen or consumed Diagnostic is terminal.
+Do not rerun it.
+Do not rewrite its evidence.
+Do not refill its budget.
+Do not change its thresholds to hide a result.
+Preserve unrelated working-tree changes.
+Before cleanup, prove merge or patch equivalence, branch and worktree ownership, and the absence of open dependencies.
+Complete the requested outcome.
+Run affected checks.
+Inspect their results.
+Fix failures caused by the change.
+Repeat affected checks.
+Keep independent final review and required CI blocking.
+Stop when acceptance evidence is met or a concrete external blocker prevents progress.
+Report evidence classes separately. State skipped or unavailable evidence.
+
+### Roadmap and GitHub records
+
+The Roadmap owns direction, invariants, horizon order, and exit criteria.
+The GitHub Project owns live status, horizon, and priority.
+Each roadmap issue represents one independently mergeable outcome.
+Add active roadmap issues and pull requests to the Project. Keep their fields current.
+Link each roadmap pull request with `Closes #<issue>`.
+After acceptance evidence exists, the final commit reaches `main`, and required CI passes, set the Project item to `Done`.
+Then close the issue.
+A structural child may close while its live-evidence parent stays open.
+Use the issue body and Project fields as the current execution record. Replace superseded status in place.
+Default to zero status comments. Do not comment on plans, progress, pending CI, or facts already in linked records.
+An immutable comment is only for a consumed external/provider execution or a human decision that the issue body and fields cannot represent.
+Add one concise immutable comment for that event or decision.
+Before deleting an obsolete comment, preserve unique audit and no-rerun evidence.
+Before deletion, migrate inbound links.
+
 During the current private rapid-iteration phase,
 [human acceptance is not required](./docs/QUALIFICATION_POLICY.md#rapid-iteration-acceptance).
 Non-author agent review and all affected automated/required CI gates remain
