@@ -19,7 +19,7 @@ use crate::domain::entities::world_session::{
     build_world_turn_prompt_with_check, parse_world_turn_transition_with_check, trailing_chars,
     CharacterBranchContext, CharacterBranchEvent, CharacterContextEnvelope,
     CharacterContextSnapshot, CharacterWorldContext, ObservedWorldAction, RecentWorldActionContext,
-    RecentWorldTurnContext, WorldAction, WorldActionKind, WorldSession,
+    RecentWorldTurnContext, WorldAction, WorldActionKind, WorldSession, WorldSessionError,
     MAX_CHARACTER_CONTEXT_TEXT_CHARS, MAX_CHARACTER_RECENT_ACTIONS, MAX_CHARACTER_RECENT_EVENTS,
     MAX_RECENT_WORLD_NARRATIVE_CHARS, MAX_RECENT_WORLD_TURNS,
 };
@@ -440,6 +440,19 @@ pub enum NarrativeError {
 }
 
 pub type NarrativeResult<T> = std::result::Result<T, NarrativeError>;
+
+pub(crate) fn warn_world_transition_rejection(error: &WorldSessionError) {
+    tracing::warn!(
+        failure_code = "invalid_transition",
+        rejection_class = if error.0.starts_with("world transition JSON is invalid:") {
+            "json"
+        } else {
+            "semantic"
+        },
+        rejection_category = error.rejection_category(),
+        "generated world transition rejected"
+    );
+}
 
 fn map_world_state_write_error(error: anyhow::Error) -> NarrativeError {
     if let Some(source) = error.downcast_ref::<WorldSourceError>() {
@@ -2229,15 +2242,7 @@ impl NarrativeCommandHandler {
         ) {
             Ok(transition) => transition,
             Err(error) => {
-                tracing::warn!(
-                    failure_code = "invalid_transition",
-                    rejection_class = if error.0.starts_with("world transition JSON is invalid:") {
-                        "json"
-                    } else {
-                        "semantic"
-                    },
-                    "generated world transition rejected"
-                );
+                warn_world_transition_rejection(&error);
                 self.fail_world_turn(&claim, attempt, "invalid_transition")
                     .await;
                 return Err(NarrativeError::Llm(anyhow::anyhow!(error)));

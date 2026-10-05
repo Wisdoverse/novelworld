@@ -1586,6 +1586,94 @@ impl WorldSession {
 #[error("invalid world session: {0}")]
 pub struct WorldSessionError(pub(crate) String);
 
+impl WorldSessionError {
+    /// Classify a rejection without exposing provider text or entity references.
+    pub(crate) fn rejection_category(&self) -> &'static str {
+        // ponytail: Owned message changes fall back to unclassified; use typed errors
+        // if categories must remain stable across message changes.
+        let message = self
+            .0
+            .strip_prefix("invalid narrative transition: ")
+            .unwrap_or(&self.0);
+        match message {
+            message if message.starts_with("world transition JSON is invalid:") => "json_payload",
+            "world transition does not match its session and canon context" => "context_binding",
+            "world event actors do not match selected characters" => "actor_selection",
+            message
+                if message.starts_with("unknown or future event actor ")
+                    || message.starts_with("unknown or future relationship character ") =>
+            {
+                "actor_reference"
+            }
+            "dead characters cannot act or receive relationship changes" => "actor_state",
+            message if message.starts_with("dead character ") => "actor_state",
+            "unknown or future event location"
+            | "unknown or future location change"
+            | "player location is unknown" => "location_reference",
+            "unknown or future thread change" => "thread_reference",
+            "explicit canonical event changes must describe player impact"
+            | "only the current scheduled canonical event may change"
+            | "an event with a dead actor cannot occur as scheduled" => "canonical_event",
+            message if message.starts_with("canonical event ") => "canonical_event",
+            message
+                if message.starts_with("attribute changes ")
+                    || message.starts_with("attribute change ") =>
+            {
+                "attribute_change"
+            }
+            "failed action must not change player state" => "player_state",
+            message
+                if [
+                    "inventory additions ",
+                    "inventory removals ",
+                    "knowledge discoveries ",
+                    "player state item ",
+                    "faction changes ",
+                    "faction change ",
+                    "faction reason ",
+                ]
+                .iter()
+                .any(|prefix| message.starts_with(prefix)) =>
+            {
+                "player_state"
+            }
+            "travel must move the player to the requested location"
+            | "only travel may change the player location"
+            | "ally must improve the target relationship"
+            | "oppose must reduce the target relationship"
+            | "resolve_thread must resolve the target thread"
+            | "advance_thread must update the target thread" => "action_effect",
+            message
+                if [
+                    "rendered_narrative ",
+                    "events ",
+                    "event summary ",
+                    "event actors ",
+                    "event location_id ",
+                    "relationship_changes ",
+                    "relationship characters ",
+                    "relationship delta ",
+                    "relationship reason ",
+                    "location_changes ",
+                    "location changes ",
+                    "location_id ",
+                    "location state ",
+                    "location reason ",
+                    "thread_changes ",
+                    "thread changes ",
+                    "thread_id ",
+                    "thread description ",
+                ]
+                .iter()
+                .any(|prefix| message.starts_with(prefix)) =>
+            {
+                "transition_shape"
+            }
+            _ => "unclassified",
+        }
+    }
+}
+
 impl From<TransitionError> for WorldSessionError {
     fn from(error: TransitionError) -> Self {
         Self(error.to_string())
@@ -1712,6 +1800,123 @@ mod tests {
         state.state["player_entity"] = serde_json::to_value(player).unwrap();
         state.start_open_world(context).unwrap();
         state
+    }
+
+    #[test]
+    fn parser_rejections_have_fixed_categories() {
+        let character_id = Uuid::new_v4();
+        let context = context(character_id);
+        let session = state(&context).open_world().unwrap().unwrap();
+        let action = WorldAction {
+            kind: WorldActionKind::Investigate,
+            target_id: Some("spy".into()),
+            intent: "调查内应".into(),
+        };
+        let valid = serde_json::json!({
+            "schema_version": 1,
+            "rendered_narrative": "你在城门检查暗号，守门人继续布防。",
+            "events": [{
+                "summary": "玩家检查暗号",
+                "actor_character_ids": [],
+                "location_id": "gate"
+            }]
+        });
+        assert!(
+            parse_world_turn_transition(&valid.to_string(), &action, &context, &session).is_ok()
+        );
+
+        let cases = [
+            ("schema_version", serde_json::json!(0), "context_binding"),
+            (
+                "events",
+                serde_json::json!([{
+                    "summary": "未知角色行动",
+                    "actor_character_ids": [Uuid::new_v4()],
+                    "location_id": "gate"
+                }]),
+                "actor_selection",
+            ),
+            (
+                "relationship_changes",
+                serde_json::json!([{
+                    "character_id": Uuid::new_v4(), "delta": 1, "reason": "PRIVATE_REASON"
+                }]),
+                "actor_reference",
+            ),
+            (
+                "location_changes",
+                serde_json::json!([{
+                    "location_id": "PRIVATE_UNKNOWN_LOCATION", "state": "closed", "reason": "原因"
+                }]),
+                "location_reference",
+            ),
+            (
+                "thread_changes",
+                serde_json::json!([{
+                    "thread_id": "PRIVATE_UNKNOWN_THREAD", "status": "open", "description": "线索"
+                }]),
+                "thread_reference",
+            ),
+            (
+                "canonical_event_change",
+                serde_json::json!({
+                    "event_id": "PRIVATE_UNKNOWN_EVENT", "status": "assisted", "reason": "原因"
+                }),
+                "canonical_event",
+            ),
+            (
+                "attribute_changes",
+                serde_json::json!([{
+                    "attribute_key": "PRIVATE_UNKNOWN_ATTRIBUTE", "delta": 1,
+                    "event_index": 0, "reason": "原因"
+                }]),
+                "attribute_change",
+            ),
+            (
+                "inventory_additions",
+                serde_json::json!(["重复物品", "重复物品"]),
+                "player_state",
+            ),
+            (
+                "rendered_narrative",
+                serde_json::json!("PRIVATE_PROVIDER_NARRATIVE"),
+                "transition_shape",
+            ),
+            (
+                "PRIVATE_PROVIDER_FIELD",
+                serde_json::json!(true),
+                "json_payload",
+            ),
+        ];
+        for (field, value, expected) in cases {
+            let mut raw = valid.clone();
+            raw[field] = value;
+            let error = parse_world_turn_transition(&raw.to_string(), &action, &context, &session)
+                .unwrap_err();
+            assert_eq!(error.rejection_category(), expected, "{field}");
+        }
+
+        let travel = WorldAction {
+            kind: WorldActionKind::Travel,
+            target_id: Some("gate".into()),
+            intent: "前往城门".into(),
+        };
+        let error = parse_world_turn_transition(&valid.to_string(), &travel, &context, &session)
+            .unwrap_err();
+        assert_eq!(error.rejection_category(), "action_effect");
+
+        let mut dead_context = context.clone();
+        dead_context.dead_character_ids.push(character_id);
+        let dead_session = state(&dead_context).open_world().unwrap().unwrap();
+        let mut raw = valid;
+        raw["relationship_changes"] = serde_json::json!([{
+            "character_id": character_id, "delta": 1, "reason": "PRIVATE_REASON"
+        }]);
+        let error =
+            parse_world_turn_transition(&raw.to_string(), &action, &dead_context, &dead_session)
+                .unwrap_err();
+        assert!(error.0.contains(&character_id.to_string()));
+        assert_eq!(error.rejection_category(), "actor_state");
     }
 
     fn advanced_state(context: &WorldEntryContext) -> (WorldState, GameRuleTemplate) {
