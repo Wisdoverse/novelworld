@@ -65,7 +65,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     expect(await page.evaluate(() => {
       const narrative = document.getElementById('latest-world-narrative');
       const action = document.getElementById('world-action-form');
-      const characters = [...document.querySelectorAll('h3')].find(node => node.textContent === '此刻同场的角色' || node.textContent === 'Characters here now');
+      const characters = [...document.querySelectorAll('h3')].find(node => node.textContent?.trim() === '此刻同场的角色' || node.textContent?.trim() === 'Characters here now');
       return Boolean(narrative && action && characters
         && (narrative.compareDocumentPosition(action) & Node.DOCUMENT_POSITION_FOLLOWING)
         && (action.compareDocumentPosition(characters) & Node.DOCUMENT_POSITION_FOLLOWING));
