@@ -338,58 +338,55 @@ authorization for that registration. Frozen or consumed registrations remain
 terminal and cannot be renewed or rerun. Issue bodies and Project 4 own current
 execution and live-evidence status.
 
-For the next prospective v6 registration only, the exact merged, PCRE2-fixed
-baseline `3709c317cce1b90ca42c4fe6cbc4c20404364883` (#506) may pair only with
-its actual direct child `67ec02dff66fa63d3bbaf1d48638ee1e05172875` (#502).
-That child updates three shipped production browser dependencies: React Query
-`5.103.0` → `5.104.0`, Framer Motion `13.3.0` → `13.4.6`, and Lucide React
-`1.46.0` → `1.49.0`. The frontend recipe remains the reviewed recipe, including
-`pcre2=10.49-r0`, `libcrypto3=3.5.9-r0`, and `libssl3=3.5.9-r0`; Rust inputs
-and recipe, Compose source, shared infrastructure between the pair, the frozen
-`four-layer-journey-diagnostic-v4` profile, V1/V2 fixture bytes,
-`llm-diagnostic-budget-v2` ceilings, and the V5 four-layer schedule remain
-unchanged. V6 continues to select V2.
+For the next prospective v6 registration only, use the exact merged source pair
+`25e815e49d5d8f5ea594789acd03c76b835de990` →
+`f4000bff1189a846f36625fe7c81452f43698f08` (#521), tracked by child #522
+under parent #378. The candidate is the actual direct child and strict
+descendant. It contains the Agent trusted-instruction ordering repair, shared
+provider adapters, and provider settings UI: a useful application change, not
+metadata or artificial image churn. The clean runner checkout, candidate
+manifest, and fresh registration must all identify the full candidate SHA
+above; no later descendant is eligible.
 
-For this isolated Diagnostic only, both explicit release manifests select the
-frozen v4 `embedding_probe_image`,
-`nginx:alpine@sha256:db35bfc6b2951e7f8a72db5db120288c127ffaeeb4a6d4b95a26fead017d5913`.
-Release validation consumes the explicit active manifest and requires
-infrastructure references to match across the pair; the v6 runner also requires
-both manifest `NGINX_IMAGE` values to equal the profile pin. The source Compose
-default, `nginx:alpine@sha256:df221db836e1754089190208cee7eeda94f233197056426eda74a43ab1abeac2`,
-and live/default deployment remain unchanged. Preserve original default-pin
-manifests and evidence unchanged; they are ineligible for this registration.
-This isolated manifest override does not change application image references,
-PostgreSQL or Redis references, the frozen profile, fixtures, or limits.
+Keep the `four-layer-journey-diagnostic-v4` profile, DeepSeek-only generation,
+local embedding model and revision, V2 fixture, four-layer schedule, retry,
+deadline, stop, metrics, cleanup, and payer contracts unchanged. Build recipes
+and source Compose remain identical across the pair. The existing
+profile maximum remains 35 CNY, but a new registration for this invocation
+must set `max_cost_micro_cny=10000000`. This lower ceiling covers the whole
+invocation, including every HTTP attempt, retry, and uncertain outcome; it is
+not a per-request allowance. No old authorization transfers, and this source
+eligibility change authorizes no paid call. The separate H1 v3 five-attempt
+upfront reservation remains unchanged and is not part of this registration.
 
-Derive wholly fresh `world-turn-v4` prompt, Canon, branch, schema, source, and
-image bindings for this candidate. The clean candidate runner checkout SHA,
-candidate manifest, and registration must each identify exactly
-`67ec02dff66fa63d3bbaf1d48638ee1e05172875`; no later descendant is eligible.
-For the frontend runtime change, require changed complete file maps for both
-compiled assets and served frontend files, plus the corresponding immutable
-frontend image-ID and filesystem-layer changes. Verify the copied ELF hashes and
-filesystem layers for all five Rust services remain unchanged across the pair;
-record any image-ID differences caused only by revision labels separately.
+For all twelve application images across the pair, bind source, immutable image
+ID, repository digest, and filesystem layers; bind copied ELF hashes for all
+five Rust services and compiled plus served frontend file maps for frontend.
+Derive fresh `world-turn-v4` prompt, Canon, branch, and schema bindings. Preserve
+the native gate: at least one affected application image must change its
+repository digest, immutable image ID, and filesystem-layer list together.
+Verify actual copied ELF and asset changes; record genuinely unchanged outputs
+explicitly. Gateway does not depend on `llm-client`, so its
+unchanged ELF and layers are expected; a revision-label image-ID change alone
+is not application-change evidence. Preserve the frozen profile, fixture, and
+budgets. Both manifests retain pair-identical infrastructure, including the
+frozen `embedding_probe_image` override
+`nginx:alpine@sha256:db35bfc6b2951e7f8a72db5db120288c127ffaeeb4a6d4b95a26fead017d5913`;
+the source and live/default deployment retain Nginx
+`nginx:alpine@sha256:df221db836e1754089190208cee7eeda94f233197056426eda74a43ab1abeac2`.
+Retain canonical HIGH/CRITICAL scans, SBOM gates, all eight actual payer
+capability probes, and mandatory prestart. Require a fresh infrastructure scan
+and independent risk disposition; no prior scanner exception or unresolved
+finding is inherited.
 
-Retain complete immutable image-ID and repository-digest records, with
-source/binary/asset provenance, for all six application images in both releases:
-gateway, user service, novel service, agent service, narrative service, and
-frontend. Preserve the original canonical HIGH/CRITICAL scan policy, SBOMs,
-profile, budgets and thresholds; all eight actual paying-service capability
-probes; mandatory prestart checks; and exact paid-run authorization. No limit or
-threshold is weakened.
-
-The former `e883` candidate used `world-turn-v3`. The earlier C→e883
-pin-build failure and aca→ff1 full-build/frontend-scan failure remain terminal,
-ineligible historical evidence. Retain them unchanged; do not reuse, relabel, or
-renew any frozen or consumed registration. This prospective source eligibility
-does not establish live H1/H3/H4 quality, formal
-qualification, the dependency upgrade's live behavior, or #492 saved-world-action
-GET recovery; each needs its own evidence. Separate keyless readiness
-observations remain prerequisites, not passed mandatory-prestart or lifecycle
-evidence. These are eligibility conditions, not evidence that candidate
-artifacts or any gate have passed.
+Only after policy delivery may an independently reviewed artifact-production
+plan proceed. Candidate artifacts, registrations, paid execution, and
+qualification each require their own gates and evidence. Retain all failed,
+frozen, consumed, and expired packets unchanged. Eligibility does not establish
+live model compatibility, H1/H3/H4 quality, formal qualification, release
+readiness, RTO, or repair of #492 saved-world-action GET recovery; parent #378
+remains open. A wholly new registration and independent packet review must
+precede exact user authorization and mandatory registered prestart.
 
 CI runs the real-schema regressions against its digest-pinned disposable
 `test-postgres` database. Local runs name the container with
