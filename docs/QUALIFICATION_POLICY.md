@@ -338,15 +338,27 @@ authorization for that registration. Frozen or consumed registrations remain
 terminal and cannot be renewed or rerun. Issue bodies and Project 4 own current
 execution and live-evidence status.
 
-For the next prospective v6 registration only, use the exact merged source pair
+For the next prospective v6 registration only, use the exact source pair
 `25e815e49d5d8f5ea594789acd03c76b835de990` →
-`f4000bff1189a846f36625fe7c81452f43698f08` (#521), tracked by child #522
-under parent #378. The candidate is the actual direct child and strict
-descendant. It contains the Agent trusted-instruction ordering repair, shared
-provider adapters, and provider settings UI: a useful application change, not
-metadata or artificial image churn. The clean runner checkout, candidate
-manifest, and fresh registration must all identify the full candidate SHA
-above; no later descendant is eligible.
+`a7c8c688e1633d3127d67561267722f9127a5cb1`. Child [#536](https://github.com/Wisdoverse/novelworld/issues/536) tracks this pair under parent #378. The base is a strict ancestor of the candidate. It is not the candidate's direct parent.
+
+The candidate includes Agent trusted-context, shared-provider, and provider
+settings changes from
+[PR #521](https://github.com/Wisdoverse/novelworld/pull/521). It includes the
+integrated multilingual UI from
+[PR #527](https://github.com/Wisdoverse/novelworld/pull/527). It includes the
+captured-profile embedding image repair from
+[PR #535](https://github.com/Wisdoverse/novelworld/pull/535). These are useful
+application changes, not metadata or artificial image churn. The policy commit
+that admits this pair is separate from the application candidate SHA. The
+clean runner checkout, candidate manifest, and fresh registration must identify
+the full candidate SHA above. No later descendant is eligible.
+
+The image-only overlay uses the captured profile, as documented in
+[ADR 0004](./adr/0004-durable-diagnostic-budget.md). It does not change source
+Compose or deployment defaults. Ordinary Compose keeps local embedding
+disabled by default. Explicit ordinary local selection remains TEI 1.9.4.
+External mode remains unchanged.
 
 Keep the `four-layer-journey-diagnostic-v4` profile, DeepSeek-only generation,
 local embedding model and revision, V2 fixture, four-layer schedule, retry,
