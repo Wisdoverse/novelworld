@@ -1,11 +1,13 @@
 use crate::application::handlers::{
     journey_memory_id, record_world_journey_memory, resolve_protagonist,
+    warn_world_transition_rejection,
 };
 use crate::domain::entities::game_rules::GameRuleTemplate;
 use crate::domain::entities::narrative_node::{NarrativeChoice, NarrativeNode, WorldState};
 use crate::domain::entities::player_entity::PlayerEntity;
 use crate::domain::entities::world_session::{
-    WorldAction, WorldActionKind, WorldEntryContext, WorldSession, WorldTurnTransition,
+    parse_world_turn_transition, WorldAction, WorldActionKind, WorldEntryContext, WorldSession,
+    WorldSessionError, WorldTurnTransition,
 };
 use crate::domain::ports::AgentMemoryPort;
 use crate::domain::repositories::{
@@ -18,9 +20,112 @@ use crate::domain::services::narrative_transition::{
 };
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
+
+struct Capture(Arc<Mutex<Vec<u8>>>);
+
+impl Write for Capture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn world_rejection_warning_omits_private_error_details() {
+    let result = journey_result(Uuid::new_v4(), Uuid::new_v4(), None, 1);
+    let session = result.world_state.open_world().unwrap().unwrap();
+    let action = WorldAction {
+        kind: WorldActionKind::PursueGoal,
+        target_id: None,
+        intent: "观察四周".into(),
+    };
+    let private_actor = Uuid::new_v4();
+    let valid = serde_json::json!({
+        "schema_version": 1,
+        "rendered_narrative": "你观察四周，发现了一处线索。",
+        "events": [{ "summary": "玩家观察四周", "actor_character_ids": [] }]
+    });
+    assert!(
+        parse_world_turn_transition(&valid.to_string(), &action, session.context(), &session,)
+            .is_ok()
+    );
+    let mut invalid_json = valid.clone();
+    invalid_json["PRIVATE_PROVIDER_FIELD"] = true.into();
+    let mut invalid_actor = valid;
+    invalid_actor["relationship_changes"] = serde_json::json!([{
+        "character_id": private_actor, "delta": 1, "reason": "PRIVATE_REASON"
+    }]);
+    let json_error = parse_world_turn_transition(
+        &invalid_json.to_string(),
+        &action,
+        session.context(),
+        &session,
+    )
+    .unwrap_err();
+    let actor_error = parse_world_turn_transition(
+        &invalid_actor.to_string(),
+        &action,
+        session.context(),
+        &session,
+    )
+    .unwrap_err();
+    assert!(json_error.0.contains("PRIVATE_PROVIDER_FIELD"));
+    assert!(actor_error.0.contains(&private_actor.to_string()));
+
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let writer = output.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || Capture(writer.clone()))
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        warn_world_transition_rejection(&json_error);
+        warn_world_transition_rejection(&actor_error);
+        warn_world_transition_rejection(&WorldSessionError("PRIVATE_UNRECOGNIZED_ERROR".into()));
+    });
+    let logged = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+    let records = logged
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 3);
+    for (record, (class, category)) in records.iter().zip([
+        ("json", "json_payload"),
+        ("semantic", "actor_reference"),
+        ("semantic", "unclassified"),
+    ]) {
+        assert_eq!(record["level"], "WARN");
+        assert_eq!(
+            record["fields"],
+            serde_json::json!({
+                "message": "generated world transition rejected",
+                "failure_code": "invalid_transition",
+                "rejection_class": class,
+                "rejection_category": category,
+            })
+        );
+    }
+    for private in [
+        "PRIVATE_",
+        &private_actor.to_string(),
+        &result.turn_id.to_string(),
+        &action.intent,
+        "你观察四周",
+        "玩家观察四周",
+    ] {
+        assert!(!logged.contains(private));
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RecordedMemoryCall {

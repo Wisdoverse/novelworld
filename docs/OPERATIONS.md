@@ -157,9 +157,13 @@ A durably failed row unlocks only after the latest world refresh succeeds;
 unknown, active, and committed-pending outcomes retain the original key.
 Confirmation must not be retried as a generation request. Use the separate
 explicit resume only when the original action still needs processing.
-Narrative transition rejections log `failure_code=invalid_transition` with a
-static `rejection_class` (`json` or `semantic`). These categories do not record
-model text or establish the historical failure's exact cause.
+Narrative transition rejections emit a `WARN` with
+`failure_code=invalid_transition`, `rejection_class` (`json` or `semantic`),
+and a fixed `rejection_category`, such as `actor_selection`,
+`thread_reference`, or `attribute_change`. Unrecognized errors use
+`unclassified`. These fields contain no provider text or entity references.
+Use the request's `trace_id` to correlate nearby logs. Older logs without
+this field do not identify the rejection category.
 
 ## Ownership and escalation
 
