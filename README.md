@@ -71,7 +71,7 @@ Configure the provider, model, and key for AI features. See the [provider guide]
 The default setup uses PostgreSQL. Redis is optional. Story generation needs an
 Internet connection and a configured key. Source excerpts and conversations are
 sent to the configured provider. Review that provider's data and billing policies.
-Upload only works you have the right or permission to process.
+Upload only works that you have the right or permission to process.
 
 ## Support and limits
 
