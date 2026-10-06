@@ -428,6 +428,44 @@ set `CACHE_MODE=redis`, a strong URL-safe `REDIS_PASSWORD`, and the matching
 together and are the supported path. The independent integration Compose file
 above always starts its isolated unauthenticated test Redis.
 
+### Disposable PostgreSQL recovery drill
+
+The backup/restore drill uses a local E2E stub for model, embedding, and image
+requests. It needs no external provider credentials. The drill runs destructive
+`down -v` steps, so use a disposable checkout with no private `.env`, synthetic
+secrets, and a Compose project that owns no retained data. Select unused
+loopback ports before starting.
+
+```bash
+set -euo pipefail
+suffix="$(date -u +%Y%m%d%H%M%S)-$$"
+export COMPOSE_FILE=docker-compose.yml:docker-compose.e2e.yml
+export COMPOSE_PROJECT_NAME="nw-recovery-$suffix"
+export CONTAINER_PREFIX="nw-recovery-$suffix"
+export NGINX_HTTP_BIND=127.0.0.1 NGINX_HTTP_PORT=28080
+export E2E_GATEWAY_PORT=28081 E2E_LLM_STUB_PORT=28082
+export E2E_API_URL="http://127.0.0.1:${NGINX_HTTP_PORT}/api"
+export E2E_LLM_STUB_URL="http://127.0.0.1:${E2E_LLM_STUB_PORT}"
+export POSTGRES_IMAGE='pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a'
+export POSTGRES_PASSWORD="$(openssl rand -hex 32)"
+export JWT_SECRET="$(openssl rand -hex 32)"
+export RUNTIME_CONFIG_KEY="$(openssl rand -hex 32)"
+export INTERNAL_SERVICE_TOKEN="$(openssl rand -hex 32)"
+export LLM_API_KEY="$(openssl rand -hex 16)"
+# Optional cross-image restore: use an immutable digest already cached locally.
+# export E2E_RESTORE_POSTGRES_IMAGE='registry/image@sha256:<digest>'
+docker image inspect "$POSTGRES_IMAGE" >/dev/null
+[ -z "${E2E_RESTORE_POSTGRES_IMAGE:-}" ] || docker image inspect "$E2E_RESTORE_POSTGRES_IMAGE" >/dev/null
+docker compose up -d --wait
+tests/e2e/backup_restore_drill.sh
+docker compose down -v
+```
+
+Run the backup/restore drill only in this owned disposable project. Stop and
+preserve the stack if any command fails. The command
+does not prove image compatibility, deployment adoption, or the RTO target;
+those claims require the corresponding completed native evidence.
+
 The required Compose core journey admits source chapter 2 into an existing
 source-1 world without provider work, commits a subsequent event outcome,
 checks exact source replay after service restart, and stops Agent during a world turn and checks

@@ -8,7 +8,7 @@ services:
     networks:
       - novel-net
     ports:
-      - 127.0.0.1:18080:18080
+      - 127.0.0.1:${E2E_LLM_STUB_PORT:-18080}:18080
     healthcheck:
       test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18080/health')"]
       interval: 1s
@@ -53,4 +53,4 @@ services:
 
   gateway:
     ports:
-      - 127.0.0.1:18081:8080
+      - 127.0.0.1:${E2E_GATEWAY_PORT:-18081}:8080

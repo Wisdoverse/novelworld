@@ -157,6 +157,8 @@ jobs:
         run: tests/e2e/release_state_drill.sh
       - name: Verify restore deployment selection fails closed
         run: python3 tests/e2e/restore_preflight_test.py
+      - name: Verify backup drill isolation and cached image preflight
+        run: python3 tests/e2e/backup_restore_isolation_test.py
       - name: Verify scale rehearsal measures the complete restore path
         run: python3 tests/e2e/scale_rehearsal_test.py
       - uses: dtolnay/rust-toolchain@stable
