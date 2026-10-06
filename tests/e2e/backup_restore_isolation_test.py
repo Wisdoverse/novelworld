@@ -26,13 +26,21 @@ ENV = {
 
 class BackupRestoreIsolation(unittest.TestCase):
     def test_actual_compose_defaults_and_isolated_host_ports(self):
+        # Execute only the documented naming statements, never its drill/cleanup.
+        docs = (ROOT / "CONTRIBUTING.md").read_text().split(
+            "### Disposable PostgreSQL recovery drill", 1)[1].split("```bash", 1)[1].split("```", 1)[0]
+        naming = "\n".join(line for line in docs.splitlines() if line.startswith((
+            "suffix=", "export COMPOSE_PROJECT_NAME=", "export CONTAINER_PREFIX=")))
+        result = subprocess.run(["bash", "-c", naming + '\nprintf "%s" "$COMPOSE_PROJECT_NAME"'],
+                                env=ENV, capture_output=True, text=True, timeout=5, check=True)
+        documented_project = result.stdout
         for overrides, ports, prefix in (
             ({}, (18080, 18081), "novel"),
-            ({"COMPOSE_PROJECT_NAME": "nw-isolation-test",
-              "CONTAINER_PREFIX": "nw-isolation-test",
+            ({"COMPOSE_PROJECT_NAME": documented_project,
+              "CONTAINER_PREFIX": documented_project,
               "E2E_LLM_STUB_PORT": "28080", "E2E_GATEWAY_PORT": "28081",
               "NGINX_HTTP_BIND": "127.0.0.1", "NGINX_HTTP_PORT": "28082"},
-             (28080, 28081), "nw-isolation-test"),
+             (28080, 28081), documented_project),
         ):
             with self.subTest(prefix=prefix):
                 result = subprocess.run(
@@ -58,7 +66,7 @@ class BackupRestoreIsolation(unittest.TestCase):
                     self.assertEqual(services[name]["environment"]["LLM_API_URL"],
                                      "http://llm-stub:18080")
                 if overrides:
-                    self.assertEqual(config["name"], "nw-isolation-test")
+                    self.assertEqual(config["name"], documented_project)
                     self.assertEqual(services["nginx"]["ports"][0]["host_ip"], "127.0.0.1")
                     self.assertEqual(services["nginx"]["ports"][0]["published"], "28082")
 
@@ -101,6 +109,64 @@ class BackupRestoreIsolation(unittest.TestCase):
                     expected = [["docker", "image", "inspect", "--format", "{{.Id}}", IMAGE]] \
                         if image == IMAGE else []
                     self.assertEqual(actual, expected)
+
+    def test_pgdata_guard_rejects_redirecting_submounts(self):
+        # Run the real shell function with metadata fixtures and a Docker substitute.
+        source = SCRIPT.read_text()
+        start = source.index("  pgdata_identity() {")
+        function = source[start:source.index("  table_snapshot() {", start)]
+        project = "nw-pgdata-test"
+        volume = {"Name": project + "_postgres_data", "Driver": "local",
+                  "CreatedAt": "2026-10-06T00:00:00Z", "Mountpoint": "/synthetic/pgdata",
+                  "Scope": "local", "Labels": {"com.docker.compose.project": project,
+                  "com.docker.compose.volume": "postgres_data"}}
+        container = {"Config": {"Labels": {"com.docker.compose.project": project,
+                     "com.docker.compose.service": "postgres"},
+                     "Env": ["PGDATA=/var/lib/postgresql/data/pgdata"]}, "Mounts": [
+                         {"Type": "volume", "Name": "anonymous-parent",
+                          "Destination": "/var/lib/postgresql"},
+                         {"Type": "volume", "Name": volume["Name"],
+                          "Destination": "/var/lib/postgresql/data"}]}
+        with tempfile.TemporaryDirectory(prefix="nw-pgdata-mount-test-") as directory:
+            root = Path(directory)
+            log = root / "calls.jsonl"
+            docker = root / "docker"
+            docker.write_text(
+                "#!/usr/bin/env python3\nimport json,os,sys\nfrom pathlib import Path\n"
+                "with Path(os.environ['ISOLATION_TEST_LOG']).open('a') as log:\n"
+                "    log.write(json.dumps(sys.argv[1:])+'\\n')\n"
+                "if sys.argv[1] == 'inspect': print(os.environ['ISOLATION_CONTAINER'])\n"
+                "elif sys.argv[1:3] == ['volume','inspect']: print(os.environ['ISOLATION_VOLUME'])\n"
+                "else: sys.exit(92)\n"
+            )
+            docker.chmod(0o700)
+            for destination in (None, "/var/lib/postgresql/data/pgdata",
+                                "/var/lib/postgresql/data/pgdata/base"):
+                with self.subTest(destination=destination):
+                    metadata = dict(container, Mounts=list(container["Mounts"]))
+                    if destination:
+                        metadata["Mounts"].append({"Type": "volume", "Name": "redirected",
+                                                   "Destination": destination})
+                    log.unlink(missing_ok=True)
+                    result = subprocess.run(
+                        ["bash", "-c", "set -euo pipefail\n" + function + "\npgdata_identity"],
+                        env=dict(ENV, PATH=str(root) + os.pathsep + ENV["PATH"],
+                                 POSTGRES_CONTAINER=project + "-postgres", PYTHONOPTIMIZE="1",
+                                 ISOLATION_TEST_LOG=str(log), ISOLATION_CONTAINER=json.dumps(metadata),
+                                 ISOLATION_VOLUME=json.dumps([volume])),
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    calls = [json.loads(line) for line in log.read_text().splitlines()]
+                    self.assertEqual(calls[0], ["inspect", "--format", "{{json .}}", project + "-postgres"])
+                    if destination:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn("cannot identify the selected PGDATA volume", result.stderr)
+                        self.assertEqual(len(calls), 1)
+                        self.assertEqual(result.stdout, "")
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(calls[1], ["volume", "inspect", volume["Name"]])
+                        self.assertRegex(result.stdout, r"^[0-9a-f]{64}\n$")
 
 
 if __name__ == "__main__":

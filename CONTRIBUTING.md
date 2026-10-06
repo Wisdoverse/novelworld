@@ -438,7 +438,7 @@ loopback ports before starting.
 
 ```bash
 set -euo pipefail
-suffix="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+suffix="$(date -u +%Y%m%d%H%M%S)-$$"
 export COMPOSE_FILE=docker-compose.yml:docker-compose.e2e.yml
 export COMPOSE_PROJECT_NAME="nw-recovery-$suffix"
 export CONTAINER_PREFIX="nw-recovery-$suffix"

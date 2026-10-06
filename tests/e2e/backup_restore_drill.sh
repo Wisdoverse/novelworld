@@ -369,7 +369,8 @@ m=[m for m in c["Mounts"] if m["Destination"] == "/var/lib/postgresql/data"]
 project=labels["com.docker.compose.project"]
 if (labels["com.docker.compose.service"] != "postgres" or not project
     or "PGDATA=/var/lib/postgresql/data/pgdata" not in c["Config"]["Env"]
-    or len(m) != 1 or m[0]["Type"] != "volume" or not m[0]["Name"]):
+    or len(m) != 1 or m[0]["Type"] != "volume" or not m[0]["Name"]
+    or any(m["Destination"].startswith("/var/lib/postgresql/data/") for m in c["Mounts"])):
     sys.exit("drill: cannot identify the selected PGDATA volume")
 print(m[0]["Name"] + "\t" + project)') || return 1
     IFS=$'\t' read -r volume project <<<"$mount"
