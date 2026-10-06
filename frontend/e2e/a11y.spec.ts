@@ -149,15 +149,16 @@ test('chat announces pending/error/retry separately from committed messages', as
   await page.goto('/characters/novel-1');
   await page.getByRole('button', { name: /对话/ }).first().click();
   const input = page.getByRole('textbox', { name: /对 林晚 说/ });
+  const panel = page.getByRole('region').filter({ has: input });
   const log = page.getByRole('log', { name: '已保存的对话' });
   await input.fill('尚未提交的消息');
   await input.press('Enter');
   await expect(page.getByRole('status', { name: '对话状态' })).toContainText('尚未确认保存');
   await expect(log).not.toContainText('尚未提交的消息');
   release();
-  await expect(page.getByRole('alert')).toContainText('暂时无法生成回复');
+  await expect(panel.getByRole('alert')).toContainText('暂时无法生成回复');
   await expect(log).not.toContainText('尚未提交的消息');
-  await page.getByRole('button', { name: '重试', exact: true }).click();
+  await panel.getByRole('button', { name: '重试', exact: true }).click();
   await expect(log).toContainText('已保存的测试回复');
   await expect(log).toContainText('尚未提交的消息');
   await expect(page.getByRole('status', { name: '对话状态' })).toBeEmpty();

@@ -22,6 +22,9 @@ export const novelKeys = {
   detail: (id: string) => [...novelKeys.all, 'detail', id] as const,
   chapter: (id: string, num: number) => [...novelKeys.all, id, 'chapters', num] as const,
   characters: (id: string, chapter: number) => [...novelKeys.all, id, 'characters', chapter] as const,
+  sourceRelationships: (principalId: string, id: string, chapter: number) => [
+    ...novelKeys.all, 'source-relationships', principalId, id, chapter,
+  ] as const,
   worldSeriesList: (principalId: string) => [...novelKeys.all, 'world-series', principalId, 'list'] as const,
   novelWorldSeries: (principalId: string, novelId: string) => [
     ...novelKeys.all, 'world-series', principalId, 'novel', novelId,
@@ -289,6 +292,171 @@ export function useCharacters(novelId: string, currentChapter: number, enabled =
         .map(character => sanitizeCharacterPersona(character, currentChapter))
         .filter((character): character is Character => character !== null)),
     enabled: enabled && !!novelId && currentChapter >= 1,
+  });
+}
+
+export interface SourceRelationshipCitation {
+  chapter_number: number;
+  excerpt: string;
+}
+
+export interface SourceRelationshipCharacter {
+  id: string;
+  name: string;
+}
+
+export interface SourceRelationship {
+  id: string;
+  from_character_id: string;
+  to_character_id: string;
+  kind: string;
+  description: string;
+  source_citations: SourceRelationshipCitation[];
+}
+
+export interface SourceRelationshipGraph {
+  novel_id: string;
+  model_version: 1;
+  checkpoint_chapter: number;
+  characters: SourceRelationshipCharacter[];
+  relationships: SourceRelationship[];
+}
+
+const SOURCE_GRAPH_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SOURCE_GRAPH_NIL_UUID = '00000000-0000-0000-0000-000000000000';
+
+function sourceGraphUuid(value: unknown): value is string {
+  return typeof value === 'string'
+    && SOURCE_GRAPH_UUID.test(value)
+    && value.toLowerCase() !== SOURCE_GRAPH_NIL_UUID;
+}
+
+function exactObjectKeys(value: unknown, expected: readonly string[]): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length === expected.length && keys.every(key => expected.includes(key));
+}
+
+function boundedSourceText(value: unknown, maxCharacters: number): value is string {
+  return typeof value === 'string'
+    && value.trim().length > 0
+    && Array.from(value).length <= maxCharacters
+    && !/(?![\n\r\t])\p{Cc}/u.test(value);
+}
+
+function sourceChapter(value: unknown, currentChapter: number): value is number {
+  return typeof value === 'number'
+    && Number.isSafeInteger(value)
+    && value >= 1
+    && value <= currentChapter;
+}
+
+/** Accept only the source-v1 fields and evidence visible at the trusted progress boundary. */
+export function parseSourceRelationshipGraph(
+  value: unknown,
+  novelId: string,
+  currentChapter: number,
+): SourceRelationshipGraph | null {
+  if (
+    !sourceGraphUuid(novelId)
+    || !Number.isSafeInteger(currentChapter)
+    || currentChapter < 1
+    || !exactObjectKeys(value, [
+      'novel_id', 'model_version', 'checkpoint_chapter', 'characters', 'relationships',
+    ])
+    || value.novel_id !== novelId
+    || value.model_version !== 1
+    || !sourceChapter(value.checkpoint_chapter, currentChapter)
+    || value.checkpoint_chapter !== currentChapter
+    || !Array.isArray(value.characters)
+    || value.characters.length > 256
+    || !Array.isArray(value.relationships)
+    || value.relationships.length > 256
+  ) return null;
+
+  const characterNames = new Map<string, string>();
+  for (const character of value.characters) {
+    if (
+      !exactObjectKeys(character, ['id', 'name'])
+      || !sourceGraphUuid(character.id)
+      || !boundedSourceText(character.name, 200)
+      || characterNames.has(character.id)
+    ) return null;
+    characterNames.set(character.id, character.name);
+  }
+
+  const relationshipIds = new Set<string>();
+  const relationships: SourceRelationship[] = [];
+  for (const relationship of value.relationships) {
+    if (
+      !exactObjectKeys(relationship, [
+        'id', 'from_character_id', 'to_character_id', 'kind', 'description', 'source_citations',
+      ])
+      || !boundedSourceText(relationship.id, 100)
+      || !sourceGraphUuid(relationship.from_character_id)
+      || !characterNames.has(relationship.from_character_id)
+      || !sourceGraphUuid(relationship.to_character_id)
+      || relationship.from_character_id === relationship.to_character_id
+      || !characterNames.has(relationship.to_character_id)
+      || !boundedSourceText(relationship.kind, 500)
+      || !boundedSourceText(relationship.description, 10_000)
+      || !Array.isArray(relationship.source_citations)
+      || relationship.source_citations.length === 0
+      || relationship.source_citations.length > 8
+      || relationshipIds.has(relationship.id)
+    ) return null;
+
+    const citations: SourceRelationshipCitation[] = [];
+    for (const citation of relationship.source_citations) {
+      if (
+        !exactObjectKeys(citation, ['chapter_number', 'excerpt'])
+        || !sourceChapter(citation.chapter_number, value.checkpoint_chapter)
+        || !boundedSourceText(citation.excerpt, 2_000)
+      ) return null;
+      citations.push({ chapter_number: citation.chapter_number, excerpt: citation.excerpt });
+    }
+
+    relationshipIds.add(relationship.id);
+    relationships.push({
+      id: relationship.id,
+      from_character_id: relationship.from_character_id,
+      to_character_id: relationship.to_character_id,
+      kind: relationship.kind,
+      description: relationship.description,
+      source_citations: citations,
+    });
+  }
+
+  return {
+    novel_id: value.novel_id,
+    model_version: 1,
+    checkpoint_chapter: value.checkpoint_chapter,
+    characters: value.characters.map(character => ({ id: character.id as string, name: character.name as string })),
+    relationships,
+  };
+}
+
+export function useSourceRelationships(
+  principalId: string | undefined,
+  novelId: string,
+  currentChapter: number,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: novelKeys.sourceRelationships(principalId ?? '', novelId, currentChapter),
+    retry: false,
+    queryFn: async ({ signal }) => {
+      const response = await apiClient.get<unknown>(
+        `/novels/${novelId}/relationships/source-v1`,
+        { signal },
+      );
+      const graph = parseSourceRelationshipGraph(response.data, novelId, currentChapter);
+      if (!graph) throw new Error('Invalid source relationship response');
+      return graph;
+    },
+    enabled: Boolean(
+      enabled && principalId && novelId && Number.isSafeInteger(currentChapter) && currentChapter >= 1,
+    ),
   });
 }
 

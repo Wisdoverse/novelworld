@@ -363,6 +363,17 @@ parse structured JSON and apply domain validation before transaction commits.
 Chat streams distinguish completion from failure and commit both messages before
 emitting the durable completion event.
 
+The public `source-v1` relationship projection uses immutable Canon v1 and the
+acting reader's shelf and saved progress. It withholds each whole fact unless
+all citations match unlocked source chapters and both names have lexical first
+appearance evidence. It exposes no persona, ending, confidence, legacy strength,
+or private world state. A final ownership and progress read follows all source
+I/O. A five-second deadline and response bounds limit work. Browser keys include
+the principal and progress; unreliable progress hides cached relationships.
+Text is escaped, and citation links use validated chapter numbers in fixed
+reader routes. These checks do not establish semantic accuracy or global
+spoiler safety. See [ADR 0014](./adr/0014-source-cited-relationships.md).
+
 The realistic security stories are not merely a model leaving character. They
 are injected content causing cross-user/source disclosure, bypassing server-side
 spoiler limits, producing a durable transition outside allowed bounds, leaking

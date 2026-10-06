@@ -149,6 +149,10 @@ fn routes() -> Router<AppState> {
             get(export_account),
         )
         .route("/novels/{id}/relationships", get(list_relationships))
+        .route(
+            "/novels/{id}/relationships/source-v1",
+            get(source_relationship_graph),
+        )
         .route("/novels/{id}/status", get(get_parse_status))
         .route("/progress/{novel_id}", get(get_progress))
         .route("/progress/{novel_id}", put(update_progress))
@@ -1842,6 +1846,23 @@ async fn list_relationships(
         state
             .progress_handler
             .list_available_relationships(user_id, novel_id)
+            .await,
+    )
+}
+
+async fn source_relationship_graph(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(novel_id): Path<Uuid>,
+) -> Response {
+    let user_id = match extract_user_id(&headers) {
+        Some(user_id) => user_id,
+        None => return private_no_store(StatusCode::UNAUTHORIZED.into_response()),
+    };
+    progress_bound_read_response(
+        state
+            .progress_handler
+            .get_source_relationship_graph(user_id, novel_id)
             .await,
     )
 }

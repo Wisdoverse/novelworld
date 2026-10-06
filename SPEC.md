@@ -1684,8 +1684,41 @@ are recorded in [`LLM_PROVIDERS.md`](docs/LLM_PROVIDERS.md).
 | GET | `/api/novels/:id/status` | Novel | JWT | Parse status (poll) |
 | POST | `/api/novels/:id/retry` | Novel | JWT | Retry an owned failed import from its last committed durable stage; re-upload is required when no chapters remain |
 | POST | `/api/novels/:id/lore/search` | Novel | JWT | Search owned, progress-bounded source lore |
-| GET | `/api/novels/:id/relationships` | Novel | JWT | Source-extracted character relationships |
+| GET | `/api/novels/:id/relationships` | Novel | JWT | Legacy whole-book relationships at exact full progress |
+| GET | `/api/novels/:id/relationships/source-v1` | Novel | JWT | Cited Canon v1 relationships at saved reading progress |
 | DELETE | `/api/novels/:id` | Novel | JWT | Delete novel |
+
+The `source-v1` read MUST use the acting reader's shelf and saved progress for a
+`Ready` novel. It MUST select immutable Canon model version 1. Each returned
+relationship MUST retain its complete description and all source citations.
+Every citation MUST identify an unlocked chapter and an exact excerpt in that
+novel. A relationship with any later citation MUST be withheld as a whole.
+Endpoint names MUST have lexical evidence at their declared first appearance.
+
+The read MAY use Novel's existing idempotent chapter-1 initialization when a
+reading-progress row is absent. It MUST NOT advance progress or save a graph.
+
+The response MUST contain `novel_id`, `model_version`, `checkpoint_chapter`,
+`characters` (`id`, `name`), and `relationships` (`id`, `from_character_id`,
+`to_character_id`, `kind`, `description`, `source_citations`). Citations contain
+only `chapter_number` and `excerpt`. The response MUST NOT expose confidence,
+legacy strength, whole-book persona, ending data, or private player state.
+It MUST contain at most 256 characters and 256 relationships, with at most
+eight citations per relationship. Text MUST retain the Canon validation limits
+without truncation. Missing or invalid authority MUST fail closed.
+
+Novel MUST recheck shelf ownership, Ready status, total chapters, and unchanged
+saved progress after all source reads. The read MUST have a five-second deadline
+and no automatic retry or provider call. All responses MUST use
+`Cache-Control: private, no-store`. Browser query keys MUST include principal,
+novel, and progress. The browser MUST withhold the view while progress is
+unknown, loading, refetching, or in error.
+
+These facts describe extracted source history. They do not describe later
+relationship changes or the reader's private world. Partial relationship access
+MUST NOT enable partial-progress character chat. The legacy relationship shape
+and exact-full chat boundary remain unchanged. See
+[ADR 0014](docs/adr/0014-source-cited-relationships.md).
 
 ### 10.3 Chapter Endpoints
 

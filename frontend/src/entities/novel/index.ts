@@ -34,10 +34,15 @@ export {
   useWorldSeriesList,
   useWorldSeriesBackgroundDraft,
   useSeriesBackgroundDraft,
+  useSourceRelationships,
 } from './api';
 export type {
   CreateWorldSeriesInput,
   NovelBatchUploadInput,
   NovelImportAccepted,
   NovelUploadInput,
+  SourceRelationship,
+  SourceRelationshipCitation,
+  SourceRelationshipCharacter,
+  SourceRelationshipGraph,
 } from './api';

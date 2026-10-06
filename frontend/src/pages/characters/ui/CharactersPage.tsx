@@ -1,7 +1,7 @@
 import { translate as t, useLocale } from '@/shared/lib/i18n';
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { useCharacters } from '@/entities/novel';
+import { useCharacters, useSourceRelationships } from '@/entities/novel';
 import { useReadingProgress, useResetReaderIdentity } from '@/entities/reading-progress';
 import { CharacterCard } from '@/widgets/character-card';
 import { ChatPanel } from '@/widgets/chat-panel';
@@ -9,6 +9,7 @@ import { useAuthStore } from '@/features/auth';
 import { getApiErrorCode } from '@/shared/api/client';
 import { getReaderIdentityScope } from '@/shared/lib/readerIdentityScope';
 import { LanguageSwitcher } from '@/shared/ui/LanguageSwitcher';
+import { SourceRelationships } from '@/widgets/source-relationships';
 import { AlertCircle, ArrowLeft, Users } from 'lucide-react';
 
 export function CharactersPage() {
@@ -19,6 +20,7 @@ export function CharactersPage() {
   const {
     data: readingProgress,
     isLoading: isProgressLoading,
+    isFetching: isProgressFetching,
     isError: isProgressError,
     error: progressError,
     refetch: refetchProgress,
@@ -34,6 +36,22 @@ export function CharactersPage() {
   } = useCharacters(
     novelId || '',
     readingProgress?.current_chapter ?? 0,
+  );
+  const canReadSourceRelationships = Boolean(
+    user?.id
+      && novelId
+      && readingProgress
+      && Number.isSafeInteger(readingProgress.current_chapter)
+      && readingProgress.current_chapter >= 1
+      && !isProgressLoading
+      && !isProgressFetching
+      && !isProgressError,
+  );
+  const sourceRelationships = useSourceRelationships(
+    user?.id,
+    novelId || '',
+    readingProgress?.current_chapter ?? 0,
+    canReadSourceRelationships,
   );
   const [chatCharacterId, setChatCharacterId] = useState<string | null>(null);
   const [isChatOpen, setIsChatOpen] = useState(false);
@@ -126,6 +144,16 @@ export function CharactersPage() {
             ))}
           </div>
         )}
+
+        {canReadSourceRelationships ? (
+          <SourceRelationships
+            novelId={novelId}
+            graph={sourceRelationships.data}
+            isLoading={sourceRelationships.isPending}
+            isError={sourceRelationships.isError}
+            onRetry={() => void sourceRelationships.refetch()}
+          />
+        ) : null}
       </div>
 
       {chatCharacter && (
