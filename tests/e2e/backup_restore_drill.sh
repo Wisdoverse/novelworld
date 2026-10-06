@@ -27,7 +27,9 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 api=${E2E_API_URL:-http://127.0.0.1/api}
-stub=${E2E_LLM_STUB_URL:-http://127.0.0.1:18080}
+stub=${E2E_LLM_STUB_URL:-http://127.0.0.1:${E2E_LLM_STUB_PORT:-18080}}
+export POSTGRES_CONTAINER=${POSTGRES_CONTAINER:-${CONTAINER_PREFIX:-novel}-postgres}
+gateway_container=${CONTAINER_PREFIX:-novel}-gateway
 password='RuntimeSmokeOnly123!'
 admin_email=drill-admin@test.invalid
 reader_email=drill-reader@test.invalid
@@ -35,6 +37,19 @@ third_email=drill-third@test.invalid
 
 export COMPOSE_FILE=${COMPOSE_FILE:-docker-compose.yml:docker-compose.e2e.yml}
 export BACKUP_ENCRYPTION_KEY=${BACKUP_ENCRYPTION_KEY:-drill-backup-key-at-least-32-characters-long}
+
+fail() { printf 'drill: %s\n' "$1" >&2; exit 1; }
+
+# Check the cached target before creating fixtures. Never pull or build it.
+restore_image=${E2E_RESTORE_POSTGRES_IMAGE:-}
+if [ -n "$restore_image" ]; then
+  [[ "$restore_image" =~ ^[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}$ ]] ||
+    fail 'E2E_RESTORE_POSTGRES_IMAGE must be an immutable image reference'
+  restore_image_id=$(timeout 30s docker image inspect --format '{{.Id}}' "$restore_image") ||
+    fail 'E2E_RESTORE_POSTGRES_IMAGE must already be cached locally'
+  [[ "$restore_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+    fail 'cannot resolve the exact cached restore image ID'
+fi
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -52,7 +67,7 @@ json_get() { python3 -c "import json,sys; value=json.load(sys.stdin); print($1)"
 pause() { sleep 1.1; }
 
 psql() {
-  docker exec -i novel-postgres psql -U "${POSTGRES_USER:-novel}" \
+  docker exec -i "$POSTGRES_CONTAINER" psql -U "${POSTGRES_USER:-novel}" \
     -d "${POSTGRES_DB:-novel_world}" -At -v ON_ERROR_STOP=1 "$@"
 }
 
@@ -89,7 +104,7 @@ refusal_says() {
 
 wait_healthy() {
   for _ in $(seq 1 90); do
-    if [ "$(docker inspect --format '{{.State.Health.Status}}' novel-gateway 2>/dev/null)" = healthy ]; then
+    if [ "$(docker inspect --format '{{.State.Health.Status}}' "$gateway_container" 2>/dev/null)" = healthy ]; then
       return 0
     fi
     sleep 2
@@ -320,6 +335,87 @@ check 'metadata negatives changed nothing' "$before_negatives" \
   "$(psql -c "SELECT (SELECT COUNT(*) FROM users) || ':' || (SELECT COUNT(*) FROM novels)")"
 check 'negatives changed nothing' "$before_negatives" \
   "$(psql -c "SELECT (SELECT COUNT(*) FROM users) || ':' || (SELECT COUNT(*) FROM novels)")"
+
+# ─── Optional image transition on the original PGDATA volume ──────────────
+
+if [ -n "$restore_image" ]; then
+  compose_postgres=$(timeout 30s docker compose ps --all --quiet postgres) ||
+    fail 'cannot inspect the selected Compose postgres service'
+  [[ "$compose_postgres" =~ ^[0-9a-f]{64}$ ]] ||
+    fail 'the selected Compose project must have exactly one postgres container'
+  selected_id=$(timeout 30s docker inspect --format '{{.Id}}' "$POSTGRES_CONTAINER")
+  check 'image transition selects the Compose postgres container' "$compose_postgres" "$selected_id"
+
+  writer_services=(gateway user-service novel-service agent-service narrative-service postgres-migrate)
+  timeout 90s docker compose stop --timeout 30 "${writer_services[@]}"
+  writer_ids=$(timeout 30s docker compose ps --all --quiet "${writer_services[@]}") ||
+    fail 'cannot inspect the selected application writers'
+  while IFS= read -r writer_id; do
+    [ -n "$writer_id" ] || continue
+    [[ "$writer_id" =~ ^[0-9a-f]{64}$ ]] || fail 'invalid application writer inventory'
+    writer_state=$(timeout 30s docker inspect --format '{{.State.Status}}' "$writer_id")
+    case "$writer_state" in
+      created | exited | dead) ;;
+      *) fail "application writer is not stopped: $writer_state" ;;
+    esac
+  done <<<"$writer_ids"
+
+  pgdata_identity() {
+    local mount volume project
+    mount=$(timeout 30s docker inspect --format '{{json .}}' "$POSTGRES_CONTAINER" |
+      python3 -c 'import json,sys
+c=json.load(sys.stdin); labels=c["Config"]["Labels"]
+m=[m for m in c["Mounts"] if m["Destination"] == "/var/lib/postgresql/data"]
+project=labels["com.docker.compose.project"]
+if (labels["com.docker.compose.service"] != "postgres" or not project
+    or "PGDATA=/var/lib/postgresql/data/pgdata" not in c["Config"]["Env"]
+    or len(m) != 1 or m[0]["Type"] != "volume" or not m[0]["Name"]):
+    sys.exit("drill: cannot identify the selected PGDATA volume")
+print(m[0]["Name"] + "\t" + project)') || return 1
+    IFS=$'\t' read -r volume project <<<"$mount"
+    timeout 30s docker volume inspect "$volume" |
+      python3 -c 'import json,sys
+v,=json.load(sys.stdin)
+if (v["Name"] != sys.argv[1] or not all(v[k] for k in ("Driver","CreatedAt","Mountpoint"))
+    or v["Labels"]["com.docker.compose.project"] != sys.argv[2]
+    or v["Labels"]["com.docker.compose.volume"] != "postgres_data"):
+    sys.exit("drill: PGDATA volume does not belong to the selected Compose project")
+keys=("Name","Driver","CreatedAt","Mountpoint","Scope","Labels")
+print(json.dumps({k:v[k] for k in keys},sort_keys=True,separators=(",",":")))' "$volume" "$project" |
+      sha256sum | cut -d ' ' -f 1
+  }
+
+  table_snapshot() {
+    # One consistent read-only transaction; only normalized public table facts.
+    timeout 30s docker exec -i "$POSTGRES_CONTAINER" psql \
+      -U "${POSTGRES_USER:-novel}" -d "${POSTGRES_DB:-novel_world}" \
+      -XqAt -v ON_ERROR_STOP=1 <<'SQL' | sha256sum | cut -d ' ' -f 1
+BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SET LOCAL TIME ZONE 'UTC';
+SET LOCAL extra_float_digits = 3;
+SET LOCAL statement_timeout = '25s';
+SELECT format(
+  'SELECT jsonb_build_object(''table'', %L, ''rows'', COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text COLLATE "C"), ''[]''::jsonb)) FROM public.%I AS t;',
+  tablename, tablename)
+FROM pg_catalog.pg_tables WHERE schemaname = 'public' ORDER BY tablename COLLATE "C"
+\gexec
+COMMIT;
+SQL
+  }
+
+  volume_before=$(pgdata_identity)
+  tables_before=$(table_snapshot)
+  export POSTGRES_IMAGE=$restore_image
+  timeout 210s docker compose up -d --wait --wait-timeout 180 \
+    --no-build --no-deps --pull never --force-recreate postgres
+  actual_image_id=$(timeout 30s docker inspect --format '{{.Image}}' "$POSTGRES_CONTAINER")
+  check 'recreated postgres uses the cached target image' "$restore_image_id" \
+    "$actual_image_id"
+  volume_after=$(pgdata_identity)
+  check 'image transition retains the original PGDATA volume' "$volume_before" "$volume_after"
+  tables_after=$(table_snapshot)
+  check 'image transition preserves every public table' "$tables_before" "$tables_after"
+fi
 
 # ─── Drill A: backup → erase → fresh-host restore ──────────────────────────
 
