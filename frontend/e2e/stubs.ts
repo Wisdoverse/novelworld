@@ -71,6 +71,8 @@ export async function installStubs(page: Page, opts: StubOptions = {}): Promise<
     ['GET', /^\/novels\/[^/]+\/chapters$/, () => json(200, [CHAPTER])],
     ['GET', /^\/novels\/[^/]+\/chapters\/[^/]+$/, () => json(200, CHAPTER)],
     ['GET', /^\/novels\/[^/]+\/characters$/, () => json(200, CHARACTERS)],
+    // Shared fixtures have no Canon model; source-relationship tests override this read.
+    ['GET', /^\/novels\/[^/]+\/relationships\/source-v1$/, () => json(404, null)],
     ['GET', /^\/progress\/[^/]+$/, () => json(200, progress)],
     ['PUT', /^\/progress\/[^/]+$/, () => json(200, progress)],
     ['GET', /^\/narrative\/[^/]+\/player-entry$/, () => json(200, entry)],

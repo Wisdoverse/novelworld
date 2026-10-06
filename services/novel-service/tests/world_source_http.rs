@@ -40,6 +40,9 @@ async fn request(
         None => Body::empty(),
     };
     let response = app.clone().oneshot(req.body(body).unwrap()).await.unwrap();
+    if path.ends_with("/relationships/source-v1") {
+        assert_eq!(response.headers()["cache-control"], "private, no-store");
+    }
     let status = response.status();
     let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
     (
@@ -50,6 +53,190 @@ async fn request(
 
 fn evidence(chapters: &[i32]) -> Value {
     json!({"confidence":1.0,"provenance":chapters.iter().map(|chapter| json!({"chapter_number":chapter,"excerpt":"synthetic authority"})).collect::<Vec<_>>()})
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly disposable TEST_DATABASE_URL; run with --ignored"]
+async fn source_relationship_routes_use_owned_chapters_and_independent_reader_progress() {
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&std::env::var("TEST_DATABASE_URL").expect("provide disposable PostgreSQL"))
+        .await
+        .unwrap();
+    let owner = Uuid::new_v4();
+    let reader = Uuid::new_v4();
+    let outsider = Uuid::new_v4();
+    for user in [owner, reader, outsider] {
+        sqlx::query("INSERT INTO users (id,email,password_hash) VALUES ($1,$2,'synthetic')")
+            .bind(user)
+            .bind(format!("relations-{user}@test.invalid"))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let novel = Uuid::new_v4();
+    sqlx::query("INSERT INTO novels (id,user_id,title,total_chapters,status) VALUES ($1,$2,'Synthetic relationships',3,'ready'::novel_status)")
+        .bind(novel).bind(owner).execute(&pool).await.unwrap();
+    for user in [owner, reader] {
+        sqlx::query("INSERT INTO user_novels (user_id,novel_id) VALUES ($1,$2)")
+            .bind(user)
+            .bind(novel)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let sources = [
+        "Alice and Bob founded the library. The caretaker answered.",
+        "Alice and Bob opened its doors.",
+        "Cora met Alice. Alice and Bob ended their alliance.",
+    ];
+    for (index, content) in sources.iter().enumerate() {
+        sqlx::query("INSERT INTO chapters (novel_id,chapter_number,content) VALUES ($1,$2,$3)")
+            .bind(novel)
+            .bind(index as i32 + 1)
+            .bind(content)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let alice = Uuid::new_v4();
+    let bob = Uuid::new_v4();
+    let cora = Uuid::new_v4();
+    let unproven = Uuid::new_v4();
+    for (id, name, first) in [
+        (alice, "Alice", 1),
+        (bob, "Bob", 1),
+        (cora, "Cora", 3),
+        (unproven, "Shadow", 1),
+    ] {
+        sqlx::query("INSERT INTO characters (id,novel_id,name,role,first_appearance_chapter,description) VALUES ($1,$2,$3,'supporting',$4,'private future persona')")
+            .bind(id).bind(novel).bind(name).bind(first).execute(&pool).await.unwrap();
+    }
+    let quoted = |chapters: &[i32]| json!({"confidence":1.0,"provenance":chapters.iter().map(|number| json!({"chapter_number":number,"excerpt":sources[*number as usize - 1]})).collect::<Vec<_>>()});
+    let content = json!({
+        "arcs":[], "events":[], "locations":[], "factions":[], "world_rules":[],
+        "character_goals":[], "deaths":[], "unresolved_threads":[],
+        "relationships":[
+            {"id":"colleagues","from_character_id":alice,"to_character_id":bob,"kind":"colleagues","description":"They founded the library.","evidence":quoted(&[1])},
+            {"id":"mixed","from_character_id":alice,"to_character_id":bob,"kind":"former colleagues","description":"Their alliance ended.","evidence":quoted(&[1,3])},
+            {"id":"later","from_character_id":cora,"to_character_id":alice,"kind":"acquaintances","description":"Cora met Alice.","evidence":quoted(&[3])},
+            {"id":"unproven","from_character_id":alice,"to_character_id":unproven,"kind":"visitors","description":"The caretaker answered.","evidence":quoted(&[1])}
+        ],
+        "ending":{"summary":"private future ending","character_states":{},"faction_states":{},"location_states":{},"unresolved_thread_ids":[],"evidence":quoted(&[3])}
+    });
+    for version in [1, 2] {
+        let mut facts = content.clone();
+        if version == 2 {
+            facts["relationships"][0]["description"] = json!("unselected newer model");
+        }
+        sqlx::query("INSERT INTO canon_story_models (id,novel_id,model_version,schema_version,prompt_version,content) VALUES ($1,$2,$3,1,'canon-extraction-v1',$4)")
+            .bind(Uuid::new_v4()).bind(novel).bind(version).bind(facts).execute(&pool).await.unwrap();
+    }
+    let legacy_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO character_relationships (id,novel_id,from_character_id,to_character_id,relationship_type,strength) VALUES ($1,$2,$3,$4,'whole-book relationship',88)")
+        .bind(legacy_id).bind(novel).bind(alice).bind(bob).execute(&pool).await.unwrap();
+    let app = router(http_state::state_with_pool(pool.clone()));
+    let path = format!("/novels/{novel}/relationships/source-v1");
+    for (principal, expected) in [
+        (None, StatusCode::UNAUTHORIZED),
+        (Some(outsider), StatusCode::NOT_FOUND),
+    ] {
+        assert_eq!(
+            request(&app, "GET", &path, principal, false, None).await.0,
+            expected
+        );
+    }
+    let partial = request(&app, "GET", &path, Some(reader), false, None).await;
+    assert_eq!(partial.0, StatusCode::OK);
+    assert_eq!(partial.1["model_version"], 1);
+    assert_eq!(partial.1["checkpoint_chapter"], 1);
+    assert_eq!(partial.1["relationships"].as_array().unwrap().len(), 1);
+    assert_eq!(partial.1["relationships"][0]["id"], "colleagues");
+    assert_eq!(
+        partial.1["relationships"][0]["source_citations"][0]["excerpt"],
+        sources[0]
+    );
+    let serialized = partial.1.to_string();
+    for hidden in [
+        "Cora",
+        "Shadow",
+        "alliance ended",
+        "private future",
+        "unselected newer",
+        "whole-book relationship",
+        "strength",
+        "confidence",
+    ] {
+        assert!(
+            !serialized.contains(hidden),
+            "unexpected source graph field: {hidden}"
+        );
+    }
+    let legacy = format!("/novels/{novel}/relationships");
+    assert_eq!(
+        request(&app, "GET", &legacy, Some(reader), false, None)
+            .await
+            .1,
+        json!([])
+    );
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            &format!("/progress/{novel}/advance"),
+            Some(owner),
+            false,
+            Some(json!({"current_chapter":3}))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let completed = request(&app, "GET", &path, Some(owner), false, None).await;
+    assert_eq!(completed.0, StatusCode::OK);
+    assert_eq!(completed.1["checkpoint_chapter"], 3);
+    assert_eq!(completed.1["relationships"].as_array().unwrap().len(), 3);
+    let full_legacy = request(&app, "GET", &legacy, Some(owner), false, None).await;
+    assert_eq!(full_legacy.1[0]["id"], legacy_id.to_string());
+    assert_eq!(full_legacy.1[0]["strength"], 88);
+    assert_eq!(
+        request(&app, "GET", &path, Some(reader), false, None)
+            .await
+            .1,
+        partial.1
+    );
+    assert_eq!(
+        request(
+            &app,
+            "PUT",
+            &format!("/progress/{novel}"),
+            Some(owner),
+            false,
+            Some(json!({"current_chapter":1}))
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        request(&app, "GET", &path, Some(owner), false, None)
+            .await
+            .1,
+        partial.1
+    );
+    sqlx::query("DELETE FROM novels WHERE id=$1")
+        .bind(novel)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for user in [owner, reader, outsider] {
+        sqlx::query("DELETE FROM users WHERE id=$1")
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    pool.close().await;
 }
 
 #[tokio::test]

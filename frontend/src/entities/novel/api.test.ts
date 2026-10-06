@@ -13,9 +13,11 @@ import {
   buildNovelUploadFormData,
   novelKeys,
   novelTitleFromFile,
+  parseSourceRelationshipGraph,
   sanitizeCharacterPersona,
   shouldPollNovelList,
   useCharacters,
+  useSourceRelationships,
   useDeleteNovel,
   useConfirmWorldSeriesBackground,
   useSuggestNovelWorldSeriesDeepSeek,
@@ -230,6 +232,128 @@ describe('character persona boundary', () => {
     await waitFor(() => expect(result.current.data).toEqual([partial]));
     expect(queryClient.getQueryData(novelKeys.characters('novel', 2))).toEqual([partial]);
     get.mockRestore();
+  });
+});
+
+describe('source-v1 relationship boundary', () => {
+  const novelId = 'a3924eb2-a039-4fea-a696-c14dc25e2894';
+  const fromId = 'e9e895cb-e34d-4a1c-9780-c0b82d5966a3';
+  const toId = 'b2e2f767-9299-4cdb-8a08-5da7c35a9b6d';
+  const graph = {
+    novel_id: novelId,
+    model_version: 1,
+    checkpoint_chapter: 3,
+    characters: [
+      { id: fromId, name: '林晚' },
+      { id: toId, name: '老船长' },
+    ],
+    relationships: [{
+      id: 'relation:source:1',
+      from_character_id: fromId,
+      to_character_id: toId,
+      kind: '互相守望',
+      description: '两人共同守护北塔与海港。',
+      source_citations: [{ chapter_number: 2, excerpt: '船长把灯递给林晚。' }],
+    }],
+  };
+
+  it('keeps only bounded source fields and preserves lexical order', () => {
+    expect(parseSourceRelationshipGraph(graph, novelId, 3)).toEqual(graph);
+    expect(parseSourceRelationshipGraph({
+      ...graph,
+      checkpoint_chapter: 2,
+      relationships: [{
+        ...graph.relationships[0],
+        source_citations: [{ chapter_number: 3, excerpt: 'outside checkpoint' }],
+      }],
+    }, novelId, 2)).toBeNull();
+    expect(parseSourceRelationshipGraph({ ...graph, private_notes: 'not public' }, novelId, 3)).toBeNull();
+    expect(parseSourceRelationshipGraph({
+      ...graph,
+      characters: [graph.characters[1], graph.characters[0]],
+    }, novelId, 3)?.characters.map(character => character.id)).toEqual([toId, fromId]);
+  });
+
+  it.each([
+    ['another novel', { ...graph, novel_id: '65b5263a-862c-48f7-b58b-4c9e3b25fc93' }],
+    ['future checkpoint', { ...graph, checkpoint_chapter: 4 }],
+    ['stale checkpoint', { ...graph, checkpoint_chapter: 2 }],
+    ['future citation', { ...graph, relationships: [{
+      ...graph.relationships[0],
+      source_citations: [{ chapter_number: 4, excerpt: 'future' }],
+    }] }],
+    ['citation after returned checkpoint', { ...graph, checkpoint_chapter: 2, relationships: [{
+      ...graph.relationships[0],
+      source_citations: [{ chapter_number: 3, excerpt: 'outside checkpoint' }],
+    }] }],
+    ['relationship without citations', { ...graph, relationships: [{
+      ...graph.relationships[0], source_citations: [],
+    }] }],
+    ['nil character id', { ...graph, characters: [
+      { ...graph.characters[0], id: '00000000-0000-0000-0000-000000000000' },
+      graph.characters[1],
+    ] }],
+    ['nil endpoint id', { ...graph, relationships: [{
+      ...graph.relationships[0], from_character_id: '00000000-0000-0000-0000-000000000000',
+    }] }],
+    ['self-referencing relation', { ...graph, relationships: [{
+      ...graph.relationships[0], to_character_id: fromId,
+    }] }],
+    ['oversized description', { ...graph, relationships: [{
+      ...graph.relationships[0], description: 'x'.repeat(10_001),
+    }] }],
+    ['empty description', { ...graph, relationships: [{
+      ...graph.relationships[0], description: '',
+    }] }],
+    ['blank citation', { ...graph, relationships: [{
+      ...graph.relationships[0], source_citations: [{ chapter_number: 2, excerpt: ' \t ' }],
+    }] }],
+    ['control character in source text', { ...graph, relationships: [{
+      ...graph.relationships[0], description: 'unsafe\u0000text',
+    }] }],
+    ['oversized citation list', { ...graph, relationships: [{
+      ...graph.relationships[0],
+      source_citations: Array.from({ length: 9 }, () => graph.relationships[0].source_citations[0]),
+    }] }],
+    ['unlisted endpoint', { ...graph, relationships: [{
+      ...graph.relationships[0], to_character_id: 'd970db02-57be-499f-9240-fca3c4c37e03',
+    }] }],
+  ])('rejects %s rather than truncating or exposing it', (_label, candidate) => {
+    expect(parseSourceRelationshipGraph(candidate, novelId, 3)).toBeNull();
+  });
+
+  it('scopes the cancellable query by principal, novel, and trusted progress', async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: PropsWithChildren) => React.createElement(
+      QueryClientProvider,
+      { client: queryClient },
+      children,
+    );
+    const get = vi.spyOn(apiClient, 'get').mockResolvedValue({ data: graph } as never);
+    const { result, rerender } = renderHook(
+      ({ principalId, enabled }) => useSourceRelationships(principalId, novelId, 3, enabled),
+      { initialProps: { principalId: 'reader-a', enabled: false }, wrapper },
+    );
+
+    expect(get).not.toHaveBeenCalled();
+    expect(result.current.data).toBeUndefined();
+    rerender({ principalId: 'reader-a', enabled: true });
+    await waitFor(() => expect(queryClient.getQueryData(
+      novelKeys.sourceRelationships('reader-a', novelId, 3),
+    )).toEqual(graph));
+    rerender({ principalId: 'reader-b', enabled: true });
+    await waitFor(() => expect(queryClient.getQueryData(
+      novelKeys.sourceRelationships('reader-b', novelId, 3),
+    )).toEqual(graph));
+
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(get).toHaveBeenCalledWith(
+      `/novels/${novelId}/relationships/source-v1`,
+      { signal: expect.any(AbortSignal) },
+    );
+    expect(queryClient.getQueryData(novelKeys.sourceRelationships('reader-a', novelId, 3))).toEqual(graph);
+    get.mockRestore();
+    queryClient.clear();
   });
 });
 

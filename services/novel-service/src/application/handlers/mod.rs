@@ -38,8 +38,9 @@ use crate::domain::repositories::{
 };
 use crate::domain::services::{
     canon_story_context::{
-        build_character_canon_grounding, build_world_source_delta, CharacterCanonGrounding,
-        WorldSourceDelta,
+        build_character_canon_grounding, build_source_relationship_graph, build_world_source_delta,
+        CharacterCanonGrounding, SourceRelationshipGraph, WorldSourceDelta,
+        MAX_GROUNDING_SOURCE_CHAPTERS,
     },
     canon_story_extractor, chapter_boundary_detector, game_rule_generator, node_detector,
 };
@@ -3803,6 +3804,114 @@ impl ReadingProgressHandler {
         Ok(relationships)
     }
 
+    pub async fn get_source_relationship_graph(
+        &self,
+        user_id: Uuid,
+        novel_id: Uuid,
+    ) -> std::result::Result<SourceRelationshipGraph, ReadingProgressError> {
+        // One read deadline, with no retries or provider work.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let novel = self.owned_novel(user_id, novel_id).await?;
+            if novel.id != novel_id
+                || novel.status != NovelStatus::Ready
+                || novel.total_chapters < 1
+            {
+                return Err(ReadingProgressError::NotFound);
+            }
+            let progress = self.progress_for_novel(user_id, &novel).await?;
+            if progress.user_id != user_id || progress.novel_id != novel_id {
+                return Err(ReadingProgressError::Internal(anyhow::anyhow!(
+                    "source relationship progress scope is invalid"
+                )));
+            }
+            let model = self
+                .canon_repo
+                .find_version(novel_id, 1)
+                .await
+                .map_err(ReadingProgressError::Internal)?
+                .ok_or(ReadingProgressError::NotFound)?;
+            if model.novel_id != novel_id {
+                return Err(ReadingProgressError::Internal(anyhow::anyhow!(
+                    "source relationship model scope is invalid"
+                )));
+            }
+            let characters = self
+                .character_repo
+                .find_by_novel(novel_id)
+                .await
+                .map_err(ReadingProgressError::Internal)?;
+            let mut chapter_numbers = characters
+                .iter()
+                .filter_map(|character| character.first_appearance_chapter)
+                .filter(|chapter| (1..=progress.current_chapter).contains(chapter))
+                .collect::<HashSet<_>>();
+            for relationship in &model.content.relationships {
+                if relationship.evidence.provenance.len() > MAX_GROUNDING_SOURCE_CHAPTERS {
+                    return Err(ReadingProgressError::Internal(anyhow::anyhow!(
+                        "source relationship evidence exceeds its bound"
+                    )));
+                }
+                chapter_numbers.extend(
+                    relationship
+                        .evidence
+                        .provenance
+                        .iter()
+                        .map(|citation| citation.chapter_number)
+                        .filter(|chapter| (1..=progress.current_chapter).contains(chapter)),
+                );
+            }
+            let chapters = self.source_chapters_for(novel_id, chapter_numbers).await?;
+            if chapters.iter().any(|(number, chapter)| {
+                chapter.novel_id != novel_id || chapter.chapter_number != *number
+            }) {
+                return Err(ReadingProgressError::Internal(anyhow::anyhow!(
+                    "source relationship chapter scope is invalid"
+                )));
+            }
+            let names = known_character_names(&characters);
+            let proven = characters
+                .iter()
+                .filter(|character| {
+                    character.novel_id == novel_id
+                        && character_name_is_canonical(&character.name)
+                        && canonical_name_is_source_proven(character, &names, &chapters)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let source = chapters
+                .into_iter()
+                .map(|(number, chapter)| (number, chapter.content))
+                .collect();
+            let graph =
+                build_source_relationship_graph(&model, &proven, &source, progress.current_chapter)
+                    .map_err(|error| ReadingProgressError::Internal(error.into()))?;
+
+            // All source I/O precedes the final shelf, status and progress reads.
+            let final_novel = self.owned_novel(user_id, novel_id).await?;
+            let final_progress = self
+                .persisted_progress_for_novel(user_id, &final_novel)
+                .await?;
+            if final_novel.id != novel_id
+                || final_novel.status != NovelStatus::Ready
+                || final_novel.total_chapters != novel.total_chapters
+                || final_progress.user_id != user_id
+                || final_progress.novel_id != novel_id
+                || final_progress.current_chapter != progress.current_chapter
+            {
+                return Err(ReadingProgressError::Internal(anyhow::anyhow!(
+                    "persisted reading boundary changed during source relationship validation"
+                )));
+            }
+            Ok(graph)
+        })
+        .await
+        .map_err(|_| {
+            ReadingProgressError::Internal(anyhow::anyhow!(
+                "source relationship read deadline exceeded"
+            ))
+        })?
+    }
+
     pub async fn get_character_canon_grounding(
         &self,
         user_id: Uuid,
@@ -5004,6 +5113,103 @@ mod reading_progress_handler_tests {
             Err(ReadingProgressError::Internal(_))
         ));
         calls.assert_eq(&["novel", "progress:2", "chapter:2", "relationships"]);
+    }
+
+    #[tokio::test]
+    async fn source_relationship_graph_is_scoped_and_rechecks_progress_after_source_io() {
+        let novel_id = Uuid::new_v4();
+        let partial_user = Uuid::new_v4();
+        let rewinding_user = Uuid::new_v4();
+        let outsider = Uuid::new_v4();
+        let character = persona_character(novel_id);
+        let mut other = Character::new(novel_id, "顾衡".into(), CharacterRole::Supporting);
+        other.first_appearance_chapter = Some(1);
+        let first = "沈知微与顾衡是邻居。";
+        let later = "沈知微与顾衡结为盟友。";
+        let mut model = canon_model(novel_id, character.id, other.id);
+        model.content.relationships[0].evidence.provenance = vec![SourceCitation {
+            chapter_number: 1,
+            excerpt: first.into(),
+        }];
+        model.content.relationships[0].description = "他们是邻居。".into();
+        let mut future = model.content.relationships[0].clone();
+        future.id = "later".into();
+        future.kind = "盟友".into();
+        future.description = "第二章结为盟友。".into();
+        future.evidence.provenance = vec![SourceCitation {
+            chapter_number: 2,
+            excerpt: later.into(),
+        }];
+        model.content.relationships.push(future);
+        let (handler, calls, _, _, canon_repo) = handler(
+            ready_novel(novel_id, 2),
+            &[partial_user, rewinding_user],
+            vec![character, other],
+            vec![
+                Chapter::new(novel_id, 1, None, first.into()),
+                Chapter::new(novel_id, 2, None, later.into()),
+            ],
+            vec![
+                progress(partial_user, novel_id, 1, None),
+                progress(rewinding_user, novel_id, 2, None),
+                progress(rewinding_user, novel_id, 1, None),
+            ],
+        );
+        *canon_repo.model.lock().unwrap() = Some(model.clone());
+        assert!(matches!(
+            handler
+                .get_source_relationship_graph(outsider, novel_id)
+                .await,
+            Err(ReadingProgressError::NotFound)
+        ));
+        calls.assert_eq(&["novel"]);
+        calls.clear();
+        let graph = handler
+            .get_source_relationship_graph(partial_user, novel_id)
+            .await
+            .unwrap();
+        assert_eq!(graph.checkpoint_chapter, 1);
+        assert_eq!(graph.relationships.len(), 1);
+        assert_eq!(graph.relationships[0].description, "他们是邻居。");
+        assert_eq!(graph.characters.len(), 2);
+        calls.assert_eq(&[
+            "novel",
+            "progress:1",
+            "chapter:1",
+            "canon:1",
+            "characters",
+            "chapter:1",
+            "novel",
+            "progress:1",
+        ]);
+        calls.clear();
+        assert!(matches!(
+            handler
+                .get_source_relationship_graph(rewinding_user, novel_id)
+                .await,
+            Err(ReadingProgressError::Internal(_))
+        ));
+        calls.assert_eq(&[
+            "novel",
+            "progress:2",
+            "chapter:2",
+            "canon:1",
+            "characters",
+            "chapter:1",
+            "chapter:2",
+            "novel",
+            "progress:1",
+        ]);
+        calls.clear();
+        model.novel_id = Uuid::new_v4();
+        *canon_repo.model.lock().unwrap() = Some(model);
+        assert!(matches!(
+            handler
+                .get_source_relationship_graph(partial_user, novel_id)
+                .await,
+            Err(ReadingProgressError::NotFound)
+        ));
+        calls.assert_eq(&["novel", "progress:1", "chapter:1", "canon:1"]);
     }
 
     #[tokio::test]

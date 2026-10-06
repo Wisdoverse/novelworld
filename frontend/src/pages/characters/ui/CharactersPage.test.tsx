@@ -9,19 +9,29 @@ const mocks = vi.hoisted(() => ({
   charactersError: false,
   charactersCachedOnError: false,
   refetchCharacters: vi.fn(),
+  sourceGraph: undefined as Record<string, unknown> | undefined,
+  sourceError: false,
+  sourceLoading: false,
+  sourceRefetch: vi.fn(),
+  sourceQueryArgs: [] as unknown[],
+  principalId: 'user',
   progressErrorCode: undefined as string | undefined,
   progressCachedOnError: false,
+  progressFetching: false,
   refetchProgress: vi.fn(),
   resetIdentity: vi.fn(),
   resetIdentityPending: false,
 }));
 
 vi.mock('react-router-dom', () => ({
+  Link: ({ to, children }: { to: string; children: React.ReactNode }) => (
+    <a href={to}>{children}</a>
+  ),
   useNavigate: () => vi.fn(),
   useParams: () => ({ novelId: 'novel' }),
 }));
 vi.mock('@/features/auth', () => ({
-  useAuthStore: () => ({ user: { id: 'user' } }),
+  useAuthStore: () => ({ user: { id: mocks.principalId } }),
 }));
 vi.mock('@/entities/reading-progress', () => ({
   useReadingProgress: () => ({
@@ -29,6 +39,7 @@ vi.mock('@/entities/reading-progress', () => ({
       ? undefined
       : { current_chapter: 2, reader_identity_type: 'self' },
     isLoading: false,
+    isFetching: mocks.progressFetching,
     isError: Boolean(mocks.progressErrorCode),
     error: mocks.progressErrorCode
       ? {
@@ -52,6 +63,15 @@ vi.mock('@/entities/novel', () => ({
     isError: mocks.charactersError,
     refetch: mocks.refetchCharacters,
   }),
+  useSourceRelationships: (...args: unknown[]) => {
+    mocks.sourceQueryArgs = args;
+    return {
+      data: mocks.sourceGraph,
+      isPending: mocks.sourceLoading,
+      isError: mocks.sourceError,
+      refetch: mocks.sourceRefetch,
+    };
+  },
 }));
 vi.mock('@/widgets/character-card', () => ({
   CharacterCard: ({ character, onTalk }: {
@@ -72,10 +92,16 @@ vi.mock('@/widgets/chat-panel', () => ({
 describe('CharactersPage progress gate', () => {
   beforeEach(() => {
     mocks.characters = [];
+    mocks.sourceGraph = undefined;
+    mocks.sourceError = false;
+    mocks.sourceLoading = false;
+    mocks.sourceQueryArgs = [];
+    mocks.principalId = 'user';
     mocks.charactersError = false;
     mocks.charactersCachedOnError = false;
     mocks.progressErrorCode = undefined;
     mocks.progressCachedOnError = false;
+    mocks.progressFetching = false;
     mocks.resetIdentityPending = false;
     mocks.refetchProgress.mockReset();
     mocks.resetIdentity.mockReset();
@@ -147,6 +173,62 @@ describe('CharactersPage progress gate', () => {
     mocks.characters = [];
     view.rerender(<CharactersPage />);
     await waitFor(() => expect(screen.queryByTestId('chat-panel')).toBeNull());
+  });
+
+  it('shows source-cited relationships with the matching reader route', () => {
+    mocks.sourceGraph = {
+      novel_id: 'novel',
+      model_version: 1,
+      checkpoint_chapter: 2,
+      characters: [
+        { id: 'character-a', name: '林晚' },
+        { id: 'character-b', name: '老船长' },
+      ],
+      relationships: [{
+        id: 'relation-1',
+        from_character_id: 'character-a',
+        to_character_id: 'character-b',
+        kind: '互相守望',
+        description: '两人共同守护北塔与海港。',
+        source_citations: [{ chapter_number: 2, excerpt: '船长把灯递给林晚。' }],
+      }],
+    };
+    render(<CharactersPage />);
+
+    expect(screen.getByRole('heading', { name: '原著人物关系' })).toBeTruthy();
+    expect(screen.getByText('两人共同守护北塔与海港。')).toBeTruthy();
+    expect(screen.getByText('船长把灯递给林晚。')).toBeTruthy();
+    expect(screen.getByRole('link', { name: '第 2 章' }).getAttribute('href')).toBe('/reader/novel/2');
+    expect(mocks.sourceQueryArgs).toEqual(['user', 'novel', 2, true]);
+  });
+
+  it('keeps a paused source request pending rather than claiming an empty graph', () => {
+    mocks.sourceLoading = true;
+    render(<CharactersPage />);
+
+    expect(screen.getByRole('status').textContent).toBe('正在加载原著人物关系…');
+    expect(screen.queryByText('当前阅读进度内没有带来源引文的人物关系。')).toBeNull();
+  });
+
+  it.each([
+    ['refreshing progress', () => { mocks.progressFetching = true; }],
+    ['failed progress with cached data', () => {
+      mocks.progressErrorCode = 'progress_unavailable';
+      mocks.progressCachedOnError = true;
+    }],
+  ])('hides cached source relationships while %s', (_label, setState) => {
+    mocks.sourceGraph = {
+      novel_id: 'novel',
+      model_version: 1,
+      checkpoint_chapter: 2,
+      characters: [],
+      relationships: [],
+    };
+    setState();
+    render(<CharactersPage />);
+
+    expect(screen.queryByRole('heading', { name: '原著人物关系' })).toBeNull();
+    expect(mocks.sourceQueryArgs[3]).toBe(false);
   });
 
   it('replaces a selected full persona with the latest partial view for the same id', () => {

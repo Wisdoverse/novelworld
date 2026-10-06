@@ -420,7 +420,7 @@ fn validate_unique_ids<'a>(
     Ok(())
 }
 
-fn validate_evidence(
+pub(crate) fn validate_evidence(
     evidence: &SourceEvidence,
     source_chapters: &BTreeMap<i32, String>,
 ) -> Result<(), CanonStoryModelError> {
@@ -450,7 +450,11 @@ fn validate_evidence(
     Ok(())
 }
 
-fn validate_text(name: &str, value: &str, max_chars: usize) -> Result<(), CanonStoryModelError> {
+pub(crate) fn validate_text(
+    name: &str,
+    value: &str,
+    max_chars: usize,
+) -> Result<(), CanonStoryModelError> {
     let length = value.chars().count();
     if value.trim().is_empty()
         || length > max_chars
@@ -465,7 +469,11 @@ fn validate_text(name: &str, value: &str, max_chars: usize) -> Result<(), CanonS
     Ok(())
 }
 
-fn validate_token(name: &str, value: &str, max_chars: usize) -> Result<(), CanonStoryModelError> {
+pub(crate) fn validate_token(
+    name: &str,
+    value: &str,
+    max_chars: usize,
+) -> Result<(), CanonStoryModelError> {
     validate_text(name, value, max_chars)?;
     if value.trim() != value || value.chars().any(char::is_control) {
         return invalid(format!(

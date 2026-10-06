@@ -20,6 +20,27 @@ fn auth_test_state() -> AppState {
 }
 
 #[tokio::test]
+async fn source_relationship_route_rejects_missing_principal_before_database_work() {
+    let response = router(auth_test_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/novels/{}/relationships/source-v1",
+                    Uuid::new_v4()
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response.headers()[CACHE_CONTROL],
+        HeaderValue::from_static("private, no-store")
+    );
+}
+
+#[tokio::test]
 async fn canon_grounding_route_rejects_missing_and_wrong_internal_tokens() {
     let app = router(auth_test_state());
     let uri = format!(

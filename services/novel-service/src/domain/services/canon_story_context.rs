@@ -1,10 +1,13 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::entities::{
-    canon_story_model::{CanonStoryModel, SourceEvidence},
+    canon_story_model::{
+        validate_evidence, validate_text, validate_token, CanonStoryModel, SourceCitation,
+        SourceEvidence, CANON_STORY_SCHEMA_VERSION,
+    },
     character::Character,
 };
 
@@ -14,7 +17,7 @@ const MAX_CHARACTER_RELATIONSHIPS: usize = 8;
 const MAX_CHARACTER_NAME_CHARS: usize = 100;
 const MAX_RELATIONSHIP_KIND_CHARS: usize = 50;
 const MAX_GROUNDING_DESCRIPTION_CHARS: usize = 200;
-const MAX_GROUNDING_SOURCE_CHAPTERS: usize = 8;
+pub(crate) const MAX_GROUNDING_SOURCE_CHAPTERS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -98,6 +101,151 @@ pub struct CharacterCanonRelationship {
     pub kind: String,
     pub description: String,
     pub source_chapters: Vec<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceRelationshipGraph {
+    pub novel_id: Uuid,
+    pub model_version: i32,
+    pub checkpoint_chapter: i32,
+    pub characters: Vec<CanonCharacterRef>,
+    pub relationships: Vec<SourceRelationship>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceRelationship {
+    pub id: String,
+    pub from_character_id: Uuid,
+    pub to_character_id: Uuid,
+    pub kind: String,
+    pub description: String,
+    pub source_citations: Vec<SourceCitation>,
+}
+
+/// Names must carry lexical first-appearance proof from the owning source chapters.
+pub fn build_source_relationship_graph(
+    model: &CanonStoryModel,
+    characters: &[Character],
+    source_chapters: &BTreeMap<i32, String>,
+    checkpoint_chapter: i32,
+) -> Result<SourceRelationshipGraph, CanonContextError> {
+    if checkpoint_chapter < 1 {
+        return Err(CanonContextError::InvalidCheckpoint);
+    }
+    if model.id.is_nil()
+        || model.novel_id.is_nil()
+        || model.model_version != 1
+        || model.schema_version != CANON_STORY_SCHEMA_VERSION
+    {
+        return Err(CanonContextError::InvalidRelationshipSource);
+    }
+    let mut visible = HashMap::new();
+    for character in characters {
+        if character.id.is_nil()
+            || character.novel_id != model.novel_id
+            || !character
+                .first_appearance_chapter
+                .is_some_and(|chapter| (1..=checkpoint_chapter).contains(&chapter))
+            || validate_text("character name", &character.name, 200).is_err()
+            || visible
+                .insert(character.id, character.name.as_str())
+                .is_some()
+        {
+            return Err(CanonContextError::InvalidRelationshipSource);
+        }
+    }
+    let mut relationships = Vec::new();
+    let mut ids = HashSet::new();
+    for relationship in &model.content.relationships {
+        let evidence = &relationship.evidence;
+        if evidence.provenance.is_empty()
+            || evidence.provenance.len() > MAX_GROUNDING_SOURCE_CHAPTERS
+            || evidence
+                .provenance
+                .iter()
+                .any(|citation| citation.chapter_number < 1)
+            || !evidence.confidence.is_finite()
+            || !(0.0..=1.0).contains(&evidence.confidence)
+        {
+            return Err(CanonContextError::InvalidRelationshipSource);
+        }
+        // A whole first-source fact needs every citation, never a cropped earlier subset.
+        if bounded_authority(evidence, checkpoint_chapter).is_none() {
+            continue;
+        }
+        if relationship.from_character_id.is_nil()
+            || relationship.to_character_id.is_nil()
+            || relationship.from_character_id == relationship.to_character_id
+            || validate_token("relationship id", &relationship.id, 100).is_err()
+            || validate_token("relationship kind", &relationship.kind, 500).is_err()
+            || validate_text(
+                "relationship description",
+                &relationship.description,
+                10_000,
+            )
+            .is_err()
+            || validate_evidence(evidence, source_chapters).is_err()
+            || !ids.insert(relationship.id.as_str())
+        {
+            return Err(CanonContextError::InvalidRelationshipSource);
+        }
+        if !visible.contains_key(&relationship.from_character_id)
+            || !visible.contains_key(&relationship.to_character_id)
+        {
+            continue;
+        }
+        relationships.push(SourceRelationship {
+            id: relationship.id.clone(),
+            from_character_id: relationship.from_character_id,
+            to_character_id: relationship.to_character_id,
+            kind: relationship.kind.clone(),
+            description: relationship.description.clone(),
+            source_citations: evidence.provenance.clone(),
+        });
+        if relationships.len() > MAX_CONTEXT_ITEMS {
+            return Err(CanonContextError::TooLarge("relationships"));
+        }
+    }
+    relationships.sort_by(|left, right| {
+        let chapter = |item: &SourceRelationship| {
+            item.source_citations
+                .iter()
+                .map(|citation| citation.chapter_number)
+                .max()
+        };
+        chapter(left)
+            .cmp(&chapter(right))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let used = relationships
+        .iter()
+        .flat_map(|relationship| [relationship.from_character_id, relationship.to_character_id])
+        .collect::<HashSet<_>>();
+    let mut characters = visible
+        .into_iter()
+        .filter(|(id, _)| used.contains(id))
+        .map(|(id, name)| CanonCharacterRef {
+            id,
+            name: name.to_owned(),
+        })
+        .collect::<Vec<_>>();
+    characters.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    if characters.len() > MAX_CONTEXT_ITEMS {
+        return Err(CanonContextError::TooLarge("characters"));
+    }
+    Ok(SourceRelationshipGraph {
+        novel_id: model.novel_id,
+        model_version: model.model_version,
+        checkpoint_chapter,
+        characters,
+        relationships,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -404,6 +552,8 @@ pub enum CanonContextError {
     InvalidWorldRange,
     #[error("character is not visible at the checkpoint")]
     UnknownCharacter,
+    #[error("source relationship evidence is invalid")]
+    InvalidRelationshipSource,
 }
 
 pub fn build_canon_context(
@@ -1089,5 +1239,130 @@ mod tests {
         assert_eq!(grounding.relationships[0].other_character_name, "同伴");
         assert_eq!(grounding.relationships[0].direction, "outgoing");
         assert_eq!(grounding.relationships[0].source_chapters, vec![1, 2]);
+    }
+
+    #[test]
+    fn source_relationships_require_whole_visible_matching_source_facts() {
+        let novel_id = Uuid::new_v4();
+        let mut alice = Character::new(novel_id, "Alice".into(), CharacterRole::Protagonist);
+        let mut bob = Character::new(novel_id, "Bob".into(), CharacterRole::Supporting);
+        alice.first_appearance_chapter = Some(1);
+        bob.first_appearance_chapter = Some(1);
+        let source = BTreeMap::from([(1, "Alice and Bob founded the library.".to_owned())]);
+        let citation = SourceCitation {
+            chapter_number: 1,
+            excerpt: source[&1].clone(),
+        };
+        let relationship = CanonRelationship {
+            id: "library-colleagues".into(),
+            from_character_id: alice.id,
+            to_character_id: bob.id,
+            kind: "colleagues".into(),
+            description: "They founded the library.".into(),
+            evidence: SourceEvidence {
+                provenance: vec![citation.clone()],
+                confidence: 1.0,
+            },
+        };
+        let mut future = relationship.clone();
+        future.id = "future".into();
+        future.kind = "former colleagues".into();
+        future.description = "Their alliance ends in chapter three.".into();
+        future.evidence.provenance[0].chapter_number = 3;
+        let mut mixed = future.clone();
+        mixed.id = "mixed".into();
+        mixed.evidence.provenance.push(citation.clone());
+        let mut hidden_endpoint = relationship.clone();
+        hidden_endpoint.id = "unproven-endpoint".into();
+        hidden_endpoint.to_character_id = Uuid::new_v4();
+        let mut model = CanonStoryModel {
+            id: Uuid::new_v4(),
+            novel_id,
+            model_version: 1,
+            schema_version: CANON_STORY_SCHEMA_VERSION,
+            prompt_version: "canon-extraction-v1".into(),
+            created_at: Utc::now(),
+            content: CanonStoryContent {
+                arcs: vec![],
+                events: vec![],
+                locations: vec![],
+                factions: vec![],
+                world_rules: vec![],
+                character_goals: vec![],
+                relationships: vec![relationship.clone(), future, mixed, hidden_endpoint],
+                deaths: vec![],
+                unresolved_threads: vec![],
+                ending: CanonEndingSnapshot {
+                    summary: "Future ending.".into(),
+                    character_states: BTreeMap::new(),
+                    faction_states: BTreeMap::new(),
+                    location_states: BTreeMap::new(),
+                    unresolved_thread_ids: vec![],
+                    evidence: SourceEvidence {
+                        provenance: vec![],
+                        confidence: 1.0,
+                    },
+                },
+            },
+        };
+        let characters = vec![alice, bob];
+        let graph =
+            super::build_source_relationship_graph(&model, &characters, &source, 1).unwrap();
+        assert_eq!(graph.relationships.len(), 1);
+        assert_eq!(graph.relationships[0].id, "library-colleagues");
+        assert_eq!(graph.relationships[0].description, relationship.description);
+        assert_eq!(graph.relationships[0].source_citations, vec![citation]);
+        assert_eq!(graph.characters.len(), 2);
+        let json = serde_json::to_string(&graph).unwrap();
+        assert!(!json.contains("Future ending"));
+        assert!(!json.contains("alliance ends"));
+        assert!(!json.contains("strength"));
+        assert!(!json.contains("confidence"));
+
+        model.content.relationships = vec![relationship.clone()];
+        let mut malformed = relationship.clone();
+        for citations in [
+            vec![],
+            vec![SourceCitation {
+                chapter_number: 0,
+                excerpt: source[&1].clone(),
+            }],
+            vec![SourceCitation {
+                chapter_number: 1,
+                excerpt: "Missing source text.".into(),
+            }],
+            vec![relationship.evidence.provenance[0].clone(); 9],
+        ] {
+            malformed.evidence.provenance = citations;
+            model.content.relationships = vec![malformed.clone()];
+            assert!(
+                super::build_source_relationship_graph(&model, &characters, &source, 1).is_err()
+            );
+        }
+        malformed = relationship.clone();
+        malformed.description = "x".repeat(10_001);
+        model.content.relationships = vec![malformed];
+        assert!(super::build_source_relationship_graph(&model, &characters, &source, 1).is_err());
+        model.content.relationships = vec![relationship.clone(), relationship.clone()];
+        assert!(super::build_source_relationship_graph(&model, &characters, &source, 1).is_err());
+        model.content.relationships = vec![relationship.clone()];
+        let mut foreign = characters.clone();
+        foreign[0].novel_id = Uuid::new_v4();
+        assert!(super::build_source_relationship_graph(&model, &foreign, &source, 1).is_err());
+        assert!(
+            super::build_source_relationship_graph(&model, &characters, &BTreeMap::new(), 1)
+                .is_err()
+        );
+        model.content.relationships = (0..=super::MAX_CONTEXT_ITEMS)
+            .map(|index| {
+                let mut item = relationship.clone();
+                item.id = format!("relationship-{index}");
+                item
+            })
+            .collect();
+        assert_eq!(
+            super::build_source_relationship_graph(&model, &characters, &source, 1),
+            Err(super::CanonContextError::TooLarge("relationships")),
+        );
     }
 }
