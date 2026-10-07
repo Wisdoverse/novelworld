@@ -136,7 +136,8 @@ def qualification_environment(
     return {
         key: value
         for key, value in host_environment.items()
-        if key not in product_keys and key != "RELEASE_QUALIFICATION_SUBNET"
+        if key not in product_keys and key not in (
+            "RELEASE_QUALIFICATION_SUBNET", "RELEASE_DIAGNOSTIC_REGISTRATION_SHA256")
     }
 
 
@@ -1421,10 +1422,11 @@ class Journey:
         summary_schema = (diagnostic_registration.value["schema"]
                           if diagnostic_registration is not None else None)
         self.local_embedding = summary_schema in (
-            diagnostic.REGISTRATION_SCHEMA_V5, diagnostic.REGISTRATION_SCHEMA_V6)
+            diagnostic.REGISTRATION_SCHEMA_V5, diagnostic.REGISTRATION_SCHEMA_V6,
+            diagnostic.REGISTRATION_SCHEMA_V7)
         self.four_layer = summary_schema in (
             diagnostic.REGISTRATION_SCHEMA_V4, diagnostic.REGISTRATION_SCHEMA_V5,
-            diagnostic.REGISTRATION_SCHEMA_V6)
+            diagnostic.REGISTRATION_SCHEMA_V6, diagnostic.REGISTRATION_SCHEMA_V7)
         if ((summary_schema == diagnostic.REGISTRATION_SCHEMA_V4)
                 != (embedding_config_path is not None)):
             raise QualificationFailure("embedding_config_v4_only")
@@ -1567,6 +1569,7 @@ class Journey:
                 diagnostic.REGISTRATION_SCHEMA_V4: "h3-h4-four-layer-diagnostic-v4",
                 diagnostic.REGISTRATION_SCHEMA_V5: "h3-h4-four-layer-diagnostic-v5",
                 diagnostic.REGISTRATION_SCHEMA_V6: "h3-h4-four-layer-diagnostic-v6",
+                diagnostic.REGISTRATION_SCHEMA_V7: "h3-h4-four-layer-diagnostic-v7",
             }[summary_schema])
             self.report["policy_identity"].update(
                 qualification=None, extraction=None,
@@ -1589,6 +1592,9 @@ class Journey:
             record["duration_ms"] = round((time.monotonic() - started) * 1000)
 
     def validate_release_inputs(self) -> None:
+        if self.diagnostic_registration is not None:
+            diagnostic.verify_infrastructure(
+                self.diagnostic_registration, self.base_manifest, self.candidate_manifest)
         base_sha = self.base_manifest["RELEASE_GIT_SHA"]
         if self.candidate_manifest["RELEASE_GIT_SHA"] != self.git_sha:
             raise QualificationFailure("candidate_manifest_sha_mismatch")
@@ -1867,6 +1873,12 @@ class Journey:
             target.write_bytes((self.root / relative).read_bytes())
         self.release_tool = tool_root / "infra/docker/release.sh"
         self.release_tool.chmod(0o700)
+        if (self.diagnostic_registration is not None
+                and self.diagnostic_registration.value["schema"] == diagnostic.REGISTRATION_SCHEMA_V7):
+            self.release_tool.parent.chmod(0o700)
+            write_private(self.release_tool.parent / "diagnostic-registration.json",
+                          self.diagnostic_registration.encoded)
+            diagnostic.sync_directory(self.release_tool.parent)
         self.release_state = temporary_root / "release-state"
         run(
             [
@@ -1928,6 +1940,9 @@ class Journey:
             "RELEASE_HTTP_PORT": str(self.port),
             "RELEASE_QUALIFICATION_SUBNET": self.network_subnet or "",
         }
+        if (self.diagnostic_registration is not None
+                and self.diagnostic_registration.value["schema"] == diagnostic.REGISTRATION_SCHEMA_V7):
+            self.compose_env["RELEASE_DIAGNOSTIC_REGISTRATION_SHA256"] = self.diagnostic_registration.sha256
         if self.network_subnet is not None:
             path = diagnostic.network.guard("overlay", self.network_subnet, self.release_state,
                                             self.project, self.runtime_root)
@@ -1961,8 +1976,15 @@ class Journey:
         adapter = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(adapter)
         try:
-            path = adapter.embedding_overlay(profile, self.release_state, self.runtime_root)
-        except (adapter.Invalid, ValueError, TypeError, KeyError, OSError) as error:
+            registration_input = None
+            if self.diagnostic_registration.value["schema"] == diagnostic.REGISTRATION_SCHEMA_V7:
+                raw = adapter.capture_registration(
+                    profile, self.release_tool.parent / "diagnostic-registration.json",
+                    self.diagnostic_registration.sha256, self.runtime_root)
+                registration_input = (raw, self.diagnostic_registration.sha256)
+            path = adapter.embedding_overlay(profile, self.release_state, self.runtime_root,
+                                             registration_input)
+        except (adapter.Invalid, ValueError, TypeError, KeyError, OSError, RecursionError) as error:
             raise QualificationFailure("diagnostic_embedding_overlay_invalid") from error
         self.private_report["embedding_overlay_sha256"] = sha256_bytes(Path(path).read_bytes())
         return ["-f", path]
@@ -4236,18 +4258,19 @@ class Journey:
             self.compose("up", "-d", "--no-deps", "embedding", capture=False)
             self.prestart_docker_mutation_unknown = False
             profile = self.diagnostic_registration.profile
+            images = self.diagnostic_registration.infrastructure_images
             embedding_name = f"{self.prefix}-embedding"
             nginx_name = f"{self.prefix}-nginx"
             embedding = docker_inspect("container", embedding_name)
-            image = docker_inspect("image", profile["embedding_runtime_image"])
+            image = docker_inspect("image", images["EMBEDDING_IMAGE"])
             nginx = docker_inspect("container", nginx_name)
-            nginx_image = docker_inspect("image", profile["embedding_probe_image"])
+            nginx_image = docker_inspect("image", images["NGINX_IMAGE"])
             config = embedding.get("Config") or {}
             host = embedding.get("HostConfig") or {}
             command = config.get("Cmd") or []
             repo_digests = image.get("RepoDigests") or []
-            digest_suffix = profile["embedding_runtime_image"].split("@", 1)[1]
-            nginx_digest_suffix = profile["embedding_probe_image"].split("@", 1)[1]
+            digest_suffix = images["EMBEDDING_IMAGE"].split("@", 1)[1]
+            nginx_digest_suffix = images["NGINX_IMAGE"].split("@", 1)[1]
             nginx_config = nginx.get("Config") or {}
             mounts = [mount for mount in embedding.get("Mounts") or []
                       if mount.get("Destination") == "/data"]
@@ -4263,13 +4286,13 @@ class Journey:
                 "--max-client-batch-size": "1",
                 "--payload-limit": str(profile["embedding_max_request_bytes"]),
             }
-            if (config.get("Image") != profile["embedding_runtime_image"]
+            if (config.get("Image") != images["EMBEDDING_IMAGE"]
                     or embedding.get("Image") != image.get("Id")
                     or not any(value.endswith("@" + digest_suffix) for value in repo_digests)
                     or (config.get("Labels") or {}).get("com.docker.compose.project") != self.project
                     or (host.get("PortBindings") or {})
                     or (cache.get("Labels") or {}).get("com.docker.compose.project") != self.project
-                    or nginx_config.get("Image") != profile["embedding_probe_image"]
+                    or nginx_config.get("Image") != images["NGINX_IMAGE"]
                     or nginx.get("Image") != nginx_image.get("Id")
                     or not any(value.endswith("@" + nginx_digest_suffix)
                                for value in nginx_image.get("RepoDigests") or [])
@@ -4359,8 +4382,8 @@ class Journey:
                 "provider": profile["embedding_provider"],
                 "model": profile["embedding_model"],
                 "model_revision": profile["embedding_model_revision"],
-                "runtime_image": profile["embedding_runtime_image"],
-                "probe_image": profile["embedding_probe_image"],
+                "runtime_image": images["EMBEDDING_IMAGE"],
+                "probe_image": images["NGINX_IMAGE"],
                 "provider_dimensions": len(vector),
                 "storage_dimensions": profile["embedding_storage_dimensions"],
                 "prompt_tokens": usage["prompt_tokens"],
@@ -6671,9 +6694,11 @@ def main() -> int:
                 root, base["RELEASE_GIT_SHA"], args.git_sha,
             ),
         )
+        diagnostic.verify_infrastructure(registration, base, candidate)
         if registration.value["schema"] in (
-                diagnostic.REGISTRATION_SCHEMA_V5, diagnostic.REGISTRATION_SCHEMA_V6):
-            probe_image = registration.profile["embedding_probe_image"]
+                diagnostic.REGISTRATION_SCHEMA_V5, diagnostic.REGISTRATION_SCHEMA_V6,
+                diagnostic.REGISTRATION_SCHEMA_V7):
+            probe_image = registration.infrastructure_images["NGINX_IMAGE"]
             if base["NGINX_IMAGE"] != probe_image or candidate["NGINX_IMAGE"] != probe_image:
                 raise QualificationFailure("embedding_probe_image_mismatch")
         load_product_input(root / diagnostic.product_fixture(registration.value["schema"]),
@@ -6683,6 +6708,7 @@ def main() -> int:
                                diagnostic.REGISTRATION_SCHEMA_V4,
                                diagnostic.REGISTRATION_SCHEMA_V5,
                                diagnostic.REGISTRATION_SCHEMA_V6,
+                               diagnostic.REGISTRATION_SCHEMA_V7,
                            ))
         diagnostic.network.preflight(registration.value.get("network_subnet"))
         if any(base[key] != candidate[key] for key in INFRASTRUCTURE_IMAGE_KEYS):

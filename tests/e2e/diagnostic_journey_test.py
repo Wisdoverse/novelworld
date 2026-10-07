@@ -290,6 +290,201 @@ class DiagnosticJourneyTest(unittest.TestCase):
         value["limits"]["profile"] = CONTROL.PROFILE_V4
         return value
 
+    def v7_value(self):
+        value = self.v6_value()
+        value["schema"] = CONTROL.REGISTRATION_SCHEMA_V7
+        value["limits"]["max_cost_micro_cny"] = 10000000
+        value["infrastructure"] = {
+            "images": {key: "registry.invalid/repair@sha256:" + marker * 64
+                       for key, marker in (("POSTGRES_IMAGE", "c"), ("NGINX_IMAGE", "d"),
+                                           ("EMBEDDING_IMAGE", "e"))},
+            "evidence_sha256": {key: "f" * 64 for key in BUDGET.INFRASTRUCTURE_KEYS},
+            "risk_review_sha256": "1" * 64,
+        }
+        return value
+
+    def test_v7_authenticates_deployment_and_preserves_the_compiled_v4_budget(self):
+        value = self.v7_value()
+        registration = self.load(value)
+        legacy = self.v6_value()
+        legacy["limits"]["max_cost_micro_cny"] = 10000000
+        old = self.load(legacy)
+        self.assertEqual(registration.binding, old.binding)
+        self.assertEqual(registration.environment(), old.environment())
+        self.assertEqual(registration.profile, old.profile)
+        self.assertEqual(registration.profile_raw, (ROOT / CONTROL.PROFILE_PATH_V4).read_bytes())
+        self.assertEqual(registration.infrastructure_images, value["infrastructure"]["images"])
+        self.assertNotEqual(registration.infrastructure_images["EMBEDDING_IMAGE"],
+                            registration.profile["embedding_runtime_image"])
+        self.assertEqual(CONTROL.product_fixture(value["schema"]),
+                         CONTROL.product_fixture(CONTROL.REGISTRATION_SCHEMA_V6))
+        for amount in (0, 9999999, 10000000):
+            bounded = copy.deepcopy(value)
+            bounded["limits"]["max_cost_micro_cny"] = amount
+            self.load(bounded)
+        for amount in (-1, True, 10000001, 35000000):
+            invalid = copy.deepcopy(value)
+            invalid["limits"]["max_cost_micro_cny"] = amount
+            with self.subTest(amount=amount), self.assertRaises(CONTROL.DiagnosticFailure):
+                self.load(invalid)
+        for schema in (CONTROL.REGISTRATION_SCHEMA, CONTROL.REGISTRATION_SCHEMA_V2,
+                       CONTROL.REGISTRATION_SCHEMA_V3, CONTROL.REGISTRATION_SCHEMA_V4,
+                       CONTROL.REGISTRATION_SCHEMA_V5, CONTROL.REGISTRATION_SCHEMA_V6):
+            with self.subTest(legacy=schema), self.assertRaises(CONTROL.DiagnosticFailure):
+                self.load({**value, "schema": schema})
+
+    def test_v7_rejects_missing_mutable_malformed_and_changed_infrastructure(self):
+        value = self.v7_value()
+        approved = CONTROL.digest(CONTROL.canonical(value))
+        for path, replacement in (
+            (("infrastructure",), None),
+            (("infrastructure", "images"), {}),
+            (("infrastructure", "images", "EMBEDDING_IMAGE"), "registry.invalid/repair:latest"),
+            (("infrastructure", "images", "EMBEDDING_IMAGE"), "a" * 513 + "@sha256:" + "a" * 64),
+            (("infrastructure", "evidence_sha256"), {}),
+            (("infrastructure", "evidence_sha256", "NGINX_IMAGE"), "F" * 64),
+            (("infrastructure", "risk_review_sha256"), False),
+            (("infrastructure", "risk_review_sha256"), ""),
+        ):
+            invalid = copy.deepcopy(value)
+            target = invalid
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = replacement
+            with self.subTest(path=path), self.assertRaises(CONTROL.DiagnosticFailure):
+                self.load(invalid)
+        for path in ((), ("infrastructure",), ("infrastructure", "images"),
+                     ("infrastructure", "evidence_sha256")):
+            invalid = copy.deepcopy(value)
+            target = invalid
+            for key in path:
+                target = target[key]
+            target["override"] = "a" * 64
+            with self.subTest(extra=path), self.assertRaises(CONTROL.DiagnosticFailure):
+                self.load(invalid)
+        invalid = copy.deepcopy(value)
+        del invalid["infrastructure"]
+        with self.assertRaises(CONTROL.DiagnosticFailure):
+            self.load(invalid)
+        invalid = copy.deepcopy(value)
+        invalid["infrastructure"]["risk_review_sha256"] = "2" * 64
+        with self.assertRaises(CONTROL.DiagnosticFailure) as changed:
+            self.load(invalid, approved)
+        self.assertEqual(changed.exception.code, "diagnostic_registration_digest_mismatch")
+
+    def test_v7_release_carrier_binds_budget_and_fences_missing_or_replaced_registration(self):
+        registration = self.load(self.v7_value())
+        profile = (ROOT / CONTROL.PROFILE_PATH_V4).read_text()
+        state = self.directory / "release-state"
+        state.mkdir(mode=0o700)
+        environment = {**os.environ, **registration.environment()}
+
+        def invoke(action, *, raw=registration.encoded, sha=registration.sha256, env=environment,
+                   captured=True, paths=()):
+            binding = (["--registration-json", raw.decode(), "--registration-sha256", sha]
+                       if captured else [])
+            return subprocess.run([sys.executable, "-B", str(ROOT / "infra/docker/diagnostic_budget.py"),
+                                   profile, action, str(state), "nwq-abcdef1234", *binding, *paths],
+                                  env=env, capture_output=True, timeout=10)
+
+        capture_paths = (str(self.registration_file), registration.sha256, str(ROOT))
+        result = invoke("capture-registration", captured=False, paths=capture_paths)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, registration.encoded)
+        for mutation in (
+            {"LLM_DIAGNOSTIC_BUDGET_ID": str(uuid.uuid4())},
+            {"LLM_DIAGNOSTIC_BUDGET_LIMITS": CONTROL.canonical({
+                **registration.value["limits"], "max_cost_micro_cny": 9999999}).decode()},
+        ):
+            with self.subTest(budget=mutation):
+                refused = invoke("capture-registration", captured=False, paths=capture_paths,
+                                 env={**environment, **mutation})
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertEqual(refused.stdout, b"")
+                self.assertNotIn(str(self.registration_file).encode(), refused.stderr)
+        for mode in (0o644, 0o400):
+            self.registration_file.chmod(mode)
+            self.assertNotEqual(invoke("capture-registration", captured=False,
+                                      paths=capture_paths).returncode, 0)
+        self.registration_file.chmod(0o600)
+        link = self.directory / "linked-registration.json"
+        link.symlink_to(self.registration_file)
+        self.assertNotEqual(invoke("capture-registration", captured=False,
+                                  paths=(str(link), *capture_paths[1:])).returncode, 0)
+        for action in ("adopt", "provision-start", "provision-complete", "preflight", "upgrade", "rollback"):
+            with self.subTest(action=action):
+                self.assertEqual(invoke(action).returncode, 0)
+        marker = state / "diagnostic-provisioning.json"
+        original = marker.read_bytes()
+        self.assertEqual(json.loads(original)["registration_sha256"], registration.sha256)
+        self.assertNotEqual(invoke("preflight", captured=False).returncode, 0)
+        replacement = registration.value
+        replacement["infrastructure"]["risk_review_sha256"] = "2" * 64
+        raw = CONTROL.canonical(replacement)
+        self.assertNotEqual(invoke("preflight", raw=raw, sha=CONTROL.digest(raw)).returncode, 0)
+        self.assertEqual(marker.read_bytes(), original)
+        self.assertEqual(list(self.output.iterdir()), [])
+
+    def test_v7_release_requires_the_approved_capture_before_cold_adoption(self):
+        journey = self.journey(self.v7_value())
+
+        def git_only(command, **_):
+            if command[:2] == ["git", "clone"]:
+                Path(command[-1]).mkdir()
+            elif command[:2] != ["git", "checkout"]:
+                raise AssertionError("unexpected subprocess")
+            return ""
+
+        with mock.patch.object(RUNNER, "run", side_effect=git_only):
+            journey.prepare_runtime()
+        self.addCleanup(journey.runtime_temp.cleanup)
+        self.assertEqual(journey.compose_env["RELEASE_DIAGNOSTIC_REGISTRATION_SHA256"],
+                         journey.diagnostic_registration.sha256)
+        self.assertNotIn("RELEASE_DIAGNOSTIC_REGISTRATION_SHA256",
+                         RUNNER.qualification_environment(ROOT, {
+                             "RELEASE_DIAGNOSTIC_REGISTRATION_SHA256": "f" * 64}))
+        source = journey.release_tool.read_text()
+        functions = source[source.index("diagnostic_value() {\n"):
+                           source.index("\ndiagnostic_preflight()")]
+        script = """set -euo pipefail
+repo_root=$TEST_ROOT; secrets_file="$repo_root/.env"; state_dir=$TEST_STATE
+qualification_scope=true; qualification_project=$TEST_PROJECT
+diagnostic_loaded=false; diagnostic_enabled=false; diagnostic_registration_args=()
+die() { exit 1; }
+""" + functions + "\nload_diagnostic_mode\ndiagnostic adopt\n"
+        harness = journey.release_tool.parent / "capture-test.sh"
+        RUNNER.write_private(harness, script.encode())
+        environment = {**journey.compose_env, **journey.diagnostic_registration.environment(),
+                       "TEST_ROOT": str(journey.runtime_root), "TEST_STATE": str(journey.release_state),
+                       "TEST_PROJECT": journey.project}
+
+        def invoke(env=environment):
+            return subprocess.run(["bash", str(harness)], env=env, capture_output=True, timeout=10)
+
+        self.assertEqual(invoke().returncode, 0)
+        captured = journey.release_tool.parent / "diagnostic-registration.json"
+        encoded = captured.read_bytes()
+        for sha in ("", "f" * 64):
+            with self.subTest(sha=sha):
+                self.assertNotEqual(invoke({**environment,
+                    "RELEASE_DIAGNOSTIC_REGISTRATION_SHA256": sha}).returncode, 0)
+        captured.unlink()
+        self.assertNotEqual(invoke().returncode, 0)
+        RUNNER.write_private(captured, encoded)
+        captured.chmod(0o644)
+        self.assertNotEqual(invoke().returncode, 0)
+        captured.chmod(0o600)
+        changed = journey.diagnostic_registration.value
+        changed["infrastructure"]["risk_review_sha256"] = "2" * 64
+        captured.write_bytes(CONTROL.canonical(changed))
+        self.assertNotEqual(invoke().returncode, 0)
+        captured.write_bytes(b"[" * 2000 + b"0" + b"]" * 2000)
+        refused = invoke()
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertNotIn(b"Traceback", refused.stderr)
+        self.assertFalse((journey.release_state / "diagnostic-provisioning.json").exists())
+        self.assertEqual(list(self.output.iterdir()), [])
+
     def test_v6_selects_only_current_flash_with_frozen_limits_and_fixture(self):
         value = self.v6_value()
         registration = self.load(value)
@@ -361,6 +556,7 @@ class DiagnosticJourneyTest(unittest.TestCase):
             (CONTROL.PROFILE_PATH, "a589b4cb0e4968f5624f8d4039c262ab330ecd5f9524204b39cfa868c8257839"),
             (CONTROL.PROFILE_PATH_V2, "6cee114e4008b250e2d00d629c938dd245027d5245437b1f2cbdeb81c4bdffbc"),
             (CONTROL.PROFILE_PATH_V3, "1ff657e8dbe753cd7b7202400fe71ee0d4be13eaeac526d4733a74647cecb4db"),
+            (CONTROL.PROFILE_PATH_V4, "7ba857fd01e4c6333d9b9bf90211ed40633b18cdfbef7c48cc3c9c046baf1ebe"),
             (Path("tests/e2e/fixtures/h4-journey-v1.json"), "e01d35e1bdad197876aefce1ae32f43dc93be185f9987c247ef2525c8ed0f9a9"),
             (Path("tests/e2e/fixtures/h4-journey-v2.json"), "e020028f99d8da474d2698d10cf3cae6e96e645e8ed3b15ea4c4cdcf49d9c551"),
         ):
@@ -931,12 +1127,16 @@ class DiagnosticJourneyTest(unittest.TestCase):
         self.assertIn(journey.project + "-postgres", calls[0])
 
     def journey(self, value=None):
+        value = self.value if value is None else value
         for path, marker in ((self.base, "b"), (self.candidate, "a")):
             manifest = {"RELEASE_VERSION": "test", "RELEASE_GIT_SHA": marker * 40,
                         **{key: "registry.invalid/service@sha256:" + marker * 64
                            for key in RUNNER.RELEASE_IMAGE_KEYS}}
+            if value["schema"] == CONTROL.REGISTRATION_SCHEMA_V7:
+                manifest.update({key: value["infrastructure"]["images"][key]
+                                 for key in ("POSTGRES_IMAGE", "NGINX_IMAGE")})
+                manifest["REDIS_IMAGE"] = "registry.invalid/redis@sha256:" + "b" * 64
             path.write_text("".join(f"{key}={item}\n" for key, item in manifest.items()))
-        value = self.value if value is None else value
         value["base_manifest_sha256"] = CONTROL.digest(self.base.read_bytes())
         value["candidate_manifest_sha256"] = CONTROL.digest(self.candidate.read_bytes())
         registration = self.load(value)
@@ -952,14 +1152,18 @@ class DiagnosticJourneyTest(unittest.TestCase):
     def test_local_diagnostic_native_compose_uses_captured_profile_image(self):
         selected = {}
         expected = {}
-        for value in (self.v5_value(), self.v6_value()):
+        for value in (self.v5_value(), self.v6_value(), self.v7_value()):
             journey = self.journey(value)
             # This checks native config only, with synthetic registration data.
             journey.git_sha = RUNNER.git(ROOT, "rev-parse", "HEAD")
-            journey.prepare_runtime()
+            with mock.patch.object(RUNNER.diagnostic, "sync_directory",
+                                   wraps=RUNNER.diagnostic.sync_directory) as sync:
+                journey.prepare_runtime()
+            self.assertEqual(sync.call_args_list, [mock.call(journey.release_tool.parent)]
+                             if value["schema"] == CONTROL.REGISTRATION_SCHEMA_V7 else [])
             self.addCleanup(journey.runtime_temp.cleanup)
             profile = journey.release_tool.parents[2] / CONTROL.profile_path(value["schema"])
-            image = json.loads(profile.read_bytes())["embedding_runtime_image"]
+            image = journey.diagnostic_registration.infrastructure_images["EMBEDDING_IMAGE"]
             name = value["schema"]
             selected[name + ":journey"] = json.loads(journey.compose(
                 "config", "--format", "json", "embedding"))["services"]["embedding"]["image"]
@@ -974,13 +1178,22 @@ state_dir=$TEST_STATE; qualification_project=$TEST_PROJECT; qualification_subnet
 cache_mode=postgres; cache_redis_password=; cache_redis_url=memory://
 diagnostic_enabled=true; diagnostic_id=$LLM_DIAGNOSTIC_BUDGET_ID
 diagnostic_limits=$LLM_DIAGNOSTIC_BUDGET_LIMITS; diagnostic_profile=$LLM_DIAGNOSTIC_PROFILE
+diagnostic_registration_args=()
 IFS= read -r -d '' diagnostic_helper_source < "$TEST_HELPER" || true
 IFS= read -r -d '' diagnostic_profile_source < "$TEST_PROFILE" || true
 qualification_scope=true; container_prefix=$TEST_PROJECT; http_bind=127.0.0.1; http_port=18080
 compose_project_args=(--project-name "$TEST_PROJECT")
 compose_deadline_args=(); compose_profile_args=(); network_overlay_args=()
 die() { return 1; }
-""" + diagnostic_function + "\n" + compose_function + "\ncompose config --format json embedding\n"
+""" + diagnostic_function + "\n" + compose_function + """
+if [[ -n "${RELEASE_DIAGNOSTIC_REGISTRATION_SHA256:-}" ]]; then
+  captured=$(diagnostic capture-registration "${TEST_HELPER%/*}/diagnostic-registration.json" \
+    "$RELEASE_DIAGNOSTIC_REGISTRATION_SHA256" "$repo_root")
+  diagnostic_registration_args=(--registration-json "$captured" \
+    --registration-sha256 "$RELEASE_DIAGNOSTIC_REGISTRATION_SHA256")
+fi
+compose config --format json embedding
+"""
             rendered = subprocess.run(["bash", "-c", script], capture_output=True, timeout=30,
                 env={**journey.compose_env, **journey.diagnostic_registration.environment(),
                      "TEST_ROOT": str(journey.runtime_root), "TEST_STATE": str(journey.release_state),
@@ -990,6 +1203,12 @@ die() { return 1; }
             self.assertEqual(rendered.returncode, 0, "native release config failed")
             selected[name + ":release"] = json.loads(rendered.stdout)["services"]["embedding"]["image"]
             expected.update({name + ":journey": image, name + ":release": image})
+            if value["schema"] == CONTROL.REGISTRATION_SCHEMA_V7:
+                RUNNER.git(journey.runtime_root, "checkout", "--detach",
+                           "ac04165dd13b210876dcb4d1a736b1c99f128f39")
+                selected[name + ":base"] = json.loads(journey.compose(
+                    "config", "--format", "json", "embedding"))["services"]["embedding"]["image"]
+                expected[name + ":base"] = image
             self.assertEqual(RUNNER.git(journey.runtime_root, "status", "--porcelain"), "")
             overlay = journey.release_state / "diagnostic-embedding.compose.json"
             self.assertEqual(journey.private_report["embedding_overlay_sha256"],
@@ -1004,6 +1223,17 @@ die() { return 1; }
                     self.assertNotIn(str(overlay), docker.call_args.args[0])
                 profile.write_bytes(profile_bytes)
                 overlay.write_bytes(overlay_bytes)
+            if value["schema"] == CONTROL.REGISTRATION_SCHEMA_V7:
+                captured = journey.release_tool.parent / "diagnostic-registration.json"
+                self.assertEqual(captured.read_bytes(), journey.diagnostic_registration.encoded)
+                self.assertEqual(captured.stat().st_mode & 0o777, 0o600)
+                captured.unlink()
+                with mock.patch.object(RUNNER, "run") as docker:
+                    with self.assertRaises(RUNNER.QualificationFailure):
+                        journey.compose("config", "--quiet")
+                    docker.assert_not_called()
+                    journey.compose("stop", "--timeout", "5", "embedding")
+                    self.assertNotIn(str(overlay), docker.call_args.args[0])
         self.assertEqual(selected, expected)
         for explicit in (False, True):
             command = ["docker", "compose", "--project-directory", str(ROOT),
@@ -1408,12 +1638,18 @@ die() { return 1; }
             self.load()
 
     def test_v5_v6_prestart_proves_keyless_pinned_runtime_and_vector(self):
+        cases = []
         for path in (CONTROL.PROFILE_PATH_V3, CONTROL.PROFILE_PATH_V4):
+            profile = json.loads((ROOT / path).read_bytes())
+            cases.append((path, {"EMBEDDING_IMAGE": profile["embedding_runtime_image"],
+                                 "NGINX_IMAGE": profile["embedding_probe_image"]}))
+        cases.append((CONTROL.PROFILE_PATH_V4, self.load(self.v7_value()).infrastructure_images))
+        for path, images in cases:
             profile = json.loads((ROOT / path).read_bytes())
             journey = object.__new__(RUNNER.Journey)
             journey.local_embedding = True
             journey.project = journey.prefix = "nwq-abcdef1234"
-            journey.diagnostic_registration = mock.Mock(profile=profile)
+            journey.diagnostic_registration = mock.Mock(profile=profile, infrastructure_images=images)
             journey.private_report = {}
             journey.report = {"stages": []}
             journey.current_stage = "preflight"
@@ -1438,19 +1674,19 @@ die() { return 1; }
                 if kind == "container" and name.endswith("-embedding"):
                     return {
                         "Image": tei_id,
-                        "Config": {"Image": profile["embedding_runtime_image"], "Cmd": command,
+                        "Config": {"Image": images["EMBEDDING_IMAGE"], "Cmd": command,
                                    "Labels": {"com.docker.compose.project": journey.project}},
                         "HostConfig": {"PortBindings": {}},
                         "Mounts": [{"Type": "volume", "Destination": "/data", "Name": "cache"}],
                     }
                 if kind == "container":
                     return {"Image": nginx_id, "Config": {
-                        "Image": profile["embedding_probe_image"],
+                        "Image": images["NGINX_IMAGE"],
                         "Labels": {"com.docker.compose.project": journey.project},
                     }}
                 if kind == "volume":
                     return {"Labels": {"com.docker.compose.project": journey.project}}
-                image_id = tei_id if name == profile["embedding_runtime_image"] else nginx_id
+                image_id = tei_id if name == images["EMBEDDING_IMAGE"] else nginx_id
                 digest = name.split("@", 1)[1]
                 return {"Id": image_id, "RepoDigests": ["registry.invalid/image@" + digest]}
 
@@ -1505,6 +1741,10 @@ die() { return 1; }
                     mock.patch.object(RUNNER.diagnostic, "bounded_command", side_effect=bounded):
                 journey.prestart_v5()
             self.assertTrue(journey.base_prestarted)
+            self.assertEqual(journey.private_report["local_embedding_prestart"]["runtime_image"],
+                             images["EMBEDDING_IMAGE"])
+            self.assertEqual(journey.private_report["local_embedding_prestart"]["probe_image"],
+                             images["NGINX_IMAGE"])
             self.assertEqual(
                 journey.private_report["local_embedding_prestart"]["provider_dimensions"], 1024
             )
@@ -2244,13 +2484,17 @@ die() { return 1; }
         run_diagnostic.assert_called_once_with(fake_journey)
 
     def test_v6_cli_checks_probe_pins_before_artifacts_config_and_started(self):
-        self.value = self.v6_value()
+        for value in (self.v6_value(), self.v7_value()):
+            self.check_cli_infrastructure_pins(value)
+
+    def check_cli_infrastructure_pins(self, value):
+        self.value = value
         journey = self.journey()
         registration = journey.diagnostic_registration
         base, candidate = dict(journey.base_manifest), dict(journey.candidate_manifest)
         for key in RUNNER.INFRASTRUCTURE_IMAGE_KEYS:
             candidate[key] = base[key]
-        base["NGINX_IMAGE"] = candidate["NGINX_IMAGE"] = registration.profile["embedding_probe_image"]
+        base["NGINX_IMAGE"] = candidate["NGINX_IMAGE"] = registration.infrastructure_images["NGINX_IMAGE"]
         arguments = [
             "runner", "--config", str(journey.config_path),
             "--output-dir", str(self.output), "--git-sha", "a" * 40,
@@ -2262,13 +2506,14 @@ die() { return 1; }
         def fake_git(_root, *parts):
             return "a" * 40 if parts[:2] == ("rev-parse", "HEAD") else ""
 
-        for wrong in ("base", "candidate", None):
-            with self.subTest(wrong=wrong):
+        keys = ("POSTGRES_IMAGE", "NGINX_IMAGE") if value["schema"] == CONTROL.REGISTRATION_SCHEMA_V7 else ("NGINX_IMAGE",)
+        for wrong_key, wrong in ((key, label) for key in keys for label in ("base", "candidate", None)):
+            with self.subTest(schema=value["schema"], wrong=wrong, key=wrong_key):
                 for label, path, manifest in (("base", self.base, base), ("candidate", self.candidate, candidate)):
-                    value = dict(manifest)
+                    manifest_value = dict(manifest)
                     if label == wrong:
-                        value["NGINX_IMAGE"] = "nginx:alpine@sha256:" + "f" * 64
-                    path.write_text("".join(f"{key}={item}\n" for key, item in value.items()))
+                        manifest_value[wrong_key] = "registry.invalid/wrong@sha256:" + "f" * 64
+                    path.write_text("".join(f"{key}={item}\n" for key, item in manifest_value.items()))
                 fake_journey = mock.Mock(diagnostic_ledger=object())
                 with mock.patch.object(sys, "argv", arguments), \
                         mock.patch.object(RUNNER, "git", side_effect=fake_git), \
@@ -2281,9 +2526,11 @@ die() { return 1; }
                         mock.patch.object(RUNNER, "run_diagnostic", return_value=0) as run_diagnostic, \
                         mock.patch.object(CONTROL.DiagnosticLedger, "start") as started:
                     if wrong:
-                        with self.assertRaises(RUNNER.QualificationFailure) as failure:
+                        v7 = registration.value["schema"] == CONTROL.REGISTRATION_SCHEMA_V7
+                        with self.assertRaises(RUNNER.diagnostic.DiagnosticFailure if v7 else RUNNER.QualificationFailure) as failure:
                             RUNNER.main()
-                        self.assertEqual(str(failure.exception), "embedding_probe_image_mismatch")
+                        self.assertEqual(str(failure.exception), "diagnostic_infrastructure_manifest_mismatch"
+                                         if v7 else "embedding_probe_image_mismatch")
                         artifacts.assert_not_called()
                         fixture.assert_not_called()
                         journey_type.assert_not_called()
@@ -2291,7 +2538,7 @@ die() { return 1; }
                     else:
                         self.assertEqual(RUNNER.main(), 0)
                         artifacts.assert_called_once()
-                        fixture.assert_called_once_with(ROOT / CONTROL.product_fixture(CONTROL.REGISTRATION_SCHEMA_V6), prospective=True)
+                        fixture.assert_called_once_with(ROOT / CONTROL.product_fixture(registration.value["schema"]), prospective=True)
                         self.assertIs(journey_type.call_args.kwargs["diagnostic_registration"], registration)
                         run_diagnostic.assert_called_once_with(fake_journey)
                     config.assert_not_called()

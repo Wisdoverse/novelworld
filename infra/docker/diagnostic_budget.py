@@ -19,6 +19,15 @@ import uuid
 
 SERVICES = ("user-service", "novel-service", "agent-service", "narrative-service")
 MAX_OUTPUT = 4096
+REGISTRATION_SCHEMA_V7 = "vision-journey-registration-v7"
+REGISTRATION_KEYS = {
+    "schema", "budget_id", "hypothesis", "candidate_git_sha",
+    "base_manifest_sha256", "candidate_manifest_sha256",
+    "base_application_image_ids", "candidate_application_image_ids",
+    "profile_sha256", "product_fixture_sha256", "prompt_schema_identities",
+    "limits", "output_dir", "ledger_path",
+}
+INFRASTRUCTURE_KEYS = {"POSTGRES_IMAGE", "NGINX_IMAGE", "EMBEDDING_IMAGE"}
 PROBE_REASONS = frozenset(("child_nonzero", "deadline", "output_overflow", "spawn_error",
                            "read_error", "wait_error", "invalid_capability", "create_ack_invalid",
                            "create_unconfirmed", "cleanup_nonzero", "cleanup_timeout",
@@ -125,12 +134,67 @@ def sync_directory(directory):
         os.close(descriptor)
 
 
-def embedding_overlay(profile_bytes, state, root):
+def infrastructure_registration(profile_bytes, raw, approved_sha256):
+    """Validate a separate V7 deployment binding without changing the payer profile."""
+    require(isinstance(raw, bytes) and len(raw) <= 65536)
+    require(isinstance(approved_sha256, str)
+            and re.fullmatch(r"[0-9a-f]{64}", approved_sha256))
+    value = strict_json(raw)
+    require(isinstance(value, dict)
+            and set(value) == REGISTRATION_KEYS | {"network_subnet", "infrastructure"}
+            and value["schema"] == REGISTRATION_SCHEMA_V7)
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"), allow_nan=False).encode()
+    require(raw == encoded and hashlib.sha256(encoded).hexdigest() == approved_sha256)
+    profile = strict_json(profile_bytes)
+    require(profile["profile"] == "four-layer-journey-diagnostic-v4"
+            and profile["contract"] == "llm-diagnostic-budget-v2"
+            and value["profile_sha256"] == hashlib.sha256(profile_bytes).hexdigest())
+    registered = registration(profile_bytes, {
+        "LLM_DIAGNOSTIC_BUDGET_ID": value["budget_id"],
+        "LLM_DIAGNOSTIC_BUDGET_LIMITS": json.dumps(value["limits"], allow_nan=False),
+    })
+    require(registered["limits"]["max_cost_micro_cny"] <= 10000000)
+    infrastructure = value["infrastructure"]
+    require(isinstance(infrastructure, dict) and set(infrastructure) == {
+        "images", "evidence_sha256", "risk_review_sha256"})
+    images, evidence = infrastructure["images"], infrastructure["evidence_sha256"]
+    require(isinstance(images, dict) and set(images) == INFRASTRUCTURE_KEYS
+            and all(isinstance(image, str) and len(image) <= 512 and re.fullmatch(
+                r"[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}", image)
+                for image in images.values()))
+    require(isinstance(evidence, dict) and set(evidence) == INFRASTRUCTURE_KEYS
+            and all(isinstance(item, str) and re.fullmatch(r"[0-9a-f]{64}", item)
+                    for item in [*evidence.values(), infrastructure["risk_review_sha256"]]))
+    return value
+
+
+def capture_registration(profile_bytes, path, approved_sha256, root):
+    path, root = Path(path), Path(root).resolve()
+    require(path.is_absolute() and path == path.resolve()
+            and not any(part.is_symlink() for part in (path, *path.parents))
+            and path != root and root not in path.parents)
+    parent = path.parent.stat()
+    require(parent.st_uid == os.getuid() and stat.S_IMODE(parent.st_mode) == 0o700)
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+                and stat.S_IMODE(info.st_mode) == 0o600 and info.st_size <= 65536)
+        raw = stream.read(65537)
+    infrastructure_registration(profile_bytes, raw, approved_sha256)
+    return raw
+
+
+def embedding_overlay(profile_bytes, state, root, registration_input=None):
     profile = strict_json(profile_bytes)
     if profile["profile"] in ("vision-journey-diagnostic-v1", "four-layer-journey-diagnostic-v2"):
+        require(registration_input is None)
         return None
     require(profile["profile"] in ("four-layer-journey-diagnostic-v3", "four-layer-journey-diagnostic-v4"))
-    image = profile["embedding_runtime_image"]
+    image = (infrastructure_registration(profile_bytes, *registration_input)
+             ["infrastructure"]["images"]["EMBEDDING_IMAGE"]
+             if registration_input is not None else profile["embedding_runtime_image"])
     require(isinstance(image, str) and re.fullmatch(
         r"[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}", image))
     encoded = json.dumps({"services": {"embedding": {"image": image}}},
@@ -364,10 +428,16 @@ def probe(image, project, expected):
             raise failure from cleanup_cause
 
 
-def preflight(raw, manifest, registered, project):
+def preflight(raw, manifest, registered, project, infrastructure=None):
     config = strict_json(raw)
     services = config["services"]
     require(isinstance(services, dict))
+    if infrastructure is not None:
+        for key, service in (("POSTGRES_IMAGE", "postgres"), ("NGINX_IMAGE", "nginx")):
+            require(manifest[key] == infrastructure[key]
+                    and services[service]["image"] == infrastructure[key])
+        if "embedding" in services:
+            require(services["embedding"]["image"] == infrastructure["EMBEDDING_IMAGE"])
     expected = {key: value for key, value in registered["binding"].items() if key != "budget_id"}
     tokens = []
     images = []
@@ -398,11 +468,29 @@ def preflight(raw, manifest, registered, project):
 
 def main():
     profile_bytes, action, state, project, *paths = sys.argv[1:]
+    profile_bytes = profile_bytes.encode()
     require(re.fullmatch(r"nwq-(?:[a-f0-9]{10}|[a-f0-9]{32})", project))
-    registered = registration(profile_bytes.encode(), os.environ)
-    if action == "embedding-overlay":
+    registered = registration(profile_bytes, os.environ)
+    registration_input = None
+    if paths[:1] == ["--registration-json"]:
+        require(len(paths) >= 4 and paths[2] == "--registration-sha256")
+        registration_input = (paths[1].encode(), paths[3])
+        paths = paths[4:]
+    if action == "capture-registration":
+        require(registration_input is None and len(paths) == 3)
+        registration_input = (capture_registration(profile_bytes, paths[0], paths[1], paths[2]), paths[1])
+    infrastructure = None
+    if registration_input is not None:
+        value = infrastructure_registration(profile_bytes, *registration_input)
+        require(value["budget_id"] == registered["binding"]["budget_id"]
+                and value["limits"] == registered["limits"])
+        registered["registration_sha256"] = registration_input[1]
+        infrastructure = value["infrastructure"]["images"]
+    if action == "capture-registration":
+        sys.stdout.buffer.write(registration_input[0])
+    elif action == "embedding-overlay":
         require(len(paths) == 1)
-        overlay = embedding_overlay(profile_bytes.encode(), state, paths[0])
+        overlay = embedding_overlay(profile_bytes, state, paths[0], registration_input)
         if overlay is not None:
             print(overlay)
     elif action == "probe":
@@ -414,7 +502,7 @@ def main():
             manifest[key] = value
         raw = sys.stdin.buffer.read(1048577)
         require(len(raw) <= 1048576)
-        preflight(raw, manifest, registered, project)
+        preflight(raw, manifest, registered, project, infrastructure)
     else:
         marker_action(action, Path(state), registered)
 
@@ -422,5 +510,5 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (Invalid, ValueError, TypeError, KeyError, OSError, subprocess.SubprocessError):
+    except (Invalid, ValueError, TypeError, KeyError, OSError, RecursionError, subprocess.SubprocessError):
         sys.exit("release: diagnostic budget preflight failed")

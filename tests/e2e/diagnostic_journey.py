@@ -28,6 +28,10 @@ _network_spec = importlib.util.spec_from_file_location(
 network = importlib.util.module_from_spec(_network_spec)
 _network_spec.loader.exec_module(network)
 
+_budget_spec = importlib.util.spec_from_file_location(
+    "diagnostic_release_budget", Path(__file__).resolve().parents[2] / "infra/docker/diagnostic_budget.py")
+release_budget = importlib.util.module_from_spec(_budget_spec)
+_budget_spec.loader.exec_module(release_budget)
 
 REGISTRATION_SCHEMA = "vision-journey-registration-v1"
 REGISTRATION_SCHEMA_V2 = "vision-journey-registration-v2"
@@ -35,6 +39,7 @@ REGISTRATION_SCHEMA_V3 = "vision-journey-registration-v3"
 REGISTRATION_SCHEMA_V4 = "vision-journey-registration-v4"
 REGISTRATION_SCHEMA_V5 = "vision-journey-registration-v5"
 REGISTRATION_SCHEMA_V6 = "vision-journey-registration-v6"
+REGISTRATION_SCHEMA_V7 = release_budget.REGISTRATION_SCHEMA_V7
 LEDGER_SCHEMA = "vision-journey-ledger-v1"
 PRESTART_SCHEMA = "vision-journey-prestart-v1"
 PRESTART_SCHEMA_V2 = "vision-journey-prestart-v2"
@@ -55,13 +60,7 @@ APP_KEYS = {
     "GATEWAY_IMAGE", "USER_SERVICE_IMAGE", "NOVEL_SERVICE_IMAGE",
     "AGENT_SERVICE_IMAGE", "NARRATIVE_SERVICE_IMAGE", "FRONTEND_IMAGE",
 }
-REGISTRATION_KEYS = {
-    "schema", "budget_id", "hypothesis", "candidate_git_sha",
-    "base_manifest_sha256", "candidate_manifest_sha256",
-    "base_application_image_ids", "candidate_application_image_ids",
-    "profile_sha256", "product_fixture_sha256", "prompt_schema_identities",
-    "limits", "output_dir", "ledger_path",
-}
+REGISTRATION_KEYS = release_budget.REGISTRATION_KEYS
 
 
 class DiagnosticFailure(RuntimeError):
@@ -152,10 +151,11 @@ def sync_directory(path: Path) -> None:
 class Registration:
     """Canonical immutable bytes bind every run input to the reviewed digest."""
 
-    def __init__(self, encoded: bytes, profile: dict[str, Any]):
+    def __init__(self, encoded: bytes, profile: dict[str, Any], profile_raw: bytes | None = None):
         self.encoded = encoded
         self.sha256 = digest(encoded)
         self.profile = profile
+        self.profile_raw = profile_raw
 
     @property
     def value(self) -> dict[str, Any]:
@@ -173,19 +173,30 @@ class Registration:
                 "LLM_DIAGNOSTIC_PROFILE": self.profile["profile"],
                 "LLM_DIAGNOSTIC_BUDGET_LIMITS": canonical(value["limits"]).decode()}
 
+    @property
+    def infrastructure_images(self) -> dict[str, str]:
+        if self.value["schema"] == REGISTRATION_SCHEMA_V7:
+            try:
+                return release_budget.infrastructure_registration(
+                    self.profile_raw, self.encoded, self.sha256)["infrastructure"]["images"]
+            except (release_budget.Invalid, ValueError, TypeError, KeyError, OSError, RecursionError) as error:
+                raise DiagnosticFailure("diagnostic_infrastructure_invalid") from error
+        return {"EMBEDDING_IMAGE": self.profile["embedding_runtime_image"],
+                "NGINX_IMAGE": self.profile["embedding_probe_image"]}
+
 
 def product_fixture(schema: str) -> Path:
     require(schema in (
         REGISTRATION_SCHEMA, REGISTRATION_SCHEMA_V2,
         REGISTRATION_SCHEMA_V3, REGISTRATION_SCHEMA_V4, REGISTRATION_SCHEMA_V5,
-        REGISTRATION_SCHEMA_V6,
+        REGISTRATION_SCHEMA_V6, REGISTRATION_SCHEMA_V7,
     ))
     version = 1 if schema == REGISTRATION_SCHEMA else 2
     return Path(f"tests/e2e/fixtures/h4-journey-v{version}.json")
 
 
 def profile_path(schema: str) -> Path:
-    if schema == REGISTRATION_SCHEMA_V6:
+    if schema in (REGISTRATION_SCHEMA_V6, REGISTRATION_SCHEMA_V7):
         return PROFILE_PATH_V4
     if schema == REGISTRATION_SCHEMA_V5:
         return PROFILE_PATH_V3
@@ -210,14 +221,17 @@ def load_registration(
             if value.get("schema") in (
                 REGISTRATION_SCHEMA_V2, REGISTRATION_SCHEMA_V3,
                 REGISTRATION_SCHEMA_V4, REGISTRATION_SCHEMA_V5, REGISTRATION_SCHEMA_V6,
+                REGISTRATION_SCHEMA_V7,
             ) else set())
+        if value.get("schema") == REGISTRATION_SCHEMA_V7:
+            expected_keys.add("infrastructure")
         require(set(value) == expected_keys)
         encoded = canonical(value)
         require(digest(encoded) == approved_sha256, "diagnostic_registration_digest_mismatch")
         require(value["schema"] in (
             REGISTRATION_SCHEMA, REGISTRATION_SCHEMA_V2,
             REGISTRATION_SCHEMA_V3, REGISTRATION_SCHEMA_V4, REGISTRATION_SCHEMA_V5,
-            REGISTRATION_SCHEMA_V6,
+            REGISTRATION_SCHEMA_V6, REGISTRATION_SCHEMA_V7,
         ) and uuid4(value["budget_id"]))
         try:
             network.subnet(value.get("network_subnet"))
@@ -233,12 +247,13 @@ def load_registration(
         profile_raw = (root / profile_path(value["schema"])).read_bytes()
         profile = strict_json(profile_raw)
         memory_schema = value["schema"] in (
-            REGISTRATION_SCHEMA_V4, REGISTRATION_SCHEMA_V5, REGISTRATION_SCHEMA_V6)
+            REGISTRATION_SCHEMA_V4, REGISTRATION_SCHEMA_V5, REGISTRATION_SCHEMA_V6,
+            REGISTRATION_SCHEMA_V7)
         expected_contract = CONTRACT_V2 if memory_schema else CONTRACT
-        expected_profile = (PROFILE_V4 if value["schema"] == REGISTRATION_SCHEMA_V6 else
+        expected_profile = (PROFILE_V4 if value["schema"] in (REGISTRATION_SCHEMA_V6, REGISTRATION_SCHEMA_V7) else
                             PROFILE_V3 if value["schema"] == REGISTRATION_SCHEMA_V5 else
                             PROFILE_V2 if memory_schema else PROFILE)
-        expected_model = (CURRENT_MEMORY_MODEL if value["schema"] == REGISTRATION_SCHEMA_V6 else
+        expected_model = (CURRENT_MEMORY_MODEL if value["schema"] in (REGISTRATION_SCHEMA_V6, REGISTRATION_SCHEMA_V7) else
                           MEMORY_MODEL if memory_schema else MODEL)
         require(value["profile_sha256"] == digest(profile_raw)
                 and profile["contract"] == expected_contract and profile["profile"] == expected_profile
@@ -252,7 +267,7 @@ def load_registration(
                     and profile.get("embedding_dimensions") == 1536
                     and profile.get("operations", {}).get("embedding") == 0,
                     "diagnostic_profile_mismatch")
-        if value["schema"] in (REGISTRATION_SCHEMA_V5, REGISTRATION_SCHEMA_V6):
+        if value["schema"] in (REGISTRATION_SCHEMA_V5, REGISTRATION_SCHEMA_V6, REGISTRATION_SCHEMA_V7):
             require(profile.get("embedding_provider") == "local-tei"
                     and profile.get("embedding_model") == "Qwen/Qwen3-Embedding-0.6B"
                     and profile.get("embedding_origin") == "http://embedding:80"
@@ -282,6 +297,11 @@ def load_registration(
         require(limits["profile"] == expected_profile)
         for name, ceiling in profile["max_limits"].items():
             require(integer(limits["max_" + name], ceiling))
+        if value["schema"] == REGISTRATION_SCHEMA_V7:
+            try:
+                release_budget.infrastructure_registration(profile_raw, encoded, approved_sha256)
+            except (release_budget.Invalid, ValueError, TypeError, KeyError, OSError, RecursionError) as error:
+                raise DiagnosticFailure("diagnostic_infrastructure_invalid") from error
         remaining = (expiry(limits["expires_at"]) - (now or datetime.now(timezone.utc))).total_seconds()
         require(0 < remaining <= profile["max_lifetime_seconds"], "diagnostic_expiry_invalid")
         require(isinstance(value["output_dir"], str) and Path(value["output_dir"]) == output)
@@ -295,7 +315,7 @@ def load_registration(
         require(ledger.parent != output and output not in ledger.parents,
                 "diagnostic_ledger_inside_output")
         require(not os.path.lexists(ledger), "diagnostic_registration_already_started")
-        return Registration(encoded, profile)
+        return Registration(encoded, profile, profile_raw)
     except (OSError, KeyError, TypeError, ValueError, RecursionError) as error:
         raise DiagnosticFailure("diagnostic_registration_invalid") from error
 
@@ -305,6 +325,15 @@ SUMMARY_DEFAULTS = {
     "summary_claim_attempt": 0, "summary_lease_expires_at": None,
     "summary_next_attempt_at": None, "summary_failure_code": None,
 }
+
+
+def verify_infrastructure(registration: Registration, base: dict[str, str],
+                          candidate: dict[str, str]) -> None:
+    if registration.value["schema"] == REGISTRATION_SCHEMA_V7:
+        images = registration.infrastructure_images
+        require(all(manifest[key] == images[key] for manifest in (base, candidate)
+                    for key in ("POSTGRES_IMAGE", "NGINX_IMAGE")),
+                "diagnostic_infrastructure_manifest_mismatch")
 
 
 def upgrade_authority(raw: str) -> bytes:
@@ -485,6 +514,7 @@ def verify_artifacts(registration: Registration, root: Path,
     proof of a meaningful version change; prospective review still owns that.
     """
     value = registration.value
+    verify_infrastructure(registration, base, candidate)
     base_sha, candidate_sha = base["RELEASE_GIT_SHA"], candidate["RELEASE_GIT_SHA"]
     require(base_sha != candidate_sha and candidate_sha == value["candidate_git_sha"],
             "diagnostic_release_identity_invalid")
