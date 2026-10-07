@@ -1,4 +1,4 @@
-use futures::StreamExt;
+use futures::{future::join_all, StreamExt};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -80,15 +80,33 @@ impl Drop for LocalHttp {
 
 impl LocalHttp {
     async fn start(
-        reply: impl Fn(&str, &Value) -> Option<(u16, &'static str, Vec<u8>)> + Send + 'static,
+        reply: impl Fn(&str, &Value) -> Option<(u16, &'static str, Vec<u8>)> + Send + Sync + 'static,
+    ) -> Self {
+        Self::start_with_delay(Duration::ZERO, reply).await
+    }
+
+    async fn start_with_delay(
+        delay: Duration,
+        reply: impl Fn(&str, &Value) -> Option<(u16, &'static str, Vec<u8>)> + Send + Sync + 'static,
     ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recorded = requests.clone();
+        let reply = Arc::new(reply);
         let task = tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
             loop {
-                let (mut socket, _) = listener.accept().await.unwrap();
+                let (mut socket, _) = tokio::select! {
+                    connection = listener.accept() => connection.unwrap(),
+                    Some(result) = connections.join_next(), if !connections.is_empty() => {
+                        result.unwrap();
+                        continue;
+                    }
+                };
+                let recorded = recorded.clone();
+                let reply = reply.clone();
+                connections.spawn(async move {
                 let mut bytes = Vec::new();
                 let (path, body) = tokio::time::timeout(Duration::from_secs(2), async {
                     loop {
@@ -129,12 +147,16 @@ impl LocalHttp {
                     // Test-only sentinel: keep an accepted request unanswered past its logical deadline.
                     if status == 0 {
                         tokio::time::sleep(Duration::from_secs(2)).await;
-                        continue;
+                        return;
+                    }
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
                     }
                     let headers = format!("HTTP/1.1 {status} Test\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nRetry-After: 0\r\n\r\n", body.len());
                     let _ = socket.write_all(headers.as_bytes()).await;
                     let _ = socket.write_all(&body).await;
                 }
+                });
             }
         });
         Self {
@@ -214,6 +236,138 @@ fn embedding_request() -> EmbeddingRequest {
 fn completion(content: &str, usage: bool) -> Value {
     json!({"model":budget::profile().model, "choices":[{"message":{"content":content}, "finish_reason":"stop"}],
         "usage": if usage { json!({"prompt_tokens":10,"completion_tokens":2}) } else { Value::Null }})
+}
+
+#[tokio::test]
+async fn concurrent_canon_calls_settle_before_the_next_reservation() {
+    #[derive(Default)]
+    struct Ledger {
+        charged: u64,
+        peak: u64,
+        attempts: u64,
+        max_pending: usize,
+        pending: std::collections::HashMap<String, u64>,
+    }
+
+    const CAP: u64 = 10_000_000;
+    let profile = budget::profile_named("four-layer-journey-diagnostic-v4").unwrap();
+    let ledger = Arc::new(Mutex::new(Ledger::default()));
+    let observed = ledger.clone();
+    let control = LocalHttp::start(move |path, body| {
+        let mut ledger = observed.lock().unwrap();
+        let attempt = body["attempt_id"].as_str().unwrap().to_owned();
+        if path.ends_with("/reserve") {
+            let output = body["output_limit"].as_u64().unwrap();
+            let quote = profile.input_token_ceiling * profile.input_micro_cny
+                + output * profile.output_micro_cny;
+            if ledger.charged + quote > CAP {
+                return Some((409, "application/json", b"{}".to_vec()));
+            }
+            ledger.charged += quote;
+            ledger.attempts += 1;
+            assert!(ledger.pending.insert(attempt, quote).is_none());
+            ledger.peak = ledger.peak.max(ledger.charged);
+            ledger.max_pending = ledger.max_pending.max(ledger.pending.len());
+            json_reply(json!({
+                "binding": body["binding"], "attempt_id": body["attempt_id"],
+                "ordinal": ledger.attempts,
+                "reservation": {"attempts": 1,
+                    "tokens": profile.input_token_ceiling + output, "cost_micro_cny": quote}
+            }))
+        } else {
+            assert!(path.ends_with("/settle"));
+            let quote = ledger.pending.remove(&attempt).unwrap();
+            let actual = body["usage"]["input_tokens"].as_u64().unwrap() * profile.input_micro_cny
+                + body["usage"]["output_tokens"].as_u64().unwrap() * profile.output_micro_cny;
+            ledger.charged = ledger.charged - quote + actual;
+            json_reply(body.clone())
+        }
+    })
+    .await;
+    let provider = LocalHttp::start_with_delay(Duration::from_millis(20), |_, _| {
+        json_reply(completion("ok", true))
+    })
+    .await;
+    let binding = Binding::new_for_profile(Uuid::new_v4(), &profile.profile);
+    let owner = BudgetClient::new(binding, &control.origin, TOKEN.into()).unwrap();
+    let client = LlmClient::diagnostic_test_client(Arc::new(owner), provider.origin.clone());
+    let results = join_all((0..4).map(|_| {
+        client.chat(
+            ChatRequest::new(LlmOperation::CanonExtraction, &profile.model)
+                .message("user", "synthetic Canon source")
+                .max_tokens(8192)
+                .thinking(false),
+        )
+    }))
+    .await;
+    assert!(results.iter().all(Result::is_ok), "{results:?}");
+    assert_eq!(provider.count(), 4);
+    assert_eq!(control.count(), 8);
+    let ledger = ledger.lock().unwrap();
+    assert_eq!(ledger.attempts, 4);
+    assert_eq!(ledger.max_pending, 1);
+    assert!(ledger.pending.is_empty());
+    assert!(ledger.peak <= CAP);
+    assert_eq!(ledger.charged, 4 * (10 * 4 + 2 * 12));
+}
+
+#[tokio::test]
+async fn queued_diagnostic_expiry_and_cancellation_never_dispatch() {
+    let control = LocalHttp::start(control_reply).await;
+    let provider = LocalHttp::start(|_, _| Some((0, "application/json", vec![]))).await;
+    let client = Arc::new(client(&control, &provider));
+    let active_client = client.clone();
+    let active = tokio::spawn(async move { active_client.chat(request()).await });
+    tokio::time::timeout(Duration::from_millis(100), async {
+        while provider.count() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(20);
+    assert!(client
+        .chat_with_deadline(request(), Some(deadline))
+        .await
+        .unwrap_err()
+        .is::<BudgetControlError>());
+    let mut cancelled = Box::pin(client.chat(request()));
+    tokio::select! {
+        result = &mut cancelled => panic!("queued call completed: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+    }
+    drop(cancelled);
+    assert_eq!(control.count(), 1);
+    assert_eq!(provider.count(), 1);
+    assert!(active
+        .await
+        .unwrap()
+        .unwrap_err()
+        .is::<BudgetEvidenceError>());
+    assert_eq!(control.count(), 1, "unknown provider work never settles");
+}
+
+#[tokio::test]
+async fn ordinary_requests_keep_immediate_eight_request_capacity() {
+    let control = LocalHttp::start(control_reply).await;
+    let provider = LocalHttp::start(|_, _| Some((0, "application/json", vec![]))).await;
+    let mut client = client(&control, &provider);
+    client.budget = Ok(None);
+    let results = join_all((0..9).map(|_| client.chat(request()))).await;
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| {
+                result
+                    .as_ref()
+                    .is_err_and(|error| error.to_string() == "LLM request capacity is busy")
+            })
+            .count(),
+        1
+    );
+    assert_eq!(provider.count(), 8);
+    assert_eq!(control.count(), 0);
 }
 
 #[test]
