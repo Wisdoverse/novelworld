@@ -376,88 +376,98 @@ authorization for that registration. Frozen or consumed registrations remain
 terminal and cannot be renewed or rerun. Issue bodies and Project 4 own current
 execution and live-evidence status.
 
-For the next prospective v6 registration only, use the exact source pair
-`ac04165dd13b210876dcb4d1a736b1c99f128f39` →
-`08af672235254885c5832354c5e8acb3daae25ef`.
-Child [#544](https://github.com/Wisdoverse/novelworld/issues/544) tracks this pair under parent #378.
-The base is the candidate's direct parent and strict ancestor.
+For the next prospective V7 registration only, use this exact source pair:
 
-Both revisions include the runtime package repair from
-[PR #539](https://github.com/Wisdoverse/novelworld/pull/539).
-The candidate adds the immersive multilingual reader from
-[PR #543](https://github.com/Wisdoverse/novelworld/pull/543).
-Frontend is the only affected application image.
-Runtime source, Cargo inputs, build recipes, Compose, and frontend dependency
-inputs are identical across the pair.
-This pair evaluates the frontend release on the shared backend.
-It cannot prove a backend binary or schema upgrade.
+- Fix-only baseline B: `a501af77c58b8973cf341fb22d9c924d85b06afb`.
+- Integrated main candidate C: `0019710655cf12ebf71bd54801783f2f4f2859c5`.
 
-The policy commit is separate from the application candidate SHA.
-The clean runner checkout, candidate manifest, and fresh registration must
-identify the full candidate SHA above.
-No later descendant inherits eligibility.
+Child [#555](https://github.com/Wisdoverse/novelworld/issues/555) tracks this
+pair under parent #378. B is a strict ancestor of C. B is not C's direct parent.
+Both revisions contain the shared Diagnostic admission fix from [PR
+#554](https://github.com/Wisdoverse/novelworld/pull/554). PR #554 merged with a
+GitHub merge commit. The policy commit stays separate from C. No later
+descendant inherits this eligibility.
 
-The prior source pair from
-[#536](https://github.com/Wisdoverse/novelworld/issues/536) remains historical:
-`25e815e49d5d8f5ea594789acd03c76b835de990` →
-`a7c8c688e1633d3127d67561267722f9127a5cb1`.
-Artifacts for that pair failed the configured scan gate.
-Retain those rejected artifacts and every terminal packet unchanged.
-Do not rebuild that pair to rescore its result.
-No old artifacts, registrations, or authorization transfer to the new pair.
+An independent review verified the exact merge identity and B-to-C source delta.
+The comparison covers 48 paths. Novel runtime and frontend source and lock
+inputs changed. The other four runtime services, shared crates and Cargo inputs,
+build recipes, production Compose, and frozen profiles and fixtures remain
+identical. This source comparison does not prove every binary changed or prove a
+backend schema upgrade.
 
-The image-only overlay uses the captured profile, as documented in
-[ADR 0004](./adr/0004-durable-diagnostic-budget.md). It does not change source
-Compose or deployment defaults. Ordinary Compose keeps local embedding
-disabled by default. Explicit ordinary local selection remains TEI 1.9.4.
-External mode remains unchanged.
+The clean runner checkout, candidate manifest, and new registration must bind
+the full C SHA above.
 
-Keep the `four-layer-journey-diagnostic-v4` profile, DeepSeek-only generation,
-local embedding model and revision, V2 fixture, four-layer schedule, retry,
-deadline, stop, metrics, cleanup, and payer contracts unchanged. Build recipes
-and source Compose remain identical across the pair. The existing
-profile maximum remains 35 CNY, but a new registration for this invocation
-must set `max_cost_micro_cny=10000000`. This lower ceiling covers the whole
-invocation, including every HTTP attempt, retry, and uncertain outcome. It is
-not a per-request allowance. No old authorization transfers, and this source
-eligibility change authorizes no paid call. The separate H1 v3 five-attempt
-upfront reservation remains unchanged and is not part of this registration.
+The pair tracked by [#544](https://github.com/Wisdoverse/novelworld/issues/544)
+remains historical: `ac04165dd13b210876dcb4d1a736b1c99f128f39` →
+`08af672235254885c5832354c5e8acb3daae25ef`. It includes the runtime package
+change from [PR #539](https://github.com/Wisdoverse/novelworld/pull/539) and the
+reader from [PR #543](https://github.com/Wisdoverse/novelworld/pull/543). The
+rejected pair tracked by
+[#536](https://github.com/Wisdoverse/novelworld/issues/536) also remains
+historical: `25e815e49d5d8f5ea594789acd03c76b835de990` →
+`a7c8c688e1633d3127d67561267722f9127a5cb1`. Its artifacts failed the configured
+scan gate. Keep all earlier audit links, artifact bindings, registrations, and
+terminal records unchanged. Do not rebuild, rescore, rerun, or refill historical
+runs. No old artifact, finding disposition, or authorization transfers. Keep
+expired scan evidence and prior waivers historical. Do not reuse them as fresh
+evidence.
 
-Require these artifact bindings and changes across the pair:
+V7 uses the authenticated canonical PostgreSQL, Nginx, and TEI binding from [PR
+#552](https://github.com/Wisdoverse/novelworld/pull/552) and [ADR
+0004](./adr/0004-durable-diagnostic-budget.md). Both release manifests must use
+pair-identical infrastructure references. Bind their PostgreSQL and Nginx
+references to the authenticated V7 registration. Bind TEI and the Nginx prestart
+probe to the same V7 registration. Keep both Compose callers on these captured
+references. Require fresh role provenance and compatibility evidence. Use a
+fresh scanner database. Apply the canonical HIGH/CRITICAL scan gates. Do not
+change any threshold or transfer an old scanner waiver.
 
-- Bind all twelve application images to source, immutable image IDs, repository
-  digests, and filesystem layers.
-  Record copied ELF hashes for all five Rust services.
-  Record compiled and served frontend file maps.
-  Derive fresh `world-turn-v4` prompt, Canon, branch, and schema bindings.
-- Preserve the native gate.
-  At least one affected application image must change its repository digest,
-  immutable image ID, and filesystem-layer list together.
-  Require real compiled and served frontend byte changes for this pair.
-  Require frontend digest, image ID, and filesystem-layer changes together.
-- Record all five Rust outputs honestly, including unchanged ELF and layers.
-  Shared Rust inputs may produce identical artifacts.
-  Image changes from revision labels alone do not prove application changes.
-
-Preserve the frozen profile, fixture, and budgets.
-Both manifests retain pair-identical infrastructure, including the
-frozen `embedding_probe_image` override
-`nginx:alpine@sha256:db35bfc6b2951e7f8a72db5db120288c127ffaeeb4a6d4b95a26fead017d5913`.
-The source and live/default deployment retain Nginx
+The frozen V6 `embedding_probe_image` override
+`nginx:alpine@sha256:db35bfc6b2951e7f8a72db5db120288c127ffaeeb4a6d4b95a26fead017d5913`
+is historical only. It is not fresh V7 infrastructure evidence. Source and
+ordinary deployment defaults retain Nginx
 `nginx:alpine@sha256:df221db836e1754089190208cee7eeda94f233197056426eda74a43ab1abeac2`.
-Retain canonical HIGH/CRITICAL scans, SBOM gates, all eight actual payer
-capability probes, and mandatory prestart. Require a fresh infrastructure scan
-and independent risk disposition.
-No prior scanner exception or unresolved finding transfers.
+Keep ordinary local embeddings disabled by default. Preserve the supported
+external embedding mode and deployment defaults.
+
+Keep the compiled `four-layer-journey-diagnostic-v4` profile unchanged. Preserve
+DeepSeek-only generation, model identity, local embedding model and revision,
+vector contract, payer wire format, and quotes. Keep retries, deadlines, stop
+rules, metrics, cleanup, the V2 fixture, and the four-layer schedule unchanged.
+Keep the compiled profile maximum at 35 CNY. Set `max_cost_micro_cny=10000000`
+in a new registration. This is a 10 CNY whole-invocation cap. It includes every
+attempt, retry, and uncertain outcome. It is not a per-request allowance. Keep
+the separate H1 v3 five-attempt upfront reservation unchanged. No previous
+authorization transfers.
+
+Bind all twelve application images to exact source SHAs, immutable image IDs,
+repository digests, and filesystem layers. Record ELF hashes for all five Rust
+services. Record complete compiled and served frontend file maps. Derive fresh
+`world-turn-v4` prompt, Canon, branch, and schema bindings. Preserve the native
+affected-layer predicate. At least one affected application image must change
+its digest, image ID, and filesystem layers together. Require real compiled and
+served frontend byte changes. Require frontend digest, image ID, and
+filesystem-layer changes together. Record all five Rust outputs honestly. Shared
+Rust inputs may produce unchanged Rust outputs. Revision labels alone do not
+prove an application change.
+
+Require fresh infrastructure scans and all twelve application scans. Require
+complete SBOMs and an independent risk disposition. Require all eight actual
+payer probes, keyless readiness checks, and financial checks. Bind a new exact
+registration to C and all reviewed evidence. Require independent packet review
+and explicit authorization. Run mandatory registered prestart before any paid
+execution.
 
 Only after policy delivery may an independently reviewed artifact-production
-plan proceed. Candidate artifacts, registrations, paid execution, and
-qualification each require their own gates and evidence. Retain all failed,
-frozen, consumed, and expired packets unchanged. Eligibility does not establish
-live model compatibility, H1/H3/H4 quality, formal qualification, release
-readiness, RTO, or repair of #492 saved-world-action GET recovery. Parent #378
-remains open. A wholly new registration and independent packet review must
-precede exact user authorization and mandatory registered prestart.
+plan proceed. Artifact production, registration, paid execution, and
+qualification each require their own evidence. This policy grants source
+eligibility only. It grants no artifact, prestart, paid-execution, or
+live-qualification authority. It proves no live model compatibility, H1/H3/H4
+quality, formal qualification, production readiness, RTO, backend schema
+upgrade, or saved-action recovery from PR #492. Parents #378, #230, and #222
+remain open. Preserve every frozen, failed, consumed, and expired packet
+unchanged.
 
 CI runs the real-schema regressions against its digest-pinned disposable
 `test-postgres` database. Local runs name the container with
