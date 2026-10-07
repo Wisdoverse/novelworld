@@ -118,8 +118,8 @@ unquoted `KEY=value` environment-file entries, without shell expansion.
 external-embedding four-layer journey selects `four-layer-journey-diagnostic-v2`;
 the keyless local-embedding journey selects the additive
 `four-layer-journey-diagnostic-v3`; prospective current-Flash four-layer
-registration v6 selects `four-layer-journey-diagnostic-v4`. Only that exact
-registration schema selects the new profile; v1–v5 retain their existing
+registrations v6 and v7 select `four-layer-journey-diagnostic-v4`. These exact
+registration schemas select the profile; v1–v5 retain their existing
 profile and model identities. The new profile keeps the
 `llm-diagnostic-budget-v2` wire contract, fixture, limits, and local TEI
 model/revision/probe. A non-default
@@ -145,6 +145,27 @@ release state, exclusive creation, and exact byte checks. Conflicts block
 startup. Stop and cleanup do not require the overlay. This action creates no
 budget or provisioning marker. Ordinary deployments keep local embedding
 disabled by default. An explicit ordinary local profile keeps its source image.
+
+Registration v7 can bind reviewed compatible infrastructure separately from
+the unchanged compiled v4 budget. Its canonical registration authenticates
+three immutable image references, per-role artifact evidence hashes, and the
+independent risk-review hash. PostgreSQL and Nginx must match both manifests;
+TEI and the Nginx prestart probe use the same registered references. This
+deployment binding changes no payer wire or profile bytes. V1–v6 retain their
+frozen image selection.
+
+The journey writes one canonical `diagnostic-registration.json` beside the
+captured adapter and supplies its approved
+`RELEASE_DIAGNOSTIC_REGISTRATION_SHA256`. The release tool requires both
+inputs, reads only an owner-private regular file outside the runtime checkout,
+and captures its bytes before checkout. It verifies the canonical digest,
+exact v7 schema, budget UUID, profile digest, and identical limits. The existing
+provisioning marker stores the registration SHA for v7. Its exact equality
+check prevents a missing or replaced registration from continuing with the
+same budget. No image override comes from inherited environment values.
+V7 also caps the whole invocation at 10 CNY. Fresh artifact/risk review,
+source-pair eligibility, registered prestart, and exact paid authorization
+remain separate gates under the qualification policy.
 
 Capability creation and attached execution share a ten-second deadline. The
 adapter requires the acknowledged container ID before starting the diagnostic

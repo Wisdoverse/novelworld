@@ -129,6 +129,8 @@ diagnostic_profile=vision-journey-diagnostic-v1
 diagnostic_profile_file=diagnostic-v1.json
 diagnostic_helper_source=
 diagnostic_profile_source=
+diagnostic_registration_source=
+diagnostic_registration_args=()
 
 diagnostic_value() {
   local wanted=$1 key value count=0 found=
@@ -155,9 +157,11 @@ load_diagnostic_mode() {
   diagnostic_id=$(diagnostic_value LLM_DIAGNOSTIC_BUDGET_ID)
   diagnostic_limits=$(diagnostic_value LLM_DIAGNOSTIC_BUDGET_LIMITS)
   diagnostic_profile=$(diagnostic_value LLM_DIAGNOSTIC_PROFILE)
+  diagnostic_registration_sha256=${RELEASE_DIAGNOSTIC_REGISTRATION_SHA256:-}
   diagnostic_profile=${diagnostic_profile:-vision-journey-diagnostic-v1}
   diagnostic_loaded=true
   if [[ -z "$diagnostic_id$diagnostic_limits" ]]; then
+    [[ -z "$diagnostic_registration_sha256" ]] || die "diagnostic registration requires a budget"
     [[ "$diagnostic_profile" == vision-journey-diagnostic-v1 ]] \
       || die "diagnostic profile requires a budget registration"
     return 0
@@ -178,6 +182,15 @@ load_diagnostic_mode() {
     || die "diagnostic release adapter missing"
   IFS= read -r -d '' diagnostic_helper_source < "$tool_dir/diagnostic_budget.py" || true
   IFS= read -r -d '' diagnostic_profile_source < "$tool_dir/../../tools/llm-budget/$diagnostic_profile_file" || true
+  if [[ -n "$diagnostic_registration_sha256" || -e "$tool_dir/diagnostic-registration.json" \
+        || -L "$tool_dir/diagnostic-registration.json" ]]; then
+    [[ -n "$diagnostic_registration_sha256" ]] || die "diagnostic registration digest missing"
+    diagnostic_registration_source=$(diagnostic capture-registration \
+      "$tool_dir/diagnostic-registration.json" "$diagnostic_registration_sha256" "$repo_root") \
+      || die "diagnostic registration capture failed"
+    diagnostic_registration_args=(--registration-json "$diagnostic_registration_source" \
+      --registration-sha256 "$diagnostic_registration_sha256")
+  fi
 }
 
 diagnostic() {
@@ -186,7 +199,7 @@ diagnostic() {
   env LLM_DIAGNOSTIC_BUDGET_ID="$diagnostic_id" LLM_DIAGNOSTIC_BUDGET_LIMITS="$diagnostic_limits" \
     LLM_DIAGNOSTIC_PROFILE="$diagnostic_profile" \
     python3 -c "$diagnostic_helper_source" "$diagnostic_profile_source" "$1" \
-      "$state_dir" "$qualification_project" "${@:2}"
+      "$state_dir" "$qualification_project" "${diagnostic_registration_args[@]}" "${@:2}"
 }
 
 diagnostic_preflight() {

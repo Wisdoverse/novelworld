@@ -324,6 +324,44 @@ four-layer schedule, V2 product fixture, local TEI model/revision and probe,
 only the profile name and model from the V3 local-embedding profile; prior
 profile and fixture bytes remain unchanged.
 
+V7 adds `vision-journey-registration-v7` and report kind
+`h3-h4-four-layer-diagnostic-v7`. It keeps the exact V4 compiled profile,
+DeepSeek model, payer wire, model revision, dimensions, V2 fixture, four-layer
+schedule, deadlines, and terminal rules. The entire invocation must register
+`max_cost_micro_cny` at or below `10000000`, including retries and uncertain
+outcomes. The compiled historical profile maximum remains unchanged.
+
+Only V7 has an `infrastructure` field. It contains exactly `images`,
+`evidence_sha256`, and `risk_review_sha256`. Each role map contains exactly
+`POSTGRES_IMAGE`, `NGINX_IMAGE`, and `EMBEDDING_IMAGE`. Image references must
+have immutable repository digests and fit within 512 characters. Each evidence
+value is the lowercase SHA-256 of that role's independently reviewed artifact
+audit; `risk_review_sha256` binds the independent risk disposition. The
+canonical registration SHA authenticates all these values. Both manifests
+must match the registered PostgreSQL and Nginx images and keep identical Redis
+images. Both Compose callers and prestart resolve TEI and Nginx from this
+binding. The original profile image fields and bytes remain frozen; V1–V6
+cannot add this field or replace their image identities.
+
+The runner copies the canonical V7 registration to a private file beside its
+captured release adapter, outside the changing checkout. It supplies the
+already-approved `RELEASE_DIAGNOSTIC_REGISTRATION_SHA256` and removes any
+inherited value. Release requires the file and expected SHA together, verifies
+private ownership and permissions, captures the bytes before checkout, and
+checks the actual budget UUID, profile digest, and limits. The existing
+provisioning marker also binds this registration SHA. Missing or replaced
+bindings block admission, restart, upgrade, and rollback. Stop and cleanup
+remain available.
+
+Evidence digests bind reviewed documents. They do not establish fresh scans,
+package compatibility, recovery, or model readiness. Fresh provenance, scans,
+SBOMs, independent risk review, all eight real payer probes, and registered
+prestart remain required. V7 support alone admits no source pair. A separate
+reviewed policy must name the exact base and candidate before artifact
+production and a new registration. All failed, Frozen, consumed, and expired
+packets remain terminal. Exact registration review and explicit authorization
+remain required before paid execution. Parent #378 stays open.
+
 As checked on 2026-09-26, DeepSeek's [Models & Pricing
 documentation](https://api-docs.deepseek.com/quick_start/pricing/) lists
 `deepseek-flash` as DeepSeek-V4.1-Flash and says the retired
