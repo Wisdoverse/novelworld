@@ -93,11 +93,24 @@ impl LlmClient {
         }
     }
 
-    fn admit(&self) -> Result<OwnedSemaphorePermit> {
-        self.admission
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| anyhow!("LLM request capacity is busy"))
+    async fn admit(&self, deadline: TokioInstant) -> Result<OwnedSemaphorePermit> {
+        if matches!(&self.budget, Ok(Some(_))) {
+            // ponytail: serialize per process; use owner admission if cross-process concurrency is required.
+            tokio::time::timeout_at(
+                deadline,
+                self.admission
+                    .clone()
+                    .acquire_many_owned(MAX_CONCURRENT_LLM_REQUESTS as u32),
+            )
+            .await
+            .map_err(|_| BudgetControlError)?
+            .map_err(|_| BudgetControlError.into())
+        } else {
+            self.admission
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| anyhow!("LLM request capacity is busy"))
+        }
     }
 
     /// Configure the shared provider transport. The official Anthropic origin
@@ -163,7 +176,13 @@ impl LlmClient {
         if request.operation == LlmOperation::SeriesMatching && provider_name != "deepseek" {
             return Err(crate::UnsupportedSeriesProvider.into());
         }
-        let _permit = self.admit()?;
+        let deadline = deadline.unwrap_or_else(|| TokioInstant::now() + LLM_TOTAL_TIMEOUT);
+        let deadline = if request.operation == LlmOperation::SeriesMatching {
+            deadline.min(TokioInstant::now() + Duration::from_secs(30))
+        } else {
+            deadline
+        };
+        let _permit = self.admit(deadline).await?;
         let labels = RequestLabels::new(
             &provider_name,
             &model_name,
@@ -177,12 +196,6 @@ impl LlmClient {
         req.model = model_name;
         req.stream = false;
 
-        let deadline = deadline.unwrap_or_else(|| TokioInstant::now() + LLM_TOTAL_TIMEOUT);
-        let deadline = if req.operation == LlmOperation::SeriesMatching {
-            deadline.min(TokioInstant::now() + Duration::from_secs(30))
-        } else {
-            deadline
-        };
         let mut provider_started = false;
         let mut pending_attempt = None;
         match tokio::time::timeout_at(deadline, async {
@@ -399,7 +412,8 @@ impl LlmClient {
         let started = Instant::now();
         let (provider, api_key, provider_name, model_name) =
             self.resolve_provider(&request.model)?;
-        let permit = self.admit()?;
+        let deadline = deadline.unwrap_or_else(|| TokioInstant::now() + LLM_TOTAL_TIMEOUT);
+        let permit = self.admit(deadline).await?;
         let labels = RequestLabels::new(
             &provider_name,
             &model_name,
@@ -413,7 +427,6 @@ impl LlmClient {
         req.model = model_name;
         req.stream = true;
 
-        let deadline = deadline.unwrap_or_else(|| TokioInstant::now() + LLM_TOTAL_TIMEOUT);
         let mut provider_started = false;
         let mut pending_attempt = None;
         let (upstream, grant) = match tokio::time::timeout_at(deadline, async {
@@ -507,7 +520,8 @@ impl LlmClient {
         let started = Instant::now();
         let (provider, api_key, provider_name, model_name) =
             self.resolve_provider(&request.model)?;
-        let _permit = self.admit()?;
+        let deadline = TokioInstant::now() + LLM_TOTAL_TIMEOUT;
+        let _permit = self.admit(deadline).await?;
         let labels = EmbeddingLabels::new(&provider_name, &model_name, api_key);
         labels.started();
         let req = EmbeddingRequest {
@@ -515,7 +529,6 @@ impl LlmClient {
             input: request.input,
         };
         let wire = provider.embedding_wire_bytes(&req)?;
-        let deadline = TokioInstant::now() + LLM_TOTAL_TIMEOUT;
         let mut provider_started = false;
         match tokio::time::timeout_at(deadline, async {
             for attempt in 0..=RetryPolicy::max_retries() {
