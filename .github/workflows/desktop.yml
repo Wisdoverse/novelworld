@@ -124,21 +124,21 @@ jobs:
           frontend/src-tauri/target/${{ matrix.target }}/release/bundle/macos/NovelWorld.app
           ${{ matrix.artifact }}.zip
 
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         if: runner.os == 'Windows'
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}.zip
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         if: runner.os == 'Linux'
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}.tar.gz
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         if: runner.os == 'macOS'
         with:
           name: ${{ matrix.artifact }}

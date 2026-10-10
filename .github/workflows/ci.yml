@@ -319,7 +319,7 @@ jobs:
         run: pnpm exec playwright test
       - name: Retain failed browser evidence
         if: failure()
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: frontend-browser-failure
           path: frontend/test-results/
@@ -661,7 +661,7 @@ jobs:
             --git-sha "$GITHUB_SHA"
       - name: Upload capacity report
         if: always() && env.RUN_EXTENDED_DRILLS == 'true'
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: single-node-v1-${{ github.sha }}
           path: capacity-report.json
