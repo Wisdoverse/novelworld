@@ -65,7 +65,7 @@ jobs:
           infra/security/scan-images.sh "$IMAGE"
           mkdir -p image-digests
           printf '%s\n' "$IMAGE" > "image-digests/${{ matrix.service }}.txt"
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         timeout-minutes: 5
         with:
           name: release-image-digest-${{ matrix.service }}-${{ github.sha }}
@@ -108,7 +108,7 @@ jobs:
           infra/security/scan-images.sh "$IMAGE"
           mkdir -p image-digests
           printf '%s\n' "$IMAGE" > image-digests/frontend.txt
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         timeout-minutes: 5
         with:
           name: release-image-digest-frontend-${{ github.sha }}
@@ -186,7 +186,7 @@ jobs:
           mapfile -t app_images < <(awk -F= '/^(GATEWAY|USER_SERVICE|NOVEL_SERVICE|AGENT_SERVICE|NARRATIVE_SERVICE|FRONTEND)_IMAGE=/{print $2}' release.env)
           [[ "${#app_images[@]}" -eq 6 ]]
           infra/security/generate-sboms.sh sboms "${app_images[@]}"
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: novel-world-release-${{ github.sha }}
           path: |
@@ -254,7 +254,7 @@ jobs:
           cp "$BUNDLE_PATH" release-assets/release-attestation.json
           tests/e2e/release_attestation_check.sh release-assets "$GITHUB_SHA" \
             "$RUNNER_TEMP/release-trusted-root.jsonl"
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         timeout-minutes: 5
         with:
           name: release-files-${{ github.sha }}
