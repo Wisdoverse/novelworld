@@ -22,9 +22,8 @@ language of generated content.
 
 ## Development setup
 
-Prerequisites are current stable Rust (the locked dependency graph currently
-requires Rust 1.94.1 or newer), Node.js 22 or newer, pnpm, Docker, and Docker
-Compose.
+Use current stable Rust, Node.js 26, pnpm, Docker, and Docker Compose.
+The locked Rust dependencies require version 1.94.1 or newer.
 
 ```bash
 git clone https://github.com/<you>/novelworld.git
