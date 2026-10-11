@@ -399,6 +399,22 @@ UUID v4 `Idempotency-Key` 后，输入脚本
 
 ---
 
+## 可选的告警通知
+
+已有监控使用 `docker-compose.monitoring.yml`。需要通知时，再叠加
+`docker-compose.alerting.yml`。默认启动方式不要求配置或部署 Alertmanager。
+把 `infra/monitoring/alertmanager.example.yml` 复制到仓库外的私有目录，
+将示例 URL 换成已授权、支持 Alertmanager webhook 格式的 HTTPS 接收端。
+目录权限保持 `0700`，文件须能被容器的 `nobody` 用户读取；私有目录内
+的 `0644` 文件可通过只读单文件挂载读取。把绝对路径写入 `.env` 的
+`ALERTMANAGER_CONFIG_FILE`。接收端密钥留在这个私有文件中。
+
+先用 `amtool check-config` 验证，再启动通知。命令、超时与重试规则、
+接收端去重责任和停用方法见 [告警通知操作说明](./docs/OPERATIONS.md#optional-operator-notifications)。
+保留 `alertmanager_data` 卷才能保留通知记录和静默规则。不要用删除数据卷
+来停用通知。Alertmanager 只与 Prometheus 共用专用桥接网络，不接入应用网络，
+也不发布主机端口。该组件不代表真实值班接收或 SLO 已验收。
+
 ## LLM 指标与发布预算
 
 `user-service`、`novel-service`、`agent-service` 和 `narrative-service`

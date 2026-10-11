@@ -1,8 +1,8 @@
 # Monitoring profile (H2 production-readiness): Prometheus collectors +
 # Grafana dashboard + alert rules for the private self-hosted deployment.
 # Optional overlay: docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
-# Requires GRAFANA_ADMIN_PASSWORD in the environment. Notification routing
-# (Alertmanager) is deferred to H5; see docs/OPERATIONS.md.
+# Requires GRAFANA_ADMIN_PASSWORD in the environment. Add docker-compose.alerting.yml
+# for optional operator notifications; see docs/OPERATIONS.md.
 services:
   prometheus:
     image: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e

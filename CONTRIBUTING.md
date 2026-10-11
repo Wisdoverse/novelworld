@@ -229,6 +229,21 @@ database grants, complete timeout/drain behavior, recovery drills, alerting,
 capacity, multi-replica safety, horizontal scaling, or public deployment.
 Those claims require their own runtime or migration evidence.
 
+For monitoring configuration or notification changes, run:
+
+```bash
+bash infra/monitoring/drill.sh --rules-only
+python3 tests/e2e/notification_drill_test.py
+python3 infra/monitoring/notification_drill.py
+```
+
+The notification check uses four owned disposable containers and pinned images.
+It requires a local Linux Docker engine and Linux `iproute2`.
+It checks that the application fixture cannot reach the Alertmanager API.
+It tests retries, timeout handling, restart deduplication and resolved notifications.
+It removes only its project resources and makes no real receiver or provider call.
+It does not qualify operator receipt, paging or journey SLOs.
+
 Changes to diagnostic LLM dispatch, its owner ledger, or lifecycle fixture also
 run the offline budget boundary gate on Linux with Docker and OpenSSL:
 

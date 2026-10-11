@@ -109,6 +109,17 @@ Their output is untrusted application data, while their internal storage,
 retention, moderation, and compromise are external risks that NovelWorld can
 limit but cannot enforce.
 
+The optional Alertmanager overlay sends operational metadata to an
+operator-selected receiver. Only privileged deployment configuration selects the
+endpoint. Browsers cannot configure it. Current alerts contain service names,
+internal addresses, severity and runbook summaries. They exclude reader IDs,
+story content and provider bodies. Receiver credentials stay in a private host
+file mounted read-only. Alertmanager publishes no host port and joins a dedicated
+bridge with Prometheus. Application containers cannot reach its management API.
+Retries and lost
+acknowledgements can repeat requests. Receiver acceptance does not prove human
+receipt or external retention guarantees.
+
 ### Trust boundaries
 
 1. **Internet to Nginx/Gateway.** Production Compose exposes Nginx only. Nginx
