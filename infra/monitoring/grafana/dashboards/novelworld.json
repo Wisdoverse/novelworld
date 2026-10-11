@@ -3,7 +3,7 @@
   "uid": "novelworld-overview",
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "30s",
   "panels": [
     {
@@ -203,6 +203,58 @@
               }
             ]
           },
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "id": 7,
+      "title": "Oldest retained import job age",
+      "type": "stat",
+      "description": "Database-clock age since job creation, including queue and retries; not time in the current state or readiness latency. Known-empty states are zero. Unavailable observations and down targets are No data.",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 22
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "novelworld_import_job_oldest_age_seconds{job=\"novel-service\"} AND on(job,instance) novelworld_import_jobs_observation_success{job=\"novel-service\"} == 1 AND on(job,instance) up{job=\"novel-service\"} == 1",
+          "legendFormat": "{{status}}",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
+          "mappings": [],
+          "unit": "s",
           "noValue": "No data"
         },
         "overrides": []

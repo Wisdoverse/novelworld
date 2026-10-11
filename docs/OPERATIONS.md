@@ -278,7 +278,7 @@ import-state expression fixtures without a running monitoring profile. This
 check also runs in the required Production Compose Smoke job.
 
 The dashboard shows the current retained `novel_import_jobs` counts for
-`pending`, `in_progress`, `failed`, and `completed`; retries and reclaims remain
+`pending`, `in_progress`, `failed`, and `completed`. Retries and reclaims remain
 one retained job. A successful empty-table observation is four valid zeros. The
 count panel appears only when the observation succeeded and the matching
 `novel-service` target is up. The status panel shows `Observed` for a successful
@@ -286,14 +286,26 @@ observation, `Unknown` when collection failed on a healthy target, and `No data`
 when the observation is absent or the target is down. Neither panel carries a
 previous value forward or converts missing data to zero.
 
+The oldest-job panel shows `novelworld_import_job_oldest_age_seconds` for
+`pending`, `in_progress`, and `failed`. It uses the same observation and target
+gate. The query rounds age down to whole seconds. It measures the difference
+between the PostgreSQL statement clock and the oldest retained job's immutable
+`created_at`. Retry and reclaim do not reset this origin. The value includes
+time before the current state. It is not time spent in that state.
+Completed jobs have no age series. An empty state has zero age only when the
+query succeeds. A future unfinished-job
+timestamp or an age outside the integer range makes the entire observation
+unknown. Database clock correction can change age. These are not monotonic
+durations, readiness latency or a registered import success rate.
+
 Prometheus keeps its existing 15-second scrape interval. The observation uses a
 one-second PostgreSQL statement timeout, a two-second response-future deadline,
 and a five-second minimum start interval with one admitted future per process.
 The response-future deadline is not proof that PostgreSQL work or rollback has
-ended. Cancellation retains the start budget; the server timeout bounds each
-scan and the admission budget limits subsequent launches. These
+ended. Cancellation retains the start budget. The server timeout bounds each
+scan and the admission budget limits subsequent starts. These
 limits are per process, not fleet-wide. The metrics add only the fixed `status`
-label to the four count series; the observation flag has no custom label.
+label to four count and three age series. The observation flag has no custom label.
 Prometheus supplies `job` and `instance`. Do not add job IDs, users, titles,
 source keys, or failure text.
 

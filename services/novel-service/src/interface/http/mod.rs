@@ -525,6 +525,21 @@ async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
             )
             .expect("writing to a String cannot fail");
         }
+        body.push_str(
+            "# HELP novelworld_import_job_oldest_age_seconds Database-clock age since job creation. An empty state has zero age.\n\
+             # TYPE novelworld_import_job_oldest_age_seconds gauge\n",
+        );
+        for (status, age) in [
+            ("pending", counts.pending_oldest_age_seconds),
+            ("in_progress", counts.in_progress_oldest_age_seconds),
+            ("failed", counts.failed_oldest_age_seconds),
+        ] {
+            writeln!(
+                body,
+                "novelworld_import_job_oldest_age_seconds{{status=\"{status}\"}} {age}"
+            )
+            .expect("writing to a String cannot fail");
+        }
     }
     (
         [

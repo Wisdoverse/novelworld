@@ -323,22 +323,50 @@ impl NovelRepository for NovelPgRepository {
             sqlx::query("SELECT pg_catalog.set_config('statement_timeout', '1s', true)")
                 .execute(&mut *tx)
                 .await?;
-            let (pending, in_progress, failed, completed) =
-                sqlx::query_as::<_, (i64, i64, i64, i64)>(
-                    "SELECT COUNT(*) FILTER (WHERE status = 'pending'), \
-                 COUNT(*) FILTER (WHERE status = 'in_progress'), \
-                 COUNT(*) FILTER (WHERE status = 'failed'), \
-                 COUNT(*) FILTER (WHERE status = 'completed') \
-                 FROM novel_import_jobs",
-                )
-                .fetch_one(&mut *tx)
-                .await?;
+            let (
+                pending,
+                in_progress,
+                failed,
+                completed,
+                pending_oldest_age_seconds,
+                in_progress_oldest_age_seconds,
+                failed_oldest_age_seconds,
+                clock_valid,
+            ) = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64, i64, bool)>(
+                r#"
+                SELECT COUNT(*) FILTER (WHERE status = 'pending'),
+                       COUNT(*) FILTER (WHERE status = 'in_progress'),
+                       COUNT(*) FILTER (WHERE status = 'failed'),
+                       COUNT(*) FILTER (WHERE status = 'completed'),
+                       COALESCE(FLOOR(EXTRACT(EPOCH FROM (statement_timestamp()
+                           - MIN(created_at) FILTER (WHERE status = 'pending')))), 0)::BIGINT,
+                       COALESCE(FLOOR(EXTRACT(EPOCH FROM (statement_timestamp()
+                           - MIN(created_at) FILTER (WHERE status = 'in_progress')))), 0)::BIGINT,
+                       COALESCE(FLOOR(EXTRACT(EPOCH FROM (statement_timestamp()
+                           - MIN(created_at) FILTER (WHERE status = 'failed')))), 0)::BIGINT,
+                       COALESCE(BOOL_AND(created_at <= statement_timestamp())
+                           FILTER (WHERE status <> 'completed'), TRUE)
+                FROM novel_import_jobs
+                "#,
+            )
+            .fetch_one(&mut *tx)
+            .await?;
             tx.rollback().await?;
+            ensure!(
+                clock_valid
+                    && pending_oldest_age_seconds >= 0
+                    && in_progress_oldest_age_seconds >= 0
+                    && failed_oldest_age_seconds >= 0,
+                "import job age is invalid"
+            );
             Ok::<_, anyhow::Error>(ImportJobCounts {
                 pending,
                 in_progress,
                 failed,
                 completed,
+                pending_oldest_age_seconds,
+                in_progress_oldest_age_seconds,
+                failed_oldest_age_seconds,
             })
         })
         .await
