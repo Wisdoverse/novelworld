@@ -245,6 +245,9 @@ class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
             runtime.write_text("{}")
             capability.write_text("{}")
             cases = (
+                ["--cold-report-dir", directory],
+                ["--mock", "--cold-report-dir", directory],
+                ["--capability-images", str(capability), "--cold-report-dir", directory],
                 ["--journey-images", str(runtime)],
                 ["--journey-output", directory],
                 ["--journey-images", str(runtime), "--journey-output", directory,
@@ -661,7 +664,7 @@ class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
                                                                   diagnostic_failures=[]), False)
 
     def test_cold_startup_status_is_bounded_allowlisted_and_foreign_safe(self):
-        services = (*LIFECYCLE.SERVICES, "gateway", "frontend", "nginx")
+        services = ("postgres", *LIFECYCLE.SERVICES, "gateway", "frontend", "nginx")
         expected_fields = {
             "observed", "present", "running", "health", "exit_nonzero",
             "oom_killed", "logs_observed", "budget_invalid", "budget_unavailable",
@@ -717,6 +720,8 @@ class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
         self.assertNotIn("private-key", output.getvalue())
         self.assertNotIn("/secret/key", output.getvalue())
         self.assertNotIn(f"{project}-gateway", output.getvalue())
+        self.assertTrue(summary["services"]["postgres"]["logs_observed"])
+        self.assertTrue(summary["services"]["postgres"]["permission_denied"])
 
         with tempfile.TemporaryDirectory() as directory, \
              mock.patch.dict(sys.modules, {"diagnostic_journey": control}), \
@@ -749,6 +754,172 @@ class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
                 LIFECYCLE.report_cold_startup_status(SimpleNamespace(project=project, prefix=project), False)
         self.assertTrue(json.loads(output.getvalue())["startup_observation_unproven"])
         control.bounded_command.assert_not_called()
+
+    def test_cold_reports_retain_both_cases_without_private_fields_or_overwrites(self):
+        import live_deepseek_journey as runner
+        reporters = {"adoption": LIFECYCLE.report_cold_adoption_status,
+                     "release": LIFECYCLE.report_cold_release_status,
+                     "startup": LIFECYCLE.report_cold_startup_status}
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = Path(directory) / "evidence"
+            reports = Path(directory) / "reports"
+            evidence.mkdir(mode=0o700)
+            reports.mkdir(mode=0o700)
+            (evidence / "release-adopt.log").write_text(
+                "qualification-phase database_start start 1\nprivate-key=/private/report\n")
+            journey = SimpleNamespace(project="nwq-abcdef1234", prefix="nwq-abcdef1234",
+                                      output=evidence, diagnostic_failures=["private-budget-id"],
+                                      private_report={"private_key": "private-key",
+                                                      "diagnostic_payers_stopped": True},
+                                      report={"environment": {"internal_id": "private-budget-id"}})
+            with mock.patch.object(runner.diagnostic, "bounded_command", return_value=b""), \
+                 contextlib.redirect_stdout(io.StringIO()) as output:
+                for zero in (True, False):
+                    for reporter in reporters.values():
+                        reporter(journey, zero, reports)
+            expected = {f"cold-{kind}-{case}.json" for kind in reporters for case in ("zero", "nonzero")}
+            self.assertEqual({path.name for path in reports.iterdir()}, expected)
+            original = {path.name: path.read_bytes() for path in reports.iterdir()}
+            self.assertLessEqual(sum(map(len, original.values())), 98304)
+            printed = [json.loads(line) for line in output.getvalue().splitlines()]
+            for name, raw in original.items():
+                self.assertLessEqual(len(raw), 16384)
+                self.assertEqual((reports / name).stat().st_mode & 0o777, 0o600)
+                document = json.loads(raw)
+                self.assertEqual(set(document), {"version", "kind", "status"})
+                self.assertEqual(document["version"], 1)
+                self.assertIn(document["status"], printed)
+                for private in ("private-key", "private-budget-id", "/private/report", str(evidence)):
+                    self.assertNotIn(private.encode(), raw)
+            journey.private_report["diagnostic_payers_stopped"] = False
+            with contextlib.redirect_stdout(io.StringIO()):
+                LIFECYCLE.report_cold_adoption_status(journey, True, reports)
+            self.assertEqual({path.name: path.read_bytes() for path in reports.iterdir()}, original)
+
+    def test_cold_report_bounds_and_symlink_refusal_preserve_original_failure(self):
+        import live_deepseek_journey as runner
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            reports = Path(directory)
+            for kind, status in (("unknown", {"case": "zero"}),
+                                 ("adoption", {"case": "../private"}),
+                                 ("adoption", {"case": "zero", "oversized": "x" * 16384})):
+                LIFECYCLE.emit_cold_status(kind, status, reports)
+            self.assertEqual(list(reports.iterdir()), [])
+            target = reports / "private.json"
+            target.write_bytes(b"private evidence")
+            link = reports / "cold-adoption-zero.json"
+            link.symlink_to(target)
+            LIFECYCLE.emit_cold_status("adoption", {"case": "zero"}, reports)
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(target.read_bytes(), b"private evidence")
+
+            original = LIFECYCLE.Failure("release_adopt_failed")
+            original.code = "release_adopt_failed"
+            journey = SimpleNamespace(release=mock.Mock(side_effect=original))
+            with mock.patch.object(runner, "write_private", side_effect=PermissionError) as write, \
+                 mock.patch("builtins.print", side_effect=BrokenPipeError):
+                with self.assertRaises(LIFECYCLE.Failure) as failure:
+                    LIFECYCLE.cold_adopt_release(journey, Path("/private/manifest"), False, reports)
+            self.assertIs(failure.exception, original)
+            write.assert_called_once()
+
+    def test_cold_report_directory_is_validated_before_docker_or_evidence_write(self):
+        import live_deepseek_journey as runner
+        with tempfile.TemporaryDirectory() as directory, \
+             tempfile.TemporaryDirectory(dir=ROOT) as in_checkout:
+            evidence = Path(directory) / "evidence"
+            evidence.mkdir(mode=0o700)
+            public = Path(directory) / "public"
+            public.mkdir(mode=0o755)
+            occupied = Path(directory) / "occupied"
+            occupied.mkdir(mode=0o700)
+            (occupied / "old.json").write_bytes(b"old")
+            valid = Path(directory) / "reports"
+            valid.mkdir(mode=0o700)
+            link = Path(directory) / "link"
+            link.symlink_to(occupied)
+            file = Path(directory) / "file"
+            file.touch(mode=0o600)
+            invalid = (evidence, Path(directory), public, occupied, link, file,
+                       Path(directory) / "missing", Path(in_checkout), Path("relative"))
+            for reports in invalid:
+                with self.subTest(reports=reports), \
+                     mock.patch.object(LIFECYCLE.shutil, "which", return_value="/usr/bin/socat"), \
+                     mock.patch.object(runner, "docker_inventory_snapshot") as inventory, \
+                     mock.patch.object(runner, "write_private") as write:
+                    lifecycle = self.ingress_lifecycle(network=False)
+                    lifecycle.subnet = "10.254.241.0/28"
+                    with self.assertRaises((LIFECYCLE.Failure, runner.diagnostic.DiagnosticFailure)):
+                        lifecycle.journey_wiring(None, evidence, reports)
+                    inventory.assert_not_called()
+                    write.assert_not_called()
+                    self.assertEqual(list(evidence.iterdir()), [])
+            sentinel = RuntimeError("stop before Docker")
+            with mock.patch.object(LIFECYCLE.shutil, "which", return_value="/usr/bin/socat"), \
+                 mock.patch.object(runner, "docker_inventory_snapshot", side_effect=sentinel) as inventory, \
+                 mock.patch.object(runner, "write_private") as write:
+                with self.assertRaises(RuntimeError) as failure:
+                    lifecycle.journey_wiring(None, evidence, valid)
+                self.assertIs(failure.exception, sentinel)
+                inventory.assert_called_once_with()
+                write.assert_not_called()
+
+    def test_ci_cold_step_forwards_separate_reports_and_keeps_failure_and_exact_upload_paths(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        step = workflow.split("      - name: Verify offline Vision cold-adoption wiring\n", 1)[1]
+        step = step.split("      - name:", 1)[0]
+        self.assertIn("        id: cold_adoption\n", step)
+        source = step.split("          python3 - <<'PY'\n", 1)[1].split("          PY\n", 1)[0]
+        source = "\n".join(line[10:] for line in source.splitlines())
+        upload = workflow.split("      - name: Retain safe cold-adoption failure summaries\n", 1)[1]
+        upload = upload.split("      - name:", 1)[0]
+        self.assertIn("if: failure() && steps.cold_adoption.outcome == 'failure'", upload)
+        self.assertIn("steps.cold_adoption.outputs.report_dir != ''", upload)
+        uploaded = {line.strip() for line in upload.splitlines()
+                    if "${{ steps.cold_adoption.outputs.report_dir }}" in line}
+        expected = {"${{ steps.cold_adoption.outputs.report_dir }}/" + f"cold-{kind}-{case}.json"
+                    for kind in ("adoption", "release", "startup") for case in ("zero", "nonzero")}
+        self.assertEqual(uploaded, expected)
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "fixture"
+            fixture.mkdir(mode=0o700)
+            stale = Path(directory) / "nwq-cold-reports"
+            stale.mkdir(mode=0o700)
+            (stale / "cold-adoption-zero.json").write_bytes(b"private old evidence")
+            output = Path(directory) / "github-output"
+            mkdtemp = tempfile.mkdtemp
+            def create(*args, **kwargs):
+                return str(fixture) if kwargs.get("prefix") == "nwq-cold-adopt-" else mkdtemp(*args, **kwargs)
+            failure = subprocess.CalledProcessError(1, ["cold-fixture"])
+            with mock.patch.dict(os.environ, {"RUNNER_TEMP": directory, "GITHUB_OUTPUT": str(output)}), \
+                 mock.patch.object(tempfile, "mkdtemp", side_effect=create), \
+                 mock.patch.object(subprocess, "run", side_effect=failure) as run:
+                with self.assertRaises(subprocess.CalledProcessError) as raised:
+                    exec(compile(source, "ci-cold-step", "exec"), {})
+            self.assertIs(raised.exception, failure)
+            arguments = run.call_args.args[0]
+            reports = Path(arguments[arguments.index("--cold-report-dir") + 1])
+            evidence = Path(arguments[arguments.index("--journey-output") + 1])
+            self.assertEqual(reports.parent, Path(directory))
+            self.assertTrue(reports.name.startswith("nwq-cold-reports-"))
+            self.assertNotEqual(reports, stale)
+            self.assertEqual(output.read_text(), f"report_dir={reports}\n")
+            self.assertEqual(reports.stat().st_mode & 0o777, 0o700)
+            self.assertNotIn(reports, (evidence, *evidence.parents))
+            self.assertNotIn(evidence, reports.parents)
+            self.assertEqual(list(reports.iterdir()), [])
+            self.assertTrue(run.call_args.kwargs["check"])
+            self.assertEqual((stale / "cold-adoption-zero.json").read_bytes(), b"private old evidence")
+            another = Path(directory) / "fixture-2"
+            another.mkdir(mode=0o700)
+            output.write_text("")
+            with mock.patch.dict(os.environ, {"RUNNER_TEMP": directory, "GITHUB_OUTPUT": str(output)}), \
+                 mock.patch.object(tempfile, "mkdtemp", side_effect=[str(another), PermissionError]), \
+                 mock.patch.object(subprocess, "run") as run:
+                with self.assertRaises(PermissionError):
+                    exec(compile(source, "ci-cold-step", "exec"), {})
+            run.assert_not_called()
+            self.assertEqual(output.read_text(), "")
 
     def test_cold_adopt_release_preserves_original_error_and_skips_on_interrupt(self):
         control_spec = importlib.util.spec_from_file_location(

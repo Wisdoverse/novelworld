@@ -343,6 +343,13 @@ Private output retains forwarding-process recovery metadata and the pre-adoption
 Docker inventory. A failed stop gets one bounded cleanup retry; unproven removal
 still fails the fixture. Production Compose Smoke runs this gate after the
 existing release-image dispatch/refusal matrix, without publishing private output.
+
+The optional `--cold-report-dir` accepts a separate empty mode-0700 directory
+outside the checkout and private evidence tree. It retains only fixed stage,
+shutdown and service-state summaries, including bounded PostgreSQL startup hints.
+There are at most six exclusive JSON files, each limited to 16 KiB.
+CI uploads these safe summaries only when the cold-adoption step fails.
+
 Cold-adoption stdout reports only the zero/nonzero case and fixed boolean stage
 presence/terminal flags after the journey's terminal handling, including failure;
 private reports and identifiers
