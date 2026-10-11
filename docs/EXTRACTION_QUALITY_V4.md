@@ -14,7 +14,7 @@ requires a separate immutable registration and enforceable budget under
 | Corpus | `h1-synthetic-v6`, `tools/h1-eval/corpus/v6.json` |
 | Rubric | `h1-extraction-v4` |
 | Judge prompt | `h1-semantic-judge-v10` |
-| Bounded Diagnostic profile / model | `vision-diagnostic-budget-v3` / `deepseek-v4-flash` |
+| Existing default bounded Diagnostic profile / model | `vision-diagnostic-budget-v3` / `deepseek-v4-flash` |
 | Public report / private response envelope | 4 / 2 |
 
 The new corpus copies `corpus/v1.json`, changing only policy/corpus/rubric
@@ -23,6 +23,16 @@ composition are unchanged. Previous policies, corpus bytes and reports remain
 frozen. There is one evaluator, not a compatibility scoring path; historical
 results retain their original source revision. Consumers must explicitly adopt
 schema 4 and must not interpret successful execution as quality approval.
+
+## Prospective CNY 10 budget profile
+
+Select the optional `vision-diagnostic-budget-v4` profile with
+`--diagnostic-budget-profile vision-diagnostic-budget-v4` and both
+`--live --bounded-diagnostic`. It caps one evaluator process at CNY 10.
+The default v3 profile and semantic measurement contract remain unchanged.
+The [evaluator guide](../tools/h1-eval/README.md#prospective-cny-10-profile)
+owns reservation, restart, and paid-registration limits. This selection does
+not adopt a formal corpus, qualify a provider, or authorize provider work.
 
 ## Gold alignment
 
@@ -87,10 +97,10 @@ own limit later, and previous extraction usage must remain recorded.
 
 Judge output remains capped at 800 tokens and the parsed response at 32 KiB.
 An identical judge request may repeat once only for JSON/schema/rubric/token/
-explanation violations. Existing transport retries and diagnostic reservations
-remain unchanged. Valid low alignment, unsupported or undetermined observations
-do not trigger retries. Offline shape tests do not establish that a live judge
-can reliably produce this expanded response within 800 tokens.
+explanation violations. Existing transport retry rules and default v3
+reservations remain unchanged. Valid low alignment, unsupported or undetermined
+observations do not trigger retries. Offline shape tests do not establish that
+a live judge can reliably produce this expanded response within 800 tokens.
 
 Top-level `quality_status` is always `measurement_only`.
 `measurement_completed` controls CLI exit 0: all required measurement and

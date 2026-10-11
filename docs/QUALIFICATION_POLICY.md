@@ -58,6 +58,15 @@ decision, not a change to the frozen Qualification contract below.
   usage evidence; keep credentials and raw responses outside Git and public
   reports. This delegation does not authorize account top-ups or public
   deployment and does not automatically unlock H4 or formal Qualification.
+- The H1 evaluator keeps `vision-diagnostic-budget-v3` as its default profile
+  with its existing five-attempt reservations and 35,000,000 micro-CNY limit.
+  The separate `vision-diagnostic-budget-v4` option sets a 10,000,000
+  micro-CNY process-invocation limit and reserves the largest affordable
+  attempt count before each logical call. Its retries and JSON fallback share
+  that reservation. The ledger is process-local, not durable across restart or
+  enforced by the provider. V4 does not change frozen results or formal H1
+  adoption. Paid use still requires a new reviewed registration, durable
+  one-shot intent, and exact user authorization before credential use.
 - Formal Qualification/Observation and broader release/support claims still
   use their versioned evidence contracts. Before leaving this rapid-iteration
   phase, explicitly review the next acceptance policy and any deferred human

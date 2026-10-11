@@ -200,9 +200,19 @@ impl LlmClient {
         let mut pending_attempt = None;
         match tokio::time::timeout_at(deadline, async {
             let mut retry_attempt = 0;
+            let mut physical_attempts = 0;
             let mut missing_attempt_usage = false;
             loop {
                 provider_started = false;
+                if req
+                    .max_attempts
+                    .is_some_and(|limit| physical_attempts >= limit)
+                {
+                    labels.finish("budget_error", started);
+                    return Err(anyhow!(
+                        "LLM attempt allowance exhausted; do not send another request"
+                    ));
+                }
                 let grant = match reserve_attempt(
                     budget.as_ref(),
                     provider,
@@ -221,6 +231,7 @@ impl LlmClient {
                 let attempt_started = Instant::now();
                 provider_started = true;
                 pending_attempt = Some(attempt_started);
+                physical_attempts += 1;
                 let response = provider.chat(&self.http, api_key, &req).await;
                 pending_attempt = None;
                 match response {
@@ -407,6 +418,9 @@ impl LlmClient {
             return Err(anyhow!(
                 "response evidence observers require non-streaming chat"
             ));
+        }
+        if request.max_attempts.is_some() {
+            return Err(anyhow!("attempt allowances require non-streaming chat"));
         }
         validate_request(&request)?;
         let started = Instant::now();
@@ -636,6 +650,14 @@ async fn reserve_attempt(
 }
 
 fn validate_request(request: &ChatRequest) -> Result<()> {
+    if request
+        .max_attempts
+        .is_some_and(|limit| !(1..=5).contains(&limit))
+    {
+        return Err(anyhow!(
+            "LLM attempt allowance must be between 1 and 5; correct the request"
+        ));
+    }
     let max_tokens = request
         .effective_max_output_tokens()
         .ok_or_else(|| anyhow!("LLM request must declare an output-token limit"))?;

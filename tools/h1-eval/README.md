@@ -100,9 +100,9 @@ write failure stops further provider calls and retains the unproven reservation.
 
 ## Bounded Vision Diagnostic (opt-in)
 
-New paid Diagnostic work is allowed only with `--live --bounded-diagnostic`, both
-private output paths, and a separately registered immutable input/model/budget
-under the prospective fixed `vision-diagnostic-budget-v3` profile:
+The existing default path requires `--live --bounded-diagnostic`, both private
+output paths, and a separately registered immutable input/model/budget. It uses
+the fixed `vision-diagnostic-budget-v3` profile:
 
 ```bash
 H1_EVAL_PROVIDER=deepseek \
@@ -134,6 +134,34 @@ The profile's 8192-token maximum for other operations does not raise the judge's
 these frozen accounting assumptions are not a statement of current prices.
 See [Qualification policy](../../docs/QUALIFICATION_POLICY.md) and
 [`budget.rs`](src/budget.rs) for the registration and enforcement contract.
+
+### Prospective CNY 10 profile
+
+The opt-in `vision-diagnostic-budget-v4` profile uses the same model, request
+limits, token limit, call limit, and attempt limit as v3. Select it explicitly
+with `--diagnostic-budget-profile vision-diagnostic-budget-v4` together with
+`--live --bounded-diagnostic`. The v3 default and its CNY 35 limit remain
+unchanged. V4 limits one process invocation to 10,000,000 micro-CNY (CNY 10).
+
+Before each logical call, v4 reserves the largest affordable count of physical
+attempts from five down to one. It checks the logical-call, physical-attempt,
+token, and cost limits before it dispatches the call. Retries and JSON fallback
+use the same reserved attempt count. This option cannot increase the existing
+retry rules. Streaming requests fail before provider I/O.
+
+At the 800-token output limit, two worst-case attempts reserve 8,407,808
+micro-CNY. Three attempts would reserve 12,611,712 micro-CNY, so the budget
+refuses a third attempt.
+
+Only complete usage and transport-metric reconciliation releases unused
+reservation. An error, missing usage, cancellation, or unknown outcome keeps
+the full reservation and stops further H1 calls.
+
+The v4 ledger is process-local. It does not persist across a restart and does
+not enforce an account-wide or provider-side cap. A future paid run still needs
+a separately reviewed registration, a durable one-shot launcher intent, and
+exact user authorization before credential use. This profile change does not
+provide that launcher or authorize a paid run.
 
 No current v4 live quality result is implied here. Fresh registration,
 independent review, private evidence, and prospective approval are required

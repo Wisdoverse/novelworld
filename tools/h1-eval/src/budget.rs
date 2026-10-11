@@ -5,6 +5,7 @@ use serde::Serialize;
 
 pub const MODEL: &str = "deepseek-v4-flash";
 pub const PROFILE: &str = "vision-diagnostic-budget-v3";
+pub const CNY10_PROFILE: &str = "vision-diagnostic-budget-v4";
 const INPUT_CEILING: u64 = 1 << 20;
 const ATTEMPTS_PER_CALL: u64 = 5;
 const INPUT_MICRO_CNY: u64 = 4;
@@ -24,6 +25,41 @@ const LIMITS: Amount = Amount {
     tokens: 20_000_000,
     cost_micro_cny: 35_000_000,
 };
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Profile {
+    #[default]
+    V3,
+    V4,
+}
+
+impl Profile {
+    pub fn parse(value: &str) -> Result<Self, &'static str> {
+        match value {
+            PROFILE => Ok(Self::V3),
+            CNY10_PROFILE => Ok(Self::V4),
+            _ => Err("unknown H1 budget profile; select vision-diagnostic-budget-v3 or vision-diagnostic-budget-v4"),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::V3 => PROFILE,
+            Self::V4 => CNY10_PROFILE,
+        }
+    }
+
+    fn limits(self) -> Amount {
+        Amount {
+            cost_micro_cny: if self == Self::V4 {
+                10_000_000
+            } else {
+                LIMITS.cost_micro_cny
+            },
+            ..LIMITS
+        }
+    }
+}
 
 impl Amount {
     fn add(self, other: Self) -> Option<Self> {
@@ -87,10 +123,12 @@ impl Counters {
 pub struct Ticket {
     before: Counters,
     output_limit: u32,
+    pub attempt_limit: Option<u32>,
 }
 
 #[derive(Default)]
 struct Ledger {
+    profile: Profile,
     // Charged = settled consumption + every unreleased reservation.
     charged: Amount,
     pending: Option<Amount>,
@@ -115,24 +153,34 @@ impl Ledger {
             return Err("diagnostic_metrics_invalid");
         }
         let output = u64::from(output_limit);
-        // These factors are fixed and bounded above; ledger accumulation is checked.
-        let reservation = Amount {
-            logical_calls: 1,
-            attempts: ATTEMPTS_PER_CALL,
-            tokens: ATTEMPTS_PER_CALL * (INPUT_CEILING + output),
-            cost_micro_cny: ATTEMPTS_PER_CALL
-                * (INPUT_CEILING * INPUT_MICRO_CNY + output * OUTPUT_MICRO_CNY),
+        let mut attempts = ATTEMPTS_PER_CALL;
+        let (reservation, charged) = loop {
+            // These factors are fixed and bounded above; ledger accumulation is checked.
+            let reservation = Amount {
+                logical_calls: 1,
+                attempts,
+                tokens: attempts * (INPUT_CEILING + output),
+                cost_micro_cny: attempts
+                    * (INPUT_CEILING * INPUT_MICRO_CNY + output * OUTPUT_MICRO_CNY),
+            };
+            if let Some(charged) = self
+                .charged
+                .add(reservation)
+                .filter(|charged| charged.within(self.profile.limits()))
+            {
+                break (reservation, charged);
+            }
+            if self.profile == Profile::V3 || attempts == 1 {
+                return Err("diagnostic_budget_exhausted");
+            }
+            attempts -= 1;
         };
-        let charged = self
-            .charged
-            .add(reservation)
-            .filter(|charged| charged.within(LIMITS))
-            .ok_or("diagnostic_budget_exhausted")?;
         self.charged = charged;
         self.pending = Some(reservation);
         Ok(Ticket {
             before,
             output_limit,
+            attempt_limit: (self.profile == Profile::V4).then_some(attempts as u32),
         })
     }
 
@@ -149,7 +197,7 @@ impl Ledger {
         let attempts = after
             .attempts
             .checked_sub(ticket.before.attempts)
-            .filter(|count| (1..=ATTEMPTS_PER_CALL).contains(count))
+            .filter(|count| (1..=reserved.attempts).contains(count))
             .ok_or("diagnostic_metrics_invalid")?;
         if after.started.checked_sub(ticket.before.started) != Some(1)
             || after.terminal.checked_sub(ticket.before.terminal) != Some(1)
@@ -188,7 +236,7 @@ impl Ledger {
             .charged
             .subtract(reserved)
             .and_then(|charged| charged.add(actual))
-            .filter(|charged| charged.within(LIMITS))
+            .filter(|charged| charged.within(self.profile.limits()))
             .ok_or("diagnostic_usage_out_of_bounds")?;
         self.pending = None;
         Ok(())
@@ -210,9 +258,12 @@ pub struct Report {
 }
 
 impl Control {
-    pub fn new(metrics: MetricsHandle) -> Self {
+    pub fn new(metrics: MetricsHandle, profile: Profile) -> Self {
         Self {
-            ledger: Mutex::new(Ledger::default()),
+            ledger: Mutex::new(Ledger {
+                profile,
+                ..Ledger::default()
+            }),
             metrics,
         }
     }
@@ -255,8 +306,8 @@ impl Control {
             .lock()
             .map_err(|_| "diagnostic_budget_lock_failed")?;
         Ok(Report {
-            profile: PROFILE,
-            limits: LIMITS,
+            profile: ledger.profile.name(),
+            limits: ledger.profile.limits(),
             charged: ledger.charged,
             unreleased_reservation: ledger.pending,
             stopped: ledger.stopped,
@@ -286,6 +337,7 @@ mod tests {
         assert_eq!(PROFILE, "vision-diagnostic-budget-v3");
         let mut ledger = Ledger::default();
         let ticket = ledger.reserve(8192, Counters::default()).unwrap();
+        assert_eq!(ticket.attempt_limit, None);
         assert_eq!(ledger.charged.tokens, 5_283_840);
         assert_eq!(ledger.charged.cost_micro_cny, 21_463_040);
         assert_eq!(ledger.charged.attempts, 5);
@@ -324,6 +376,119 @@ mod tests {
             assert_eq!(ledger.charged, charged);
             assert!(ledger.pending.is_some());
         }
+    }
+
+    #[test]
+    fn cny10_profile_reserves_affordable_attempts_across_logical_calls() {
+        let mut ledger = Ledger {
+            profile: Profile::V4,
+            ..Ledger::default()
+        };
+        let ticket = ledger.reserve(800, Counters::default()).unwrap();
+        assert_eq!(ticket.attempt_limit, Some(2));
+        assert_eq!(ledger.charged.cost_micro_cny, 8_407_808);
+        assert_eq!(ledger.charged.attempts, 2);
+        ledger
+            .settle(ticket, counters(1), &[usage(500_000, 0)])
+            .unwrap();
+        assert_eq!(ledger.charged.cost_micro_cny, 2_000_000);
+
+        let ticket = ledger.reserve(800, counters(1)).unwrap();
+        assert_eq!(ticket.attempt_limit, Some(1));
+        let after = Counters {
+            started: 2,
+            terminal: 2,
+            attempts: 2,
+        };
+        ledger
+            .settle(ticket, after, &[usage(INPUT_CEILING as u32, 800)])
+            .unwrap();
+        assert_eq!(ledger.charged.cost_micro_cny, 6_203_904);
+        let charged = ledger.charged;
+        assert_eq!(
+            ledger.reserve(800, after).err(),
+            Some("diagnostic_budget_exhausted")
+        );
+        assert_eq!(ledger.charged, charged);
+        assert!(ledger.pending.is_none());
+
+        let mut ledger = Ledger {
+            profile: Profile::V4,
+            ..Ledger::default()
+        };
+        let ticket = ledger.reserve(800, Counters::default()).unwrap();
+        let charged = ledger.charged;
+        assert!(ledger
+            .settle(
+                ticket,
+                counters(3),
+                &[usage(3, 2), usage(3, 2), usage(3, 2)]
+            )
+            .is_err());
+        assert_eq!(ledger.charged, charged);
+        assert!(ledger.pending.is_some());
+    }
+
+    #[test]
+    fn cny10_admission_checks_each_ceiling_and_checked_arithmetic() {
+        let per_attempt = Amount {
+            logical_calls: 1,
+            attempts: 1,
+            tokens: INPUT_CEILING + 800,
+            cost_micro_cny: INPUT_CEILING * INPUT_MICRO_CNY + 800 * OUTPUT_MICRO_CNY,
+        };
+        let limits = Profile::V4.limits();
+        assert_eq!(limits.cost_micro_cny, 10_000_000);
+        for dimension in 0..4 {
+            for extra in [0, 1] {
+                let mut charged = Amount::default();
+                match dimension {
+                    0 => {
+                        charged.logical_calls =
+                            limits.logical_calls - per_attempt.logical_calls + extra
+                    }
+                    1 => charged.attempts = limits.attempts - per_attempt.attempts + extra,
+                    2 => charged.tokens = limits.tokens - per_attempt.tokens + extra,
+                    _ => {
+                        charged.cost_micro_cny =
+                            limits.cost_micro_cny - per_attempt.cost_micro_cny + extra
+                    }
+                }
+                let before = Counters {
+                    started: charged.logical_calls,
+                    terminal: charged.logical_calls,
+                    attempts: charged.attempts,
+                };
+                let mut ledger = Ledger {
+                    profile: Profile::V4,
+                    charged,
+                    ..Ledger::default()
+                };
+                let result = ledger.reserve(800, before);
+                if extra == 0 {
+                    assert_eq!(
+                        result.unwrap().attempt_limit,
+                        Some(if dimension == 0 { 2 } else { 1 })
+                    );
+                    assert!(ledger.charged.within(limits));
+                } else {
+                    assert_eq!(result.err(), Some("diagnostic_budget_exhausted"));
+                    assert_eq!(ledger.charged, charged);
+                    assert!(ledger.pending.is_none());
+                }
+            }
+        }
+        let mut ledger = Ledger {
+            profile: Profile::V4,
+            charged: Amount {
+                cost_micro_cny: u64::MAX,
+                ..Amount::default()
+            },
+            ..Ledger::default()
+        };
+        assert!(ledger.reserve(800, Counters::default()).is_err());
+        assert_eq!(ledger.charged.cost_micro_cny, u64::MAX);
+        assert!(ledger.pending.is_none());
     }
 
     #[test]
@@ -402,37 +567,43 @@ mod tests {
         use std::{collections::BTreeSet, env, process::Command, sync::atomic::Ordering};
 
         const CHILD: &str = "NOVELWORLD_BUDGET_TEST_CASE";
+        const PROFILE_CHILD: &str = "NOVELWORLD_BUDGET_TEST_PROFILE";
         let Ok(case) = env::var(CHILD) else {
             // Each child owns a fresh real recorder; unrelated parallel tests cannot
             // change its counters. No new test dependency or runtime metric hook.
-            for case in [
-                "success",
-                "fallback",
-                "exhausted",
-                "missing_usage",
-                "missing_headers",
-                "metrics_mismatch",
-                "write_failure",
-                "cancelled",
-            ] {
-                let output = Command::new(env::current_exe().unwrap())
-                    .args([
-                        "--exact",
-                        "budget::tests::bounded_chat_enforces_network_and_evidence_boundaries",
-                        "--nocapture",
-                    ])
-                    .env(CHILD, case)
-                    .output()
-                    .unwrap();
-                assert!(
-                    output.status.success(),
-                    "{case}: {} {}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                );
+            for profile in [PROFILE, CNY10_PROFILE] {
+                for case in [
+                    "success",
+                    "fallback",
+                    "exhausted",
+                    "missing_usage",
+                    "missing_headers",
+                    "metrics_mismatch",
+                    "write_failure",
+                    "cancelled",
+                    "mixed_allowance",
+                ] {
+                    let output = Command::new(env::current_exe().unwrap())
+                        .args([
+                            "--exact",
+                            "budget::tests::bounded_chat_enforces_network_and_evidence_boundaries",
+                            "--nocapture",
+                        ])
+                        .env(CHILD, case)
+                        .env(PROFILE_CHILD, profile)
+                        .output()
+                        .unwrap();
+                    assert!(
+                        output.status.success(),
+                        "{case}: {} {}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
             }
             return;
         };
+        let profile = Profile::parse(&env::var(PROFILE_CHILD).unwrap()).unwrap();
         let metrics = llm_client::install_metrics("h1-eval").unwrap();
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             let success = Some(envelope(MODEL, "{}", true));
@@ -440,14 +611,16 @@ mod tests {
                 "fallback" => vec![Some(envelope(MODEL, "", true)), success],
                 "missing_usage" => vec![Some(envelope(MODEL, "{}", false))],
                 "missing_headers" | "cancelled" => vec![None, success],
+                "mixed_allowance" => vec![None, Some(envelope(MODEL, "", true)), success],
                 _ => vec![success],
             };
             let (_, server, calls, url) = evidence_server(bodies).await;
             let path = env::temp_dir().join(format!("h1-budget-{}.jsonl", uuid::Uuid::new_v4()));
             let sink = PrivateResponseSink::create(&path).unwrap();
-            let control = Control::new(metrics);
+            let control = Control::new(metrics, profile);
             if case == "exhausted" {
-                control.ledger.lock().unwrap().charged.cost_micro_cny = LIMITS.cost_micro_cny;
+                control.ledger.lock().unwrap().charged.cost_micro_cny =
+                    profile.limits().cost_micro_cny;
             } else if case == "metrics_mismatch" {
                 control.ledger.lock().unwrap().charged.logical_calls = 1;
             } else if case == "write_failure" {
@@ -493,6 +666,9 @@ mod tests {
             let count = calls.load(Ordering::SeqCst);
             let control = config.budget.as_ref().unwrap();
             let report = control.report().unwrap();
+            assert_eq!(report.profile, profile.name());
+            assert_eq!(report.limits, profile.limits());
+            assert!(report.charged.cost_micro_cny <= profile.limits().cost_micro_cny);
             if healthy {
                 let expected = if case == "fallback" { 2 } else { 1 };
                 assert_eq!(count, expected);
@@ -509,9 +685,14 @@ mod tests {
                     assert_eq!(count, 0);
                 } else {
                     assert!(report.unreleased_reservation.is_some());
-                    assert_eq!(report.charged.attempts, 5);
+                    assert_eq!(
+                        report.charged.attempts,
+                        if profile == Profile::V4 { 2 } else { 5 }
+                    );
                     if case == "missing_headers" {
                         assert_eq!(count, 2);
+                    } else if case == "mixed_allowance" {
+                        assert_eq!(count, if profile == Profile::V4 { 2 } else { 3 });
                     }
                 }
                 // Bypass the existing private_request fail guard deliberately:

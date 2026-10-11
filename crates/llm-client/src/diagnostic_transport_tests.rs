@@ -865,6 +865,71 @@ async fn successful_sync_requires_matching_usage_and_settlement_ack() {
 }
 
 #[tokio::test]
+async fn attempt_allowance_precedes_grants_and_counts_retries_and_fallback() {
+    for allowance in [None, Some(1), Some(2), Some(3), Some(5)] {
+        let control = LocalHttp::start(control_reply).await;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = LocalHttp::start(move |_, _| {
+            match calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                0 | 2 => Some((429, "application/json", b"{}".to_vec())),
+                1 => json_reply(completion("", true)),
+                3 => Some((503, "application/json", b"{}".to_vec())),
+                _ => json_reply(completion("ok", true)),
+            }
+        })
+        .await;
+        let mut request = request().json();
+        if let Some(allowance) = allowance {
+            request = request.max_attempts(allowance);
+        }
+        let result = client(&control, &provider).chat(request).await;
+        let expected = allowance.unwrap_or(5) as usize;
+        if expected == 5 {
+            assert_eq!(result.unwrap().content, "ok");
+        } else {
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("allowance exhausted"));
+        }
+        assert_eq!(provider.count(), expected);
+        let records = control.requests.lock().unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.get("operation").is_some())
+                .count(),
+            expected
+        );
+        assert_eq!(
+            records.len(),
+            expected + usize::from(expected >= 2) + usize::from(expected == 5)
+        );
+    }
+}
+
+#[tokio::test]
+async fn invalid_or_stream_attempt_allowances_never_reserve_or_dispatch() {
+    let control = LocalHttp::start(control_reply).await;
+    let provider = LocalHttp::start(|_, _| panic!("provider work is forbidden")).await;
+    for allowance in [0, 6, u32::MAX] {
+        let error = client(&control, &provider)
+            .chat(request().max_attempts(allowance))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("between 1 and 5"));
+    }
+    let error = client(&control, &provider)
+        .chat_stream(request().max_attempts(1))
+        .await
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("non-streaming chat"));
+    assert_eq!(control.count(), 0);
+    assert_eq!(provider.count(), 0);
+}
+
+#[tokio::test]
 async fn retry_and_json_fallback_require_fresh_reservations() {
     for fallback in [false, true] {
         let control = LocalHttp::start(control_reply).await;

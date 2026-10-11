@@ -106,6 +106,7 @@ pub struct ChatRequest {
     pub stream: bool,
     pub json_mode: bool,
     pub thinking: Option<bool>,
+    pub(crate) max_attempts: Option<u32>,
     pub(crate) response_observer: Option<ResponseObserver>,
 }
 
@@ -121,6 +122,7 @@ impl ChatRequest {
             stream: false,
             json_mode: false,
             thinking: None,
+            max_attempts: None,
             response_observer: None,
         }
     }
@@ -171,6 +173,13 @@ impl ChatRequest {
 
     pub fn max_tokens(mut self, n: u32) -> Self {
         self.max_tokens = Some(n);
+        self
+    }
+
+    /// Restrict non-streaming HTTP attempts, including retries and JSON fallback.
+    /// The allowance cannot increase the existing retry policy.
+    pub fn max_attempts(mut self, n: u32) -> Self {
+        self.max_attempts = Some(n);
         self
     }
 
