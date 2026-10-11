@@ -1,0 +1,48 @@
+# Optional third overlay after docker-compose.yml and docker-compose.monitoring.yml.
+# The operator supplies a private, container-readable Alertmanager configuration.
+services:
+  prometheus:
+    volumes:
+      - ./infra/monitoring/prometheus-alerting.yml:/etc/prometheus/prometheus.yml:ro
+    networks:
+      - novel-net
+      - alerting-net
+    depends_on:
+      alertmanager:
+        condition: service_healthy
+
+  alertmanager:
+    image: prom/alertmanager:v0.34.1@sha256:e9733bafb1bdef9b00e25a21f8f99dc26a22224bf16641ad754d1649f4c3357a
+    container_name: ${CONTAINER_PREFIX:-novel}-alertmanager
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --cluster.listen-address=
+      - --log.format=json
+    volumes:
+      - type: bind
+        source: ${ALERTMANAGER_CONFIG_FILE:?Set ALERTMANAGER_CONFIG_FILE to a private Alertmanager configuration file}
+        target: /etc/alertmanager/alertmanager.yml
+        read_only: true
+        bind:
+          create_host_path: false
+      - alertmanager_data:/alertmanager
+    networks:
+      - alerting-net
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    logging:
+      driver: local
+    healthcheck:
+      test: [CMD, wget, -q, --spider, http://127.0.0.1:9093/-/ready]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  alertmanager_data:
+
+networks:
+  alerting-net:
+    driver: bridge

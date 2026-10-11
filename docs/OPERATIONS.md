@@ -3,8 +3,8 @@
 Version: **`operations-v1`**. This is the minimum production-readiness
 **partial slice** for the private self-hosted profile: health checks, the
 playbook index, ownership, Prometheus collectors, a Grafana dashboard, and
-alert rules. The remaining H2 subset — journey SLIs, the initial
-SLO/error budget, and alert notification routing/paging — is explicitly
+alert rules and optional operator webhook notifications. The remaining H2 subset —
+journey SLIs, the initial SLO/error budget, and operational paging — is explicitly
 **not yet landed** (ROADMAP H2 scope and H5 own that work).
 
 ## Service map and health checks
@@ -43,8 +43,8 @@ surface, not scripted probes. Cron example:
 */5 * * * * /srv/novelworld/infra/ops/health-checks.sh http://127.0.0.1:80 >> /var/log/novelworld-health.log 2>&1 || true
 ```
 
-This is a fail-closed health probe, not actionable alerting: no routing,
-dedup, or paging exists yet.
+This health probe does not send notifications. The optional Alertmanager overlay
+routes Prometheus alerts. The operator still owns receipt and response.
 
 ## Playbook index
 
@@ -194,6 +194,82 @@ Grafana serves the provisioned NovelWorld Overview dashboard on
 provably fire (promtool unit tests), every target scrapes, the
 instance-down alert fires and resolves against a live service stop/start,
 and Grafana serves the dashboard.
+
+### Optional operator notifications
+
+Add [`docker-compose.alerting.yml`](../docker-compose.alerting.yml) after the base
+and monitoring files to send alerts through Alertmanager. The existing monitoring
+command works without this overlay or its configuration variable.
+The single deployment operator owns the receiver and incident response.
+There is no on-call rotation or automatic paging integration.
+
+1. Copy [`alertmanager.example.yml`](../infra/monitoring/alertmanager.example.yml)
+   to a private host directory outside the checkout. Keep the parent directory
+   mode `0700`. Make the file readable by the container's `nobody` user. Mode
+   `0644` inside that private directory supports the file-only bind mount.
+2. Replace the reserved example URL with an authorized HTTPS endpoint that accepts
+   the standard Alertmanager webhook payload. Alertmanager does not expand
+   environment variables in this file. Keep receiver credentials there.
+3. Set `ALERTMANAGER_CONFIG_FILE` in `.env` to the file's absolute path.
+   Keep `GRAFANA_ADMIN_PASSWORD` configured for the monitoring overlay.
+4. Check the configuration before starting notifications:
+
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.monitoring.yml \
+     -f docker-compose.alerting.yml run --rm --no-deps --entrypoint amtool \
+     alertmanager check-config /etc/alertmanager/alertmanager.yml
+   ```
+
+5. Start the two services after the check:
+
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.monitoring.yml \
+     -f docker-compose.alerting.yml up -d --wait prometheus alertmanager
+   ```
+
+Alertmanager publishes no host port. Its dedicated bridge includes only Prometheus
+and Alertmanager. Prometheus also joins the application network to keep its scrapes.
+The overlay mounts the Alertmanager configuration read-only.
+Docker rejects missing files instead of creating directories. Its named volume
+retains notification history and silences across recreation. Keep that volume
+when disabling notifications. Removing it resets duplicate suppression and silences.
+After changing the file, recreate Alertmanager to load the replacement inode.
+Keep configuration and error output private.
+
+The example groups alerts by name, job and severity. The first notification waits
+30 seconds. Critical alerts wait 10 seconds. Group updates use a five-minute
+interval. Unchanged alerts repeat every four hours, or hourly for critical alerts.
+Unknown severities reach the root receiver. Resolved alerts send a recovery message.
+Each webhook attempt has a 10-second timeout. The HTTP client does not follow redirects.
+Transient failures can retry within the group interval, then on later intervals.
+Use the [upstream configuration contract](https://prometheus.io/docs/alerting/latest/configuration/)
+when changing these settings.
+
+Retries, lost acknowledgements and reminders can produce repeated requests.
+The receiver must use `groupKey` and alert fingerprints to correlate incidents.
+A successful HTTP response proves endpoint acceptance, not human receipt.
+The example caps each payload at 100 alerts. A nonzero `truncatedAlerts` value
+means the payload is incomplete. Current rules send service names, internal
+addresses, severity and runbook summaries. They send no reader IDs or story text.
+Do not add private content to alert labels or annotations.
+
+Run `python3 infra/monitoring/notification_drill.py` to check configuration,
+notification retries, timeout handling, duplicate suppression across restart and
+recovery messages. It pulls missing pinned images and starts four disposable
+containers on two internal networks without host ports. Install Linux `iproute2` first.
+The existing inventory guard requires a local Linux Docker engine and matches
+its bridge to the host routes. Remote contexts, Desktop proxies and rootless
+engines fail this check. The drill selects two private `/28` subnets after checking
+Docker subnets and all host routes. Its metrics fixture cannot reach the
+Alertmanager API. It sends synthetic alerts to a separate receiver fixture and
+removes its containers, volumes and networks.
+Required Production Compose Smoke also runs this check. It does not prove
+operator adoption, real recipient delivery, paging, journey SLOs or H5 acceptance.
+
+To disable delivery, stop Alertmanager with all three Compose files, then recreate
+only Prometheus with the base and monitoring files. Retain `alertmanager_data`.
+Check Alertmanager readiness and notification-failure metrics when delivery fails.
+A broken notification channel cannot reliably report its own failure through itself.
 
 ### Current retained import state
 
