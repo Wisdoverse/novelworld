@@ -54,7 +54,25 @@ def require(condition, code):
         raise Failure(code)
 
 
-def report_cold_adoption_status(journey, zero):
+def emit_cold_status(kind, status, report_dir):
+    try:
+        print(json.dumps(status, sort_keys=True), flush=True)
+    except Exception:
+        pass
+    if report_dir is not None:
+        try:
+            import live_deepseek_journey as runner
+            require(kind in ("adoption", "release", "startup")
+                    and status["case"] in ("zero", "nonzero"), "cold_report_kind_invalid")
+            value = runner.diagnostic.canonical({"version": 1, "kind": kind, "status": status}) + b"\n"
+            require(len(value) <= 16384, "cold_report_oversized")
+            runner.write_private(report_dir / f"cold-{kind}-{status['case']}.json", value)
+            runner.diagnostic.sync_directory(report_dir)
+        except Exception:
+            pass  # A report failure must not replace the original failure or cleanup.
+
+
+def report_cold_adoption_status(journey, zero, report_dir=None):
     """Best-effort stage presence only; never publish private diagnostic data."""
     failure_codes = (
         "diagnostic_stop_timeout", "diagnostic_stop_inventory_invalid",
@@ -89,14 +107,10 @@ def report_cold_adoption_status(journey, zero):
                for name in ("initial", "settings", "restart", "terminal")})
     except (AttributeError, TypeError):
         pass
-    try:
-        print(json.dumps(status, sort_keys=True), flush=True)
-    except Exception:
-        # A broken CI output pipe must not replace the original failure or cleanup.
-        pass
+    emit_cold_status("adoption", status, report_dir)
 
 
-def report_cold_release_status(journey, zero):
+def report_cold_release_status(journey, zero, report_dir=None):
     """Project fixed release markers only; raw private logs never reach CI."""
     phases = ("pull", "database_start", "migration", "application_deployment", "readiness")
     refusals = {
@@ -129,13 +143,10 @@ def report_cold_release_status(journey, zero):
                 status["curl_failed"] |= re.match(rb"curl: \([0-9]+\) ", line) is not None
     except (AttributeError, TypeError, OSError):
         pass
-    try:
-        print(json.dumps(status, sort_keys=True), flush=True)
-    except Exception:
-        pass  # Observability cannot supersede terminal failure or cleanup.
+    emit_cold_status("release", status, report_dir)
 
 
-def report_cold_startup_status(journey, zero):
+def report_cold_startup_status(journey, zero, report_dir=None):
     """Failure-only, bounded hints before terminal cleanup removes containers."""
     import diagnostic_journey as control
     hints = {"budget_invalid": b"diagnostic_budget_invalid",
@@ -147,7 +158,7 @@ def report_cold_startup_status(journey, zero):
               "services": {service: {"observed": False, "present": False, "running": False,
                                      "health": "unknown", "exit_nonzero": False, "oom_killed": False,
                                      "logs_observed": False, **{key: False for key in hints}}
-                           for service in (*SERVICES, "gateway", "frontend", "nginx")}}
+                           for service in ("postgres", *SERVICES, "gateway", "frontend", "nginx")}}
     deadline = time.monotonic() + 15
 
     def read(args):
@@ -187,19 +198,16 @@ def report_cold_startup_status(journey, zero):
                 status["startup_observation_unproven"] = True
     except Exception:
         status["startup_observation_unproven"] = True
-    try:
-        print(json.dumps(status, sort_keys=True), flush=True)
-    except Exception:
-        pass  # Never replace the original adopt failure or block terminal cleanup.
+    emit_cold_status("startup", status, report_dir)
 
 
-def cold_adopt_release(journey, manifest, zero):
+def cold_adopt_release(journey, manifest, zero, report_dir=None):
     try:
         journey.release("adopt", manifest, release_name="base")
     except Exception as error:
         if getattr(error, "code", None) == "release_adopt_failed":
             try:
-                report_cold_startup_status(journey, zero)
+                report_cold_startup_status(journey, zero, report_dir)
             except Exception:
                 pass
         raise
@@ -668,7 +676,7 @@ class Lifecycle:
                             "HTTPS_PROXY": "http://mock:3128", "NO_PROXY": NO_PROXY,
                             "SSL_CERT_FILE": "/fixture/ca.pem", "RUST_LOG": "error"}
 
-    def journey_wiring(self, image_sources, evidence):
+    def journey_wiring(self, image_sources, evidence, report_dir=None):
         """Real single-image cold adoption, not a semantic/two-version journey.
 
         Use the runner's registration, environment, release, snapshot, seal and
@@ -682,6 +690,11 @@ class Lifecycle:
         require(shutil.which("socat") is not None, "fixture_socat_required")
         evidence = control.private_path(evidence, ROOT, directory=True)
         require(not any(evidence.iterdir()), "journey_evidence_not_empty")
+        if report_dir is not None:
+            report_dir = control.private_path(report_dir, ROOT, directory=True)
+            require(not any(report_dir.iterdir()) and report_dir != evidence
+                    and evidence not in report_dir.parents and report_dir not in evidence.parents,
+                    "cold_report_directory_invalid")
         self.ingress_evidence = evidence
         self.journey_user_stack_before = runner.docker_inventory_snapshot()
         runner.write_private(evidence / "fixture-boundary.json", control.canonical({
@@ -766,7 +779,7 @@ class Lifecycle:
                 control.sync_directory(output)
                 journey.prepare_runtime()
                 self.start_ingress(journey.port)
-                cold_adopt_release(journey, manifest_path, zero)
+                cold_adopt_release(journey, manifest_path, zero, report_dir)
                 journey.stack_started = True
                 journey.wait_gateway()
                 journey.verify_release_images("base", manifest)
@@ -811,8 +824,8 @@ class Lifecycle:
             try:
                 require(runner.run_diagnostic(journey) == 1, "partial_journey_must_not_pass")
             finally:
-                report_cold_adoption_status(journey, zero)
-                report_cold_release_status(journey, zero)
+                report_cold_adoption_status(journey, zero, report_dir)
+                report_cold_release_status(journey, zero, report_dir)
                 self.stop_ingresses()
             require(set(journey.diagnostic_failures) <= {
                 "response_model_observation_count_mismatch", "llm_budget_failed", "diagnostic_cleanup_residue",
@@ -1243,12 +1256,15 @@ def main():
                         help="Cold-adopt wiring only: six release-built application images, no semantic journey")
     parser.add_argument("--journey-output", type=Path,
                         help="Pre-created empty private directory for retained cold-adopt evidence")
+    parser.add_argument("--cold-report-dir", type=Path,
+                        help="Separate empty private directory for safe cold-adopt summaries, journey mode only")
     parser.add_argument("--subnet", help="Unused RFC1918 /28; required for journey static ingress, optional in other modes")
     args = parser.parse_args()
     if args.mock:
+        require(args.cold_report_dir is None, "journey_fixture_inputs_required")
         mock_server()
         return
-    if args.journey_images or args.journey_output:
+    if args.journey_images or args.journey_output or args.cold_report_dir:
         require(args.journey_images and args.journey_output
                 and not any((args.owner_binary, args.client_binary, args.capability_images, args.runtime_images)),
                 "journey_fixture_inputs_required")
@@ -1261,7 +1277,8 @@ def main():
         signal.signal(signal.SIGTERM, cancel_journey)
         signal.signal(signal.SIGINT, cancel_journey)
         try:
-            lifecycle.journey_wiring(json.loads(args.journey_images.read_bytes()), args.journey_output)
+            lifecycle.journey_wiring(json.loads(args.journey_images.read_bytes()), args.journey_output,
+                                     args.cold_report_dir)
         finally:
             lifecycle.cleanup()
         import live_deepseek_journey as runner
