@@ -49,7 +49,7 @@ jobs:
       - uses: pnpm/action-setup@v6.1.0
         with:
           version: 11.24.0
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: 26
           cache: pnpm
@@ -124,21 +124,21 @@ jobs:
           frontend/src-tauri/target/${{ matrix.target }}/release/bundle/macos/NovelWorld.app
           ${{ matrix.artifact }}.zip
 
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         if: runner.os == 'Windows'
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}.zip
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         if: runner.os == 'Linux'
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}.tar.gz
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         if: runner.os == 'macOS'
         with:
           name: ${{ matrix.artifact }}
