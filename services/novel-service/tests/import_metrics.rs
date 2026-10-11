@@ -39,6 +39,34 @@ fn observed(text: &str, counts: [i64; 4]) {
         assert!(samples
             .contains(&format!("novelworld_import_jobs{{status=\"{status}\"}} {count}").as_str()));
     }
+    let ages = ages(text);
+    for (count, age) in counts[..3].iter().zip(ages) {
+        assert!(age >= 0);
+        if *count == 0 {
+            assert_eq!(age, 0, "a known empty state has zero age");
+        }
+    }
+}
+
+fn ages(text: &str) -> [i64; 3] {
+    let samples = text
+        .lines()
+        .filter(|line| line.starts_with("novelworld_import_job_oldest_age_seconds{"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        samples.len(),
+        3,
+        "completed jobs must not have an age series"
+    );
+    ["pending", "in_progress", "failed"].map(|status| {
+        let prefix = format!("novelworld_import_job_oldest_age_seconds{{status=\"{status}\"}} ");
+        samples
+            .iter()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .unwrap()
+            .parse()
+            .unwrap()
+    })
 }
 
 fn unknown(text: &str) {
@@ -46,6 +74,7 @@ fn unknown(text: &str) {
         .lines()
         .any(|line| line == "novelworld_import_jobs_observation_success 0"));
     assert!(!text.contains("novelworld_import_jobs{"));
+    assert!(!text.contains("novelworld_import_job_oldest_age_seconds{"));
 }
 
 async fn next_observation() {
@@ -173,6 +202,28 @@ async fn import_metrics_observe_retained_states_and_fail_boundedly_without_stale
     .unwrap();
     sqlx::query("UPDATE novels SET status='ready'::novel_status, original_file_key='source-files/PRIVATE_KEY' WHERE id=$1")
         .bind(novels[3].id).execute(&pool).await.unwrap();
+    for (novel, seconds) in novels.iter().zip([30_i64, 80, 180, 86400]) {
+        sqlx::query(
+            "UPDATE novel_import_jobs SET created_at=statement_timestamp()-$2::BIGINT*INTERVAL '1 second' WHERE novel_id=$1",
+        )
+        .bind(novel.id)
+        .bind(seconds)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let newer = Novel::create(user, "PRIVATE NEWER TITLE".into(), None);
+    repo.create_import(
+        &newer,
+        &[Chapter::new(
+            newer.id,
+            1,
+            None,
+            "PRIVATE NEWER CONTENT".into(),
+        )],
+    )
+    .await
+    .unwrap();
     next_observation().await;
     let before: serde_json::Value = sqlx::query_scalar(
         "SELECT jsonb_agg(to_jsonb(job) ORDER BY novel_id) FROM novel_import_jobs AS job",
@@ -181,7 +232,11 @@ async fn import_metrics_observe_retained_states_and_fail_boundedly_without_stale
     .await
     .unwrap();
     let text = scrape(&client, &endpoint).await;
-    observed(&text, [1, 1, 1, 1]);
+    observed(&text, [2, 1, 1, 1]);
+    let initial_ages = ages(&text);
+    for (age, lower) in initial_ages.into_iter().zip([30, 80, 180]) {
+        assert!(age >= lower && age < lower + 15, "oldest job age: {age}");
+    }
     for private in [
         user.to_string(),
         "PRIVATE IMPORT TITLE".into(),
@@ -189,6 +244,9 @@ async fn import_metrics_observe_retained_states_and_fail_boundedly_without_stale
         "PRIVATE_FAILURE".into(),
         "PRIVATE FAILURE TEXT".into(),
         "PRIVATE_KEY".into(),
+        "PRIVATE NEWER TITLE".into(),
+        "PRIVATE NEWER CONTENT".into(),
+        newer.id.to_string(),
     ]
     .into_iter()
     .chain(novels.iter().map(|n| n.id.to_string()))
@@ -208,6 +266,33 @@ async fn import_metrics_observe_retained_states_and_fail_boundedly_without_stale
     for _ in 0..3 {
         unknown(&scrape(&client, &endpoint).await);
     }
+
+    // A future younger row must fail even beside an otherwise valid oldest row.
+    sqlx::query("UPDATE novel_import_jobs SET created_at=statement_timestamp()+INTERVAL '1 hour' WHERE novel_id=$1")
+        .bind(newer.id).execute(&pool).await.unwrap();
+    next_observation().await;
+    unknown(&scrape(&client, &endpoint).await);
+    sqlx::query("UPDATE novel_import_jobs SET created_at=statement_timestamp() WHERE novel_id=$1")
+        .bind(newer.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Out-of-range database timestamps must not become a valid zero or old age.
+    sqlx::query(
+        "UPDATE novel_import_jobs SET created_at='-infinity'::timestamptz WHERE novel_id=$1",
+    )
+    .bind(newer.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    next_observation().await;
+    unknown(&scrape(&client, &endpoint).await);
+    sqlx::query("UPDATE novel_import_jobs SET created_at=statement_timestamp() WHERE novel_id=$1")
+        .bind(newer.id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     for attempt in 2..=3 {
         assert_eq!(
@@ -256,7 +341,14 @@ async fn import_metrics_observe_retained_states_and_fail_boundedly_without_stale
         2
     );
     next_observation().await;
-    observed(&scrape(&client, &endpoint).await, [1, 1, 1, 1]);
+    let text = scrape(&client, &endpoint).await;
+    observed(&text, [2, 1, 1, 1]);
+    for (before, after) in initial_ages.into_iter().zip(ages(&text)) {
+        assert!(
+            after > before,
+            "retry and reclaim must retain the age origin"
+        );
+    }
 
     next_observation().await;
     let mut lock = control.begin().await.unwrap();
@@ -297,7 +389,7 @@ async fn import_metrics_observe_retained_states_and_fail_boundedly_without_stale
     .expect("cancelled work must retain admission: a burst cannot wait on more database scans");
     lock.rollback().await.unwrap();
     next_observation().await;
-    observed(&scrape(&client, &endpoint).await, [1, 1, 1, 1]);
+    observed(&scrape(&client, &endpoint).await, [2, 1, 1, 1]);
     let statement_timeout: String = sqlx::query_scalar("SHOW statement_timeout")
         .fetch_one(&pool)
         .await

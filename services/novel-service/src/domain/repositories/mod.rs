@@ -138,6 +138,11 @@ pub struct ImportJobCounts {
     pub in_progress: i64,
     pub failed: i64,
     pub completed: i64,
+    /// Whole database-clock seconds since the oldest retained job was created.
+    /// An empty state has zero age. Retry and reclaim do not reset the origin.
+    pub pending_oldest_age_seconds: i64,
+    pub in_progress_oldest_age_seconds: i64,
+    pub failed_oldest_age_seconds: i64,
 }
 
 #[async_trait]

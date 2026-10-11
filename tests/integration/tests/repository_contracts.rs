@@ -1677,8 +1677,12 @@ async fn poll_import_state(
     .expect("import state did not reach the expected condition")
 }
 
+// Global claims must not consume another test's upload reservation.
+static SOURCE_DELETION_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn retained_import_accepts_at_source_stage_and_replays_chapters() {
+    let _source_deletion_test = SOURCE_DELETION_TEST_LOCK.lock().await;
     let pool = PgPoolOptions::new()
         .max_connections(4)
         .connect(&db_url())
@@ -1743,6 +1747,7 @@ async fn retained_import_accepts_at_source_stage_and_replays_chapters() {
 
 #[tokio::test]
 async fn source_stage_jobs_are_claimable_at_the_source_boundary() {
+    let _source_deletion_test = SOURCE_DELETION_TEST_LOCK.lock().await;
     let pool = PgPoolOptions::new()
         .max_connections(4)
         .connect(&db_url())
@@ -1798,6 +1803,7 @@ async fn seed_failed_source_import(pool: &PgPool, user_id: Uuid, novel: &Novel) 
 
 #[tokio::test]
 async fn source_stage_missing_object_fails_with_reupload_guidance() {
+    let _source_deletion_test = SOURCE_DELETION_TEST_LOCK.lock().await;
     let pool = PgPoolOptions::new()
         .max_connections(4)
         .connect(&db_url())
@@ -1836,6 +1842,7 @@ async fn source_stage_missing_object_fails_with_reupload_guidance() {
 
 #[tokio::test]
 async fn source_stage_storage_failure_marks_a_retryable_error() {
+    let _source_deletion_test = SOURCE_DELETION_TEST_LOCK.lock().await;
     let pool = PgPoolOptions::new()
         .max_connections(4)
         .connect(&db_url())
@@ -1874,6 +1881,7 @@ async fn source_stage_storage_failure_marks_a_retryable_error() {
 
 #[tokio::test]
 async fn replayed_chapter_replacement_is_fenced_and_replaces_legacy_rows() {
+    let _source_deletion_test = SOURCE_DELETION_TEST_LOCK.lock().await;
     let pool = PgPoolOptions::new()
         .max_connections(4)
         .connect(&db_url())
@@ -1976,6 +1984,7 @@ async fn replayed_chapter_replacement_is_fenced_and_replaces_legacy_rows() {
 
 #[tokio::test]
 async fn failed_source_import_retries_from_the_retained_object() {
+    let _source_deletion_test = SOURCE_DELETION_TEST_LOCK.lock().await;
     let pool = PgPoolOptions::new()
         .max_connections(4)
         .connect(&db_url())
@@ -2341,6 +2350,7 @@ async fn import_character_snapshot_is_atomic_and_attempt_fenced() {
 
 #[tokio::test]
 async fn source_file_cleanup_waits_for_shared_novel_deletion() {
+    let _source_deletion_test = SOURCE_DELETION_TEST_LOCK.lock().await;
     let pool = PgPoolOptions::new()
         .max_connections(2)
         .connect(&db_url())
@@ -2447,6 +2457,7 @@ async fn source_file_cleanup_waits_for_shared_novel_deletion() {
 
 #[tokio::test]
 async fn claimed_source_cleanup_fences_a_late_import_commit() {
+    let _source_deletion_test = SOURCE_DELETION_TEST_LOCK.lock().await;
     let pool = PgPoolOptions::new()
         .max_connections(2)
         .connect(&db_url())
@@ -2509,6 +2520,7 @@ async fn claimed_source_cleanup_fences_a_late_import_commit() {
 
 #[tokio::test]
 async fn acceptance_failure_requeues_cleanup_after_a_late_put() {
+    let _source_deletion_test = SOURCE_DELETION_TEST_LOCK.lock().await;
     let pool = PgPoolOptions::new()
         .max_connections(4)
         .connect(&db_url())
