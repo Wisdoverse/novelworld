@@ -536,6 +536,7 @@ enum Mode {
 struct Args {
     mode: Mode,
     bounded_diagnostic: bool,
+    budget_profile: budget::Profile,
     git_sha: String,
     metrics_output: Option<PathBuf>,
     private_responses_output: Option<PathBuf>,
@@ -594,6 +595,10 @@ impl RunConfig {
         let ticket = control
             .begin(request.max_tokens.unwrap_or(0))
             .map_err(fail)?;
+        let request = match ticket.attempt_limit {
+            Some(limit) => request.max_attempts(limit),
+            None => request,
+        };
         let response = match client.chat(request).await {
             Ok(response) => response,
             Err(_) => return Err(fail("diagnostic_request_failed")),
@@ -780,6 +785,7 @@ async fn main() -> Result<()> {
                 .as_ref()
                 .context("diagnostic_metrics_missing")?
                 .clone(),
+            args.budget_profile,
         ));
     }
     let outcome = evaluate(&corpus, &config, args.git_sha, &mut private_responses).await;
@@ -804,6 +810,7 @@ fn parse_args() -> Result<Args> {
 fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args> {
     let mut mode = None;
     let mut bounded_diagnostic = false;
+    let mut budget_profile = None;
     let mut git_sha = None;
     let mut metrics_output = None;
     let mut private_responses_output = None;
@@ -813,6 +820,11 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args> {
             "--recorded" if mode.is_none() => mode = Some(Mode::Recorded),
             "--live" if mode.is_none() => mode = Some(Mode::Live),
             "--bounded-diagnostic" if !bounded_diagnostic => bounded_diagnostic = true,
+            "--diagnostic-budget-profile" if budget_profile.is_none() => {
+                budget_profile = Some(budget::Profile::parse(
+                    &args.next().context("--diagnostic-budget-profile requires a value")?,
+                ).map_err(anyhow::Error::msg)?);
+            }
             "--git-sha" if git_sha.is_none() => {
                 git_sha = Some(args.next().context("--git-sha requires a value")?)
             }
@@ -828,13 +840,16 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args> {
                     )?))
             }
             _ => bail!(
-                "usage: h1-eval (--recorded | --live) [--bounded-diagnostic] --git-sha <40-hex-sha> [--metrics-output <path>] [--private-responses-output <absolute-path-outside-checkout>]"
+                "usage: h1-eval (--recorded | --live) [--bounded-diagnostic] [--diagnostic-budget-profile <profile>] --git-sha <40-hex-sha> [--metrics-output <path>] [--private-responses-output <absolute-path-outside-checkout>]"
             ),
         }
     }
     let mode = mode.context("--recorded or --live is required")?;
     if bounded_diagnostic && mode != Mode::Live {
         bail!("--bounded-diagnostic requires --live");
+    }
+    if budget_profile.is_some() && !bounded_diagnostic {
+        bail!("--diagnostic-budget-profile requires --live --bounded-diagnostic");
     }
     if matches!(mode, Mode::Recorded)
         && (metrics_output.is_some() || private_responses_output.is_some())
@@ -861,6 +876,7 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args> {
     Ok(Args {
         mode,
         bounded_diagnostic,
+        budget_profile: budget_profile.unwrap_or_default(),
         git_sha: git_sha.context("--git-sha is required")?,
         metrics_output,
         private_responses_output,
@@ -4022,6 +4038,37 @@ mod tests {
             "/private/responses.jsonl".to_owned(),
         ];
         assert!(parse_args_from(args.clone()).unwrap().bounded_diagnostic);
+        assert_eq!(
+            parse_args_from(args.clone()).unwrap().budget_profile,
+            budget::Profile::V3
+        );
+        for (profile, expected) in [
+            (budget::PROFILE, budget::Profile::V3),
+            (budget::CNY10_PROFILE, budget::Profile::V4),
+        ] {
+            let mut selected = args.clone();
+            selected.extend(["--diagnostic-budget-profile".into(), profile.into()]);
+            assert_eq!(
+                parse_args_from(selected.clone()).unwrap().budget_profile,
+                expected
+            );
+            selected.retain(|arg| arg != "--bounded-diagnostic");
+            assert!(parse_args_from(selected).is_err());
+        }
+        for suffix in [
+            vec!["--diagnostic-budget-profile"],
+            vec!["--diagnostic-budget-profile", "other"],
+            vec![
+                "--diagnostic-budget-profile",
+                budget::CNY10_PROFILE,
+                "--diagnostic-budget-profile",
+                budget::CNY10_PROFILE,
+            ],
+        ] {
+            let mut invalid = args.clone();
+            invalid.extend(suffix.into_iter().map(str::to_owned));
+            assert!(parse_args_from(invalid).is_err());
+        }
         let mut invalid = args.clone();
         invalid[0] = "--recorded".into();
         assert!(parse_args_from(invalid).is_err());
