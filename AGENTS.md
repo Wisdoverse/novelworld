@@ -56,6 +56,6 @@ Public deployment, credential disclosure, account funding, and destructive actio
 ## Work and records
 
 Follow [work authorization and cleanup rules](CONTRIBUTING.md#work-authorization-stopping-and-cleanup) and [roadmap record rules](CONTRIBUTING.md#roadmap-and-github-records).
-Inspect actual results. Keep independent final-head review and required CI blocking.
+Inspect actual results. Follow [small-team review](CONTRIBUTING.md#small-team-review). Keep required CI blocking.
 Report source, local tests, CI, artifacts, runtime, deployment, provider execution, qualification, merge, and Project status as separate facts.
 State skipped or unavailable evidence.

@@ -148,9 +148,11 @@ list:
 For the current private rapid-iteration phase, follow
 [rapid-iteration acceptance](./QUALIFICATION_POLICY.md#rapid-iteration-acceptance):
 human acceptance is not a development, merge, or iteration-delivery gate.
-Retain plan review, implementation, non-author agent review and all affected
-automated gates. Deferred human evidence is unverified, not passed; human-only
-work is not planned for this phase. The horizon exit requirements below remain
+Use [small-team review](../CONTRIBUTING.md#small-team-review) and all affected
+automated gates. Routine changes need one non-author agent review of the final diff.
+Add a separate plan review for the risks listed in the small-team rules.
+Record deferred human observations as unverified. Defer human-only work in this phase.
+The horizon exit requirements below remain
 the formal qualification contract, not a reason to block rapid iteration.
 
 This private iteration direction prioritizes H3/H4: believable cross-session
@@ -160,11 +162,11 @@ priority does not change H1's formal exit criteria or supersede the repository
 Project as the authority for execution status and priority. It is not evidence
 that H3 or H4 has reached its horizon exit state.
 
-Every horizon exit has at least three recorded perspectives. Each record names
-the reviewer, commit, evidence, unresolved risks, and disposition. A
-fresh-context review agent may supply adversarial evidence, but it does not
-replace accountable maintainer approval or an independent human reviewer when
-policy requires one; the implementer cannot be the only approving reviewer.
+A horizon-exit review covers the applicable perspectives below.
+One non-author agent may cover them in one recorded review.
+Record the reviewer, commit, evidence, unresolved risks, and disposition.
+Keep accountable maintainer approval and direct human observations when the formal policy requires them.
+The implementer cannot be the only approving reviewer.
 
 1. **Current-truth review — before planning.** Reconstruct the user outcome,
    current runtime, hard constraints, dependencies, and non-goals from evidence.
@@ -187,12 +189,10 @@ policy requires one; the implementer cannot be the only approving reviewer.
    of an error budget pauses unrelated rollout until recovery or an explicit
    risk decision.
 
-Review weight is proportional to risk. A documentation-only change may reuse
-existing adversarial evidence. Authentication, authorization, persistent state,
-migrations, deletion, backup/restore, model commit boundaries, privacy, and the
-release workflow require separate contract/design and adversarial reviewers.
-When independent human review is unavailable, record the limitation and
-explicit risk acceptance; do not label an agent review as human sign-off.
+Review weight is proportional to risk. A documentation-only change may reuse existing adversarial evidence.
+For authentication, authorization, persistent state, migrations, deletion, backup/restore, model commit boundaries, privacy, or release controls, include contract/design and adversarial checks.
+Use another reviewer only when the first cannot assess a material risk.
+Record missing human observations as unverified. Do not label agent review as human sign-off.
 
 ## Dependency map
 

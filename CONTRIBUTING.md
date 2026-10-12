@@ -52,6 +52,20 @@ the resulting secrets or provider credentials.
 6. Run the relevant local gates, open a pull request, and respond to review with
    new evidence rather than unsupported claims.
 
+### Small-team review
+
+For routine changes, use one non-author agent review of the final diff and its evidence.
+One reviewer may cover correctness, security, accessibility, and operational risks.
+Use the issue or pull-request body as the plan and review record.
+Run affected tests and required CI before merging.
+Add a separate plan review for changes to service or trust boundaries, data ownership, migrations, deletion, restore, or release controls.
+Paid Diagnostics keep their registered plan-review and authorization rules.
+Add another reviewer only when the first cannot assess a material risk.
+Agents may execute browser journeys, recovery drills, and evidence checks. Report what they actually tested.
+Human decisions remain necessary for legal obligations and actions that require explicit operator authority.
+Formal policies that require direct human observations still require those observations.
+Keep missing human evidence unverified. Agent review alone does not prove live runtime or provider behavior.
+
 ### Work authorization, stopping, and cleanup
 
 Inspect the implementation, callers, contract, and current issue or pull request before editing.
@@ -82,7 +96,7 @@ Run affected checks.
 Inspect their results.
 Fix failures caused by the change.
 Repeat affected checks.
-Keep independent final review and required CI blocking.
+Follow [small-team review](#small-team-review). Keep required CI blocking.
 Stop when acceptance evidence is met or a concrete external blocker prevents progress.
 Report evidence classes separately. State skipped or unavailable evidence.
 
@@ -105,8 +119,8 @@ Before deletion, migrate inbound links.
 
 During the current private rapid-iteration phase,
 [human acceptance is not required](./docs/QUALIFICATION_POLICY.md#rapid-iteration-acceptance).
-Non-author agent review and all affected automated/required CI gates remain
-mandatory; no additional human sign-off is needed to deliver a focused change.
+Follow [small-team review](#small-team-review) and all affected automated/required
+CI gates. A focused change needs no additional human sign-off.
 This applies throughout the active roadmap goal, including agent-adjudicated
 new revisions and bounded Diagnostics under the linked policy's pre-call
 identity, budget and evidence controls.

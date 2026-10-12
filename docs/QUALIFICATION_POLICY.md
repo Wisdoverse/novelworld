@@ -17,9 +17,11 @@ security, reliability and operability; no additional human decision or approval
 is required within this private iteration scope. This is an execution-phase
 decision, not a change to the frozen Qualification contract below.
 
-- Keep the workflow: plan → non-author review → implementation → independent
-  final review. A non-author agent may supply the independent review; no
-  additional human sign-off is required for rapid-iteration acceptance.
+Operator update, **2026-10-12**: use the [small-team review rules](../CONTRIBUTING.md#small-team-review) for private iteration.
+
+- One non-author agent review of the final diff is sufficient for routine changes.
+  Add a separate plan review for the risks listed in the small-team rules or the Diagnostic registration.
+  Rapid-iteration acceptance needs no additional human sign-off.
 - All affected automated tests and required CI remain blocking, including
   browser accessibility, strict FSD, backend Cloud Native/DDD/microservice
   architecture, security, privacy, data-integrity and recovery gates where
