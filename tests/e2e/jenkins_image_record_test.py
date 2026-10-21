@@ -62,7 +62,7 @@ class RecordTest(unittest.TestCase):
         self.repo.mkdir()
         (self.repo / "infra/ops").mkdir(parents=True)
         shutil.copyfile(ROOT / SCRIPT, self.repo / SCRIPT)
-        (self.repo / ".gitignore").write_text(".env\n.local/\n")
+        shutil.copyfile(ROOT / ".gitignore", self.repo / ".gitignore")
         (self.repo / "tracked.txt").write_text("original")
         (self.repo / ".env").write_text("PRIVATE_VALUE=synthetic-do-not-archive\n")
         self.git("init", "-q")
@@ -116,6 +116,17 @@ class RecordTest(unittest.TestCase):
                 self.run_record("build", case, success=False)
                 self.assertFalse(self.build_record.exists())
 
+    def test_local_compose_override_is_private_and_preserved(self):
+        override = self.repo / "docker-compose.override.yml"
+        contents = 'services:\n  gateway:\n    environment:\n      PRIVATE_VALUE: synthetic-do-not-archive\n'
+        override.write_text(contents)
+        self.run_record("build")
+        self.git("add", ".")
+        self.assertEqual(self.git("ls-files", "--", override.name), "")
+        self.run_record("verify")
+        self.assertEqual(override.read_text(), contents)
+        self.assertNotIn("synthetic-do-not-archive", self.record.read_text())
+
     def test_verification_failures_never_publish_partial_records(self):
         self.run_record("build")
         for case in ("missing_container", "multiple_containers", "mismatch", "stopped", "wrong_service", "source_during_verify"):
@@ -124,9 +135,10 @@ class RecordTest(unittest.TestCase):
                 self.run_record("verify", case, success=False)
 
     def test_dirty_and_untracked_source_rejected(self):
-        for name in ("tracked.txt", "untracked.txt"):
+        for name in ("tracked.txt", "untracked.txt", "nested/docker-compose.override.yml"):
             with self.subTest(name=name):
                 path = self.repo / name
+                path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("modified")
                 self.seed_stale_record()
                 self.run_record("build", success=False)

@@ -16,6 +16,7 @@ __pycache__/
 .env
 .env.local
 .env.prod
+/docker-compose.override.yml
 
 # IDE
 .idea/
