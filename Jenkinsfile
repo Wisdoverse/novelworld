@@ -40,8 +40,7 @@ set -euo pipefail
     exit 1
 }
 unset COMPOSE_PROJECT_NAME
-docker compose --env-file .env build \
-    gateway user-service novel-service agent-service narrative-service frontend
+bash infra/ops/jenkins-image-record.sh build
 '''
             }
         }
@@ -64,7 +63,9 @@ unset COMPOSE_PROJECT_NAME
 bash start.sh </dev/null
 nginx_url="$(sed -n 's/^NGINX_URL=//p' .env | tail -n 1)"
 bash infra/ops/health-checks.sh "${nginx_url:-http://127.0.0.1:80}"
+bash infra/ops/jenkins-image-record.sh verify
 '''
+                archiveArtifacts artifacts: '.local/jenkins-deployment/deployment.tsv', onlyIfSuccessful: true
             }
         }
     }

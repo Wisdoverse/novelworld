@@ -173,6 +173,19 @@ Jenkins 前，应确认选用的受信任分支或提交已通过 CI。每次成
 部署依赖 Job 默认 workspace 中预先配置且跨构建保留的 `.env`；缺少时，镜像构建前
 即失败关闭。Compose 使用该 `.env` 构建和启动，不使用示例配置。
 
+每次成功部署应在 Job 的默认 workspace 中归档
+`.local/jenkins-deployment/deployment.tsv`：记录干净检出的完整 Git SHA，以及
+`gateway`、`user-service`、`novel-service`、`agent-service`、`narrative-service` 和
+`frontend` 各自的构建镜像 ID 与部署容器 ID。首次成功部署也按此方式记录；每次运行都应
+先移除 workspace 中旧的未归档记录，并在 `start.sh`、readiness 和健康检查全部成功后
+生成记录。健康检查后，应确认每个部署容器仍使用对应的构建镜像 ID，再归档完整记录；
+失败时不得留下可被误认为成功的部分记录。若部署已成功但记录或归档失败，先检查当前
+服务状态和镜像身份，再决定是否重试；此流程不会自动回滚或重置安装。
+
+该记录只提供受信任单写入者部署流程的观察证据，不是隔离构建、可复现构建、签名或
+正式来源证明；不得据此追认旧构建。记录中的 SHA 只证明已检出提交及其受跟踪文件干净，
+不证明默认 workspace 内被忽略的本地文件、环境或 Docker 主机状态。
+
 1. 在目标 Linux 部署服务器安装 Git、Bash、OpenSSL、curl，以及带 BuildKit 的
    Docker 和 Compose v2。Jenkins agent 用户必须能访问该服务器的 Docker daemon。
    Jenkins 主机无需安装 Rust、Node.js、pnpm 或 Python；镜像所需的 Rust、Node.js
