@@ -437,9 +437,10 @@ commit and metric emission can omit a sample; these counts are not authoritative
 lifetime facts or whole-journey success. Existing global labels, metric
 contracts, and frozen evidence remain unchanged.
 
-Journey denominators and latency, the initial SLO/error budget, alert
-notification routing/dedup/paging (the rules fire; nothing pages yet),
-postmortem tooling, and H5 Observation remain pending.
+PR #569 delivers optional Alertmanager routing and duplicate suppression.
+Real-recipient delivery and on-call paging remain unverified. Deployment-wide journey
+denominators and latency, the initial SLO/error budget, postmortem tooling,
+and H5 Observation remain pending.
 
 ### Import readiness measurement boundary
 
@@ -469,8 +470,74 @@ The existing process-local commit-acknowledgement counter cannot reconstruct
 this cohort across restarts, lost acknowledgements or unknown outcomes. The
 120-second import objective above belongs to its deterministic capacity
 workload; it is not a live-provider SLO. A live cutoff, target, sampling policy
-and observation window need separate reviewed registration. Registered-cohort
-collection, journey SLIs/SLOs, alerts and H5 Observation remain pending.
+and observation window need separate reviewed registration. Deployment-wide
+journey SLIs/SLOs, readiness alerts and H5 Observation remain pending.
+
+### Observe a selected import cohort
+
+Use [`import_readiness.py`](../infra/ops/import_readiness.py) on Linux to capture
+one read-only observation of a registered cohort. It requires Python 3, Docker
+access, and `psql` inside the PostgreSQL container. The database role must read
+`novel_import_jobs` and `novels`, and call `pg_control_system()`.
+The tool makes no provider request and changes no application data.
+
+Register the complete selected cohort after its jobs commit and before their
+cutoffs. Use unique novel IDs and the exact job `created_at` values.
+Read timestamps as JSON to retain a supported timezone representation:
+
+```sql
+SELECT novel_id, to_json(created_at) AS created_at
+FROM novel_import_jobs
+WHERE novel_id IN ('<novel UUID>'::uuid);
+```
+
+Read the database system identifier with `SELECT system_identifier::text FROM
+pg_control_system();`. These values are private observation inputs.
+The selected cohort does not represent every deployment import or a random
+sample. The source SHA and profile are operator declarations, not verified
+runtime provenance.
+
+Save a private registration file with this shape. Replace the placeholders and
+choose a reviewed cutoff; `120` below is an example, not a live SLO.
+
+```json
+{
+  "version": 1,
+  "source_sha": "<40-character lowercase commit SHA>",
+  "profile": "single-node-v1",
+  "database": {"system_identifier": "<decimal identifier>", "name": "novel_world"},
+  "cutoff_seconds": 120,
+  "jobs": [{"novel_id": "<UUID>", "created_at": "<timestamp with timezone>"}]
+}
+```
+
+Use the configured PostgreSQL container and database role in this command.
+
+```bash
+chmod 600 /private/import-cohort.json
+python3 infra/ops/import_readiness.py \
+  --registration /private/import-cohort.json \
+  --evidence /private/import-observation.json \
+  --container novel-postgres --db-user novel
+```
+
+Run the same command for later observations. The first observation must find
+every registered job and novel, verify their origins, and precede every cutoff.
+Incomplete or late enrollment fails without reducing the cohort. The evidence binds the original
+registration. Changing that registration requires a separate prospective cohort.
+
+The output contains aggregate counts, coverage, and sampled latency upper
+bounds. A completed job with a ready novel, observed on time, establishes Good.
+Later regression, deletion, or collection failure does not erase that proof.
+Unresolved jobs are Open before cutoff and Unknown afterward. This observer
+cannot rule out prior readiness, so Bad remains zero. It produces no SLO verdict
+or error-budget decision. A late ready sample does not prove on-time completion.
+
+Keep the registration, evidence, and lock file private. Evidence uses mode 0600
+and atomic replacement; an exclusive lock rejects a second writer.
+Collection errors return nonzero with a sanitized code and preserve prior
+evidence. They do not return old counts as a fresh observation. Do not delete
+evidence or change timestamps to hide missing coverage.
 
 ### Uploads while parsing is busy
 
