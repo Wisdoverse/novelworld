@@ -19,6 +19,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from http.client import HTTPException
 from pathlib import Path
 
 
@@ -343,6 +344,80 @@ def wait_provider_calls(provider_url, expected_calls, timeout=10):
         time.sleep(0.05)
 
 
+class ChatStreamObservation:
+    def __init__(self, turn_id):
+        self.turn_id = turn_id
+        self.event = b""
+        self.data = []
+        self.terminal = False
+        self.first_content_seconds = None
+        self.commit_ack_seconds = None
+        self.replayed = None
+
+    @staticmethod
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate JSON key")
+            value[key] = item
+        return value
+
+    @staticmethod
+    def reject_constant(value):
+        raise ValueError("nonstandard JSON constant")
+
+    def feed_line(self, line, elapsed):
+        if self.terminal:
+            return
+        line = line.removesuffix(b"\n").removesuffix(b"\r")
+        if line:
+            field, _, value = line.partition(b":")
+            value = value.removeprefix(b" ")
+            if field == b"event":
+                self.event = value
+            elif field == b"data":
+                self.data.append(value)
+            return
+        event, data = self.event, b"\n".join(self.data)
+        self.event, self.data = b"", []
+        if event == b"error":
+            self.terminal = True
+            return
+        if event not in (b"delta", b"done"):
+            return
+        try:
+            value = json.loads(
+                data.decode("utf-8"), object_pairs_hook=self.unique_object,
+                parse_constant=self.reject_constant,
+            )
+        except (ValueError, UnicodeError):
+            return
+        if not isinstance(value, dict):
+            return
+        if event == b"delta":
+            if isinstance(value.get("content"), str) and value["content"]:
+                if self.first_content_seconds is None:
+                    self.first_content_seconds = elapsed
+        elif (
+            value.get("turn_id") == self.turn_id
+            and value.get("committed") is True
+            and ("replayed" not in value or type(value["replayed"]) is bool)
+        ):
+            self.commit_ack_seconds = elapsed
+            self.replayed = value.get("replayed")
+            self.terminal = True
+
+    def sample(self, status, transport_outcome):
+        return {
+            "http_status": status,
+            "transport_outcome": transport_outcome,
+            "first_content_seconds": self.first_content_seconds,
+            "commit_ack_seconds": self.commit_ack_seconds,
+            "replayed": self.replayed,
+        }
+
+
 def stream_chat(api_url, fixture, turn_id, released_at=None, timeout=30):
     payload = json.dumps(
         {"message": "容量门禁对话。", "novel_id": fixture["novel_id"]},
@@ -360,28 +435,42 @@ def stream_chat(api_url, fixture, turn_id, released_at=None, timeout=30):
         method="POST",
     )
     started = released_at if released_at is not None else time.perf_counter()
+    observation = ChatStreamObservation(turn_id)
+    first_event = None
+    body = bytearray()
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            first_event = None
-            body = bytearray()
-            for line in response:
-                body.extend(line)
-                if first_event is None and line.strip():
-                    first_event = time.perf_counter() - started
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                for line in response:
+                    body.extend(line)
+                    if first_event is None and line.strip():
+                        first_event = time.perf_counter() - started
+                    observation.feed_line(line, time.perf_counter() - started)
+                return {
+                    "status": response.status,
+                    "elapsed": time.perf_counter() - started,
+                    "first_event": first_event,
+                    "retry_after": response.headers.get("Retry-After"),
+                    "body": bytes(body),
+                    "observation": observation.sample(response.status, "eof"),
+                }
+        except urllib.error.HTTPError as error:
             return {
-                "status": response.status,
+                "status": error.code,
                 "elapsed": time.perf_counter() - started,
-                "first_event": first_event,
-                "retry_after": response.headers.get("Retry-After"),
-                "body": bytes(body),
+                "first_event": None,
+                "retry_after": error.headers.get("Retry-After"),
+                "body": error.read(),
+                "observation": observation.sample(error.code, "http_error"),
             }
-    except urllib.error.HTTPError as error:
+    except (urllib.error.URLError, OSError, HTTPException):
         return {
-            "status": error.code,
+            "status": 0,
             "elapsed": time.perf_counter() - started,
-            "first_event": None,
-            "retry_after": error.headers.get("Retry-After"),
-            "body": error.read(),
+            "first_event": first_event,
+            "retry_after": None,
+            "body": bytes(body),
+            "observation": observation.sample(0, "transport_error"),
         }
 
 
@@ -826,6 +915,11 @@ class CapacityProfile:
                 ),
             ),
         )
+        self.report["phases"]["stream_observations"] = {
+            "schema": "chat-stream-observations-v1",
+            "attempts": len(results),
+            "samples": [entry[2]["observation"] for entry in results],
+        }
         succeeded = [entry for entry in results if entry[2]["status"] == 200]
         rejected = [entry for entry in results if entry[2]["status"] == 503]
         self.check(
@@ -1239,6 +1333,169 @@ class CapacityProfile:
         Path(path).write_text(serialized)
 
 
+def stream_observation_self_test(policy):
+    import io
+    from unittest.mock import patch
+
+    turn_id = "00000000-0000-4000-8000-000000000001"
+    fixture = {
+        "novel_id": "PRIVATE_NOVEL", "character_id": "PRIVATE_CHARACTER", "token": "PRIVATE_TOKEN"
+    }
+
+    def frame(event, value):
+        return [b"event: " + event + b"\n", b"data: " + json.dumps(value).encode() + b"\n", b"\n"]
+
+    delta = frame(b"delta", {"content": "PRIVATE_CONTENT"})
+    done = frame(b"done", {"turn_id": turn_id, "committed": True, "replayed": False})
+
+    def measured(lines):
+        observation = ChatStreamObservation(turn_id)
+        for elapsed, line in enumerate(lines, 1):
+            observation.feed_line(line, elapsed)
+        return observation.sample(200, "eof")
+
+    invalid_frames = [
+        [b": keepalive\n", b"id: metadata\n", b"\n"],
+        frame(b"message", {"content": "PRIVATE_CONTENT"}),
+        frame(b"delta", {"content": ""}),
+        frame(b"delta", {"content": 1}),
+        frame(b"delta", ["PRIVATE_CONTENT"]),
+        [b"event: delta\n", b"data: invalid-json\n", b"\n"],
+        [b"event: delta\n", b'data: {"content":"\xff"}\n', b"\n"],
+        frame(b"done", {"turn_id": "wrong-turn", "committed": True}),
+        frame(b"done", {"turn_id": turn_id, "committed": False}),
+        frame(b"done", {"turn_id": turn_id, "committed": 1}),
+        frame(b"done", {"turn_id": turn_id, "committed": True, "replayed": "false"}),
+        delta[:-1], done[:-1],
+    ]
+    for event, data in (
+        (b"delta", '{"content":"","content":"PRIVATE_CONTENT"}'),
+        (b"delta", '{"content":"PRIVATE_CONTENT","ignored":{"key":false,"key":true}}'),
+        (b"done", f'{{"turn_id":"{turn_id}","committed":false,"committed":true}}'),
+        (b"done", f'{{"turn_id":"wrong-turn","turn_id":"{turn_id}","committed":true}}'),
+    ):
+        invalid_frames.append([b"event: " + event + b"\n", b"data: " + data.encode() + b"\n", b"\n"])
+    for constant in (math.nan, math.inf, -math.inf):
+        invalid_frames.append(frame(b"delta", {"content": "PRIVATE_CONTENT", "ignored": constant}))
+        invalid_frames.append(frame(b"done", {
+            "turn_id": turn_id, "committed": True, "ignored": {"nested": constant}
+        }))
+    for encoding in ("utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le", "utf-32-be"):
+        for event, value in ((b"delta", {"content": "PRIVATE_CONTENT"}),
+                             (b"done", {"turn_id": turn_id, "committed": True})):
+            invalid_frames.append([
+                b"event: " + event + b"\n",
+                b"data: " + json.dumps(value).encode(encoding) + b"\n", b"\n",
+            ])
+    for lines in invalid_frames:
+        sample = measured(lines)
+        assert sample["first_content_seconds"] is None
+        assert sample["commit_ack_seconds"] is None and sample["replayed"] is None
+    assert measured(delta)["first_content_seconds"] == 3
+    assert measured(delta)["commit_ack_seconds"] is None
+    assert measured(delta)["replayed"] is None
+    assert measured(delta + delta)["first_content_seconds"] == 3
+    assert measured(done + delta)["first_content_seconds"] is None
+    assert measured(done + done)["commit_ack_seconds"] == 3
+    assert measured(frame(b"delta", {"content": ""}) + delta)["first_content_seconds"] == 6
+    sample = measured(delta + frame(b"error", {"message": "PRIVATE_ERROR"}) + done)
+    assert sample["first_content_seconds"] == 3 and sample["commit_ack_seconds"] is None
+    assert measured(frame(b"error", {}) + delta)["first_content_seconds"] is None
+    sample = measured(frame(b"done", {"turn_id": turn_id, "committed": True}))
+    assert sample["commit_ack_seconds"] == 3 and sample["replayed"] is None
+    sample = measured(frame(b"done", {"turn_id": turn_id, "committed": True, "replayed": True}))
+    assert sample["replayed"] is True and sample["first_content_seconds"] is None
+
+    def request(lines, failure=None, http_error=None):
+        clock = [100]
+
+        class Response:
+            status = 200
+            headers = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def __iter__(self):
+                for elapsed, line in enumerate(lines, 1):
+                    clock[0] = 100 + elapsed
+                    yield line
+                clock[0] += 3
+                if failure:
+                    raise failure
+
+        with patch.object(urllib.request, "urlopen", return_value=Response(), side_effect=http_error), \
+                patch.object(time, "perf_counter", side_effect=lambda: clock[0]):
+            return stream_chat("https://capacity.invalid/api", fixture, turn_id, released_at=100)
+
+    lines = [b": keepalive\n", b"\n", b"event: delta\r\n", b'data: {"content":\r\n',
+             b'data: "PRIVATE_CONTENT"}\r\n', b"\r\n"] + done
+    success = request(lines)
+    assert success["first_event"] == 1 and success["elapsed"] == 12
+    assert success["body"] == b"".join(lines)
+    assert success["observation"] == {
+        "http_status": 200, "transport_outcome": "eof", "first_content_seconds": 6,
+        "commit_ack_seconds": 9, "replayed": False,
+    }
+    for failure in (TimeoutError("PRIVATE_ERROR"), urllib.error.URLError("PRIVATE_ERROR"),
+                    HTTPException("PRIVATE_ERROR")):
+        partial = request(delta, failure=failure)
+        assert partial["status"] == 0 and partial["observation"]["http_status"] == 0
+        assert partial["observation"]["transport_outcome"] == "transport_error"
+        assert partial["observation"]["first_content_seconds"] == 3
+        assert partial["observation"]["commit_ack_seconds"] is None
+        assert partial["observation"]["replayed"] is None
+    disconnected = request(lines, failure=ConnectionResetError("PRIVATE_ERROR"))
+    assert disconnected["status"] == 0
+    assert disconnected["observation"]["commit_ack_seconds"] == 9
+    assert disconnected["observation"]["replayed"] is False
+    before_headers = request([], http_error=urllib.error.URLError("PRIVATE_ERROR"))
+    assert before_headers["status"] == 0
+    assert before_headers["observation"]["first_content_seconds"] is None
+    rejected = request([], http_error=urllib.error.HTTPError(
+        "https://capacity.invalid", 503, "PRIVATE_ERROR", {"Retry-After": "1"}, io.BytesIO(b"PRIVATE_BODY")
+    ))
+    assert rejected["status"] == 503 and rejected["retry_after"] == "1"
+    assert rejected["first_event"] is None and rejected["body"] == b"PRIVATE_BODY"
+    assert rejected["observation"] == {
+        "http_status": 503, "transport_outcome": "http_error", "first_content_seconds": None,
+        "commit_ack_seconds": None, "replayed": None,
+    }
+    try:
+        request([], failure=RuntimeError("programming error"))
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("programming error was hidden as a transport failure")
+
+    profile = CapacityProfile.__new__(CapacityProfile)
+    profile.policy, profile.api_url, profile.provider_url = policy, "unused", "unused"
+    attempts = policy["workload"]["stream_concurrency"] + 1
+    profile.fixtures = [fixture] * attempts
+    profile.report = {"phases": {}, "checks": []}
+    outcomes = [success] * (attempts - 2) + [rejected, disconnected]
+    results = [(fixture, turn_id, result) for result in outcomes]
+    with patch.dict(globals(), provider_reset=lambda *args: None, barrier_batch=lambda *args: results):
+        try:
+            profile.chat_saturation_phase()
+        except ProfileError as error:
+            assert str(error) == "capacity predicate failed: stream_admission_shape"
+        else:
+            raise AssertionError("transport failure passed the original admission predicate")
+    block = profile.report["phases"]["stream_observations"]
+    assert block["schema"] == "chat-stream-observations-v1"
+    assert block["attempts"] == len(block["samples"]) == attempts
+    assert block["samples"] == [result["observation"] for result in outcomes]
+    assert all(set(sample) == {
+        "http_status", "transport_outcome", "first_content_seconds", "commit_ack_seconds", "replayed"
+    } for sample in block["samples"])
+    report = json.dumps(profile.report)
+    assert "PRIVATE_" not in report and turn_id not in report
+
+
 def self_test(policy):
     validate_policy(policy)
     assert CapacityProfile.world_action(3)["expected_turn_number"] == 3
@@ -1302,7 +1559,8 @@ def self_test(policy):
             pass
         else:
             raise AssertionError("invalid upload overload response was accepted")
-    print("single-node-v1 policy, percentile, and import-admission self-check passed")
+    stream_observation_self_test(policy)
+    print("single-node-v1 policy, percentile, import-admission, and chat-observation self-check passed")
 
 
 def git_sha(value):
