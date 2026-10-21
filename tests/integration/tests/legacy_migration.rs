@@ -248,7 +248,7 @@ async fn diagnostic_budget_schema_signature(pool: &sqlx::PgPool) -> DiagnosticBu
 }
 
 #[tokio::test]
-async fn lore_migration_repairs_chunks_without_rewriting_unchanged_rows() {
+async fn lore_migration_repairs_chunks_without_locking_unchanged_rows() {
     let admin = PgPoolOptions::new()
         .max_connections(1)
         .connect(&db_url())
@@ -302,9 +302,9 @@ async fn lore_migration_repairs_chunks_without_rewriting_unchanged_rows() {
         .execute(&pool)
         .await
         .unwrap();
-    let snapshot_sql = "SELECT id, chunk_index, content, ctid::TEXT \
+    let snapshot_sql = "SELECT id, chunk_index, content, ctid::TEXT, xmax::TEXT \
                         FROM chapter_chunks WHERE chapter_id = $1 ORDER BY chunk_index";
-    let initial = sqlx::query_as::<_, (uuid::Uuid, i32, String, String)>(snapshot_sql)
+    let initial = sqlx::query_as::<_, (uuid::Uuid, i32, String, String, String)>(snapshot_sql)
         .bind(chapter)
         .fetch_all(&pool)
         .await
@@ -314,12 +314,12 @@ async fn lore_migration_repairs_chunks_without_rewriting_unchanged_rows() {
         .execute(&pool)
         .await
         .unwrap();
-    let replayed = sqlx::query_as::<_, (uuid::Uuid, i32, String, String)>(snapshot_sql)
+    let replayed = sqlx::query_as::<_, (uuid::Uuid, i32, String, String, String)>(snapshot_sql)
         .bind(chapter)
         .fetch_all(&pool)
         .await
         .unwrap();
-    assert_eq!(initial, replayed, "unchanged chunks must keep their tuples");
+    assert_eq!(initial, replayed, "unchanged chunks must not acquire locks");
 
     sqlx::query("DELETE FROM chapter_chunks WHERE chapter_id = $1 AND chunk_index = 1")
         .bind(chapter)
@@ -335,7 +335,7 @@ async fn lore_migration_repairs_chunks_without_rewriting_unchanged_rows() {
         .execute(&pool)
         .await
         .unwrap();
-    let repaired = sqlx::query_as::<_, (uuid::Uuid, i32, String, String)>(snapshot_sql)
+    let repaired = sqlx::query_as::<_, (uuid::Uuid, i32, String, String, String)>(snapshot_sql)
         .bind(chapter)
         .fetch_all(&pool)
         .await
@@ -355,16 +355,20 @@ async fn lore_migration_repairs_chunks_without_rewriting_unchanged_rows() {
         initial[0].0, repaired[0].0,
         "repair must retain existing IDs"
     );
+    assert_eq!(
+        initial[2], repaired[2],
+        "repair must not lock an unchanged chunk"
+    );
     sqlx::raw_sql(CHAPTER_LORE_MIGRATION)
         .execute(&pool)
         .await
         .unwrap();
-    let repeated = sqlx::query_as::<_, (uuid::Uuid, i32, String, String)>(snapshot_sql)
+    let repeated = sqlx::query_as::<_, (uuid::Uuid, i32, String, String, String)>(snapshot_sql)
         .bind(chapter)
         .fetch_all(&pool)
         .await
         .unwrap();
-    assert_eq!(repaired, repeated, "repaired chunks must keep their tuples");
+    assert_eq!(repaired, repeated, "repaired chunks must not acquire locks");
     pool.close().await;
     sqlx::query("DROP DATABASE novelworld_lore_replay")
         .execute(&admin)
