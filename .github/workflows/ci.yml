@@ -378,6 +378,9 @@ jobs:
         run: |
           python3 tests/e2e/notification_drill_test.py
           timeout --signal=TERM --kill-after=30s 360s python3 infra/monitoring/notification_drill.py
+      - name: Verify fixed-cohort import readiness observer
+        timeout-minutes: 4
+        run: timeout --signal=TERM --kill-after=10s 180s python3 tests/e2e/import_readiness_test.py --native
       - name: Include extended drills for backup and core journey changes
         if: github.event_name == 'pull_request'
         run: |
