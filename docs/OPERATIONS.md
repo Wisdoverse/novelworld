@@ -365,6 +365,27 @@ are. Fixture creation and warm-up are excluded from latency samples.
 - Every run starts with empty PostgreSQL and Redis volumes and unique fixture
   identifiers. CI always tears the stack down.
 
+The existing first-event sample measures the first nonblank SSE line, which can
+be a keepalive or metadata. The completion sample measures stream EOF. Those
+fields and the `single-node-v1` thresholds remain unchanged.
+
+The additive `stream_observations` phase uses `chat-stream-observations-v1`.
+It records one content-free sample per attempted chat before the capacity
+predicates run, including HTTP rejection and transport failure. Each sample
+contains the HTTP status (`0` denotes a local transport failure), transport
+outcome, `first_content_seconds`, `commit_ack_seconds`, and `replayed`.
+Both times start at the shared release. Content requires a complete `delta`
+frame with nonempty string content. Commit acknowledgement requires a complete
+`done` frame for the requested turn with `committed: true`. Replay is known only
+when that acknowledgement supplies a Boolean replay flag.
+
+Unobserved boundaries remain null. An error or disconnect preserves earlier
+observations. Without a valid acknowledgement, completion remains unconfirmed;
+Agent may still commit after the client disconnects. These samples measure
+client receipt, not rendered text or exact database COMMIT time. They add no
+target or pass verdict. The deterministic provider cannot establish an SLO or
+error budget for a live provider.
+
 ### Decision rule
 
 A passing report keeps the current architecture. It does not justify a durable
