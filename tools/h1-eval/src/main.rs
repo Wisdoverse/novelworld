@@ -761,7 +761,7 @@ async fn main() -> Result<()> {
     let args = parse_args()?;
     validate_checkout(&args.git_sha)?;
     let corpus = load_corpus()?;
-    let mut config = run_config(args.mode, args.bounded_diagnostic)?;
+    let mut config = run_config(args.mode, args.bounded_diagnostic, args.budget_profile)?;
     let mut private_responses = args
         .private_responses_output
         .as_deref()
@@ -904,7 +904,11 @@ fn validate_checkout(git_sha: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_config(mode: Mode, bounded_diagnostic: bool) -> Result<RunConfig> {
+fn run_config(
+    mode: Mode,
+    bounded_diagnostic: bool,
+    budget_profile: budget::Profile,
+) -> Result<RunConfig> {
     if matches!(mode, Mode::Recorded) {
         return Ok(RunConfig {
             mode,
@@ -932,8 +936,8 @@ fn run_config(mode: Mode, bounded_diagnostic: bool) -> Result<RunConfig> {
     if bounded_diagnostic
         && (provider != "deepseek"
             || api_url != "https://api.deepseek.com"
-            || model != budget::MODEL
-            || allowed_response_models != BTreeSet::from([budget::MODEL.to_owned()]))
+            || model != budget_profile.model()
+            || allowed_response_models != BTreeSet::from([budget_profile.model().to_owned()]))
     {
         bail!("bounded Diagnostic requires the fixed Vision provider profile");
     }
@@ -3351,7 +3355,7 @@ mod tests {
     #[tokio::test]
     async fn recorded_corpus_passes() {
         let corpus = load_corpus().unwrap();
-        let config = run_config(Mode::Recorded, false).unwrap();
+        let config = run_config(Mode::Recorded, false, budget::Profile::default()).unwrap();
         let report = evaluate(&corpus, &config, "0".repeat(40), &mut None)
             .await
             .unwrap();
@@ -3445,7 +3449,7 @@ mod tests {
         // A raw source below 128 KiB can exceed the serialized message bound.
         case.source = "\"".repeat(MAX_JUDGE_MESSAGES_BYTES / 3);
         assert!(case.source.len() < MAX_JUDGE_MESSAGES_BYTES);
-        let config = run_config(Mode::Recorded, false).unwrap(); // No HTTP client exists.
+        let config = run_config(Mode::Recorded, false, budget::Profile::default()).unwrap(); // No HTTP client exists.
         let failure = judge_live(
             &config,
             &case,
@@ -4015,8 +4019,10 @@ mod tests {
     #[test]
     fn bounded_diagnostic_requires_live_and_fixed_profile() {
         const CHILD: &str = "NOVELWORLD_BUDGET_PROFILE_TEST";
+        const PROFILE_CHILD: &str = "NOVELWORLD_BUDGET_PROFILE_ID";
         if let Ok(valid) = std::env::var(CHILD) {
-            let result = run_config(Mode::Live, true);
+            let profile = budget::Profile::parse(&std::env::var(PROFILE_CHILD).unwrap()).unwrap();
+            let result = run_config(Mode::Live, true, profile);
             if valid == "valid" {
                 assert!(result.is_ok());
             } else {
@@ -4045,6 +4051,7 @@ mod tests {
         for (profile, expected) in [
             (budget::PROFILE, budget::Profile::V3),
             (budget::CNY10_PROFILE, budget::Profile::V4),
+            (budget::FLASH_PROFILE, budget::Profile::V5),
         ] {
             let mut selected = args.clone();
             selected.extend(["--diagnostic-budget-profile".into(), profile.into()]);
@@ -4076,38 +4083,52 @@ mod tests {
         invalid.push("--bounded-diagnostic".into());
         assert!(parse_args_from(invalid).is_err());
 
-        for (name, value) in [
-            ("", ""),
-            ("H1_EVAL_PROVIDER", "other"),
-            ("LLM_API_URL", "https://example.invalid"),
-            ("LLM_MODEL", "other"),
-            ("LLM_MODEL", "deepseek-flash"),
-            ("H1_EVAL_ALLOWED_RESPONSE_MODELS", "other"),
-            ("H1_EVAL_ALLOWED_RESPONSE_MODELS", "deepseek-flash"),
+        for profile_id in [
+            budget::PROFILE,
+            budget::CNY10_PROFILE,
+            budget::FLASH_PROFILE,
         ] {
-            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
-            child
-                .args([
-                    "--exact",
-                    "tests::bounded_diagnostic_requires_live_and_fixed_profile",
-                    "--nocapture",
-                ])
-                .env(CHILD, if name.is_empty() { "valid" } else { "invalid" })
-                .env("H1_EVAL_PROVIDER", "deepseek")
-                .env("LLM_API_URL", "https://api.deepseek.com")
-                .env("LLM_MODEL", budget::MODEL)
-                .env("H1_EVAL_ALLOWED_RESPONSE_MODELS", budget::MODEL)
-                .env("LLM_API_KEY", "synthetic-key");
-            if !name.is_empty() {
-                child.env(name, value).env_remove("LLM_API_KEY");
+            let profile = budget::Profile::parse(profile_id).unwrap();
+            let model = profile.model();
+            let other_model = if model == budget::MODEL {
+                budget::FLASH_MODEL
+            } else {
+                budget::MODEL
+            };
+            for (name, value) in [
+                ("", ""),
+                ("H1_EVAL_PROVIDER", "other"),
+                ("LLM_API_URL", "https://example.invalid"),
+                ("LLM_MODEL", "other"),
+                ("LLM_MODEL", other_model),
+                ("H1_EVAL_ALLOWED_RESPONSE_MODELS", "other"),
+                ("H1_EVAL_ALLOWED_RESPONSE_MODELS", other_model),
+            ] {
+                let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+                child
+                    .args([
+                        "--exact",
+                        "tests::bounded_diagnostic_requires_live_and_fixed_profile",
+                        "--nocapture",
+                    ])
+                    .env(PROFILE_CHILD, profile_id)
+                    .env(CHILD, if name.is_empty() { "valid" } else { "invalid" })
+                    .env("H1_EVAL_PROVIDER", "deepseek")
+                    .env("LLM_API_URL", "https://api.deepseek.com")
+                    .env("LLM_MODEL", model)
+                    .env("H1_EVAL_ALLOWED_RESPONSE_MODELS", model)
+                    .env("LLM_API_KEY", "synthetic-key");
+                if !name.is_empty() {
+                    child.env(name, value).env_remove("LLM_API_KEY");
+                }
+                let output = child.output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{name}: {} {}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
             }
-            let output = child.output().unwrap();
-            assert!(
-                output.status.success(),
-                "{name}: {} {}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
         }
     }
 

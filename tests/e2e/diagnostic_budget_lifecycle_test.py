@@ -471,6 +471,11 @@ class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
             "diagnostic_command_bounds_invalid_present", "diagnostic_command_timeout_present",
             "diagnostic_command_output_oversized_present", "diagnostic_command_failed_present",
             "diagnostic_command_stop_unproven_present", "diagnostic_terminal_unproven_present",
+            "primary_failure_unclassified", "release_phase_timing_invalid_present",
+            "gateway_not_ready_present", "docker_image_failed_present",
+            "docker_inspect_failed_present", "docker_inspect_invalid_present",
+            "release_image_identity_mismatch_present", "unexpected_diagnostic_failure_present",
+            "base_release_timings_recorded",
         }
         for case in ("zero", "nonzero"):
             with self.subTest(case=case):
@@ -538,6 +543,11 @@ class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
             "settings_snapshot_present", "restart_snapshot_present",
             "terminal_snapshot_present", "payers_stopped", "metrics_reconciled",
             "existing_stack_unchanged", *(code + "_present" for code in codes),
+            "primary_failure_unclassified", "release_phase_timing_invalid_present",
+            "gateway_not_ready_present", "docker_image_failed_present",
+            "docker_inspect_failed_present", "docker_inspect_invalid_present",
+            "release_image_identity_mismatch_present", "unexpected_diagnostic_failure_present",
+            "base_release_timings_recorded",
         }
 
         def summary(failures):
@@ -579,6 +589,56 @@ class DiagnosticBudgetLifecycleCleanupTest(unittest.TestCase):
         with mock.patch("builtins.print", side_effect=BrokenPipeError):
             LIFECYCLE.report_cold_adoption_status(
                 SimpleNamespace(private_report={}, report={}, diagnostic_failures=list(codes)), False)
+
+    def test_cold_adoption_status_projects_only_first_primary_failure_and_base_timings(self):
+        primary_codes = (
+            "release_phase_timing_invalid", "gateway_not_ready", "docker_image_failed",
+            "docker_inspect_failed", "docker_inspect_invalid",
+            "release_image_identity_mismatch", "unexpected_diagnostic_failure",
+        )
+        primary_flags = {code + "_present" for code in primary_codes}
+        expected = primary_flags | {"case", "primary_failure_unclassified", "base_release_timings_recorded"}
+
+        def summary(code, timings, failures):
+            journey = SimpleNamespace(private_report={"release_phase_durations_ms": timings},
+                                      report={"failure": {"stage": "adopt", "code": code}},
+                                      diagnostic_failures=failures)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                LIFECYCLE.report_cold_adoption_status(journey, False)
+            encoded = output.getvalue()
+            result = json.loads(encoded)
+            self.assertEqual(set(result), expected | {
+                "base_images_recorded", "initial_snapshot_present", "settings_snapshot_present",
+                "restart_snapshot_present", "terminal_snapshot_present", "payers_stopped",
+                "metrics_reconciled", "existing_stack_unchanged",
+                "diagnostic_stop_timeout_present", "diagnostic_stop_inventory_invalid_present",
+                "diagnostic_payers_still_running_present", "diagnostic_payer_inventory_unproven_present",
+                "diagnostic_payer_stop_unproven_present", "diagnostic_stop_unproven_present",
+                "diagnostic_command_bounds_invalid_present", "diagnostic_command_timeout_present",
+                "diagnostic_command_output_oversized_present", "diagnostic_command_failed_present",
+                "diagnostic_command_stop_unproven_present", "diagnostic_terminal_unproven_present",
+            })
+            self.assertTrue(all(type(value) is bool for key, value in result.items() if key != "case"))
+            return result, encoded
+
+        for code in primary_codes:
+            with self.subTest(primary_code=code):
+                result, _ = summary(code, {"base": {"pull": 1}}, ["diagnostic_payer_inventory_unproven"])
+                self.assertEqual({name for name in primary_codes if result[name + "_present"]}, {code})
+                self.assertFalse(result["primary_failure_unclassified"])
+                self.assertTrue(result["base_release_timings_recorded"])
+                self.assertTrue(result["diagnostic_payer_inventory_unproven_present"])
+
+        for code in ("", "private-provider-message", None, 17, {"private": "value"}):
+            with self.subTest(unclassified=code):
+                result, encoded = summary(code, {"base": []}, [])
+                self.assertFalse(any(result[name] for name in primary_flags))
+                self.assertFalse(result["base_release_timings_recorded"])
+                self.assertEqual(result["primary_failure_unclassified"],
+                                 isinstance(code, str) and bool(code) and code not in primary_codes)
+                if isinstance(code, str) and code:
+                    self.assertNotIn(code, encoded)
 
     def test_cold_release_status_is_allowlisted_and_bounded(self):
         phases = ("pull", "database_start", "migration", "application_deployment", "readiness")

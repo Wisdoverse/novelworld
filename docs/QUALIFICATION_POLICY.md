@@ -65,9 +65,15 @@ Operator update, **2026-10-12**: use the [small-team review rules](../CONTRIBUTI
   The separate `vision-diagnostic-budget-v4` option sets a 10,000,000
   micro-CNY process-invocation limit and reserves the largest affordable
   attempt count before each logical call. Its retries and JSON fallback share
-  that reservation. The ledger is process-local, not durable across restart or
-  enforced by the provider. V4 does not change frozen results or formal H1
-  adoption. Paid use still requires a new reviewed registration, durable
+  that reservation. The opt-in `vision-diagnostic-budget-v5` profile keeps
+  those CNY 10 limits, reservation rules, and conservative 4/12 micro-CNY
+  input/output token rates, but requires exactly `deepseek-flash` for both the
+  request model and allowed response model. V3 and v4 keep their exact
+  `deepseek-v4-flash` identity. Model/profile mismatches fail before credential
+  access; an unregistered response model stops the run and keeps its reservation.
+  The ledger is process-local, not durable across restart or enforced by the
+  provider. V4 and v5 do not change frozen results, registrations, launchers, or
+  formal H1 adoption. Paid use still requires a new reviewed registration, durable
   one-shot intent, and exact user authorization before credential use.
 - Formal Qualification/Observation and broader release/support claims still
   use their versioned evidence contracts. Before leaving this rapid-iteration

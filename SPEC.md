@@ -1864,12 +1864,27 @@ embedding models requires re-embedding stored Long memories.
 
 ### 11.2 Tunable Parameters
 
-The following parameters SHOULD be configurable via environment variables with the listed defaults:
+The private-preview-v1 profile supports these environment settings:
 
 | Parameter | Env Variable | Default | Description |
 |---|---|---|---|
 | Access token expiry | `AUTH_ACCESS_TOKEN_EXPIRY` | `3600` | Seconds |
 | Refresh token expiry | `AUTH_REFRESH_TOKEN_EXPIRY` | `604800` | Seconds |
+
+Other preview limits are fixed source policies, not environment settings:
+
+- A durable summary window contains ten completed turns and twenty paired messages (§6.2.1). Changing this window requires a versioned lifecycle change.
+- The optional Redis projection retains at most fifty messages. Prompt assembly selects at most ten recent messages, five Mid entries, and five semantic results. These bounds do not limit the number of stored Mid-memory rows.
+- Input caps remain 10 MiB for TXT, 20 MiB for EPUB/PDF, and 5 MiB for pasted text. Character extraction retains at most fifty characters (§5.4).
+
+The preview selects fixed limits to preserve durable window identities, bounded prompts, and the declared input and provider-cost envelope. Raising these limits requires source review and affected checks. Setting the proposed variables below does not change preview behavior.
+
+#### Future configuration recommendations
+
+Future profiles SHOULD provide the following controls when operator needs justify them. These names and proposed defaults remain design guidance. They are not implemented settings. Any implementation must preserve the versioned summary protocol and validate its supported input and cost bounds.
+
+| Parameter | Proposed Env Variable | Proposed Default | Description |
+|---|---|---|---|
 | Short-term memory limit | `MEMORY_SHORT_TERM_LIMIT` | `20` | Max entries before compression |
 | Compression threshold | `MEMORY_COMPRESS_THRESHOLD` | `15` | Trigger compression at this count |
 | Mid-term memory limit | `MEMORY_MID_TERM_LIMIT` | `50` | Max mid-term entries |

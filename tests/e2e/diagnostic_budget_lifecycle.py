@@ -82,13 +82,21 @@ def report_cold_adoption_status(journey, zero, report_dir=None):
         "diagnostic_command_output_oversized", "diagnostic_command_failed",
         "diagnostic_command_stop_unproven", "diagnostic_terminal_unproven",
     )
+    primary_failure_codes = (
+        "release_phase_timing_invalid", "gateway_not_ready", "docker_image_failed",
+        "docker_inspect_failed", "docker_inspect_invalid",
+        "release_image_identity_mismatch", "unexpected_diagnostic_failure",
+    )
     status = {"case": "zero" if zero else "nonzero",
               "base_images_recorded": False,
               **{name + "_snapshot_present": False
                  for name in ("initial", "settings", "restart", "terminal")},
               "payers_stopped": False, "metrics_reconciled": False,
               "existing_stack_unchanged": False,
-              **{code + "_present": False for code in failure_codes}}
+              **{code + "_present": False for code in failure_codes},
+              "primary_failure_unclassified": False,
+              **{code + "_present": False for code in primary_failure_codes},
+              "base_release_timings_recorded": False}
     try:
         failures = getattr(journey, "diagnostic_failures", None)
         if isinstance(failures, list):
@@ -96,15 +104,24 @@ def report_cold_adoption_status(journey, zero, report_dir=None):
         private = journey.private_report
         images = private.get("release_images", {})
         snapshots = private.get("diagnostic_budget_snapshots", {})
-        environment = journey.report.get("environment", {})
+        timings = private.get("release_phase_durations_ms", {})
+        report = journey.report
+        environment = report.get("environment", {}) if isinstance(report, dict) else {}
+        failure = report.get("failure", {}) if isinstance(report, dict) else {}
+        primary_code = failure.get("code") if isinstance(failure, dict) else None
         status.update(
             base_images_recorded=isinstance(images, dict) and "base" in images,
+            base_release_timings_recorded=isinstance(timings, dict)
+                and isinstance(timings.get("base"), dict) and bool(timings["base"]),
+            primary_failure_unclassified=isinstance(primary_code, str)
+                and bool(primary_code) and primary_code not in primary_failure_codes,
             payers_stopped=private.get("diagnostic_payers_stopped") is True,
             metrics_reconciled=private.get("diagnostic_metrics_reconciled") is True,
             existing_stack_unchanged=isinstance(environment, dict)
                 and environment.get("existing_user_stack_unchanged") is True,
             **{name + "_snapshot_present": isinstance(snapshots, dict) and name in snapshots
-               for name in ("initial", "settings", "restart", "terminal")})
+               for name in ("initial", "settings", "restart", "terminal")},
+            **{code + "_present": primary_code == code for code in primary_failure_codes})
     except (AttributeError, TypeError):
         pass
     emit_cold_status("adoption", status, report_dir)
