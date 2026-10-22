@@ -373,11 +373,20 @@ remain available.
 Evidence digests bind reviewed documents. They do not establish fresh scans,
 package compatibility, recovery, or model readiness. Fresh provenance, scans,
 SBOMs, independent risk review, all eight real payer probes, and registered
-prestart remain required. V7 support alone admits no source pair. A separate
-reviewed policy must name the exact base and candidate before artifact
-production and a new registration. All failed, Frozen, consumed, and expired
-packets remain terminal. Exact registration review and explicit authorization
-remain required before paid execution. Parent #378 stays open.
+prestart remain required. V7 support alone admits no source pair. Before an
+artifact plan, the #378 execution record must name the full baseline B and
+candidate C SHAs and record a non-author source review. B must be a strict
+ancestor of C. Both must contain the Diagnostic admission fix from [PR
+#554](https://github.com/Wisdoverse/novelworld/pull/554). The review must verify
+the exact source delta, frozen-input hashes, change scope, and build-input
+preflight with its limits. An immutable review receipt must bind the pair and
+reviewed inputs. Record its SHA-256 in the issue. Capture the exact record and
+receipt in the artifact plan, and bind later artifacts and registration to the
+same B/C pair. A source or input change requires a new review. Issue edits,
+descendants, and old approvals transfer no eligibility. This policy approves no
+pair. All failed, Frozen, consumed, and expired packets remain terminal. Exact
+registration review and explicit authorization remain required before paid
+execution. Parent #378 stays open.
 
 As checked on 2026-09-26, DeepSeek's [Models & Pricing
 documentation](https://api-docs.deepseek.com/quick_start/pricing/) lists
@@ -393,51 +402,24 @@ authorization for that registration. Frozen or consumed registrations remain
 terminal and cannot be renewed or rerun. Issue bodies and Project 4 own current
 execution and live-evidence status.
 
-For the next prospective V7 registration only, use this exact source pair:
+The pair recorded in child [#601](https://github.com/Wisdoverse/novelworld/issues/601)
+is historical source-only eligibility:
 
 - Baseline B: `0019710655cf12ebf71bd54801783f2f4f2859c5`.
 - Merged candidate C: `3eaecd8beae73817d262e4c249d8e3d0996fa986`.
 
-Child [#601](https://github.com/Wisdoverse/novelworld/issues/601) tracks this
-pair under parent #378. B is a strict ancestor of C, but not its direct parent.
-Both revisions contain the shared Diagnostic admission fix from [PR
-#554](https://github.com/Wisdoverse/novelworld/pull/554). The policy commit stays
-separate from C. No later descendant inherits this eligibility.
-
-Independent source review verified the exact pair and its 59 changed paths. The
-change includes novel-service import-age metrics and its ZIP dependency, shared
-`llm-client` attempt limiting, and workspace lock inputs. Direct source for the
-other four runtime services is unchanged, but shared inputs can affect their
-builds. Frontend settings setup behavior and build/dependency inputs change;
-reader and world-progression source does not. The default Nginx bind moves to
-loopback. The release adapter uses monotonic qualification timing. Build, CI,
-deployment and observation tooling also change. H1 evaluator changes are a
-separate outcome, not H3/H4 semantic evidence.
-
-Migration 0007 exists in both revisions. C excludes unchanged chapter chunks
-before conflict handling, so those rows avoid the conflict-update lock. This
-changes migration replay behavior, not schema shape, and does not prove a schema
-upgrade or RTO. The comparison does not assert that any compiled artifact changes.
-
-For H3, `tools/h3-eval/Cargo.toml`, evaluator sources, and
-`tools/h3-eval/corpus/v1.json` remain byte-identical. For H4, the compiled V4
-profile (`tools/llm-budget/diagnostic-v4.json`), budget policy
-(`tools/llm-budget/policy-v2.json`), V2 product fixture
-(`tests/e2e/fixtures/h4-journey-v2.json`), and schedule
-(`tests/e2e/diagnostic_journey.py`) remain byte-identical. The H3 source
-manifest includes the changed root `Cargo.lock`; bind that file and the build
-inputs again. Unchanged source, profile, or corpus bytes do not prove an
-unchanged evaluator binary. Independent review verified the recorded frozen
-input hashes for this exact pair.
+That review applied only to those exact revisions and inputs. Preserve its
+source-only conclusion and the #555, #544, and #536 history. It approves no
+replacement pair, descendant, artifact, registration, or execution.
 
 The previous pair tracked by [#555](https://github.com/Wisdoverse/novelworld/issues/555)
 remains historical: `a501af77c58b8973cf341fb22d9c924d85b06afb` →
 `0019710655cf12ebf71bd54801783f2f4f2859c5`. Its registration expired unused.
 Its reviews, scans, artifacts, waivers and authority do not validate or transfer
-to this pair. Preserve that history and the existing #544 and #536 records.
+to a new pair. Preserve that history and the existing #544 and #536 records.
 
 The clean runner checkout, candidate manifest, and new registration must bind
-the full C SHA above.
+the full C SHA in the independently reviewed execution record.
 
 The pair tracked by [#544](https://github.com/Wisdoverse/novelworld/issues/544)
 remains historical: `ac04165dd13b210876dcb4d1a736b1c99f128f39` →
@@ -500,11 +482,11 @@ registration to C and all reviewed evidence. Require independent packet review
 and explicit authorization. Run mandatory registered prestart before any paid
 execution.
 
-Only after policy delivery may an independently reviewed artifact-production
-plan proceed. Artifact production, registration, paid execution, and
-qualification each require their own evidence. This policy grants source
-eligibility only. It grants no artifact, prestart, paid-execution, or
-live-qualification authority. It proves no live model compatibility, H1/H3/H4
+Only after an independent review approves the exact source record in #378 may a
+separately reviewed artifact-production plan proceed. Artifact production,
+registration, paid execution, and qualification each require their own
+evidence. This policy defines the eligibility rules; it approves no source pair
+and grants no artifact, prestart, paid-execution, or live-qualification authority. It proves no live model compatibility, H1/H3/H4
 quality, formal qualification, production readiness, RTO, backend schema
 upgrade, or saved-action recovery from PR #492. Parents #378, #230, and #222
 remain open. Preserve every frozen, failed, consumed, and expired packet

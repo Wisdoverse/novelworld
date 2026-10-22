@@ -319,11 +319,12 @@ The historical C→B Diagnostic path used merged A (#428),
 cache-freshness C (#432), and remote-profile B (#429); eligibility required an
 actual merged C baseline and strict-descendant B candidate with the guard on
 both sides.
-For the exact prospective V6 source pair and its artifact, prestart, scan,
-budget, and authorization gates, follow the owning
-[Qualification Policy](docs/QUALIFICATION_POLICY.md). Source eligibility is
-prospective only; it does not transfer historical evidence, renew a frozen or
-consumed registration, or claim live or formal qualification.
+For a prospective V7 source pair and its artifact, prestart, scan, budget, and
+authorization gates, follow the [Qualification Policy](docs/QUALIFICATION_POLICY.md)
+and the current execution record in [issue #378](https://github.com/Wisdoverse/novelworld/issues/378). Independent review applies only
+to the recorded source pair and inputs. A change requires a new review. Source
+eligibility does not transfer historical evidence, renew a frozen or consumed
+registration, or claim live or formal qualification.
 
 A dependency-only frontend pair also requires different full maps of compiled
 and served assets, plus a changed corresponding frontend filesystem layer. The
