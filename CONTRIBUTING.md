@@ -326,10 +326,14 @@ to the recorded source pair and inputs. A change requires a new review. Source
 eligibility does not transfer historical evidence, renew a frozen or consumed
 registration, or claim live or formal qualification.
 
-A dependency-only frontend pair also requires different full maps of compiled
-and served assets, plus a changed corresponding frontend filesystem layer. The
-historical C→B artifacts and Frozen records retain their original identities
-and results.
+For a genuinely Rust-only V7 pair, unchanged frontend bytes are allowed only
+when independent review proves that all frontend build inputs are identical.
+Whenever frontend build inputs differ, require changed compiled and served
+frontend maps and the corresponding frontend filesystem layer. A mixed
+Rust/frontend pair cannot bypass this requirement. A dependency-only frontend
+pair still requires different full maps of compiled and served assets, plus a
+changed corresponding frontend filesystem layer. Historical C→B artifacts and
+Frozen records retain their original identities and results.
 
 For Vision journey tooling changes, also run
 `python3 tests/e2e/live_deepseek_journey.py --self-test`. CI runs

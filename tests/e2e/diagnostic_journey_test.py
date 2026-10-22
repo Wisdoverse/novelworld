@@ -2345,19 +2345,20 @@ compose config --format json embedding
     def test_build_input_requires_corresponding_image_content_change(self):
         journey = self.journey()
         registration = journey.diagnostic_registration
-        changed_image = "FRONTEND_IMAGE"
         for manifest in (journey.base_manifest, journey.candidate_manifest):
             for key in CONTROL.APP_KEYS:
                 manifest[key] = manifest[key].replace("@sha256:", "/" + key.lower() + "@sha256:")
 
+        case = {"paths": b"", "changed_image": None}
+
         def command(argv, **_):
             if argv[0] == "git":
-                return b"frontend/pnpm-lock.yaml\0" if "diff" in argv else b""
+                return case["paths"] if "diff" in argv else b""
             reference = argv[-1]
             label = "base" if reference.endswith("b" * 64) else "candidate"
             manifest = journey.base_manifest if label == "base" else journey.candidate_manifest
             key = next(key for key in CONTROL.APP_KEYS if manifest[key] == reference)
-            changed = label == "candidate" and key == changed_image
+            changed = label == "candidate" and key == case["changed_image"]
             return CONTROL.canonical([{
                 "Id": registration.value[label + "_application_image_ids"][key],
                 "RepoDigests": [reference],
@@ -2365,10 +2366,32 @@ compose config --format json embedding
             }])
 
         with mock.patch.object(CONTROL, "bounded_command", side_effect=command):
-            CONTROL.verify_artifacts(registration, ROOT, journey.base_manifest, journey.candidate_manifest)
-            for changed_image in ("GATEWAY_IMAGE", None):
-                with self.subTest(changed_image=changed_image), self.assertRaises(CONTROL.DiagnosticFailure):
-                    CONTROL.verify_artifacts(registration, ROOT, journey.base_manifest, journey.candidate_manifest)
+            cases = (
+                ("frontend inputs and image change", b"frontend/pnpm-lock.yaml\0",
+                 "FRONTEND_IMAGE", True),
+                ("frontend inputs but unrelated image changes", b"frontend/pnpm-lock.yaml\0",
+                 "GATEWAY_IMAGE", False),
+                ("frontend inputs but layers stay unchanged", b"frontend/pnpm-lock.yaml\0",
+                 None, False),
+                ("Rust-only input change with unchanged frontend",
+                 b"services/novel-service/src/domain/services/character_extractor.rs\0",
+                 "NOVEL_SERVICE_IMAGE", True),
+                ("Rust-only input with unrelated frontend image change",
+                 b"services/novel-service/src/domain/services/character_extractor.rs\0",
+                 "FRONTEND_IMAGE", False),
+            )
+            for name, paths, changed_image, should_pass in cases:
+                with self.subTest(case=name):
+                    case.update(paths=paths, changed_image=changed_image)
+                    if should_pass:
+                        CONTROL.verify_artifacts(
+                            registration, ROOT, journey.base_manifest, journey.candidate_manifest
+                        )
+                    else:
+                        with self.assertRaises(CONTROL.DiagnosticFailure):
+                            CONTROL.verify_artifacts(
+                                registration, ROOT, journey.base_manifest, journey.candidate_manifest
+                            )
 
     def test_diagnostic_cli_refuses_mixed_modes_before_config_or_execution(self):
         for arguments in (
