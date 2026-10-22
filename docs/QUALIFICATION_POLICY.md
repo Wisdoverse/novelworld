@@ -395,22 +395,46 @@ execution and live-evidence status.
 
 For the next prospective V7 registration only, use this exact source pair:
 
-- Fix-only baseline B: `a501af77c58b8973cf341fb22d9c924d85b06afb`.
-- Integrated main candidate C: `0019710655cf12ebf71bd54801783f2f4f2859c5`.
+- Baseline B: `0019710655cf12ebf71bd54801783f2f4f2859c5`.
+- Merged candidate C: `3eaecd8beae73817d262e4c249d8e3d0996fa986`.
 
-Child [#555](https://github.com/Wisdoverse/novelworld/issues/555) tracks this
-pair under parent #378. B is a strict ancestor of C. B is not C's direct parent.
+Child [#601](https://github.com/Wisdoverse/novelworld/issues/601) tracks this
+pair under parent #378. B is a strict ancestor of C, but not its direct parent.
 Both revisions contain the shared Diagnostic admission fix from [PR
-#554](https://github.com/Wisdoverse/novelworld/pull/554). PR #554 merged with a
-GitHub merge commit. The policy commit stays separate from C. No later
-descendant inherits this eligibility.
+#554](https://github.com/Wisdoverse/novelworld/pull/554). The policy commit stays
+separate from C. No later descendant inherits this eligibility.
 
-An independent review verified the exact merge identity and B-to-C source delta.
-The comparison covers 48 paths. Novel runtime and frontend source and lock
-inputs changed. The other four runtime services, shared crates and Cargo inputs,
-build recipes, production Compose, and frozen profiles and fixtures remain
-identical. This source comparison does not prove every binary changed or prove a
-backend schema upgrade.
+Independent source review verified the exact pair and its 59 changed paths. The
+change includes novel-service import-age metrics and its ZIP dependency, shared
+`llm-client` attempt limiting, and workspace lock inputs. Direct source for the
+other four runtime services is unchanged, but shared inputs can affect their
+builds. Frontend settings setup behavior and build/dependency inputs change;
+reader and world-progression source does not. The default Nginx bind moves to
+loopback. The release adapter uses monotonic qualification timing. Build, CI,
+deployment and observation tooling also change. H1 evaluator changes are a
+separate outcome, not H3/H4 semantic evidence.
+
+Migration 0007 exists in both revisions. C excludes unchanged chapter chunks
+before conflict handling, so those rows avoid the conflict-update lock. This
+changes migration replay behavior, not schema shape, and does not prove a schema
+upgrade or RTO. The comparison does not assert that any compiled artifact changes.
+
+For H3, `tools/h3-eval/Cargo.toml`, evaluator sources, and
+`tools/h3-eval/corpus/v1.json` remain byte-identical. For H4, the compiled V4
+profile (`tools/llm-budget/diagnostic-v4.json`), budget policy
+(`tools/llm-budget/policy-v2.json`), V2 product fixture
+(`tests/e2e/fixtures/h4-journey-v2.json`), and schedule
+(`tests/e2e/diagnostic_journey.py`) remain byte-identical. The H3 source
+manifest includes the changed root `Cargo.lock`; bind that file and the build
+inputs again. Unchanged source, profile, or corpus bytes do not prove an
+unchanged evaluator binary. Independent review verified the recorded frozen
+input hashes for this exact pair.
+
+The previous pair tracked by [#555](https://github.com/Wisdoverse/novelworld/issues/555)
+remains historical: `a501af77c58b8973cf341fb22d9c924d85b06afb` →
+`0019710655cf12ebf71bd54801783f2f4f2859c5`. Its registration expired unused.
+Its reviews, scans, artifacts, waivers and authority do not validate or transfer
+to this pair. Preserve that history and the existing #544 and #536 records.
 
 The clean runner checkout, candidate manifest, and new registration must bind
 the full C SHA above.
