@@ -381,7 +381,7 @@ services:
     restart: unless-stopped
     logging: *bounded-logs
     ports:
-      - "${NGINX_HTTP_BIND:-0.0.0.0}:${NGINX_HTTP_PORT:-80}:80"
+      - "${NGINX_HTTP_BIND:-127.0.0.1}:${NGINX_HTTP_PORT:-80}:80"
     volumes:
       - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:

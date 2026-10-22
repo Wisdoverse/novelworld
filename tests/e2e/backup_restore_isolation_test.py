@@ -39,7 +39,7 @@ class BackupRestoreIsolation(unittest.TestCase):
             ({"COMPOSE_PROJECT_NAME": documented_project,
               "CONTAINER_PREFIX": documented_project,
               "E2E_LLM_STUB_PORT": "28080", "E2E_GATEWAY_PORT": "28081",
-              "NGINX_HTTP_BIND": "127.0.0.1", "NGINX_HTTP_PORT": "28082"},
+              "NGINX_HTTP_BIND": "127.0.0.2", "NGINX_HTTP_PORT": "28082"},
              (28080, 28081), documented_project),
         ):
             with self.subTest(prefix=prefix):
@@ -65,10 +65,13 @@ class BackupRestoreIsolation(unittest.TestCase):
                 for name in ("user-service", "novel-service", "agent-service", "narrative-service"):
                     self.assertEqual(services[name]["environment"]["LLM_API_URL"],
                                      "http://llm-stub:18080")
+                self.assertEqual(services["nginx"]["ports"], [{
+                    "mode": "ingress", "host_ip": overrides.get("NGINX_HTTP_BIND", "127.0.0.1"),
+                    "target": 80, "published": overrides.get("NGINX_HTTP_PORT", "80"),
+                    "protocol": "tcp",
+                }])
                 if overrides:
                     self.assertEqual(config["name"], documented_project)
-                    self.assertEqual(services["nginx"]["ports"][0]["host_ip"], "127.0.0.1")
-                    self.assertEqual(services["nginx"]["ports"][0]["published"], "28082")
 
     def test_invalid_or_missing_cached_target_never_creates_fixtures(self):
         with tempfile.TemporaryDirectory(prefix="nw-restore-image-preflight-") as directory:

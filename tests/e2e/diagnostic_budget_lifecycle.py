@@ -249,7 +249,7 @@ def isolated_journey_compose(compose, project, ca_path, nginx_ip):
             "      HTTPS_PROXY: http://mock:3128\n      NO_PROXY: localhost,127.0.0.1,user-service\n"
             "      SSL_CERT_FILE: /fixture/ca.pem\n")
         compose = compose[:start] + block + compose[end:]
-    ports = '    ports:\n      - "${NGINX_HTTP_BIND:-0.0.0.0}:${NGINX_HTTP_PORT:-80}:80"\n'
+    ports = '    ports:\n      - "${NGINX_HTTP_BIND:-127.0.0.1}:${NGINX_HTTP_PORT:-80}:80"\n'
     require(compose.count(ports) == 1, "fixture_nginx_ports_changed")
     compose = compose.replace(ports, "")
     start = re.search(r"(?m)^  nginx:\n", compose)
