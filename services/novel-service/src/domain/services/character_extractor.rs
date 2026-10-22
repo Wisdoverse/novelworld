@@ -7,8 +7,17 @@ use crate::domain::entities::chapter::Chapter;
 const SUMMARY_SAMPLE_BYTES: usize = 8_000;
 const SCAN_CHUNK_BYTES: usize = 24_000;
 const SCAN_OVERLAP_BYTES: usize = 256;
-pub const CHARACTER_EXTRACTION_PROMPT_VERSION: &str = "character-extraction-v8";
-const CHARACTER_DESCRIPTION_RULE: &str = "所有角色描述字段及关系描述只能包含给定文本明确支持的信息；保留人物、行为主体、所有者及关系归属，不得把他人的经历或物品移到该角色名下。对话、传闻、猜测和承诺须保留原有说话者、归属、条件与不确定性；除非文本另有明确证实，不得改写为已发生或无条件成立的事实。保留原文支持的具体细节；未说明的外貌、性格、背景或说话风格用空字符串，不为满足字数、细节数量或画像需要补造。";
+pub const CHARACTER_EXTRACTION_PROMPT_VERSION: &str = "character-extraction-v9";
+const CHARACTER_DESCRIPTION_RULE: &str = r#"所有角色描述字段及关系描述只能包含给定文本明确支持的信息；保留人物、行为主体、所有者及关系归属，不得把他人的经历或物品移到该角色名下。对话、传闻、猜测和承诺须保留原有说话者、归属、条件与不确定性；除非文本另有明确证实，不得改写为已发生或无条件成立的事实。保留原文支持的具体细节；未说明的外貌、性格、背景或说话风格用空字符串，不为满足字数、细节数量或画像需要补造。
+
+Check attribution with these synthetic examples.
+Extract actual facts only from the supplied novel text.
+Ownership example source: Zed holds Liv's aunt's ring.
+Preserve: Zed holds Liv's aunt's ring.
+Do not infer: Zed's aunt owns the ring.
+Conditional example source: 苒苒承诺：如果包裹送达，就付钟明报酬。
+Preserve: 苒苒承诺若包裹送达则付钟明报酬。
+Do not infer: 苒苒已向钟明支付报酬。"#;
 const CHARACTER_OUTPUT_RULE: &str = "完整 JSON 控制在 3000 token 内；不得为控制篇幅省略符合条件的角色或明确关系。保留原文支持的具体事实，删去重复措辞；每个角色描述字段及关系描述最多 30 字，world_summary 最多 600 字，绝不输出截断的 JSON。";
 const MIN_SCAN_SPLIT_BYTES: usize = 1_500;
 
@@ -996,7 +1005,7 @@ mod tests {
         let chunk_prompt = build_chunk_extraction_prompt("北塔旧事", "Chapter 1 文本。", 0);
         assert_eq!(
             CHARACTER_EXTRACTION_PROMPT_VERSION,
-            "character-extraction-v8"
+            "character-extraction-v9"
         );
         for text in [&prompt, &chunk_prompt] {
             assert_eq!(text.matches(CHARACTER_DESCRIPTION_RULE).count(), 1);
@@ -1005,6 +1014,18 @@ mod tests {
             assert!(!text.contains("列举3-5个"));
             assert!(!text.contains("2-4句话"));
         }
+        let sample_source_block = "小说文本（节选）：\n---\n第一章 文本。\n---";
+        let chunk_source_block = "文本：\n---\nChapter 1 文本。\n---";
+        assert!(prompt.contains(sample_source_block));
+        assert!(chunk_prompt.contains(chunk_source_block));
+        assert!(
+            prompt.find(CHARACTER_DESCRIPTION_RULE).unwrap()
+                < prompt.find(sample_source_block).unwrap()
+        );
+        assert!(
+            chunk_prompt.find(CHARACTER_DESCRIPTION_RULE).unwrap()
+                < chunk_prompt.find(chunk_source_block).unwrap()
+        );
         let endpoint_rule = "两端必须同时出现在本次 characters 的 name 或 aliases 中";
         assert!(prompt.contains(endpoint_rule));
         assert!(!chunk_prompt.contains(endpoint_rule));
@@ -1062,6 +1083,31 @@ mod tests {
             find_first_appearance(&alice, std::slice::from_ref(&alice), &chapters),
             Some(2)
         );
+    }
+
+    #[test]
+    fn prompt_example_names_are_grounded_only_when_present_in_source() {
+        let characters =
+            ["Zed", "Liv", "苒苒", "钟明"].map(|name| character(name, &[], "supporting"));
+        let absent_source = [chapter(1, "The room was empty.")];
+        for character in &characters {
+            assert_eq!(
+                find_first_appearance(character, &characters, &absent_source),
+                None,
+                "{} must not be grounded by prompt examples",
+                character.name
+            );
+        }
+
+        let present_source = [chapter(2, "Zed met Liv. 苒苒 spoke with 钟明.")];
+        for character in &characters {
+            assert_eq!(
+                find_first_appearance(character, &characters, &present_source),
+                Some(2),
+                "{} must remain eligible when it appears in source",
+                character.name
+            );
+        }
     }
 
     #[test]
