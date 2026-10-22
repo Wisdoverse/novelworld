@@ -89,7 +89,11 @@ readonly qualification_subnet qualification_network_source
 
 qualification_phase() {
   [[ "$qualification_scope" == true ]] || return 0
-  printf 'qualification-phase %s %s %s\n' "$1" "$2" "$(date +%s%3N)"
+  local timestamp
+  timestamp=$(python3 -c 'import time; print(time.monotonic_ns() // 1_000_000)') \
+    || die "qualification timer failed"
+  # Wall-clock corrections must not reverse an elapsed phase interval.
+  printf 'qualification-phase %s %s %s\n' "$1" "$2" "$timestamp"
 }
 
 acquire_release_lock() {
