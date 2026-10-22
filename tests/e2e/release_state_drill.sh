@@ -234,6 +234,78 @@ cold_health_line=$(grep -nF 'qualification cold health' "$release" | cut -d: -f1
 printf 'drill: ok   candidate client fail-stop, migration drain and downgrade barrier ordering\n'
 printf 'drill: ok   rejected client gate restores current or stops candidate client before exit\n'
 
+# Extract the real timer function so fake wall-clock corrections cannot affect it.
+clock_function="$work/qualification-phase.sh"
+sed -n '/^qualification_phase() {$/,/^}$/p' "$release" >"$clock_function"
+clock_bin="$work/clock-bin"
+mkdir -p "$clock_bin"
+real_timer_python=$(command -v python3)
+cat >"$clock_bin/date" <<'EOF'
+#!/usr/bin/env bash
+count=0
+[[ ! -f "$DATE_CALLS" ]] || count=$(<"$DATE_CALLS")
+count=$((count + 1))
+printf '%s' "$count" >"$DATE_CALLS"
+if ((count == 1)); then printf '1000\n'; else printf '999\n'; fi
+EOF
+cat >"$clock_bin/python3" <<'EOF'
+#!/usr/bin/env bash
+printf 'called\n' >>"$PYTHON_CALLS"
+if [[ "${TIMER_FAIL:-false}" == true ]]; then
+  printf 'stub timer failure\n' >&2
+  exit 71
+fi
+exec "$REAL_TIMER_PYTHON" "$@"
+EOF
+chmod +x "$clock_bin/date" "$clock_bin/python3"
+clock_calls="$work/python-calls"
+date_calls="$work/date-calls"
+nonqualification_output=$(PATH="$clock_bin:$PATH" PYTHON_CALLS="$clock_calls" DATE_CALLS="$date_calls" \
+  bash -c 'qualification_scope=false; die() { exit 1; }; source "$1"; qualification_phase pull start' \
+  _ "$clock_function")
+[[ -z "$nonqualification_output" && ! -e "$clock_calls" && ! -e "$date_calls" ]] \
+  || { printf 'drill: FAIL nonqualification phase invoked its clock or emitted a marker\n' >&2; exit 1; }
+clock_output=$(PATH="$clock_bin:$PATH" REAL_TIMER_PYTHON="$real_timer_python" \
+  PYTHON_CALLS="$clock_calls" DATE_CALLS="$date_calls" \
+  bash -c 'qualification_scope=true; die() { printf "release: %s\\n" "$*" >&2; exit 1; }; source "$1"; qualification_phase pull start; qualification_phase pull end' \
+  _ "$clock_function")
+mapfile -t timer_records <<<"$clock_output"
+start_record=${timer_records[0]:-}
+end_record=${timer_records[1]:-}
+[[ "$start_record" =~ ^qualification-phase\ pull\ start\ ([0-9]+)$ ]] \
+  && start_ms=${BASH_REMATCH[1]}
+[[ "$end_record" =~ ^qualification-phase\ pull\ end\ ([0-9]+)$ ]] \
+  && end_ms=${BASH_REMATCH[1]}
+[[ ${#timer_records[@]} -eq 2 && ${start_ms:-} =~ ^[0-9]+$ && ${end_ms:-} =~ ^[0-9]+$ ]] \
+  && ((end_ms >= start_ms)) && [[ ! -e "$date_calls" ]] \
+  || { printf 'drill: FAIL qualification phase used wall-clock time or reversed its timer\n' >&2; exit 1; }
+printf 'drill: ok   qualification timer ignores reversing wall-clock time and skips nonqualification\n'
+
+for fail_context in if negation; do
+  marker="$work/timer-$fail_context-returned"
+  output="$work/timer-$fail_context.stdout"
+  error="$work/timer-$fail_context.stderr"
+  if PATH="$clock_bin:$PATH" REAL_TIMER_PYTHON="$real_timer_python" \
+      PYTHON_CALLS="$work/failing-python-calls" DATE_CALLS="$date_calls" \
+      TIMER_FAIL=true bash -c '
+        qualification_scope=true
+        die() { printf "release: %s\\n" "$*" >&2; exit 1; }
+        source "$1"
+        if [[ "$2" == if ]]; then
+          if qualification_phase pull start; then touch "$3"; fi
+        else
+          ! qualification_phase pull start || touch "$3"
+        fi
+      ' _ "$clock_function" "$fail_context" "$marker" >"$output" 2>"$error"; then
+    printf 'drill: FAIL timer failure returned in %s context\n' "$fail_context" >&2
+    exit 1
+  fi
+  grep -Fq 'release: qualification timer failed' "$error" \
+    && [[ ! -e "$marker" && ! -s "$output" ]] \
+    || { printf 'drill: FAIL timer failure was hidden in %s context\n' "$fail_context" >&2; exit 1; }
+done
+printf 'drill: ok   qualification timer failure aborts even in conditional contexts\n'
+
 # --- validate: the manifest grammar fails closed ---
 good=$(mktemp "$work/good.XXXXXX")
 write_manifest "$good" "$sha_a"

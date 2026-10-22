@@ -6170,6 +6170,8 @@ def self_test(root: Path) -> None:
         for invalid_release_log in (
             release_log.replace("qualification-phase pull end 25\n", ""),
             release_log + "qualification-phase pull end 25\n",
+            release_log.replace("qualification-phase pull start 10\n", "qualification-phase pull start 25\n")
+            .replace("qualification-phase pull end 25\n", "qualification-phase pull end 10\n"),
         ):
             try:
                 release_phase_durations(invalid_release_log, set(release_phases))
