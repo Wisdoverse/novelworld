@@ -383,6 +383,9 @@ Cold-adoption stdout reports only the zero/nonzero case and fixed boolean stage
 presence/terminal flags after the journey's terminal handling, including failure;
 private reports and identifiers
 remain local. These flags do not replace the fixture's blocking assertions.
+The summary also maps the first preserved failure code to fixed allowlist
+booleans, marks an unclassified string code, and reports whether base release
+timings were recorded; it never emits failure-code strings or timing values.
 A second fixed boolean summary recognizes release phase markers and selected
 failure classes from at most 1 MiB of the private adoption log. Missing or larger
 logs do not produce phase evidence; raw lines and unknown values are never emitted.
