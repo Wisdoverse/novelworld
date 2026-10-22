@@ -6,6 +6,8 @@ use serde::Serialize;
 pub const MODEL: &str = "deepseek-v4-flash";
 pub const PROFILE: &str = "vision-diagnostic-budget-v3";
 pub const CNY10_PROFILE: &str = "vision-diagnostic-budget-v4";
+pub const FLASH_MODEL: &str = "deepseek-flash";
+pub const FLASH_PROFILE: &str = "vision-diagnostic-budget-v5";
 const INPUT_CEILING: u64 = 1 << 20;
 const ATTEMPTS_PER_CALL: u64 = 5;
 const INPUT_MICRO_CNY: u64 = 4;
@@ -31,6 +33,7 @@ pub enum Profile {
     #[default]
     V3,
     V4,
+    V5,
 }
 
 impl Profile {
@@ -38,7 +41,8 @@ impl Profile {
         match value {
             PROFILE => Ok(Self::V3),
             CNY10_PROFILE => Ok(Self::V4),
-            _ => Err("unknown H1 budget profile; select vision-diagnostic-budget-v3 or vision-diagnostic-budget-v4"),
+            FLASH_PROFILE => Ok(Self::V5),
+            _ => Err("unknown H1 budget profile; select vision-diagnostic-budget-v3, vision-diagnostic-budget-v4, or vision-diagnostic-budget-v5"),
         }
     }
 
@@ -46,15 +50,22 @@ impl Profile {
         match self {
             Self::V3 => PROFILE,
             Self::V4 => CNY10_PROFILE,
+            Self::V5 => FLASH_PROFILE,
+        }
+    }
+
+    pub fn model(self) -> &'static str {
+        match self {
+            Self::V3 | Self::V4 => MODEL,
+            Self::V5 => FLASH_MODEL,
         }
     }
 
     fn limits(self) -> Amount {
         Amount {
-            cost_micro_cny: if self == Self::V4 {
-                10_000_000
-            } else {
-                LIMITS.cost_micro_cny
+            cost_micro_cny: match self {
+                Self::V3 => LIMITS.cost_micro_cny,
+                Self::V4 | Self::V5 => 10_000_000,
             },
             ..LIMITS
         }
@@ -180,7 +191,10 @@ impl Ledger {
         Ok(Ticket {
             before,
             output_limit,
-            attempt_limit: (self.profile == Profile::V4).then_some(attempts as u32),
+            attempt_limit: match self.profile {
+                Profile::V3 => None,
+                Profile::V4 | Profile::V5 => Some(attempts as u32),
+            },
         })
     }
 
@@ -332,6 +346,44 @@ mod tests {
     }
 
     #[test]
+    fn profiles_preserve_model_identity_and_limits() {
+        assert_eq!(Profile::default(), Profile::V3);
+        for (profile, name, model, cost_micro_cny) in [
+            (
+                Profile::V3,
+                "vision-diagnostic-budget-v3",
+                "deepseek-v4-flash",
+                35_000_000,
+            ),
+            (
+                Profile::V4,
+                "vision-diagnostic-budget-v4",
+                "deepseek-v4-flash",
+                10_000_000,
+            ),
+            (
+                Profile::V5,
+                "vision-diagnostic-budget-v5",
+                "deepseek-flash",
+                10_000_000,
+            ),
+        ] {
+            assert_eq!(Profile::parse(name).unwrap(), profile);
+            assert_eq!(profile.name(), name);
+            assert_eq!(profile.model(), model);
+            assert_eq!(
+                profile.limits(),
+                Amount {
+                    logical_calls: 40,
+                    attempts: 200,
+                    tokens: 20_000_000,
+                    cost_micro_cny,
+                }
+            );
+        }
+    }
+
+    #[test]
     fn reserves_before_dispatch_and_only_settles_complete_evidence() {
         assert_eq!(MODEL, "deepseek-v4-flash");
         assert_eq!(PROFILE, "vision-diagnostic-budget-v3");
@@ -380,115 +432,119 @@ mod tests {
 
     #[test]
     fn cny10_profile_reserves_affordable_attempts_across_logical_calls() {
-        let mut ledger = Ledger {
-            profile: Profile::V4,
-            ..Ledger::default()
-        };
-        let ticket = ledger.reserve(800, Counters::default()).unwrap();
-        assert_eq!(ticket.attempt_limit, Some(2));
-        assert_eq!(ledger.charged.cost_micro_cny, 8_407_808);
-        assert_eq!(ledger.charged.attempts, 2);
-        ledger
-            .settle(ticket, counters(1), &[usage(500_000, 0)])
-            .unwrap();
-        assert_eq!(ledger.charged.cost_micro_cny, 2_000_000);
+        for profile in [Profile::V4, Profile::V5] {
+            let mut ledger = Ledger {
+                profile,
+                ..Ledger::default()
+            };
+            let ticket = ledger.reserve(800, Counters::default()).unwrap();
+            assert_eq!(ticket.attempt_limit, Some(2));
+            assert_eq!(ledger.charged.cost_micro_cny, 8_407_808);
+            assert_eq!(ledger.charged.attempts, 2);
+            ledger
+                .settle(ticket, counters(1), &[usage(500_000, 0)])
+                .unwrap();
+            assert_eq!(ledger.charged.cost_micro_cny, 2_000_000);
 
-        let ticket = ledger.reserve(800, counters(1)).unwrap();
-        assert_eq!(ticket.attempt_limit, Some(1));
-        let after = Counters {
-            started: 2,
-            terminal: 2,
-            attempts: 2,
-        };
-        ledger
-            .settle(ticket, after, &[usage(INPUT_CEILING as u32, 800)])
-            .unwrap();
-        assert_eq!(ledger.charged.cost_micro_cny, 6_203_904);
-        let charged = ledger.charged;
-        assert_eq!(
-            ledger.reserve(800, after).err(),
-            Some("diagnostic_budget_exhausted")
-        );
-        assert_eq!(ledger.charged, charged);
-        assert!(ledger.pending.is_none());
+            let ticket = ledger.reserve(800, counters(1)).unwrap();
+            assert_eq!(ticket.attempt_limit, Some(1));
+            let after = Counters {
+                started: 2,
+                terminal: 2,
+                attempts: 2,
+            };
+            ledger
+                .settle(ticket, after, &[usage(INPUT_CEILING as u32, 800)])
+                .unwrap();
+            assert_eq!(ledger.charged.cost_micro_cny, 6_203_904);
+            let charged = ledger.charged;
+            assert_eq!(
+                ledger.reserve(800, after).err(),
+                Some("diagnostic_budget_exhausted")
+            );
+            assert_eq!(ledger.charged, charged);
+            assert!(ledger.pending.is_none());
 
-        let mut ledger = Ledger {
-            profile: Profile::V4,
-            ..Ledger::default()
-        };
-        let ticket = ledger.reserve(800, Counters::default()).unwrap();
-        let charged = ledger.charged;
-        assert!(ledger
-            .settle(
-                ticket,
-                counters(3),
-                &[usage(3, 2), usage(3, 2), usage(3, 2)]
-            )
-            .is_err());
-        assert_eq!(ledger.charged, charged);
-        assert!(ledger.pending.is_some());
+            let mut ledger = Ledger {
+                profile,
+                ..Ledger::default()
+            };
+            let ticket = ledger.reserve(800, Counters::default()).unwrap();
+            let charged = ledger.charged;
+            assert!(ledger
+                .settle(
+                    ticket,
+                    counters(3),
+                    &[usage(3, 2), usage(3, 2), usage(3, 2)]
+                )
+                .is_err());
+            assert_eq!(ledger.charged, charged);
+            assert!(ledger.pending.is_some());
+        }
     }
 
     #[test]
     fn cny10_admission_checks_each_ceiling_and_checked_arithmetic() {
-        let per_attempt = Amount {
-            logical_calls: 1,
-            attempts: 1,
-            tokens: INPUT_CEILING + 800,
-            cost_micro_cny: INPUT_CEILING * INPUT_MICRO_CNY + 800 * OUTPUT_MICRO_CNY,
-        };
-        let limits = Profile::V4.limits();
-        assert_eq!(limits.cost_micro_cny, 10_000_000);
-        for dimension in 0..4 {
-            for extra in [0, 1] {
-                let mut charged = Amount::default();
-                match dimension {
-                    0 => {
-                        charged.logical_calls =
-                            limits.logical_calls - per_attempt.logical_calls + extra
+        for profile in [Profile::V4, Profile::V5] {
+            let per_attempt = Amount {
+                logical_calls: 1,
+                attempts: 1,
+                tokens: INPUT_CEILING + 800,
+                cost_micro_cny: INPUT_CEILING * INPUT_MICRO_CNY + 800 * OUTPUT_MICRO_CNY,
+            };
+            let limits = profile.limits();
+            assert_eq!(limits.cost_micro_cny, 10_000_000);
+            for dimension in 0..4 {
+                for extra in [0, 1] {
+                    let mut charged = Amount::default();
+                    match dimension {
+                        0 => {
+                            charged.logical_calls =
+                                limits.logical_calls - per_attempt.logical_calls + extra
+                        }
+                        1 => charged.attempts = limits.attempts - per_attempt.attempts + extra,
+                        2 => charged.tokens = limits.tokens - per_attempt.tokens + extra,
+                        _ => {
+                            charged.cost_micro_cny =
+                                limits.cost_micro_cny - per_attempt.cost_micro_cny + extra
+                        }
                     }
-                    1 => charged.attempts = limits.attempts - per_attempt.attempts + extra,
-                    2 => charged.tokens = limits.tokens - per_attempt.tokens + extra,
-                    _ => {
-                        charged.cost_micro_cny =
-                            limits.cost_micro_cny - per_attempt.cost_micro_cny + extra
+                    let before = Counters {
+                        started: charged.logical_calls,
+                        terminal: charged.logical_calls,
+                        attempts: charged.attempts,
+                    };
+                    let mut ledger = Ledger {
+                        profile,
+                        charged,
+                        ..Ledger::default()
+                    };
+                    let result = ledger.reserve(800, before);
+                    if extra == 0 {
+                        assert_eq!(
+                            result.unwrap().attempt_limit,
+                            Some(if dimension == 0 { 2 } else { 1 })
+                        );
+                        assert!(ledger.charged.within(limits));
+                    } else {
+                        assert_eq!(result.err(), Some("diagnostic_budget_exhausted"));
+                        assert_eq!(ledger.charged, charged);
+                        assert!(ledger.pending.is_none());
                     }
-                }
-                let before = Counters {
-                    started: charged.logical_calls,
-                    terminal: charged.logical_calls,
-                    attempts: charged.attempts,
-                };
-                let mut ledger = Ledger {
-                    profile: Profile::V4,
-                    charged,
-                    ..Ledger::default()
-                };
-                let result = ledger.reserve(800, before);
-                if extra == 0 {
-                    assert_eq!(
-                        result.unwrap().attempt_limit,
-                        Some(if dimension == 0 { 2 } else { 1 })
-                    );
-                    assert!(ledger.charged.within(limits));
-                } else {
-                    assert_eq!(result.err(), Some("diagnostic_budget_exhausted"));
-                    assert_eq!(ledger.charged, charged);
-                    assert!(ledger.pending.is_none());
                 }
             }
+            let mut ledger = Ledger {
+                profile,
+                charged: Amount {
+                    cost_micro_cny: u64::MAX,
+                    ..Amount::default()
+                },
+                ..Ledger::default()
+            };
+            assert!(ledger.reserve(800, Counters::default()).is_err());
+            assert_eq!(ledger.charged.cost_micro_cny, u64::MAX);
+            assert!(ledger.pending.is_none());
         }
-        let mut ledger = Ledger {
-            profile: Profile::V4,
-            charged: Amount {
-                cost_micro_cny: u64::MAX,
-                ..Amount::default()
-            },
-            ..Ledger::default()
-        };
-        assert!(ledger.reserve(800, Counters::default()).is_err());
-        assert_eq!(ledger.charged.cost_micro_cny, u64::MAX);
-        assert!(ledger.pending.is_none());
     }
 
     #[test]
@@ -571,12 +627,13 @@ mod tests {
         let Ok(case) = env::var(CHILD) else {
             // Each child owns a fresh real recorder; unrelated parallel tests cannot
             // change its counters. No new test dependency or runtime metric hook.
-            for profile in [PROFILE, CNY10_PROFILE] {
+            for profile in [PROFILE, CNY10_PROFILE, FLASH_PROFILE] {
                 for case in [
                     "success",
                     "fallback",
                     "exhausted",
                     "missing_usage",
+                    "wrong_model",
                     "missing_headers",
                     "metrics_mismatch",
                     "write_failure",
@@ -604,14 +661,17 @@ mod tests {
             return;
         };
         let profile = Profile::parse(&env::var(PROFILE_CHILD).unwrap()).unwrap();
+        let model = profile.model();
+        let other_model = if model == MODEL { FLASH_MODEL } else { MODEL };
         let metrics = llm_client::install_metrics("h1-eval").unwrap();
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-            let success = Some(envelope(MODEL, "{}", true));
+            let success = Some(envelope(model, "{}", true));
             let bodies = match case.as_str() {
-                "fallback" => vec![Some(envelope(MODEL, "", true)), success],
-                "missing_usage" => vec![Some(envelope(MODEL, "{}", false))],
+                "fallback" => vec![Some(envelope(model, "", true)), success],
+                "wrong_model" => vec![Some(envelope(other_model, "", true)), success],
+                "missing_usage" => vec![Some(envelope(model, "{}", false))],
                 "missing_headers" | "cancelled" => vec![None, success],
-                "mixed_allowance" => vec![None, Some(envelope(MODEL, "", true)), success],
+                "mixed_allowance" => vec![None, Some(envelope(model, "", true)), success],
                 _ => vec![success],
             };
             let (_, server, calls, url) = evidence_server(bodies).await;
@@ -630,11 +690,11 @@ mod tests {
             let config = RunConfig {
                 mode: Mode::Live,
                 provider: "deepseek".into(),
-                model: MODEL.into(),
-                allowed_response_models: BTreeSet::from([MODEL.into()]),
+                model: model.into(),
+                allowed_response_models: BTreeSet::from([model.into()]),
                 client: Some(RuntimeLlmClient::static_config(
                     url,
-                    MODEL.into(),
+                    model.into(),
                     "synthetic-key".into(),
                     false,
                 )),
@@ -646,7 +706,7 @@ mod tests {
                     "budget-case",
                     1,
                     &config.allowed_response_models,
-                    ChatRequest::new(LlmOperation::CharacterExtraction, MODEL)
+                    ChatRequest::new(LlmOperation::CharacterExtraction, model)
                         .max_tokens(20)
                         .json(),
                 )
@@ -678,6 +738,10 @@ mod tests {
                 assert_eq!(report.charged.tokens, expected as u64 * 5);
                 assert!(report.unreleased_reservation.is_none());
                 assert!(report.stopped.is_none());
+                assert_eq!(
+                    sink.0.lock().unwrap().response_models,
+                    BTreeSet::from([model.to_owned()])
+                );
                 config.chat(Some(&sink), request()).await.unwrap();
                 assert_eq!(calls.load(Ordering::SeqCst), count + 1);
             } else {
@@ -687,12 +751,16 @@ mod tests {
                     assert!(report.unreleased_reservation.is_some());
                     assert_eq!(
                         report.charged.attempts,
-                        if profile == Profile::V4 { 2 } else { 5 }
+                        if profile == Profile::V3 { 5 } else { 2 }
                     );
-                    if case == "missing_headers" {
+                    if case == "wrong_model" {
+                        assert_eq!(count, 1);
+                        assert_eq!(sink.failure(), Some("response_model_not_allowed"));
+                        assert!(sink.0.lock().unwrap().response_models.is_empty());
+                    } else if case == "missing_headers" {
                         assert_eq!(count, 2);
                     } else if case == "mixed_allowance" {
-                        assert_eq!(count, if profile == Profile::V4 { 2 } else { 3 });
+                        assert_eq!(count, if profile == Profile::V3 { 3 } else { 2 });
                     }
                 }
                 // Bypass the existing private_request fail guard deliberately:
@@ -700,7 +768,7 @@ mod tests {
                 assert!(config
                     .chat(
                         Some(&sink),
-                        ChatRequest::new(LlmOperation::CharacterExtraction, MODEL).max_tokens(20)
+                        ChatRequest::new(LlmOperation::CharacterExtraction, model).max_tokens(20)
                     )
                     .await
                     .is_err());

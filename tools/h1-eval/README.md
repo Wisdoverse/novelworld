@@ -135,7 +135,7 @@ these frozen accounting assumptions are not a statement of current prices.
 See [Qualification policy](../../docs/QUALIFICATION_POLICY.md) and
 [`budget.rs`](src/budget.rs) for the registration and enforcement contract.
 
-### Prospective CNY 10 profile
+### Prospective CNY 10 profiles
 
 The opt-in `vision-diagnostic-budget-v4` profile uses the same model, request
 limits, token limit, call limit, and attempt limit as v3. Select it explicitly
@@ -143,10 +143,19 @@ with `--diagnostic-budget-profile vision-diagnostic-budget-v4` together with
 `--live --bounded-diagnostic`. The v3 default and its CNY 35 limit remain
 unchanged. V4 limits one process invocation to 10,000,000 micro-CNY (CNY 10).
 
-Before each logical call, v4 reserves the largest affordable count of physical
-attempts from five down to one. It checks the logical-call, physical-attempt,
-token, and cost limits before it dispatches the call. Retries and JSON fallback
-use the same reserved attempt count. This option cannot increase the existing
+The separate opt-in `vision-diagnostic-budget-v5` profile requires exactly
+`deepseek-flash` for both `LLM_MODEL` and `H1_EVAL_ALLOWED_RESPONSE_MODELS`.
+Select it with `--diagnostic-budget-profile vision-diagnostic-budget-v5`
+together with `--live --bounded-diagnostic`. It keeps v4's CNY 10 limit,
+reservation rules, and conservative rates of 4 input and 12 output micro-CNY
+per token. V3 and v4 retain their exact `deepseek-v4-flash` identity. The runner
+rejects mismatched model/profile settings before reading the credential, and
+an unregistered response model stops the run without releasing its reservation.
+
+Before each logical call, v4 and v5 reserve the largest affordable count of
+physical attempts from five down to one. Both profiles check the logical-call,
+physical-attempt, token, and cost limits before dispatch. Retries and JSON fallback
+use the same reserved attempt count. Neither profile increases the existing
 retry rules. Streaming requests fail before provider I/O.
 
 At the 800-token output limit, two worst-case attempts reserve 8,407,808
@@ -157,16 +166,17 @@ Only complete usage and transport-metric reconciliation releases unused
 reservation. An error, missing usage, cancellation, or unknown outcome keeps
 the full reservation and stops further H1 calls.
 
-The v4 ledger is process-local. It does not persist across a restart and does
-not enforce an account-wide or provider-side cap. A future paid run still needs
+The v4 and v5 ledgers are process-local. They do not persist across a restart or
+enforce an account-wide or provider-side cap. A future paid run still needs
 a separately reviewed registration, a durable one-shot launcher intent, and
 exact user authorization before credential use. This profile change does not
 provide that launcher or authorize a paid run.
 
-No current v4 live quality result is implied here. Fresh registration,
+No current v4 or v5 live quality result is implied here. Fresh registration,
 independent review, private evidence, and prospective approval are required
 before any provider call. Existing formal Qualification remains on its frozen
-v1 identity and cannot silently adopt v4.
+v1 identity and cannot silently adopt v4 or v5. Frozen or consumed registrations
+and their launchers remain unchanged.
 
 Both modes fail closed on malformed corpus data, threshold drift, missing or
 duplicate tokens, unregistered response models, non-commit SHA, dirty checkout,
