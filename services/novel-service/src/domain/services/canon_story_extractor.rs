@@ -14,9 +14,9 @@ use crate::domain::entities::{
     character::Character,
 };
 
-pub const CANON_CHUNK_PROMPT_VERSION: &str = "canon-chunk-v10";
+pub const CANON_CHUNK_PROMPT_VERSION: &str = "canon-chunk-v11";
 pub const CANON_EVENT_SELECTION_PROMPT_VERSION: &str = "canon-event-grouping-v5";
-pub const CANON_EXTRACTION_PROMPT_VERSION: &str = "canon-chunk-v10+event-grouping-v5";
+pub const CANON_EXTRACTION_PROMPT_VERSION: &str = "canon-chunk-v11+event-grouping-v5";
 const MAX_SOURCE_CHUNK_BYTES: usize = 16_000;
 const MAX_CHARACTER_CONTEXT_BYTES: usize = 16_000;
 const MAX_EVENT_SELECTION_PROMPT_BYTES: usize = 16_000;
@@ -319,6 +319,7 @@ Every evidence excerpt must be the shortest single contiguous non-empty verbatim
 Copy one continuous span. Never join, skip, or reorder sentences — do not drop an intervening sentence and concatenate the rest. Omit the fact when no single continuous span independently proves it.
 caused_by and death event_index are zero-based indexes into this chunk's events and may only point backward.
 Use stable semantic keys for arcs, rules, and threads so repeated mentions can be merged.
+Classification example only; never use it as source evidence: Rin predicts that a violet bell will stop time. This establishes Rin's prediction, not a persistent world rule. Preserve the speaker and uncertainty in any material fact you retain. Setting hard=false does not establish source support for a rule. A persistent constraint independently established by SOURCE remains eligible, including one conveyed in dialogue.
 status is exactly open or resolved. ending must be null unless FINAL_CHUNK is true, and must be present when it is true. Add a character_state whenever this chunk explicitly establishes a supplied canonical character's current state.
 Keep each top-level fact array at {max_items} items or fewer and each nested event reference array at {max_references} items or fewer. These are ceilings, not targets. For events, return the smallest sufficient set of major plot-level causal milestones explicitly established by this chunk; events are not a transcript of every action, observation, dialogue line, or specialized field change. Treat an action and its immediate observation, dialogue, and durable state consequence within the same local story beat as one event; do not split those components into separate events. Do not create another event merely to restate a location, faction, world rule, goal, state, relationship, thread, or ending detail already explained by that milestone, unless that change is itself a separate major turning point. A short or simple chunk often has zero or one event. Emit two or more only when every remaining event is a clearly separate major turning point that remains independently meaningful as a durable change. Distinct turning points may be causally related; preserve that relation with caused_by, and do not merge them merely because one causes another. Put a final character, location, or faction state in character_states or ending and do not repeat that final-state-only fact as an event. Omit incidental standalone dialogue beats, observations, repeated mentions, and actions only when they contribute no material part of a retained milestone. In each retained event, preserve the source-established material actions, identity revelations, participants, targets, quantities, and conditions within that local beat; concise wording must not erase what happened or what made it consequential. An observation or dialogue may convey such a part, but a quoted claim alone does not establish its truth. Do not infer omitted details. A world rule must be a persistent invariant of the setting; a one-time event, unsupported character opinion or conjecture, isolated non-response, quoted command, or incidental detail is not a world rule. A persistent eligibility or permission constraint explicitly established by the source may be a world rule even when conveyed in dialogue; speech alone does not establish its truth or make it a hard rule. Include only material facts explicitly established by this chunk, keep descriptions concise, and use [] when a category has no such fact. Output one JSON object only, with exactly this shape:
 {{
@@ -1941,10 +1942,10 @@ mod tests {
         };
 
         let prompt = build_prompt("Novel", &chunk, &[]).unwrap();
-        assert_eq!(CANON_CHUNK_PROMPT_VERSION, "canon-chunk-v10");
+        assert_eq!(CANON_CHUNK_PROMPT_VERSION, "canon-chunk-v11");
         assert_eq!(
             CANON_EXTRACTION_PROMPT_VERSION,
-            "canon-chunk-v10+event-grouping-v5"
+            "canon-chunk-v11+event-grouping-v5"
         );
         let ending_example = prompt
             .split_once("When FINAL_CHUNK is true, replace null with:\n")
@@ -1998,6 +1999,35 @@ mod tests {
     }
 
     #[test]
+    fn attribution_guidance_does_not_supply_source_evidence() {
+        let source = "The pilot crosses the ridge.";
+        let example = "Rin predicts that a violet bell will stop time.";
+        let mut chunk = CanonSourceChunk {
+            chapter_number: 1,
+            chunk_index: 0,
+            is_final: false,
+            content: source.into(),
+        };
+        let prompt = build_prompt("Novel", &chunk, &[]).unwrap();
+        let (guidance, supplied) = prompt.split_once("<SOURCE>\n").unwrap();
+        assert!(guidance.contains(example));
+        assert!(guidance.contains("Setting hard=false does not establish source support"));
+        assert_eq!(supplied, format!("{source}\n</SOURCE>"));
+
+        let mut extraction = base_extraction(source, false);
+        extraction.world_rules[0].evidence = extracted_evidence(example);
+        let raw = serde_json::to_string(&extraction).unwrap();
+        assert_eq!(
+            parse_chunk(&raw, &chunk).unwrap_err().reason_code(),
+            "evidence_mismatch"
+        );
+
+        chunk.content.push(' ');
+        chunk.content.push_str(example);
+        parse_chunk(&raw, &chunk).unwrap();
+    }
+
+    #[test]
     fn event_selection_input_preserves_source_boundaries_and_global_indexes() {
         assert!(build_event_selection_prompt("Novel", &[]).is_none());
         let first = CanonSourceChunk {
@@ -2043,7 +2073,7 @@ mod tests {
             ),
         ];
         let prompt = build_event_selection_prompt("Novel", &chunks).unwrap();
-        assert_eq!(CANON_CHUNK_PROMPT_VERSION, "canon-chunk-v10");
+        assert_eq!(CANON_CHUNK_PROMPT_VERSION, "canon-chunk-v11");
         assert_eq!(
             CANON_EVENT_SELECTION_PROMPT_VERSION,
             "canon-event-grouping-v5"
