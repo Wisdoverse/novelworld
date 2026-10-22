@@ -469,11 +469,18 @@ repository digests, and filesystem layers. Record ELF hashes for all five Rust
 services. Record complete compiled and served frontend file maps. Derive fresh
 `world-turn-v4` prompt, Canon, branch, and schema bindings. Preserve the native
 affected-layer predicate. At least one affected application image must change
-its digest, image ID, and filesystem layers together. Require real compiled and
-served frontend byte changes. Require frontend digest, image ID, and
-filesystem-layer changes together. Record all five Rust outputs honestly. Shared
-Rust inputs may produce unchanged Rust outputs. Revision labels alone do not
-prove an application change.
+its digest, image ID, and filesystem layers together. When frontend build inputs
+differ between B and C, require real compiled and served frontend byte changes,
+with matching frontend digest, image ID, and filesystem-layer changes. A
+genuinely Rust-only pair may retain unchanged frontend bytes only when an
+independent review proves that all frontend build inputs are identical. A mixed
+Rust/frontend pair cannot use its Rust change to bypass the frontend byte-change
+requirement. For both releases, retain fresh source-equivalence and artifact
+evidence, complete compiled and served frontend maps, and HTTP coverage.
+Unchanged bytes do not transfer earlier admission. Record all five Rust outputs
+honestly. Shared Rust inputs may
+produce unchanged Rust outputs. Revision labels alone do not prove an
+application change.
 
 Require fresh infrastructure scans and all twelve application scans. Require
 complete SBOMs and an independent risk disposition. Require all eight actual
