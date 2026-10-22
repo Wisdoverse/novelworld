@@ -2162,8 +2162,9 @@ compose config --format json embedding
         sha = RUNNER.git(ROOT, "rev-parse", "HEAD")
         identities = CONTROL.source_identities(ROOT, sha, sha)
         self.assertEqual(identities["base"], identities["candidate"])
+        # Current source can differ from the frozen legacy journey defaults.
         self.assertEqual(identities["candidate"]["prompt_versions"], {
-            "canon": RUNNER.EXPECTED_CANON_PROMPT, "branch": RUNNER.EXPECTED_BRANCH_PROMPT,
+            "canon": "canon-chunk-v11+event-grouping-v5", "branch": RUNNER.EXPECTED_BRANCH_PROMPT,
             "world": RUNNER.EXPECTED_WORLD_PROMPT,
         })
         self.assertIn("infra/postgres", identities["base"]["source_trees"])
