@@ -232,13 +232,17 @@ detail fails the release. The same check runs locally and in release CI via
 `infra/security/scan-images.sh`. The four base
 images in the Dockerfiles are digest-pinned. The digest-pinned
 infrastructure images are scanned when they are re-pinned through the
-separately approved infrastructure procedure; the current local scan of
-the pinned `pgvector/pgvector:pg18@sha256:2ba9ca5f…` (compose `POSTGRES_IMAGE`)
-reports 22 findings (21 HIGH, 1 CRITICAL, CVE-2025-68121) inside its
-bundled gosu binary, fixed upstream in go 1.24.13 but not yet rebuilt into
-the pinned image - tracked for the next infrastructure re-pin. gosu runs
-only as the postgres entrypoint's privilege-drop helper, and that path
-does not exercise the affected Go TLS session-resumption code.
+separately approved infrastructure procedure. A native scan captured on
+2026-10-22 for the current `pgvector/pgvector:pg18@sha256:2ba9ca5f…`
+(`POSTGRES_IMAGE`) reported 58 vulnerability rows: 13 CRITICAL and 45 HIGH,
+including 32 Debian OS rows and 26 gosu Go rows. This supersedes the earlier
+22-row summary. No finding is waived or treated as clean.
+
+The edge Nginx candidate `nginx:alpine@sha256:060849a174666c53439dc7cecbf8f67e225c7cbfb1a44ca97915d9a172a81e6d`
+passed the native HIGH/CRITICAL gate on 2026-10-22 with zero rows. Its captured
+SBOM contained 73 components, including 72 reconciled packages, and zero
+vulnerability records. This scan does not establish runtime compatibility,
+deployment use, or qualification.
 
 The 2026-08-31 re-pin moved every Compose image to the newest artifact in its
 supported release channel. Prometheus scans clean. The pinned Redis 8.10.1
@@ -248,13 +252,12 @@ does not publish its production port. The pinned Python 3.14.7 drill image
 reports two HIGH rows from pip's vendored SBOM (`GHSA-6v7p-g79w-8964` and
 `CVE-2025-47273`), but the vulnerable msgpack extension and setuptools
 package-index code are absent and the read-only mock imports only the standard
-library. The official edge Nginx image and the Grafana, MinIO, pgvector, and
-Python drill
-images still contain upstream-owned findings. They are not application-release
-images and are not reported as clean or silently ignored: each stays
+library. Grafana, MinIO, pgvector, and Python drill images still contain
+upstream-owned findings. They are not application-release images and are not
+reported as clean or silently ignored: each stays
 digest-pinned and role-bounded, `docker-compose` Dependabot tracks all of them,
 and every new artifact must be re-scanned before re-pinning. The shipped
-frontend runtime installs fixed OpenSSL and PCRE2 packages on the same Nginx
+frontend runtime installs fixed OpenSSL and PCRE2 packages on its pinned Nginx
 base; each rebuilt application image must pass the shared gate.
 
 The current release pipeline (docker.yml) generates one CycloneDX 1.7 SBOM per
