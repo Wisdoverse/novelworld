@@ -260,6 +260,41 @@ describe('SettingsPage', () => {
     expect(mocks.put).not.toHaveBeenCalled();
   });
 
+  it('lets a reader create personal settings when platform setup is deferred', async () => {
+    useAuthStore.setState({
+      user: { id: 'reader', email: 'reader@example.com', role: 'user' },
+    });
+    mocks.get.mockRejectedValueOnce({ code: 'setup_required' });
+    mocks.put.mockResolvedValue({
+      data: {
+        scope: 'user',
+        provider: 'deepseek',
+        model: 'deepseek-flash',
+        thinking_enabled: false,
+        api_key_configured: true,
+      },
+    });
+
+    render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+
+    await screen.findByRole('heading', { name: '个人模型设置' });
+    expect(screen.getByLabelText('个人 API Key').hasAttribute('required')).toBe(true);
+    expect(screen.queryByLabelText(/平台 API Key/)).toBeNull();
+    expect(screen.queryByRole('button', { name: '保存平台设置' })).toBeNull();
+
+    fireEvent.change(screen.getByLabelText('个人 API Key'), {
+      target: { value: 'test-personal-key' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '保存个人设置' }));
+
+    await waitFor(() => expect(mocks.put).toHaveBeenCalledWith('/settings/llm', {
+      provider: 'deepseek',
+      model: 'deepseek-flash',
+      thinking_enabled: false,
+      api_key: 'test-personal-key',
+    }));
+  });
+
   it('rejects whitespace when a reader configures a personal key for the first time', async () => {
     useAuthStore.setState({
       user: { id: 'reader', email: 'reader@example.com', role: 'user' },

@@ -85,9 +85,9 @@ export function SettingsPage() {
         : response.data);
     } catch (error) {
       if (useAuthStore.getState().user?.id !== principalId) return;
-      if (isAdmin && getApiErrorCode(error) === 'setup_required') {
+      if (getApiErrorCode(error) === 'setup_required') {
         setSettings({
-          scope: 'platform',
+          scope: isAdmin ? 'platform' : 'user',
           provider: 'deepseek',
           model: MODELS.deepseek[0].id,
           thinking_enabled: false,
