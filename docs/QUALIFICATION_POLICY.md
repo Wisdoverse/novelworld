@@ -449,8 +449,8 @@ change any threshold or transfer an old scanner waiver.
 The frozen V6 `embedding_probe_image` override
 `nginx:alpine@sha256:db35bfc6b2951e7f8a72db5db120288c127ffaeeb4a6d4b95a26fead017d5913`
 is historical only. It is not fresh V7 infrastructure evidence. Source and
-ordinary deployment defaults retain Nginx
-`nginx:alpine@sha256:df221db836e1754089190208cee7eeda94f233197056426eda74a43ab1abeac2`.
+ordinary deployment defaults use Nginx
+`nginx:alpine@sha256:060849a174666c53439dc7cecbf8f67e225c7cbfb1a44ca97915d9a172a81e6d`.
 Keep ordinary local embeddings disabled by default. Preserve the supported
 external embedding mode and deployment defaults.
 

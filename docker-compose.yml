@@ -376,7 +376,7 @@ services:
   # ─── Nginx reverse proxy ───────────────────────────────────────────────────
 
   nginx:
-    image: ${NGINX_IMAGE:-nginx:alpine@sha256:df221db836e1754089190208cee7eeda94f233197056426eda74a43ab1abeac2}
+    image: ${NGINX_IMAGE:-nginx:alpine@sha256:060849a174666c53439dc7cecbf8f67e225c7cbfb1a44ca97915d9a172a81e6d}
     container_name: ${CONTAINER_PREFIX:-novel}-nginx
     restart: unless-stopped
     logging: *bounded-logs
