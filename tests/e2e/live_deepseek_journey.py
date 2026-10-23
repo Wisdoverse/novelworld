@@ -436,10 +436,13 @@ def load_cohort_manifest(path: Path) -> dict[str, Any]:
     if (
         not isinstance(value, dict)
         or set(value) != {"manifest_version", "cohort_id", "identity"}
-        or value.get("manifest_version") != "h4-cohort-v1"
+        or value.get("manifest_version") not in ("h4-cohort-v1", "h4-cohort-v2")
         or not isinstance(value.get("identity"), dict)
         or value.get("cohort_id") != sha256_bytes(canonical_json(value["identity"]))
     ):
+        raise QualificationFailure("invalid_cohort_manifest_shape")
+    if (value["manifest_version"] == "h4-cohort-v2"
+            and value["identity"].get("manifest_version") != "h4-cohort-v2"):
         raise QualificationFailure("invalid_cohort_manifest_shape")
     return value
 
@@ -1701,7 +1704,7 @@ class Journey:
             "image_generation_origin": "http://127.0.0.1:1",
             "http_bind": "127.0.0.1",
         }
-        return {
+        identity = {
             "evaluated_git_sha": self.git_sha,
             "allowed_response_models": declared["allowed_response_models"],
             "clean_tree_proof": True,
@@ -1756,6 +1759,19 @@ class Journey:
             "viewport_device_matrix": declared["viewport_device_matrix"],
             "manual_review_role_matrix": declared["manual_review_role_matrix"],
         }
+        if (getattr(self, "cohort_manifest", None) or {}).get("manifest_version") == "h4-cohort-v2":
+            identities = diagnostic.source_identities(
+                self.root, self.base_manifest["RELEASE_GIT_SHA"], self.git_sha)
+            identity.update(manifest_version="h4-cohort-v2", prompt_schema_identities=identities)
+            identity["versions"] = {
+                **COHORT_VERSIONS,
+                **{key: {release: identities[release]["prompt_versions"][name]
+                         for release in ("base", "candidate")}
+                   for key, name in (("canon_prompt", "canon"),
+                                     ("branch_transition_prompt", "branch"),
+                                     ("world_transition_prompt", "world"))},
+            }
+        return identity
 
     def preflight(self) -> None:
         self.validate_release_inputs()
@@ -3762,16 +3778,8 @@ class Journey:
                 expected_model=self.expected_model,
             ) != 1:
                 raise QualificationFailure("compatibility_branch_provider_delta_invalid")
-            if (
-                compatibility_choice.get("transition", {}).get("prompt_version")
-                != EXPECTED_BRANCH_PROMPT
-                or self.db_scalar(
-                    "SELECT transition ->> 'prompt_version' FROM user_choices "
-                    f"WHERE user_id = '{compatibility_user_id}' AND node_id = '{compatibility_node_id}'"
-                )
-                != EXPECTED_BRANCH_PROMPT
-            ):
-                raise QualificationFailure("compatibility_branch_prompt_identity_mismatch")
+            self.verify_compatibility_branch_prompt(
+                compatibility_choice, compatibility_user_id, compatibility_node_id)
             actor_ids = [
                 actor
                 for event in compatibility_choice.get("transition", {}).get("events", [])
@@ -4146,20 +4154,49 @@ class Journey:
                 }
             )
 
+    def source_prompt_versions(self, release: str) -> dict[str, str]:
+        cohort = getattr(self, "cohort_manifest", None) or {}
+        if cohort.get("manifest_version") != "h4-cohort-v2":
+            return {"canon": EXPECTED_CANON_PROMPT, "branch": EXPECTED_BRANCH_PROMPT,
+                    "world": EXPECTED_WORLD_PROMPT}
+        try:
+            versions = cohort["identity"]["prompt_schema_identities"][release]["prompt_versions"]
+        except (KeyError, TypeError):
+            raise QualificationFailure("prompt_identity_mismatch") from None
+        if (not isinstance(versions, dict) or set(versions) != {"canon", "branch", "world"}
+                or any(not isinstance(version, str)
+                       or re.fullmatch(r"[a-z0-9+_-]{1,100}", version) is None
+                       for version in versions.values())):
+            raise QualificationFailure("prompt_identity_mismatch")
+        return versions
+
+    def verify_compatibility_branch_prompt(
+        self, choice: dict[str, Any], user_id: str, node_id: str
+    ) -> None:
+        expected = self.source_prompt_versions("candidate")["branch"]
+        if (choice.get("transition", {}).get("prompt_version") != expected
+                or self.db_scalar(
+                    "SELECT transition ->> 'prompt_version' FROM user_choices "
+                    f"WHERE user_id = '{user_id}' AND node_id = '{node_id}'") != expected):
+            raise QualificationFailure("compatibility_branch_prompt_identity_mismatch")
+
     def verify_prompt_identity(self, novel_id: str, *, include_world: bool) -> None:
+        release = "candidate" if self.journey_slice == "legacy-character" else "base"
+        versions = self.source_prompt_versions(release)
+        source_bound = (getattr(self, "cohort_manifest", None) or {}).get("manifest_version") == "h4-cohort-v2"
         prompt_checks = {
             "canon": (
-                EXPECTED_CANON_PROMPT,
+                versions["canon"],
                 "SELECT prompt_version AS version FROM canon_story_models "
                 f"WHERE novel_id = '{novel_id}'",
             ),
             "branch": (
-                EXPECTED_BRANCH_PROMPT,
+                versions["branch"],
                 "SELECT transition ->> 'prompt_version' AS version FROM user_choices "
                 f"WHERE novel_id = '{novel_id}'",
             ),
         }
-        if include_world and self.diagnostic_registration is None:
+        if include_world and self.diagnostic_registration is None and not source_bound:
             prompt_checks["world"] = (
                 EXPECTED_WORLD_PROMPT,
                 "SELECT transition ->> 'prompt_version' AS version FROM world_turns "
@@ -4175,14 +4212,18 @@ class Journey:
             if observed != "ok":
                 raise QualificationFailure("prompt_identity_mismatch")
             prompt_identity[name] = expected
-        if include_world and self.diagnostic_registration is not None:
+        if include_world and (self.diagnostic_registration is not None or source_bound):
             # Preflight bound these identities to the exact base/candidate
             # commits and manifests. Reuse that immutable registration rather
             # than relabeling historical base turns with the current prompt.
             try:
-                identities = self.diagnostic_registration.value["prompt_schema_identities"]
-                base = identities["base"]["prompt_versions"]["world"]
-                candidate = identities["candidate"]["prompt_versions"]["world"]
+                if self.diagnostic_registration is not None:
+                    identities = self.diagnostic_registration.value["prompt_schema_identities"]
+                    base = identities["base"]["prompt_versions"]["world"]
+                    candidate = identities["candidate"]["prompt_versions"]["world"]
+                else:
+                    base = self.source_prompt_versions("base")["world"]
+                    candidate = self.source_prompt_versions("candidate")["world"]
             except (KeyError, TypeError):
                 raise QualificationFailure("prompt_identity_mismatch") from None
             if any(not isinstance(version, str)
@@ -5968,12 +6009,13 @@ def self_test_h1_cohort_boundary(root: Path) -> None:
         journey.root = root
         journey.local_embedding = False
         journey.runtime_root = None
-        journey.git_sha = "b" * 40
+        journey.git_sha = git(root, "rev-parse", "HEAD")
         journey.project = journey.prefix = "nwq-0123456789"
         journey.port = 12345
         journey.attempt_id = str(uuid.uuid4())
         journey.journey_slice = "core"
         journey.base_manifest = {key: "base" for key in APPLICATION_IMAGE_KEYS}
+        journey.base_manifest["RELEASE_GIT_SHA"] = journey.git_sha
         journey.candidate_manifest = {key: "candidate" for key in APPLICATION_IMAGE_KEYS}
         journey.base_manifest_path = temporary / "base.env"
         journey.candidate_manifest_path = temporary / "candidate.env"
@@ -6003,6 +6045,13 @@ def self_test_h1_cohort_boundary(root: Path) -> None:
         with patch.dict(globals(), {"sha256_bytes": frozen_digest}):
             declared = journey.cohort_identity(engine, compose, declared)
         assert declared["registered_inputs"]["h1"] == H1_V1_CORPUS_SHA256
+        assert declared["versions"] == COHORT_VERSIONS
+        journey.cohort_manifest = {"manifest_version": "h4-cohort-v2"}
+        with patch.dict(globals(), {"sha256_bytes": frozen_digest}):
+            v2_declared = journey.cohort_identity(engine, compose, declared)
+            journey.journey_slice = "legacy-character"
+            assert journey.cohort_identity(engine, compose, declared) == v2_declared
+        journey.journey_slice = "core"
 
         for name, observed_digest, registered, expected_error in (
             ("frozen", H1_V1_CORPUS_SHA256, True, None),
@@ -6011,6 +6060,10 @@ def self_test_h1_cohort_boundary(root: Path) -> None:
             ("declared-drift", H1_V1_CORPUS_SHA256, True, "cohort_identity_mismatch"),
             ("allowlist-drift", H1_V1_CORPUS_SHA256, True, "cohort_identity_mismatch"),
             ("unregistered", digest(corpus_bytes), False, None),
+            ("v2-frozen", H1_V1_CORPUS_SHA256, True, None),
+            ("v2-unadopted", digest(corpus_bytes), True, "qualification_h1_corpus_not_adopted"),
+            ("v2-source-prompt-drift", H1_V1_CORPUS_SHA256, True, "cohort_identity_mismatch"),
+            ("v2-source-tree-drift", H1_V1_CORPUS_SHA256, True, "cohort_identity_mismatch"),
         ):
             journey.private_report, journey.report = {}, {}
             journey.ledger = None
@@ -6019,12 +6072,17 @@ def self_test_h1_cohort_boundary(root: Path) -> None:
             journey.ledger_path = temporary / f"{name}.jsonl" if registered else None
             if journey.ledger_path is not None:
                 journey.ledger_path.write_text("", encoding="utf-8")
-            identity = json.loads(json.dumps(declared))
+            identity = json.loads(json.dumps(v2_declared if name.startswith("v2-") else declared))
             if name == "declared-drift":
                 identity["docker_engine"] = "unregistered-engine"
             if name == "allowlist-drift":
                 identity["provider"]["allowed_response_models"] = ["different-model"]
+            if name == "v2-source-prompt-drift":
+                identity["prompt_schema_identities"]["candidate"]["prompt_versions"]["canon"] = "canon-v999"
+            if name == "v2-source-tree-drift":
+                identity["prompt_schema_identities"]["base"]["source_trees"]["infra/postgres"] = "0" * 40
             journey.cohort_manifest = {
+                "manifest_version": "h4-cohort-v2" if name.startswith("v2-") else "h4-cohort-v1",
                 "identity": identity,
                 "cohort_id": digest(canonical_json(identity)),
             } if registered else None

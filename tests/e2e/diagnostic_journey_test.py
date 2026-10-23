@@ -2169,28 +2169,48 @@ compose config --format json embedding
         })
         self.assertIn("infra/postgres", identities["base"]["source_trees"])
 
-    def prompt_identity_journey(self, versions, *, registered):
+    def cohort_v2(self):
+        identity = {
+            "manifest_version": "h4-cohort-v2",
+            "prompt_schema_identities": {
+                "base": {"prompt_versions": {
+                    "canon": RUNNER.EXPECTED_CANON_PROMPT,
+                    "branch": RUNNER.EXPECTED_BRANCH_PROMPT, "world": "world-turn-v2"}},
+                "candidate": {"prompt_versions": {
+                    "canon": "canon-chunk-v11+event-grouping-v5",
+                    "branch": "narrative-transition-v2", "world": "world-turn-v3"}},
+            },
+        }
+        return {"manifest_version": "h4-cohort-v2", "identity": identity,
+                "cohort_id": RUNNER.sha256_bytes(RUNNER.canonical_json(identity))}
+
+    def prompt_identity_journey(self, versions, *, registered,
+                                canon_versions=None, branch_versions=None):
         # Disposable offline SQL stub executes the same aggregate query;
         # FILTER and JSON ->> syntax also work in SQLite, without a provider.
         database = sqlite3.connect(":memory:")
         self.addCleanup(database.close)
         database.executescript("""
             CREATE TABLE canon_story_models (novel_id TEXT, prompt_version TEXT);
-            CREATE TABLE user_choices (novel_id TEXT, transition TEXT);
+            CREATE TABLE user_choices (novel_id TEXT, user_id TEXT, node_id TEXT, transition TEXT);
             CREATE TABLE world_turns (
                 novel_id TEXT, status TEXT, expected_turn_number INTEGER, transition TEXT
             );
         """)
-        database.execute("INSERT INTO canon_story_models VALUES (?, ?)",
-                         ("novel", RUNNER.EXPECTED_CANON_PROMPT))
-        database.execute("INSERT INTO user_choices VALUES (?, ?)",
-                         ("novel", json.dumps({"prompt_version": RUNNER.EXPECTED_BRANCH_PROMPT})))
+        database.executemany("INSERT INTO canon_story_models VALUES (?, ?)", [
+            ("novel", version) for version in (
+                [RUNNER.EXPECTED_CANON_PROMPT] if canon_versions is None else canon_versions)])
+        database.executemany("INSERT INTO user_choices VALUES (?, ?, ?, ?)", [
+            ("novel", "user", "node", json.dumps({"prompt_version": version})) for version in (
+                [RUNNER.EXPECTED_BRANCH_PROMPT] if branch_versions is None else branch_versions)])
         database.executemany("INSERT INTO world_turns VALUES (?, ?, ?, ?)", [
             ("novel", "completed", number, json.dumps({"prompt_version": version}))
             for number, version in versions
         ])
         journey = object.__new__(RUNNER.Journey)
         journey.report = {"journey": {}}
+        journey.journey_slice = "core"
+        journey.cohort_manifest = None
         registration_value = {
             "prompt_schema_identities": {
                 "base": {"prompt_versions": {"world": "world-turn-v2"}},
@@ -2201,6 +2221,99 @@ compose config --format json embedding
             mock.Mock(value=registration_value) if registered else None)
         journey.db_scalar = lambda query: database.execute(query).fetchone()[0]
         return journey, registration_value
+
+    def test_cohort_v2_manifest_hashes_its_schema_and_preserves_v1(self):
+        path = self.directory / "cohort.json"
+        v1 = {"manifest_version": "h4-cohort-v1", "identity": {"registered": True}}
+        v1["cohort_id"] = RUNNER.sha256_bytes(RUNNER.canonical_json(v1["identity"]))
+        for value in (v1, self.cohort_v2()):
+            path.write_text(json.dumps(value))
+            self.assertEqual(RUNNER.load_cohort_manifest(path), value)
+        invalid = self.cohort_v2()
+        del invalid["identity"]["manifest_version"]
+        invalid["cohort_id"] = RUNNER.sha256_bytes(RUNNER.canonical_json(invalid["identity"]))
+        for value in (invalid, {**self.cohort_v2(), "manifest_version": "h4-cohort-v3"},
+                      {**self.cohort_v2(), "cohort_id": v1["cohort_id"]}):
+            path.write_text(json.dumps(value))
+            with self.assertRaises(RUNNER.QualificationFailure):
+                RUNNER.load_cohort_manifest(path)
+
+    def test_cohort_v2_checks_base_core_and_candidate_legacy_prompts(self):
+        rows = [(number, "world-turn-v2" if number < 6 else "world-turn-v3")
+                for number in range(12)]
+        cohort = self.cohort_v2()
+        frozen = CONTROL.canonical(cohort)
+        for journey_slice, release in (("core", "base"), ("legacy-character", "candidate")):
+            with self.subTest(slice=journey_slice):
+                expected = cohort["identity"]["prompt_schema_identities"][release]["prompt_versions"]
+                journey, _ = self.prompt_identity_journey(
+                    rows, registered=False, canon_versions=[expected["canon"]],
+                    branch_versions=[expected["branch"]])
+                journey.cohort_manifest = cohort
+                journey.journey_slice = journey_slice
+                with mock.patch.object(RUNNER.diagnostic, "source_identities") as identities:
+                    journey.verify_prompt_identity("novel", include_world=journey_slice == "core")
+                identities.assert_not_called()
+                observed = journey.report["journey"]["prompt_identity"]
+                self.assertEqual(observed["canon"], expected["canon"])
+                self.assertEqual(observed["branch"], expected["branch"])
+        self.assertEqual(CONTROL.canonical(cohort), frozen)
+
+    def test_cohort_v2_rejects_wrong_release_empty_and_mixed_facts(self):
+        core = self.cohort_v2()["identity"]["prompt_schema_identities"]["base"]["prompt_versions"]
+        candidate = self.cohort_v2()["identity"]["prompt_schema_identities"]["candidate"]["prompt_versions"]
+        for journey_slice, canon, branch in (
+            ("core", [candidate["canon"]], [core["branch"]]),
+            ("legacy-character", [core["canon"]], [candidate["branch"]]),
+            ("legacy-character", [candidate["canon"]], [core["branch"]]),
+            ("core", [], [core["branch"]]), ("core", [core["canon"]], []),
+            ("core", [core["canon"], candidate["canon"]], [core["branch"]]),
+            ("core", [core["canon"]], [core["branch"], candidate["branch"]]),
+        ):
+            with self.subTest(slice=journey_slice, canon=canon, branch=branch):
+                journey, _ = self.prompt_identity_journey(
+                    [], registered=False, canon_versions=canon, branch_versions=branch)
+                journey.cohort_manifest = self.cohort_v2()
+                journey.journey_slice = journey_slice
+                with self.assertRaises(RUNNER.QualificationFailure) as rejected:
+                    journey.verify_prompt_identity("novel", include_world=False)
+                self.assertEqual(rejected.exception.code, "prompt_identity_mismatch")
+
+    def test_cohort_v2_rejects_missing_malformed_and_injected_versions(self):
+        for metadata in ({}, {"base": None}, {"base": {"prompt_versions": []}}):
+            journey, _ = self.prompt_identity_journey([], registered=False)
+            journey.cohort_manifest = self.cohort_v2()
+            journey.cohort_manifest["identity"]["prompt_schema_identities"] = metadata
+            with self.assertRaises(RUNNER.QualificationFailure):
+                journey.source_prompt_versions("base")
+        for name in ("canon", "branch", "world"):
+            for malformed in (None, "", "x" * 101, "v1' OR '1'='1"):
+                journey, _ = self.prompt_identity_journey([], registered=False)
+                journey.cohort_manifest = self.cohort_v2()
+                versions = journey.cohort_manifest["identity"]["prompt_schema_identities"]["base"]["prompt_versions"]
+                versions[name] = malformed
+                with self.subTest(name=name, value=malformed), self.assertRaises(RUNNER.QualificationFailure):
+                    journey.source_prompt_versions("base")
+
+    def test_legacy_branch_response_and_persisted_version_use_candidate(self):
+        candidate = "narrative-transition-v2"
+        frozen = RUNNER.EXPECTED_BRANCH_PROMPT
+        for v2, response, persisted, valid in (
+            (True, candidate, candidate, True),
+            (True, frozen, candidate, False), (True, candidate, frozen, False),
+            (False, frozen, frozen, True), (False, candidate, frozen, False),
+        ):
+            with self.subTest(v2=v2, response=response, persisted=persisted):
+                journey, _ = self.prompt_identity_journey(
+                    [], registered=False, branch_versions=[persisted])
+                journey.cohort_manifest = self.cohort_v2() if v2 else None
+                choice = {"transition": {"prompt_version": response}}
+                if valid:
+                    journey.verify_compatibility_branch_prompt(choice, "user", "node")
+                else:
+                    with self.assertRaises(RUNNER.QualificationFailure) as rejected:
+                        journey.verify_compatibility_branch_prompt(choice, "user", "node")
+                    self.assertEqual(rejected.exception.code, "compatibility_branch_prompt_identity_mismatch")
 
     def test_registered_world_prompts_follow_bound_base_and_candidate_stages(self):
         rows = [(number, "world-turn-v2" if number < 6 else "world-turn-v3")
@@ -2227,12 +2340,15 @@ compose config --format json embedding
             "duplicate": [*valid[:11], valid[10]],
             "outside_stage": [*valid[:11], (12, "world-turn-v3")],
         }
-        for label, rows in cases.items():
-            with self.subTest(label=label):
-                journey, _ = self.prompt_identity_journey(rows, registered=True)
-                with self.assertRaises(RUNNER.QualificationFailure) as rejected:
-                    journey.verify_prompt_identity("novel", include_world=True)
-                self.assertEqual(rejected.exception.code, "prompt_identity_mismatch")
+        for registered in (True, False):
+            for label, rows in cases.items():
+                with self.subTest(label=label, registered_diagnostic=registered):
+                    journey, _ = self.prompt_identity_journey(rows, registered=registered)
+                    if not registered:
+                        journey.cohort_manifest = self.cohort_v2()
+                    with self.assertRaises(RUNNER.QualificationFailure) as rejected:
+                        journey.verify_prompt_identity("novel", include_world=True)
+                    self.assertEqual(rejected.exception.code, "prompt_identity_mismatch")
 
     def test_registered_world_prompts_require_valid_registration_metadata(self):
         rows = [(number, "world-turn-v3") for number in range(12)]
