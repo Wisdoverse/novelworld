@@ -163,6 +163,21 @@ for attempt in 1 2 3; do
 done
 ```
 
+The opt-in `h4-cohort-v2` manifest binds both releases' prompt versions and
+domain/schema Git trees from their committed source. Its canonical identity
+contains the v2 marker and the complete source pair. Preflight re-derives the
+identity and requires exact equality before any ledger `Started` record.
+Core checks the baseline Canon and branch facts retained through upgrade;
+the legacy-character slice checks fresh candidate facts, including the branch
+response and persisted transition. Core world turns 1–6 require the baseline
+prompt and turns 7–12 require the candidate prompt. Missing, mixed, or
+unexpected versions fail. Both slices share one cohort identity and ledger.
+The v1 manifest, defaults, historical cohorts, and core-only registered
+Diagnostics keep their existing behavior. V2 changes no threshold, slice,
+denominator, corpus-adoption requirement, or terminal-cohort rule. In
+particular, the current unadopted H1 corpus still blocks Qualification.
+Tooling support grants no provider execution or Qualification readiness.
+
 Only after that ledger contains three matching core `Started`/`Passed` pairs,
 run the one bounded legacy-character smoke with the same cohort, ledger,
 candidate, provider, and registered input. It uses a fourth empty output
