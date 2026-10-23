@@ -7,7 +7,7 @@ use crate::domain::entities::chapter::Chapter;
 const SUMMARY_SAMPLE_BYTES: usize = 8_000;
 const SCAN_CHUNK_BYTES: usize = 24_000;
 const SCAN_OVERLAP_BYTES: usize = 256;
-pub const CHARACTER_EXTRACTION_PROMPT_VERSION: &str = "character-extraction-v9";
+pub const CHARACTER_EXTRACTION_PROMPT_VERSION: &str = "character-extraction-v10";
 const CHARACTER_DESCRIPTION_RULE: &str = r#"所有角色描述字段及关系描述只能包含给定文本明确支持的信息；保留人物、行为主体、所有者及关系归属，不得把他人的经历或物品移到该角色名下。对话、传闻、猜测和承诺须保留原有说话者、归属、条件与不确定性；除非文本另有明确证实，不得改写为已发生或无条件成立的事实。保留原文支持的具体细节；未说明的外貌、性格、背景或说话风格用空字符串，不为满足字数、细节数量或画像需要补造。
 
 Check attribution with these synthetic examples.
@@ -291,7 +291,13 @@ pub fn build_extraction_prompt(novel_title: &str, sample_text: &str) -> String {
 1. 返回 0–12 个真正重要的角色。只保留原文明示的专名角色，或稳定且唯一指向同一人物的专属称谓；不要为凑数补充角色，省略一次性匿名职业、泛称、背景人物和偶发说话者。含职业的稳定唯一称谓不等于一次性匿名职业，仍须满足来源和重要性要求。主角只有在原文明确存在时才包含
 2. 外貌描述仅保留原文明示的细节；画像需要不构成补造依据
 3. 说话风格仅保留所给文本明确支持的表达特点，未说明则为空字符串
-4. world_summary 必须覆盖时代/地理/社会背景、主要势力或团体、核心冲突，以及独特世界规则（如魔法体系、科技设定，如有），总长不超过 2000 字
+4. For `world_summary`, summarize only facts established by the supplied text.
+   Cover setting (time, geography, and society), major factions or groups, the core conflict, and persistent world rules only when the source supports them.
+   Preserve the speaker and attribution, conditions, negation, and uncertainty.
+   A prediction, rumor, warning, or promise alone does not establish a completed event or world rule.
+   An independently established persistent constraint remains eligible, including one conveyed in dialogue.
+   Omit unsupported dimensions instead of inventing details.
+   Keep `world_summary` at or below 2,000 characters.
 5. relationships 只提取原文明示或无歧义建立的关系；仅凭前后任、同属组织、同处一地或同场、共同线索、一次合作或角色顺序不足以建立关系，不得据此推断。原文明示的角色间权责关系，不因建立该关系的互动只发生一次而排除；仍须有明确来源，不得补造关系。没有明确关系时返回 []。relationship_type 使用原文语言中简短、稳定的关系名，strength 为 0-100 的关系密切度
 6. 文本中的 `Chapter N` 是真实章节号，first_appearance_chapter 必须填写角色或关系在所给文本中首次明确出现的 N（关系不能早于其双方角色的首次出现章节）
 7. aliases 只收原文明确使用的姓名或称谓，不要收“他/她/那人”等代词
@@ -1005,7 +1011,7 @@ mod tests {
         let chunk_prompt = build_chunk_extraction_prompt("北塔旧事", "Chapter 1 文本。", 0);
         assert_eq!(
             CHARACTER_EXTRACTION_PROMPT_VERSION,
-            "character-extraction-v9"
+            "character-extraction-v10"
         );
         for text in [&prompt, &chunk_prompt] {
             assert_eq!(text.matches(CHARACTER_DESCRIPTION_RULE).count(), 1);
@@ -1016,6 +1022,14 @@ mod tests {
         }
         let sample_source_block = "小说文本（节选）：\n---\n第一章 文本。\n---";
         let chunk_source_block = "文本：\n---\nChapter 1 文本。\n---";
+        let world_summary_rule =
+            "For `world_summary`, summarize only facts established by the supplied text.";
+        assert!(prompt.contains(world_summary_rule));
+        assert!(!chunk_prompt.contains(world_summary_rule));
+        assert!(
+            prompt.find(world_summary_rule).unwrap()
+                >= prompt.find(sample_source_block).unwrap() + sample_source_block.len()
+        );
         assert!(prompt.contains(sample_source_block));
         assert!(chunk_prompt.contains(chunk_source_block));
         assert!(
