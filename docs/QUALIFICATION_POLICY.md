@@ -487,25 +487,47 @@ affected-layer predicate. At least one affected application image must change
 its digest, image ID, and filesystem layers together. When web frontend build or
 runtime inputs differ between B and C, require real compiled and served frontend
 byte changes. Require corresponding changes to the frontend digest, image ID,
-and filesystem layers. A genuinely Rust-only pair may retain unchanged frontend
-bytes only when independent review proves all web inputs identical under the
-classification below. A mixed
-Rust/frontend pair cannot use its Rust change to bypass the frontend byte-change
-requirement.
+and filesystem layers. Apply the input classification below before comparing
+web inputs. A pair may retain unchanged frontend bytes only when independent
+review proves all active web inputs identical. A mixed Rust/frontend pair cannot
+use its Rust change to bypass the byte-change requirement for active web inputs.
 
 For a Linux/web runtime pair, record the complete copied frontend-context diff.
-Independent review may exclude an exact path only if the desktop build alone
-uses it beyond the context copy. Check build scripts, plugins, pinned content
+Include all package, manifest, and lock changes. Exclusions apply only to exact
+desktop paths or exact test packages under the conditions below. Do not exclude
+a directory, an entire lockfile, a build tool, or all development dependencies.
+
+Independent review may exclude an exact desktop path only if the desktop build
+alone uses it beyond the context copy. Check build scripts, plugins, pinned content
 scanners, generators, dependency resolution, explicit source overrides, and
-runtime copies. Directory names and unchanged imports are not proof. All
-remaining web source, dependencies, toolchains, build arguments, image recipes,
-and runtime configuration must be identical. Require complete compiled and
-served maps and HTTP equality, plus the required desktop CI for changed desktop
-inputs. Equal outputs alone are insufficient. Unknown use, incomplete coverage,
-or unexplained output differences block this exclusion. Web-input changes
-retain the frontend byte-change requirement. Apply this exclusion only in fresh
-reviews under this policy revision. Historical findings, registrations, and
-terminal results keep their original rules.
+runtime copies. Directory names and unchanged imports are not proof. Keep the
+required desktop CI for changed desktop inputs.
+
+Independent review may exclude an exact changed test package and its supporting
+lock entries only when all these conditions hold:
+
+- Record each package version and every excluded lock entry.
+- Prove that installation only stores and links the changed package. No install
+  lifecycle script or web build step may execute its changed code.
+- Prove that compilation, type resolution, scripts, generators, plugins,
+  scanners, explicit source overrides, and runtime copies use no changed input.
+  Include imported tests, declarations, and pinned content scanners in this
+  check. Check effective compiler and command selection and dependency resolution.
+- Keep the required tests and CI for the changed dependency. Keep the security
+  policy, fresh scans, SBOMs, and independent risk review.
+
+A development-dependency label or equal output alone is insufficient. All
+remaining active web source, dependencies, toolchains, build arguments, image
+recipes, and runtime configuration must be identical. Require complete compiled
+and served maps and HTTP equality for unchanged frontend artifacts. Unknown
+use, incomplete coverage, or unexplained output differences block exclusion.
+Active web-input changes retain the frontend byte-change requirement.
+
+Apply these exclusions only in fresh exact-pair source and artifact reviews
+under the new merged policy revision. Historical findings, registrations, and
+terminal results keep their original rules. This amendment grants no source-pair
+or artifact admission. Keep the native affected-image predicate and all quality,
+budget, financial, prestart, and authorization controls unchanged.
 
 For both releases, retain fresh source-equivalence and artifact
 evidence, complete compiled and served frontend maps, and HTTP coverage.
