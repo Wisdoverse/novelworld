@@ -8,6 +8,7 @@ pub const PROFILE: &str = "vision-diagnostic-budget-v3";
 pub const CNY10_PROFILE: &str = "vision-diagnostic-budget-v4";
 pub const FLASH_MODEL: &str = "deepseek-flash";
 pub const FLASH_PROFILE: &str = "vision-diagnostic-budget-v5";
+pub const STRICT_FLASH_PROFILE: &str = "vision-diagnostic-budget-v6";
 const INPUT_CEILING: u64 = 1 << 20;
 const ATTEMPTS_PER_CALL: u64 = 5;
 const INPUT_MICRO_CNY: u64 = 4;
@@ -34,6 +35,7 @@ pub enum Profile {
     V3,
     V4,
     V5,
+    V6,
 }
 
 impl Profile {
@@ -42,7 +44,8 @@ impl Profile {
             PROFILE => Ok(Self::V3),
             CNY10_PROFILE => Ok(Self::V4),
             FLASH_PROFILE => Ok(Self::V5),
-            _ => Err("unknown H1 budget profile; select vision-diagnostic-budget-v3, vision-diagnostic-budget-v4, or vision-diagnostic-budget-v5"),
+            STRICT_FLASH_PROFILE => Ok(Self::V6),
+            _ => Err("unknown H1 budget profile; select vision-diagnostic-budget-v3, vision-diagnostic-budget-v4, vision-diagnostic-budget-v5, or vision-diagnostic-budget-v6"),
         }
     }
 
@@ -51,13 +54,21 @@ impl Profile {
             Self::V3 => PROFILE,
             Self::V4 => CNY10_PROFILE,
             Self::V5 => FLASH_PROFILE,
+            Self::V6 => STRICT_FLASH_PROFILE,
         }
     }
 
     pub fn model(self) -> &'static str {
         match self {
             Self::V3 | Self::V4 => MODEL,
-            Self::V5 => FLASH_MODEL,
+            Self::V5 | Self::V6 => FLASH_MODEL,
+        }
+    }
+
+    pub const fn character_output_mode(self) -> llm_client::CharacterOutputMode {
+        match self {
+            Self::V6 => llm_client::CharacterOutputMode::StrictJsonV1,
+            _ => llm_client::CharacterOutputMode::LegacyJson,
         }
     }
 
@@ -65,7 +76,7 @@ impl Profile {
         Amount {
             cost_micro_cny: match self {
                 Self::V3 => LIMITS.cost_micro_cny,
-                Self::V4 | Self::V5 => 10_000_000,
+                Self::V4 | Self::V5 | Self::V6 => 10_000_000,
             },
             ..LIMITS
         }
@@ -193,7 +204,7 @@ impl Ledger {
             output_limit,
             attempt_limit: match self.profile {
                 Profile::V3 => None,
-                Profile::V4 | Profile::V5 => Some(attempts as u32),
+                Profile::V4 | Profile::V5 | Profile::V6 => Some(attempts as u32),
             },
         })
     }
@@ -367,6 +378,12 @@ mod tests {
                 "deepseek-flash",
                 10_000_000,
             ),
+            (
+                Profile::V6,
+                "vision-diagnostic-budget-v6",
+                "deepseek-flash",
+                10_000_000,
+            ),
         ] {
             assert_eq!(Profile::parse(name).unwrap(), profile);
             assert_eq!(profile.name(), name);
@@ -432,7 +449,7 @@ mod tests {
 
     #[test]
     fn cny10_profile_reserves_affordable_attempts_across_logical_calls() {
-        for profile in [Profile::V4, Profile::V5] {
+        for profile in [Profile::V4, Profile::V5, Profile::V6] {
             let mut ledger = Ledger {
                 profile,
                 ..Ledger::default()
@@ -485,7 +502,7 @@ mod tests {
 
     #[test]
     fn cny10_admission_checks_each_ceiling_and_checked_arithmetic() {
-        for profile in [Profile::V4, Profile::V5] {
+        for profile in [Profile::V4, Profile::V5, Profile::V6] {
             let per_attempt = Amount {
                 logical_calls: 1,
                 attempts: 1,
@@ -692,6 +709,7 @@ mod tests {
                 provider: "deepseek".into(),
                 model: model.into(),
                 allowed_response_models: BTreeSet::from([model.into()]),
+                character_output_mode: llm_client::CharacterOutputMode::LegacyJson,
                 client: Some(RuntimeLlmClient::static_config(
                     url,
                     model.into(),

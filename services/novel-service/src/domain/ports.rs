@@ -22,6 +22,17 @@ pub trait AccountExportPort: Send + Sync {
 #[async_trait]
 pub trait LlmPort: Send + Sync {
     async fn chat_json(&self, user_id: Uuid, task: NovelLlmTask, prompt: &str) -> Result<String>;
+    /// Legacy implementations keep their JSON path; schema-aware adapters override this call.
+    async fn chat_json_with_schema(
+        &self,
+        user_id: Uuid,
+        task: NovelLlmTask,
+        prompt: &str,
+        _schema_name: &str,
+        _schema: &serde_json::Value,
+    ) -> Result<String> {
+        self.chat_json(user_id, task, prompt).await
+    }
     async fn prepare_series_match(&self, _user_id: Uuid) -> Result<Box<dyn SeriesCompletionPort>> {
         Err(SeriesProviderUnavailable::NotConfigured.into())
     }

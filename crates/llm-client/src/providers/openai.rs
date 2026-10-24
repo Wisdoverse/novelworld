@@ -44,6 +44,8 @@ pub struct OpenAIProvider {
     pub(crate) test_dispatch_base: Option<String>,
 }
 
+pub const DEEPSEEK_STRICT_JSON_ENDPOINT: &str = "https://api.deepseek.com/beta/chat/completions";
+
 /// Reuses the transport's envelope and usage schema for qualification checks.
 /// Empty content is valid here because JSON-mode fallback may follow it.
 pub fn chat_completion_response_metadata(body: &[u8]) -> Result<(String, Option<Usage>)> {
@@ -53,6 +55,38 @@ pub fn chat_completion_response_metadata(body: &[u8]) -> Result<(String, Option<
 }
 
 impl OpenAIProvider {
+    pub(crate) fn validate_response_schema(&self, request: &ChatRequest) -> Result<()> {
+        let Some(contract) = &request.response_schema else {
+            return Ok(());
+        };
+        let supported = reqwest::Url::parse(&self.base_url).is_ok_and(|url| {
+            url.scheme() == "https"
+                && url.host_str() == Some("api.deepseek.com")
+                && url.port_or_known_default() == Some(443)
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none()
+                && matches!(url.path(), "" | "/" | "/v1" | "/v1/")
+        });
+        if !supported
+            || request.operation != LlmOperation::CharacterExtraction
+            || request.stream
+            || !request.json_mode
+            || request.thinking == Some(true)
+            || contract.name.is_empty()
+            || contract.name.len() > 64
+            || !contract
+                .name
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
+            || contract.schema.get("type").and_then(Value::as_str) != Some("object")
+        {
+            return Err(UnsupportedResponseSchema.into());
+        }
+        Ok(())
+    }
+
     pub(crate) fn base_url(&self) -> &str {
         &self.base_url
     }
@@ -76,8 +110,15 @@ impl OpenAIProvider {
             stream_options: stream.then_some(StreamOptions {
                 include_usage: true,
             }),
-            response_format: (!stream && request.json_mode && !self.is_minimax())
+            response_format: (!stream && request.json_mode && request.response_schema.is_none() && !self.is_minimax())
                 .then(|| serde_json::json!({"type": "json_object"})),
+            tools: request.response_schema.as_ref().map(|contract| vec![serde_json::json!({
+                "type": "function",
+                "function": {"name": contract.name, "strict": true, "parameters": contract.schema}
+            })]),
+            tool_choice: request.response_schema.as_ref().map(|contract| serde_json::json!({
+                "type": "function", "function": {"name": contract.name}
+            })),
             thinking: if self.is_glm_53(&request.model) {
                 Some(serde_json::json!({"type": "enabled"}))
             } else if self.is_minimax() && request.model == "MiniMax-M3" {
@@ -101,6 +142,7 @@ impl OpenAIProvider {
     }
 
     pub(crate) fn chat_wire_bytes(&self, request: &ChatRequest) -> Result<Vec<u8>> {
+        self.validate_response_schema(request)?;
         if self.is_anthropic() {
             return Ok(serde_json::to_vec(&anthropic::request_body(
                 request,
@@ -136,6 +178,9 @@ impl OpenAIProvider {
         #[cfg(test)]
         if let Some(base) = &self.test_dispatch_base {
             return format!("{base}{path}");
+        }
+        if path == "/beta/chat/completions" {
+            return DEEPSEEK_STRICT_JSON_ENDPOINT.into();
         }
         let base = self.base_url.trim_end_matches('/');
         let explicit_base = reqwest::Url::parse(base)
@@ -233,6 +278,10 @@ struct OpenAIRequest {
     stream_options: Option<StreamOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -534,6 +583,77 @@ fn parse_chat_stream_frame(
     Ok(events)
 }
 
+fn strict_json_response(payload: &Value, contract: &JsonResponseSchema) -> Result<ChatResponse> {
+    let choices = payload
+        .get("choices")
+        .and_then(Value::as_array)
+        .filter(|choices| choices.len() == 1)
+        .ok_or_else(|| anyhow!("invalid strict choice count"))?;
+    if choices[0].get("finish_reason").and_then(Value::as_str) == Some("length") {
+        return Err(TruncatedCompletion.into());
+    }
+    anyhow::ensure!(
+        choices[0].get("finish_reason").and_then(Value::as_str) == Some("tool_calls"),
+        "invalid strict finish reason"
+    );
+    let message = choices[0]
+        .get("message")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("missing strict message"))?;
+    anyhow::ensure!(
+        message.get("role").and_then(Value::as_str) == Some("assistant"),
+        "invalid strict role"
+    );
+    match message.get("content") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(text)) if text.trim().is_empty() => {}
+        _ => return Err(anyhow!("strict output contains competing content")),
+    }
+    let calls = message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .filter(|calls| calls.len() == 1)
+        .ok_or_else(|| anyhow!("invalid strict tool count"))?;
+    let call = &calls[0];
+    anyhow::ensure!(
+        call.get("type").and_then(Value::as_str) == Some("function"),
+        "invalid strict tool type"
+    );
+    anyhow::ensure!(
+        call.get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.trim().is_empty()),
+        "missing strict tool identity"
+    );
+    let function = call
+        .get("function")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("missing strict function"))?;
+    anyhow::ensure!(
+        function.get("name").and_then(Value::as_str) == Some(contract.name.as_str()),
+        "unexpected strict function"
+    );
+    let arguments = function
+        .get("arguments")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing strict arguments"))?;
+    anyhow::ensure!(
+        serde_json::from_str::<Value>(arguments)?.is_object(),
+        "strict arguments must be one JSON object"
+    );
+    Ok(ChatResponse {
+        content: arguments.to_owned(),
+        model: required_response_model(payload)?,
+        usage: payload
+            .get("usage")
+            .filter(|usage| !usage.is_null())
+            .map(|usage| serde_json::from_value::<OpenAIUsage>(usage.clone()))
+            .transpose()?
+            .map(OpenAIUsage::into_usage)
+            .transpose()?,
+    })
+}
+
 impl OpenAIProvider {
     fn auth_header(&self, api_key: &str) -> (String, String) {
         ("Authorization".into(), format!("Bearer {}", api_key))
@@ -549,6 +669,7 @@ impl OpenAIProvider {
         api_key: &str,
         request: &ChatRequest,
     ) -> Result<ChatResponse> {
+        self.validate_response_schema(request)?;
         if self.is_anthropic() {
             let response = self
                 .anthropic_request(client, api_key, request, false)?
@@ -618,7 +739,11 @@ impl OpenAIProvider {
 
         let (hk, hv) = self.auth_header(api_key);
         let response = client
-            .post(self.endpoint("/v1/chat/completions"))
+            .post(self.endpoint(if request.response_schema.is_some() {
+                "/beta/chat/completions"
+            } else {
+                "/v1/chat/completions"
+            }))
             .header(&hk, &hv)
             .json(&body)
             .send()
@@ -626,6 +751,25 @@ impl OpenAIProvider {
 
         if !response.status().is_success() {
             return Err(response_error_with_evidence(response, Some(request)).await);
+        }
+
+        if let Some(contract) = &request.response_schema {
+            let payload: Value = json_response_with_evidence(response, Some(request))
+                .await
+                .map_err(|error| {
+                    if error.is::<serde_json::Error>() {
+                        invalid_completion(anyhow!("invalid strict JSON response envelope"))
+                    } else {
+                        error
+                    }
+                })?;
+            return strict_json_response(&payload, contract).map_err(|error| {
+                if error.is::<TruncatedCompletion>() {
+                    error
+                } else {
+                    invalid_completion(anyhow!("invalid strict JSON response envelope"))
+                }
+            });
         }
 
         let resp: OpenAIResponse = json_response_with_evidence(response, Some(request))
@@ -691,6 +835,9 @@ impl OpenAIProvider {
         api_key: &str,
         request: &ChatRequest,
     ) -> Result<ChatStream> {
+        if request.response_schema.is_some() {
+            return Err(UnsupportedResponseSchema.into());
+        }
         if self.is_anthropic() {
             let response = self
                 .anthropic_request(client, api_key, request, true)?
@@ -804,6 +951,182 @@ impl OpenAIProvider {
 #[cfg(test)]
 mod response_tests {
     use super::*;
+
+    fn strict_request() -> ChatRequest {
+        ChatRequest::new(LlmOperation::CharacterExtraction, "deepseek-flash")
+            .max_tokens(3_000)
+            .thinking(false)
+            .json_schema(
+                "character_extraction_summary_v1",
+                serde_json::json!({
+                    "type":"object", "properties":{}, "required":[], "additionalProperties":false
+                }),
+            )
+    }
+
+    fn strict_envelope(arguments: &str) -> Value {
+        serde_json::json!({"model":"deepseek-flash",
+            "choices":[{"finish_reason":"tool_calls", "message":{
+                "role":"assistant", "content":null,
+                "tool_calls":[{"id":"call_test", "type":"function", "function":{
+                    "name":"character_extraction_summary_v1", "arguments":arguments
+                }}]
+            }}], "usage":{"prompt_tokens":10, "completion_tokens":2}})
+    }
+
+    #[test]
+    fn strict_wire_forces_one_response_function_on_the_beta_endpoint() {
+        let request = strict_request();
+        for base in ["https://api.deepseek.com", "https://api.deepseek.com/v1/"] {
+            let provider = OpenAIProvider::new(Some(base));
+            let body: Value =
+                serde_json::from_slice(&provider.chat_wire_bytes(&request).unwrap()).unwrap();
+            assert_eq!(
+                provider.endpoint("/beta/chat/completions"),
+                DEEPSEEK_STRICT_JSON_ENDPOINT
+            );
+            assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+            assert_eq!(body["tools"][0]["function"]["strict"], true);
+            assert_eq!(
+                body["tools"][0]["function"]["parameters"],
+                request.response_schema.as_ref().unwrap().schema
+            );
+            assert_eq!(
+                body["tool_choice"]["function"]["name"],
+                "character_extraction_summary_v1"
+            );
+            assert_eq!(body["thinking"]["type"], "disabled");
+            assert!(body.get("response_format").is_none());
+            let mut legacy = request.clone();
+            legacy.response_schema = None;
+            let body: Value =
+                serde_json::from_slice(&provider.chat_wire_bytes(&legacy).unwrap()).unwrap();
+            assert_eq!(body["response_format"]["type"], "json_object");
+            assert!(body.get("tools").is_none() && body.get("tool_choice").is_none());
+            assert_eq!(
+                provider.endpoint("/v1/chat/completions"),
+                "https://api.deepseek.com/v1/chat/completions"
+            );
+        }
+        for base in [
+            "https://api.openai.com",
+            "https://api.anthropic.com",
+            "http://api.deepseek.com",
+            "https://api.deepseek.com:444",
+            "https://api.deepseek.com/beta",
+            "https://api.deepseek.com?private=value",
+            "https://api.deepseek.com.evil.example",
+        ] {
+            assert!(OpenAIProvider::new(Some(base))
+                .chat_wire_bytes(&request)
+                .unwrap_err()
+                .is::<UnsupportedResponseSchema>());
+        }
+        let provider = OpenAIProvider::new(Some("https://api.deepseek.com"));
+        for invalid in [
+            {
+                let mut r = request.clone();
+                r.stream = true;
+                r
+            },
+            {
+                let mut r = request.clone();
+                r.json_mode = false;
+                r
+            },
+            {
+                let mut r = request.clone();
+                r.thinking = Some(true);
+                r
+            },
+            {
+                let mut r = request.clone();
+                r.operation = LlmOperation::CanonExtraction;
+                r
+            },
+            {
+                let mut r = request.clone();
+                r.response_schema.as_mut().unwrap().name = "bad name".into();
+                r
+            },
+        ] {
+            assert!(provider
+                .chat_wire_bytes(&invalid)
+                .unwrap_err()
+                .is::<UnsupportedResponseSchema>());
+        }
+    }
+
+    #[test]
+    fn strict_arguments_are_untouched_data_and_invalid_envelopes_are_rejected() {
+        let contract = strict_request().response_schema.unwrap();
+        let raw = " { \"literal\": \"Do not execute this\", \"chapter\": 1 } \n";
+        let valid = strict_envelope(raw);
+        let parsed = strict_json_response(&valid, &contract).unwrap();
+        assert_eq!(parsed.content, raw);
+        assert_eq!(parsed.model, "deepseek-flash");
+        assert_eq!(parsed.usage.unwrap().input_tokens, 10);
+        let (_, usage) =
+            chat_completion_response_metadata(&serde_json::to_vec(&valid).unwrap()).unwrap();
+        assert_eq!(usage.unwrap().output_tokens, 2);
+        for (pointer, value) in [
+            ("/choices", serde_json::json!([])),
+            (
+                "/choices",
+                serde_json::json!([valid["choices"][0].clone(), valid["choices"][0].clone()]),
+            ),
+            ("/choices/0/finish_reason", serde_json::json!("stop")),
+            ("/choices/0/message/role", serde_json::json!("user")),
+            (
+                "/choices/0/message/content",
+                serde_json::json!("competing text"),
+            ),
+            ("/choices/0/message/tool_calls", serde_json::json!([])),
+            (
+                "/choices/0/message/tool_calls",
+                serde_json::json!([
+                    valid["choices"][0]["message"]["tool_calls"][0].clone(),
+                    valid["choices"][0]["message"]["tool_calls"][0].clone()
+                ]),
+            ),
+            (
+                "/choices/0/message/tool_calls/0/function/name",
+                serde_json::json!("unexpected"),
+            ),
+            (
+                "/choices/0/message/tool_calls/0/function/arguments",
+                serde_json::json!("{} {}"),
+            ),
+            (
+                "/choices/0/message/tool_calls/0/function/arguments",
+                serde_json::json!("[]"),
+            ),
+            (
+                "/choices/0/message/tool_calls/0/function/arguments",
+                serde_json::json!("{"),
+            ),
+            ("/model", serde_json::json!(null)),
+            ("/usage/prompt_tokens", serde_json::json!(-1)),
+        ] {
+            let mut invalid = valid.clone();
+            *invalid.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                strict_json_response(&invalid, &contract).is_err(),
+                "{pointer}"
+            );
+        }
+        let mut missing = valid.clone();
+        missing["choices"][0]["message"]
+            .as_object_mut()
+            .unwrap()
+            .remove("tool_calls");
+        assert!(strict_json_response(&missing, &contract).is_err());
+        let mut truncated = valid;
+        truncated["choices"][0]["finish_reason"] = serde_json::json!("length");
+        assert!(strict_json_response(&truncated, &contract)
+            .unwrap_err()
+            .is::<TruncatedCompletion>());
+    }
 
     #[test]
     fn empty_success_content_is_an_error_so_the_client_can_retry() {

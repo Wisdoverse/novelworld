@@ -11,8 +11,9 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use llm_client::{
-    chat_completion_response_metadata, production_json_request, ChatRequest, ChatResponse,
-    HttpResponseEvidence, LlmOperation, RuntimeLlmClient,
+    chat_completion_response_metadata, production_character_request, production_json_request,
+    CharacterOutputMode, ChatRequest, ChatResponse, HttpResponseEvidence, JsonResponseSchema,
+    LlmOperation, RuntimeLlmClient, DEEPSEEK_STRICT_JSON_ENDPOINT,
 };
 use novel_service::domain::{
     entities::{
@@ -36,6 +37,7 @@ const CORPUS_VERSION: &str = "h1-synthetic-v6";
 const RUBRIC_VERSION: &str = "h1-extraction-v4";
 const JUDGE_PROMPT_VERSION: &str = "h1-semantic-judge-v10";
 const REPORT_SCHEMA_VERSION: u8 = 4;
+const STRICT_REPORT_SCHEMA_VERSION: u8 = 5;
 const MAX_CORPUS_BYTES: usize = 256 * 1024;
 const MAX_JUDGE_MESSAGES_BYTES: usize = 128 * 1024;
 const MAX_JUDGE_RESPONSE_BYTES: usize = 32 * 1024;
@@ -433,6 +435,8 @@ struct EvalReport {
     model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    character_output_contract: Option<CharacterOutputContract>,
     prompt_versions: BTreeMap<String, String>,
     allowed_response_models: Vec<String>,
     response_models: Vec<String>,
@@ -447,6 +451,41 @@ struct EvalReport {
     quality_status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     diagnostic_budget: Option<budget::Report>,
+}
+
+#[derive(Debug, Serialize)]
+struct CharacterOutputContract {
+    mode: &'static str,
+    effective_endpoint: &'static str,
+    schema_sha256: BTreeMap<String, String>,
+}
+
+impl CharacterOutputContract {
+    fn for_mode(mode: CharacterOutputMode) -> Option<Self> {
+        (mode == CharacterOutputMode::StrictJsonV1).then(|| Self {
+            mode: mode.as_str(),
+            effective_endpoint: DEEPSEEK_STRICT_JSON_ENDPOINT,
+            schema_sha256: [
+                (
+                    character_extractor::CHARACTER_SUMMARY_SCHEMA_VERSION,
+                    character_extractor::summary_response_schema(),
+                ),
+                (
+                    character_extractor::CHARACTER_CHUNK_SCHEMA_VERSION,
+                    character_extractor::chunk_response_schema(),
+                ),
+            ]
+            .into_iter()
+            .map(|(name, schema)| {
+                let contract = JsonResponseSchema {
+                    name: name.into(),
+                    schema,
+                };
+                (name.into(), contract.schema_sha256())
+            })
+            .collect(),
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
@@ -556,6 +595,7 @@ struct RunConfig {
     provider: String,
     model: String,
     allowed_response_models: BTreeSet<String>,
+    character_output_mode: CharacterOutputMode,
     client: Option<RuntimeLlmClient>,
     budget: Option<budget::Control>,
 }
@@ -909,12 +949,19 @@ fn run_config(
     bounded_diagnostic: bool,
     budget_profile: budget::Profile,
 ) -> Result<RunConfig> {
+    let character_output_mode = budget_profile.character_output_mode();
+    if character_output_mode == CharacterOutputMode::StrictJsonV1
+        && (!bounded_diagnostic || !matches!(mode, Mode::Live))
+    {
+        bail!("strict character output requires a bounded live Diagnostic");
+    }
     if matches!(mode, Mode::Recorded) {
         return Ok(RunConfig {
             mode,
             provider: "recorded".into(),
             model: "calibration-fixtures-v1".into(),
             allowed_response_models: BTreeSet::from(["calibration-fixtures-v1".into()]),
+            character_output_mode,
             client: None,
             budget: None,
         });
@@ -948,6 +995,7 @@ fn run_config(
         provider,
         model,
         allowed_response_models,
+        character_output_mode,
         client: Some(client),
         budget: None,
     })
@@ -1441,7 +1489,11 @@ async fn evaluate(
     ]);
 
     Ok(EvalReport {
-        schema_version: REPORT_SCHEMA_VERSION,
+        schema_version: if config.character_output_mode == CharacterOutputMode::StrictJsonV1 {
+            STRICT_REPORT_SCHEMA_VERSION
+        } else {
+            REPORT_SCHEMA_VERSION
+        },
         policy_version: corpus.policy_version.clone(),
         corpus_version: corpus.corpus_version.clone(),
         rubric_version: corpus.rubric_version.clone(),
@@ -1450,6 +1502,7 @@ async fn evaluate(
         provider: config.provider.clone(),
         model: config.model.clone(),
         thinking_enabled: matches!(config.mode, Mode::Live).then_some(false),
+        character_output_contract: CharacterOutputContract::for_mode(config.character_output_mode),
         prompt_versions,
         allowed_response_models: config.allowed_response_models.iter().cloned().collect(),
         response_models: response_models.into_iter().collect(),
@@ -2246,7 +2299,12 @@ async fn run_live(
                 &case.id,
                 1,
                 &config.allowed_response_models,
-                production_json_request(LlmOperation::CharacterExtraction, &extraction_prompt),
+                production_character_request(
+                    &extraction_prompt,
+                    config.character_output_mode,
+                    character_extractor::CHARACTER_SUMMARY_SCHEMA_VERSION,
+                    character_extractor::summary_response_schema(),
+                ),
             )?,
         )
         .await
@@ -2291,7 +2349,12 @@ async fn run_live(
                         &case.id,
                         1,
                         &config.allowed_response_models,
-                        production_json_request(LlmOperation::CharacterExtraction, &prompt),
+                        production_character_request(
+                            &prompt,
+                            config.character_output_mode,
+                            character_extractor::CHARACTER_CHUNK_SCHEMA_VERSION,
+                            character_extractor::chunk_response_schema(),
+                        ),
                     )?,
                 )
                 .await
@@ -3349,7 +3412,55 @@ mod tests {
         assert_eq!(left.max_tokens, right.max_tokens);
         assert_eq!(left.stream, right.stream);
         assert_eq!(left.json_mode, right.json_mode);
+        assert_eq!(left.response_schema, right.response_schema);
         assert_eq!(left.thinking, right.thinking);
+    }
+
+    #[test]
+    fn prospective_strict_contract_binds_shared_schema_hashes_without_changing_legacy_reports() {
+        assert!(CharacterOutputContract::for_mode(CharacterOutputMode::LegacyJson).is_none());
+        for profile in [
+            budget::Profile::V3,
+            budget::Profile::V4,
+            budget::Profile::V5,
+        ] {
+            assert_eq!(
+                profile.character_output_mode(),
+                CharacterOutputMode::LegacyJson
+            );
+        }
+        assert_eq!(
+            budget::Profile::V6.character_output_mode(),
+            CharacterOutputMode::StrictJsonV1
+        );
+        assert!(run_config(Mode::Recorded, true, budget::Profile::V6).is_err());
+        assert!(run_config(Mode::Live, false, budget::Profile::V6).is_err());
+        let contract =
+            CharacterOutputContract::for_mode(budget::Profile::V6.character_output_mode()).unwrap();
+        assert_eq!(contract.mode, "strict-json-v1");
+        assert_eq!(contract.effective_endpoint, DEEPSEEK_STRICT_JSON_ENDPOINT);
+        assert_eq!(contract.schema_sha256.len(), 2);
+        for (name, schema) in [
+            (
+                character_extractor::CHARACTER_SUMMARY_SCHEMA_VERSION,
+                character_extractor::summary_response_schema(),
+            ),
+            (
+                character_extractor::CHARACTER_CHUNK_SCHEMA_VERSION,
+                character_extractor::chunk_response_schema(),
+            ),
+        ] {
+            let request = production_character_request(
+                "source",
+                budget::Profile::V6.character_output_mode(),
+                name,
+                schema,
+            );
+            let hash = request.response_schema.unwrap().schema_sha256();
+            assert_eq!(contract.schema_sha256[name], hash);
+            assert_eq!(hash.len(), 64);
+            assert!(hash.bytes().all(|b| b.is_ascii_hexdigit()));
+        }
     }
 
     #[tokio::test]
@@ -3367,6 +3478,7 @@ mod tests {
         assert!(report.cases.iter().all(|case| case.passed));
         let report = serde_json::to_value(report).unwrap();
         assert!(!report.as_object().unwrap().contains_key("thinking_enabled"));
+        assert!(report.get("character_output_contract").is_none());
         assert!(!report
             .as_object()
             .unwrap()
@@ -4052,6 +4164,7 @@ mod tests {
             (budget::PROFILE, budget::Profile::V3),
             (budget::CNY10_PROFILE, budget::Profile::V4),
             (budget::FLASH_PROFILE, budget::Profile::V5),
+            (budget::STRICT_FLASH_PROFILE, budget::Profile::V6),
         ] {
             let mut selected = args.clone();
             selected.extend(["--diagnostic-budget-profile".into(), profile.into()]);
@@ -4087,6 +4200,7 @@ mod tests {
             budget::PROFILE,
             budget::CNY10_PROFILE,
             budget::FLASH_PROFILE,
+            budget::STRICT_FLASH_PROFILE,
         ] {
             let profile = budget::Profile::parse(profile_id).unwrap();
             let model = profile.model();

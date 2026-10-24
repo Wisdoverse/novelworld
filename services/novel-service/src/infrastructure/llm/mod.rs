@@ -12,16 +12,59 @@ use crate::domain::ports::{
 
 pub struct LlmAdapter {
     client: Arc<llm_client::RuntimeLlmClient>,
+    character_output_mode: llm_client::CharacterOutputMode,
 }
 
 impl LlmAdapter {
     pub fn new(client: Arc<llm_client::RuntimeLlmClient>) -> Self {
-        Self { client }
+        Self {
+            client,
+            character_output_mode: llm_client::CharacterOutputMode::LegacyJson,
+        }
+    }
+
+    pub fn with_character_output_mode(mut self, mode: llm_client::CharacterOutputMode) -> Self {
+        self.character_output_mode = mode;
+        self
+    }
+
+    fn character_request(
+        &self,
+        user_id: Uuid,
+        prompt: &str,
+        schema_name: &str,
+        schema: &serde_json::Value,
+    ) -> llm_client::ChatRequest {
+        llm_client::production_character_request(
+            prompt,
+            self.character_output_mode,
+            schema_name,
+            schema.clone(),
+        )
+        .runtime_user_id(user_id.to_string())
     }
 }
 
 #[async_trait]
 impl LlmPort for LlmAdapter {
+    async fn chat_json_with_schema(
+        &self,
+        user_id: Uuid,
+        task: NovelLlmTask,
+        prompt: &str,
+        schema_name: &str,
+        schema: &serde_json::Value,
+    ) -> Result<String> {
+        anyhow::ensure!(
+            matches!(task, NovelLlmTask::CharacterExtraction),
+            "response schemas are limited to character extraction"
+        );
+        self.client
+            .chat(self.character_request(user_id, prompt, schema_name, schema))
+            .await
+            .map(|response| response.content)
+            .map_err(classify_llm_error)
+    }
     async fn prepare_series_match(&self, user_id: Uuid) -> Result<Box<dyn SeriesCompletionPort>> {
         self.client
             .prepare_series_match(user_id.to_string())
@@ -67,7 +110,13 @@ impl SeriesCompletionPort for llm_client::PreparedSeriesMatch {
 }
 
 fn classify_llm_error(error: anyhow::Error) -> anyhow::Error {
-    if error
+    if error.is::<llm_client::UnsupportedResponseSchema>() {
+        LlmProviderFailure {
+            kind: LlmProviderFailureKind::RequestRejected,
+            source: error,
+        }
+        .into()
+    } else if error
         .chain()
         .any(|cause| cause.is::<llm_client::TruncatedCompletion>())
     {
@@ -121,6 +170,63 @@ impl TextTranslator for LlmAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn concrete_character_adapter_selects_shared_schema_mode_without_downgrading() {
+        use crate::domain::services::character_extractor::*;
+        use llm_client::{CharacterOutputMode, RuntimeLlmClient};
+        let client = Arc::new(RuntimeLlmClient::static_config(
+            "http://127.0.0.1:1".into(),
+            "synthetic-model".into(),
+            "synthetic-key".into(),
+            false,
+        ));
+        let user_id = Uuid::new_v4();
+        for (name, schema) in [
+            (CHARACTER_SUMMARY_SCHEMA_VERSION, summary_response_schema()),
+            (CHARACTER_CHUNK_SCHEMA_VERSION, chunk_response_schema()),
+        ] {
+            let adapter = LlmAdapter::new(client.clone());
+            let legacy = adapter.character_request(user_id, "source", name, &schema);
+            assert!(legacy.response_schema.is_none());
+            let adapter = adapter.with_character_output_mode(CharacterOutputMode::StrictJsonV1);
+            let actual = adapter.character_request(user_id, "source", name, &schema);
+            let expected = llm_client::production_character_request(
+                "source",
+                CharacterOutputMode::StrictJsonV1,
+                name,
+                schema.clone(),
+            );
+            assert_eq!(actual.response_schema, expected.response_schema);
+            assert_eq!(actual.messages[0].content, expected.messages[0].content);
+            assert_eq!(actual.messages[1].content, expected.messages[1].content);
+            assert_eq!(actual.temperature, expected.temperature);
+            assert_eq!(actual.max_tokens, expected.max_tokens);
+            assert_eq!(actual.thinking, Some(false));
+            assert_eq!(actual.runtime_user_id, Some(user_id.to_string()));
+            let error = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                LlmPort::chat_json_with_schema(
+                    &adapter,
+                    user_id,
+                    NovelLlmTask::CharacterExtraction,
+                    "source",
+                    name,
+                    &schema,
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<LlmProviderFailure>().unwrap().kind,
+                LlmProviderFailureKind::RequestRejected
+            );
+            assert!(error
+                .chain()
+                .any(|cause| cause.is::<llm_client::UnsupportedResponseSchema>()));
+        }
+    }
 
     #[test]
     fn classifies_typed_model_failures_without_claiming_local_413_is_upstream() {

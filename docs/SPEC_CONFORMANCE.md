@@ -164,6 +164,13 @@ state in two places.
 - Character extraction uses a representative first/middle/last sample and a
   bounded overlapping full-text chunk scan; successful chunk results are merged
   case-insensitively.
+  The default character output mode remains `legacy-json`. The experimental
+  `strict-json-v1` opt-in shares versioned domain response schemas with H1 V6
+  and forces a response function on the official DeepSeek Beta endpoint.
+  Unsupported configurations fail before dispatch; returned arguments still
+  pass the existing local validators. Offline structure checks do not establish
+  Beta compatibility, attribution accuracy, or H1 live acceptance. See
+  [provider configuration](./LLM_PROVIDERS.md).
 - Self-mode prompt context currently retrieves two independently bounded permanent
   candidate buckets: the ten most recently created UUIDv5 journey candidates
   and ten non-v5 legacy rows by importance/recency. Rust then authenticates the

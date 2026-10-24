@@ -9,7 +9,8 @@ immutable and are not rescored or compared.
 
 Active identities: policy `extraction-quality-v4`, corpus `h1-synthetic-v6`,
 response rubric `h1-extraction-v4`, semantic judge `h1-semantic-judge-v10`,
-public report schema `4`, and private HTTP response envelope `2`.
+public report schema `4` for recorded and V3–V5 runs (`5` for prospective V6),
+and private HTTP response envelope `2`.
 
 Public reports explicitly carry these identities and distinguish gold alignment
 from source-support measurements. `quality_status` is always
@@ -152,11 +153,23 @@ per token. V3 and v4 retain their exact `deepseek-v4-flash` identity. The runner
 rejects mismatched model/profile settings before reading the credential, and
 an unregistered response model stops the run without releasing its reservation.
 
-Before each logical call, v4 and v5 reserve the largest affordable count of
-physical attempts from five down to one. Both profiles check the logical-call,
-physical-attempt, token, and cost limits before dispatch. Retries and JSON fallback
-use the same reserved attempt count. Neither profile increases the existing
-retry rules. Streaming requests fail before provider I/O.
+The prospective opt-in `vision-diagnostic-budget-v6` profile keeps V5's exact
+`deepseek-flash` model, reservation rules, 4/12 micro-CNY rates, CNY 10
+invocation ceiling, and limits of 40 logical calls, 200 HTTP attempts, and
+20,000,000 tokens. It uses
+`strict-json-v1` only for character summary and chunk requests to DeepSeek's
+official `/beta/chat/completions` endpoint; Canon and judge requests keep the
+legacy endpoint. Reports add the output mode, summary/chunk schema versions and
+hashes, and effective endpoint. V3-V5 remain unchanged and use legacy JSON.
+Offline checks establish request mechanics only. DeepSeek Beta compatibility
+and semantic extraction quality remain unverified. V6 does not authorize a paid
+run; a future run needs a separate reviewed registration and exact authorization.
+
+Before each logical call, v4, v5, and v6 reserve the largest affordable count
+of physical attempts from five down to one. All three profiles check the
+logical-call, physical-attempt, token, and cost limits before dispatch. Retries
+and JSON fallback use the same reserved attempt count. None increases the
+existing retry rules. Streaming requests fail before provider I/O.
 
 At the 800-token output limit, two worst-case attempts reserve 8,407,808
 micro-CNY. Three attempts would reserve 12,611,712 micro-CNY, so the budget
@@ -166,17 +179,17 @@ Only complete usage and transport-metric reconciliation releases unused
 reservation. An error, missing usage, cancellation, or unknown outcome keeps
 the full reservation and stops further H1 calls.
 
-The v4 and v5 ledgers are process-local. They do not persist across a restart or
-enforce an account-wide or provider-side cap. A future paid run still needs
+The v4, v5, and v6 ledgers are process-local. They do not persist across a
+restart or enforce an account-wide or provider-side cap. A future paid run still needs
 a separately reviewed registration, a durable one-shot launcher intent, and
 exact user authorization before credential use. This profile change does not
 provide that launcher or authorize a paid run.
 
-No current v4 or v5 live quality result is implied here. Fresh registration,
+No current v4, v5, or v6 live quality result is implied here. Fresh registration,
 independent review, private evidence, and prospective approval are required
 before any provider call. Existing formal Qualification remains on its frozen
-v1 identity and cannot silently adopt v4 or v5. Frozen or consumed registrations
-and their launchers remain unchanged.
+v1 identity and cannot silently adopt v4, v5, or v6. Frozen or consumed
+registrations and their launchers remain unchanged.
 
 Both modes fail closed on malformed corpus data, threshold drift, missing or
 duplicate tokens, unregistered response models, non-commit SHA, dirty checkout,

@@ -71,9 +71,19 @@ Operator update, **2026-10-12**: use the [small-team review rules](../CONTRIBUTI
   request model and allowed response model. V3 and v4 keep their exact
   `deepseek-v4-flash` identity. Model/profile mismatches fail before credential
   access; an unregistered response model stops the run and keeps its reservation.
+  The prospective opt-in `vision-diagnostic-budget-v6` profile retains V5's
+  model, reservation rules, rates, CNY 10 ceiling, 40 logical-call, 200
+  HTTP-attempt, and 20,000,000 token limits. It enables `strict-json-v1` only
+  for character summary/chunk requests to the official DeepSeek
+  `/beta/chat/completions` endpoint; Canon and judge traffic remains legacy.
+  Reports record the mode, schema versions and hashes, and effective endpoint.
+  V3-V5 remain unchanged. Offline checks do not
+  prove Beta compatibility or semantic quality, and V6 does not authorize paid
+  execution; a new reviewed registration and exact user authorization remain
+  required.
   The ledger is process-local, not durable across restart or enforced by the
-  provider. V4 and v5 do not change frozen results, registrations, launchers, or
-  formal H1 adoption. Paid use still requires a new reviewed registration, durable
+  provider. V4, v5, and v6 do not change frozen results, registrations, launchers,
+  or formal H1 adoption. Paid use still requires a new reviewed registration, durable
   one-shot intent, and exact user authorization before credential use.
 - Formal Qualification/Observation and broader release/support claims still
   use their versioned evidence contracts. Before leaving this rapid-iteration

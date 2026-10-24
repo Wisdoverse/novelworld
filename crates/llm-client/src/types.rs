@@ -58,6 +58,57 @@ impl std::fmt::Display for LlmApiError {
 impl std::error::Error for LlmApiError {}
 
 #[derive(Debug)]
+pub struct UnsupportedResponseSchema;
+
+impl std::fmt::Display for UnsupportedResponseSchema {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("strict JSON output requires a supported non-streaming DeepSeek configuration")
+    }
+}
+impl std::error::Error for UnsupportedResponseSchema {}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum CharacterOutputMode {
+    #[default]
+    LegacyJson,
+    StrictJsonV1,
+}
+
+impl CharacterOutputMode {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "legacy-json" => Ok(Self::LegacyJson),
+            "strict-json-v1" => Ok(Self::StrictJsonV1),
+            _ => anyhow::bail!("character output mode must be legacy-json or strict-json-v1"),
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LegacyJson => "legacy-json",
+            Self::StrictJsonV1 => "strict-json-v1",
+        }
+    }
+}
+
+/// A versioned response contract, never an executable tool definition.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JsonResponseSchema {
+    pub name: String,
+    pub schema: serde_json::Value,
+}
+
+impl JsonResponseSchema {
+    pub fn schema_sha256(&self) -> String {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(self.schema.to_string().as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct JsonModeEmpty {
     pub(crate) model: String,
     pub(crate) usage: Option<Usage>,
@@ -105,6 +156,7 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
     pub stream: bool,
     pub json_mode: bool,
+    pub response_schema: Option<JsonResponseSchema>,
     pub thinking: Option<bool>,
     pub(crate) max_attempts: Option<u32>,
     pub(crate) response_observer: Option<ResponseObserver>,
@@ -121,6 +173,7 @@ impl ChatRequest {
             max_tokens: None,
             stream: false,
             json_mode: false,
+            response_schema: None,
             thinking: None,
             max_attempts: None,
             response_observer: None,
@@ -185,6 +238,16 @@ impl ChatRequest {
 
     pub fn json(mut self) -> Self {
         self.json_mode = true;
+        self
+    }
+
+    /// Require native schema enforcement; unsupported transports fail before dispatch.
+    pub fn json_schema(mut self, name: impl Into<String>, schema: serde_json::Value) -> Self {
+        self.json_mode = true;
+        self.response_schema = Some(JsonResponseSchema {
+            name: name.into(),
+            schema,
+        });
         self
     }
 
