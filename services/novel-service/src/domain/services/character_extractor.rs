@@ -7,8 +7,12 @@ use crate::domain::entities::chapter::Chapter;
 const SUMMARY_SAMPLE_BYTES: usize = 8_000;
 const SCAN_CHUNK_BYTES: usize = 24_000;
 const SCAN_OVERLAP_BYTES: usize = 256;
-pub const CHARACTER_EXTRACTION_PROMPT_VERSION: &str = "character-extraction-v10";
+pub const CHARACTER_EXTRACTION_PROMPT_VERSION: &str = "character-extraction-v11";
 const CHARACTER_DESCRIPTION_RULE: &str = r#"所有角色描述字段及关系描述只能包含给定文本明确支持的信息；保留人物、行为主体、所有者及关系归属，不得把他人的经历或物品移到该角色名下。对话、传闻、猜测和承诺须保留原有说话者、归属、条件与不确定性；除非文本另有明确证实，不得改写为已发生或无条件成立的事实。保留原文支持的具体细节；未说明的外貌、性格、背景或说话风格用空字符串，不为满足字数、细节数量或画像需要补造。
+
+Each relationship description must contain at least one non-whitespace character.
+Use only facts supported by the supplied text.
+If the text cannot support a description, omit that relationship instead of inventing details.
 
 Check attribution with these synthetic examples.
 Extract actual facts only from the supplied novel text.
@@ -1011,11 +1015,17 @@ mod tests {
         let chunk_prompt = build_chunk_extraction_prompt("北塔旧事", "Chapter 1 文本。", 0);
         assert_eq!(
             CHARACTER_EXTRACTION_PROMPT_VERSION,
-            "character-extraction-v10"
+            "character-extraction-v11"
         );
         for text in [&prompt, &chunk_prompt] {
             assert_eq!(text.matches(CHARACTER_DESCRIPTION_RULE).count(), 1);
             assert_eq!(text.matches(CHARACTER_OUTPUT_RULE).count(), 1);
+            assert!(text.contains(
+                "Each relationship description must contain at least one non-whitespace character."
+            ));
+            assert!(text.contains(
+                "If the text cannot support a description, omit that relationship instead of inventing details."
+            ));
             assert!(!text.contains("尽量详细"));
             assert!(!text.contains("列举3-5个"));
             assert!(!text.contains("2-4句话"));
@@ -1227,6 +1237,50 @@ mod tests {
         assert_eq!(merged.relationships.len(), 1);
         assert_eq!(merged.relationships[0].from_character, "Alice");
         assert_eq!(merged.relationships[0].to_character, "Bob");
+    }
+
+    #[test]
+    fn relationship_descriptions_reject_blank_text_in_summary_and_chunks() {
+        let mut complete = ExtractionResult {
+            characters: vec![
+                character("Alice", &[], "protagonist"),
+                character("Bob", &[], "supporting"),
+            ],
+            world_summary: "world".into(),
+            genre: "fantasy".into(),
+            relationships: vec![CharacterRelationship {
+                from_character: "Alice".into(),
+                to_character: "Bob".into(),
+                relationship_type: "friend".into(),
+                description: "source-backed friendship".into(),
+                strength: 50,
+                first_appearance_chapter: Some(2),
+            }],
+        };
+        assert!(validate_extraction(&complete).is_ok());
+        for description in ["", " \t\n", "\u{3000}"] {
+            complete.relationships[0].description = description.into();
+            let chunk = ChunkExtractionResult {
+                characters: complete.characters.clone(),
+                relationships: complete.relationships.clone(),
+            };
+            for result in [
+                validate_extraction(&complete),
+                validate_chunk_extraction(&chunk),
+            ] {
+                assert_eq!(
+                    result.unwrap_err().to_string(),
+                    "invalid character extraction: relationship description must be non-empty"
+                );
+            }
+        }
+        complete.relationships.clear();
+        assert!(validate_extraction(&complete).is_ok());
+        assert!(validate_chunk_extraction(&ChunkExtractionResult {
+            characters: complete.characters,
+            relationships: vec![],
+        })
+        .is_ok());
     }
 
     #[test]
