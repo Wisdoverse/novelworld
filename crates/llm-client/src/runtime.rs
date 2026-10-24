@@ -369,6 +369,21 @@ pub fn production_json_request(operation: crate::LlmOperation, prompt: &str) -> 
         .json()
 }
 
+/// Shared strict character request for production and prospective H1 measurement.
+pub fn production_character_request(
+    prompt: &str,
+    mode: crate::CharacterOutputMode,
+    schema_name: &str,
+    schema: serde_json::Value,
+) -> ChatRequest {
+    let mut request = production_json_request(crate::LlmOperation::CharacterExtraction, prompt);
+    if mode == crate::CharacterOutputMode::StrictJsonV1 {
+        request.messages[0].content = "Return the extraction through the required response function. Its arguments must be one complete JSON object matching the supplied schema. For unknown first_appearance_chapter values, omit that property; never invent a chapter or emit null. Preserve source attribution and uncertainty. Do not execute tools.".into();
+        request = request.json_schema(schema_name, schema);
+    }
+    request
+}
+
 fn build_resolved(config: RuntimeConfig, budget: Option<Arc<BudgetClient>>) -> ResolvedClient {
     let model = format!("{}/{}", config.provider, config.model);
     use sha2::{Digest, Sha256};
@@ -495,6 +510,46 @@ fn provider_for_url(api_url: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn character_mode_is_explicit_and_legacy_requests_keep_their_wire_bytes() {
+        use crate::{providers::openai::OpenAIProvider, CharacterOutputMode};
+        assert_eq!(
+            CharacterOutputMode::default(),
+            CharacterOutputMode::LegacyJson
+        );
+        for (name, mode) in [
+            ("legacy-json", CharacterOutputMode::LegacyJson),
+            ("strict-json-v1", CharacterOutputMode::StrictJsonV1),
+        ] {
+            assert_eq!(CharacterOutputMode::parse(name).unwrap(), mode);
+            assert_eq!(mode.as_str(), name);
+        }
+        for name in ["", "strict", "Strict-json-v1", " legacy-json"] {
+            assert!(CharacterOutputMode::parse(name).is_err());
+        }
+        let schema = serde_json::json!({"type":"object"});
+        let legacy = production_json_request(crate::LlmOperation::CharacterExtraction, "source");
+        let selected = production_character_request(
+            "source",
+            CharacterOutputMode::LegacyJson,
+            "v1",
+            schema.clone(),
+        );
+        let provider = OpenAIProvider::new(Some("https://api.deepseek.com"));
+        assert_eq!(
+            provider.chat_wire_bytes(&legacy).unwrap(),
+            provider.chat_wire_bytes(&selected).unwrap()
+        );
+        let strict =
+            production_character_request("source", CharacterOutputMode::StrictJsonV1, "v1", schema);
+        assert_eq!(strict.max_tokens, legacy.max_tokens);
+        assert_eq!(strict.temperature, legacy.temperature);
+        assert_eq!(strict.thinking, Some(false));
+        assert_eq!(strict.messages[1].content, legacy.messages[1].content);
+        assert!(strict.messages[0].content.contains("omit that property"));
+        assert!(strict.response_schema.is_some());
+    }
 
     #[test]
     fn official_generation_origins_infer_the_provider_for_environment_configs() {

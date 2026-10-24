@@ -1075,3 +1075,79 @@ async fn stream_requires_settlement_before_finished_and_never_refunds_a_drop() {
         assert_eq!(provider.count(), 1);
     }
 }
+
+#[tokio::test]
+async fn strict_without_internal_budget_stops_at_the_first_invalid_envelope_and_retains_raw_usage()
+{
+    use crate::providers::openai::InvalidCompletion;
+    for malformed in [false, true] {
+        let raw = if malformed {
+            b"{".to_vec()
+        } else {
+            serde_json::to_vec(&completion("{}", true)).unwrap()
+        };
+        let expected_raw = raw.clone();
+        let provider = LocalHttp::start(move |path, body| {
+            assert_eq!(path, "/beta/chat/completions");
+            assert_eq!(body["tools"][0]["function"]["strict"], true);
+            assert!(body.get("response_format").is_none());
+            Some((200, "application/json", raw.clone()))
+        })
+        .await;
+        let mut client = LlmClient::new().with_openai_compatible(
+            "deepseek",
+            "synthetic-key",
+            "https://api.deepseek.com",
+        );
+        client.budget = Ok(None);
+        client.test_dispatch_to(provider.origin.clone());
+        let evidence = Arc::new(Mutex::new(Vec::new()));
+        let captured = evidence.clone();
+        let request = ChatRequest::new(
+            LlmOperation::CharacterExtraction,
+            budget::profile().model.clone(),
+        )
+        .max_tokens(8)
+        .thinking(false)
+        .max_attempts(5)
+        .json_schema("character_v1", json!({"type":"object"}))
+        .observe_responses(move |response| {
+            assert_eq!(response.status, 200);
+            assert!(response.complete);
+            captured.lock().unwrap().push(response.body.to_vec());
+            Ok(())
+        });
+        let error = client.chat(request).await.unwrap_err();
+        assert!(error.is::<InvalidCompletion>(), "{error:?}");
+        assert_eq!(provider.count(), 1);
+        assert_eq!(*evidence.lock().unwrap(), vec![expected_raw.clone()]);
+        if !malformed {
+            let (_, usage) = crate::chat_completion_response_metadata(&expected_raw).unwrap();
+            assert_eq!(usage.unwrap().input_tokens, 10);
+        }
+    }
+}
+
+#[tokio::test]
+async fn strict_observer_failure_keeps_its_terminal_error_identity() {
+    let provider = LocalHttp::start(|_, _| json_reply(completion("{}", true))).await;
+    let mut client = LlmClient::new().with_openai_compatible(
+        "deepseek",
+        "synthetic-key",
+        "https://api.deepseek.com",
+    );
+    client.budget = Ok(None);
+    client.test_dispatch_to(provider.origin.clone());
+    let request = ChatRequest::new(
+        LlmOperation::CharacterExtraction,
+        budget::profile().model.clone(),
+    )
+    .max_tokens(8)
+    .thinking(false)
+    .json_schema("character_v1", json!({"type":"object"}))
+    .observe_responses(|_| Err(anyhow::anyhow!("private observer sentinel")));
+    let error = client.chat(request).await.unwrap_err();
+    assert!(error.is::<crate::ResponseEvidenceError>(), "{error:?}");
+    assert!(!format!("{error:?}").contains("private observer sentinel"));
+    assert_eq!(provider.count(), 1);
+}

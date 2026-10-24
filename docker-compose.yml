@@ -204,6 +204,7 @@ services:
       LLM_API_URL: ${LLM_API_URL:-https://api.openai.com}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      LLM_CHARACTER_OUTPUT_MODE: ${LLM_CHARACTER_OUTPUT_MODE:-legacy-json}
       LAYA_API_URL: ${LAYA_API_URL:-}
       LAYA_API_KEY: ${LAYA_API_KEY:-}
       USER_SERVICE_URL: http://user-service:8001
