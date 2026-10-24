@@ -326,15 +326,18 @@ to the recorded source pair and inputs. A change requires a new review. Source
 eligibility does not transfer historical evidence, renew a frozen or consumed
 registration, or claim live or formal qualification.
 
-For V7 web frontend inputs, use the Qualification Policy's path classification
+For V7 web frontend inputs, use the Qualification Policy's input classification
 and byte-change rules. Unchanged frontend bytes require independent review of
-identical web inputs, complete compiled and served maps, and HTTP equality.
-Require proof that no web build or runtime consumer uses each excluded desktop
-path beyond its context copy. Directory exemptions are not allowed. Keep
-required desktop CI. Web-input changes, including web dependency changes,
-require different full compiled and served maps and the corresponding frontend
-filesystem layer. A Rust change cannot bypass this requirement. Historical C→B
-artifacts and Frozen records retain their original rules, identities, and results.
+identical active web inputs, complete compiled and served maps, and HTTP
+equality. The policy permits exact desktop-path or test-package exclusions only
+with complete consumer proof. Record every package, manifest, and lock change.
+Unknown use blocks exclusion. Directory and whole-lockfile exemptions are
+forbidden. A development-dependency label is not proof. Keep required dependency and
+desktop CI, scans, SBOMs, and risk review. Active web-input changes require
+different full compiled and served maps and the corresponding frontend layer.
+A Rust change cannot bypass this requirement. Apply exclusions only in fresh
+exact-pair reviews under the merged policy revision. Historical artifacts and
+Frozen records retain their original rules, identities, and results.
 
 For Vision journey tooling changes, also run
 `python3 tests/e2e/live_deepseek_journey.py --self-test`. CI runs
