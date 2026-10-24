@@ -122,6 +122,25 @@ Operator-only `LLM_API_URL` supports other compatible services and workspace dom
 Configure the API base, not the full `/chat/completions` resource. Custom path prefixes
 that previously relied on an appended `/v1` must explicitly include that version now.
 
+### Experimental strict character output
+
+`LLM_CHARACTER_OUTPUT_MODE` is a `novel-service` setting. It accepts
+`legacy-json` (the default) or `strict-json-v1`; an unknown value prevents
+service startup. `strict-json-v1` opts character summary and chunk extraction
+into DeepSeek's experimental strict schema mode. Configure the official HTTPS
+API root `https://api.deepseek.com` or API base `https://api.deepseek.com/v1`.
+The adapter sends only strict character extraction requests to
+`https://api.deepseek.com/beta/chat/completions`. Canon extraction, judge tasks,
+and other traffic keep the legacy route. Other providers remain on legacy JSON
+by default. An unsupported provider or API URL fails before dispatch; the
+service does not fall back to legacy mode. Set the value to `legacy-json` to
+roll back. This setting requires no data or schema migration.
+
+This mode depends on DeepSeek's [strict tool-call schema support](https://api-docs.deepseek.com/guides/tool_calls/).
+Offline structural tests do not establish live compatibility with the vendor's
+Beta endpoint. They also do not prove source-faithful extraction, canon quality,
+or H1 qualification.
+
 Google Gemini uses its official OpenAI-compatible Chat Completions endpoint at the
 explicit `/v1beta/openai` base above ([compatibility guide](https://ai.google.dev/gemini-api/docs/openai)).
 Anthropic uses its native Messages API at `/v1/messages`; its OpenAI SDK compatibility

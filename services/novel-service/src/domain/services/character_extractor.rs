@@ -90,6 +90,98 @@ pub struct ChunkExtractionResult {
     pub relationships: Vec<CharacterRelationship>,
 }
 
+pub const CHARACTER_SUMMARY_SCHEMA_VERSION: &str = "character_extraction_summary_v1";
+pub const CHARACTER_CHUNK_SCHEMA_VERSION: &str = "character_extraction_chunk_v1";
+
+fn non_whitespace_string() -> serde_json::Value {
+    serde_json::json!({"type": "string", "pattern": "\\S"})
+}
+
+fn character_schema() -> serde_json::Value {
+    let properties = serde_json::Map::from_iter([
+        ("name".into(), non_whitespace_string()),
+        (
+            "aliases".into(),
+            serde_json::json!({"type": "array", "items": non_whitespace_string()}),
+        ),
+        (
+            "role".into(),
+            serde_json::json!({
+                "type": "string",
+                "enum": ["protagonist", "antagonist", "supporting", "minor"]
+            }),
+        ),
+        ("description".into(), serde_json::json!({"type": "string"})),
+        ("personality".into(), serde_json::json!({"type": "string"})),
+        ("background".into(), serde_json::json!({"type": "string"})),
+        (
+            "speaking_style".into(),
+            serde_json::json!({"type": "string"}),
+        ),
+        ("appearance".into(), serde_json::json!({"type": "string"})),
+    ]);
+    extraction_item_schema(properties)
+}
+
+fn relationship_schema() -> serde_json::Value {
+    let properties = serde_json::Map::from_iter([
+        ("from_character".into(), non_whitespace_string()),
+        ("to_character".into(), non_whitespace_string()),
+        ("relationship_type".into(), non_whitespace_string()),
+        ("description".into(), non_whitespace_string()),
+        (
+            "strength".into(),
+            serde_json::json!({"type": "integer", "minimum": 0, "maximum": 100}),
+        ),
+    ]);
+    extraction_item_schema(properties)
+}
+
+fn extraction_item_schema(
+    properties: serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Value {
+    let required = properties.keys().cloned().collect::<Vec<_>>();
+    let mut with_chapter = properties.clone();
+    with_chapter.insert(
+        "first_appearance_chapter".into(),
+        serde_json::json!({"type": "integer", "minimum": 1, "maximum": i32::MAX}),
+    );
+    let mut required_with_chapter = required.clone();
+    required_with_chapter.push("first_appearance_chapter".into());
+    serde_json::json!({
+        "anyOf": [
+            {"type": "object", "properties": with_chapter, "required": required_with_chapter, "additionalProperties": false},
+            {"type": "object", "properties": properties, "required": required, "additionalProperties": false}
+        ]
+    })
+}
+
+pub fn summary_response_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "characters": {"type": "array", "items": character_schema()},
+            "relationships": {"type": "array", "items": relationship_schema()},
+            "world_summary": non_whitespace_string(),
+            "genre": non_whitespace_string()
+        },
+        "required": ["characters", "relationships", "world_summary", "genre"],
+        "additionalProperties": false
+    })
+}
+
+pub fn chunk_response_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "characters": {"type": "array", "items": character_schema()},
+            "relationships": {"type": "array", "items": relationship_schema()}
+        },
+        "required": ["characters", "relationships"],
+        "additionalProperties": false
+    })
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("invalid character extraction: {0}")]
 pub struct ExtractionValidationError(String);
@@ -770,6 +862,194 @@ pub(crate) fn text_contains_name(text: &str, name: &str, known_names: &HashSet<&
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn response_schemas_are_versioned_and_match_the_summary_and_chunk_dtos() {
+        let summary = summary_response_schema();
+        let chunk = chunk_response_schema();
+        let summary_dto = serde_json::to_value(ExtractionResult {
+            characters: vec![],
+            world_summary: "world".into(),
+            genre: "fantasy".into(),
+            relationships: vec![],
+        })
+        .unwrap();
+        let chunk_dto = serde_json::to_value(ChunkExtractionResult {
+            characters: vec![],
+            relationships: vec![],
+        })
+        .unwrap();
+        let property_names = |value: &serde_json::Value| {
+            value
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+
+        assert_eq!(
+            CHARACTER_SUMMARY_SCHEMA_VERSION,
+            "character_extraction_summary_v1"
+        );
+        assert_eq!(
+            CHARACTER_CHUNK_SCHEMA_VERSION,
+            "character_extraction_chunk_v1"
+        );
+        assert_eq!(
+            property_names(&summary["properties"]),
+            property_names(&summary_dto)
+        );
+        assert_eq!(
+            property_names(&chunk["properties"]),
+            property_names(&chunk_dto)
+        );
+        assert_eq!(summary["additionalProperties"], false);
+        assert_eq!(chunk["additionalProperties"], false);
+        assert!(summary["properties"].get("world_summary").is_some());
+        assert!(chunk["properties"].get("world_summary").is_none());
+        assert_eq!(
+            summary["required"],
+            serde_json::json!(["characters", "relationships", "world_summary", "genre"])
+        );
+        assert_eq!(
+            chunk["required"],
+            serde_json::json!(["characters", "relationships"])
+        );
+
+        fn check_supported_schema_features(value: &serde_json::Value) {
+            match value {
+                serde_json::Value::Object(object) => {
+                    for forbidden in ["minLength", "maxLength", "minItems", "maxItems"] {
+                        assert!(
+                            !object.contains_key(forbidden),
+                            "unsupported schema key: {forbidden}"
+                        );
+                    }
+                    if object.get("type").and_then(serde_json::Value::as_str) == Some("object") {
+                        assert_eq!(
+                            object
+                                .get("additionalProperties")
+                                .and_then(serde_json::Value::as_bool),
+                            Some(false)
+                        );
+                        let properties = object["properties"].as_object().unwrap();
+                        let required = object["required"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|field| field.as_str().unwrap())
+                            .collect::<std::collections::BTreeSet<_>>();
+                        assert_eq!(required, properties.keys().map(String::as_str).collect());
+                    }
+                    for nested in object.values() {
+                        check_supported_schema_features(nested);
+                    }
+                }
+                serde_json::Value::Array(values) => {
+                    for nested in values {
+                        check_supported_schema_features(nested);
+                    }
+                }
+                _ => {}
+            }
+        }
+        check_supported_schema_features(&summary);
+        check_supported_schema_features(&chunk);
+        assert_eq!(
+            summary["properties"]["characters"]["items"]["anyOf"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            summary["properties"]["relationships"]["items"]["anyOf"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn optional_chapter_citations_remain_omittable_and_validator_owned() {
+        let value = serde_json::json!({
+            "name": "Alice", "aliases": [], "role": "protagonist",
+            "description": "", "personality": "", "background": "",
+            "speaking_style": "", "appearance": ""
+        });
+        let character: ExtractedCharacter = serde_json::from_value(value).unwrap();
+        assert_eq!(character.first_appearance_chapter, None);
+        let result = ExtractionResult {
+            characters: vec![character],
+            world_summary: "world".into(),
+            genre: "fantasy".into(),
+            relationships: vec![],
+        };
+        validate_extraction(&result).unwrap();
+
+        let alternatives = summary_response_schema()["properties"]["characters"]["items"]["anyOf"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(alternatives.len(), 2);
+        assert!(alternatives[0]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "first_appearance_chapter"));
+        assert!(alternatives[1]["properties"]
+            .get("first_appearance_chapter")
+            .is_none());
+        assert_eq!(
+            alternatives[0]["properties"]["first_appearance_chapter"]["minimum"],
+            1
+        );
+        assert_eq!(
+            alternatives[0]["properties"]["first_appearance_chapter"]["type"],
+            "integer"
+        );
+    }
+
+    #[test]
+    fn schema_patterns_cover_non_whitespace_fields_but_leave_descriptions_emptyable() {
+        let summary = summary_response_schema();
+        let character = &summary["properties"]["characters"]["items"]["anyOf"][0]["properties"];
+        let relationship =
+            &summary["properties"]["relationships"]["items"]["anyOf"][0]["properties"];
+        for field in ["name", "world_summary", "genre"] {
+            let schema = match field {
+                "name" => &character["name"],
+                "world_summary" => &summary["properties"]["world_summary"],
+                _ => &summary["properties"]["genre"],
+            };
+            assert_eq!(schema["pattern"], "\\S");
+        }
+        for field in [
+            "from_character",
+            "to_character",
+            "relationship_type",
+            "description",
+        ] {
+            assert_eq!(relationship[field]["pattern"], "\\S");
+        }
+        for field in [
+            "description",
+            "personality",
+            "background",
+            "speaking_style",
+            "appearance",
+        ] {
+            assert!(character[field].get("pattern").is_none());
+        }
+        assert_eq!(
+            character["role"]["enum"],
+            serde_json::json!(["protagonist", "antagonist", "supporting", "minor"])
+        );
+        assert_eq!(relationship["strength"]["minimum"], 0);
+        assert_eq!(relationship["strength"]["maximum"], 100);
+    }
 
     fn character(name: &str, aliases: &[&str], role: &str) -> ExtractedCharacter {
         ExtractedCharacter {

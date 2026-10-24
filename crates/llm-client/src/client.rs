@@ -173,6 +173,7 @@ impl LlmClient {
         let started = Instant::now();
         let (provider, api_key, provider_name, model_name) =
             self.resolve_provider(&request.model)?;
+        provider.validate_response_schema(&request)?;
         if request.operation == LlmOperation::SeriesMatching && provider_name != "deepseek" {
             return Err(crate::UnsupportedSeriesProvider.into());
         }
@@ -270,12 +271,17 @@ impl LlmClient {
                         return Ok(resp);
                     }
                     Err(e) => {
-                        if budget.is_some() && e.is::<crate::providers::openai::InvalidCompletion>()
+                        if (budget.is_some() || req.response_schema.is_some())
+                            && e.is::<crate::providers::openai::InvalidCompletion>()
                         {
                             labels
                                 .attempt("evidence_error", attempt_started.elapsed().as_secs_f64());
                             labels.finish("evidence_error", started);
-                            return Err(BudgetEvidenceError.into());
+                            return if budget.is_some() {
+                                Err(BudgetEvidenceError.into())
+                            } else {
+                                Err(e)
+                            };
                         }
                         if e.is::<ResponseEvidenceError>() {
                             labels
@@ -410,6 +416,9 @@ impl LlmClient {
         request: ChatRequest,
         deadline: Option<TokioInstant>,
     ) -> Result<ChatStream> {
+        if request.response_schema.is_some() {
+            return Err(UnsupportedResponseSchema.into());
+        }
         if request.operation == LlmOperation::SeriesMatching {
             return Err(crate::UnsupportedSeriesProvider.into());
         }

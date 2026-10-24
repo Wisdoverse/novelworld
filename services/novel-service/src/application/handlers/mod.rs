@@ -47,10 +47,11 @@ use crate::domain::services::{
 use crate::domain::services::{
     character_extractor::{
         build_chunk_extraction_prompt, build_extraction_prompt,
-        build_representative_sample_with_limit, build_scan_plan, find_first_appearance,
-        json_object_payload, merge_extractions, needs_chunk_scan, text_contains_name,
-        validate_chunk_extraction, validate_extraction, ChunkExtractionResult, ExtractionResult,
-        ScanChunk, MAX_WORLD_SUMMARY_CHARS,
+        build_representative_sample_with_limit, build_scan_plan, chunk_response_schema,
+        find_first_appearance, json_object_payload, merge_extractions, needs_chunk_scan,
+        summary_response_schema, text_contains_name, validate_chunk_extraction,
+        validate_extraction, ChunkExtractionResult, ExtractionResult, ScanChunk,
+        CHARACTER_CHUNK_SCHEMA_VERSION, CHARACTER_SUMMARY_SCHEMA_VERSION, MAX_WORLD_SUMMARY_CHARS,
     },
     novel_parser::NovelParserService,
 };
@@ -123,6 +124,7 @@ async fn validated_json<T>(
     user_id: Uuid,
     task: NovelLlmTask,
     prompt: &str,
+    schema: Option<(&str, &serde_json::Value)>,
     validate: impl Fn(&T) -> Result<()>,
 ) -> Result<T>
 where
@@ -133,9 +135,15 @@ where
     for attempt in 1..=3 {
         // Transport retries already live in the shared client. This loop is
         // only for a fresh model response after JSON/schema validation fails.
-        let raw = budget
-            .chat_json(llm, user_id, task, &current_prompt)
-            .await?;
+        let raw = if let Some((name, schema)) = schema {
+            budget
+                .chat_json_with_schema(llm, user_id, task, &current_prompt, name, schema)
+                .await?
+        } else {
+            budget
+                .chat_json(llm, user_id, task, &current_prompt)
+                .await?
+        };
         let result = serde_json::from_str::<T>(json_object_payload(&raw))
             .map_err(anyhow::Error::from)
             .and_then(|value| {
@@ -172,6 +180,7 @@ async fn extract_character_summary(
             user_id,
             NovelLlmTask::CharacterExtraction,
             &prompt,
+            Some((CHARACTER_SUMMARY_SCHEMA_VERSION, &summary_response_schema())),
             |result: &ExtractionResult| validate_extraction(result).map_err(Into::into),
         )
         .await
@@ -210,6 +219,7 @@ async fn extract_character_scan_chunk(
             user_id,
             NovelLlmTask::CharacterExtraction,
             &prompt,
+            Some((CHARACTER_CHUNK_SCHEMA_VERSION, &chunk_response_schema())),
             |result: &ChunkExtractionResult| validate_chunk_extraction(result).map_err(Into::into),
         )
         .await
@@ -247,6 +257,58 @@ fn canon_retry_prompt(base_prompt: &str, validation_error: &str) -> String {
 mod validated_json_tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct SchemaOnly(AtomicUsize);
+    #[async_trait::async_trait]
+    impl LlmPort for SchemaOnly {
+        async fn chat_json(&self, _: Uuid, _: NovelLlmTask, _: &str) -> Result<String> {
+            panic!("schema call must reach the schema-aware port");
+        }
+        async fn chat_json_with_schema(
+            &self,
+            _: Uuid,
+            _: NovelLlmTask,
+            _: &str,
+            name: &str,
+            schema: &serde_json::Value,
+        ) -> Result<String> {
+            assert_eq!(name, CHARACTER_SUMMARY_SCHEMA_VERSION);
+            assert_eq!(*schema, summary_response_schema());
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(r#"{"ok":true}"#.into())
+        }
+    }
+    #[tokio::test]
+    async fn schema_dispatch_spends_one_import_slot_without_a_legacy_call() {
+        let llm = SchemaOnly(AtomicUsize::new(0));
+        let budget = ImportLlmDispatchBudget::new(1);
+        let schema = summary_response_schema();
+        let value: serde_json::Value = validated_json(
+            &llm,
+            &budget,
+            Uuid::nil(),
+            NovelLlmTask::CharacterExtraction,
+            "source",
+            Some((CHARACTER_SUMMARY_SCHEMA_VERSION, &schema)),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(value["ok"], true);
+        let error = budget
+            .chat_json_with_schema(
+                &llm,
+                Uuid::nil(),
+                NovelLlmTask::CharacterExtraction,
+                "source",
+                CHARACTER_SUMMARY_SCHEMA_VERSION,
+                &schema,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.is::<ImportBudgetExceeded>());
+        assert_eq!(llm.0.load(Ordering::Relaxed), 1);
+    }
 
     struct InvalidThenValid {
         calls: AtomicUsize,
@@ -400,6 +462,7 @@ mod validated_json_tests {
             Uuid::nil(),
             NovelLlmTask::CharacterExtraction,
             "prompt",
+            None,
             |_| Ok(()),
         )
         .await
@@ -423,6 +486,7 @@ mod validated_json_tests {
             Uuid::nil(),
             NovelLlmTask::CharacterExtraction,
             "prompt",
+            None,
             |_| Ok(()),
         )
         .await
@@ -1330,6 +1394,20 @@ impl ImportLlmDispatchBudget {
         self.spend()?;
         llm.chat_json(user_id, task, prompt).await
     }
+
+    async fn chat_json_with_schema(
+        &self,
+        llm: &dyn LlmPort,
+        user_id: Uuid,
+        task: NovelLlmTask,
+        prompt: &str,
+        schema_name: &str,
+        schema: &serde_json::Value,
+    ) -> Result<String> {
+        self.spend()?;
+        llm.chat_json_with_schema(user_id, task, prompt, schema_name, schema)
+            .await
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2230,6 +2308,7 @@ impl NovelCommandHandler {
                                 user_id,
                                 NovelLlmTask::ChapterBoundaryDetection,
                                 &prompt,
+                                None,
                                 |result| {
                                     chapter_boundary_detector::validate_detection(
                                         result,
@@ -2426,6 +2505,7 @@ impl NovelCommandHandler {
             claim.user_id,
             NovelLlmTask::NarrativeNodeDetection,
             &node_prompt,
+            None,
             |result| {
                 node_detector::validate_detection(result, chapter_numbers.iter().copied())
                     .map_err(Into::into)

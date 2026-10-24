@@ -108,6 +108,9 @@ async fn run_body() -> Result<()> {
         // (empty outside a request, the propagated X-Trace-Id while handling one).
 
         dotenvy::dotenv().ok();
+        let character_output_mode = llm_client::CharacterOutputMode::parse(
+            &std::env::var("LLM_CHARACTER_OUTPUT_MODE").unwrap_or_else(|_| "legacy-json".into()),
+        )?;
         let metrics = llm_client::install_metrics("novel-service")?;
         let internal_service_token =
             std::env::var("INTERNAL_SERVICE_TOKEN").expect("INTERNAL_SERVICE_TOKEN must be set");
@@ -121,9 +124,10 @@ async fn run_body() -> Result<()> {
 
         tracing::info!("Connected to PostgreSQL");
 
-        let llm_adapter = Arc::new(LlmAdapter::new(Arc::new(
-            llm_client::RuntimeLlmClient::from_env()?,
-        )));
+        let llm_adapter = Arc::new(
+            LlmAdapter::new(Arc::new(llm_client::RuntimeLlmClient::from_env()?))
+                .with_character_output_mode(character_output_mode),
+        );
 
         let image_client = Arc::new(ImageClient::new(
             std::env::var("IMAGE_GEN_API_URL").unwrap_or_else(|_| "https://api.openai.com".into()),
