@@ -484,13 +484,30 @@ repository digests, and filesystem layers. Record ELF hashes for all five Rust
 services. Record complete compiled and served frontend file maps. Derive fresh
 `world-turn-v4` prompt, Canon, branch, and schema bindings. Preserve the native
 affected-layer predicate. At least one affected application image must change
-its digest, image ID, and filesystem layers together. When frontend build inputs
-differ between B and C, require real compiled and served frontend byte changes,
-with matching frontend digest, image ID, and filesystem-layer changes. A
-genuinely Rust-only pair may retain unchanged frontend bytes only when an
-independent review proves that all frontend build inputs are identical. A mixed
+its digest, image ID, and filesystem layers together. When web frontend build or
+runtime inputs differ between B and C, require real compiled and served frontend
+byte changes. Require corresponding changes to the frontend digest, image ID,
+and filesystem layers. A genuinely Rust-only pair may retain unchanged frontend
+bytes only when independent review proves all web inputs identical under the
+classification below. A mixed
 Rust/frontend pair cannot use its Rust change to bypass the frontend byte-change
-requirement. For both releases, retain fresh source-equivalence and artifact
+requirement.
+
+For a Linux/web runtime pair, record the complete copied frontend-context diff.
+Independent review may exclude an exact path only if the desktop build alone
+uses it beyond the context copy. Check build scripts, plugins, pinned content
+scanners, generators, dependency resolution, explicit source overrides, and
+runtime copies. Directory names and unchanged imports are not proof. All
+remaining web source, dependencies, toolchains, build arguments, image recipes,
+and runtime configuration must be identical. Require complete compiled and
+served maps and HTTP equality, plus the required desktop CI for changed desktop
+inputs. Equal outputs alone are insufficient. Unknown use, incomplete coverage,
+or unexplained output differences block this exclusion. Web-input changes
+retain the frontend byte-change requirement. Apply this exclusion only in fresh
+reviews under this policy revision. Historical findings, registrations, and
+terminal results keep their original rules.
+
+For both releases, retain fresh source-equivalence and artifact
 evidence, complete compiled and served frontend maps, and HTTP coverage.
 Unchanged bytes do not transfer earlier admission. Record all five Rust outputs
 honestly. Shared Rust inputs may

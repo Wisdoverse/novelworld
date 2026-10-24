@@ -326,14 +326,15 @@ to the recorded source pair and inputs. A change requires a new review. Source
 eligibility does not transfer historical evidence, renew a frozen or consumed
 registration, or claim live or formal qualification.
 
-For a genuinely Rust-only V7 pair, unchanged frontend bytes are allowed only
-when independent review proves that all frontend build inputs are identical.
-Whenever frontend build inputs differ, require changed compiled and served
-frontend maps and the corresponding frontend filesystem layer. A mixed
-Rust/frontend pair cannot bypass this requirement. A dependency-only frontend
-pair still requires different full maps of compiled and served assets, plus a
-changed corresponding frontend filesystem layer. Historical C→B artifacts and
-Frozen records retain their original identities and results.
+For V7 web frontend inputs, use the Qualification Policy's path classification
+and byte-change rules. Unchanged frontend bytes require independent review of
+identical web inputs, complete compiled and served maps, and HTTP equality.
+Require proof that no web build or runtime consumer uses each excluded desktop
+path beyond its context copy. Directory exemptions are not allowed. Keep
+required desktop CI. Web-input changes, including web dependency changes,
+require different full compiled and served maps and the corresponding frontend
+filesystem layer. A Rust change cannot bypass this requirement. Historical C→B
+artifacts and Frozen records retain their original rules, identities, and results.
 
 For Vision journey tooling changes, also run
 `python3 tests/e2e/live_deepseek_journey.py --self-test`. CI runs
