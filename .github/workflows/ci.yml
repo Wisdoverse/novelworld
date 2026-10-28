@@ -401,6 +401,7 @@ jobs:
           echo "RUNTIME_CONFIG_KEY=$runtime_key" >> "$GITHUB_ENV"
           echo "INTERNAL_SERVICE_TOKEN=$internal_token" >> "$GITHUB_ENV"
       - name: Build and wait for the minimum production topology
+        id: production_topology
         run: |
           docker compose -f docker-compose.yml up -d --build --wait --wait-timeout 180
           test -z "$(docker ps -a --filter name=^/novel-redis$ --format '{{.Names}}')"
@@ -636,6 +637,7 @@ jobs:
           BACKUP_ENCRYPTION_KEY: runtime-drill-backup-key-at-least-32-characters
         run: tests/e2e/backup_restore_drill.sh
       - name: Start the S3 source-retention topology
+        id: s3_topology
         if: env.RUN_EXTENDED_DRILLS == 'true'
         run: |
           docker compose -f docker-compose.yml -f docker-compose.e2e.yml --profile redis down -v
@@ -660,10 +662,10 @@ jobs:
         if: env.RUN_EXTENDED_DRILLS == 'true'
         run: tests/e2e/bad_release_drill.sh
       - name: Show S3 topology logs on failure
-        if: failure() && env.RUN_EXTENDED_DRILLS == 'true'
+        if: failure() && env.RUN_EXTENDED_DRILLS == 'true' && steps.s3_topology.outcome != '' && steps.s3_topology.outcome != 'skipped'
         run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml --profile redis logs --no-color || true
       - name: Stop the S3 source-retention topology
-        if: always() && env.RUN_EXTENDED_DRILLS == 'true'
+        if: always() && env.RUN_EXTENDED_DRILLS == 'true' && steps.s3_topology.outcome != '' && steps.s3_topology.outcome != 'skipped'
         run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml -f docker-compose.s3-e2e.yml --profile redis down -v
       - name: Reset production topology for the capacity profile
         if: env.RUN_EXTENDED_DRILLS == 'true'
@@ -695,10 +697,10 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       - name: Show logs on failure
-        if: failure()
+        if: failure() && steps.production_topology.outcome != '' && steps.production_topology.outcome != 'skipped'
         run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml --profile redis logs --no-color || true
       - name: Stop production topology
-        if: always()
+        if: always() && steps.production_topology.outcome != '' && steps.production_topology.outcome != 'skipped'
         run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml --profile redis down -v
 
   required:
