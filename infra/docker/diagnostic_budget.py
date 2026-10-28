@@ -197,7 +197,11 @@ def embedding_overlay(profile_bytes, state, root, registration_input=None):
              if registration_input is not None else profile["embedding_runtime_image"])
     require(isinstance(image, str) and re.fullmatch(
         r"[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}", image))
-    encoded = json.dumps({"services": {"embedding": {"image": image}}},
+    service = {"image": image}
+    if registration_input is not None:
+        # The captured V7 helper must also limit threads on the older baseline.
+        service["environment"] = {"RAYON_NUM_THREADS": "4", "MKL_NUM_THREADS": "4"}
+    encoded = json.dumps({"services": {"embedding": service}},
                          sort_keys=True, separators=(",", ":")).encode() + b"\n"
     require(len(encoded) <= MAX_OUTPUT)
     state, root = Path(state), Path(root).resolve()

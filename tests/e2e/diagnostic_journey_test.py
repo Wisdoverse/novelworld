@@ -1152,6 +1152,7 @@ die() { exit 1; }
     def test_local_diagnostic_native_compose_uses_captured_profile_image(self):
         selected = {}
         expected = {}
+        thread_limits = {"RAYON_NUM_THREADS": "4", "MKL_NUM_THREADS": "4"}
         for value in (self.v5_value(), self.v6_value(), self.v7_value()):
             journey = self.journey(value)
             # This checks native config only, with synthetic registration data.
@@ -1165,8 +1166,12 @@ die() { exit 1; }
             profile = journey.release_tool.parents[2] / CONTROL.profile_path(value["schema"])
             image = journey.diagnostic_registration.infrastructure_images["EMBEDDING_IMAGE"]
             name = value["schema"]
-            selected[name + ":journey"] = json.loads(journey.compose(
-                "config", "--format", "json", "embedding"))["services"]["embedding"]["image"]
+            service = json.loads(journey.compose(
+                "config", "--format", "json", "embedding"))["services"]["embedding"]
+            selected[name + ":journey"] = service["image"]
+            if value["schema"] == CONTROL.REGISTRATION_SCHEMA_V7:
+                self.assertEqual({key: service["environment"].get(key) for key in thread_limits},
+                                 thread_limits)
             source = journey.release_tool.read_text()
             diagnostic_function = source[source.index("diagnostic() {\n"):
                                          source.index("\ndiagnostic_preflight()")]
@@ -1194,20 +1199,34 @@ if [[ -n "${RELEASE_DIAGNOSTIC_REGISTRATION_SHA256:-}" ]]; then
 fi
 compose config --format json embedding
 """
-            rendered = subprocess.run(["bash", "-c", script], capture_output=True, timeout=30,
-                env={**journey.compose_env, **journey.diagnostic_registration.environment(),
+            render_environment = {**journey.compose_env, **journey.diagnostic_registration.environment(),
                      "TEST_ROOT": str(journey.runtime_root), "TEST_STATE": str(journey.release_state),
                      "TEST_MANIFEST": str(journey.compose_manifest()), "TEST_PROJECT": journey.project,
                      "TEST_HELPER": str(journey.release_tool.parent / "diagnostic_budget.py"),
-                     "TEST_PROFILE": str(profile)})
+                     "TEST_PROFILE": str(profile)}
+            rendered = subprocess.run(["bash", "-c", script], capture_output=True, timeout=30,
+                                      env=render_environment)
             self.assertEqual(rendered.returncode, 0, "native release config failed")
-            selected[name + ":release"] = json.loads(rendered.stdout)["services"]["embedding"]["image"]
+            service = json.loads(rendered.stdout)["services"]["embedding"]
+            selected[name + ":release"] = service["image"]
             expected.update({name + ":journey": image, name + ":release": image})
             if value["schema"] == CONTROL.REGISTRATION_SCHEMA_V7:
+                self.assertEqual({key: service["environment"].get(key) for key in thread_limits},
+                                 thread_limits)
                 RUNNER.git(journey.runtime_root, "checkout", "--detach",
                            "ac04165dd13b210876dcb4d1a736b1c99f128f39")
-                selected[name + ":base"] = json.loads(journey.compose(
-                    "config", "--format", "json", "embedding"))["services"]["embedding"]["image"]
+                service = json.loads(journey.compose(
+                    "config", "--format", "json", "embedding"))["services"]["embedding"]
+                selected[name + ":base"] = service["image"]
+                self.assertEqual({key: service["environment"].get(key) for key in thread_limits},
+                                 thread_limits)
+                rendered = subprocess.run(["bash", "-c", script], capture_output=True, timeout=30,
+                                          env=render_environment)
+                self.assertEqual(rendered.returncode, 0, "native baseline release config failed")
+                service = json.loads(rendered.stdout)["services"]["embedding"]
+                self.assertEqual(service["image"], image)
+                self.assertEqual({key: service["environment"].get(key) for key in thread_limits},
+                                 thread_limits)
                 expected[name + ":base"] = image
             self.assertEqual(RUNNER.git(journey.runtime_root, "status", "--porcelain"), "")
             overlay = journey.release_state / "diagnostic-embedding.compose.json"
@@ -1245,6 +1264,8 @@ compose config --format json embedding
             self.assertEqual("embedding" in services, explicit)
             if explicit:
                 self.assertIn(":cpu-1.9.4@sha256:", services["embedding"]["image"])
+                self.assertEqual(services["embedding"]["environment"], thread_limits)
+                self.assertEqual(float(services["embedding"]["cpus"]), 4)
 
     def test_embedding_overlay_is_private_pure_and_rejects_conflicts(self):
         state = self.directory / "embedding-state"
@@ -1639,17 +1660,20 @@ compose config --format json embedding
 
     def test_v5_v6_prestart_proves_keyless_pinned_runtime_and_vector(self):
         cases = []
-        for path in (CONTROL.PROFILE_PATH_V3, CONTROL.PROFILE_PATH_V4):
+        for schema, path in ((CONTROL.REGISTRATION_SCHEMA_V5, CONTROL.PROFILE_PATH_V3),
+                             (CONTROL.REGISTRATION_SCHEMA_V6, CONTROL.PROFILE_PATH_V4)):
             profile = json.loads((ROOT / path).read_bytes())
-            cases.append((path, {"EMBEDDING_IMAGE": profile["embedding_runtime_image"],
+            cases.append((schema, path, {"EMBEDDING_IMAGE": profile["embedding_runtime_image"],
                                  "NGINX_IMAGE": profile["embedding_probe_image"]}))
-        cases.append((CONTROL.PROFILE_PATH_V4, self.load(self.v7_value()).infrastructure_images))
-        for path, images in cases:
+        cases.append((CONTROL.REGISTRATION_SCHEMA_V7, CONTROL.PROFILE_PATH_V4,
+                      self.load(self.v7_value()).infrastructure_images))
+        for schema, path, images in cases:
             profile = json.loads((ROOT / path).read_bytes())
             journey = object.__new__(RUNNER.Journey)
             journey.local_embedding = True
             journey.project = journey.prefix = "nwq-abcdef1234"
-            journey.diagnostic_registration = mock.Mock(profile=profile, infrastructure_images=images)
+            journey.diagnostic_registration = mock.Mock(
+                profile=profile, infrastructure_images=images, value={"schema": schema})
             journey.private_report = {}
             journey.report = {"stages": []}
             journey.current_stage = "preflight"
@@ -1659,6 +1683,8 @@ compose config --format json embedding
             journey.adopt_initial_release = mock.Mock()
             journey.compose = mock.Mock()
             tei_id, nginx_id = "sha256:" + "a" * 64, "sha256:" + "b" * 64
+            environment = (["RAYON_NUM_THREADS=4", "MKL_NUM_THREADS=4"]
+                           if schema == CONTROL.REGISTRATION_SCHEMA_V7 else ["RAYON_NUM_THREADS=8"])
             command = [
                 "--model-id", profile["embedding_model"],
                 "--revision", profile["embedding_model_revision"],
@@ -1674,7 +1700,7 @@ compose config --format json embedding
                 if kind == "container" and name.endswith("-embedding"):
                     return {
                         "Image": tei_id,
-                        "Config": {"Image": images["EMBEDDING_IMAGE"], "Cmd": command,
+                        "Config": {"Image": images["EMBEDDING_IMAGE"], "Cmd": command, "Env": environment,
                                    "Labels": {"com.docker.compose.project": journey.project}},
                         "HostConfig": {"PortBindings": {}},
                         "Mounts": [{"Type": "volume", "Destination": "/data", "Name": "cache"}],
@@ -1753,6 +1779,24 @@ compose config --format json embedding
             )
             self.assertTrue(all("Authorization" not in command for command, _ in calls))
             self.assertEqual(list(self.output.iterdir()), [])
+
+            if schema == CONTROL.REGISTRATION_SCHEMA_V7:
+                for environment in (None, {}, [], [7], ["RAYON_NUM_THREADS=4"],
+                                    ["RAYON_NUM_THREADS=4", "MKL_NUM_THREADS=8"],
+                                    ["RAYON_NUM_THREADS=8", "MKL_NUM_THREADS=4"],
+                                    ["RAYON_NUM_THREADS=4", "MKL_NUM_THREADS=4", "MKL_NUM_THREADS=4"],
+                                    ["RAYON_NUM_THREADS=4", "MKL_NUM_THREADS=4", "RAYON_NUM_THREADS=4"]):
+                    with self.subTest(environment=environment), \
+                            mock.patch.object(RUNNER, "docker_inspect", side_effect=inspect), \
+                            mock.patch.object(RUNNER.diagnostic, "bounded_command") as probe:
+                        with self.assertRaises(RUNNER.QualificationFailure) as invalid:
+                            journey.prestart_v5()
+                        self.assertEqual(invalid.exception.code, "local_embedding_thread_limits_invalid")
+                        probe.assert_not_called()
+                environment = ["PATH=/usr/bin", "MKL_NUM_THREADS=4", "RAYON_NUM_THREADS=4"]
+                with mock.patch.object(RUNNER, "docker_inspect", side_effect=inspect), \
+                        mock.patch.object(RUNNER.diagnostic, "bounded_command", side_effect=bounded):
+                    journey.prestart_v5()
 
             for invalid_response in (None, [], "not-an-object"):
                 with self.subTest(profile=path, response=invalid_response):
