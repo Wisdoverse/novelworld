@@ -2164,7 +2164,7 @@ compose config --format json embedding
         self.assertEqual(identities["base"], identities["candidate"])
         # Current source can differ from the frozen legacy journey defaults.
         self.assertEqual(identities["candidate"]["prompt_versions"], {
-            "canon": "canon-chunk-v11+event-grouping-v5", "branch": RUNNER.EXPECTED_BRANCH_PROMPT,
+            "canon": "canon-chunk-v12+event-grouping-v5", "branch": RUNNER.EXPECTED_BRANCH_PROMPT,
             "world": RUNNER.EXPECTED_WORLD_PROMPT,
         })
         self.assertIn("infra/postgres", identities["base"]["source_trees"])
