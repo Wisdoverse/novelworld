@@ -4336,6 +4336,15 @@ class Journey:
                            for flag, value in required_args.items())):
                 raise QualificationFailure("local_embedding_runtime_identity_invalid")
 
+            if self.diagnostic_registration.value["schema"] == diagnostic.REGISTRATION_SCHEMA_V7:
+                environment = config.get("Env")
+                if (not isinstance(environment, list)
+                        or not all(isinstance(value, str) for value in environment)
+                        or sorted(value for value in environment if value.partition("=")[0]
+                                  in {"RAYON_NUM_THREADS", "MKL_NUM_THREADS"})
+                        != ["MKL_NUM_THREADS=4", "RAYON_NUM_THREADS=4"]):
+                    raise QualificationFailure("local_embedding_thread_limits_invalid")
+
             def checked_command(step: str, argv: list[str], *, payload: bytes = b"") -> bytes:
                 try:
                     return diagnostic.bounded_command(argv, stdin=payload)

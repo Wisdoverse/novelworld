@@ -385,6 +385,13 @@ images. Both Compose callers and prestart resolve TEI and Nginx from this
 binding. The original profile image fields and bytes remain frozen; V1–V6
 cannot add this field or replace their image identities.
 
+The V7 embedding overlay sets both `RAYON_NUM_THREADS` and `MKL_NUM_THREADS`
+to `4`, matching the local service's four-CPU quota. The captured helper applies
+these limits to the baseline and candidate. Prestart rejects missing, duplicate,
+or changed thread settings before the probe. Older profile-only overlays keep
+their existing bytes. Changed source and configuration need fresh evidence;
+this setting does not qualify an earlier registration or extend its deadlines.
+
 The runner copies the canonical V7 registration to a private file beside its
 captured release adapter, outside the changing checkout. It supplies the
 already-approved `RELEASE_DIAGNOSTIC_REGISTRATION_SHA256` and removes any

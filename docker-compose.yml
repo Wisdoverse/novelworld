@@ -113,6 +113,9 @@ services:
     container_name: ${CONTAINER_PREFIX:-novel}-embedding
     restart: unless-stopped
     logging: *bounded-logs
+    environment:
+      RAYON_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
     command:
       - --model-id
       - Qwen/Qwen3-Embedding-0.6B
