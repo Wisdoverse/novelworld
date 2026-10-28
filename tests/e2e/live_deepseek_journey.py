@@ -4155,12 +4155,14 @@ class Journey:
             )
 
     def source_prompt_versions(self, release: str) -> dict[str, str]:
+        registration = self.diagnostic_registration
         cohort = getattr(self, "cohort_manifest", None) or {}
-        if cohort.get("manifest_version") != "h4-cohort-v2":
+        if registration is None and cohort.get("manifest_version") != "h4-cohort-v2":
             return {"canon": EXPECTED_CANON_PROMPT, "branch": EXPECTED_BRANCH_PROMPT,
                     "world": EXPECTED_WORLD_PROMPT}
         try:
-            versions = cohort["identity"]["prompt_schema_identities"][release]["prompt_versions"]
+            identity = registration.value if registration is not None else cohort["identity"]
+            versions = identity["prompt_schema_identities"][release]["prompt_versions"]
         except (KeyError, TypeError):
             raise QualificationFailure("prompt_identity_mismatch") from None
         if (not isinstance(versions, dict) or set(versions) != {"canon", "branch", "world"}
@@ -4216,20 +4218,8 @@ class Journey:
             # Preflight bound these identities to the exact base/candidate
             # commits and manifests. Reuse that immutable registration rather
             # than relabeling historical base turns with the current prompt.
-            try:
-                if self.diagnostic_registration is not None:
-                    identities = self.diagnostic_registration.value["prompt_schema_identities"]
-                    base = identities["base"]["prompt_versions"]["world"]
-                    candidate = identities["candidate"]["prompt_versions"]["world"]
-                else:
-                    base = self.source_prompt_versions("base")["world"]
-                    candidate = self.source_prompt_versions("candidate")["world"]
-            except (KeyError, TypeError):
-                raise QualificationFailure("prompt_identity_mismatch") from None
-            if any(not isinstance(version, str)
-                   or re.fullmatch(r"[a-z0-9+_-]{1,100}", version) is None
-                   for version in (base, candidate)):
-                raise QualificationFailure("prompt_identity_mismatch")
+            base = self.source_prompt_versions("base")["world"]
+            candidate = self.source_prompt_versions("candidate")["world"]
             # The unchanged journey commits turns 1-6 before upgrade and
             # turns 7-12 after upgrade; persisted expected_turn_number is zero based.
             observed = self.db_scalar(

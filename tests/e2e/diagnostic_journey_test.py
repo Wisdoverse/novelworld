@@ -2213,8 +2213,12 @@ compose config --format json embedding
         journey.cohort_manifest = None
         registration_value = {
             "prompt_schema_identities": {
-                "base": {"prompt_versions": {"world": "world-turn-v2"}},
-                "candidate": {"prompt_versions": {"world": "world-turn-v3"}},
+                "base": {"prompt_versions": {
+                    "canon": RUNNER.EXPECTED_CANON_PROMPT,
+                    "branch": RUNNER.EXPECTED_BRANCH_PROMPT, "world": "world-turn-v2"}},
+                "candidate": {"prompt_versions": {
+                    "canon": "canon-chunk-v12+event-grouping-v5",
+                    "branch": "narrative-transition-v3", "world": "world-turn-v3"}},
             },
         }
         journey.diagnostic_registration = (
@@ -2326,6 +2330,62 @@ compose config --format json embedding
         self.assertEqual(CONTROL.canonical(registration), frozen)
         self.assertEqual(journey.report["journey"]["prompt_identity"]["world"],
                          {"base": "world-turn-v2", "candidate": "world-turn-v3"})
+
+    def test_registered_canon_and_branch_use_bound_baseline_versions(self):
+        rows = [(number, "world-turn-v2" if number < 6 else "world-turn-v3")
+                for number in range(12)]
+        canon = "canon-chunk-v11+event-grouping-v5"
+        branch = "narrative-transition-v2"
+        journey, registration = self.prompt_identity_journey(
+            rows, registered=True, canon_versions=[canon], branch_versions=[branch])
+        registration["prompt_schema_identities"]["base"]["prompt_versions"].update(
+            canon=canon, branch=branch)
+        frozen = CONTROL.canonical(registration)
+        with mock.patch.object(RUNNER.diagnostic, "source_identities") as identities:
+            journey.verify_prompt_identity("novel", include_world=True)
+        identities.assert_not_called()
+        self.assertEqual(CONTROL.canonical(registration), frozen)
+        self.assertEqual(journey.report["journey"]["prompt_identity"], {
+            "canon": canon, "branch": branch,
+            "world": {"base": "world-turn-v2", "candidate": "world-turn-v3"},
+        })
+
+    def test_registered_canon_and_branch_reject_wrong_empty_and_mixed_facts(self):
+        canon = "canon-chunk-v11+event-grouping-v5"
+        branch = "narrative-transition-v2"
+        candidate_canon = "canon-chunk-v12+event-grouping-v5"
+        candidate_branch = "narrative-transition-v3"
+        for canon_rows, branch_rows in (
+            ([RUNNER.EXPECTED_CANON_PROMPT], [RUNNER.EXPECTED_BRANCH_PROMPT]),
+            ([RUNNER.EXPECTED_CANON_PROMPT], [branch]),
+            ([canon], [RUNNER.EXPECTED_BRANCH_PROMPT]),
+            ([candidate_canon], [branch]), ([canon], [candidate_branch]),
+            ([], [branch]), ([canon], []),
+            ([canon, candidate_canon], [branch]), ([canon], [branch, candidate_branch]),
+        ):
+            with self.subTest(canon=canon_rows, branch=branch_rows):
+                journey, registration = self.prompt_identity_journey(
+                    [], registered=True, canon_versions=canon_rows, branch_versions=branch_rows)
+                registration["prompt_schema_identities"]["base"]["prompt_versions"].update(
+                    canon=canon, branch=branch)
+                with self.assertRaises(RUNNER.QualificationFailure) as rejected:
+                    journey.verify_prompt_identity("novel", include_world=False)
+                self.assertEqual(rejected.exception.code, "prompt_identity_mismatch")
+
+    def test_registered_prompts_reject_missing_malformed_and_injected_versions(self):
+        for metadata in ({}, {"base": None}, {"base": {"prompt_versions": []}}):
+            journey, registration = self.prompt_identity_journey([], registered=True)
+            registration["prompt_schema_identities"] = metadata
+            with self.assertRaises(RUNNER.QualificationFailure):
+                journey.source_prompt_versions("base")
+        for release in ("base", "candidate"):
+            for name in ("canon", "branch", "world"):
+                for malformed in (None, "", "x" * 101, "v1' OR '1'='1"):
+                    journey, registration = self.prompt_identity_journey([], registered=True)
+                    registration["prompt_schema_identities"][release]["prompt_versions"][name] = malformed
+                    with self.subTest(release=release, name=name, value=malformed), \
+                         self.assertRaises(RUNNER.QualificationFailure):
+                        journey.source_prompt_versions(release)
 
     def test_registered_world_prompts_reject_swapped_unknown_and_wrong_stage_rows(self):
         valid = [(number, "world-turn-v2" if number < 6 else "world-turn-v3")
