@@ -167,10 +167,16 @@ class ReleaseImageDigestTest(unittest.TestCase):
             output = subprocess.run([str(target / "release" / name)], capture_output=True,
                                     text=True, check=True, timeout=10).stdout.strip()
             self.assertEqual(output, "source-A:policy-A:leaf")
-        leaf_artifacts = list((target / "release/deps").glob("libcached_leaf-*.rlib"))
-        self.assertTrue(leaf_artifacts)
-        retained = {path.name: (path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).digest())
-                    for path in leaf_artifacts}
+
+        def leaf_artifacts():
+            # Cargo 1.100 moved dependency rlibs from release/deps to
+            # release/build/<package>/<hash>/out; the build-dir layout is unstable.
+            return {str(path.relative_to(target)):
+                    (path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).digest())
+                    for path in target.rglob("libcached_leaf-*.rlib")}
+
+        retained = leaf_artifacts()
+        self.assertTrue(retained, "non-workspace dependency artifact missing")
         for path, value in ((module, 'pub fn label() -> &\'static str { "source-B" }\n'),
                             (policy, "policy-B")):
             old_mtime = path.stat().st_mtime_ns
@@ -182,10 +188,8 @@ class ReleaseImageDigestTest(unittest.TestCase):
             output = subprocess.run([str(target / "release" / name)], capture_output=True,
                                     text=True, check=True, timeout=10).stdout.strip()
             self.assertEqual(output, "source-B:policy-B:leaf", "stale native artifact: " + name)
-        self.assertEqual(retained, {
-            path.name: (path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).digest())
-            for path in (target / "release/deps").glob("libcached_leaf-*.rlib")
-        }, "non-workspace dependency artifacts must stay cached")
+        self.assertEqual(retained, leaf_artifacts(),
+                         "non-workspace dependency artifacts must stay cached")
 
     def test_publication_is_new_tag_push_only(self):
         workflow = WORKFLOW.read_text()
