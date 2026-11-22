@@ -262,6 +262,11 @@ release 前向修复。此要求是 rollout 契约，不代表该迁移已在生
 历史部分迁移。`tests/integration/tests/legacy_migration.rs` 中的全迁移重放回归覆盖显式移除
 后的保留行为；Issue #424 记录最终 CI 与 live 部署证据。
 
+Migration 0007 replay derives lore chunks only for chapters without any
+`chapter_chunks` row. It does not repair a stale or partial chunk set; novel
+service rewrites a chapter's chunks when it saves that chapter. Direct migration
+still requires stopped application writers.
+
 若受管停机后只需重开已经存在的 Nginx 容器，本机 Compose `start --help` 不提供
 `--no-deps`；确认只返回一个 Nginx 容器 ID 后再使用：
 
