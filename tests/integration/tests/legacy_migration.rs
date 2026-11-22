@@ -247,8 +247,62 @@ async fn diagnostic_budget_schema_signature(pool: &sqlx::PgPool) -> DiagnosticBu
     }
 }
 
+type ChunkRow = (uuid::Uuid, i32, String, String, String);
+
+/// Models the 0007 backfill statement, not the novel-service splitter.
+fn sql_backfill_model(content: &str) -> Vec<(i32, String)> {
+    let chars: Vec<char> = content.chars().collect();
+    (0..chars.len().max(1))
+        .step_by(1050)
+        .filter_map(|start| {
+            let end = (start + 1200).min(chars.len());
+            let piece: String = chars[start.min(end)..end].iter().collect();
+            // PostgreSQL btrim with one argument strips only spaces.
+            let piece = piece.trim_matches(' ');
+            (!piece.is_empty()).then(|| ((start / 1050) as i32, piece.to_owned()))
+        })
+        .collect()
+}
+
+async fn chunk_rows(pool: &sqlx::PgPool, chapter: uuid::Uuid) -> Vec<ChunkRow> {
+    sqlx::query_as(
+        "SELECT id, chunk_index, content, ctid::TEXT, xmax::TEXT \
+         FROM chapter_chunks WHERE chapter_id = $1 ORDER BY chunk_index",
+    )
+    .bind(chapter)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn all_chunk_rows(pool: &sqlx::PgPool) -> Vec<ChunkRow> {
+    sqlx::query_as(
+        "SELECT id, chunk_index, content, ctid::TEXT, xmax::TEXT \
+         FROM chapter_chunks ORDER BY chapter_id, chunk_index",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+fn indexed_content(rows: &[ChunkRow]) -> Vec<(i32, String)> {
+    rows.iter().map(|row| (row.1, row.2.clone())).collect()
+}
+
+fn indexed_lengths(rows: &[ChunkRow]) -> Vec<(i32, usize)> {
+    rows.iter()
+        .map(|row| (row.1, row.2.chars().count()))
+        .collect()
+}
+
 #[tokio::test]
-async fn lore_migration_repairs_chunks_without_locking_unchanged_rows() {
+async fn lore_migration_backfills_only_chapters_without_chunks() {
+    use novel_service::domain::{
+        entities::{chapter::Chapter, novel::Novel},
+        repositories::NovelRepository,
+    };
+    use novel_service::infrastructure::persistence::novel_pg_repo::NovelPgRepository;
+
     let admin = PgPoolOptions::new()
         .max_connections(1)
         .connect(&db_url())
@@ -274,7 +328,6 @@ async fn lore_migration_repairs_chunks_without_locking_unchanged_rows() {
 
     let user = uuid::Uuid::new_v4();
     let novel = uuid::Uuid::new_v4();
-    let chapter = uuid::Uuid::new_v4();
     sqlx::query("INSERT INTO users (id, email, password_hash) VALUES ($1, 'lore-replay@test.invalid', 'test-hash')")
         .bind(user)
         .execute(&pool)
@@ -286,89 +339,149 @@ async fn lore_migration_repairs_chunks_without_locking_unchanged_rows() {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query(
-        "INSERT INTO chapters (id, novel_id, chapter_number, content) VALUES ($1, $2, 1, $3)",
-    )
-    .bind(chapter)
-    .bind(novel)
-    .bind(format!(
-        " {}\nA final paragraph. ",
-        "风暴之塔。".repeat(500)
-    ))
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::raw_sql(CHAPTER_LORE_MIGRATION)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let snapshot_sql = "SELECT id, chunk_index, content, ctid::TEXT, xmax::TEXT \
-                        FROM chapter_chunks WHERE chapter_id = $1 ORDER BY chunk_index";
-    let initial = sqlx::query_as::<_, (uuid::Uuid, i32, String, String, String)>(snapshot_sql)
-        .bind(chapter)
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-    assert!(initial.len() >= 3);
-    sqlx::raw_sql(CHAPTER_LORE_MIGRATION)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let replayed = sqlx::query_as::<_, (uuid::Uuid, i32, String, String, String)>(snapshot_sql)
-        .bind(chapter)
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-    assert_eq!(initial, replayed, "unchanged chunks must not acquire locks");
 
-    sqlx::query("DELETE FROM chapter_chunks WHERE chapter_id = $1 AND chunk_index = 1")
+    // Each case is chapter content and its exact (chunk_index, character count) output.
+    let cases: Vec<(String, Vec<(i32, usize)>)> = vec![
+        ("a".repeat(1050), vec![(0, 1050)]),
+        ("a".repeat(1051), vec![(0, 1051), (1, 1)]),
+        ("a".repeat(1199), vec![(0, 1199), (1, 149)]),
+        // A 1,200-character chapter gets an overlapping tail chunk.
+        ("a".repeat(1200), vec![(0, 1200), (1, 150)]),
+        ("a".repeat(1201), vec![(0, 1200), (1, 151)]),
+        ("风暴之塔。".repeat(420), vec![(0, 1200), (1, 1050)]),
+        (
+            format!("  \t{}\n  ", "b".repeat(1100)),
+            vec![(0, 1102), (1, 54)],
+        ),
+        // The blank piece at index 1 is skipped; index 2 keeps its position.
+        (
+            format!("{}{}{}", "x".repeat(1050), " ".repeat(1200), "y".repeat(10)),
+            vec![(0, 1050), (2, 10)],
+        ),
+        (String::new(), vec![]),
+        (" ".repeat(30), vec![]),
+        (
+            format!(" {}\nA final paragraph. ", "风暴之塔。".repeat(500)),
+            vec![(0, 1199), (1, 1200), (2, 420)],
+        ),
+        ("c".repeat(3000), vec![(0, 1200), (1, 1200), (2, 900)]),
+    ];
+    let mut chapters = Vec::new();
+    for (number, (content, _)) in cases.iter().enumerate() {
+        let chapter = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO chapters (id, novel_id, chapter_number, content) VALUES ($1, $2, $3, $4)",
+        )
         .bind(chapter)
+        .bind(novel)
+        .bind(number as i32 + 1)
+        .bind(content)
+        .execute(&pool)
+        .await
+        .unwrap();
+        chapters.push(chapter);
+    }
+
+    // Novel service trims Unicode whitespace, stops at the final window, and
+    // renumbers. Its rows differ from the SQL backfill but are a full chunk set.
+    let service_content = format!("\u{3000}{}\u{3000}", "z".repeat(1198));
+    let service_novel = Novel::create(user, "Service chunks".into(), None);
+    let service_chapter = Chapter::new(service_novel.id, 1, None, service_content.clone());
+    NovelPgRepository::new(pool.clone())
+        .create_import(&service_novel, std::slice::from_ref(&service_chapter))
+        .await
+        .unwrap();
+    let service_rows = chunk_rows(&pool, service_chapter.id).await;
+    assert_eq!(indexed_content(&service_rows), vec![(0, "z".repeat(1198))]);
+    assert_ne!(
+        indexed_content(&service_rows),
+        sql_backfill_model(&service_content)
+    );
+
+    sqlx::raw_sql(CHAPTER_LORE_MIGRATION)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for ((content, expected), chapter) in cases.iter().zip(&chapters) {
+        let rows = chunk_rows(&pool, *chapter).await;
+        assert_eq!(&indexed_lengths(&rows), expected, "{content:?}");
+        assert_eq!(indexed_content(&rows), sql_backfill_model(content));
+    }
+    let tabbed = chunk_rows(&pool, chapters[6]).await;
+    assert!(tabbed[0].2.starts_with('\t') && tabbed[1].2.ends_with('\n'));
+    assert_eq!(
+        chunk_rows(&pool, service_chapter.id).await,
+        service_rows,
+        "backfill must not touch a service-written chunk set"
+    );
+
+    let initial = all_chunk_rows(&pool).await;
+    sqlx::raw_sql(CHAPTER_LORE_MIGRATION)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        all_chunk_rows(&pool).await,
+        initial,
+        "replay must not write or lock existing chunks"
+    );
+
+    // A chapter that keeps at least one chunk is outside the backfill.
+    let partial = chapters[11];
+    sqlx::query("DELETE FROM chapter_chunks WHERE chapter_id = $1 AND chunk_index = 1")
+        .bind(partial)
         .execute(&pool)
         .await
         .unwrap();
     sqlx::query("UPDATE chapter_chunks SET content = 'stale chunk' WHERE chapter_id = $1 AND chunk_index = 0")
-        .bind(chapter)
+        .bind(partial)
         .execute(&pool)
         .await
         .unwrap();
+    let reset = chapters[10];
+    let reset_ids: Vec<uuid::Uuid> = chunk_rows(&pool, reset)
+        .await
+        .iter()
+        .map(|row| row.0)
+        .collect();
+    sqlx::query("DELETE FROM chapter_chunks WHERE chapter_id = $1")
+        .bind(reset)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mutated = all_chunk_rows(&pool).await;
     sqlx::raw_sql(CHAPTER_LORE_MIGRATION)
         .execute(&pool)
         .await
         .unwrap();
-    let repaired = sqlx::query_as::<_, (uuid::Uuid, i32, String, String, String)>(snapshot_sql)
-        .bind(chapter)
-        .fetch_all(&pool)
-        .await
-        .unwrap();
     assert_eq!(
-        initial
-            .iter()
-            .map(|row| (row.1, &row.2))
-            .collect::<Vec<_>>(),
-        repaired
-            .iter()
-            .map(|row| (row.1, &row.2))
-            .collect::<Vec<_>>(),
-        "replay must restore every missing or stale chunk"
+        indexed_lengths(&chunk_rows(&pool, partial).await),
+        vec![(0, 11), (2, 900)],
+        "replay does not repair a stale or partial chunk set"
     );
+    let reset_rows = chunk_rows(&pool, reset).await;
     assert_eq!(
-        initial[0].0, repaired[0].0,
-        "repair must retain existing IDs"
+        indexed_content(&reset_rows),
+        sql_backfill_model(&cases[10].0),
+        "a chapter without chunks is backfilled again"
     );
+    assert!(reset_rows.iter().all(|row| !reset_ids.contains(&row.0)));
+    let mut expected = mutated;
+    expected.extend(reset_rows);
+    expected.sort();
+    let mut replayed = all_chunk_rows(&pool).await;
+    replayed.sort();
     assert_eq!(
-        initial[2], repaired[2],
-        "repair must not lock an unchanged chunk"
+        replayed, expected,
+        "replay must write only the reset chapter"
     );
+
+    let repaired = all_chunk_rows(&pool).await;
     sqlx::raw_sql(CHAPTER_LORE_MIGRATION)
         .execute(&pool)
         .await
         .unwrap();
-    let repeated = sqlx::query_as::<_, (uuid::Uuid, i32, String, String, String)>(snapshot_sql)
-        .bind(chapter)
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-    assert_eq!(repaired, repeated, "repaired chunks must not acquire locks");
+    assert_eq!(all_chunk_rows(&pool).await, repaired);
     pool.close().await;
     sqlx::query("DROP DATABASE novelworld_lore_replay")
         .execute(&admin)

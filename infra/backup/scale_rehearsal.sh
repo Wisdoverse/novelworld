@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Opt-in synthetic measurement for backup-restore-v2. See docs/BACKUP_RESTORE.md.
 # Reuses the production backup/restore procedures; never run against user data.
-# Docker discovery: 30s per call; fixture statements: 10m; backup/size scan: 1h;
-# restore plus startup/readiness: 30m. No automatic retry of side effects.
+# Docker discovery: 30s per call; fixture statements: 10m; fixture chunk
+# migrator: 1h; backup/size scan: 1h; restore plus startup/readiness: 30m.
+# No automatic retry of side effects.
 set -euo pipefail
 
 fail() { printf 'scale: %s\n' "$1" >&2; exit 1; }
@@ -120,7 +121,7 @@ result = {
     "manifest_sha256": hashlib.sha256(pathlib.Path(manifest).read_bytes()).hexdigest() if manifest else None,
     "source_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
     "script_sha256": {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in files},
-    "fixture": "legacy repeated chapter text; highly compressible",
+    "fixture": "repeated chapter text with migrator-derived lore chunks; highly compressible",
     "host_logical_cpu_count": os.cpu_count(),
     "host_memory_bytes": os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"),
     "reference_hardware_verified": False,
@@ -137,7 +138,8 @@ trap finish EXIT
 # of TOAST/compressed physical storage, then verify the actual artifact below.
 batch_bytes=$(psql -c "SELECT pg_catalog.octet_length(pg_catalog.repeat('风暴之塔的章节内容用于容量演练。', 3000))::bigint * 100 * 20")
 [[ "$batch_bytes" =~ ^[1-9][0-9]*$ ]] || fail 'cannot determine fixture batch size'
-batches=$(((target_bytes + batch_bytes - 1) / batch_bytes))
+# Derived chunks overlap (1,200 per 1,050 characters), so they add at least the chapter bytes.
+batches=$(((target_bytes + 2 * batch_bytes - 1) / (2 * batch_bytes)))
 psql -c "INSERT INTO users (id, email, password_hash)
   VALUES ('00000000-0000-4000-8000-00000000ffff', 'scale@test.invalid', 'x')" >/dev/null
 for ((batch = 1; batch <= batches; batch++)); do
@@ -157,6 +159,13 @@ for ((batch = 1; batch <= batches; batch++)); do
   [ "$inserted" = "$batch_bytes" ] || fail 'fixture batch did not insert the expected logical bytes'
   printf 'scale: fixture batch %s/%s\n' "$batch" "$batches"
 done
+# A deployment backup contains the chunks that novel service writes with each
+# chapter. Derive them with the product migrator, outside the restore clock.
+stage=fixture_chunks
+timeout --kill-after=30s 3600s "${compose[@]}" run --rm postgres-migrate >/dev/null
+[ "$(psql -c 'SELECT NOT EXISTS (SELECT 1 FROM chapters WHERE NOT EXISTS (
+    SELECT 1 FROM chapter_chunks WHERE chapter_chunks.chapter_id = chapters.id))')" = t ] ||
+  fail 'the migrator left fixture chapters without lore chunks'
 physical_bytes=$(psql -c 'SELECT pg_catalog.pg_database_size(pg_catalog.current_database())')
 [[ "$physical_bytes" =~ ^[0-9]+$ ]] || fail 'cannot measure physical database size'
 stage=backup

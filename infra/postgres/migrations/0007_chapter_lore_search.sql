@@ -17,27 +17,23 @@ CREATE TABLE IF NOT EXISTS public.chapter_chunks (
     UNIQUE(chapter_id, chunk_index)
 );
 
-INSERT INTO public.chapter_chunks (
-    id, chapter_id, chunk_index, content
+-- Backfill only chapters without any chunk, so replay cost does not grow with
+-- chunked text. Novel service writes all chunks of a chapter in one transaction.
+-- Replay does not repair a stale or partial chunk set.
+-- MATERIALIZED keeps all content reads behind the chunk-existence filter.
+WITH missing AS MATERIALIZED (
+    SELECT chapter.id, chapter.content
+    FROM public.chapters AS chapter
+    WHERE NOT EXISTS (
+        SELECT 1 FROM public.chapter_chunks AS existing
+        WHERE existing.chapter_id = chapter.id
+    )
 )
-SELECT
-    public.uuid_generate_v4(),
-    chapter.id,
-    ((piece.start_at - 1) / 1050)::INTEGER,
-    btrim(substring(chapter.content FROM piece.start_at FOR 1200))
-FROM public.chapters AS chapter
-CROSS JOIN LATERAL generate_series(
-    1,
-    GREATEST(char_length(chapter.content), 1),
-    1050
-) AS piece(start_at)
-LEFT JOIN public.chapter_chunks AS existing
-    ON existing.chapter_id = chapter.id
-    AND existing.chunk_index = ((piece.start_at - 1) / 1050)::INTEGER
-WHERE btrim(substring(chapter.content FROM piece.start_at FOR 1200)) <> ''
-    -- The conflict-update guard still locks equal rows. Exclude them first.
-    AND (existing.chapter_id IS NULL OR existing.content IS DISTINCT FROM
-        btrim(substring(chapter.content FROM piece.start_at FOR 1200)))
-ON CONFLICT (chapter_id, chunk_index) DO UPDATE SET
-    content = EXCLUDED.content
-WHERE public.chapter_chunks.content IS DISTINCT FROM EXCLUDED.content;
+INSERT INTO public.chapter_chunks (id, chapter_id, chunk_index, content)
+SELECT public.uuid_generate_v4(), missing.id,
+       ((piece.start_at - 1) / 1050)::INTEGER,
+       btrim(substring(missing.content FROM piece.start_at FOR 1200))
+FROM missing
+CROSS JOIN LATERAL generate_series(1, GREATEST(char_length(missing.content), 1), 1050) AS piece(start_at)
+WHERE btrim(substring(missing.content FROM piece.start_at FOR 1200)) <> ''
+ON CONFLICT (chapter_id, chunk_index) DO NOTHING;

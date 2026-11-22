@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Command-boundary checks for scale_rehearsal.sh.
 
-The fixture substitutes Docker, backup/restore, and byte counters. It never
+The fixture substitutes Docker, timeout, backup/restore, and byte counters. It never
 creates a database or a 5 GiB artifact; a passing test is only script evidence.
 """
 import json
@@ -43,6 +43,10 @@ if a and a[0] == "compose" and "up" in a:
     Path(os.environ["SCALE_EVENTS"]).open("a").write("up-env-ok wait no-build\\n")
     import time; time.sleep(0.1)
     sys.exit(1 if scenario == "readiness_failure" else 0)
+if a and a[0] == "compose" and "run" in a:
+    assert a[-2:] == ["--rm", "postgres-migrate"], a
+    Path(os.environ["SCALE_EVENTS"]).open("a").write("migrate\n")
+    sys.exit(1 if scenario == "migrator_failure" else 0)
 if a and a[0] == "inspect":
     fmt, name = a[a.index("--format") + 1], a[-1]
     if fmt == "{{.Id}}":
@@ -52,7 +56,11 @@ if a and a[0] == "inspect":
     if fmt == "{{.State.Status}}": print("running" if scenario == "running_writer" else "exited"); sys.exit(0)
 if a and a[0] == "exec":
     sql = a[a.index("-c") + 1] if "-c" in a else ""
-    if "NOT EXISTS" in sql: print("f" if scenario == "existing_userdata" else "t")
+    if "new_novels" in sql: Path(os.environ["SCALE_EVENTS"]).open("a").write("seed\n")
+    if "chapter_chunks" in sql:
+        Path(os.environ["SCALE_EVENTS"]).open("a").write("chunks-checked\n")
+        print("f" if scenario == "missing_chunks" else "t")
+    elif "NOT EXISTS" in sql: print("f" if scenario == "existing_userdata" else "t")
     elif "octet_length" in sql: print("600000000")
     elif "pg_database_size" in sql: print("700000000")
     elif "POSTGRES_USER" in sql: print("novel\nnovel_world")
@@ -72,6 +80,7 @@ class ScaleRehearsal(unittest.TestCase):
         (self.root / "infra/backup/backup.sh").write_text(
             """#!/bin/sh
 set -eu
+printf '%s\\n' backup >>\"$SCALE_EVENTS\"
 [ \"${SCALE_SCENARIO}\" = backup_failure ] && exit 1
 base=\"$BACKUP_DIR/synthetic\"
 printf x >\"$base.dump.gz.enc\"
@@ -117,9 +126,15 @@ esac
         (bindir / "df").chmod(0o700)
         (bindir / "git").write_text("#!/bin/sh\nprintf 'synthetic-head\\n'\n")
         (bindir / "git").chmod(0o700)
+        # Record each deadline, then run the command without the real bound.
+        (bindir / "timeout").write_text(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$SCALE_TIMEOUTS\"\n"
+            "while [ \"${1#-}\" != \"$1\" ]; do shift; done\nshift\nexec \"$@\"\n")
+        (bindir / "timeout").chmod(0o700)
         self.env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"],
                         BACKUP_ENCRYPTION_KEY=KEY, POSTGRES_CONTAINER=CONTAINER,
                         SCALE_LOG=str(self.root / "docker.log"), SCALE_EVENTS=str(self.root / "events.log"),
+                        SCALE_TIMEOUTS=str(self.root / "timeouts.log"),
                         TMPDIR=str(self.root / "tmp"),
                         BACKUP_DIR=str(self.root / "backups"))
         (self.root / "tmp").mkdir()
@@ -159,12 +174,17 @@ esac
         self.assertIn("octet_length", log)
         calls = [json.loads(line) for line in log.splitlines() if line.startswith("[")]
         batch_calls = [call for call in calls if call[0] == "exec" and "new_novels" in " ".join(call)]
-        self.assertEqual(len(batch_calls), 9)
-        physical_calls = [call for call in calls if call[0] == "exec" and "pg_database_size" in " ".join(call)]
+        # Chapter bytes count twice because derived chunks overlap.
+        self.assertEqual(len(batch_calls), 5)
+        physical_calls = [i for i, call in enumerate(calls) if call[0] == "exec" and "pg_database_size" in " ".join(call)]
+        chunk_calls = [i for i, call in enumerate(calls) if call[0] == "exec" and "chapter_chunks" in " ".join(call)]
         self.assertEqual(len(physical_calls), 1)
-        events = (self.root / "events.log").read_text()
-        self.assertIn("restore-ok", events)
-        self.assertIn("up-env-ok wait no-build", events)
+        self.assertLess(chunk_calls[0], physical_calls[0])
+        events = (self.root / "events.log").read_text().splitlines()
+        self.assertEqual(events[:-1], ["seed"] * 5 + ["migrate", "chunks-checked", "backup", "restore-ok"])
+        self.assertIn("up-env-ok wait no-build", events[-1])
+        self.assertIn(f"--kill-after=30s 3600s docker compose --env-file {self.env_file} run --rm postgres-migrate",
+                      (self.root / "timeouts.log").read_text().splitlines())
         self.assertEqual(self.env_file.read_text(), "JWT_SECRET=synthetic-new\n")
         report = next((self.root / "backups").glob("scale-*/measurement.json"))
         data = json.loads(report.read_text())
@@ -173,6 +193,21 @@ esac
         self.assertLess(data["database_physical_bytes"], data["plain_dump_bytes"])
         self.assertGreaterEqual(data["restore_to_readiness_seconds"], 0.1)
         self.assertFalse(data["reference_hardware_verified"])
+        self.assertIn("migrator-derived lore chunks", data["fixture"])
+
+    def test_chunk_derivation_fails_before_backup(self):
+        for scenario in ("migrator_failure", "missing_chunks"):
+            with self.subTest(scenario=scenario):
+                (self.root / "events.log").unlink(missing_ok=True)
+                before = set((self.root / "backups").glob("scale-*/measurement.json"))
+                result = self.run_scale(scenario)
+                self.assertNotEqual(result.returncode, 0)
+                report = (set((self.root / "backups").glob("scale-*/measurement.json")) - before).pop()
+                data = json.loads(report.read_text())
+                self.assertEqual((data["status"], data["stage"]), ("failed", "fixture_chunks"))
+                events = (self.root / "events.log").read_text().splitlines()
+                self.assertEqual(events[-1], "migrate" if scenario == "migrator_failure" else "chunks-checked")
+                self.assertNotIn("backup", events)
 
     def test_backup_decrypt_size_restore_and_readiness_fail_closed(self):
         for scenario in ("backup_failure", "decrypt_failure", "undersized", "restore_failure", "readiness_failure"):

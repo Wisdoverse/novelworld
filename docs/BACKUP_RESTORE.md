@@ -381,11 +381,12 @@ stopped for the entire restore. Before seeding, `TMPDIR` must have at least
 twice the requested plain size free; the PostgreSQL and backup filesystems also
 need operator-confirmed headroom. Set `TMPDIR` to a persistent filesystem when
 the default temporary filesystem is too small. The command bounds Compose and
-Docker discovery at 30 seconds per call, fixture statements at 10 minutes,
-backup and artifact-size scanning at 1 hour, and restore plus readiness at 30
-minutes. A timeout fails the measurement; command termination can take another
-30 seconds. Inspect any remaining database or migration work before manual
-recovery; failed side effects are never automatically retried.
+Docker discovery at 30 seconds per call and fixture statements at 10 minutes.
+The fixture chunk migrator, backup, and artifact-size scan each have a 1-hour
+bound. Restore plus readiness has a 30-minute bound. A timeout fails the measurement;
+command termination can take another 30 seconds. Inspect any remaining
+database or migration work before manual recovery; failed side effects are
+never automatically retried.
 
 The command retains `measurement.json` and the encrypted artifact in its own
 dedicated backup directory. A failed restore is left stopped: the rehearsal
@@ -393,10 +394,17 @@ does not retry the restore or start services after failure. The report records
 plain and encrypted artifact sizes, physical database size, restore-to-readiness
 time, readiness result, source hashes, and observed host resources.
 
+After seeding, the command runs the product migrator once, outside the restore
+clock. The migrator derives `chapter_chunks`, which novel service also writes
+for each imported chapter. The command fails before backup if a seeded chapter
+has no chunk. The backup therefore contains derived lore chunks, as a deployment
+backup does.
+
 The fixture uses repeated text and is highly compressible, so a successful
-scripted measurement is not itself the H1 RTO record. Shared-host CPU and
-memory counts do not establish the required 2-core / 4 GB / SSD reference
-envelope. Qualifying evidence requires a separate deployment with verified
+scripted measurement is not itself the H1 RTO record. The fixture backfill is
+not a legacy-upgrade measurement and provides no legacy-backfill RTO evidence.
+Shared-host CPU and memory counts do not establish the required 2-core / 4 GB /
+SSD reference envelope. Qualifying evidence requires a separate deployment with verified
 resource and storage bounds, followed by hardware and artifact review.
 
 ## Versioning
