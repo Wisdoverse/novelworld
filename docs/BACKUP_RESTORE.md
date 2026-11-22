@@ -381,9 +381,9 @@ stopped for the entire restore. Before seeding, `TMPDIR` must have at least
 twice the requested plain size free; the PostgreSQL and backup filesystems also
 need operator-confirmed headroom. Set `TMPDIR` to a persistent filesystem when
 the default temporary filesystem is too small. The command bounds Compose and
-Docker discovery at 30 seconds per call, fixture statements at 10 minutes, the
-fixture chunk migrator at 1 hour, backup and artifact-size scanning at 1 hour,
-and restore plus readiness at 30 minutes. A timeout fails the measurement;
+Docker discovery at 30 seconds per call and fixture statements at 10 minutes.
+The fixture chunk migrator, backup, and artifact-size scan each have a 1-hour
+bound. Restore plus readiness has a 30-minute bound. A timeout fails the measurement;
 command termination can take another 30 seconds. Inspect any remaining
 database or migration work before manual recovery; failed side effects are
 never automatically retried.
