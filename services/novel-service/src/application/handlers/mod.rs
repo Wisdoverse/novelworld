@@ -17,6 +17,7 @@ use tracing::{error, info, warn, Instrument};
 use uuid::Uuid;
 
 use crate::application::commands::ImportNovelCommand;
+use crate::application::{stop_requested, wake_unless_stopped};
 use crate::domain::entities::{
     chapter::{chapters_are_importable, Chapter},
     character::Character,
@@ -1910,16 +1911,18 @@ impl NovelCommandHandler {
         Ok(template)
     }
 
-    pub fn spawn_import_recovery(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+    pub fn spawn_import_recovery(
+        self: &Arc<Self>,
+        mut stop: watch::Receiver<bool>,
+    ) -> tokio::task::JoinHandle<()> {
         let handler = self.clone();
         let current_span = tracing::Span::current();
         tokio::spawn(
             async move {
                 let mut interval = tokio::time::interval(IMPORT_RECOVERY_INTERVAL);
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                loop {
-                    interval.tick().await;
-                    if let Err(error) = handler.recover_imports_once().await {
+                while wake_unless_stopped(&mut stop, interval.tick()).await {
+                    if let Err(error) = handler.recover_imports_once(&stop).await {
                         error!(error = ?error, "novel import recovery scan failed");
                     }
                 }
@@ -1928,8 +1931,11 @@ impl NovelCommandHandler {
         )
     }
 
-    async fn recover_imports_once(self: &Arc<Self>) -> Result<()> {
+    async fn recover_imports_once(self: &Arc<Self>, stop: &watch::Receiver<bool>) -> Result<()> {
         for candidate in self.novel_repo.recoverable_imports(100).await? {
+            if stop_requested(stop) {
+                break;
+            }
             let Ok(admission) = self.try_admit_import(candidate.user_id) else {
                 continue;
             };
@@ -4398,7 +4404,8 @@ mod reading_progress_handler_tests {
         }
 
         async fn create_import_batch(&self, _imports: &[(Novel, Vec<Chapter>)]) -> Result<()> {
-            unreachable!("unused test repository method")
+            self.calls.push("create");
+            Ok(())
         }
 
         async fn create_source_import(&self, _novel: &Novel) -> Result<()> {
@@ -4410,14 +4417,19 @@ mod reading_progress_handler_tests {
             _novel_id: Uuid,
             _user_id: Uuid,
         ) -> Result<Option<ImportClaim>> {
-            unreachable!("unused test repository method")
+            self.calls.push("claim");
+            Ok(None)
         }
 
         async fn recoverable_imports(
             &self,
             _limit: i64,
         ) -> Result<Vec<crate::domain::repositories::RecoverableImport>> {
-            unreachable!("unused test repository method")
+            self.calls.push("recoverable");
+            Ok(vec![crate::domain::repositories::RecoverableImport {
+                novel_id: self.novel.id,
+                user_id: self.novel.user_id,
+            }])
         }
 
         async fn renew_import(&self, _novel_id: Uuid, _attempt: i64) -> Result<bool> {
@@ -4458,8 +4470,9 @@ mod reading_progress_handler_tests {
             unreachable!("unused test repository method")
         }
 
-        async fn find_by_id(&self, _id: Uuid) -> Result<Option<Novel>> {
-            unreachable!("unused test repository method")
+        async fn find_by_id(&self, id: Uuid) -> Result<Option<Novel>> {
+            self.calls.push("novel");
+            Ok((self.novel.id == id).then(|| self.novel.clone()))
         }
 
         async fn find_for_user(&self, user_id: Uuid, novel_id: Uuid) -> Result<Option<Novel>> {
@@ -4517,8 +4530,16 @@ mod reading_progress_handler_tests {
             unreachable!("unused test repository method")
         }
 
-        async fn find_by_novel(&self, _novel_id: Uuid) -> Result<Vec<Chapter>> {
-            unreachable!("unused test repository method")
+        async fn find_by_novel(&self, novel_id: Uuid) -> Result<Vec<Chapter>> {
+            self.calls.push("chapters");
+            let mut chapters = self
+                .chapters
+                .values()
+                .filter(|chapter| chapter.novel_id == novel_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            chapters.sort_by_key(|chapter| chapter.chapter_number);
+            Ok(chapters)
         }
 
         async fn find_by_number(&self, novel_id: Uuid, number: i32) -> Result<Option<Chapter>> {
@@ -5486,5 +5507,222 @@ mod reading_progress_handler_tests {
             "chapter:1",
             "progress:1",
         ]);
+    }
+
+    /// Import admission after the shutdown signal closes the import permits.
+    mod import_shutdown_tests {
+        use super::*;
+        use crate::domain::ports::DocumentExtractionError;
+        use crate::domain::repositories::PendingSourceFileDeletion;
+
+        struct Unused;
+
+        #[async_trait::async_trait]
+        impl LlmPort for Unused {
+            async fn chat_json(&self, _: Uuid, _: NovelLlmTask, _: &str) -> Result<String> {
+                unreachable!("an unclaimed import calls no provider")
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl ImagePort for Unused {
+            async fn generate(&self, _: &str) -> Result<String> {
+                unreachable!("an unclaimed import calls no provider")
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl PrivacyCleanupPort for Unused {
+            async fn clear_novel(&self, _: Uuid, _: Uuid) -> Result<()> {
+                unreachable!("unused test port method")
+            }
+
+            async fn allow_novel(&self, _: Uuid, _: Uuid) -> Result<()> {
+                unreachable!("unused test port method")
+            }
+        }
+
+        impl DocumentTextExtractor for Unused {
+            fn extract_text(
+                &self,
+                _: Option<&str>,
+                _: Option<&str>,
+                _: &[u8],
+            ) -> std::result::Result<String, DocumentExtractionError> {
+                unreachable!("unused test port method")
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl SourceFileDeletionRepository for Unused {
+            async fn reserve_upload(&self, _: &str, _: DateTime<Utc>) -> Result<()> {
+                unreachable!("unused test repository method")
+            }
+
+            async fn enqueue_cleanup(&self, _: &str, _: DateTime<Utc>) -> Result<()> {
+                unreachable!("unused test repository method")
+            }
+
+            async fn due(&self, _: i64) -> Result<Vec<PendingSourceFileDeletion>> {
+                unreachable!("unused test repository method")
+            }
+
+            async fn complete(&self, _: &str, _: &str) -> Result<()> {
+                unreachable!("unused test repository method")
+            }
+
+            async fn retry(&self, _: &str, _: &str, _: &str, _: DateTime<Utc>) -> Result<()> {
+                unreachable!("unused test repository method")
+            }
+        }
+
+        fn command_handler(
+            novel: Novel,
+            chapters: Vec<Chapter>,
+        ) -> (Arc<NovelCommandHandler>, CallLog) {
+            let calls = CallLog::default();
+            let handler = NovelCommandHandler {
+                novel_repo: Arc::new(TestNovelRepository {
+                    novel: novel.clone(),
+                    readers: HashSet::new(),
+                    calls: calls.clone(),
+                }),
+                chapter_repo: Arc::new(TestChapterRepository {
+                    chapters: chapters
+                        .into_iter()
+                        .map(|chapter| (chapter.chapter_number, chapter))
+                        .collect(),
+                    calls: calls.clone(),
+                }),
+                character_repo: Arc::new(TestCharacterRepository {
+                    novel_id: novel.id,
+                    characters: Vec::new(),
+                    relationships: Mutex::new(Vec::new()),
+                    relationship_error: Mutex::new(false),
+                    calls: calls.clone(),
+                }),
+                canon_repo: Arc::new(TestCanonStoryModelRepository {
+                    model: Mutex::new(None),
+                    calls: calls.clone(),
+                }),
+                llm: Arc::new(Unused),
+                image_client: Arc::new(Unused),
+                privacy_cleanup: Arc::new(Unused),
+                source_storage: None,
+                source_deletions: Arc::new(Unused),
+                document_extractor: Arc::new(Unused),
+                acceptance_permits: Arc::new(Semaphore::new(1)),
+                import_permits: Arc::new(Semaphore::new(1)),
+                active_import_users: Arc::new(Mutex::new(HashSet::new())),
+            };
+            (Arc::new(handler), calls)
+        }
+
+        fn pending_novel() -> Novel {
+            Novel::create(Uuid::new_v4(), "故事".into(), None)
+        }
+
+        fn count(calls: &CallLog, call: &str) -> usize {
+            calls
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|seen| *seen == call)
+                .count()
+        }
+
+        async fn assert_stops(handle: tokio::task::JoinHandle<()>) {
+            tokio::time::timeout(Duration::from_secs(600), handle)
+                .await
+                .expect("import recovery did not stop")
+                .unwrap();
+        }
+
+        #[tokio::test]
+        async fn closed_admission_prevents_recovery_claims() {
+            let (handler, calls) = command_handler(pending_novel(), Vec::new());
+            let (_stop, running) = watch::channel(false);
+            handler.recover_imports_once(&running).await.unwrap();
+            calls.assert_eq(&["recoverable", "claim"]);
+
+            calls.clear();
+            handler.import_permits.close();
+            handler.recover_imports_once(&running).await.unwrap();
+            calls.assert_eq(&["recoverable"]);
+        }
+
+        #[tokio::test]
+        async fn upload_after_closure_returns_ids_and_leaves_the_job_unclaimed() {
+            let novel = pending_novel();
+            let (handler, calls) = command_handler(novel.clone(), Vec::new());
+            handler.import_permits.close();
+
+            let ids = handler
+                .handle_import_batch(vec![ImportNovelCommand {
+                    user_id: novel.user_id,
+                    title: "故事".into(),
+                    author: None,
+                    raw_content: Some("第一章 开始\n沈知微走进庭院。".into()),
+                    source_bytes: None,
+                    deviation_mode: None,
+                }])
+                .await
+                .unwrap();
+
+            assert_eq!(ids.len(), 1);
+            calls.assert_eq(&["create"]);
+        }
+
+        #[tokio::test]
+        async fn retry_after_closure_is_capacity_unavailable_and_leaves_the_job_failed() {
+            let mut novel = pending_novel();
+            novel.mark_error("provider failed".into());
+            let chapters = vec![Chapter::new(novel.id, 1, None, "沈知微走进庭院。".into())];
+            let (handler, calls) = command_handler(novel.clone(), chapters);
+            handler.import_permits.close();
+
+            let error = handler
+                .retry_import(novel.user_id, novel.id)
+                .await
+                .unwrap_err();
+
+            assert!(error.downcast_ref::<ImportCapacityUnavailable>().is_some());
+            calls.assert_eq(&["novel", "chapters"]);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn import_recovery_stops_after_the_signal() {
+            let (handler, calls) = command_handler(pending_novel(), Vec::new());
+            let (stop, stopped) = watch::channel(false);
+            let recovery = handler.spawn_import_recovery(stopped);
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            assert_eq!(count(&calls, "recoverable"), 1);
+
+            stop.send(true).unwrap();
+            assert_stops(recovery).await;
+            assert_eq!(count(&calls, "recoverable"), 1);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn import_recovery_with_a_signalled_receiver_starts_no_pass() {
+            let (handler, calls) = command_handler(pending_novel(), Vec::new());
+            let (stop, stopped) = watch::channel(false);
+            stop.send(true).unwrap();
+            assert_stops(handler.spawn_import_recovery(stopped)).await;
+            assert_eq!(count(&calls, "recoverable"), 0);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn import_recovery_stops_when_the_sender_is_dropped() {
+            let (handler, calls) = command_handler(pending_novel(), Vec::new());
+            let (stop, stopped) = watch::channel(false);
+            let recovery = handler.spawn_import_recovery(stopped);
+            tokio::time::sleep(Duration::from_secs(1)).await;
+
+            drop(stop);
+            assert_stops(recovery).await;
+            assert_eq!(count(&calls, "recoverable"), 1);
+        }
     }
 }

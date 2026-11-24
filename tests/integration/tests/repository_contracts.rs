@@ -725,7 +725,8 @@ async fn startup_recovery_claims_a_pending_import() {
     .await
     .unwrap();
 
-    let recovery = blocking_import_handler(&pool, None).spawn_import_recovery();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let recovery = blocking_import_handler(&pool, None).spawn_import_recovery(stopped);
     let state = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             let state = sqlx::query_as::<_, (String, i64, bool)>(
@@ -1209,7 +1210,8 @@ async fn resumed_import_with_gapped_chapters_fails_with_reupload_guidance() {
         "No parsed chapters are available; re-upload the source"
     );
 
-    let recovery = handler.spawn_import_recovery();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let recovery = handler.spawn_import_recovery(stopped);
     let failure = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let state = sqlx::query_as::<_, (String, Option<String>, String, Option<String>)>(

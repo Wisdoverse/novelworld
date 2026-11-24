@@ -192,8 +192,13 @@ async fn run_body() -> Result<()> {
         let source_deletions: Arc<
             dyn novel_service::domain::repositories::SourceFileDeletionRepository,
         > = source_deletions_impl;
+        let (stop_workers, workers_stopped) = tokio::sync::watch::channel(false);
+        let mut workers = Vec::new();
         if let Some(storage) = source_storage.clone() {
-            SourceFileCleanupWorker::new(storage, source_deletions.clone()).spawn();
+            workers.push(
+                SourceFileCleanupWorker::new(storage, source_deletions.clone())
+                    .spawn(workers_stopped.clone()),
+            );
         }
 
         let translator: Arc<dyn TextTranslator> = llm_adapter.clone();
@@ -223,7 +228,16 @@ async fn run_body() -> Result<()> {
             import_permits: Arc::new(Semaphore::new(2)),
             active_import_users: Arc::new(Mutex::new(HashSet::new())),
         });
-        let _import_recovery = handler.spawn_import_recovery();
+        workers.push(handler.spawn_import_recovery(workers_stopped.clone()));
+        let import_permits = handler.import_permits.clone();
+        let worker_supervisor = tokio::spawn(
+            novel_service::application::supervise_workers(
+                workers_stopped,
+                workers,
+                novel_service::application::WORKER_STOP_GRACE,
+            )
+            .instrument(tracing::Span::current()),
+        );
         let progress_handler = Arc::new(ReadingProgressHandler {
             novel_repo: novel_repo.clone(),
             chapter_repo: chapter_repo.clone(),
@@ -273,8 +287,14 @@ async fn run_body() -> Result<()> {
 
         let listener = tokio::net::TcpListener::bind(&addr).await?;
         axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal())
+            .with_graceful_shutdown(async move {
+                shutdown_signal().await;
+                // Close admission before stopping workers so no new import claims an attempt.
+                import_permits.close();
+                let _ = stop_workers.send(true);
+            })
             .await?;
+        worker_supervisor.await?;
 
         Ok(())
     }
