@@ -185,7 +185,17 @@ async fn run_body() -> Result<()> {
                 .clone()
                 .map(|client| client as Arc<dyn domain::ports::ActionAdjudicationPort>),
         });
-        let _memory_projection_recovery = handler.spawn_memory_projection_recovery();
+        let (stop_workers, workers_stopped) = tokio::sync::watch::channel(false);
+        let memory_projection_recovery =
+            handler.spawn_memory_projection_recovery(workers_stopped.clone());
+        let worker_supervisor = tokio::spawn(
+            narrative_service::application::supervise_workers(
+                workers_stopped,
+                vec![memory_projection_recovery],
+                narrative_service::application::WORKER_STOP_GRACE,
+            )
+            .instrument(tracing::Span::current()),
+        );
 
         let action_suggester =
             laya_client.map(|client| client as Arc<dyn domain::ports::ActionSuggestionPort>);
@@ -217,8 +227,12 @@ async fn run_body() -> Result<()> {
 
         let listener = tokio::net::TcpListener::bind(&addr).await?;
         axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal())
+            .with_graceful_shutdown(async move {
+                shutdown_signal().await;
+                let _ = stop_workers.send(true);
+            })
             .await?;
+        worker_supervisor.await?;
 
         Ok(())
     }
