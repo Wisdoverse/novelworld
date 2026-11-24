@@ -2,6 +2,7 @@ use std::{collections::HashSet, time::Duration};
 
 use anyhow::{anyhow, ensure, Result};
 use async_trait::async_trait;
+use llm_client::TraceContextExt;
 use reqwest::Client;
 use uuid::Uuid;
 
@@ -44,6 +45,7 @@ impl NarrativeServiceClient {
     fn world_context_request(&self, url: &str, user_id: Uuid) -> reqwest::RequestBuilder {
         self.client
             .get(url)
+            .with_trace_context()
             .header("X-User-Id", user_id.to_string())
             .header("X-Internal-Service-Token", &self.internal_service_token)
             .header(WORLD_CONTEXT_VERSION_HEADER, WORLD_CONTEXT_VERSION)
@@ -88,6 +90,7 @@ impl ReadinessProbe for NarrativeServiceClient {
     async fn is_ready(&self) -> bool {
         self.client
             .get(format!("{}/ready", self.base_url))
+            .with_trace_context()
             .send()
             .await
             .is_ok_and(|response| response.status().is_success())
@@ -306,6 +309,50 @@ mod tests {
         CharacterBranchEvent, WorldActionContext, WorldActionData, WorldActiveThread,
         WorldCanonicalEvent, WorldCharacterGoal, WorldHistoryItem,
     };
+
+    #[tokio::test]
+    async fn narrative_calls_forward_the_trace_id_only_inside_a_request_span() {
+        use axum::{http::HeaderMap, routing::get, Router};
+        use std::sync::{Arc, Mutex};
+        use tracing::Instrument;
+        use tracing_subscriber::layer::SubscriberExt;
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(llm_client::TraceContextLayer),
+        );
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        let router = Router::new().route(
+            "/ready",
+            get(move |headers: HeaderMap| async move {
+                recorded.lock().unwrap().push(
+                    headers
+                        .get("x-trace-id")
+                        .map(|value| value.to_str().unwrap().to_owned()),
+                );
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = NarrativeServiceClient::new(format!("http://{address}"), "token".into());
+        let span = tracing::info_span!("request", trace_id = "narrative-trace");
+        assert!(client.is_ready().instrument(span.clone()).await);
+        assert!(client.is_ready().await);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [Some("narrative-trace".into()), None]
+        );
+        let context = |client: &NarrativeServiceClient| {
+            client
+                .world_context_request("https://narrative.invalid/context", Uuid::nil())
+                .build()
+                .unwrap()
+        };
+        let inside = span.in_scope(|| context(&client));
+        assert_eq!(inside.headers()["x-trace-id"], "narrative-trace");
+        assert!(!context(&client).headers().contains_key("x-trace-id"));
+        server.abort();
+    }
 
     #[test]
     fn world_context_request_declares_the_fail_closed_context_version() {

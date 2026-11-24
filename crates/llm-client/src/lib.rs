@@ -6,6 +6,7 @@ pub(crate) mod retry;
 mod runtime;
 mod security;
 mod telemetry;
+mod trace_context;
 pub mod types;
 
 pub use client::LlmClient;
@@ -18,6 +19,7 @@ pub use runtime::{
 };
 pub use security::{validate_internal_service_token, validate_jwt_secret};
 pub use telemetry::{install_metrics, usage_key_fingerprint, MetricsHandle};
+pub use trace_context::{current_trace_id, TraceContextExt, TraceContextLayer, TRACE_ID_HEADER};
 pub use types::*;
 
 #[cfg(test)]

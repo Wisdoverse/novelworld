@@ -117,7 +117,11 @@ docker logs novel-novel-service --since 30m 2>&1 \
 ```
 
 Use the same `trace_id` with `docker logs` for the Gateway and the downstream
-service. This is local, rotating log inspection; a central collector, archive
+service. Internal calls between services keep the request's `trace_id`,
+including the Gateway account-export fan-out. Startup background work runs
+outside a request, so its `trace_id` is empty. Cached Gateway readiness checks
+are shared across requests and send no trace ID.
+This is local, rotating log inspection; a central collector, archive
 retention, and paging integration are not yet qualified for the supported profile.
 
 ## D20 rules blocked by reading progress

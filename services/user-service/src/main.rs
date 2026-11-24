@@ -91,6 +91,7 @@ async fn run_body(provision: bool) -> Result<()> {
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into())
         )))
         .with(tracing_subscriber::fmt::layer().json())
+        .with(llm_client::TraceContextLayer)
         .init();
 
     let service_span = tracing::info_span!(target: "novelworld_context", "service", service = "user-service", trace_id = "");
