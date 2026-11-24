@@ -7,7 +7,7 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::time::Duration;
-use tokio::sync::Notify;
+use tokio::sync::{watch, Notify};
 use uuid::Uuid;
 
 use crate::application::handlers::{
@@ -1025,6 +1025,7 @@ struct ToctouFixture {
     begin_turn_calls: AtomicUsize,
     complete_turn_calls: AtomicUsize,
     finish_projection_calls: AtomicUsize,
+    rotate_projection_calls: AtomicUsize,
     agent_memory_available: AtomicBool,
     agent_memory_calls: AtomicUsize,
     saved_memory_ids: Mutex<Vec<Uuid>>,
@@ -1158,6 +1159,7 @@ impl ToctouFixture {
             begin_turn_calls: AtomicUsize::new(0),
             complete_turn_calls: AtomicUsize::new(0),
             finish_projection_calls: AtomicUsize::new(0),
+            rotate_projection_calls: AtomicUsize::new(0),
             agent_memory_available: AtomicBool::new(true),
             agent_memory_calls: AtomicUsize::new(0),
             saved_memory_ids: Mutex::new(vec![]),
@@ -2180,6 +2182,7 @@ impl WorldTurnRepository for ToctouFixture {
         &self,
         _limit: usize,
     ) -> Result<Vec<WorldTurnResult>> {
+        self.rotate_projection_calls.fetch_add(1, Ordering::SeqCst);
         if *self.memory_projection_status.lock().unwrap() != MemoryProjectionStatus::Pending {
             return Ok(vec![]);
         }
@@ -4476,7 +4479,7 @@ async fn pending_projection_stays_pending_if_progress_rewinds_before_acknowledge
 
     assert_eq!(
         handler
-            .reconcile_pending_memory_projections_once()
+            .reconcile_pending_memory_projections_once(&running())
             .await
             .unwrap(),
         0
@@ -4489,7 +4492,7 @@ async fn pending_projection_stays_pending_if_progress_rewinds_before_acknowledge
     fixture.current_chapter.store(2, Ordering::SeqCst);
     assert_eq!(
         handler
-            .reconcile_pending_memory_projections_once()
+            .reconcile_pending_memory_projections_once(&running())
             .await
             .unwrap(),
         1
@@ -4544,7 +4547,7 @@ async fn pending_projection_recovers_after_agent_returns_without_replaying_the_t
     fixture.self_identity.store(false, Ordering::SeqCst);
     assert_eq!(
         handler
-            .reconcile_pending_memory_projections_once()
+            .reconcile_pending_memory_projections_once(&running())
             .await
             .unwrap(),
         0
@@ -4553,7 +4556,7 @@ async fn pending_projection_recovers_after_agent_returns_without_replaying_the_t
     fixture.current_chapter.store(1, Ordering::SeqCst);
     assert_eq!(
         handler
-            .reconcile_pending_memory_projections_once()
+            .reconcile_pending_memory_projections_once(&running())
             .await
             .unwrap(),
         0
@@ -4569,7 +4572,7 @@ async fn pending_projection_recovers_after_agent_returns_without_replaying_the_t
 
     assert_eq!(
         handler
-            .reconcile_pending_memory_projections_once()
+            .reconcile_pending_memory_projections_once(&running())
             .await
             .unwrap(),
         0
@@ -4584,7 +4587,7 @@ async fn pending_projection_recovers_after_agent_returns_without_replaying_the_t
     fixture.agent_memory_available.store(true, Ordering::SeqCst);
     assert_eq!(
         handler
-            .reconcile_pending_memory_projections_once()
+            .reconcile_pending_memory_projections_once(&running())
             .await
             .unwrap(),
         1
@@ -4602,7 +4605,7 @@ async fn pending_projection_recovers_after_agent_returns_without_replaying_the_t
 
     assert_eq!(
         handler
-            .reconcile_pending_memory_projections_once()
+            .reconcile_pending_memory_projections_once(&running())
             .await
             .unwrap(),
         0
@@ -4624,7 +4627,7 @@ async fn projection_stays_pending_when_progress_rewinds_during_agent_write() {
     let recovery_handler = handler.clone();
     let recovery = tokio::spawn(async move {
         recovery_handler
-            .reconcile_pending_memory_projections_once()
+            .reconcile_pending_memory_projections_once(&running())
             .await
     });
 
@@ -4647,7 +4650,7 @@ async fn projection_stays_pending_when_progress_rewinds_during_agent_write() {
         .store(fixture.source_chapter, Ordering::SeqCst);
     assert_eq!(
         handler
-            .reconcile_pending_memory_projections_once()
+            .reconcile_pending_memory_projections_once(&running())
             .await
             .unwrap(),
         1
@@ -4673,7 +4676,7 @@ async fn projection_rechecks_identity_and_chapter_in_one_post_agent_snapshot() {
     let recovery_handler = handler.clone();
     let recovery = tokio::spawn(async move {
         recovery_handler
-            .reconcile_pending_memory_projections_once()
+            .reconcile_pending_memory_projections_once(&running())
             .await
     });
 
@@ -4702,7 +4705,7 @@ async fn projection_rechecks_identity_and_chapter_in_one_post_agent_snapshot() {
         .store(0, Ordering::SeqCst);
     assert_eq!(
         handler
-            .reconcile_pending_memory_projections_once()
+            .reconcile_pending_memory_projections_once(&running())
             .await
             .unwrap(),
         1
@@ -4725,7 +4728,7 @@ async fn autonomous_projection_and_exact_replay_race_idempotently() {
     let recovery_handler = handler.clone();
     let recovery = tokio::spawn(async move {
         recovery_handler
-            .reconcile_pending_memory_projections_once()
+            .reconcile_pending_memory_projections_once(&running())
             .await
     });
 
@@ -4756,6 +4759,56 @@ async fn autonomous_projection_and_exact_replay_race_idempotently() {
     assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
 }
 
+/// A stop receiver whose sender lives for the whole test binary.
+fn running() -> watch::Receiver<bool> {
+    static RUNNING: std::sync::OnceLock<watch::Sender<bool>> = std::sync::OnceLock::new();
+    RUNNING.get_or_init(|| watch::channel(false).0).subscribe()
+}
+
+async fn assert_projection_recovery_stops(worker: tokio::task::JoinHandle<()>) {
+    tokio::time::timeout(Duration::from_secs(600), worker)
+        .await
+        .expect("memory projection recovery did not stop")
+        .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn projection_recovery_stops_after_the_signal() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    let (stop, stopped) = watch::channel(false);
+    let worker = Arc::new(fixture.handler()).spawn_memory_projection_recovery(stopped);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(fixture.rotate_projection_calls.load(Ordering::SeqCst), 1);
+
+    stop.send(true).unwrap();
+    assert_projection_recovery_stops(worker).await;
+    assert_eq!(fixture.rotate_projection_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn projection_recovery_with_a_signalled_receiver_starts_no_pass() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    let (stop, stopped) = watch::channel(false);
+    stop.send(true).unwrap();
+    assert_projection_recovery_stops(
+        Arc::new(fixture.handler()).spawn_memory_projection_recovery(stopped),
+    )
+    .await;
+    assert_eq!(fixture.rotate_projection_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn projection_recovery_stops_when_the_sender_is_dropped() {
+    let fixture = Arc::new(ToctouFixture::new(false));
+    let (stop, stopped) = watch::channel(false);
+    let worker = Arc::new(fixture.handler()).spawn_memory_projection_recovery(stopped);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    drop(stop);
+    assert_projection_recovery_stops(worker).await;
+    assert_eq!(fixture.rotate_projection_calls.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn spawned_projection_recovery_runs_an_immediate_pass() {
     let fixture = Arc::new(ToctouFixture::new(false));
@@ -4764,7 +4817,7 @@ async fn spawned_projection_recovery_runs_an_immediate_pass() {
         .block_next_agent_memory
         .store(true, Ordering::SeqCst);
     let handler = Arc::new(fixture.handler());
-    let worker = handler.spawn_memory_projection_recovery();
+    let worker = handler.spawn_memory_projection_recovery(running());
 
     fixture.wait_for_agent_memory().await;
     fixture.agent_memory_release.notify_one();
