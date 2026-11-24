@@ -79,7 +79,7 @@ use novel_service::infrastructure::persistence::{
     pg_progress_repo::PgReadingProgressRepository,
     source_file_deletion_pg_repo::PgSourceFileDeletionRepository,
 };
-use sqlx::{postgres::PgPoolOptions, PgPool};
+use sqlx::{postgres::PgPoolOptions, Connection, PgConnection, PgPool};
 use std::{
     collections::HashSet,
     sync::{Arc, Mutex},
@@ -6647,6 +6647,159 @@ async fn player_creation_replay_preserves_evolved_attributes() {
     let after = repo.get_or_create(user_id, novel_id).await.unwrap();
     assert_eq!(after.state, before.state);
     assert_eq!(after.updated_at, before.updated_at);
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+/// Holds the `world_states` row lock on a connection outside the repository pool.
+async fn hold_world_state_row_lock(user_id: Uuid, novel_id: Uuid) -> PgConnection {
+    let mut holder = PgConnection::connect(&db_url()).await.unwrap();
+    sqlx::query("BEGIN").execute(&mut holder).await.unwrap();
+    sqlx::query("SELECT 1 FROM world_states WHERE user_id = $1 AND novel_id = $2 FOR UPDATE")
+        .bind(user_id)
+        .bind(novel_id)
+        .execute(&mut holder)
+        .await
+        .unwrap();
+    holder
+}
+
+async fn world_state_row(pool: &PgPool, user_id: Uuid, novel_id: Uuid) -> WorldState {
+    PgWorldStateRepository::new(pool.clone())
+        .get_or_create(user_id, novel_id)
+        .await
+        .unwrap()
+}
+
+async fn assert_bounded_lock_failure<T: std::fmt::Debug>(
+    pool: &PgPool,
+    call: impl std::future::Future<Output = anyhow::Result<T>>,
+) {
+    let error = tokio::time::timeout(std::time::Duration::from_secs(10), call)
+        .await
+        .expect("the row-lock wait must be bounded")
+        .unwrap_err();
+    let code = error
+        .downcast_ref::<sqlx::Error>()
+        .and_then(sqlx::Error::as_database_error)
+        .and_then(|database| database.code().map(|code| code.into_owned()));
+    assert_eq!(code.as_deref(), Some("55P03"), "{error:#}");
+    // The pool has one connection, so this reuses the connection that failed.
+    let lock_timeout: String = sqlx::query_scalar("SHOW lock_timeout")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(lock_timeout, "0");
+}
+
+fn lock_bound_player(user_id: Uuid, novel_id: Uuid) -> PlayerEntity {
+    PlayerEntity::new(
+        user_id,
+        novel_id,
+        1,
+        "云舟".into(),
+        "来自边城的地图学徒。".into(),
+        vec!["辨认古地图".into()],
+        Some("north-tower".into()),
+        vec![],
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn player_creation_row_lock_wait_is_bounded_and_writes_nothing() {
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (user_id, novel_id) = seed_ready_novel(&pool, "player-lock", "Player lock bound").await;
+    let repo = PgWorldStateRepository::new(pool.clone());
+    let before = world_state_row(&pool, user_id, novel_id).await;
+    let player = lock_bound_player(user_id, novel_id);
+
+    let mut holder = hold_world_state_row_lock(user_id, novel_id).await;
+    assert_bounded_lock_failure(&pool, repo.create_player_entity(&player)).await;
+    sqlx::query("ROLLBACK").execute(&mut holder).await.unwrap();
+
+    let after = world_state_row(&pool, user_id, novel_id).await;
+    assert_eq!(after.state, before.state);
+    assert_eq!(after.updated_at, before.updated_at);
+    assert_eq!(repo.create_player_entity(&player).await.unwrap(), player);
+    assert!(world_state_row(&pool, user_id, novel_id)
+        .await
+        .player_entity()
+        .unwrap()
+        .is_some());
+    sqlx::query("DELETE FROM novels WHERE id = $1")
+        .bind(novel_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn world_entry_row_lock_wait_is_bounded_and_writes_nothing() {
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&db_url())
+        .await
+        .unwrap();
+    let (user_id, novel_id) = seed_ready_novel(&pool, "world-lock", "World lock bound").await;
+    let repo = PgWorldStateRepository::new(pool.clone());
+    repo.get_or_create(user_id, novel_id).await.unwrap();
+    repo.create_player_entity(&lock_bound_player(user_id, novel_id))
+        .await
+        .unwrap();
+    let context = WorldEntryContext {
+        series_setting: None,
+        model_version: 1,
+        checkpoint_chapter: 1,
+        unlocked_through_chapter: 1,
+        characters: vec![],
+        locations: vec![WorldEntityRef {
+            id: "north-tower".into(),
+            name: "North Tower".into(),
+        }],
+        factions: vec![],
+        hard_rules: vec![],
+        dead_character_ids: vec![],
+        threads: vec![],
+        scheduled_events: vec![],
+        character_goals: vec![],
+    };
+    let before = world_state_row(&pool, user_id, novel_id).await;
+
+    let mut holder = hold_world_state_row_lock(user_id, novel_id).await;
+    assert_bounded_lock_failure(
+        &pool,
+        repo.start_open_world(user_id, novel_id, &context, None),
+    )
+    .await;
+    sqlx::query("ROLLBACK").execute(&mut holder).await.unwrap();
+
+    let after = world_state_row(&pool, user_id, novel_id).await;
+    assert_eq!(after.state, before.state);
+    assert_eq!(after.updated_at, before.updated_at);
+    assert!(after.open_world().unwrap().is_none());
+    let started = repo
+        .start_open_world(user_id, novel_id, &context, None)
+        .await
+        .unwrap();
+    assert!(started.open_world().unwrap().is_some());
+    sqlx::query("DELETE FROM novels WHERE id = $1")
+        .bind(novel_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
         .execute(&pool)
