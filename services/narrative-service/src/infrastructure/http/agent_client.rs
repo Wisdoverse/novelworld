@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use llm_client::TraceContextExt;
 use reqwest::Client;
 use std::time::Duration;
 use uuid::Uuid;
@@ -51,6 +52,7 @@ impl AgentServiceClient {
         });
         self.client
             .post(url)
+            .with_trace_context()
             .header("X-Internal-Service-Token", &self.internal_service_token)
             .json(&payload)
             .send()
@@ -130,6 +132,46 @@ mod tests {
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         AgentServiceClient::new(format!("http://{address}"), "test-token".into())
+    }
+
+    #[tokio::test]
+    async fn memory_writes_forward_the_trace_id_only_inside_a_request_span() {
+        use tracing::Instrument;
+        use tracing_subscriber::layer::SubscriberExt;
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(llm_client::TraceContextLayer),
+        );
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        let client = client_for(Router::new().route(
+            "/internal/memories",
+            post(move |headers: HeaderMap| async move {
+                recorded.lock().unwrap().push(
+                    headers
+                        .get("x-trace-id")
+                        .map(|value| value.to_str().unwrap().to_owned()),
+                );
+                Json(serde_json::json!({"saved": true}))
+            }),
+        ))
+        .await;
+        let save = || {
+            client.save_permanent_memory(
+                Uuid::nil(),
+                Uuid::nil(),
+                Uuid::nil(),
+                Uuid::nil(),
+                1,
+                "{}",
+                1,
+            )
+        };
+        save()
+            .instrument(tracing::info_span!("request", trace_id = "memory-trace"))
+            .await
+            .unwrap();
+        save().await.unwrap();
+        assert_eq!(*seen.lock().unwrap(), [Some("memory-trace".into()), None]);
     }
 
     #[tokio::test]

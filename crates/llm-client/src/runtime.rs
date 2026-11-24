@@ -7,7 +7,7 @@ use serde::Deserialize;
 use tokio::sync::OnceCell;
 use tokio::time::Instant;
 
-use crate::{ChatRequest, ChatResponse, ChatStream, LlmClient};
+use crate::{ChatRequest, ChatResponse, ChatStream, LlmClient, TraceContextExt};
 
 #[derive(Debug)]
 pub struct NotConfigured;
@@ -327,6 +327,7 @@ fn remote_config_request(
 ) -> reqwest::RequestBuilder {
     let mut request = client
         .get(format!("{user_service_url}/internal/runtime/llm"))
+        .with_trace_context()
         .header("X-Internal-Service-Token", token)
         .timeout(Duration::from_secs(5));
     if let Some(user_id) = runtime_user_id {
@@ -870,6 +871,30 @@ mod tests {
             config.thinking_enabled = thinking_enabled;
             assert!(validate_remote_config(config, true, Some(&binding)).is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn remote_configuration_read_forwards_the_trace_id_only_inside_a_request_span() {
+        use tracing::Instrument;
+        use tracing_subscriber::layer::SubscriberExt;
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(crate::TraceContextLayer),
+        );
+        let mut user_service = crate::trace_context::test_support::HeaderCapture::start().await;
+        let client = reqwest::Client::new();
+        let origin = user_service.origin.clone();
+        let send = || remote_config_request(&client, &origin, "token", None).send();
+        // The builder reads the span when built, so build inside the span.
+        async { send().await }
+            .instrument(tracing::info_span!("request", trace_id = "config-trace"))
+            .await
+            .unwrap();
+        assert_eq!(
+            user_service.next_trace_id().await.as_deref(),
+            Some("config-trace")
+        );
+        send().await.unwrap();
+        assert_eq!(user_service.next_trace_id().await, None);
     }
 
     #[test]

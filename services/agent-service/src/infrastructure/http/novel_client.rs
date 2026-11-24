@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
+use llm_client::TraceContextExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -95,6 +96,7 @@ impl CharacterInfoRepository for NovelServiceClient {
         let resp = self
             .client
             .get(&url)
+            .with_trace_context()
             .header("X-User-Id", user_id.to_string())
             .send()
             .await
@@ -146,6 +148,7 @@ impl CharacterInfoRepository for NovelServiceClient {
         let response = self
             .client
             .get(&url)
+            .with_trace_context()
             .header("X-User-Id", user_id.to_string())
             .header("X-Internal-Service-Token", &self.internal_service_token)
             .send()
@@ -271,6 +274,7 @@ impl ReadingContextPort for NovelServiceClient {
         let response = self
             .client
             .get(&url)
+            .with_trace_context()
             .header("X-User-Id", user_id.to_string())
             .send()
             .await
@@ -337,6 +341,7 @@ impl LoreContextPort for NovelServiceClient {
         let response = self
             .client
             .post(&url)
+            .with_trace_context()
             .header("X-User-Id", user_id.to_string())
             .json(&LoreSearchRequest {
                 query,
@@ -372,6 +377,7 @@ impl ReadinessProbe for NovelServiceClient {
     async fn is_ready(&self) -> bool {
         self.client
             .get(format!("{}/ready", self.base_url))
+            .with_trace_context()
             .send()
             .await
             .is_ok_and(|response| response.status().is_success())
@@ -384,6 +390,58 @@ mod tests {
     use crate::domain::repositories::{CharacterCanonGoal, CharacterCanonRelationship};
     use axum::{body::Body, routing::get, Router};
     use std::convert::Infallible;
+
+    #[tokio::test]
+    async fn novel_calls_forward_the_trace_id_only_inside_a_request_span() {
+        use axum::http::{HeaderMap, StatusCode};
+        use std::sync::{Arc, Mutex};
+        use tracing::Instrument;
+        use tracing_subscriber::layer::SubscriberExt;
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(llm_client::TraceContextLayer),
+        );
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = |seen: Arc<Mutex<Vec<Option<String>>>>| {
+            move |headers: HeaderMap| async move {
+                seen.lock().unwrap().push(
+                    headers
+                        .get("x-trace-id")
+                        .map(|value| value.to_str().unwrap().to_owned()),
+                );
+                StatusCode::NOT_FOUND
+            }
+        };
+        let app = Router::new()
+            .route("/characters/{id}", get(record(seen.clone())))
+            .route("/ready", get(record(seen.clone())));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = NovelServiceClient::new(format!("http://{address}"), "token".into());
+        let span = tracing::info_span!("request", trace_id = "novel-trace");
+        let character = client
+            .find_by_id(Uuid::nil(), Uuid::nil())
+            .instrument(span.clone())
+            .await;
+        assert!(character.unwrap().is_none());
+        assert!(client
+            .find_by_id(Uuid::nil(), Uuid::nil())
+            .await
+            .unwrap()
+            .is_none());
+        assert!(!client.is_ready().instrument(span).await);
+        assert!(!client.is_ready().await);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                Some("novel-trace".into()),
+                None,
+                Some("novel-trace".into()),
+                None
+            ]
+        );
+        server.abort();
+    }
 
     fn grounding() -> CharacterCanonGrounding {
         CharacterCanonGrounding {

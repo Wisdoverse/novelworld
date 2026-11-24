@@ -8,8 +8,10 @@ structured JSON carrying timestamp, level, message, and the service span fields
 must also have logged at least one request-scoped line with a propagated
 non-empty trace id, and the checker itself proves propagation end to end: it
 sends a request stamped with a known X-Trace-Id and asserts the downstream
-service logs that exact id. It also checks the edge access outcome and rejects
-raw request metadata in Nginx logs.
+service logs that exact id. It also proves one internal hop: a stamped
+narrative-service readiness request calls novel-service readiness, and both
+services must log a successful completion with that id. It also checks the
+edge access outcome and rejects raw request metadata in Nginx logs.
 """
 import json
 import subprocess
@@ -43,6 +45,29 @@ def logs_of(service):
     return result.stdout + result.stderr if service == "nginx" else result.stdout
 
 
+def logged_success(service, trace_id, route):
+    """True when service logged a structured 2xx completion of route with trace_id."""
+    for line in logs_of(service).splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        fields = entry.get("fields") if isinstance(entry, dict) else None
+        if not isinstance(fields, dict):
+            continue
+        status = fields.get("status")
+        if (
+            fields.get("message") == "request completed"
+            and fields.get("route") == route
+            and type(status) is int
+            and 200 <= status <= 299
+            and service in find_entries(entry, "service")
+            and trace_id in find_entries(entry, "trace_id")
+        ):
+            return True
+    return False
+
+
 def main():
     api = sys.argv[1] if len(sys.argv) > 1 else API
     problems = []
@@ -73,6 +98,34 @@ def main():
         time.sleep(1.2)  # rate limiter spacing
     if not propagated:
         problems.append("propagation: the stamped X-Trace-Id never reached user-service logs")
+
+    # Prove one internal hop without a provider: narrative-service readiness
+    # makes one per-request readiness call to novel-service. Both must log a
+    # successful completion under the stamped id.
+    hop_id = f"log-contract-hop-{uuid.uuid4()}"
+    hop_services = ("narrative-service", "novel-service")
+    for attempt in range(5):
+        subprocess.run(
+            [
+                "docker", "exec", "novel-narrative-service",
+                "curl", "--silent", "--show-error", "--fail", "--output", "/dev/null",
+                "-H", f"X-Trace-Id: {hop_id}",
+                "http://127.0.0.1:8004/ready",
+            ],
+            check=False,
+        )
+        deadline = time.time() + 10
+        hop_logged = False
+        while time.time() < deadline and not hop_logged:
+            time.sleep(0.5)
+            hop_logged = all(
+                logged_success(service, hop_id, "/ready") for service in hop_services
+            )
+        if hop_logged:
+            break
+    for service in hop_services:
+        if not logged_success(service, hop_id, "/ready"):
+            problems.append(f"internal hop: {service} has no successful /ready completion with the stamped id")
 
     edge_logs = logs_of("nginx")
     if private_marker in edge_logs:

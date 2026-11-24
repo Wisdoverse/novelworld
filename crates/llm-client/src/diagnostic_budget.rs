@@ -1,4 +1,4 @@
-use crate::{ChatRequest, EmbeddingResponse, Usage};
+use crate::{ChatRequest, EmbeddingResponse, TraceContextExt, Usage};
 use futures::StreamExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -364,6 +364,7 @@ impl BudgetClient {
                     "{}/internal/llm-budget/{}/{}",
                     self.control_origin, self.binding.budget_id, suffix
                 ))
+                .with_trace_context()
                 .header("X-Internal-Service-Token", &self.token)
                 .header(CONTRACT_HEADER, &self.binding.contract)
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -683,4 +684,41 @@ pub fn profile_sha256_for(name: &str) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+#[cfg(test)]
+mod trace_context_tests {
+    use super::*;
+    use crate::trace_context::test_support::HeaderCapture;
+    use tracing::Instrument;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    #[tokio::test]
+    async fn control_calls_forward_the_trace_id_only_inside_a_request_span() {
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(crate::TraceContextLayer),
+        );
+        let mut control = HeaderCapture::start().await;
+        let client = BudgetClient::new(
+            Binding::new(Uuid::new_v4()),
+            &control.origin,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let _: serde_json::Value = client
+            .post("reserve", &serde_json::json!({}), deadline)
+            .instrument(tracing::info_span!("request", trace_id = "budget-trace"))
+            .await
+            .unwrap();
+        assert_eq!(
+            control.next_trace_id().await.as_deref(),
+            Some("budget-trace")
+        );
+        let _: serde_json::Value = client
+            .post("settle", &serde_json::json!({}), deadline)
+            .await
+            .unwrap();
+        assert_eq!(control.next_trace_id().await, None);
+    }
 }
