@@ -344,7 +344,7 @@ mod tests {
         );
         let context = |client: &NarrativeServiceClient| {
             client
-                .world_context_request("http://narrative.invalid/context", Uuid::nil())
+                .world_context_request("https://narrative.invalid/context", Uuid::nil())
                 .build()
                 .unwrap()
         };

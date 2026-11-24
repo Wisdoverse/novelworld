@@ -272,7 +272,7 @@ mod tests {
         let client = reqwest::Client::new();
         let build = || {
             client
-                .get("http://internal.example/ready")
+                .get("https://internal.example/ready")
                 .with_trace_context()
                 .build()
                 .unwrap()
