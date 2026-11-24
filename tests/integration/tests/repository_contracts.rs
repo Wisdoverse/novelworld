@@ -6732,6 +6732,11 @@ async fn player_creation_row_lock_wait_is_bounded_and_writes_nothing() {
         .player_entity()
         .unwrap()
         .is_some());
+    sqlx::query("DELETE FROM novels WHERE id = $1")
+        .bind(novel_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
         .execute(&pool)
@@ -6788,6 +6793,11 @@ async fn world_entry_row_lock_wait_is_bounded_and_writes_nothing() {
         .await
         .unwrap();
     assert!(started.open_world().unwrap().is_some());
+    sqlx::query("DELETE FROM novels WHERE id = $1")
+        .bind(novel_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
         .execute(&pool)
