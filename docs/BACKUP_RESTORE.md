@@ -407,6 +407,18 @@ Shared-host CPU and memory counts do not establish the required 2-core / 4 GB /
 SSD reference envelope. Qualifying evidence requires a separate deployment with verified
 resource and storage bounds, followed by hardware and artifact review.
 
+### Recorded run
+
+[#507](https://github.com/Wisdoverse/novelworld/issues/507) records one
+registered run. At commit `3c3763c6baaa29535d6e845f8b7c055045a4d121`, the
+rehearsal restored a 6,239,529,905-byte plain synthetic dump to Compose
+readiness in 393.84 seconds. It ran in a capped, nested KVM guest with two
+vCPUs and 4 GiB of memory on a shared host. The dump restored to about 304 MB
+of physical database. SSD backing of that environment is unverified, so the H1
+RTO record stays open. The run does not qualify a physically 5 GiB database, a
+production workload, legacy backfill, cold-host recovery, RPO, or off-host
+custody.
+
 ## Versioning
 
 Changes to targets, artifact requirements, the restore contract, the
