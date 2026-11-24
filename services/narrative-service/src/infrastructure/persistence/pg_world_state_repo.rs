@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use sqlx::prelude::FromRow;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::domain::entities::{
@@ -89,6 +89,30 @@ impl TryFrom<SourceOperationRow> for WorldSourceOperation {
     }
 }
 
+/// Takes the `world_states` row lock with a transaction-local 3-second wait
+/// bound. A lock not granted in time fails with SQLSTATE `55P03`.
+async fn lock_world_state(
+    connection: &mut PgConnection,
+    user_id: Uuid,
+    novel_id: Uuid,
+) -> Result<WorldStateRow> {
+    sqlx::query("SELECT pg_catalog.set_config('lock_timeout', '3s', true)")
+        .execute(&mut *connection)
+        .await?;
+    Ok(sqlx::query_as::<_, WorldStateRow>(
+        r#"
+        SELECT user_id, novel_id, state, updated_at
+        FROM world_states
+        WHERE user_id = $1 AND novel_id = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(user_id)
+    .bind(novel_id)
+    .fetch_one(connection)
+    .await?)
+}
+
 pub struct PgWorldStateRepository {
     pool: PgPool,
 }
@@ -142,18 +166,7 @@ impl WorldStateRepository for PgWorldStateRepository {
     async fn create_player_entity(&self, player: &PlayerEntity) -> Result<PlayerEntity> {
         player.validate()?;
         let mut transaction = self.pool.begin().await?;
-        let row = sqlx::query_as::<_, WorldStateRow>(
-            r#"
-            SELECT user_id, novel_id, state, updated_at
-            FROM world_states
-            WHERE user_id = $1 AND novel_id = $2
-            FOR UPDATE
-            "#,
-        )
-        .bind(player.user_id)
-        .bind(player.novel_id)
-        .fetch_one(&mut *transaction)
-        .await?;
+        let row = lock_world_state(&mut transaction, player.user_id, player.novel_id).await?;
         let mut world_state = WorldState::from(row);
         ensure_choice_projection_consistent(&mut *transaction, player.user_id, player.novel_id)
             .await?;
@@ -224,18 +237,7 @@ impl WorldStateRepository for PgWorldStateRepository {
     ) -> Result<WorldState> {
         context.validate()?;
         let mut transaction = self.pool.begin().await?;
-        let row = sqlx::query_as::<_, WorldStateRow>(
-            r#"
-            SELECT user_id, novel_id, state, updated_at
-            FROM world_states
-            WHERE user_id = $1 AND novel_id = $2
-            FOR UPDATE
-            "#,
-        )
-        .bind(user_id)
-        .bind(novel_id)
-        .fetch_one(&mut *transaction)
-        .await?;
+        let row = lock_world_state(&mut transaction, user_id, novel_id).await?;
         let mut world_state = WorldState::from(row);
         ensure_choice_projection_consistent(&mut *transaction, user_id, novel_id).await?;
         let before = world_state.state.clone();
@@ -289,15 +291,8 @@ impl WorldStateRepository for PgWorldStateRepository {
             "invalid source operation key"
         );
         let mut tx = self.pool.begin().await?;
-        sqlx::query("SELECT pg_catalog.set_config('statement_timeout', '5s', true), pg_catalog.set_config('lock_timeout', '3s', true)").execute(&mut *tx).await?;
-        let row = sqlx::query_as::<_, WorldStateRow>(
-            "SELECT user_id,novel_id,state,updated_at FROM world_states \
-             WHERE user_id=$1 AND novel_id=$2 FOR UPDATE",
-        )
-        .bind(user_id)
-        .bind(novel_id)
-        .fetch_one(&mut *tx)
-        .await?;
+        sqlx::query("SELECT pg_catalog.set_config('statement_timeout', '5s', true)").execute(&mut *tx).await?;
+        let row = lock_world_state(&mut tx, user_id, novel_id).await?;
         let old = sqlx::query_as::<_, SourceOperationRow>(
             "SELECT id,user_id,novel_id,expected_turn_number,previous_source_chapter,source_chapter,source_context,request_fingerprint \
              FROM world_source_operations WHERE id=$1 FOR UPDATE",
