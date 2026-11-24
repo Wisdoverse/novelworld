@@ -229,8 +229,24 @@ fn is_sse_response(path: &str, status: StatusCode, headers: &HeaderMap) -> bool 
             .is_some_and(|value| value.starts_with("text/event-stream"))
 }
 
+/// SPEC 14.1: export fan-out requests keep the request's sanitized trace ID.
+fn with_trace_id(
+    request: reqwest::RequestBuilder,
+    trace_id: Option<&HeaderValue>,
+) -> reqwest::RequestBuilder {
+    match trace_id {
+        Some(trace_id) => request.header("X-Trace-Id", trace_id.clone()),
+        None => request,
+    }
+}
+
 impl ServiceProxy {
-    async fn account_export(&self, user_id: Uuid, permit: OwnedSemaphorePermit) -> Response {
+    async fn account_export(
+        &self,
+        user_id: Uuid,
+        trace_id: Option<HeaderValue>,
+        permit: OwnedSemaphorePermit,
+    ) -> Response {
         let deadline = Instant::now() + ACCOUNT_EXPORT_TIMEOUT;
         let user_url = format!(
             "{}/internal/privacy/users/{user_id}/export",
@@ -238,8 +254,7 @@ impl ServiceProxy {
         );
         let user_response = match tokio::time::timeout_at(
             deadline,
-            self.client
-                .get(&user_url)
+            with_trace_id(self.client.get(&user_url), trace_id.as_ref())
                 .header(
                     "X-Internal-Service-Token",
                     self.internal_service_token.as_ref(),
@@ -330,8 +345,7 @@ impl ServiceProxy {
                     } else {
                         tokio::time::timeout_at(
                             deadline,
-                            client
-                                .get(&url)
+                            with_trace_id(client.get(&url), trace_id.as_ref())
                                 .header(
                                     "X-Internal-Service-Token",
                                     internal_service_token.as_ref(),
@@ -578,7 +592,9 @@ pub async fn export_account(State(state): State<AppState>, headers: HeaderMap) -
         }
     };
 
-    state.proxy.account_export(user_id, permit).await
+    // The request-ID middleware has already validated or generated this value.
+    let trace_id = headers.get("x-trace-id").cloned();
+    state.proxy.account_export(user_id, trace_id, permit).await
 }
 
 pub async fn forward_to_novel(State(state): State<AppState>, request: Request) -> Response {
@@ -679,13 +695,23 @@ mod tests {
     struct ExportServerState {
         fail_service: Option<&'static str>,
         hang_service: Option<&'static str>,
+        trace_ids: ReceivedTraceIds,
     }
+
+    /// Each received export request as (service, forwarded `X-Trace-Id`).
+    type ReceivedTraceIds = Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>;
 
     async fn export_fragment(
         State(state): State<ExportServerState>,
         Path((service, _user_id)): Path<(String, Uuid)>,
         headers: HeaderMap,
     ) -> Response {
+        state.trace_ids.lock().unwrap().push((
+            service.clone(),
+            headers
+                .get("x-trace-id")
+                .map(|value| value.to_str().unwrap().to_owned()),
+        ));
         if headers
             .get("X-Internal-Service-Token")
             .and_then(|value| value.to_str().ok())
@@ -1158,7 +1184,7 @@ mod tests {
     async fn account_export_has_fixed_order_safe_json_and_terminal_completion() {
         let proxy = export_proxy(&export_server(ExportServerState::default()).await);
         let permit = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
-        let response = proxy.account_export(Uuid::new_v4(), permit).await;
+        let response = proxy.account_export(Uuid::new_v4(), None, permit).await;
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
@@ -1207,16 +1233,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn account_export_forwards_the_trace_id_to_every_service_fragment() {
+        for trace_id in [Some("export-trace-1"), None] {
+            let state = ExportServerState::default();
+            let proxy = export_proxy(&export_server(state.clone()).await);
+            let permit = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
+            let response = proxy
+                .account_export(
+                    Uuid::new_v4(),
+                    trace_id.map(HeaderValue::from_static),
+                    permit,
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+            assert!(String::from_utf8_lossy(&body).contains(r#""type":"complete""#));
+            let expected: Vec<(String, Option<String>)> = ["user", "novel", "agent", "narrative"]
+                .into_iter()
+                .map(|service| (service.to_owned(), trace_id.map(str::to_owned)))
+                .collect();
+            assert_eq!(*state.trace_ids.lock().unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
     async fn failed_fragment_omits_terminal_completion() {
         let proxy = export_proxy(
             &export_server(ExportServerState {
                 fail_service: Some("narrative"),
-                hang_service: None,
+                ..ExportServerState::default()
             })
             .await,
         );
         let permit = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
-        let response = proxy.account_export(Uuid::new_v4(), permit).await;
+        let response = proxy.account_export(Uuid::new_v4(), None, permit).await;
         let mut stream = response.into_body().into_data_stream();
         let mut received = Vec::new();
         let mut failed = false;
@@ -1246,14 +1296,14 @@ mod tests {
     async fn account_export_streams_before_fragment_end_and_releases_disconnect_permit() {
         let proxy = export_proxy(
             &export_server(ExportServerState {
-                fail_service: None,
                 hang_service: Some("novel"),
+                ..ExportServerState::default()
             })
             .await,
         );
         let permits = Arc::new(Semaphore::new(1));
         let permit = permits.clone().try_acquire_owned().unwrap();
-        let response = proxy.account_export(Uuid::new_v4(), permit).await;
+        let response = proxy.account_export(Uuid::new_v4(), None, permit).await;
         let mut stream = response.into_body().into_data_stream();
         let mut received = Vec::new();
 
