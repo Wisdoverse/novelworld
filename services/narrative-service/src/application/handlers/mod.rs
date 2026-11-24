@@ -7,6 +7,7 @@ use tokio::sync::{oneshot, watch};
 use tracing::{info, warn, Instrument};
 use uuid::Uuid;
 
+use crate::application::{stop_requested, wake_unless_stopped};
 use crate::domain::entities::game_rules::{
     build_action_adjudication_context, resolve_action_check, AdjudicationDecision,
     GameRuleTemplate, PlayerRuleProfile, ResolutionMode, BASIC_GAME_RULE_PROMPT_VERSION,
@@ -1779,13 +1780,19 @@ impl NarrativeCommandHandler {
         }
     }
 
-    pub(crate) async fn reconcile_pending_memory_projections_once(&self) -> Result<usize> {
+    pub(crate) async fn reconcile_pending_memory_projections_once(
+        &self,
+        stop: &watch::Receiver<bool>,
+    ) -> Result<usize> {
         let candidates = self
             .world_turn_repo
             .rotate_pending_memory_projections(MEMORY_PROJECTION_RECOVERY_BATCH)
             .await?;
         let mut reconciled = 0;
         for result in candidates {
+            if stop_requested(stop) {
+                break;
+            }
             let turn_id = result.turn_id;
             let user_id = result.world_state.user_id;
             let novel_id = result.world_state.novel_id;
@@ -1813,16 +1820,21 @@ impl NarrativeCommandHandler {
         Ok(reconciled)
     }
 
-    pub fn spawn_memory_projection_recovery(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+    pub fn spawn_memory_projection_recovery(
+        self: &Arc<Self>,
+        mut stop: watch::Receiver<bool>,
+    ) -> tokio::task::JoinHandle<()> {
         let handler = self.clone();
         let current_span = tracing::Span::current();
         tokio::spawn(
             async move {
                 let mut interval = tokio::time::interval(MEMORY_PROJECTION_RECOVERY_INTERVAL);
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                loop {
-                    interval.tick().await;
-                    if let Err(error) = handler.reconcile_pending_memory_projections_once().await {
+                while wake_unless_stopped(&mut stop, interval.tick()).await {
+                    if let Err(error) = handler
+                        .reconcile_pending_memory_projections_once(&stop)
+                        .await
+                    {
                         warn!(
                             error = ?error,
                             "pending world turn memory projection scan failed"
