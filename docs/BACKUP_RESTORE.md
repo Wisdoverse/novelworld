@@ -416,8 +416,10 @@ readiness in 393.84 seconds. It ran in a capped, nested KVM guest with two vCPUs
 and 4 GiB of memory on a shared host. The dump restored to about 304 MB of
 physical database. The storage media type of that environment was not verified.
 The owner accepted the run as the H1 RTO record without that check on
-2026-11-26. The run does not qualify a physically 5 GiB database, a production
-workload, legacy backfill, cold-host recovery, RPO, or off-host custody.
+2026-11-26. This issue-specific exception does not qualify the reference
+envelope or change the policy requirements above. The run does not qualify a
+physically 5 GiB database, a production workload, legacy backfill, cold-host
+recovery, RPO, or off-host custody.
 
 ## Versioning
 
