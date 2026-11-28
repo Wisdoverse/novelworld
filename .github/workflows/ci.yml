@@ -263,7 +263,7 @@ jobs:
             --deny unsound \
             --ignore RUSTSEC-2024-0429
       - name: Enforce the dependency license and source policy
-        uses: EmbarkStudios/cargo-deny-action@v2.1.1
+        uses: EmbarkStudios/cargo-deny-action@v2.1.4
         with:
           command-arguments: licenses sources
 
